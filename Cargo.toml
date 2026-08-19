@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gateway-core",
+    "crates/gatewayd",
+    "crates/gateway-cli",
+]
+
+[workspace.dependencies]

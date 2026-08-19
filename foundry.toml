@@ -1,0 +1,5 @@
+[profile.default]
+src = "foundry/src"
+out = "foundry/out"
+libs = ["foundry/lib"]
+cache_path = "foundry/cache"
