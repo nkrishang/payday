@@ -67,7 +67,7 @@ may change; this flow is the product.
 1. A user (merchant/beneficiary) calls an HTTP endpoint on the gateway to create
    a payment invoice, specifying chain, payment token, and amount.
 2. The gateway persists the invoice and returns a unique invoice ID plus the
-   full payment instructions — critically, the **counterfactual CREATE2
+   full payment instructions — critically, the **counterfactual CREATE3
    address** of the payment contract that does not exist on-chain yet.
 3. The user (or any client) can query invoice status and perform permitted
    update actions via the API using the invoice ID.
@@ -100,9 +100,14 @@ execution.
 These are durable facts. Architecture may change; these should not.
 
 - An invoice is scoped by **chain ID, factory, token, beneficiary, amount, and
-  salt**. The Rust and Solidity implementations MUST derive the same CREATE2
+  salt**. The Rust and Solidity implementations MUST derive the same CREATE3
   address from these.
-- Amounts are **integer token base units** — never `f32`/`f64`, never floats.
+- Amounts are **integer token base units internally** — `U256`, never
+  `f32`/`f64`, never floats. The API accepts amounts as **human-readable
+  strings in full units** (e.g. `"100.5"`); the backend fetches the token's
+  decimals via RPC, then parses the string to base-unit `U256`. The native token
+  sentinel (`0xEeee…EEeE`) implies 18 decimals without an RPC call. All
+  derivation, storage, and on-chain operations use base-unit `U256`.
 - Once a payment address is issued, its economic fields (recipient, token,
   amount, chain, factory, salt) are **immutable**. Changing any creates a
   replacement invoice.
@@ -113,7 +118,7 @@ These are durable facts. Architecture may change; these should not.
 - Deployment MUST revert unless the counterfactual address currently holds at
   least the required token amount. On success, the constructor forwards the full
   balance atomically and reverts if the transfer fails. Without this guard, a
-  premature deployment consumes the CREATE2 address and prevents later
+  premature deployment consumes the CREATE3 address and prevents later
   forwarding.
 - Chain events and jobs are processed **at-least-once**. Every state transition
   MUST be idempotent.
@@ -142,6 +147,15 @@ Prevent reopening settled choices or presenting guesses as architecture.
 - `thiserror` for typed domain/application errors; `anyhow`-style context only
   for binary startup orchestration.
 - Structured `tracing` for observability; never log secrets or private keys.
+- **CREATE3** (Solady) for deterministic address derivation — the payment
+  address is independent of init code, allowing future `Payment` logic upgrades
+  without breaking issued addresses. See `docs/adr/0001-create3.md`.
+- **Salt is backend-generated** — a random `bytes32` from a CSPRNG per invoice
+  creation. The API does not accept client-supplied salts.
+- **Invoice IDs are UUIDv7** — time-ordered, sortable, and unguessable.
+- **Cargo is the task runner** for local commands and E2E orchestration.
+- **Idempotency keys are required** for invoice creation from day one, enforced
+  by a unique database constraint.
 
 **Provisional (recommend as defaults, await an ADR to confirm):**
 - Workspace layout (see Architecture). Extract crates only at real boundaries.
@@ -156,7 +170,6 @@ Prevent reopening settled choices or presenting guesses as architecture.
 - Relayer signer and nonce management strategy.
 - API versioning and OpenAPI strategy.
 - Whether server and workers run in one process or separate deployables.
-- Task runner choice (make/just/cargo aliases) for local commands.
 
 When an open decision is resolved, record the rationale in `docs/adr/` and move
 only the result here.
@@ -257,9 +270,10 @@ Encode principles, not a style encyclopedia.
 ## API and CLI expectations
 
 The API MUST expose complete payment instructions, not only an opaque ID:
-invoice ID, chain ID, token contract + metadata, amount as decimal string in
-base units, payment address, beneficiary, expiry/policy, current observed and
-finalized settlement info, and relevant transaction hashes.
+invoice ID, chain ID, token contract + metadata, amount as human-readable
+string in full units (with token decimals), payment address, beneficiary,
+expiry/policy, current observed and finalized settlement info, and relevant
+transaction hashes.
 
 - Version the public API. Use stable machine-readable error codes. Paginate
   lists. Require idempotency for invoice creation. Never expose DB rows
@@ -272,9 +286,9 @@ finalized settlement info, and relevant transaction hashes.
 ## Contracts and Rust integration
 
 The Solidity and Rust sides MUST share a specification and cross-language
-fixtures for: salt construction, constructor/init-code encoding, CREATE2
-derivation, chain ID and factory identity, address normalization, and token
-amount encoding.
+fixtures for: salt construction, constructor/init-code encoding, CREATE3
+derivation (proxy deploy + nonce-1 CREATE), chain ID and factory identity,
+address normalization, and token amount encoding.
 
 The factory SHOULD emit sufficient events to reconcile deployments. Contract
 behavior MUST be minimal and explicit: validate inputs, reject premature
@@ -293,13 +307,13 @@ participants.
 
 **Test layers:**
 
-1. **Solidity (Foundry) unit/fuzz/invariant tests** — CREATE2 parity,
+1. **Solidity (Foundry) unit/fuzz/invariant tests** — CREATE3 parity,
    pre-funding, under/exact/excess payment, partial transfers, duplicate
    deployment, wrong inputs, failed/no-return/false-return transfers,
    unsupported token behavior, permissionless caller behavior, factory/child
    invariants.
 2. **Rust unit tests** — state transitions, amount/address parsing, finality
-   calculations, retry classification, API error mapping, CREATE2 fixtures
+   calculations, retry classification, API error mapping, CREATE3 fixtures
    shared with Solidity.
 3. **DB integration tests (real Postgres)** — migrations from empty DB, unique
    constraints, idempotency, concurrent worker claims, rollback, cursor replay,
@@ -319,7 +333,8 @@ creation, restart at every workflow stage, duplicate worker execution, reorg
 before finality, RPC outage/recovery, deployment revert/replacement, and funding
 after expiry/cancellation.
 
-A one-command local flow is a goal, but the task runner is an open decision.
+A one-command local flow is a goal. Cargo is the task runner; local E2E
+orchestration uses cargo aliases or a binary test harness.
 
 ## Definition of done (for every meaningful feature)
 
