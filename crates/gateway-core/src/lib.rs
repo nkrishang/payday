@@ -1,14 +1,60 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use alloy_primitives::{Address, B256, U256};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InvoiceId(pub Uuid);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChainId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TokenAddress(pub Address);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Beneficiary(pub Address);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FactoryAddress(pub Address);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Amount(pub U256);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Salt(pub B256);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PaymentAddress(pub Address);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InvoiceStatus {
+    Created,
+    Funded,
+    Deploying,
+    Fulfilled,
+    Failed,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invoice {
+    pub id: InvoiceId,
+    pub chain_id: ChainId,
+    pub token: TokenAddress,
+    pub beneficiary: Beneficiary,
+    pub factory: FactoryAddress,
+    pub amount: Amount,
+    pub salt: Salt,
+    pub payment_address: PaymentAddress,
+    pub status: InvoiceStatus,
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInvoice {
+    pub id: InvoiceId,
+    pub chain_id: ChainId,
+    pub token: TokenAddress,
+    pub beneficiary: Beneficiary,
+    pub amount: Amount,
+    pub payment_address: PaymentAddress,
+    pub status: InvoiceStatus,
 }
