@@ -2,4 +2,5 @@
 src = "foundry/src"
 out = "foundry/out"
 libs = ["foundry/lib"]
+test = "foundry/test"
 cache_path = "foundry/cache"
