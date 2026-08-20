@@ -6,7 +6,7 @@
 use alloy_primitives::{Address, B256, b256, keccak256};
 use alloy_sol_types::{SolType, sol};
 
-use crate::{Amount, Beneficiary, FactoryAddress, PaymentAddress, Salt, TokenAddress};
+use crate::{Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, Salt, TokenAddress};
 
 /// Hash of Solady's CREATE3 proxy init code.
 /// `keccak256(abi.encodePacked(hex"67363d3d37363d34f03d5260086018f3"))`
@@ -24,7 +24,7 @@ pub fn predict_payment_address(
     factory: FactoryAddress,
     token: TokenAddress,
     amount: Amount,
-    receiver: Beneficiary,
+    receiver: BeneficiaryAddress,
     salt: Salt,
 ) -> PaymentAddress {
     // Step 1: abi.encode(token, amount, receiver, salt) — 32-byte-word-padded.

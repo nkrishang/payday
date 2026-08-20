@@ -14,7 +14,7 @@ impl TokenAddress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Beneficiary(pub Address);
+pub struct BeneficiaryAddress(pub Address);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FactoryAddress(pub Address);
