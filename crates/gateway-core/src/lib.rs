@@ -1,6 +1,9 @@
-use alloy_primitives::{Address, B256, address};
+use alloy_primitives::{Address, address};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+mod salt;
+pub use salt::*;
 
 mod amount;
 pub use amount::*;
@@ -32,9 +35,6 @@ pub struct Beneficiary(pub Address);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FactoryAddress(pub Address);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Salt(pub B256);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaymentAddress(pub Address);

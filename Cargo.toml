@@ -12,3 +12,4 @@ alloy-sol-types = "1.6.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 uuid = { version = "1.24.1", features = ["v7", "serde"] }
+rand = "0.9"

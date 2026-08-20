@@ -12,8 +12,8 @@ use std::io::Write;
 
 use alloy_primitives::{Address, B256, U256};
 
-use gateway_core::{Amount, Beneficiary, FactoryAddress, PaymentAddress, Salt, TokenAddress};
 use gateway_core::predict_payment_address;
+use gateway_core::{Amount, Beneficiary, FactoryAddress, PaymentAddress, Salt, TokenAddress};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

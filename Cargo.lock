@@ -997,6 +997,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "rand 0.9.5",
  "serde",
  "thiserror",
  "uuid",

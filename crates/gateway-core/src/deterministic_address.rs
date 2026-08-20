@@ -28,12 +28,8 @@ pub fn predict_payment_address(
     salt: Salt,
 ) -> PaymentAddress {
     // Step 1: abi.encode(token, amount, receiver, salt) — 32-byte-word-padded.
-    let encoded = DeploymentSaltInput::abi_encode_sequence(&(
-        token.0,
-        amount.0,
-        receiver.0,
-        salt.0,
-    ));
+    let encoded =
+        DeploymentSaltInput::abi_encode_sequence(&(token.0, amount.0, receiver.0, salt.0));
     let deployment_salt = keccak256(&encoded);
 
     // Step 2: CREATE2 to compute the proxy address.

@@ -9,6 +9,7 @@ alloy-sol-types = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+rand = { workspace = true }
 
 [[bin]]
 name = "derive-address"
