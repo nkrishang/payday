@@ -5,6 +5,8 @@ use alloy_primitives::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const NATIVE_TOKEN_DECIMALS: u8 = 18;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Amount(pub U256);
 
