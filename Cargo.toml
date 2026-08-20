@@ -15,7 +15,7 @@ uuid = { version = "1.24.1", features = ["v7", "serde"] }
 rand = "0.9"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "macros", "migrate"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.6", features = ["trace"] }

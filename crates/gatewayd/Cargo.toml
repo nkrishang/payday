@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 gateway-core = { path = "../gateway-core" }
+alloy-primitives = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -12,3 +13,5 @@ tracing-subscriber = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }

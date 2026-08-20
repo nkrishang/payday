@@ -1,5 +1,7 @@
 mod api;
 mod config;
+mod db;
+mod state;
 
 use axum::serve;
 use tokio::net::TcpListener;
@@ -13,7 +15,18 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let app = api::router();
+    let pool = db::connect(config.database_url())
+        .await
+        .expect("failed to connect to database");
+
+    let repo = db::InvoiceRepository::new(pool);
+    let state = state::AppState::new(
+        repo,
+        config.chain_id(),
+        config.factory_address(),
+    );
+
+    let app = api::router(state);
 
     let listener = TcpListener::bind(config.bind_addr())
         .await
