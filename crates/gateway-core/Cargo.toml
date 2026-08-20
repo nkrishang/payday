@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+[[bin]]
+name = "derive-address"
+path = "test-helpers/derive_address.rs"

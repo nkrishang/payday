@@ -5,6 +5,9 @@ use uuid::Uuid;
 mod amount;
 pub use amount::*;
 
+mod deterministic_address;
+pub use deterministic_address::*;
+
 pub const NATIVE_TOKEN_ADDRESS: TokenAddress =
     TokenAddress(address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"));
 pub const NATIVE_TOKEN_DECIMALS: u8 = 18;
