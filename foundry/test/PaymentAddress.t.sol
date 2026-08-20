@@ -16,9 +16,7 @@ contract PaymentAddressTest is Test {
 
     /// @notice Fuzz test: for any (token, amount, receiver, salt), the Rust
     ///         derivation must match Solidity's `paymentAddress`.
-    function testFuzz_address_parity(address token, uint256 amount, address receiver, bytes32 salt)
-        public
-    {
+    function testFuzz_address_parity(address token, uint256 amount, address receiver, bytes32 salt) public {
         // --- Solidity side ---
         address expected = factory.paymentAddress(token, amount, receiver, salt);
 
