@@ -1,8 +1,8 @@
 mod invoices;
 
 pub use invoices::{CreateInvoiceInput, DbInvoice, InvoiceRepository};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let pool = PgPoolOptions::new()

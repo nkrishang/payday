@@ -3,9 +3,9 @@
 use std::str::FromStr;
 
 use alloy_primitives::{Address, U256, utils::format_units};
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -55,7 +55,11 @@ impl From<Invoice> for InvoiceResponse {
     fn from(inv: Invoice) -> Self {
         let decimals = NATIVE_TOKEN_DECIMALS;
         let amount_human = format_units(inv.amount.0, decimals).unwrap_or_default();
-        let kind = if inv.token.is_native() { "native" } else { "erc20" };
+        let kind = if inv.token.is_native() {
+            "native"
+        } else {
+            "erc20"
+        };
 
         InvoiceResponse {
             id: inv.id.0.to_string(),
@@ -137,7 +141,10 @@ pub async fn create_invoice(
     // 5. Check for existing idempotency key before generating anything.
     if let Some(existing) = state.repo.find_by_idempotency_key(&idempotency_key).await? {
         if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
-            return Ok((axum::http::StatusCode::OK, Json(InvoiceResponse::from(existing))));
+            return Ok((
+                axum::http::StatusCode::OK,
+                Json(InvoiceResponse::from(existing)),
+            ));
         } else {
             return Err(ApiError::idempotency_conflict());
         }
@@ -169,7 +176,10 @@ pub async fn create_invoice(
     let inserted = state.repo.insert(&input).await?;
 
     match inserted {
-        Some(row) => Ok((axum::http::StatusCode::CREATED, Json(InvoiceResponse::from(row)))),
+        Some(row) => Ok((
+            axum::http::StatusCode::CREATED,
+            Json(InvoiceResponse::from(row)),
+        )),
         None => {
             // Race: another request won. Fetch their row and compare.
             let existing = state
@@ -179,7 +189,10 @@ pub async fn create_invoice(
                 .expect("idempotency key must exist after ON CONFLICT");
 
             if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
-                Ok((axum::http::StatusCode::OK, Json(InvoiceResponse::from(existing))))
+                Ok((
+                    axum::http::StatusCode::OK,
+                    Json(InvoiceResponse::from(existing)),
+                ))
             } else {
                 Err(ApiError::idempotency_conflict())
             }
@@ -191,8 +204,8 @@ pub async fn get_invoice(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, ApiError> {
-    let uuid = Uuid::from_str(&id)
-        .map_err(|_| ApiError::invalid_request("invalid invoice ID format"))?;
+    let uuid =
+        Uuid::from_str(&id).map_err(|_| ApiError::invalid_request("invalid invoice ID format"))?;
 
     let row = state
         .repo
@@ -214,5 +227,7 @@ fn same_request(
     row.chain_id as u64 == chain_id
         && row.token_address.as_slice() == token.as_slice()
         && row.beneficiary_address.as_slice() == beneficiary.as_slice()
-        && U256::from_str_radix(&row.amount, 10).map(|a| &a == amount).unwrap_or(false)
+        && U256::from_str_radix(&row.amount, 10)
+            .map(|a| &a == amount)
+            .unwrap_or(false)
 }

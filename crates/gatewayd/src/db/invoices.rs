@@ -7,7 +7,10 @@ use alloy_primitives::{Address, B256, U256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use gateway_core::{Amount, BeneficiaryAddress, ChainId, FactoryAddress, InvoiceId, PaymentAddress, Salt, TokenAddress};
+use gateway_core::{
+    Amount, BeneficiaryAddress, ChainId, FactoryAddress, InvoiceId, PaymentAddress, Salt,
+    TokenAddress,
+};
 
 /// Database row representing one invoice.
 #[allow(dead_code)] // some fields not used in responses yet
@@ -78,7 +81,10 @@ impl InvoiceRepository {
 
     /// Insert a new invoice. Returns the row if inserted, or None if a row with
     /// the same idempotency_key already exists (caller must handle the conflict).
-    pub async fn insert(&self, input: &CreateInvoiceInput) -> Result<Option<DbInvoice>, sqlx::Error> {
+    pub async fn insert(
+        &self,
+        input: &CreateInvoiceInput,
+    ) -> Result<Option<DbInvoice>, sqlx::Error> {
         let row = sqlx::query_as::<_, DbInvoice>(
             r#"
             INSERT INTO invoices
@@ -106,13 +112,14 @@ impl InvoiceRepository {
     }
 
     /// Fetch an existing invoice by its idempotency key.
-    pub async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<DbInvoice>, sqlx::Error> {
-        sqlx::query_as::<_, DbInvoice>(
-            r#"SELECT * FROM invoices WHERE idempotency_key = $1"#,
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await
+    pub async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(r#"SELECT * FROM invoices WHERE idempotency_key = $1"#)
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
     }
 
     /// Fetch an invoice by its ID.

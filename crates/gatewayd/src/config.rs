@@ -12,8 +12,8 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let factory_address = std::env::var("GATEWAY_FACTORY_ADDRESS")
-            .expect("GATEWAY_FACTORY_ADDRESS must be set");
+        let factory_address =
+            std::env::var("GATEWAY_FACTORY_ADDRESS").expect("GATEWAY_FACTORY_ADDRESS must be set");
         let factory_address = Address::from_str(&factory_address)
             .unwrap_or_else(|e| panic!("invalid GATEWAY_FACTORY_ADDRESS '{factory_address}': {e}"));
 
@@ -25,8 +25,7 @@ impl Config {
         Config {
             bind_addr: std::env::var("GATEWAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
-            database_url: std::env::var("DATABASE_URL")
-                .expect("DATABASE_URL must be set"),
+            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             chain_id: ChainId(chain_id),
             factory_address,
         }

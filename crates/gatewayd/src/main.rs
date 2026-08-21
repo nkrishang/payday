@@ -20,11 +20,7 @@ async fn main() {
         .expect("failed to connect to database");
 
     let repo = db::InvoiceRepository::new(pool);
-    let state = state::AppState::new(
-        repo,
-        config.chain_id(),
-        config.factory_address(),
-    );
+    let state = state::AppState::new(repo, config.chain_id(), config.factory_address());
 
     let app = api::router(state);
 
