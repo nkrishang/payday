@@ -1,0 +1,12 @@
+[package]
+name = "gateway-db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gateway-core = { path = "../gateway-core" }
+alloy-primitives = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

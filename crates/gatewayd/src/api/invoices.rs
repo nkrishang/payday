@@ -14,18 +14,18 @@ use gateway_core::{
 };
 
 use crate::api::error::ApiError;
-use crate::db::{CreateInvoiceInput, DbInvoice};
 use crate::state::AppState;
+use gateway_db::{CreateInvoiceInput, DbInvoice};
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
-/// outside the schema contract (see [`crate::db::DbInvoiceError`]).
-impl TryFrom<DbInvoice> for InvoiceResponse {
-    type Error = crate::db::DbInvoiceError;
-
-    fn try_from(row: DbInvoice) -> Result<Self, Self::Error> {
-        Ok(Invoice::try_from(&row)?.into())
-    }
+/// outside the schema contract (see [`gateway_db::DbInvoiceError`]).
+///
+/// A free function rather than a `TryFrom` impl: the orphan rule forbids
+/// implementing a foreign trait for the foreign `InvoiceResponse` from a row
+/// type that now also lives outside this crate.
+fn to_response(row: DbInvoice) -> Result<InvoiceResponse, ApiError> {
+    Ok(Invoice::try_from(&row)?.into())
 }
 
 // --- Handlers ---
@@ -75,10 +75,7 @@ pub async fn create_invoice(
     // 5. Check for existing idempotency key before generating anything.
     if let Some(existing) = state.repo.find_by_idempotency_key(&idempotency_key).await? {
         if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
-            return Ok((
-                axum::http::StatusCode::OK,
-                Json(InvoiceResponse::try_from(existing)?),
-            ));
+            return Ok((axum::http::StatusCode::OK, Json(to_response(existing)?)));
         } else {
             return Err(ApiError::idempotency_conflict());
         }
@@ -99,10 +96,7 @@ pub async fn create_invoice(
     let inserted = state.repo.insert(&input).await?;
 
     match inserted {
-        Some(row) => Ok((
-            axum::http::StatusCode::CREATED,
-            Json(InvoiceResponse::try_from(row)?),
-        )),
+        Some(row) => Ok((axum::http::StatusCode::CREATED, Json(to_response(row)?))),
         None => {
             // Race: another request won. Fetch their row and compare.
             let existing = state
@@ -112,10 +106,7 @@ pub async fn create_invoice(
                 .expect("idempotency key must exist after ON CONFLICT");
 
             if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
-                Ok((
-                    axum::http::StatusCode::OK,
-                    Json(InvoiceResponse::try_from(existing)?),
-                ))
+                Ok((axum::http::StatusCode::OK, Json(to_response(existing)?)))
             } else {
                 Err(ApiError::idempotency_conflict())
             }
@@ -136,7 +127,7 @@ pub async fn get_invoice(
         .await?
         .ok_or_else(ApiError::invoice_not_found)?;
 
-    Ok(Json(InvoiceResponse::try_from(row)?))
+    Ok(Json(to_response(row)?))
 }
 
 /// Compare a persisted DB row against request parameters for idempotency replay.

@@ -30,6 +30,12 @@ pub struct DbInvoice {
     pub status: String,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    /// Block height at which the balance was first observed to be sufficient.
+    /// Internal indexer bookkeeping; NULL until the invoice is funded.
+    pub funded_at_block: Option<i64>,
+    /// Canonical base-unit balance observed at funding time (decimal string).
+    /// Internal indexer bookkeeping; NULL until the invoice is funded.
+    pub observed_amount: Option<String>,
 }
 
 /// A stored invoice row could not be decoded into the domain model. This
@@ -220,6 +226,63 @@ impl InvoiceRepository {
             .fetch_optional(&self.pool)
             .await
     }
+
+    /// List invoices still awaiting payment on a given chain, oldest first.
+    ///
+    /// These are the invoices the indexer must reconcile against on-chain
+    /// balances. `limit` bounds the batch size so a large backlog cannot stall a
+    /// single poll pass. UUIDv7 ordering makes the scan deterministic and
+    /// fair (oldest invoices are checked first).
+    pub async fn list_created(
+        &self,
+        chain_id: u64,
+        limit: i64,
+    ) -> Result<Vec<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(
+            r#"
+            SELECT * FROM invoices
+            WHERE status = 'created' AND chain_id = $1
+            ORDER BY id
+            LIMIT $2
+            "#,
+        )
+        .bind(chain_id as i64)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Transition an invoice `created -> funded`, recording the observed balance
+    /// and block height. Idempotent compare-and-set: the `WHERE status =
+    /// 'created'` guard means a re-run, a duplicate delivery, or a concurrent
+    /// worker updates zero rows and returns `false` — the transition happens at
+    /// most once.
+    ///
+    /// `observed_amount` is the canonical base-unit balance (decimal string).
+    pub async fn mark_funded(
+        &self,
+        id: Uuid,
+        observed_amount: &str,
+        block: u64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET status = 'funded',
+                observed_amount = $2,
+                funded_at_block = $3,
+                updated_at = now()
+            WHERE id = $1 AND status = 'created'
+            "#,
+        )
+        .bind(id)
+        .bind(observed_amount)
+        .bind(block as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +310,8 @@ mod tests {
             status: "created".to_string(),
             created_at: epoch(),
             updated_at: epoch(),
+            funded_at_block: None,
+            observed_amount: None,
         }
     }
 

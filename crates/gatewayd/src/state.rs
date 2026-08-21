@@ -1,6 +1,6 @@
-use crate::db::InvoiceRepository;
 use alloy_primitives::Address;
 use gateway_core::ChainId;
+use gateway_db::InvoiceRepository;
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
 #[derive(Clone)]

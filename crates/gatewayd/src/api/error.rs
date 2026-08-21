@@ -115,8 +115,8 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
-impl From<crate::db::DbInvoiceError> for ApiError {
-    fn from(e: crate::db::DbInvoiceError) -> Self {
+impl From<gateway_db::DbInvoiceError> for ApiError {
+    fn from(e: gateway_db::DbInvoiceError) -> Self {
         // A stored row outside the schema contract is a server-side data fault,
         // not a client error.
         tracing::error!(error = ?e, "failed to decode invoice row");

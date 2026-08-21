@@ -2,13 +2,17 @@
 resolver = "2"
 members = [
     "crates/gateway-core",
+    "crates/gateway-db",
     "crates/gatewayd",
+    "crates/gateway-indexer",
     "crates/gateway-cli",
 ]
 
 [workspace.dependencies]
 alloy-primitives = { version = "1.6.1", features = ["serde"] }
 alloy-sol-types = "1.6.1"
+alloy-provider = { version = "1", features = ["reqwest-rustls-tls"] }
+async-trait = "0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 uuid = { version = "1.24.1", features = ["v7", "serde"] }

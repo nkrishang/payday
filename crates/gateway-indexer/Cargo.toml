@@ -1,5 +1,5 @@
 [package]
-name = "gatewayd"
+name = "gateway-indexer"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,13 +7,11 @@ edition = "2024"
 gateway-core = { path = "../gateway-core" }
 gateway-db = { path = "../gateway-db" }
 alloy-primitives = { workspace = true }
-axum = { workspace = true }
+alloy-provider = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tower-http = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

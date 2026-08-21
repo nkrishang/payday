@@ -1,6 +1,5 @@
 mod api;
 mod config;
-mod db;
 mod state;
 
 use axum::serve;
@@ -15,11 +14,11 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let pool = db::connect(config.database_url())
+    let pool = gateway_db::connect(config.database_url())
         .await
         .expect("failed to connect to database");
 
-    let repo = db::InvoiceRepository::new(pool);
+    let repo = gateway_db::InvoiceRepository::new(pool.clone());
     let state = state::AppState::new(repo, config.chain_id(), config.factory_address());
 
     let app = api::router(state);
@@ -30,5 +29,15 @@ async fn main() {
 
     tracing::info!("listening on {}", config.bind_addr());
 
-    serve(listener, app).await.expect("server error");
+    // Serve until Ctrl-C.
+    let server = serve(listener, app).with_graceful_shutdown(async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C handler");
+        tracing::info!("shutdown signal received");
+    });
+
+    if let Err(e) = server.await {
+        tracing::error!(error = %e, "server error");
+    }
 }
