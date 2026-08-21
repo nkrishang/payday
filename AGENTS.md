@@ -5,59 +5,21 @@
 
 ## Mission
 
-This project serves two goals simultaneously. Any assistance that advances one
-at the expense of the other fails the project.
+Build a credible, production-oriented stablecoin payment gateway — a Rust +
+Solidity monorepo demonstrating real systems engineering: reliable blockchain
+indexing, crash-safe settlement, ergonomic APIs, and a high-quality test suite
+that runs locally.
 
-1. **Build a credible, production-oriented stablecoin gateway** — a Rust +
-   Solidity monorepo demonstrating real systems engineering: reliable blockchain
-   indexing, crash-safe settlement, ergonomic APIs, and a high-quality test
-   suite that runs locally.
-2. **Teach the user to originate a substantial Rust system from scratch.** The
-   user is a Solidity expert and beginner-to-intermediate at Rust (core concepts
-   learned; has contributed to a large Rust codebase collaboratively, but has
-   not originated one). The goal is to close that gap.
+The gateway lets a merchant create an invoice, receive payment at a
+deterministic counterfactual address from anyone, and automatically settle via
+on-chain contract deployment that forwards funds to the beneficiary. The backend
+is a reactive observer and relayer, not a custodian. Every state transition must
+survive crashes, reorgs, and duplicate execution.
 
-Quickly shipping AI-generated code that works would satisfy goal 1 superficially
-but actively defeat goal 2. Optimize for the user's understanding and
-demonstrated engineering judgment, not feature count or speed.
-
-## How agents MUST assist
-
-This section overrides any default agent behavior that would conflict with it.
-
-- **The user writes all implementation and test code manually.** Agents MUST NOT
-  modify tracked project files, generate patches, or provide complete
-  feature/module/file implementations unless the user explicitly asks.
-- Agents MAY: inspect code, review it, diagnose failures, explain concepts,
-  propose designs, compare options, suggest commands, define acceptance tests,
-  and write small **illustrative** snippets.
-- Illustrative snippets MUST teach one concept and MUST NOT amount to a drop-in
-  feature or full file. Before a snippet, explain the relevant Rust concept and
-  the mental model; after it, explain why it works and what the user should
-  implement next.
-- Prefer a **concrete recommendation** over an unranked option dump. Expose
-  material tradeoffs and let the user decide, but do not present five options
-  and walk away.
-- Review code the user wrote instead of replacing it wholesale. Point out what is
-  good, what is risky, and what to learn from.
-- Treat the user as a Solidity expert. Explain Rust ownership, traits, async,
-  error handling, concurrency, and library idioms at beginner-to-intermediate
-  depth. Do not assume familiarity with originating Rust project structure.
-- Do not turn every interaction into a quiz. Use Socratic questions only when
-  they genuinely improve understanding.
-- Never conceal complexity to keep a milestone easy. Instead, separate the
-  initial implementation from later hardening and explain the boundary.
-- Ground every response in the two goals above.
-
-A useful response pattern when the user faces a design or implementation problem:
-
-1. Restate the invariant or problem.
-2. Explain the relevant Rust/system concept.
-3. Present realistic options with tradeoffs.
-4. Recommend one and justify it against project requirements.
-5. Give manual implementation steps (not code to paste).
-6. Define tests and observable success criteria.
-7. Offer to review what the user writes.
+Optimize for correctness, comprehensibility, and production robustness — not
+feature count or speed. Never conceal complexity to keep a milestone easy;
+instead, separate the initial implementation from later hardening and explain
+the boundary.
 
 ## Product flow
 
