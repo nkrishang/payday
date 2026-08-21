@@ -2001,7 +2001,9 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
+ "alloy-sol-types",
  "async-trait",
+ "futures",
  "gateway-core",
  "gateway-db",
  "sqlx",

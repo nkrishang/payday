@@ -14,6 +14,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy_primitives::{Address, U256};
+use futures::future::join_all;
 use gateway_core::{ChainId, Invoice};
 use thiserror::Error;
 use tokio::sync::watch;
@@ -21,11 +23,18 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::chain::{ChainClient, ChainError};
-use gateway_db::{CursorRepository, DbInvoiceError, InvoiceRepository};
+use gateway_db::{CursorRepository, InvoiceRepository};
 
 /// Maximum invoices reconciled in a single poll pass, so a large backlog cannot
 /// stall one tick. Remaining invoices are picked up on subsequent passes.
 const RECONCILE_BATCH_LIMIT: i64 = 500;
+
+/// Payment addresses read per Multicall3 `aggregate` call. One `eth_call`
+/// carries this many balance reads; a full pass splits its invoices into chunks
+/// of this size and runs the chunks concurrently. Kept well under the point
+/// where a node's `eth_call` gas/response limits start rejecting large
+/// multicalls (empirically ~1k calls), leaving headroom.
+const MULTICALL_CHUNK_SIZE: usize = 200;
 
 /// Errors that can abort a single poll pass. All are transient or indicate
 /// out-of-contract data; the worker logs and retries on the next tick rather
@@ -36,8 +45,6 @@ pub enum IndexerError {
     Chain(#[from] ChainError),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
-    #[error("corrupt invoice row: {0}")]
-    Row(#[from] DbInvoiceError),
 }
 
 /// The payment indexer. Owns its own repository handles and chain client; it is
@@ -119,11 +126,31 @@ impl Indexer {
             .list_created(self.chain_id.0, RECONCILE_BATCH_LIMIT)
             .await?;
 
-        for row in &rows {
-            // A single corrupt row or transient per-address RPC error must not
-            // abort the whole pass or the cursor advance.
-            if let Err(e) = self.reconcile(row, head).await {
-                warn!(invoice_id = %row.id, error = %e, "failed to reconcile invoice");
+        // Decode rows to the domain model up front so we have the typed payment
+        // address and amount before fetching balances. A single corrupt row
+        // must not abort the pass, so it is logged and skipped rather than
+        // propagated.
+        let invoices: Vec<Invoice> = rows
+            .iter()
+            .filter_map(|row| match Invoice::try_from(row) {
+                Ok(invoice) => Some(invoice),
+                Err(e) => {
+                    warn!(invoice_id = %row.id, error = %e, "skipping corrupt invoice row");
+                    None
+                }
+            })
+            .collect();
+
+        // Read every payment address's balance, batched into Multicall calls
+        // that run concurrently, then fund the covered invoices.
+        let balances = self.fetch_balances(&invoices).await;
+        for (invoice, balance) in invoices.iter().zip(balances) {
+            let Some(balance) = balance else {
+                // This invoice's batch failed this pass; it is retried next tick.
+                continue;
+            };
+            if let Err(e) = self.fund_if_covered(invoice, balance, head).await {
+                warn!(invoice_id = %invoice.id.0, error = %e, "failed to fund invoice");
             }
         }
 
@@ -131,14 +158,64 @@ impl Indexer {
         Ok(())
     }
 
-    /// Reconcile one invoice against its canonical on-chain balance, funding it
-    /// if the balance meets the required amount.
-    async fn reconcile(&self, row: &gateway_db::DbInvoice, head: u64) -> Result<(), IndexerError> {
-        // Route through the domain model so payment address and amount are the
-        // exact typed values, reusing the row->domain contract and its errors.
-        let invoice = Invoice::try_from(row)?;
+    /// Fetch the on-chain balance of every invoice's payment address.
+    ///
+    /// Addresses are split into [`MULTICALL_CHUNK_SIZE`] chunks; each chunk is
+    /// one Multicall `aggregate` request, and all chunks are issued
+    /// concurrently and awaited together, so a full pass costs
+    /// `ceil(N / chunk)` round-trips overlapped in flight rather than `N`
+    /// sequential ones.
+    ///
+    /// Returns balances aligned with `invoices`. An entry is `None` when its
+    /// chunk's request failed this pass; those invoices are simply left for the
+    /// next tick, so one failed chunk never aborts the others or the pass.
+    async fn fetch_balances(&self, invoices: &[Invoice]) -> Vec<Option<U256>> {
+        let batches = invoices.chunks(MULTICALL_CHUNK_SIZE).map(|batch| {
+            let chain = Arc::clone(&self.chain);
+            let addrs: Vec<Address> = batch.iter().map(|inv| inv.payment_address.0).collect();
+            async move {
+                match chain.get_balances(&addrs).await {
+                    // Multicall guarantees one result per input address, but
+                    // guard the alignment so a malformed response can never
+                    // shift balances onto the wrong invoices.
+                    Ok(balances) if balances.len() == addrs.len() => {
+                        balances.into_iter().map(Some).collect::<Vec<_>>()
+                    }
+                    Ok(balances) => {
+                        warn!(
+                            expected = addrs.len(),
+                            got = balances.len(),
+                            "multicall returned mismatched balance count; retrying next tick"
+                        );
+                        vec![None; addrs.len()]
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            batch_size = addrs.len(),
+                            "multicall balance batch failed; retrying next tick"
+                        );
+                        vec![None; addrs.len()]
+                    }
+                }
+            }
+        });
 
-        let balance = self.chain.get_balance(invoice.payment_address.0).await?;
+        join_all(batches)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Fund one invoice if its observed balance meets the required amount. The
+    /// transition is an idempotent compare-and-set in the repository.
+    async fn fund_if_covered(
+        &self,
+        invoice: &Invoice,
+        balance: U256,
+        head: u64,
+    ) -> Result<(), IndexerError> {
         if balance < invoice.amount.0 {
             return Ok(());
         }
@@ -190,8 +267,11 @@ mod tests {
             Ok(self.block)
         }
 
-        async fn get_balance(&self, addr: Address) -> Result<U256, ChainError> {
-            Ok(self.balances.get(&addr).copied().unwrap_or(U256::ZERO))
+        async fn get_balances(&self, addrs: &[Address]) -> Result<Vec<U256>, ChainError> {
+            Ok(addrs
+                .iter()
+                .map(|addr| self.balances.get(addr).copied().unwrap_or(U256::ZERO))
+                .collect())
         }
     }
 
