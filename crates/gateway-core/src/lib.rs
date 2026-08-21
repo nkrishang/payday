@@ -10,6 +10,9 @@ pub use amount::*;
 mod invoice;
 pub use invoice::*;
 
+mod dto;
+pub use dto::*;
+
 mod deterministic_address;
 pub use deterministic_address::*;
 

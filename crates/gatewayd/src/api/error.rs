@@ -75,6 +75,14 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal_error",
+            message: msg.into(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -104,5 +112,14 @@ impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
         tracing::error!(error = ?e, "database error");
         Self::database_unavailable("database error")
+    }
+}
+
+impl From<crate::db::DbInvoiceError> for ApiError {
+    fn from(e: crate::db::DbInvoiceError) -> Self {
+        // A stored row outside the schema contract is a server-side data fault,
+        // not a client error.
+        tracing::error!(error = ?e, "failed to decode invoice row");
+        Self::internal("failed to decode stored invoice")
     }
 }

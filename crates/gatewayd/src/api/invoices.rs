@@ -2,95 +2,29 @@
 
 use std::str::FromStr;
 
-use alloy_primitives::{Address, U256, utils::format_units};
+use alloy_primitives::{Address, U256};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, NATIVE_TOKEN_DECIMALS,
-    TokenAddress,
+    Amount, BeneficiaryAddress, ChainId, CreateInvoiceRequest, FactoryAddress, Invoice,
+    InvoiceResponse, NATIVE_TOKEN_DECIMALS, TokenAddress,
 };
 
 use crate::api::error::ApiError;
 use crate::db::{CreateInvoiceInput, DbInvoice};
 use crate::state::AppState;
 
-// --- Request DTO ---
+/// Project a DB row onto the wire response, going through the domain model so
+/// the row is never serialized directly. Fails only if the stored row is
+/// outside the schema contract (see [`crate::db::DbInvoiceError`]).
+impl TryFrom<DbInvoice> for InvoiceResponse {
+    type Error = crate::db::DbInvoiceError;
 
-#[derive(Debug, Deserialize)]
-pub struct CreateInvoiceRequest {
-    pub chain_id: String,
-    pub token_address: String,
-    pub beneficiary_address: String,
-    pub amount: String,
-}
-
-// --- Response DTO ---
-
-#[derive(Debug, Serialize)]
-pub struct InvoiceResponse {
-    pub id: String,
-    pub chain_id: String,
-    pub factory_address: String,
-    pub token: TokenDto,
-    pub beneficiary_address: String,
-    pub amount: String,
-    pub amount_base_units: String,
-    pub salt: String,
-    pub payment_address: String,
-    pub status: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TokenDto {
-    pub address: String,
-    pub kind: &'static str,
-    pub decimals: u8,
-}
-
-impl From<Invoice> for InvoiceResponse {
-    fn from(inv: Invoice) -> Self {
-        let decimals = NATIVE_TOKEN_DECIMALS;
-        let amount_human = format_units(inv.amount.0, decimals).unwrap_or_default();
-        let kind = if inv.token.is_native() {
-            "native"
-        } else {
-            "erc20"
-        };
-
-        InvoiceResponse {
-            id: inv.id.0.to_string(),
-            chain_id: inv.chain_id.0.to_string(),
-            factory_address: inv.factory.0.to_checksum(None),
-            token: TokenDto {
-                address: inv.token.0.to_checksum(None),
-                kind,
-                decimals,
-            },
-            beneficiary_address: inv.beneficiary.0.to_checksum(None),
-            amount: amount_human,
-            amount_base_units: inv.amount.0.to_string(),
-            salt: inv.salt.0.to_string(),
-            payment_address: inv.payment_address.0.to_checksum(None),
-            status: match inv.status {
-                gateway_core::InvoiceStatus::Created => "created",
-                gateway_core::InvoiceStatus::Funded => "funded",
-                gateway_core::InvoiceStatus::Deploying => "deploying",
-                gateway_core::InvoiceStatus::Fulfilled => "fulfilled",
-                gateway_core::InvoiceStatus::Failed => "failed",
-            }
-            .to_string(),
-        }
-    }
-}
-
-impl From<DbInvoice> for InvoiceResponse {
-    fn from(row: DbInvoice) -> Self {
-        let inv = row.to_domain();
-        Self::from(inv)
+    fn try_from(row: DbInvoice) -> Result<Self, Self::Error> {
+        Ok(Invoice::try_from(&row)?.into())
     }
 }
 
@@ -143,7 +77,7 @@ pub async fn create_invoice(
         if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
             return Ok((
                 axum::http::StatusCode::OK,
-                Json(InvoiceResponse::from(existing)),
+                Json(InvoiceResponse::try_from(existing)?),
             ));
         } else {
             return Err(ApiError::idempotency_conflict());
@@ -160,25 +94,14 @@ pub async fn create_invoice(
     );
 
     // 7. Persist. ON CONFLICT handles the race between our check and insert.
-    let input = CreateInvoiceInput {
-        id: invoice.id.0,
-        idempotency_key: idempotency_key.clone(),
-        chain_id,
-        factory_address: state.factory_address.into(),
-        token_address: token_addr.into(),
-        token_decimals: decimals,
-        beneficiary_address: beneficiary_addr.into(),
-        amount: invoice.amount.0.to_string(),
-        salt: invoice.salt.0.into(),
-        payment_address: invoice.payment_address.0.into(),
-    };
+    let input = CreateInvoiceInput::from_invoice(&invoice, idempotency_key.clone(), decimals);
 
     let inserted = state.repo.insert(&input).await?;
 
     match inserted {
         Some(row) => Ok((
             axum::http::StatusCode::CREATED,
-            Json(InvoiceResponse::from(row)),
+            Json(InvoiceResponse::try_from(row)?),
         )),
         None => {
             // Race: another request won. Fetch their row and compare.
@@ -191,7 +114,7 @@ pub async fn create_invoice(
             if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
                 Ok((
                     axum::http::StatusCode::OK,
-                    Json(InvoiceResponse::from(existing)),
+                    Json(InvoiceResponse::try_from(existing)?),
                 ))
             } else {
                 Err(ApiError::idempotency_conflict())
@@ -213,7 +136,7 @@ pub async fn get_invoice(
         .await?
         .ok_or_else(ApiError::invoice_not_found)?;
 
-    Ok(Json(InvoiceResponse::from(row)))
+    Ok(Json(InvoiceResponse::try_from(row)?))
 }
 
 /// Compare a persisted DB row against request parameters for idempotency replay.

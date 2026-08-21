@@ -1,4 +1,8 @@
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
@@ -14,12 +18,54 @@ pub fn generate_invoice_id() -> InvoiceId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InvoiceStatus {
     Created,
     Funded,
     Deploying,
     Fulfilled,
     Failed,
+}
+
+/// Error returned when parsing an [`InvoiceStatus`] from its string form.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("unknown invoice status: {0}")]
+pub struct InvoiceStatusParseError(pub String);
+
+impl InvoiceStatus {
+    /// The canonical lowercase string form used on the wire and in the database.
+    /// This is the single source of truth for the string mapping; [`Display`],
+    /// [`FromStr`], and the DB CHECK constraint all agree with it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InvoiceStatus::Created => "created",
+            InvoiceStatus::Funded => "funded",
+            InvoiceStatus::Deploying => "deploying",
+            InvoiceStatus::Fulfilled => "fulfilled",
+            InvoiceStatus::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for InvoiceStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for InvoiceStatus {
+    type Err = InvoiceStatusParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "created" => Ok(InvoiceStatus::Created),
+            "funded" => Ok(InvoiceStatus::Funded),
+            "deploying" => Ok(InvoiceStatus::Deploying),
+            "fulfilled" => Ok(InvoiceStatus::Fulfilled),
+            "failed" => Ok(InvoiceStatus::Failed),
+            other => Err(InvoiceStatusParseError(other.to_string())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,17 +102,6 @@ impl Invoice {
             status: InvoiceStatus::Created,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserInvoice {
-    pub id: InvoiceId,
-    pub chain_id: ChainId,
-    pub token: TokenAddress,
-    pub beneficiary: BeneficiaryAddress,
-    pub amount: Amount,
-    pub payment_address: PaymentAddress,
-    pub status: InvoiceStatus,
 }
 
 #[cfg(test)]
@@ -115,6 +150,28 @@ mod tests {
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
         )
+    }
+
+    #[test]
+    fn status_str_roundtrips_for_all_variants() {
+        for status in [
+            InvoiceStatus::Created,
+            InvoiceStatus::Funded,
+            InvoiceStatus::Deploying,
+            InvoiceStatus::Fulfilled,
+            InvoiceStatus::Failed,
+        ] {
+            let parsed = status.as_str().parse::<InvoiceStatus>().unwrap();
+            assert_eq!(parsed, status);
+            // Display and as_str agree.
+            assert_eq!(status.to_string(), status.as_str());
+        }
+    }
+
+    #[test]
+    fn status_from_str_rejects_unknown() {
+        let err = "bogus".parse::<InvoiceStatus>().unwrap_err();
+        assert_eq!(err, InvoiceStatusParseError("bogus".to_string()));
     }
 
     #[test]

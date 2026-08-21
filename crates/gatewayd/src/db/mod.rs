@@ -1,6 +1,6 @@
 mod invoices;
 
-pub use invoices::{CreateInvoiceInput, DbInvoice, InvoiceRepository};
+pub use invoices::{CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 

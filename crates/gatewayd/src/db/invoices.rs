@@ -5,11 +5,12 @@
 
 use alloy_primitives::{Address, B256, U256};
 use sqlx::PgPool;
+use thiserror::Error;
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, BeneficiaryAddress, ChainId, FactoryAddress, InvoiceId, PaymentAddress, Salt,
-    TokenAddress,
+    Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, InvoiceId,
+    InvoiceStatusParseError, PaymentAddress, Salt, TokenAddress,
 };
 
 /// Database row representing one invoice.
@@ -31,27 +32,95 @@ pub struct DbInvoice {
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
 }
 
-impl DbInvoice {
-    /// Convert DB row to domain types.
-    pub fn to_domain(&self) -> gateway_core::Invoice {
-        gateway_core::Invoice {
-            id: InvoiceId(self.id),
-            chain_id: ChainId(self.chain_id as u64),
-            token: TokenAddress(Address::from_slice(&self.token_address)),
-            beneficiary: BeneficiaryAddress(Address::from_slice(&self.beneficiary_address)),
-            factory: FactoryAddress(Address::from_slice(&self.factory_address)),
-            amount: Amount(U256::from_str_radix(&self.amount, 10).expect("invalid amount in DB")),
-            salt: Salt(B256::from_slice(&self.salt)),
-            payment_address: PaymentAddress(Address::from_slice(&self.payment_address)),
-            status: match self.status.as_str() {
-                "created" => gateway_core::InvoiceStatus::Created,
-                "funded" => gateway_core::InvoiceStatus::Funded,
-                "deploying" => gateway_core::InvoiceStatus::Deploying,
-                "fulfilled" => gateway_core::InvoiceStatus::Fulfilled,
-                "failed" => gateway_core::InvoiceStatus::Failed,
-                other => panic!("unknown invoice status in DB: {other}"),
-            },
-        }
+/// A stored invoice row could not be decoded into the domain model. This
+/// signals corrupt or out-of-contract data in the database, not client error.
+#[derive(Debug, Error)]
+pub enum DbInvoiceError {
+    #[error("invalid amount in DB row {id}: {value:?}")]
+    InvalidAmount { id: Uuid, value: String },
+    #[error("invalid {field} bytes in DB row {id}: expected {expected} bytes, got {got}")]
+    WrongByteLength {
+        id: Uuid,
+        field: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    #[error("invalid status in DB row {id}: {source}")]
+    InvalidStatus {
+        id: Uuid,
+        #[source]
+        source: InvoiceStatusParseError,
+    },
+}
+
+/// Decode a fixed-length address column, mapping a wrong length to a typed error
+/// instead of panicking (as `Address::from_slice` would).
+fn address_from_col(
+    id: Uuid,
+    field: &'static str,
+    bytes: &[u8],
+) -> Result<Address, DbInvoiceError> {
+    Address::try_from(bytes).map_err(|_| DbInvoiceError::WrongByteLength {
+        id,
+        field,
+        expected: 20,
+        got: bytes.len(),
+    })
+}
+
+impl TryFrom<&DbInvoice> for Invoice {
+    type Error = DbInvoiceError;
+
+    /// Convert a DB row to the domain model. Fails with a typed error (rather
+    /// than panicking) when a column holds data outside the contract enforced
+    /// by the schema's CHECK constraints.
+    fn try_from(row: &DbInvoice) -> Result<Self, Self::Error> {
+        let amount =
+            U256::from_str_radix(&row.amount, 10).map_err(|_| DbInvoiceError::InvalidAmount {
+                id: row.id,
+                value: row.amount.clone(),
+            })?;
+
+        let salt =
+            B256::try_from(row.salt.as_slice()).map_err(|_| DbInvoiceError::WrongByteLength {
+                id: row.id,
+                field: "salt",
+                expected: 32,
+                got: row.salt.len(),
+            })?;
+
+        let status = row
+            .status
+            .parse()
+            .map_err(|source| DbInvoiceError::InvalidStatus { id: row.id, source })?;
+
+        Ok(Invoice {
+            id: InvoiceId(row.id),
+            chain_id: ChainId(row.chain_id as u64),
+            token: TokenAddress(address_from_col(
+                row.id,
+                "token_address",
+                &row.token_address,
+            )?),
+            beneficiary: BeneficiaryAddress(address_from_col(
+                row.id,
+                "beneficiary_address",
+                &row.beneficiary_address,
+            )?),
+            factory: FactoryAddress(address_from_col(
+                row.id,
+                "factory_address",
+                &row.factory_address,
+            )?),
+            amount: Amount(amount),
+            salt: Salt(salt),
+            payment_address: PaymentAddress(address_from_col(
+                row.id,
+                "payment_address",
+                &row.payment_address,
+            )?),
+            status,
+        })
     }
 }
 
@@ -72,6 +141,28 @@ pub struct CreateInvoiceInput {
     pub amount: String,
     pub salt: [u8; 32],
     pub payment_address: [u8; 20],
+}
+
+impl CreateInvoiceInput {
+    /// Build the write-path input from a freshly created domain [`Invoice`],
+    /// projecting its strongly-typed fields to DB column types. The
+    /// idempotency key and token decimals are not part of the domain model, so
+    /// they are supplied by the caller. Status is not included — the INSERT
+    /// hardcodes `'created'`.
+    pub fn from_invoice(invoice: &Invoice, idempotency_key: String, token_decimals: u8) -> Self {
+        Self {
+            id: invoice.id.0,
+            idempotency_key,
+            chain_id: invoice.chain_id.0,
+            factory_address: invoice.factory.0.into(),
+            token_address: invoice.token.0.into(),
+            token_decimals,
+            beneficiary_address: invoice.beneficiary.0.into(),
+            amount: invoice.amount.0.to_string(),
+            salt: invoice.salt.0.into(),
+            payment_address: invoice.payment_address.0.into(),
+        }
+    }
 }
 
 impl InvoiceRepository {
@@ -128,5 +219,84 @@ impl InvoiceRepository {
             .bind(id)
             .fetch_optional(&self.pool)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::types::chrono::{DateTime, Utc};
+
+    fn epoch() -> DateTime<Utc> {
+        DateTime::from_timestamp(0, 0).unwrap()
+    }
+
+    /// A DB row that decodes cleanly; individual tests corrupt one field.
+    fn valid_row() -> DbInvoice {
+        DbInvoice {
+            id: Uuid::now_v7(),
+            idempotency_key: "key".to_string(),
+            chain_id: 1,
+            factory_address: vec![1u8; 20],
+            token_address: vec![2u8; 20],
+            token_decimals: 18,
+            beneficiary_address: vec![3u8; 20],
+            amount: "100".to_string(),
+            salt: vec![4u8; 32],
+            payment_address: vec![5u8; 20],
+            status: "created".to_string(),
+            created_at: epoch(),
+            updated_at: epoch(),
+        }
+    }
+
+    #[test]
+    fn valid_row_decodes() {
+        let invoice = Invoice::try_from(&valid_row()).expect("valid row must decode");
+        assert_eq!(invoice.chain_id.0, 1);
+        assert_eq!(invoice.amount.0.to_string(), "100");
+    }
+
+    #[test]
+    fn bad_amount_is_typed_error_not_panic() {
+        let mut row = valid_row();
+        row.amount = "not-a-number".to_string();
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::InvalidAmount { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_status_is_typed_error_not_panic() {
+        let mut row = valid_row();
+        row.status = "bogus".to_string();
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::InvalidStatus { .. })
+        ));
+    }
+
+    #[test]
+    fn wrong_length_address_is_typed_error_not_panic() {
+        let mut row = valid_row();
+        row.token_address = vec![2u8; 19]; // one byte short
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::WrongByteLength {
+                field: "token_address",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn wrong_length_salt_is_typed_error_not_panic() {
+        let mut row = valid_row();
+        row.salt = vec![4u8; 31];
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::WrongByteLength { field: "salt", .. })
+        ));
     }
 }

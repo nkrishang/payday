@@ -3,10 +3,11 @@ mod client;
 mod error;
 
 use clap::Parser;
+use gateway_core::{CreateInvoiceRequest, InvoiceResponse};
 use uuid::Uuid;
 
 use cli::{Cli, Command, CreateArgs, GetArgs, InvoiceCommand};
-use client::{CreateInvoice, GatewayClient, Invoice};
+use client::GatewayClient;
 use error::CliError;
 
 #[tokio::main]
@@ -28,7 +29,7 @@ async fn main() {
     }
 }
 
-async fn create(client: &GatewayClient, args: CreateArgs) -> Result<Invoice, CliError> {
+async fn create(client: &GatewayClient, args: CreateArgs) -> Result<InvoiceResponse, CliError> {
     // A generated key gives each invocation at-most-once semantics on retries;
     // callers can pin their own to make a retry replay the same create.
     // Reject blank fields locally so scripts get a fast, distinct exit code
@@ -41,7 +42,7 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<Invoice, Cli
         .idempotency_key
         .unwrap_or_else(|| Uuid::now_v7().to_string());
 
-    let req = CreateInvoice {
+    let req = CreateInvoiceRequest {
         chain_id: args.chain_id.to_string(),
         token_address: args.token,
         beneficiary_address: args.beneficiary,
@@ -52,7 +53,7 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<Invoice, Cli
     client.create_invoice(&req, &idempotency_key).await
 }
 
-async fn get(client: &GatewayClient, args: GetArgs) -> Result<Invoice, CliError> {
+async fn get(client: &GatewayClient, args: GetArgs) -> Result<InvoiceResponse, CliError> {
     require_nonblank("id", &args.id)?;
     client.get_invoice(&args.id).await
 }
@@ -69,7 +70,7 @@ fn require_nonblank(field: &str, value: &str) -> Result<(), CliError> {
 }
 
 /// Render an invoice as either JSON (script-friendly) or an aligned summary.
-fn print_invoice(inv: &Invoice, as_json: bool) {
+fn print_invoice(inv: &InvoiceResponse, as_json: bool) {
     if as_json {
         // Re-serialize through serde_json for stable, pretty output.
         match serde_json::to_string_pretty(inv) {

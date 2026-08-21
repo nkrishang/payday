@@ -1353,6 +1353,7 @@ name = "gateway-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "gateway-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1383,6 +1384,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror",
  "tokio",
  "tower-http",
  "tracing",
