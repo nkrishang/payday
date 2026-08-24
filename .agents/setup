@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+step() {
+  local label="$1"
+  shift
+  echo "==> ${label}"
+  time "$@"
+}
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+install_system_packages() {
+  local packages=(build-essential ca-certificates curl git libssl-dev pkg-config postgresql postgresql-client)
+  local missing=()
+  local package
+
+  for package in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+      missing+=("$package")
+    fi
+  done
+
+  if ((${#missing[@]})); then
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  else
+    echo "System packages already installed"
+  fi
+}
+
+install_rust() {
+  if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+      sh -s -- -y --profile minimal --default-toolchain stable
+  elif ! "$HOME/.cargo/bin/rustup" toolchain list | grep -q '^stable-'; then
+    "$HOME/.cargo/bin/rustup" toolchain install stable --profile minimal --no-self-update
+    "$HOME/.cargo/bin/rustup" default stable
+  else
+    echo "Rust stable already installed"
+  fi
+}
+
+install_foundry() {
+  if [[ ! -x "$HOME/.foundry/bin/foundryup" ]]; then
+    curl -L https://foundry.paradigm.xyz | bash
+  fi
+
+  if [[ ! -x "$HOME/.foundry/bin/forge" ]]; then
+    "$HOME/.foundry/bin/foundryup"
+  else
+    echo "Foundry already installed"
+  fi
+}
+
+configure_login_shell() {
+  local marker="# payday orb development environment"
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >>"$HOME/.bash_profile" <<EOF
+
+$marker
+export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
+if [[ "\$PWD" == "$repo_root" && -f "$repo_root/.env" ]]; then
+  set -a
+  source "$repo_root/.env"
+  set +a
+fi
+EOF
+  fi
+}
+
+start_postgres() {
+  if pg_isready -q; then
+    return
+  fi
+
+  local version name
+  read -r version name _ < <(pg_lsclusters --no-header | head -n 1)
+  sudo pg_ctlcluster "$version" "$name" start
+}
+
+configure_database() {
+  local db_user
+  db_user="$(id -un)"
+
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$db_user'" | grep -q 1; then
+    sudo -u postgres createuser --superuser "$db_user"
+  fi
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'gateway'" | grep -q 1; then
+    sudo -u postgres createdb --owner="$db_user" gateway
+  fi
+}
+
+create_dev_env() {
+  if [[ ! -f .env ]]; then
+    local db_user
+    db_user="$(id -un)"
+    cat >.env <<EOF
+DATABASE_URL=postgresql:///gateway?user=$db_user
+GATEWAY_CHAIN_ID=31337
+GATEWAY_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+GATEWAY_RPC_URL=http://127.0.0.1:8545
+# Anvil's public development account #0; never use this key on a real network.
+GATEWAY_SIGNER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+EOF
+  fi
+}
+
+step "Install system packages" install_system_packages
+step "Install Rust" install_rust
+export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
+step "Install Foundry" install_foundry
+step "Configure login shell" configure_login_shell
+step "Initialize git submodules" git submodule update --init --recursive --depth 1 --recommend-shallow
+step "Start PostgreSQL" start_postgres
+step "Create development database" configure_database
+step "Create local development environment" create_dev_env
+step "Fetch Rust dependencies" cargo fetch --locked
+step "Build Foundry FFI helper" cargo build --locked -p gateway-core --bin derive-address
+
+echo "Orb setup complete"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
+
+if ! pg_isready -q; then
+  read -r version name _ < <(pg_lsclusters --no-header | head -n 1)
+  sudo pg_ctlcluster "$version" "$name" start
+fi
+
+echo "PostgreSQL is ready"
