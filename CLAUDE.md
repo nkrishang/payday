@@ -85,8 +85,18 @@ Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
 
 ### 3. Build and start the services
 
-The generated `.env` contains the local addresses, database URL, RPC URL,
-confirmation depth, and Anvil signer key.
+Ensure `.env` contains the local addresses, database URL, RPC URL, confirmation
+depth, and Anvil signer key. Generate one API key and add it to the file so the
+API server and every CLI shell use the same credential:
+
+```bash
+chmod 600 .env
+printf '\nGATEWAY_API_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
+```
+
+Do this once rather than generating a different key in each terminal. In
+production, provide the key through secret management and only access the API
+over HTTPS.
 
 ```bash
 cargo build --workspace
@@ -148,6 +158,8 @@ overpayment sweeping.
 ## Configuration
 
 - `DATABASE_URL`
+- `GATEWAY_API_KEY` — bearer credential shared by `gatewayd` and authorized CLI
+  clients; minimum 32 bytes
 - `GATEWAY_CHAIN_ID`
 - `GATEWAY_FACTORY_ADDRESS`
 - `GATEWAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
