@@ -1,0 +1,14 @@
+aws_region       = "us-east-1"
+domain_name      = "api.payday.sh"
+route53_zone_id  = "Z0123456789EXAMPLE"
+image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
+alarm_email      = "operator@example.com"
+chain_id         = 143
+factory_address  = "0x0000000000000000000000000000000000000001"
+usdc_address     = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
+# Set this to the current Monad block immediately before the first deployment;
+# invoices cannot predate the service, so historical USDC logs are unnecessary.
+usdc_start_block      = 98700000
+finality_confirmations = 2
+# Prefer TF_VAR_rpc_url from a secure environment rather than placing this in a file.
+# rpc_url = "https://provider.example/v2/secret"

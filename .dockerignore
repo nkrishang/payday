@@ -1,0 +1,14 @@
+.git
+.github
+.amp
+.env
+target
+foundry/cache
+foundry/lib
+foundry/out
+broadcast
+infra/.terraform
+infra/*.tfplan
+infra/*.tfstate*
+infra/backend.hcl
+infra/terraform.tfvars

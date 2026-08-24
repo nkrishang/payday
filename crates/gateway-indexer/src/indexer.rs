@@ -27,9 +27,9 @@ const SWEEP_BATCH_LIMIT: i64 = 500;
 const SWEEP_BACKOFF_BASE_SECS: f64 = 2.0;
 const SWEEP_BACKOFF_CAP_SECS: f64 = 300.0;
 
-/// Errors that can abort a single poll pass. All are transient or indicate
-/// out-of-contract data; the worker logs and retries on the next tick rather
-/// than crashing the process.
+/// Errors that can abort a poll pass. Transient failures are retried; permanent
+/// RPC and finality failures escape the run loop so ECS restarts and alerts
+/// rather than leaving an inert process marked healthy.
 #[derive(Debug, Error)]
 pub enum IndexerError {
     #[error("chain error: {0}")]
@@ -89,10 +89,10 @@ impl Indexer {
         }
     }
 
-    /// Run the poll loop until `shutdown` is set to `true`. Returns when a
-    /// shutdown is signalled or the shutdown channel is dropped, so the caller
-    /// can `await` the task for a clean stop.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+    /// Run the poll loop until `shutdown` is set to `true`. Permanent RPC and
+    /// finality errors are returned so the process supervisor cannot mistake a
+    /// halted payment worker for a healthy one.
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), IndexerError> {
         let mut interval = tokio::time::interval(self.poll_interval);
         // If a tick is delayed (e.g. a slow RPC pass), don't fire a burst of
         // catch-up ticks afterwards; just resume the cadence.
@@ -106,11 +106,10 @@ impl Indexer {
             "indexer started"
         );
 
-        let mut halted = false;
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    self.poll_once(&mut halted).await;
+                    self.poll_once().await?;
                 }
                 changed = shutdown.changed() => {
                     // `Err` means the sender was dropped -> treat as shutdown.
@@ -121,18 +120,15 @@ impl Indexer {
                 }
             }
         }
+
+        Ok(())
     }
 
-    async fn poll_once(&self, halted: &mut bool) {
-        if *halted {
-            return;
-        }
-
+    async fn poll_once(&self) -> Result<(), IndexerError> {
         if let Err(error) = self.tick().await {
             if error.requires_halt() {
-                *halted = true;
                 warn!(error = %error, "indexer halted after a non-retryable safety or RPC error; operator intervention required");
-                return;
+                return Err(error);
             }
             warn!(error = %error, "indexer poll failed; retrying next tick");
         }
@@ -141,12 +137,14 @@ impl Indexer {
         // outage, but never after canonical history has been disputed.
         if let Err(error) = self.sweep_tick().await {
             if error.requires_halt() {
-                *halted = true;
                 warn!(error = %error, "indexer halted after a non-retryable sweep RPC error; operator intervention required");
+                return Err(error);
             } else {
                 warn!(error = %error, "indexer sweep pass failed; retrying next tick");
             }
         }
+
+        Ok(())
     }
 
     /// Ingest one bounded, finalized range of USDC Transfer logs.
@@ -808,10 +806,9 @@ mod tests {
             .unwrap();
 
         let indexer = indexer_with(&pool, MockChain::new(2, vec![]).with_hash_mismatch());
-        let mut halted = false;
-        indexer.poll_once(&mut halted).await;
+        let error = indexer.poll_once().await.unwrap_err();
 
-        assert!(halted);
+        assert!(error.requires_halt());
         let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
         assert_eq!(row.status, "funded", "halt must happen before sweep");
     }

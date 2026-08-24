@@ -30,6 +30,23 @@ install_system_packages() {
   fi
 }
 
+install_docker() {
+  if command -v docker >/dev/null 2>&1; then
+    echo "Docker already installed"
+    return
+  fi
+
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://download.docker.com/linux/debian/gpg \
+    -o /etc/apt/keyrings/docker.asc
+  sudo chmod a+r /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+    | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
 install_rust() {
   if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
@@ -113,6 +130,7 @@ EOF
 }
 
 step "Install system packages" install_system_packages
+step "Install Docker" install_docker
 step "Install Rust" install_rust
 export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 step "Install Foundry" install_foundry

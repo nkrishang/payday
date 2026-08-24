@@ -15,8 +15,11 @@ alloy-sol-types = "1.6.1"
 alloy-provider = { version = "1", features = ["reqwest-rustls-tls"] }
 alloy-network = "1"
 alloy-rpc-types-eth = "1"
+alloy-signer-aws = "1"
 alloy-signer-local = "1"
 alloy-transport = "1"
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -28,7 +31,7 @@ tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["limit", "trace"] }
 serde_json = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

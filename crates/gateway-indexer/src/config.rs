@@ -18,8 +18,14 @@ pub struct Config {
     /// Address of the deployed `PaymentFactory`, whose `execute` the sweep pass
     /// calls. Matches `GATEWAY_FACTORY_ADDRESS` used by `gatewayd`.
     factory_address: Address,
-    /// Hex private key of the backend account that signs sweep transactions.
-    signer_key: String,
+    signer: SignerConfig,
+}
+
+/// Sweep signer selected at startup. Local keys keep Anvil fully self-contained;
+/// production uses a non-exportable AWS KMS key through the ECS task role.
+pub enum SignerConfig {
+    Local(String),
+    AwsKms(String),
 }
 
 impl Config {
@@ -57,6 +63,20 @@ impl Config {
         );
         let usdc_start_block = parse_u64_env("GATEWAY_USDC_START_BLOCK", 0);
 
+        let signer = match (
+            std::env::var("GATEWAY_SIGNER_KEY").ok(),
+            std::env::var("GATEWAY_KMS_KEY_ID").ok(),
+        ) {
+            (Some(key), None) => SignerConfig::Local(key),
+            (None, Some(key_id)) => SignerConfig::AwsKms(key_id),
+            (None, None) => {
+                panic!("exactly one of GATEWAY_SIGNER_KEY or GATEWAY_KMS_KEY_ID must be set")
+            }
+            (Some(_), Some(_)) => {
+                panic!("GATEWAY_SIGNER_KEY and GATEWAY_KMS_KEY_ID cannot both be set")
+            }
+        };
+
         Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             chain_id: ChainId(chain_id),
@@ -67,8 +87,7 @@ impl Config {
             usdc_start_block,
             usdc_address,
             factory_address,
-            signer_key: std::env::var("GATEWAY_SIGNER_KEY")
-                .expect("GATEWAY_SIGNER_KEY must be set"),
+            signer,
         }
     }
 
@@ -108,8 +127,8 @@ impl Config {
         self.factory_address
     }
 
-    pub fn signer_key(&self) -> &str {
-        &self.signer_key
+    pub fn signer(&self) -> &SignerConfig {
+        &self.signer
     }
 }
 

@@ -1,5 +1,6 @@
 use axum::routing::{get, post};
 use axum::{Router, middleware};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::api::auth::{self, ApiKey};
 use crate::api::health;
@@ -13,7 +14,8 @@ pub fn router(state: AppState, api_key: ApiKey) -> Router {
         .route_layer(middleware::from_fn_with_state(
             api_key,
             auth::require_api_key,
-        ));
+        ))
+        .layer(RequestBodyLimitLayer::new(64 * 1024));
 
     Router::new()
         .route("/health", get(health::health))
@@ -130,5 +132,21 @@ mod tests {
         // The request reached the handler, which rejects the deliberately
         // malformed invoice ID before making a database query.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invoice_routes_reject_oversized_requests() {
+        let response = app()
+            .oneshot(
+                Request::post("/v1/invoices")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b'x'; 64 * 1024 + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

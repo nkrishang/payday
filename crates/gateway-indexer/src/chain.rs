@@ -10,7 +10,6 @@ use alloy_network::{EthereumWallet, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, TransactionRequest};
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, sol};
 use alloy_transport::TransportError;
 use async_trait::async_trait;
@@ -244,9 +243,9 @@ impl AlloyChainClient {
     /// Connect to the RPC endpoint at `rpc_url` (e.g. `http://127.0.0.1:8545`),
     /// signing sweep transactions with `signer` (the backend key). Reads work
     /// the same as an unsigned provider; the wallet only adds send capability.
-    pub async fn connect(rpc_url: &str, signer: PrivateKeySigner) -> Result<Self, ChainError> {
+    pub async fn connect(rpc_url: &str, wallet: EthereumWallet) -> Result<Self, ChainError> {
         let provider = ProviderBuilder::new()
-            .wallet(EthereumWallet::from(signer))
+            .wallet(wallet)
             .connect(rpc_url)
             .await
             .map_err(|error| ChainError::rpc("connect", error))?

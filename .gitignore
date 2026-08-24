@@ -7,3 +7,10 @@ target/
 
 # Amp runtime state
 /.amp/portals/*
+
+# Terraform local state and secrets
+infra/.terraform/
+infra/*.tfstate*
+infra/*.tfplan
+infra/backend.hcl
+infra/terraform.tfvars
