@@ -57,6 +57,10 @@ async fn main() {
         chain,
         config.chain_id(),
         config.factory_address(),
+        config.usdc_address(),
+        config.usdc_start_block(),
+        config.finality_confirmations(),
+        config.log_range_size(),
         Duration::from_millis(config.indexer_poll_interval_ms()),
     );
     let indexer_handle = tokio::spawn(worker.run(shutdown_rx));

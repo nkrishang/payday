@@ -8,6 +8,7 @@ pub struct Config {
     database_url: String,
     chain_id: ChainId,
     factory_address: Address,
+    usdc_address: Address,
 }
 
 impl Config {
@@ -22,12 +23,18 @@ impl Config {
             .parse()
             .unwrap_or_else(|e| panic!("invalid GATEWAY_CHAIN_ID: {e}"));
 
+        let usdc_address =
+            std::env::var("GATEWAY_USDC_ADDRESS").expect("GATEWAY_USDC_ADDRESS must be set");
+        let usdc_address = Address::from_str(&usdc_address)
+            .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_ADDRESS '{usdc_address}': {e}"));
+
         Config {
             bind_addr: std::env::var("GATEWAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             chain_id: ChainId(chain_id),
             factory_address,
+            usdc_address,
         }
     }
 
@@ -45,5 +52,9 @@ impl Config {
 
     pub fn factory_address(&self) -> Address {
         self.factory_address
+    }
+
+    pub fn usdc_address(&self) -> Address {
+        self.usdc_address
     }
 }

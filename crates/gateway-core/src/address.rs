@@ -1,17 +1,8 @@
-use alloy_primitives::{Address, address};
+use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
-
-pub const NATIVE_TOKEN_ADDRESS: TokenAddress =
-    TokenAddress(address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TokenAddress(pub Address);
-
-impl TokenAddress {
-    pub fn is_native(&self) -> bool {
-        *self == NATIVE_TOKEN_ADDRESS
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BeneficiaryAddress(pub Address);

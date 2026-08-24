@@ -1,8 +1,10 @@
 mod cursor;
 mod invoices;
 
-pub use cursor::CursorRepository;
-pub use invoices::{CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository};
+pub use cursor::{CursorRepository, IndexerCursor};
+pub use invoices::{
+    CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository, PaymentObservation,
+};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;

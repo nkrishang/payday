@@ -3,12 +3,18 @@ use gateway_core::ChainId;
 
 /// Default indexer poll interval when `GATEWAY_INDEXER_POLL_INTERVAL_MS` is unset.
 const DEFAULT_INDEXER_POLL_INTERVAL_MS: u64 = 2000;
+const DEFAULT_FINALITY_CONFIRMATIONS: u64 = 12;
+const DEFAULT_LOG_RANGE_SIZE: u64 = 100;
 
 pub struct Config {
     database_url: String,
     chain_id: ChainId,
     rpc_url: String,
     indexer_poll_interval_ms: u64,
+    finality_confirmations: u64,
+    log_range_size: u64,
+    usdc_start_block: u64,
+    usdc_address: Address,
     /// Address of the deployed `PaymentFactory`, whose `execute` the sweep pass
     /// calls. Matches `GATEWAY_FACTORY_ADDRESS` used by `gatewayd`.
     factory_address: Address,
@@ -35,13 +41,34 @@ impl Config {
             .parse()
             .unwrap_or_else(|e| panic!("invalid GATEWAY_FACTORY_ADDRESS: {e}"));
 
+        let usdc_address = std::env::var("GATEWAY_USDC_ADDRESS")
+            .expect("GATEWAY_USDC_ADDRESS must be set")
+            .parse()
+            .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_ADDRESS: {e}"));
+
+        let finality_confirmations = parse_u64_env(
+            "GATEWAY_FINALITY_CONFIRMATIONS",
+            DEFAULT_FINALITY_CONFIRMATIONS,
+        );
+        let log_range_size = parse_u64_env("GATEWAY_LOG_RANGE_SIZE", DEFAULT_LOG_RANGE_SIZE);
+        assert!(
+            log_range_size > 0,
+            "GATEWAY_LOG_RANGE_SIZE must be positive"
+        );
+        let usdc_start_block = parse_u64_env("GATEWAY_USDC_START_BLOCK", 0);
+
         Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             chain_id: ChainId(chain_id),
             rpc_url: std::env::var("GATEWAY_RPC_URL").expect("GATEWAY_RPC_URL must be set"),
             indexer_poll_interval_ms,
+            finality_confirmations,
+            log_range_size,
+            usdc_start_block,
+            usdc_address,
             factory_address,
-            signer_key: std::env::var("GATEWAY_SIGNER_KEY").expect("GATEWAY_SIGNER_KEY must be set"),
+            signer_key: std::env::var("GATEWAY_SIGNER_KEY")
+                .expect("GATEWAY_SIGNER_KEY must be set"),
         }
     }
 
@@ -61,11 +88,36 @@ impl Config {
         self.indexer_poll_interval_ms
     }
 
+    pub fn finality_confirmations(&self) -> u64 {
+        self.finality_confirmations
+    }
+
+    pub fn log_range_size(&self) -> u64 {
+        self.log_range_size
+    }
+
+    pub fn usdc_start_block(&self) -> u64 {
+        self.usdc_start_block
+    }
+
+    pub fn usdc_address(&self) -> Address {
+        self.usdc_address
+    }
+
     pub fn factory_address(&self) -> Address {
         self.factory_address
     }
 
     pub fn signer_key(&self) -> &str {
         &self.signer_key
+    }
+}
+
+fn parse_u64_env(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|e| panic!("invalid {name}: {e}")),
+        Err(_) => default,
     }
 }

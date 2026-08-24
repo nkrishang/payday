@@ -48,7 +48,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "unsupported_token",
-            message: "Only the native token is supported in this milestone".into(),
+            message: "Only the configured Circle-issued USDC token is supported".into(),
         }
     }
 
