@@ -4,3 +4,6 @@ target/
 
 # Foundry broadcast logs (from forge script)
 /broadcast/
+
+# Amp runtime state
+/.amp/portals/*
