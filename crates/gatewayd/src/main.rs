@@ -26,7 +26,7 @@ async fn main() {
         config.usdc_address(),
     );
 
-    let app = api::router(state);
+    let app = api::router(state, config.api_key());
 
     let listener = TcpListener::bind(config.bind_addr())
         .await

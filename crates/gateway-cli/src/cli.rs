@@ -2,7 +2,7 @@
 
 use clap::{Args, Parser, Subcommand};
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "gateway-cli",
     about = "Client for the stablecoin payment gateway HTTP API",
@@ -17,6 +17,11 @@ pub struct Cli {
         default_value = "http://127.0.0.1:3000"
     )]
     pub api_url: String,
+
+    /// Bearer API key. Prefer the GATEWAY_API_KEY environment variable to
+    /// avoid exposing the key in shell history and process listings.
+    #[arg(long, global = true, env = "GATEWAY_API_KEY", hide_env_values = true)]
+    pub api_key: Option<String>,
 
     /// Emit machine-readable JSON instead of a human-readable summary.
     #[arg(long, global = true)]

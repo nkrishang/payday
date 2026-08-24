@@ -1,5 +1,6 @@
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::header::WWW_AUTHENTICATE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -12,6 +13,14 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "A valid bearer API key is required".into(),
+        }
+    }
+
     pub fn missing_idempotency_key() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -98,13 +107,20 @@ struct ErrorDetail {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let status = self.status;
         let body = ErrorBody {
             error: ErrorDetail {
                 code: self.code.into(),
                 message: self.message,
             },
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        response
     }
 }
 

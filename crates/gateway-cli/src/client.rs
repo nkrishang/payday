@@ -1,10 +1,13 @@
 //! HTTP client for the gateway API.
 //!
-//! The CLI talks to the gateway strictly over HTTP — it never touches the
+//! The CLI talks to the gateway strictly over its HTTP API — it never touches the
 //! database. The request/response wire types come from `gateway-core`, the same
 //! definitions the server uses, so the two cannot drift apart.
 
+use std::net::IpAddr;
+
 use gateway_core::{CreateInvoiceRequest, InvoiceResponse};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use crate::error::{ApiErrorBody, CliError};
 
@@ -15,13 +18,40 @@ pub struct GatewayClient {
 }
 
 impl GatewayClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, api_key: &str) -> Result<Self, CliError> {
+        let base_url = base_url.into();
+        let parsed_url = reqwest::Url::parse(&base_url)
+            .map_err(|error| CliError::InvalidInput(format!("invalid API URL: {error}")))?;
+        require_secure_transport(&parsed_url)?;
+
         // Trim a trailing slash so `base + "/v1/..."` never doubles up.
-        let base_url = base_url.into().trim_end_matches('/').to_string();
-        Self {
-            base_url,
-            http: reqwest::Client::new(),
+        let base_url = base_url.trim_end_matches('/').to_string();
+        if api_key.len() < 32 {
+            return Err(CliError::InvalidInput(
+                "API key must be at least 32 bytes".into(),
+            ));
         }
+        if !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(CliError::InvalidInput(
+                "API key must contain only visible ASCII characters".into(),
+            ));
+        }
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| CliError::InvalidInput("API key contains invalid characters".into()))?;
+        authorization.set_sensitive(true);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, authorization);
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| CliError::Transport {
+                url: base_url.clone(),
+                source,
+            })?;
+
+        Ok(Self { base_url, http })
     }
 
     /// Create an invoice. `idempotency_key` is sent as the `Idempotency-Key`
@@ -64,6 +94,29 @@ impl GatewayClient {
     }
 }
 
+fn require_secure_transport(url: &reqwest::Url) -> Result<(), CliError> {
+    if url.scheme() == "https" || (url.scheme() == "http" && is_loopback(url)) {
+        return Ok(());
+    }
+
+    Err(CliError::InvalidInput(
+        "API URL must use HTTPS; HTTP is allowed only for localhost and loopback addresses".into(),
+    ))
+}
+
+fn is_loopback(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        let ip_literal = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        host.eq_ignore_ascii_case("localhost")
+            || ip_literal
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
 /// Turn a response into either a decoded body or a typed error, preserving the
 /// server's stable error code when present.
 async fn parse_response(resp: reqwest::Response) -> Result<InvoiceResponse, CliError> {
@@ -91,5 +144,130 @@ async fn parse_response(resp: reqwest::Response) -> Result<InvoiceResponse, CliE
             status: status.as_u16(),
             body,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    async fn capture_server(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn response(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn assert_bearer_header(request: &str) {
+        let authorization = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then_some(value.trim())
+        });
+        let expected = format!("Bearer {KEY}");
+        assert_eq!(authorization, Some(expected.as_str()));
+    }
+
+    #[test]
+    fn rejects_api_keys_that_cannot_be_header_values() {
+        let invalid = "0123456789abcdef0123456789abc\nde";
+        assert!(GatewayClient::new("https://gateway.example", invalid).is_err());
+    }
+
+    #[test]
+    fn rejects_whitespace_that_the_server_would_reject() {
+        for invalid in [format!("{KEY} "), format!("{KEY}\t")] {
+            assert!(GatewayClient::new("https://gateway.example", &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_short_api_keys() {
+        assert!(GatewayClient::new("https://gateway.example", "too-short").is_err());
+    }
+
+    #[test]
+    fn requires_https_except_for_loopback_development() {
+        assert!(GatewayClient::new("https://gateway.example", KEY).is_ok());
+        assert!(GatewayClient::new("http://localhost:3000", KEY).is_ok());
+        assert!(GatewayClient::new("http://127.0.0.1:3000", KEY).is_ok());
+        assert!(GatewayClient::new("http://[::1]:3000", KEY).is_ok());
+        assert!(GatewayClient::new("http://gateway.example", KEY).is_err());
+    }
+
+    #[tokio::test]
+    async fn sends_the_bearer_key_on_create_and_get() {
+        let unauthorized = response(
+            "401 Unauthorized",
+            "Content-Type: application/json\r\n",
+            "{}",
+        );
+        let (base_url, requests) = capture_server(vec![unauthorized.clone(), unauthorized]).await;
+        let client = GatewayClient::new(base_url, KEY).unwrap();
+        let create = CreateInvoiceRequest {
+            chain_id: "31337".into(),
+            token_address: "0x0000000000000000000000000000000000000001".into(),
+            beneficiary_address: "0x0000000000000000000000000000000000000002".into(),
+            amount: "1".into(),
+        };
+
+        assert!(
+            client
+                .create_invoice(&create, "test-request")
+                .await
+                .is_err()
+        );
+        assert!(client.get_invoice("test-invoice").await.is_err());
+
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("POST /v1/invoices HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/invoices/test-invoice HTTP/1.1"));
+        assert_bearer_header(&requests[0]);
+        assert_bearer_header(&requests[1]);
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_redirects_with_the_bearer_key() {
+        let redirect = response("302 Found", "Location: /redirected\r\n", "");
+        let (base_url, requests) = capture_server(vec![redirect]).await;
+        let client = GatewayClient::new(base_url, KEY).unwrap();
+
+        let error = client.get_invoice("test-invoice").await.unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::UnexpectedResponse { status: 302, .. }
+        ));
+        assert_eq!(requests.await.unwrap().len(), 1);
     }
 }

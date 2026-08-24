@@ -13,7 +13,23 @@ use error::CliError;
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let client = GatewayClient::new(&cli.api_url);
+    let api_key = match cli.api_key.as_deref() {
+        Some(api_key) => api_key,
+        None => {
+            let err = CliError::InvalidInput(
+                "API key is required; set GATEWAY_API_KEY or pass --api-key".into(),
+            );
+            eprintln!("error: {err}");
+            std::process::exit(err.exit_code());
+        }
+    };
+    let client = match GatewayClient::new(&cli.api_url, api_key) {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(err.exit_code());
+        }
+    };
 
     let result = match cli.command {
         Command::Invoice(InvoiceCommand::Create(args)) => create(&client, args).await,
