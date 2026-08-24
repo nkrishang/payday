@@ -5,7 +5,8 @@ use alloy_primitives::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const NATIVE_TOKEN_DECIMALS: u8 = 18;
+/// Circle-issued USDC uses six decimal places on supported EVM chains.
+pub const USDC_DECIMALS: u8 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Amount(pub U256);
@@ -46,14 +47,14 @@ mod tests {
 
     #[test]
     fn parse_whole_amount() {
-        let amount = Amount::from_decimal_str("123", 18).unwrap();
-        assert_eq!(amount.0.to_string(), "123000000000000000000");
+        let amount = Amount::from_decimal_str("123", USDC_DECIMALS).unwrap();
+        assert_eq!(amount.0.to_string(), "123000000");
     }
 
     #[test]
     fn parse_decimal_amount() {
-        let amount = Amount::from_decimal_str("123.456", 18).unwrap();
-        assert_eq!(amount.0.to_string(), "123456000000000000000");
+        let amount = Amount::from_decimal_str("123.456", USDC_DECIMALS).unwrap();
+        assert_eq!(amount.0.to_string(), "123456000");
     }
 
     #[test]
@@ -64,7 +65,7 @@ mod tests {
 
     #[test]
     fn parse_too_many_decimal_points() {
-        let result = Amount::from_decimal_str("100.1.33", 18);
+        let result = Amount::from_decimal_str("100.1.33", USDC_DECIMALS);
         assert!(result.is_err());
     }
 }

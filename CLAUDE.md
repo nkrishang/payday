@@ -1,87 +1,73 @@
 # CLAUDE.md
 
-Guidance for running and testing the stablecoin payment gateway end-to-end on a
-local Anvil node.
+Guidance for running and testing the USDC payment gateway end to end.
 
-> **Disclaimer:** This document describes the project **as it exists today**, mid-build.
-> It is a snapshot of current behavior, not a description of the intended end
-> state — features, flows, and constraints here are partial and will change.
-> Treat anything under "Known gaps" as in-progress, and re-verify these
-> instructions against the code before relying on them.
+## System overview
 
-## What the system does
+The API creates an invoice with a counterfactual CREATE3 payment address. The
+payer transfers USDC to that address. The indexer reads finalized ranges of
+`Transfer(address,address,uint256)` logs from the configured USDC contract,
+attributes matching recipients in one database query, and advances invoices
+from `created` to `funded` when cumulative transfers reach the requested amount.
 
-An invoice is created with a counterfactual **payment address** (derived
-off-chain via CREATE3 from the factory + salt). A payer sends the native token
-to that address. The **indexer** polls the chain and, when a payment address's
-balance meets the invoice amount, transitions the invoice `created → funded`.
-It then **sweeps** the payment: the backend signing key calls
-`PaymentFactory.execute`, which CREATE3-deploys a `Payment` contract at the
-payment address whose constructor forwards the funds to the beneficiary,
-advancing the invoice `funded → deploying → fulfilled`.
+The sweep worker calls `PaymentFactory.execute`. It deploys `Payment` at the
+counterfactual address and transfers its complete USDC balance to the
+beneficiary. The lifecycle is:
 
-Status lifecycle: `created → funded → deploying → fulfilled`, plus `blocked`
-(terminal, needs manual intervention) and `failed` (reserved). The full
-`created → … → fulfilled` sweep is implemented today; these instructions
-exercise it end to end.
+`created → funded → deploying → fulfilled`, with terminal `blocked` and reserved
+`failed` states.
 
-Components (each a crate):
-- `gatewayd` — HTTP API (`POST /v1/invoices`, `GET /v1/invoices/:id`, `GET /health`).
-- `gateway-indexer` — background worker; funds invoices from balances, then
-  sweeps funded invoices to their beneficiaries via `PaymentFactory.execute`.
-- `gateway-cli` — HTTP client for the API.
-- `gateway-core` / `gateway-db` — domain types and Postgres repository.
+Only the exact `GATEWAY_USDC_ADDRESS` is accepted. USDC amounts use six decimal
+places. Production should configure Circle's chain-specific native USDC proxy;
+the local setup deploys a mintable six-decimal fixture.
 
-### Sweep classification (`funded → fulfilled` / `blocked`)
+## Indexing and QuickNode
 
-`PaymentFactory.execute` reverts (`CREATE3.DeploymentFailed`) in two
-indistinguishable-by-selector cases, so the indexer classifies by on-chain
-reads rather than the revert:
+The production acquisition path uses standard EVM JSON-RPC and works with a
+QuickNode HTTPS endpoint in `GATEWAY_RPC_URL`:
 
-- **Code already at the payment address** → the payment was already executed
-  (our own recovered tx, or a permissionless third-party call) → `fulfilled`.
-- **Reverts and no code** → the deploy can never succeed because the beneficiary
-  rejects the native transfer → `blocked` (`receiver_rejected`), not retried.
-- **Transient (transport) failure** → retried with exponential backoff; after a
-  bounded number of attempts the invoice is `blocked` (`max_retries_exceeded`).
+- one `eth_blockNumber` per poll;
+- one `eth_getLogs` per bounded catch-up range, filtered to the USDC address and
+  `Transfer` topic;
+- block lookups to verify and persist canonical cursor hashes.
 
-The `funded → deploying` claim is a compare-and-set, so a crash mid-sweep is
-recovered on a later pass (re-`execute` sees the deployed code and fulfills).
+It does not download full blocks, trace calls, scan open invoices, or poll token
+balances. ERC-20 logs cover transfers made by EOAs, `transferFrom`, and internal
+contract calls. Observations, invoice projections, and the hash-bearing cursor
+commit atomically. Partial transfers accumulate and duplicate logs are ignored.
+
+`GATEWAY_FINALITY_CONFIRMATIONS` controls the confirmation-depth boundary. Set a
+reviewed chain-specific value in production; local Anvil uses `0`. A cursor hash
+mismatch stops further range advancement. See
+`docs/usdc-indexer-architecture.md` for the product architecture and the tradeoff
+with QuickNode Streams.
+
+Log ranges start at a configurable maximum (100 blocks by default), halve when
+QuickNode reports an HTTP 413 or range/result-size error, and grow after a
+successful response. A one-block failure is retried rather than skipped because
+skipping a block could silently lose a payment. Rate limits and temporary RPC
+failures retain their own retryable classification; only explicit EVM execution
+reverts are treated as contract failures.
 
 ## Prerequisites
 
-- Rust toolchain (`cargo`), Foundry (`anvil`, `cast`, `forge`), Postgres (`psql`).
-- A running Postgres server and a `gateway` database:
-  ```bash
-  createdb gateway   # once
-  ```
-  Migrations run automatically when `gatewayd` / the indexer / tests connect.
+- Rust, Foundry (`anvil`, `cast`, `forge`), and PostgreSQL.
+- A running PostgreSQL server and `gateway` database. Migrations run at startup.
 
-## Detection mechanism (why the bootstrap step exists)
+## Local Anvil end-to-end run
 
-The indexer reads balances by calling **`Multicall3.getEthBalance`** at the
-canonical address `0xcA11bde05977b3631167028862bE2a173976CA11`, batching many
-invoices into one `eth_call` and running batches concurrently. On real chains
-Multicall3 is always deployed there; **a fresh Anvil is not**, so it must be
-injected before the indexer can read balances. `foundry/script/Bootstrap.s.sol`
-does this (and deploys `PaymentFactory` at the `.env` address).
-
-## End-to-end run
-
-Use four terminals (or background the long-running processes). The private key
-below is Anvil's well-known **dev account #0** (`0xf39F…2266`) — a local test
-key only, never a real secret.
+The key below is Anvil's public development account #0 key. Never use it on a
+real network.
 
 ### 1. Start Anvil
 
 ```bash
 anvil --chain-id 31337
-# add `--block-time 1` to auto-mine every second; otherwise Anvil mines on each tx
 ```
 
-### 2. Bootstrap the chain (PaymentFactory + Multicall3)
+### 2. Bootstrap PaymentFactory and MockUSDC
 
-Idempotent — safe to re-run.
+Run against a fresh Anvil. The script is safe to repeat on the same node.
 
 ```bash
 forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
@@ -90,159 +76,98 @@ forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
   --broadcast
 ```
 
-Deploys `PaymentFactory` at `0x5FbDB2315678afecb367f032d93F642f64180aa3`
-(matching `GATEWAY_FACTORY_ADDRESS`) and injects Multicall3 at its canonical
-address.
+It deploys:
 
-### 3. Start `gatewayd`
+- `PaymentFactory`: `0x5FbDB2315678afecb367f032d93F642f64180aa3`
+- `MockUSDC`: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
 
-The repo `.env` sets `DATABASE_URL`, `GATEWAY_CHAIN_ID=31337`,
-`GATEWAY_FACTORY_ADDRESS`, and `GATEWAY_SIGNER_KEY` (the backend key that signs
-sweep transactions — Anvil dev account #0). The indexer additionally needs
-`GATEWAY_RPC_URL` (not in `.env`) — export it or add it.
+Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
+
+### 3. Build and start the services
+
+The generated `.env` contains the local addresses, database URL, RPC URL,
+confirmation depth, and Anvil signer key.
 
 ```bash
-cargo build   # once
-
+cargo build --workspace
 set -a; source .env; set +a
 ./target/debug/gatewayd
 ```
 
-Check it: `curl -s http://127.0.0.1:3000/health` → `ok`.
-
-### 4. Start the indexer
+In another terminal:
 
 ```bash
 set -a; source .env; set +a
-GATEWAY_RPC_URL=http://127.0.0.1:8545 \
-GATEWAY_INDEXER_POLL_INTERVAL_MS=1000 \
-./target/debug/gateway-indexer
+GATEWAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
 ```
 
-On startup it asserts the node's chain id matches `GATEWAY_CHAIN_ID`.
-
-### 5. Create an invoice, pay it, watch it fund then fulfill
+### 4. Create and pay an invoice
 
 ```bash
-# Create (native token sentinel = 0xEeee…EEeE; beneficiary = Anvil account #1)
 ./target/debug/gateway-cli --json invoice create \
   --chain-id 31337 \
-  --token 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE \
-  --beneficiary 0x70997970C51812dc3A010C7d01b50e0d17dc7C01 \
+  --token 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
+  --beneficiary 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --amount 1.5
-# -> note the `id` and `payment_address`; status is "created"
+```
 
-# Pay the payment address on-chain
-cast send <payment_address> --value 1.5ether \
+Copy `id` and `payment_address` from the response, then transfer 1.5 USDC
+(`1500000` atomic units):
+
+```bash
+cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
+  'transfer(address,uint256)' <payment_address> 1500000 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --rpc-url http://127.0.0.1:8545
 
-# The indexer logs "invoice funded", then "invoice fulfilled" once it sweeps.
-./target/debug/gateway-cli invoice get <id>          # status -> "fulfilled"
-
-# The beneficiary now holds the funds and the payment address is emptied:
-cast balance 0x70997970C51812dc3A010C7d01b50e0d17dc7C01 --rpc-url http://127.0.0.1:8545
-cast code <payment_address> --rpc-url http://127.0.0.1:8545   # non-empty: Payment deployed
+./target/debug/gateway-cli invoice get <id>
 ```
 
-Inspect internal bookkeeping directly if needed:
+The status should reach `fulfilled`. Verify the payment address was emptied and
+the Payment contract was deployed:
 
 ```bash
-psql -d gateway -c \
-  "SELECT status, observed_amount, funded_at_block, \
-          encode(execute_tx_hash,'hex') AS execute_tx_hash, fulfilled_at_block, \
-          sweep_attempts, blocked_reason \
-   FROM invoices WHERE id='<id>';"
-psql -d gateway -c "SELECT chain_id, last_block FROM indexer_cursor;"
+cast call 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
+  'balanceOf(address)(uint256)' <payment_address> --rpc-url http://127.0.0.1:8545
+cast code <payment_address> --rpc-url http://127.0.0.1:8545
 ```
 
-## Scenarios
-
-### Covered by automated tests
-
-Indexer reconcile logic (`crates/gateway-indexer/src/indexer.rs`, `#[sqlx::test]`)
-runs against a mock chain, so no Anvil is needed — only Postgres:
+## Automated tests
 
 ```bash
-DATABASE_URL=postgres://<user>@localhost/gateway cargo test --workspace
+DATABASE_URL=postgresql:///gateway?user="$USER" cargo test --workspace
+cargo build -p gateway-core --bin derive-address
+forge test
 ```
 
-| Scenario | Expected | Test |
-|---|---|---|
-| Balance == amount | `funded`, `observed_amount` recorded | `funds_invoice_when_balance_meets_amount` |
-| Balance > amount (overpayment) | `funded`, observes full balance | `overpayment_still_funds` |
-| Balance < amount (underpayment) | stays `created` | `leaves_invoice_created_when_underfunded` |
-| Re-run after funding | no re-transition; funding block stable | `tick_is_idempotent` |
-| No new block since last pass | skipped (no reconcile) | `skips_when_no_new_block` |
-| Invoice on another chain (funding) | ignored by this indexer | `ignores_invoices_on_other_chains` |
-| Corrupt DB row (bad amount/status/length) | typed error, not a panic | `crates/gateway-db/src/invoices.rs` |
-| Sweep succeeds | `fulfilled`, tx hash + block recorded | `sweeps_funded_invoice_to_fulfilled` |
-| Payment already executed on-chain | `fulfilled`, no tx of ours | `already_deployed_marks_fulfilled_without_tx` |
-| Beneficiary rejects transfer | `blocked` (`receiver_rejected`) | `receiver_rejection_marks_blocked` |
-| Transient sweep error | stays `deploying`, attempt counted | `transient_failure_increments_attempts_and_stays_deploying` |
-| Transient errors exhaust retries | `blocked` (`max_retries_exceeded`) | `transient_failures_block_after_exhausting_retries` |
-| Sweep claim is compare-and-set | claimed at most once | `claim_is_idempotent` |
-| Backoff gates retry re-selection | not re-picked until backoff elapses | `backoff_gates_deploying_reselection` |
-| Re-run after fulfilling | not re-swept; block stable | `fulfilled_invoice_is_not_reswept` |
-| Sweep ignores created / other-chain | untouched by the sweep pass | `sweep_ignores_created_invoices`, `sweep_ignores_other_chains` |
+Coverage includes exact, partial, and overpayment funding; confirmation gating;
+range replay idempotency; chain isolation; sweep success/recovery/retry; API
+validation; CREATE3 address parity; underfunded deployment failure; and complete
+overpayment sweeping.
 
-API-level idempotency and validation live in `gatewayd`; contract/address
-derivation lives in Foundry tests (`forge test`). The `execute` revert behavior
-the sweep classification relies on (both failure cases surface the same
-`CREATE3.DeploymentFailed`; code presence distinguishes them) is pinned by
-`foundry/test/ExecuteRevert.t.sol`.
+## Configuration
 
-### Worth exercising manually against Anvil
+- `DATABASE_URL`
+- `GATEWAY_CHAIN_ID`
+- `GATEWAY_FACTORY_ADDRESS`
+- `GATEWAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
+- `GATEWAY_USDC_START_BLOCK` — USDC deployment or desired backfill block
+- `GATEWAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
+- `GATEWAY_FINALITY_CONFIRMATIONS` — defaults to 12; local setup uses 0
+- `GATEWAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
+- `GATEWAY_INDEXER_POLL_INTERVAL_MS` — default 2000
+- `GATEWAY_SIGNER_KEY` — sweep signer; use secret management in production
 
-The happy path plus these edges (the mock-chain tests assert the logic; running
-them live validates the real Multicall + RPC path):
+## Current constraints
 
-- **Overpayment** — send more than the amount; invoice still funds, and
-  `observed_amount` reflects the actual (larger) balance.
-- **Underpayment then top-up** — send part of the amount (stays `created`), then
-  send the remainder; the next poll funds it.
-- **Batching / concurrency** — create many invoices (e.g. 200+) and fund a
-  subset; confirm only the funded ones transition, in one pass. Verify balances
-  are read via `eth_call` (Multicall), not per-address `eth_getBalance`, by
-  grepping the Anvil log:
-  ```bash
-  grep -c eth_call <anvil-log>        # multicall batches
-  grep -c eth_getBalance <anvil-log>  # should stay ~0 from the indexer
-  ```
-- **Idempotent create** — repeat a create with the same `--idempotency-key` and
-  identical fields → same invoice returned (HTTP 200); same key with *different*
-  fields → `409 idempotency_conflict`.
-- **Restart safety** — stop and restart the indexer after funding; it must not
-  re-fund (the transition is a compare-and-set) and the cursor resumes. After a
-  sweep it must not re-`execute` a `fulfilled` invoice.
-- **Sweep to a rejecting beneficiary** — deploy a contract that reverts in
-  `receive()` (e.g. `foundry/test/ExecuteRevert.t.sol:RejectingReceiver` via
-  `forge create`), create an invoice to it, and fund it. The invoice reaches
-  `blocked` (`receiver_rejected`) on the first sweep, and the funds stay at the
-  payment address (no code deployed):
-  ```bash
-  psql -d gateway -c "SELECT status, blocked_reason FROM invoices WHERE id='<id>';"
-  cast code <payment_address> --rpc-url http://127.0.0.1:8545   # 0x: deploy never succeeded
-  ```
-
-### Milestone constraints (expected rejections)
-
-`gatewayd` currently accepts only chain `31337` and the native token. Creating an
-invoice with another `--chain-id` returns `unsupported_chain`; a non-native
-`--token` returns `unsupported_token`; a zero/negative `--amount` returns
-`invalid_amount`.
-
-## Known gaps (not yet testable)
-
-- No reorg handling — the cursor stores height only, no block hash.
-- No confirmation-depth gate — an invoice funds on first sufficient balance
-  observation, without waiting N blocks.
-- Sweeps are sent sequentially by a single signing key; there is no concurrent
-  nonce management, and the `deploying` claim assumes a single indexer process
-  (no cross-worker lease on in-flight rows).
-- Overpayment sweeps only the invoice `amount` to the beneficiary; any excess
-  stays in the deployed `Payment` contract (not refunded).
-- The `blocked` reason `receiver_rejected` also covers the (normally
-  unreachable) case where the payment address is underfunded at sweep time.
-- `failed` is defined but unused; blocked payments use `blocked`.
-- ERC-20 tokens are not supported (native only).
+- One configured chain and one exact USDC contract per deployment.
+- Finality is a fixed confirmation depth, not the RPC `finalized` tag or
+  rollup-specific L1 settlement.
+- A finalized cursor hash mismatch requires operator intervention; there is no
+  automatic finalized-reorg rollback.
+- Sweep submissions are sequential. A mined sweep is persisted as `deploying`
+  and reaches `fulfilled` only after its inclusion block passes the configured
+  confirmation depth and the Payment code is still canonical.
+- One active indexer process is assumed for sweep nonce ownership.
+- Late USDC sent after Payment deployment can be stranded at that address.
+- `failed` is defined but unused; terminal sweep failures use `blocked`.

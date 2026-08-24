@@ -8,14 +8,21 @@ pub struct AppState {
     pub repo: InvoiceRepository,
     pub chain_id: ChainId,
     pub factory_address: Address,
+    pub usdc_address: Address,
 }
 
 impl AppState {
-    pub fn new(repo: InvoiceRepository, chain_id: ChainId, factory_address: Address) -> Self {
+    pub fn new(
+        repo: InvoiceRepository,
+        chain_id: ChainId,
+        factory_address: Address,
+        usdc_address: Address,
+    ) -> Self {
         Self {
             repo,
             chain_id,
             factory_address,
+            usdc_address,
         }
     }
 }

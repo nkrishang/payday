@@ -13,7 +13,7 @@
 use alloy_primitives::utils::format_units;
 use serde::{Deserialize, Serialize};
 
-use crate::{Invoice, NATIVE_TOKEN_DECIMALS};
+use crate::{Invoice, USDC_DECIMALS};
 
 /// Parameters for `POST /v1/invoices`.
 ///
@@ -54,16 +54,8 @@ pub struct TokenDto {
 
 impl From<Invoice> for InvoiceResponse {
     fn from(inv: Invoice) -> Self {
-        // Milestone is native-token-only, so decimals are the native default.
-        // Correcting this for ERC-20s (using the invoice's real token decimals)
-        // is tracked separately.
-        let decimals = NATIVE_TOKEN_DECIMALS;
+        let decimals = USDC_DECIMALS;
         let amount_human = format_units(inv.amount.0, decimals).unwrap_or_default();
-        let kind = if inv.token.is_native() {
-            "native"
-        } else {
-            "erc20"
-        };
 
         InvoiceResponse {
             id: inv.id.0.to_string(),
@@ -71,7 +63,7 @@ impl From<Invoice> for InvoiceResponse {
             factory_address: inv.factory.0.to_checksum(None),
             token: TokenDto {
                 address: inv.token.0.to_checksum(None),
-                kind: kind.to_string(),
+                kind: "erc20".to_string(),
                 decimals,
             },
             beneficiary_address: inv.beneficiary.0.to_checksum(None),

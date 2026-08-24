@@ -3,11 +3,14 @@
 //! All conversions between domain types and DB column types happen here.
 //! Handlers and application logic never see SQL or DB rows.
 
+use std::collections::{HashMap, HashSet};
+
 use alloy_primitives::{Address, B256, U256};
 use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::cursor::IndexerCursor;
 use gateway_core::{
     Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, InvoiceId,
     InvoiceStatusParseError, PaymentAddress, Salt, TokenAddress,
@@ -36,9 +39,20 @@ pub struct DbInvoice {
     /// Canonical base-unit balance observed at funding time (decimal string).
     /// Internal indexer bookkeeping; NULL until the invoice is funded.
     pub observed_amount: Option<String>,
-    /// Hash of the successful `execute` transaction (32 bytes). NULL until
-    /// fulfilled, and stays NULL when the payment was found already-executed
-    /// on-chain rather than swept by a transaction we sent.
+    /// Sum of finalized USDC Transfer observations attributed to this invoice.
+    pub confirmed_received: String,
+    /// Canonical hash paired with `funded_at_block`.
+    pub funded_at_block_hash: Option<Vec<u8>>,
+    /// Time at which `execute_tx_hash` was submitted. NULL when no transaction
+    /// from this worker is currently pending or known-mined.
+    pub sweep_submitted_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    /// Block where deployed Payment code was first observed. A deploying invoice
+    /// remains non-terminal until this block reaches the finality boundary.
+    pub sweep_detected_at_block: Option<i64>,
+    /// Canonical hash paired with `sweep_detected_at_block`.
+    pub sweep_detected_at_block_hash: Option<Vec<u8>>,
+    /// Hash of an `execute` transaction submitted by this worker (32 bytes).
+    /// NULL when execution was discovered from code without our transaction.
     pub execute_tx_hash: Option<Vec<u8>>,
     /// Block height at which the sweep was confirmed. NULL until fulfilled.
     pub fulfilled_at_block: Option<i64>,
@@ -48,7 +62,7 @@ pub struct DbInvoice {
     /// Timestamp of the most recent sweep attempt; with `sweep_attempts` it
     /// gates when the next retry becomes eligible. NULL before the first attempt.
     pub last_attempt_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
-    /// Why the invoice was blocked (`receiver_rejected` / `max_retries_exceeded`).
+    /// Why the invoice was blocked (`token_transfer_failed`).
     /// NULL unless status is `blocked`.
     pub blocked_reason: Option<String>,
 }
@@ -164,6 +178,19 @@ pub struct CreateInvoiceInput {
     pub payment_address: [u8; 20],
 }
 
+/// One validated, finalized USDC `Transfer` log from the configured token.
+#[derive(Debug, Clone)]
+pub struct PaymentObservation {
+    pub block_number: u64,
+    pub block_hash: B256,
+    pub transaction_hash: B256,
+    pub transaction_index: u64,
+    pub log_index: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub amount: U256,
+}
+
 impl CreateInvoiceInput {
     /// Build the write-path input from a freshly created domain [`Invoice`],
     /// projecting its strongly-typed fields to DB column types. The
@@ -240,6 +267,224 @@ impl InvoiceRepository {
             .bind(id)
             .fetch_optional(&self.pool)
             .await
+    }
+
+    /// Atomically apply one contiguous finalized log range and advance its
+    /// canonical cursor. Observations for every known invoice address are
+    /// persisted, including late transfers. Replays are idempotent by
+    /// transaction hash + log index.
+    pub async fn apply_finalized_usdc_range(
+        &self,
+        chain_id: u64,
+        token: Address,
+        expected_cursor: Option<IndexerCursor>,
+        end_block: u64,
+        end_block_hash: B256,
+        observations: &[PaymentObservation],
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let stored: Option<(Vec<u8>, i64, Vec<u8>)> = sqlx::query_as(
+            r#"
+            SELECT token_address, last_block, last_block_hash
+            FROM indexer_cursor
+            WHERE chain_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(chain_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let stored_cursor = stored
+            .map(|(stored_token, block, hash)| {
+                if stored_token.as_slice() != token.as_slice() {
+                    return Err(sqlx::Error::Protocol(
+                        "indexer cursor belongs to a different token".into(),
+                    ));
+                }
+                let block_hash = B256::try_from(hash.as_slice()).map_err(|_| {
+                    sqlx::Error::Decode("invalid indexer cursor block hash length".into())
+                })?;
+                Ok(IndexerCursor {
+                    block: block as u64,
+                    block_hash,
+                })
+            })
+            .transpose()?;
+
+        if stored_cursor != expected_cursor {
+            return Err(sqlx::Error::Protocol(
+                "indexer cursor changed while fetching logs".into(),
+            ));
+        }
+
+        let recipients: Vec<Vec<u8>> = observations
+            .iter()
+            .map(|observation| observation.recipient.as_slice().to_vec())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let rows = if recipients.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_as::<_, DbInvoice>(
+                r#"
+                SELECT * FROM invoices
+                WHERE chain_id = $1
+                  AND token_address = $2
+                  AND payment_address = ANY($3::bytea[])
+                FOR UPDATE
+                "#,
+            )
+            .bind(chain_id as i64)
+            .bind(token.as_slice())
+            .bind(&recipients)
+            .fetch_all(&mut *tx)
+            .await?
+        };
+
+        struct InvoiceCredit {
+            id: Uuid,
+            is_created: bool,
+            required: U256,
+            received: U256,
+            crossing: Option<(U256, u64, B256)>,
+        }
+
+        let mut credits = HashMap::<Vec<u8>, InvoiceCredit>::new();
+        for row in rows {
+            let required = U256::from_str_radix(&row.amount, 10).map_err(|_| {
+                sqlx::Error::Decode(format!("invalid invoice amount for {}", row.id).into())
+            })?;
+            let received = U256::from_str_radix(&row.confirmed_received, 10).map_err(|_| {
+                sqlx::Error::Decode(format!("invalid confirmed_received for {}", row.id).into())
+            })?;
+            credits.insert(
+                row.payment_address,
+                InvoiceCredit {
+                    id: row.id,
+                    is_created: row.status == "created",
+                    required,
+                    received,
+                    crossing: None,
+                },
+            );
+        }
+
+        for observation in observations {
+            let Some(credit) = credits.get_mut(observation.recipient.as_slice()) else {
+                continue;
+            };
+
+            let inserted = sqlx::query(
+                r#"
+                INSERT INTO payment_observations
+                    (chain_id, token_address, block_number, block_hash,
+                     transaction_hash, transaction_index, log_index,
+                     sender_address, recipient_address, invoice_id, amount)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(chain_id as i64)
+            .bind(token.as_slice())
+            .bind(observation.block_number as i64)
+            .bind(observation.block_hash.as_slice())
+            .bind(observation.transaction_hash.as_slice())
+            .bind(observation.transaction_index as i64)
+            .bind(observation.log_index as i64)
+            .bind(observation.sender.as_slice())
+            .bind(observation.recipient.as_slice())
+            .bind(credit.id)
+            .bind(observation.amount.to_string())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                > 0;
+
+            if !inserted {
+                continue;
+            }
+
+            credit.received = credit
+                .received
+                .checked_add(observation.amount)
+                .ok_or_else(|| {
+                    sqlx::Error::Decode("USDC observation total overflowed uint256".into())
+                })?;
+            if credit.is_created && credit.crossing.is_none() && credit.received >= credit.required
+            {
+                credit.crossing = Some((
+                    credit.received,
+                    observation.block_number,
+                    observation.block_hash,
+                ));
+            }
+        }
+
+        let mut funded = Vec::new();
+        for credit in credits.values() {
+            if let Some((observed, block, block_hash)) = credit.crossing {
+                let result = sqlx::query(
+                    r#"
+                    UPDATE invoices
+                    SET confirmed_received = $2,
+                        status = 'funded',
+                        observed_amount = $3,
+                        funded_at_block = $4,
+                        funded_at_block_hash = $5,
+                        updated_at = now()
+                    WHERE id = $1 AND status = 'created'
+                    "#,
+                )
+                .bind(credit.id)
+                .bind(credit.received.to_string())
+                .bind(observed.to_string())
+                .bind(block as i64)
+                .bind(block_hash.as_slice())
+                .execute(&mut *tx)
+                .await?;
+                if result.rows_affected() > 0 {
+                    funded.push(credit.id);
+                }
+            } else if credit.received != U256::ZERO {
+                sqlx::query(
+                    r#"
+                    UPDATE invoices
+                    SET confirmed_received = $2, updated_at = now()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(credit.id)
+                .bind(credit.received.to_string())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO indexer_cursor
+                (chain_id, token_address, last_block, last_block_hash, updated_at)
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (chain_id) DO UPDATE
+            SET token_address = EXCLUDED.token_address,
+                last_block = EXCLUDED.last_block,
+                last_block_hash = EXCLUDED.last_block_hash,
+                updated_at = now()
+            "#,
+        )
+        .bind(chain_id as i64)
+        .bind(token.as_slice())
+        .bind(end_block as i64)
+        .bind(end_block_hash.as_slice())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(funded)
     }
 
     /// List invoices still awaiting payment on a given chain, oldest first.
@@ -359,8 +604,8 @@ impl InvoiceRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Transition an in-flight invoice `deploying -> fulfilled`, recording the
-    /// sweep transaction (if we sent one) and the confirming block. `tx_hash` is
+    /// Transition an in-flight invoice `deploying -> fulfilled`, preserving the
+    /// sweep transaction (if we sent one) and recording its inclusion block. `tx_hash` is
     /// `None` when the payment was found already-executed on-chain rather than
     /// swept by a transaction we sent. Idempotent CAS on `status = 'deploying'`.
     pub async fn mark_fulfilled(
@@ -388,6 +633,100 @@ impl InvoiceRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Persist the canonical block where deployed Payment code was observed.
+    /// This survives restarts while the sweep waits for finality.
+    pub async fn record_sweep_detection(
+        &self,
+        id: Uuid,
+        tx_hash: Option<&[u8]>,
+        block: u64,
+        block_hash: &[u8],
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET execute_tx_hash = COALESCE($2, execute_tx_hash),
+                sweep_detected_at_block = $3,
+                sweep_detected_at_block_hash = $4,
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+            "#,
+        )
+        .bind(id)
+        .bind(tx_hash)
+        .bind(block as i64)
+        .bind(block_hash)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Persist an execute transaction immediately after submission, before
+    /// waiting for its receipt, so restart recovery does not blindly resubmit.
+    pub async fn record_sweep_submission(
+        &self,
+        id: Uuid,
+        tx_hash: &[u8],
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET execute_tx_hash = $2,
+                sweep_submitted_at = now(),
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+            "#,
+        )
+        .bind(id)
+        .bind(tx_hash)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Clear a transaction that mined unsuccessfully so execution can be
+    /// simulated and retried on a later pass.
+    pub async fn clear_sweep_submission(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET execute_tx_hash = NULL,
+                sweep_submitted_at = NULL,
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+              AND sweep_detected_at_block IS NULL
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Clear an orphaned sweep detection so the next pass can recover or
+    /// resubmit the permissionless execute transaction.
+    pub async fn clear_sweep_detection(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET execute_tx_hash = NULL,
+                sweep_submitted_at = NULL,
+                sweep_detected_at_block = NULL,
+                sweep_detected_at_block_hash = NULL,
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Transition an in-flight invoice `deploying -> blocked`, recording why.
     /// Used when the payment cannot be delivered on-chain (the beneficiary
     /// rejected the transfer). Idempotent CAS on `status = 'deploying'`.
@@ -409,40 +748,23 @@ impl InvoiceRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Record a transient (non-contract) sweep failure: bump `sweep_attempts`
-    /// and stamp `last_attempt_at`. When the incremented count reaches
-    /// `max_attempts`, the invoice is blocked (`max_retries_exceeded`) instead of
-    /// staying retryable. Guarded on `status = 'deploying'`.
-    ///
-    /// Returns the invoice's status after the update (`Some("deploying")` = still
-    /// retryable, `Some("blocked")` = retry budget exhausted), or `None` when no
-    /// row matched (it left `deploying` between selection and this write).
-    pub async fn record_sweep_failure(
-        &self,
-        id: Uuid,
-        max_attempts: i32,
-    ) -> Result<Option<String>, sqlx::Error> {
-        let status: Option<String> = sqlx::query_scalar(
+    /// Record a retryable sweep failure without turning an RPC outage into a
+    /// terminal invoice state. The attempt count drives exponential backoff.
+    pub async fn record_sweep_retry(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             UPDATE invoices
             SET sweep_attempts = sweep_attempts + 1,
                 last_attempt_at = now(),
-                status = CASE WHEN sweep_attempts + 1 >= $2 THEN 'blocked' ELSE status END,
-                blocked_reason = CASE
-                    WHEN sweep_attempts + 1 >= $2 THEN 'max_retries_exceeded'
-                    ELSE blocked_reason
-                END,
                 updated_at = now()
             WHERE id = $1 AND status = 'deploying'
-            RETURNING status
             "#,
         )
         .bind(id)
-        .bind(max_attempts)
-        .fetch_optional(&self.pool)
+        .execute(&self.pool)
         .await?;
 
-        Ok(status)
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -473,6 +795,11 @@ mod tests {
             updated_at: epoch(),
             funded_at_block: None,
             observed_amount: None,
+            confirmed_received: "0".to_string(),
+            funded_at_block_hash: None,
+            sweep_submitted_at: None,
+            sweep_detected_at_block: None,
+            sweep_detected_at_block_hash: None,
             execute_tx_hash: None,
             fulfilled_at_block: None,
             sweep_attempts: 0,

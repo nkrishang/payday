@@ -5,14 +5,14 @@ import {ERC20} from "foundry/lib/solady/src/tokens/ERC20.sol";
 import {SafeTransferLib} from "foundry/lib/solady/src/utils/SafeTransferLib.sol";
 
 contract Payment {
-    address private constant NATIVE_TOKEN_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    error InsufficientTokenBalance(uint256 balance, uint256 required);
 
     constructor(address token, uint256 amount, address receiver) {
-        if (token == NATIVE_TOKEN_ADDRESS) {
-            SafeTransferLib.safeTransferETH({to: receiver, amount: amount});
-        } else {
-            ERC20(token).approve({spender: address(this), amount: amount});
-            SafeTransferLib.safeTransferFrom({token: token, from: address(this), to: receiver, amount: amount});
-        }
+        uint256 balance = ERC20(token).balanceOf(address(this));
+        if (balance < amount) revert InsufficientTokenBalance(balance, amount);
+
+        // Sweep the complete balance so an overpayment is never stranded at
+        // the deterministic payment address.
+        SafeTransferLib.safeTransfer({token: token, to: receiver, amount: balance});
     }
 }

@@ -2015,16 +2015,19 @@ dependencies = [
 name = "gateway-indexer"
 version = "0.1.0"
 dependencies = [
+ "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "alloy-sol-types",
+ "alloy-transport",
  "async-trait",
  "futures",
  "gateway-core",
  "gateway-db",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",

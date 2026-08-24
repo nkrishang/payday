@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use gateway_core::{
     Amount, BeneficiaryAddress, ChainId, CreateInvoiceRequest, FactoryAddress, Invoice,
-    InvoiceResponse, NATIVE_TOKEN_DECIMALS, TokenAddress,
+    InvoiceResponse, TokenAddress, USDC_DECIMALS,
 };
 
 use crate::api::error::ApiError;
@@ -53,18 +53,18 @@ pub async fn create_invoice(
     let beneficiary_addr = Address::from_str(&req.beneficiary_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid beneficiary_address: {e}")))?;
 
-    // 3. Enforce milestone constraints: one chain, native token only.
+    // 3. Enforce the configured chain and Circle-issued USDC contract.
     if chain_id != state.chain_id.0 {
         return Err(ApiError::unsupported_chain());
     }
 
     let token = TokenAddress(token_addr);
-    if !token.is_native() {
+    if token_addr != state.usdc_address {
         return Err(ApiError::unsupported_token());
     }
 
     // 4. Parse amount using token decimals.
-    let decimals = NATIVE_TOKEN_DECIMALS;
+    let decimals = USDC_DECIMALS;
     let amount = Amount::from_decimal_str(&req.amount, decimals)
         .map_err(|e| ApiError::invalid_amount(e.to_string()))?;
 

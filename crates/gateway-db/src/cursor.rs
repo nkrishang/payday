@@ -1,12 +1,13 @@
-//! Persistent indexer cursor: the last block height processed per chain.
-//!
-//! Height-only for this milestone (no block hash / reorg detection). The cursor
-//! lets the indexer skip work when no new block has arrived and resume at the
-//! right height across restarts. Because payment detection reconciles against
-//! current canonical balances every pass, the cursor is an optimization and
-//! observability anchor, not a correctness dependency.
+//! Persistent finalized USDC log cursor.
 
+use alloy_primitives::{Address, B256};
 use sqlx::PgPool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexerCursor {
+    pub block: u64,
+    pub block_hash: B256,
+}
 
 #[derive(Clone)]
 pub struct CursorRepository {
@@ -18,34 +19,33 @@ impl CursorRepository {
         Self { pool }
     }
 
-    /// Last processed block height for `chain_id`, or `None` if never recorded.
-    pub async fn get(&self, chain_id: u64) -> Result<Option<u64>, sqlx::Error> {
-        let row: Option<(i64,)> =
-            sqlx::query_as(r#"SELECT last_block FROM indexer_cursor WHERE chain_id = $1"#)
-                .bind(chain_id as i64)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        Ok(row.map(|(last_block,)| last_block as u64))
-    }
-
-    /// Record `block` as the last processed height for `chain_id`, inserting or
-    /// updating the single per-chain row. Idempotent: re-running with the same
-    /// value is a no-op transition.
-    pub async fn upsert(&self, chain_id: u64, block: u64) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    /// Last finalized range committed for this chain and USDC contract.
+    pub async fn get(
+        &self,
+        chain_id: u64,
+        token: Address,
+    ) -> Result<Option<IndexerCursor>, sqlx::Error> {
+        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
             r#"
-            INSERT INTO indexer_cursor (chain_id, last_block, updated_at)
-            VALUES ($1, $2, now())
-            ON CONFLICT (chain_id)
-            DO UPDATE SET last_block = EXCLUDED.last_block, updated_at = now()
+            SELECT last_block, last_block_hash
+            FROM indexer_cursor
+            WHERE chain_id = $1 AND token_address = $2
             "#,
         )
         .bind(chain_id as i64)
-        .bind(block as i64)
-        .execute(&self.pool)
+        .bind(token.as_slice())
+        .fetch_optional(&self.pool)
         .await?;
 
-        Ok(())
+        row.map(|(block, hash)| {
+            let block_hash = B256::try_from(hash.as_slice()).map_err(|_| {
+                sqlx::Error::Decode("invalid indexer cursor block hash length".into())
+            })?;
+            Ok(IndexerCursor {
+                block: block as u64,
+                block_hash,
+            })
+        })
+        .transpose()
     }
 }

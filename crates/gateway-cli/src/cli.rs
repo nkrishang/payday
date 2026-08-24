@@ -47,7 +47,7 @@ pub struct CreateArgs {
     #[arg(long)]
     pub chain_id: u64,
 
-    /// Payment token contract address (use the native sentinel for the native token).
+    /// Circle-issued USDC contract address for the selected chain.
     #[arg(long)]
     pub token: String,
 
