@@ -25,6 +25,7 @@ pub enum InvoiceStatus {
     Deploying,
     Fulfilled,
     Failed,
+    Blocked,
 }
 
 /// Error returned when parsing an [`InvoiceStatus`] from its string form.
@@ -43,6 +44,7 @@ impl InvoiceStatus {
             InvoiceStatus::Deploying => "deploying",
             InvoiceStatus::Fulfilled => "fulfilled",
             InvoiceStatus::Failed => "failed",
+            InvoiceStatus::Blocked => "blocked",
         }
     }
 }
@@ -63,6 +65,7 @@ impl FromStr for InvoiceStatus {
             "deploying" => Ok(InvoiceStatus::Deploying),
             "fulfilled" => Ok(InvoiceStatus::Fulfilled),
             "failed" => Ok(InvoiceStatus::Failed),
+            "blocked" => Ok(InvoiceStatus::Blocked),
             other => Err(InvoiceStatusParseError(other.to_string())),
         }
     }
@@ -160,6 +163,7 @@ mod tests {
             InvoiceStatus::Deploying,
             InvoiceStatus::Fulfilled,
             InvoiceStatus::Failed,
+            InvoiceStatus::Blocked,
         ] {
             let parsed = status.as_str().parse::<InvoiceStatus>().unwrap();
             assert_eq!(parsed, status);

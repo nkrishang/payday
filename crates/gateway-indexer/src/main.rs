@@ -5,6 +5,7 @@ mod indexer;
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy_signer_local::PrivateKeySigner;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
@@ -22,10 +23,16 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
+    // The backend key that signs sweep (`execute`) transactions.
+    let signer: PrivateKeySigner = config
+        .signer_key()
+        .parse()
+        .expect("invalid GATEWAY_SIGNER_KEY");
+
     // Connect to the chain and assert the RPC endpoint serves the configured
     // chain — a proven-invariant startup check, so a misconfigured node fails
     // fast instead of silently indexing the wrong chain.
-    let chain_client = chain::AlloyChainClient::connect(config.rpc_url())
+    let chain_client = chain::AlloyChainClient::connect(config.rpc_url(), signer)
         .await
         .expect("failed to connect to RPC endpoint");
     let node_chain_id = chain_client
@@ -49,6 +56,7 @@ async fn main() {
         cursor,
         chain,
         config.chain_id(),
+        config.factory_address(),
         Duration::from_millis(config.indexer_poll_interval_ms()),
     );
     let indexer_handle = tokio::spawn(worker.run(shutdown_rx));

@@ -37,6 +37,10 @@ contract PaymentTest is Test {
         // Ignore: address(0) and pre-compile addresses (they revert on receiving native tokens in foundry's test VM).
         vm.assume(uint160(sender) > uint160(0x11));
         vm.assume(uint160(receiver) > uint160(0x11));
+        // Ignore Forge-reserved addresses (vm cheatcode, console, Create2Deployer),
+        // which behave specially and are not valid payers/receivers.
+        assumeNotForgeAddress(sender);
+        assumeNotForgeAddress(receiver);
 
         // Get the deterministic payment address.
         address payable paymentAddress =
@@ -65,6 +69,10 @@ contract PaymentTest is Test {
         // Ignore: address(0) and pre-compile addresses (they revert on receiving native tokens in foundry's test VM).
         vm.assume(uint160(sender) > uint160(0x11));
         vm.assume(uint160(receiver) > uint160(0x11));
+        // Ignore Forge-reserved addresses (vm cheatcode, console, Create2Deployer),
+        // which behave specially and are not valid payers/receivers.
+        assumeNotForgeAddress(sender);
+        assumeNotForgeAddress(receiver);
 
         // Get the deterministic payment address.
         address paymentAddress =

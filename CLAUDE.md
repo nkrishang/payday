@@ -12,19 +12,41 @@ local Anvil node.
 ## What the system does
 
 An invoice is created with a counterfactual **payment address** (derived
-off-chain via CREATE2 from the factory + salt). A payer sends the native token
+off-chain via CREATE3 from the factory + salt). A payer sends the native token
 to that address. The **indexer** polls the chain and, when a payment address's
 balance meets the invoice amount, transitions the invoice `created → funded`.
+It then **sweeps** the payment: the backend signing key calls
+`PaymentFactory.execute`, which CREATE3-deploys a `Payment` contract at the
+payment address whose constructor forwards the funds to the beneficiary,
+advancing the invoice `funded → deploying → fulfilled`.
 
-Status lifecycle: `created → funded → deploying → fulfilled` (plus `failed`).
-**Only `created → funded` is implemented today** — that is the flow these
-instructions exercise.
+Status lifecycle: `created → funded → deploying → fulfilled`, plus `blocked`
+(terminal, needs manual intervention) and `failed` (reserved). The full
+`created → … → fulfilled` sweep is implemented today; these instructions
+exercise it end to end.
 
 Components (each a crate):
 - `gatewayd` — HTTP API (`POST /v1/invoices`, `GET /v1/invoices/:id`, `GET /health`).
-- `gateway-indexer` — background worker; reads balances and funds invoices.
+- `gateway-indexer` — background worker; funds invoices from balances, then
+  sweeps funded invoices to their beneficiaries via `PaymentFactory.execute`.
 - `gateway-cli` — HTTP client for the API.
 - `gateway-core` / `gateway-db` — domain types and Postgres repository.
+
+### Sweep classification (`funded → fulfilled` / `blocked`)
+
+`PaymentFactory.execute` reverts (`CREATE3.DeploymentFailed`) in two
+indistinguishable-by-selector cases, so the indexer classifies by on-chain
+reads rather than the revert:
+
+- **Code already at the payment address** → the payment was already executed
+  (our own recovered tx, or a permissionless third-party call) → `fulfilled`.
+- **Reverts and no code** → the deploy can never succeed because the beneficiary
+  rejects the native transfer → `blocked` (`receiver_rejected`), not retried.
+- **Transient (transport) failure** → retried with exponential backoff; after a
+  bounded number of attempts the invoice is `blocked` (`max_retries_exceeded`).
+
+The `funded → deploying` claim is a compare-and-set, so a crash mid-sweep is
+recovered on a later pass (re-`execute` sees the deployed code and fulfills).
 
 ## Prerequisites
 
@@ -74,9 +96,10 @@ address.
 
 ### 3. Start `gatewayd`
 
-The repo `.env` sets `DATABASE_URL`, `GATEWAY_CHAIN_ID=31337`, and
-`GATEWAY_FACTORY_ADDRESS`. The indexer additionally needs `GATEWAY_RPC_URL`
-(not in `.env`) — export it or add it.
+The repo `.env` sets `DATABASE_URL`, `GATEWAY_CHAIN_ID=31337`,
+`GATEWAY_FACTORY_ADDRESS`, and `GATEWAY_SIGNER_KEY` (the backend key that signs
+sweep transactions — Anvil dev account #0). The indexer additionally needs
+`GATEWAY_RPC_URL` (not in `.env`) — export it or add it.
 
 ```bash
 cargo build   # once
@@ -98,7 +121,7 @@ GATEWAY_INDEXER_POLL_INTERVAL_MS=1000 \
 
 On startup it asserts the node's chain id matches `GATEWAY_CHAIN_ID`.
 
-### 5. Create an invoice, pay it, watch it fund
+### 5. Create an invoice, pay it, watch it fund then fulfill
 
 ```bash
 # Create (native token sentinel = 0xEeee…EEeE; beneficiary = Anvil account #1)
@@ -114,15 +137,22 @@ cast send <payment_address> --value 1.5ether \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --rpc-url http://127.0.0.1:8545
 
-# Within one poll interval the indexer logs "invoice funded". Confirm:
-./target/debug/gateway-cli invoice get <id>          # status -> "funded"
+# The indexer logs "invoice funded", then "invoice fulfilled" once it sweeps.
+./target/debug/gateway-cli invoice get <id>          # status -> "fulfilled"
+
+# The beneficiary now holds the funds and the payment address is emptied:
+cast balance 0x70997970C51812dc3A010C7d01b50e0d17dc7C01 --rpc-url http://127.0.0.1:8545
+cast code <payment_address> --rpc-url http://127.0.0.1:8545   # non-empty: Payment deployed
 ```
 
 Inspect internal bookkeeping directly if needed:
 
 ```bash
 psql -d gateway -c \
-  "SELECT status, observed_amount, funded_at_block FROM invoices WHERE id='<id>';"
+  "SELECT status, observed_amount, funded_at_block, \
+          encode(execute_tx_hash,'hex') AS execute_tx_hash, fulfilled_at_block, \
+          sweep_attempts, blocked_reason \
+   FROM invoices WHERE id='<id>';"
 psql -d gateway -c "SELECT chain_id, last_block FROM indexer_cursor;"
 ```
 
@@ -144,11 +174,23 @@ DATABASE_URL=postgres://<user>@localhost/gateway cargo test --workspace
 | Balance < amount (underpayment) | stays `created` | `leaves_invoice_created_when_underfunded` |
 | Re-run after funding | no re-transition; funding block stable | `tick_is_idempotent` |
 | No new block since last pass | skipped (no reconcile) | `skips_when_no_new_block` |
-| Invoice on another chain | ignored by this indexer | `ignores_invoices_on_other_chains` |
+| Invoice on another chain (funding) | ignored by this indexer | `ignores_invoices_on_other_chains` |
 | Corrupt DB row (bad amount/status/length) | typed error, not a panic | `crates/gateway-db/src/invoices.rs` |
+| Sweep succeeds | `fulfilled`, tx hash + block recorded | `sweeps_funded_invoice_to_fulfilled` |
+| Payment already executed on-chain | `fulfilled`, no tx of ours | `already_deployed_marks_fulfilled_without_tx` |
+| Beneficiary rejects transfer | `blocked` (`receiver_rejected`) | `receiver_rejection_marks_blocked` |
+| Transient sweep error | stays `deploying`, attempt counted | `transient_failure_increments_attempts_and_stays_deploying` |
+| Transient errors exhaust retries | `blocked` (`max_retries_exceeded`) | `transient_failures_block_after_exhausting_retries` |
+| Sweep claim is compare-and-set | claimed at most once | `claim_is_idempotent` |
+| Backoff gates retry re-selection | not re-picked until backoff elapses | `backoff_gates_deploying_reselection` |
+| Re-run after fulfilling | not re-swept; block stable | `fulfilled_invoice_is_not_reswept` |
+| Sweep ignores created / other-chain | untouched by the sweep pass | `sweep_ignores_created_invoices`, `sweep_ignores_other_chains` |
 
 API-level idempotency and validation live in `gatewayd`; contract/address
-derivation lives in Foundry tests (`forge test`).
+derivation lives in Foundry tests (`forge test`). The `execute` revert behavior
+the sweep classification relies on (both failure cases surface the same
+`CREATE3.DeploymentFailed`; code presence distinguishes them) is pinned by
+`foundry/test/ExecuteRevert.t.sol`.
 
 ### Worth exercising manually against Anvil
 
@@ -171,7 +213,17 @@ them live validates the real Multicall + RPC path):
   identical fields → same invoice returned (HTTP 200); same key with *different*
   fields → `409 idempotency_conflict`.
 - **Restart safety** — stop and restart the indexer after funding; it must not
-  re-fund (the transition is a compare-and-set) and the cursor resumes.
+  re-fund (the transition is a compare-and-set) and the cursor resumes. After a
+  sweep it must not re-`execute` a `fulfilled` invoice.
+- **Sweep to a rejecting beneficiary** — deploy a contract that reverts in
+  `receive()` (e.g. `foundry/test/ExecuteRevert.t.sol:RejectingReceiver` via
+  `forge create`), create an invoice to it, and fund it. The invoice reaches
+  `blocked` (`receiver_rejected`) on the first sweep, and the funds stay at the
+  payment address (no code deployed):
+  ```bash
+  psql -d gateway -c "SELECT status, blocked_reason FROM invoices WHERE id='<id>';"
+  cast code <payment_address> --rpc-url http://127.0.0.1:8545   # 0x: deploy never succeeded
+  ```
 
 ### Milestone constraints (expected rejections)
 
@@ -182,9 +234,15 @@ invoice with another `--chain-id` returns `unsupported_chain`; a non-native
 
 ## Known gaps (not yet testable)
 
-- No `deploying`/`fulfilled` transitions — the indexer stops at `funded`; funds
-  are not yet swept to the beneficiary via the factory.
 - No reorg handling — the cursor stores height only, no block hash.
 - No confirmation-depth gate — an invoice funds on first sufficient balance
   observation, without waiting N blocks.
+- Sweeps are sent sequentially by a single signing key; there is no concurrent
+  nonce management, and the `deploying` claim assumes a single indexer process
+  (no cross-worker lease on in-flight rows).
+- Overpayment sweeps only the invoice `amount` to the beneficiary; any excess
+  stays in the deployed `Payment` contract (not refunded).
+- The `blocked` reason `receiver_rejected` also covers the (normally
+  unreachable) case where the payment address is underfunded at sweep time.
+- `failed` is defined but unused; blocked payments use `blocked`.
 - ERC-20 tokens are not supported (native only).

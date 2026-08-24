@@ -36,6 +36,21 @@ pub struct DbInvoice {
     /// Canonical base-unit balance observed at funding time (decimal string).
     /// Internal indexer bookkeeping; NULL until the invoice is funded.
     pub observed_amount: Option<String>,
+    /// Hash of the successful `execute` transaction (32 bytes). NULL until
+    /// fulfilled, and stays NULL when the payment was found already-executed
+    /// on-chain rather than swept by a transaction we sent.
+    pub execute_tx_hash: Option<Vec<u8>>,
+    /// Block height at which the sweep was confirmed. NULL until fulfilled.
+    pub fulfilled_at_block: Option<i64>,
+    /// Count of transient (non-contract) sweep failures so far. Drives the
+    /// exponential backoff and the retry ceiling.
+    pub sweep_attempts: i32,
+    /// Timestamp of the most recent sweep attempt; with `sweep_attempts` it
+    /// gates when the next retry becomes eligible. NULL before the first attempt.
+    pub last_attempt_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    /// Why the invoice was blocked (`receiver_rejected` / `max_retries_exceeded`).
+    /// NULL unless status is `blocked`.
+    pub blocked_reason: Option<String>,
 }
 
 /// A stored invoice row could not be decoded into the domain model. This
@@ -283,6 +298,152 @@ impl InvoiceRepository {
 
         Ok(result.rows_affected() > 0)
     }
+
+    /// List invoices the sweep worker should act on for a given chain: those
+    /// awaiting a sweep (`funded`) plus those already in flight (`deploying`)
+    /// whose exponential backoff has elapsed. `funded` rows are always eligible;
+    /// a `deploying` row is eligible only when
+    /// `now - last_attempt_at >= min(base * 2^sweep_attempts, cap)` seconds
+    /// (or it has never been attempted). Oldest first (UUIDv7), bounded by `limit`.
+    pub async fn list_sweepable(
+        &self,
+        chain_id: u64,
+        limit: i64,
+        backoff_base_secs: f64,
+        backoff_cap_secs: f64,
+    ) -> Result<Vec<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(
+            r#"
+            SELECT * FROM invoices
+            WHERE chain_id = $1
+              AND (
+                status = 'funded'
+                OR (
+                    status = 'deploying'
+                    AND (
+                        last_attempt_at IS NULL
+                        OR now() >= last_attempt_at
+                            + make_interval(secs => LEAST($3 * pow(2, sweep_attempts), $4))
+                    )
+                )
+              )
+            ORDER BY id
+            LIMIT $2
+            "#,
+        )
+        .bind(chain_id as i64)
+        .bind(limit)
+        .bind(backoff_base_secs)
+        .bind(backoff_cap_secs)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Claim an invoice for sweeping, transitioning `funded -> deploying`.
+    /// Idempotent compare-and-set: the `WHERE status = 'funded'` guard means a
+    /// concurrent worker (or a re-run) claims each invoice at most once and gets
+    /// `false`. Returns `true` only for the caller that won the claim.
+    pub async fn mark_deploying(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET status = 'deploying',
+                updated_at = now()
+            WHERE id = $1 AND status = 'funded'
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Transition an in-flight invoice `deploying -> fulfilled`, recording the
+    /// sweep transaction (if we sent one) and the confirming block. `tx_hash` is
+    /// `None` when the payment was found already-executed on-chain rather than
+    /// swept by a transaction we sent. Idempotent CAS on `status = 'deploying'`.
+    pub async fn mark_fulfilled(
+        &self,
+        id: Uuid,
+        tx_hash: Option<&[u8]>,
+        block: Option<u64>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET status = 'fulfilled',
+                execute_tx_hash = $2,
+                fulfilled_at_block = $3,
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+            "#,
+        )
+        .bind(id)
+        .bind(tx_hash)
+        .bind(block.map(|b| b as i64))
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Transition an in-flight invoice `deploying -> blocked`, recording why.
+    /// Used when the payment cannot be delivered on-chain (the beneficiary
+    /// rejected the transfer). Idempotent CAS on `status = 'deploying'`.
+    pub async fn mark_blocked(&self, id: Uuid, reason: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET status = 'blocked',
+                blocked_reason = $2,
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+            "#,
+        )
+        .bind(id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record a transient (non-contract) sweep failure: bump `sweep_attempts`
+    /// and stamp `last_attempt_at`. When the incremented count reaches
+    /// `max_attempts`, the invoice is blocked (`max_retries_exceeded`) instead of
+    /// staying retryable. Guarded on `status = 'deploying'`.
+    ///
+    /// Returns the invoice's status after the update (`Some("deploying")` = still
+    /// retryable, `Some("blocked")` = retry budget exhausted), or `None` when no
+    /// row matched (it left `deploying` between selection and this write).
+    pub async fn record_sweep_failure(
+        &self,
+        id: Uuid,
+        max_attempts: i32,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let status: Option<String> = sqlx::query_scalar(
+            r#"
+            UPDATE invoices
+            SET sweep_attempts = sweep_attempts + 1,
+                last_attempt_at = now(),
+                status = CASE WHEN sweep_attempts + 1 >= $2 THEN 'blocked' ELSE status END,
+                blocked_reason = CASE
+                    WHEN sweep_attempts + 1 >= $2 THEN 'max_retries_exceeded'
+                    ELSE blocked_reason
+                END,
+                updated_at = now()
+            WHERE id = $1 AND status = 'deploying'
+            RETURNING status
+            "#,
+        )
+        .bind(id)
+        .bind(max_attempts)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(status)
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +473,11 @@ mod tests {
             updated_at: epoch(),
             funded_at_block: None,
             observed_amount: None,
+            execute_tx_hash: None,
+            fulfilled_at_block: None,
+            sweep_attempts: 0,
+            last_attempt_at: None,
+            blocked_reason: None,
         }
     }
 
