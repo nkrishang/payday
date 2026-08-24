@@ -9,3 +9,9 @@ if ! pg_isready -q; then
 fi
 
 echo "PostgreSQL is ready"
+
+if ! sudo docker info >/dev/null 2>&1; then
+  amp orb service start docker-daemon --command 'sudo dockerd'
+fi
+
+echo "Docker is ready"

@@ -34,15 +34,37 @@ async fn main() {
 
     tracing::info!("listening on {}", config.bind_addr());
 
-    // Serve until Ctrl-C.
+    // ECS stops tasks with SIGTERM; local runs use Ctrl-C.
     let server = serve(listener, app).with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
+        shutdown_signal().await;
         tracing::info!("shutdown signal received");
     });
 
     if let Err(e) = server.await {
         tracing::error!(error = %e, "server error");
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }

@@ -168,7 +168,12 @@ overpayment sweeping.
 - `GATEWAY_FINALITY_CONFIRMATIONS` — defaults to 12; local setup uses 0
 - `GATEWAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
 - `GATEWAY_INDEXER_POLL_INTERVAL_MS` — default 2000
-- `GATEWAY_SIGNER_KEY` — sweep signer; use secret management in production
+- `GATEWAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
+- `GATEWAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
+  uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
+
+The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
+Terraform source is under `infra/`.
 
 ## Current constraints
 
@@ -180,6 +185,7 @@ overpayment sweeping.
 - Sweep submissions are sequential. A mined sweep is persisted as `deploying`
   and reaches `fulfilled` only after its inclusion block passes the configured
   confirmation depth and the Payment code is still canonical.
-- One active indexer process is assumed for sweep nonce ownership.
+- Sweep nonce ownership is limited to one active indexer by a retained
+  PostgreSQL session advisory lock; a second process fails startup.
 - Late USDC sent after Payment deployment can be stranded at that address.
 - `failed` is defined but unused; terminal sweep failures use `blocked`.
