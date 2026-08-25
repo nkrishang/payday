@@ -10,7 +10,8 @@ payer transfers USDC to that address. The indexer reads finalized ranges of
 attributes matching recipients in one database query, and advances invoices
 from `created` to `funded` when cumulative transfers reach the requested amount.
 
-The sweep worker calls `PaymentFactory.execute`. It deploys `Payment` at the
+The sweep worker submits batches to `BatchSweeper`, which independently calls
+`PaymentFactory.execute` for each invoice. It deploys `Payment` at the
 counterfactual address and transfers its complete USDC balance to the
 beneficiary before expiration, or to the configured recovery address after
 expiration. The expiration timestamp and recovery address are committed into
@@ -37,6 +38,9 @@ It does not download full blocks, trace calls, scan open invoices, or poll token
 balances. ERC-20 logs cover transfers made by EOAs, `transferFrom`, and internal
 contract calls. Observations, invoice projections, and the hash-bearing cursor
 commit atomically. Partial transfers accumulate and duplicate logs are ignored.
+Every transfer to a known invoice address is retained: accepted payments are
+`credited`, while zero-value or late/terminal transfers are marked `error` or
+`blocked` for manual review.
 
 `GATEWAY_FINALITY_CONFIRMATIONS` controls the confirmation-depth boundary. Set a
 reviewed chain-specific value in production; local Anvil uses `0`. A cursor hash
@@ -82,6 +86,7 @@ It deploys:
 
 - `PaymentFactory`: `0x5FbDB2315678afecb367f032d93F642f64180aa3`
 - `MockUSDC`: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
+- `BatchSweeper`: `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`
 
 Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
 
@@ -166,6 +171,7 @@ overpayment sweeping.
   clients; minimum 32 bytes
 - `GATEWAY_CHAIN_ID`
 - `GATEWAY_FACTORY_ADDRESS`
+- `GATEWAY_BATCH_SWEEPER_ADDRESS`
 - `GATEWAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `GATEWAY_USDC_START_BLOCK` — USDC deployment or desired backfill block
 - `GATEWAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
@@ -186,9 +192,13 @@ Terraform source is under `infra/`.
   rollup-specific L1 settlement.
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.
-- Sweep submissions are sequential. A mined sweep is persisted as `deploying`
+- Sweep batches are submitted sequentially by one signer while block indexing
+  runs concurrently. A mined sweep is persisted as `deploying`
   and reaches `fulfilled` only after its inclusion block passes the configured
-  confirmation depth and the Payment code is still canonical.
+  confirmation depth and Payment code exists at that exact canonical block.
+- Only one batch transaction may remain unresolved. A transaction absent from
+  both the receipt and mempool after five minutes returns to the retry queue; a
+  still-pending transaction at that age halts for operator fee replacement.
 - Sweep nonce ownership is limited to one active indexer by a retained
   PostgreSQL session advisory lock; a second process fails startup.
 - Late USDC sent after Payment deployment can be stranded at that address.

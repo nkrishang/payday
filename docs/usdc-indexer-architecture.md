@@ -66,6 +66,7 @@ Keep a reviewed chain/asset registry containing:
 - USDC deployment/start block;
 - expected decimals (`6`), verified on-chain at onboarding and startup;
 - PaymentFactory address and expected code identity;
+- BatchSweeper address and expected code identity;
 - finality policy;
 - enabled/halted state and configuration version.
 
@@ -90,22 +91,40 @@ Credit an observation only when:
 1. The log belongs to the configured chain.
 2. `log.address` exactly equals the allowlisted USDC proxy.
 3. `topic0` equals `keccak256("Transfer(address,address,uint256)")`.
-4. The recipient is an active payment address for that chain and token.
-5. The value is nonzero and valid `uint256` data.
+4. The recipient is a known payment address for that chain and token.
+5. The value is valid `uint256` data.
 6. The containing block is at the configured finalized boundary.
 7. The observation has not already been recorded.
 
-The recommended business policy is to count any genuine nonzero inbound USDC
-credit, including a mint with `from == address(0)`, because the resulting USDC is
-spendable by the payment contract. If payer identity or compliance policy
-requires a nonzero sender, make that an explicit product rule rather than an
-indexer assumption.
+Any genuine nonzero inbound USDC credit to a `created` or `funded` invoice,
+including a mint with `from == address(0)`, is credited because the resulting
+USDC is spendable by the payment contract. A zero-value transfer is retained
+with an `error` disposition. A transfer to an invoice that is already
+`deploying` or terminal is retained with a `blocked` disposition for manual
+resolution, because the automatic sweep can no longer be assumed to include it.
+If payer identity or compliance policy requires a nonzero sender, make that an
+explicit product rule rather than an indexer assumption.
 
 Use `(chain_id, token_address, tx_hash, log_index)` as the observation identity.
 A transaction can emit multiple USDC transfers, so transaction hash alone is not
 unique.
 
 ## Acquisition loop
+
+Block acquisition and sweeping run as independently scheduled workers. The
+invoice table is their durable queue: the acquisition worker atomically commits
+finalized observations and `funded` transitions, while the sweep worker claims
+eligible rows without delaying the next log poll. It sends one BatchSweeper
+transaction for each claimed group of up to 20 invoices. The helper isolates
+every factory call with `try/catch`, and failure events plus deployed Payment
+code determine each invoice's outcome after finality.
+
+The signer uses pending-chain nonce reads rather than a local nonce cache and
+never submits a higher nonce while a prior batch lacks a receipt. After five
+minutes, an absent transaction is atomically returned to the retry queue; a
+transaction still known to the mempool halts the worker for operator-directed
+same-nonce fee replacement. Receipt outcomes query Payment code by canonical
+block hash, so later unfinalized deployments cannot affect classification.
 
 For each enabled chain/asset:
 
@@ -188,6 +207,7 @@ be missed.
 - sender and recipient;
 - invoice ID;
 - amount `NUMERIC(78, 0)`;
+- disposition (`credited`, `error`, or `blocked`) and reason;
 - observed timestamp.
 
 Enforce uniqueness on
@@ -206,7 +226,9 @@ Use a unique `(chain_id, token_address, payment_address)` index and a partial
 index over active invoice payment addresses.
 
 `payment_observations` is the audit source of truth. Invoice totals and status are
-rebuildable projections.
+rebuildable projections. Every log addressed to a known invoice is retained:
+only `credited` observations affect automatic funding, while `error` and
+`blocked` observations form an indexed manual-review queue.
 
 ## Atomic processing
 

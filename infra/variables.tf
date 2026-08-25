@@ -52,6 +52,14 @@ variable "factory_address" {
   }
 }
 
+variable "batch_sweeper_address" {
+  type = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.batch_sweeper_address))
+    error_message = "batch_sweeper_address must be a 20-byte 0x-prefixed EVM address."
+  }
+}
+
 variable "usdc_address" {
   type = string
   validation {

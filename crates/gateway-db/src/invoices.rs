@@ -362,7 +362,7 @@ impl InvoiceRepository {
 
         struct InvoiceCredit {
             id: Uuid,
-            is_created: bool,
+            status: String,
             required: U256,
             received: U256,
             crossing: Option<(U256, u64, B256)>,
@@ -380,7 +380,7 @@ impl InvoiceRepository {
                 row.payment_address,
                 InvoiceCredit {
                     id: row.id,
-                    is_created: row.status == "created",
+                    status: row.status,
                     required,
                     received,
                     crossing: None,
@@ -393,13 +393,22 @@ impl InvoiceRepository {
                 continue;
             };
 
+            let (disposition, disposition_reason) = if observation.amount.is_zero() {
+                ("error", Some("zero_amount"))
+            } else if matches!(credit.status.as_str(), "created" | "funded") {
+                ("credited", None)
+            } else {
+                ("blocked", Some("invoice_not_accepting_payments"))
+            };
+
             let inserted = sqlx::query(
                 r#"
                 INSERT INTO payment_observations
                     (chain_id, token_address, block_number, block_hash,
                      transaction_hash, transaction_index, log_index,
-                     sender_address, recipient_address, invoice_id, amount)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     sender_address, recipient_address, invoice_id, amount,
+                     disposition, disposition_reason)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT DO NOTHING
                 "#,
             )
@@ -414,6 +423,8 @@ impl InvoiceRepository {
             .bind(observation.recipient.as_slice())
             .bind(credit.id)
             .bind(observation.amount.to_string())
+            .bind(disposition)
+            .bind(disposition_reason)
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -423,13 +434,19 @@ impl InvoiceRepository {
                 continue;
             }
 
+            if disposition != "credited" {
+                continue;
+            }
+
             credit.received = credit
                 .received
                 .checked_add(observation.amount)
                 .ok_or_else(|| {
                     sqlx::Error::Decode("USDC observation total overflowed uint256".into())
                 })?;
-            if credit.is_created && credit.crossing.is_none() && credit.received >= credit.required
+            if credit.status == "created"
+                && credit.crossing.is_none()
+                && credit.received >= credit.required
             {
                 credit.crossing = Some((
                     credit.received,
@@ -559,13 +576,11 @@ impl InvoiceRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// List invoices the sweep worker should act on for a given chain: those
-    /// awaiting a sweep (`funded`) plus those already in flight (`deploying`)
-    /// whose exponential backoff has elapsed. `funded` rows are always eligible;
-    /// a `deploying` row is eligible only when
-    /// `now - last_attempt_at >= min(base * 2^sweep_attempts, cap)` seconds
-    /// (or it has never been attempted). Oldest first (UUIDv7), bounded by `limit`.
-    pub async fn list_sweepable(
+    /// Atomically claim a transaction batch from the durable invoice queue.
+    /// Newly funded rows transition to `deploying`; unsubmitted rows left by a
+    /// retry or crash are reclaimed after their backoff. Row locks are released
+    /// before any chain RPC begins.
+    pub async fn claim_sweep_batch(
         &self,
         chain_id: u64,
         limit: i64,
@@ -574,21 +589,34 @@ impl InvoiceRepository {
     ) -> Result<Vec<DbInvoice>, sqlx::Error> {
         sqlx::query_as::<_, DbInvoice>(
             r#"
-            SELECT * FROM invoices
-            WHERE chain_id = $1
-              AND (
-                status = 'funded'
-                OR (
-                    status = 'deploying'
-                    AND (
-                        last_attempt_at IS NULL
-                        OR now() >= last_attempt_at
-                            + make_interval(secs => LEAST($3 * pow(2, sweep_attempts), $4))
+            WITH candidates AS (
+                SELECT id
+                FROM invoices
+                WHERE chain_id = $1
+                  AND execute_tx_hash IS NULL
+                  AND sweep_detected_at_block IS NULL
+                  AND (
+                    status = 'funded'
+                    OR (
+                        status = 'deploying'
+                        AND (
+                            last_attempt_at IS NULL
+                            OR now() >= last_attempt_at
+                                + make_interval(secs => LEAST($3 * pow(2, sweep_attempts), $4))
+                        )
                     )
-                )
-              )
-            ORDER BY id
-            LIMIT $2
+                  )
+                ORDER BY id
+                FOR UPDATE SKIP LOCKED
+                LIMIT $2
+            )
+            UPDATE invoices AS invoice
+            SET status = 'deploying',
+                last_attempt_at = now(),
+                updated_at = now()
+            FROM candidates
+            WHERE invoice.id = candidates.id
+            RETURNING invoice.*
             "#,
         )
         .bind(chain_id as i64)
@@ -599,24 +627,24 @@ impl InvoiceRepository {
         .await
     }
 
-    /// Claim an invoice for sweeping, transitioning `funded -> deploying`.
-    /// Idempotent compare-and-set: the `WHERE status = 'funded'` guard means a
-    /// concurrent worker (or a re-run) claims each invoice at most once and gets
-    /// `false`. Returns `true` only for the caller that won the claim.
-    pub async fn mark_deploying(&self, id: Uuid) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
+    /// List submitted or mined batches that require receipt/finality
+    /// reconciliation. Pending submissions are intentionally not backoff-gated.
+    pub async fn list_sweeps_to_reconcile(
+        &self,
+        chain_id: u64,
+    ) -> Result<Vec<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(
             r#"
-            UPDATE invoices
-            SET status = 'deploying',
-                updated_at = now()
-            WHERE id = $1 AND status = 'funded'
+            SELECT * FROM invoices
+            WHERE chain_id = $1
+              AND status = 'deploying'
+              AND (execute_tx_hash IS NOT NULL OR sweep_detected_at_block IS NOT NULL)
+            ORDER BY id
             "#,
         )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected() > 0)
+        .bind(chain_id as i64)
+        .fetch_all(&self.pool)
+        .await
     }
 
     /// Transition an in-flight invoice `deploying -> fulfilled`, preserving the
@@ -677,28 +705,69 @@ impl InvoiceRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Persist an execute transaction immediately after submission, before
-    /// waiting for its receipt, so restart recovery does not blindly resubmit.
-    pub async fn record_sweep_submission(
+    /// Atomically attach one batch transaction hash to every claimed invoice.
+    /// A partial update is rolled back so batch membership is never ambiguous.
+    pub async fn record_batch_sweep_submission(
         &self,
-        id: Uuid,
+        ids: &[Uuid],
         tx_hash: &[u8],
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             r#"
             UPDATE invoices
             SET execute_tx_hash = $2,
                 sweep_submitted_at = now(),
                 updated_at = now()
-            WHERE id = $1 AND status = 'deploying'
+            WHERE id = ANY($1)
+              AND status = 'deploying'
+              AND execute_tx_hash IS NULL
+              AND sweep_detected_at_block IS NULL
             "#,
         )
-        .bind(id)
+        .bind(ids)
+        .bind(tx_hash)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() != ids.len() as u64 {
+            return Err(sqlx::Error::Protocol(format!(
+                "recorded batch submission for {} of {} invoices",
+                result.rows_affected(),
+                ids.len()
+            )));
+        }
+        tx.commit().await
+    }
+
+    /// Atomically return every member of a dropped, unmined batch to the retry
+    /// queue. The exact hash guard prevents stale recovery from clearing a newer
+    /// submission.
+    pub async fn retry_dropped_sweep_batch(
+        &self,
+        chain_id: u64,
+        tx_hash: &[u8],
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET execute_tx_hash = NULL,
+                sweep_submitted_at = NULL,
+                sweep_attempts = sweep_attempts + 1,
+                last_attempt_at = now(),
+                updated_at = now()
+            WHERE chain_id = $1
+              AND status = 'deploying'
+              AND execute_tx_hash = $2
+              AND sweep_detected_at_block IS NULL
+            "#,
+        )
+        .bind(chain_id as i64)
         .bind(tx_hash)
         .execute(&self.pool)
         .await?;
 
-        Ok(result.rows_affected() > 0)
+        Ok(result.rows_affected())
     }
 
     /// Clear a transaction that mined unsuccessfully so execution can be

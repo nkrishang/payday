@@ -65,6 +65,15 @@ async fn main() {
         config.chain_id().0,
         "configured GATEWAY_CHAIN_ID does not match the RPC node's chain id"
     );
+    let helper_factory = chain_client
+        .get_batch_sweeper_factory(config.batch_sweeper_address())
+        .await
+        .expect("failed to query configured BatchSweeper factory");
+    assert_eq!(
+        helper_factory,
+        config.factory_address(),
+        "configured BatchSweeper is bound to a different PaymentFactory"
+    );
 
     let repo = gateway_db::InvoiceRepository::new(pool.clone());
     let cursor = gateway_db::CursorRepository::new(pool.clone());
@@ -78,6 +87,8 @@ async fn main() {
         cursor,
         chain,
         config.chain_id(),
+        config.factory_address(),
+        config.batch_sweeper_address(),
         config.usdc_address(),
         config.usdc_start_block(),
         config.finality_confirmations(),

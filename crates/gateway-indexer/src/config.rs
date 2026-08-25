@@ -14,6 +14,8 @@ pub struct Config {
     finality_confirmations: u64,
     log_range_size: u64,
     usdc_start_block: u64,
+    factory_address: Address,
+    batch_sweeper_address: Address,
     usdc_address: Address,
     signer: SignerConfig,
 }
@@ -43,6 +45,8 @@ impl Config {
             .expect("GATEWAY_USDC_ADDRESS must be set")
             .parse()
             .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_ADDRESS: {e}"));
+        let factory_address = parse_address_env("GATEWAY_FACTORY_ADDRESS");
+        let batch_sweeper_address = parse_address_env("GATEWAY_BATCH_SWEEPER_ADDRESS");
 
         let finality_confirmations = parse_u64_env(
             "GATEWAY_FINALITY_CONFIRMATIONS",
@@ -77,6 +81,8 @@ impl Config {
             finality_confirmations,
             log_range_size,
             usdc_start_block,
+            factory_address,
+            batch_sweeper_address,
             usdc_address,
             signer,
         }
@@ -114,9 +120,24 @@ impl Config {
         self.usdc_address
     }
 
+    pub fn factory_address(&self) -> Address {
+        self.factory_address
+    }
+
+    pub fn batch_sweeper_address(&self) -> Address {
+        self.batch_sweeper_address
+    }
+
     pub fn signer(&self) -> &SignerConfig {
         &self.signer
     }
+}
+
+fn parse_address_env(name: &str) -> Address {
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} must be set"))
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid {name}: {error}"))
 }
 
 fn parse_u64_env(name: &str, default: u64) -> u64 {
