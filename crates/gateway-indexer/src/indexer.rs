@@ -70,6 +70,7 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repo: InvoiceRepository,
         cursor: CursorRepository,
@@ -317,7 +318,7 @@ impl Indexer {
                 .any(|(_, row)| row.sweep_detected_at_block.is_some())
             {
                 for (invoice, row) in &invoices {
-                    self.handle_missing_receipt(&invoice, &row).await?;
+                    self.handle_missing_receipt(invoice, row).await?;
                 }
                 unresolved_submission = true;
             } else if self.submission_timed_out(&invoices)? {

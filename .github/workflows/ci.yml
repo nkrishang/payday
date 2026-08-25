@@ -88,6 +88,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gateway
+      GATEWAY_BATCH_SWEEPER_ADDRESS: 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
     steps:
       - uses: actions/checkout@v5
         with:

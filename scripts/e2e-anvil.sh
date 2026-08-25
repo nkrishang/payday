@@ -4,9 +4,11 @@ set -euo pipefail
 RPC_URL="${GATEWAY_RPC_URL:-http://127.0.0.1:8545}"
 API_URL="${GATEWAY_API_URL:-http://127.0.0.1:3000}"
 FACTORY="${GATEWAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
+BATCH_SWEEPER="${GATEWAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
 USDC="${GATEWAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
 SIGNER_KEY="${GATEWAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 PAYER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+PAYER="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 BENEFICIARY_EXACT="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 BENEFICIARY_PARTIAL="0x90F79bf6EB2c4f870365E785982E1f101E93b906"
 BENEFICIARY_OVERPAYMENT="0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
@@ -16,6 +18,7 @@ RECOVERY="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 export GATEWAY_RPC_URL="$RPC_URL"
 export GATEWAY_API_URL="$API_URL"
 export GATEWAY_FACTORY_ADDRESS="$FACTORY"
+export GATEWAY_BATCH_SWEEPER_ADDRESS="$BATCH_SWEEPER"
 export GATEWAY_USDC_ADDRESS="$USDC"
 export GATEWAY_CHAIN_ID="${GATEWAY_CHAIN_ID:-31337}"
 export GATEWAY_USDC_START_BLOCK="${GATEWAY_USDC_START_BLOCK:-0}"
@@ -217,6 +220,79 @@ wait_for_status "$overpayment_id" fulfilled
 assert_eq "$((overpayment_before + 1250000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
   "overpayment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$overpayment_address"
+
+echo "Testing one-transaction batch sweeping and manual-review observations"
+batch_one="$(create_invoice 0.1 "$BENEFICIARY_EXACT" "$expiration" "batch-one-$run_id")"
+batch_two="$(create_invoice 0.2 "$BENEFICIARY_PARTIAL" "$expiration" "batch-two-$run_id")"
+batch_three="$(create_invoice 0.3 "$BENEFICIARY_OVERPAYMENT" "$expiration" "batch-three-$run_id")"
+batch_one_id="$(jq -r .id <<<"$batch_one")"
+batch_two_id="$(jq -r .id <<<"$batch_two")"
+batch_three_id="$(jq -r .id <<<"$batch_three")"
+batch_one_address="$(jq -r .payment_address <<<"$batch_one")"
+batch_two_address="$(jq -r .payment_address <<<"$batch_two")"
+batch_three_address="$(jq -r .payment_address <<<"$batch_three")"
+
+# Mine all three transfers in one block so one acquisition pass makes the
+# invoices eligible together. Explicit nonces avoid independent `cast` clients
+# replacing one another while Anvil automining is disabled.
+payer_nonce="$(cast nonce "$PAYER" --block pending --rpc-url "$RPC_URL")"
+cast rpc --rpc-url "$RPC_URL" anvil_setAutomine false >/dev/null
+for payment in \
+  "$batch_one_address:100000" \
+  "$batch_two_address:200000" \
+  "$batch_three_address:300000"; do
+  payment_address="${payment%%:*}"
+  payment_amount="${payment##*:}"
+  cast send "$USDC" 'transfer(address,uint256)' "$payment_address" "$payment_amount" \
+    --private-key "$PAYER_KEY" --nonce "$payer_nonce" --rpc-url "$RPC_URL" --async >/dev/null
+  payer_nonce="$((payer_nonce + 1))"
+done
+cast rpc --rpc-url "$RPC_URL" anvil_mine 1 >/dev/null
+cast rpc --rpc-url "$RPC_URL" anvil_setAutomine true >/dev/null
+
+wait_for_status "$batch_one_id" fulfilled
+wait_for_status "$batch_two_id" fulfilled
+wait_for_status "$batch_three_id" fulfilled
+batch_tx_count="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(DISTINCT execute_tx_hash)
+  FROM invoices
+  WHERE id IN ('$batch_one_id'::uuid, '$batch_two_id'::uuid, '$batch_three_id'::uuid)
+")"
+assert_eq 1 "$batch_tx_count" "eligible invoices did not share one batch transaction"
+assert_payment_deployed_and_empty "$batch_one_address"
+assert_payment_deployed_and_empty "$batch_two_address"
+assert_payment_deployed_and_empty "$batch_three_address"
+
+# Transfers that can no longer safely enter the automatic sweep flow remain in
+# the durable observation ledger for manual inspection instead of being lost.
+send_usdc "$batch_one_address" 7
+send_usdc "$batch_one_address" 0
+for _ in {1..200}; do
+  manual_review_count="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+    SELECT count(*)
+    FROM payment_observations
+    WHERE invoice_id = '$batch_one_id'::uuid
+      AND disposition IN ('error', 'blocked')
+  ")"
+  [[ "$manual_review_count" == 2 ]] && break
+  sleep 0.1
+done
+assert_eq 2 "$manual_review_count" "late and zero-value transfers were not retained for review"
+assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM payment_observations
+  WHERE invoice_id = '$batch_one_id'::uuid
+    AND disposition = 'blocked'
+    AND disposition_reason = 'invoice_not_accepting_payments'
+")" "late transfer was not marked blocked"
+assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM payment_observations
+  WHERE invoice_id = '$batch_one_id'::uuid
+    AND disposition = 'error'
+    AND disposition_reason = 'zero_amount'
+")" "zero-value transfer was not marked erroneous"
+assert_eq 100000 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT confirmed_received FROM invoices WHERE id = '$batch_one_id'::uuid
+")" "manual-review transfers changed credited payment accounting"
 
 echo "Testing permissionless recovery of an expired partial payment"
 expired_at="$(( $(date +%s) + 60 ))"

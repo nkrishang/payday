@@ -15,6 +15,12 @@ use alloy_transport::TransportError;
 use async_trait::async_trait;
 use thiserror::Error;
 
+/// Gas provisioned for each isolated factory execution. Estimation cannot infer
+/// this safely because an out-of-gas inner call is caught by BatchSweeper and
+/// therefore looks like a successful outer transaction.
+const SWEEP_BATCH_BASE_GAS: u64 = 100_000;
+const SWEEP_GAS_PER_ITEM: u64 = 300_000;
+
 sol! {
     struct Sweep {
         address token;
@@ -325,6 +331,12 @@ impl AlloyChainClient {
         .abi_encode()
         .into()
     }
+
+    fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
+        SWEEP_BATCH_BASE_GAS.saturating_add(
+            SWEEP_GAS_PER_ITEM.saturating_mul(u64::try_from(sweep_count).unwrap_or(u64::MAX)),
+        )
+    }
 }
 
 #[async_trait]
@@ -509,6 +521,7 @@ impl ChainClient for AlloyChainClient {
     ) -> Result<B256, ChainError> {
         let tx = TransactionRequest::default()
             .with_to(batch_sweeper)
+            .with_gas_limit(Self::sweep_batch_gas_limit(sweeps.len()))
             .with_input(Self::execute_batch_calldata(sweeps));
         let pending = self.provider.send_transaction(tx).await.map_err(|error| {
             if is_execution_revert(&error) {
@@ -621,5 +634,11 @@ mod tests {
         assert_eq!(decoded.sweeps[0].expirationTimestamp, 1_900_000_000);
         assert_eq!(decoded.sweeps[0].recovery, recovery);
         assert_eq!(decoded.sweeps[0].salt, salt);
+    }
+
+    #[test]
+    fn batch_gas_limit_scales_per_isolated_sweep() {
+        assert_eq!(AlloyChainClient::sweep_batch_gas_limit(1), 400_000);
+        assert_eq!(AlloyChainClient::sweep_batch_gas_limit(20), 6_100_000);
     }
 }
