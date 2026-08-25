@@ -52,7 +52,6 @@ pub struct Indexer {
     cursor: CursorRepository,
     chain: Arc<dyn ChainClient>,
     chain_id: ChainId,
-    factory: Address,
     usdc: Address,
     usdc_start_block: u64,
     finality_confirmations: u64,
@@ -67,7 +66,6 @@ impl Indexer {
         cursor: CursorRepository,
         chain: Arc<dyn ChainClient>,
         chain_id: ChainId,
-        factory: Address,
         usdc: Address,
         usdc_start_block: u64,
         finality_confirmations: u64,
@@ -79,7 +77,6 @@ impl Indexer {
             cursor,
             chain,
             chain_id,
-            factory,
             usdc,
             usdc_start_block,
             finality_confirmations,
@@ -329,10 +326,12 @@ impl Indexer {
         let outcome = self
             .chain
             .sweep(
-                self.factory,
+                invoice.factory.0,
                 invoice.token.0,
                 invoice.amount.0,
                 invoice.beneficiary.0,
+                invoice.expiration_timestamp,
+                invoice.recovery.0,
                 invoice.salt.0,
                 invoice.payment_address.0,
             )
@@ -453,7 +452,8 @@ mod tests {
     use alloy_primitives::{Address, B256, U256, address};
     use async_trait::async_trait;
     use gateway_core::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, TokenAddress, USDC_DECIMALS,
+        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, RecoveryAddress,
+        TokenAddress, USDC_DECIMALS,
     };
     use sqlx::PgPool;
 
@@ -480,6 +480,7 @@ mod tests {
         max_log_range: Option<u64>,
         hash_mismatch: bool,
         receipt_pending: bool,
+        expected_factory: Option<Address>,
     }
 
     impl MockChain {
@@ -491,6 +492,7 @@ mod tests {
                 max_log_range: None,
                 hash_mismatch: false,
                 receipt_pending: false,
+                expected_factory: None,
             }
         }
 
@@ -512,6 +514,11 @@ mod tests {
 
         fn with_pending_receipt(mut self) -> Self {
             self.receipt_pending = true;
+            self
+        }
+
+        fn with_expected_factory(mut self, factory: Address) -> Self {
+            self.expected_factory = Some(factory);
             self
         }
     }
@@ -579,13 +586,18 @@ mod tests {
 
         async fn sweep(
             &self,
-            _factory: Address,
+            factory: Address,
             _token: Address,
             _amount: U256,
             _receiver: Address,
+            _expiration_timestamp: u64,
+            _recovery: Address,
             _salt: B256,
             payment_address: Address,
         ) -> Result<SweepOutcome, ChainError> {
+            if let Some(expected) = self.expected_factory {
+                assert_eq!(factory, expected, "sweep must use the invoice's factory");
+            }
             match self
                 .sweeps
                 .get(&payment_address)
@@ -626,6 +638,8 @@ mod tests {
             TokenAddress(usdc()),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(amount)),
+            1_900_000_000,
+            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
         )
     }
 
@@ -667,7 +681,6 @@ mod tests {
             CursorRepository::new(pool.clone()),
             Arc::new(chain),
             ChainId(CHAIN_ID),
-            factory().0,
             usdc(),
             0,
             0,
@@ -864,6 +877,8 @@ mod tests {
             TokenAddress(usdc()),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
+            1_900_000_000,
+            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
         );
         insert(&pool, &invoice, "key-1").await;
 
@@ -898,6 +913,35 @@ mod tests {
             Some(MOCK_TX_HASH.as_slice())
         );
         assert_eq!(row.fulfilled_at_block, Some(7));
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn sweep_uses_factory_stored_on_invoice(pool: PgPool) {
+        let invoice_factory =
+            FactoryAddress(address!("0x0000000000000000000000000000000000000009"));
+        let invoice = Invoice::new(
+            invoice_factory,
+            ChainId(CHAIN_ID),
+            TokenAddress(usdc()),
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
+            Amount(U256::from(100)),
+            1_900_000_000,
+            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
+        );
+        insert_funded(&pool, &invoice, "key-1").await;
+
+        let indexer = indexer_with(
+            &pool,
+            MockChain::new(7, vec![]).with_expected_factory(invoice_factory.0),
+        );
+        indexer.sweep_tick().await.expect("sweep should succeed");
+
+        let row = InvoiceRepository::new(pool)
+            .find_by_id(invoice.id.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "fulfilled");
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1041,6 +1085,8 @@ mod tests {
             TokenAddress(usdc()),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
+            1_900_000_000,
+            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
         );
         insert_funded(&pool, &invoice, "key-1").await;
 

@@ -7,28 +7,45 @@ import {Payment} from "foundry/src/Payment.sol";
 event PaymentExecuted(address indexed source, address indexed receiver, address indexed token, uint256 amount);
 
 contract PaymentFactory {
-    function paymentAddress(address token, uint256 amount, address receiver, bytes32 salt)
-        external
-        view
-        returns (address payable)
-    {
-        return payable(CREATE3.predictDeterministicAddress(deploymentSalt(token, amount, receiver, salt)));
+    function paymentAddress(
+        address token,
+        uint256 amount,
+        address receiver,
+        uint64 expirationTimestamp,
+        address recovery,
+        bytes32 salt
+    ) external view returns (address payable) {
+        return payable(CREATE3.predictDeterministicAddress(
+                deploymentSalt(token, amount, receiver, expirationTimestamp, recovery, salt)
+            ));
     }
 
-    function execute(address token, uint256 amount, address receiver, bytes32 salt) external {
+    function execute(
+        address token,
+        uint256 amount,
+        address receiver,
+        uint64 expirationTimestamp,
+        address recovery,
+        bytes32 salt
+    ) external {
         address source = CREATE3.deployDeterministic({
-            salt: deploymentSalt(token, amount, receiver, salt),
-            initCode: abi.encodePacked(type(Payment).creationCode, abi.encode(token, amount, receiver))
+            salt: deploymentSalt(token, amount, receiver, expirationTimestamp, recovery, salt),
+            initCode: abi.encodePacked(
+                type(Payment).creationCode, abi.encode(token, amount, receiver, expirationTimestamp, recovery)
+            )
         });
 
         emit PaymentExecuted(source, receiver, token, amount);
     }
 
-    function deploymentSalt(address token, uint256 amount, address receiver, bytes32 salt)
-        private
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encode(token, amount, receiver, salt));
+    function deploymentSalt(
+        address token,
+        uint256 amount,
+        address receiver,
+        uint64 expirationTimestamp,
+        address recovery,
+        bytes32 salt
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode(token, amount, receiver, expirationTimestamp, recovery, salt));
     }
 }

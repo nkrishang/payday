@@ -64,6 +64,14 @@ pub struct CreateArgs {
     #[arg(long)]
     pub amount: String,
 
+    /// Unix timestamp in seconds after which funds are sent to recovery.
+    #[arg(long)]
+    pub expiration_timestamp: u64,
+
+    /// Address that receives all funds when execution occurs after expiration.
+    #[arg(long)]
+    pub recovery: String,
+
     /// Idempotency key. If omitted, a fresh UUIDv7 is generated per invocation.
     #[arg(long)]
     pub idempotency_key: Option<String>,

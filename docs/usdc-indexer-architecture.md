@@ -262,13 +262,22 @@ payments across transactions or blocks accumulate. Multiple transfers in one
 transaction remain distinct by log index. Fund at the first observation where
 the cumulative amount reaches the requested amount.
 
-All USDC at the payment address when execution occurs belongs to the beneficiary.
-The Payment constructor requires a balance of at least the invoice amount and
-transfers the full balance, so an overpayment present before execution is not
-stranded.
+Before expiration, all USDC at the payment address when execution occurs belongs
+to the beneficiary. The Payment constructor requires a balance of at least the
+invoice amount and transfers the full balance, so an overpayment present before
+execution is not stranded. After expiration, execution instead transfers the
+complete balance to the invoice's recovery address without requiring the invoice
+amount. Both the expiration timestamp and recovery address are committed into
+the deterministic address.
 
-Transfers sent after the Payment contract has executed can also become stranded.
-Stop presenting the address after funding and add a versioned recovery policy if
+Factory execution is permissionless, so anyone can recover an expired partial
+payment. The indexer only automatically executes finalized-funded invoices;
+operators or a separate automation path must execute expired underfunded
+invoices.
+
+Transfers sent after the Payment contract has executed can still become
+stranded: constructor-based recovery runs only at deployment. Stop presenting
+the address after funding and use a different deployed-contract design if those
 late transfers must be recoverable.
 
 ## Sweep architecture under USDC

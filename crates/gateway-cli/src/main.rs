@@ -52,6 +52,7 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<InvoiceRespo
     // instead of a network round-trip and a server-side rejection.
     require_nonblank("token", &args.token)?;
     require_nonblank("beneficiary", &args.beneficiary)?;
+    require_nonblank("recovery", &args.recovery)?;
     require_nonblank("amount", &args.amount)?;
 
     let idempotency_key = args
@@ -63,6 +64,8 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<InvoiceRespo
         token_address: args.token,
         beneficiary_address: args.beneficiary,
         amount: args.amount,
+        expiration_timestamp: args.expiration_timestamp.to_string(),
+        recovery_address: args.recovery,
     };
 
     eprintln!("using idempotency key: {idempotency_key}");
@@ -112,6 +115,8 @@ fn print_invoice(inv: &InvoiceResponse, as_json: bool) {
         inv.token.address, inv.token.kind, inv.token.decimals
     );
     println!("  beneficiary      {}", inv.beneficiary_address);
+    println!("  expires at       {}", inv.expiration_timestamp);
+    println!("  recovery         {}", inv.recovery_address);
     println!("  factory          {}", inv.factory_address);
     println!("  salt             {}", inv.salt);
 }

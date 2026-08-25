@@ -12,7 +12,9 @@ from `created` to `funded` when cumulative transfers reach the requested amount.
 
 The sweep worker calls `PaymentFactory.execute`. It deploys `Payment` at the
 counterfactual address and transfers its complete USDC balance to the
-beneficiary. The lifecycle is:
+beneficiary before expiration, or to the configured recovery address after
+expiration. The expiration timestamp and recovery address are committed into
+the counterfactual address. The lifecycle is:
 
 `created → funded → deploying → fulfilled`, with terminal `blocked` and reserved
 `failed` states.
@@ -118,6 +120,8 @@ GATEWAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
   --chain-id 31337 \
   --token 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --beneficiary 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --expiration-timestamp "$(($(date +%s) + 3600))" \
+  --recovery 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
   --amount 1.5
 ```
 
@@ -188,4 +192,7 @@ Terraform source is under `infra/`.
 - Sweep nonce ownership is limited to one active indexer by a retained
   PostgreSQL session advisory lock; a second process fails startup.
 - Late USDC sent after Payment deployment can be stranded at that address.
+- Recovering an expired, underfunded invoice requires a permissionless
+  `PaymentFactory.execute` call; the indexer only automatically sweeps invoices
+  whose finalized transfers reach the requested amount.
 - `failed` is defined but unused; terminal sweep failures use `blocked`.

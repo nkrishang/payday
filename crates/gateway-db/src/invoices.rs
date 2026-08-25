@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::cursor::IndexerCursor;
 use gateway_core::{
     Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, InvoiceId,
-    InvoiceStatusParseError, PaymentAddress, Salt, TokenAddress,
+    InvoiceStatusParseError, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
 };
 
 /// Database row representing one invoice.
@@ -27,6 +27,8 @@ pub struct DbInvoice {
     pub token_address: Vec<u8>,
     pub token_decimals: i16,
     pub beneficiary_address: Vec<u8>,
+    pub expiration_timestamp: i64,
+    pub recovery_address: Vec<u8>,
     pub amount: String,
     pub salt: Vec<u8>,
     pub payment_address: Vec<u8>,
@@ -142,6 +144,12 @@ impl TryFrom<&DbInvoice> for Invoice {
                 "beneficiary_address",
                 &row.beneficiary_address,
             )?),
+            expiration_timestamp: row.expiration_timestamp as u64,
+            recovery: RecoveryAddress(address_from_col(
+                row.id,
+                "recovery_address",
+                &row.recovery_address,
+            )?),
             factory: FactoryAddress(address_from_col(
                 row.id,
                 "factory_address",
@@ -173,6 +181,8 @@ pub struct CreateInvoiceInput {
     pub token_address: [u8; 20],
     pub token_decimals: u8,
     pub beneficiary_address: [u8; 20],
+    pub expiration_timestamp: u64,
+    pub recovery_address: [u8; 20],
     pub amount: String,
     pub salt: [u8; 32],
     pub payment_address: [u8; 20],
@@ -206,6 +216,8 @@ impl CreateInvoiceInput {
             token_address: invoice.token.0.into(),
             token_decimals,
             beneficiary_address: invoice.beneficiary.0.into(),
+            expiration_timestamp: invoice.expiration_timestamp,
+            recovery_address: invoice.recovery.0.into(),
             amount: invoice.amount.0.to_string(),
             salt: invoice.salt.0.into(),
             payment_address: invoice.payment_address.0.into(),
@@ -228,8 +240,9 @@ impl InvoiceRepository {
             r#"
             INSERT INTO invoices
                 (id, idempotency_key, chain_id, factory_address, token_address,
-                 token_decimals, beneficiary_address, amount, salt, payment_address, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'created')
+                 token_decimals, beneficiary_address, expiration_timestamp,
+                 recovery_address, amount, salt, payment_address, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'created')
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -241,6 +254,8 @@ impl InvoiceRepository {
         .bind(&input.token_address)
         .bind(input.token_decimals as i16)
         .bind(&input.beneficiary_address)
+        .bind(input.expiration_timestamp as i64)
+        .bind(&input.recovery_address)
         .bind(&input.amount)
         .bind(&input.salt)
         .bind(&input.payment_address)
@@ -787,6 +802,8 @@ mod tests {
             token_address: vec![2u8; 20],
             token_decimals: 18,
             beneficiary_address: vec![3u8; 20],
+            expiration_timestamp: 1_900_000_000,
+            recovery_address: vec![6u8; 20],
             amount: "100".to_string(),
             salt: vec![4u8; 32],
             payment_address: vec![5u8; 20],
@@ -813,6 +830,8 @@ mod tests {
         let invoice = Invoice::try_from(&valid_row()).expect("valid row must decode");
         assert_eq!(invoice.chain_id.0, 1);
         assert_eq!(invoice.amount.0.to_string(), "100");
+        assert_eq!(invoice.expiration_timestamp, 1_900_000_000);
+        assert_eq!(invoice.recovery.0, Address::repeat_byte(6));
     }
 
     #[test]
@@ -855,6 +874,19 @@ mod tests {
         assert!(matches!(
             Invoice::try_from(&row),
             Err(DbInvoiceError::WrongByteLength { field: "salt", .. })
+        ));
+    }
+
+    #[test]
+    fn wrong_length_recovery_is_typed_error_not_panic() {
+        let mut row = valid_row();
+        row.recovery_address = vec![6u8; 19];
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::WrongByteLength {
+                field: "recovery_address",
+                ..
+            })
         ));
     }
 }

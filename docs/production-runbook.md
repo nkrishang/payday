@@ -236,6 +236,8 @@ cargo run --release -p gateway-cli -- invoice create \
   --chain-id 143 \
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --beneficiary <YOUR_BENEFICIARY_ADDRESS> \
+  --expiration-timestamp "$(($(date +%s) + 3600))" \
+  --recovery <YOUR_RECOVERY_ADDRESS> \
   --amount 0.01
 ```
 

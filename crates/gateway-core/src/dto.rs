@@ -25,6 +25,8 @@ pub struct CreateInvoiceRequest {
     pub token_address: String,
     pub beneficiary_address: String,
     pub amount: String,
+    pub expiration_timestamp: String,
+    pub recovery_address: String,
 }
 
 /// Full invoice payment instructions returned by the API.
@@ -37,6 +39,8 @@ pub struct InvoiceResponse {
     pub factory_address: String,
     pub token: TokenDto,
     pub beneficiary_address: String,
+    pub expiration_timestamp: String,
+    pub recovery_address: String,
     pub amount: String,
     pub amount_base_units: String,
     pub salt: String,
@@ -67,6 +71,8 @@ impl From<Invoice> for InvoiceResponse {
                 decimals,
             },
             beneficiary_address: inv.beneficiary.0.to_checksum(None),
+            expiration_timestamp: inv.expiration_timestamp.to_string(),
+            recovery_address: inv.recovery.0.to_checksum(None),
             amount: amount_human,
             amount_base_units: inv.amount.0.to_string(),
             salt: inv.salt.0.to_string(),

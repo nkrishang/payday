@@ -20,7 +20,14 @@ sol! {
     /// counterfactual payment address, whose constructor sweeps the funds to the
     /// receiver. Reverts with `DeploymentFailed` if the address already has code
     /// (already executed) or the token transfer fails.
-    function execute(address token, uint256 amount, address receiver, bytes32 salt);
+    function execute(
+        address token,
+        uint256 amount,
+        address receiver,
+        uint64 expirationTimestamp,
+        address recovery,
+        bytes32 salt
+    );
 }
 
 /// A validated USDC `Transfer` log with the metadata needed for durable ordering.
@@ -215,8 +222,8 @@ pub trait ChainClient: Send + Sync {
         to_block: u64,
     ) -> Result<Vec<UsdcTransfer>, ChainError>;
 
-    /// Sweep one invoice: call `PaymentFactory.execute(token, amount, receiver,
-    /// salt)` on `factory` to move the funds at `payment_address` to `receiver`.
+    /// Sweep one invoice by calling `PaymentFactory.execute` with all parameters
+    /// committed into its deterministic payment address.
     ///
     /// Returns a [`SweepOutcome`] for the deterministic cases (executed, already
     /// executed, or permanently blocked), all decided from on-chain reads rather
@@ -228,6 +235,8 @@ pub trait ChainClient: Send + Sync {
         token: Address,
         amount: U256,
         receiver: Address,
+        expiration_timestamp: u64,
+        recovery: Address,
         salt: B256,
         payment_address: Address,
     ) -> Result<SweepOutcome, ChainError>;
@@ -275,11 +284,20 @@ impl AlloyChainClient {
         Ok(!code.is_empty())
     }
 
-    fn execute_calldata(token: Address, amount: U256, receiver: Address, salt: B256) -> Bytes {
+    fn execute_calldata(
+        token: Address,
+        amount: U256,
+        receiver: Address,
+        expiration_timestamp: u64,
+        recovery: Address,
+        salt: B256,
+    ) -> Bytes {
         executeCall {
             token,
             amount,
             receiver,
+            expirationTimestamp: expiration_timestamp,
+            recovery,
             salt,
         }
         .abi_encode()
@@ -447,6 +465,8 @@ impl ChainClient for AlloyChainClient {
         token: Address,
         amount: U256,
         receiver: Address,
+        expiration_timestamp: u64,
+        recovery: Address,
         salt: B256,
         payment_address: Address,
     ) -> Result<SweepOutcome, ChainError> {
@@ -457,7 +477,14 @@ impl ChainClient for AlloyChainClient {
             return Ok(SweepOutcome::AlreadyDeployed);
         }
 
-        let calldata = Self::execute_calldata(token, amount, receiver, salt);
+        let calldata = Self::execute_calldata(
+            token,
+            amount,
+            receiver,
+            expiration_timestamp,
+            recovery,
+            salt,
+        );
 
         match self.try_send_execute(factory, calldata.clone()).await {
             Ok(Some(tx_hash)) => {
@@ -496,6 +523,7 @@ mod tests {
     use std::borrow::Cow;
 
     use alloy_json_rpc::{ErrorPayload, RpcError};
+    use alloy_primitives::{address, b256};
     use alloy_transport::TransportErrorKind;
 
     use super::*;
@@ -565,5 +593,29 @@ mod tests {
         );
         assert!(!unauthorized.is_retryable());
         assert!(unauthorized.is_permanent_rpc());
+    }
+
+    #[test]
+    fn execute_calldata_includes_expiration_and_recovery() {
+        let token = address!("0x0000000000000000000000000000000000000001");
+        let receiver = address!("0x0000000000000000000000000000000000000002");
+        let recovery = address!("0x0000000000000000000000000000000000000003");
+        let salt = b256!("0x0000000000000000000000000000000000000000000000000000000000000004");
+        let calldata = AlloyChainClient::execute_calldata(
+            token,
+            U256::from(5),
+            receiver,
+            1_900_000_000,
+            recovery,
+            salt,
+        );
+
+        let decoded = executeCall::abi_decode(&calldata).unwrap();
+        assert_eq!(decoded.token, token);
+        assert_eq!(decoded.amount, U256::from(5));
+        assert_eq!(decoded.receiver, receiver);
+        assert_eq!(decoded.expirationTimestamp, 1_900_000_000);
+        assert_eq!(decoded.recovery, recovery);
+        assert_eq!(decoded.salt, salt);
     }
 }
