@@ -15,9 +15,6 @@ pub struct Config {
     log_range_size: u64,
     usdc_start_block: u64,
     usdc_address: Address,
-    /// Address of the deployed `PaymentFactory`, whose `execute` the sweep pass
-    /// calls. Matches `GATEWAY_FACTORY_ADDRESS` used by `gatewayd`.
-    factory_address: Address,
     signer: SignerConfig,
 }
 
@@ -41,11 +38,6 @@ impl Config {
                 .unwrap_or_else(|e| panic!("invalid GATEWAY_INDEXER_POLL_INTERVAL_MS: {e}")),
             Err(_) => DEFAULT_INDEXER_POLL_INTERVAL_MS,
         };
-
-        let factory_address = std::env::var("GATEWAY_FACTORY_ADDRESS")
-            .expect("GATEWAY_FACTORY_ADDRESS must be set")
-            .parse()
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_FACTORY_ADDRESS: {e}"));
 
         let usdc_address = std::env::var("GATEWAY_USDC_ADDRESS")
             .expect("GATEWAY_USDC_ADDRESS must be set")
@@ -86,7 +78,6 @@ impl Config {
             log_range_size,
             usdc_start_block,
             usdc_address,
-            factory_address,
             signer,
         }
     }
@@ -121,10 +112,6 @@ impl Config {
 
     pub fn usdc_address(&self) -> Address {
         self.usdc_address
-    }
-
-    pub fn factory_address(&self) -> Address {
-        self.factory_address
     }
 
     pub fn signer(&self) -> &SignerConfig {

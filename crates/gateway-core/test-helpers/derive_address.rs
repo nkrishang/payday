@@ -2,7 +2,7 @@
 //!
 //! Called by Foundry's `vm.ffi` in `PaymentAddress.t.sol`.
 //!
-//! Usage: `derive-address <factory> <token> <amount> <receiver> <salt>`
+//! Usage: `derive-address <factory> <token> <amount> <receiver> <expiration> <recovery> <salt>`
 //!
 //! All arguments are hex strings (0x-prefixed), except `<amount>` which is a
 //! decimal string (matching Solidity's `vm.toString(uint256)` output).
@@ -14,13 +14,15 @@ use alloy_primitives::{Address, B256, U256};
 
 use gateway_core::predict_payment_address;
 use gateway_core::{
-    Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, Salt, TokenAddress,
+    Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 6 {
-        eprintln!("Usage: derive-address <factory> <token> <amount> <receiver> <salt>");
+    if args.len() != 8 {
+        eprintln!(
+            "Usage: derive-address <factory> <token> <amount> <receiver> <expiration> <recovery> <salt>"
+        );
         std::process::exit(1);
     }
 
@@ -36,15 +38,23 @@ fn main() {
     let receiver: Address = args[4]
         .parse()
         .unwrap_or_else(|e| panic!("invalid receiver address '{}': {e}", args[4]));
-    let salt: B256 = args[5]
+    let expiration_timestamp: u64 = args[5]
         .parse()
-        .unwrap_or_else(|e| panic!("invalid salt '{}': {e}", args[5]));
+        .unwrap_or_else(|e| panic!("invalid expiration timestamp '{}': {e}", args[5]));
+    let recovery: Address = args[6]
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid recovery address '{}': {e}", args[6]));
+    let salt: B256 = args[7]
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid salt '{}': {e}", args[7]));
 
     let payment_address: PaymentAddress = predict_payment_address(
         FactoryAddress(factory),
         TokenAddress(token),
         Amount(amount),
         BeneficiaryAddress(receiver),
+        expiration_timestamp,
+        RecoveryAddress(recovery),
         Salt(salt),
     );
 

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use gateway_core::{
     Amount, BeneficiaryAddress, ChainId, CreateInvoiceRequest, FactoryAddress, Invoice,
-    InvoiceResponse, TokenAddress, USDC_DECIMALS,
+    InvoiceResponse, RecoveryAddress, TokenAddress, USDC_DECIMALS,
 };
 
 use crate::api::error::ApiError;
@@ -52,6 +52,21 @@ pub async fn create_invoice(
         .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))?;
     let beneficiary_addr = Address::from_str(&req.beneficiary_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid beneficiary_address: {e}")))?;
+    let expiration_timestamp: u64 = req.expiration_timestamp.parse().map_err(|_| {
+        ApiError::invalid_request("expiration_timestamp must be a uint64 Unix timestamp string")
+    })?;
+    if expiration_timestamp > i64::MAX as u64 {
+        return Err(ApiError::invalid_request(
+            "expiration_timestamp exceeds the supported Unix timestamp range",
+        ));
+    }
+    let recovery_addr = Address::from_str(&req.recovery_address)
+        .map_err(|e| ApiError::invalid_request(format!("invalid recovery_address: {e}")))?;
+    if recovery_addr.is_zero() {
+        return Err(ApiError::invalid_request(
+            "recovery_address must not be the zero address",
+        ));
+    }
 
     // 3. Enforce the configured chain and Circle-issued USDC contract.
     if chain_id != state.chain_id.0 {
@@ -74,7 +89,15 @@ pub async fn create_invoice(
 
     // 5. Check for existing idempotency key before generating anything.
     if let Some(existing) = state.repo.find_by_idempotency_key(&idempotency_key).await? {
-        if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
+        if same_request(
+            &existing,
+            chain_id,
+            token_addr,
+            beneficiary_addr,
+            &amount.0,
+            expiration_timestamp,
+            recovery_addr,
+        ) {
             return Ok((axum::http::StatusCode::OK, Json(to_response(existing)?)));
         } else {
             return Err(ApiError::idempotency_conflict());
@@ -88,6 +111,8 @@ pub async fn create_invoice(
         token,
         BeneficiaryAddress(beneficiary_addr),
         amount,
+        expiration_timestamp,
+        RecoveryAddress(recovery_addr),
     );
 
     // 7. Persist. ON CONFLICT handles the race between our check and insert.
@@ -105,7 +130,15 @@ pub async fn create_invoice(
                 .await?
                 .expect("idempotency key must exist after ON CONFLICT");
 
-            if same_request(&existing, chain_id, token_addr, beneficiary_addr, &amount.0) {
+            if same_request(
+                &existing,
+                chain_id,
+                token_addr,
+                beneficiary_addr,
+                &amount.0,
+                expiration_timestamp,
+                recovery_addr,
+            ) {
                 Ok((axum::http::StatusCode::OK, Json(to_response(existing)?)))
             } else {
                 Err(ApiError::idempotency_conflict())
@@ -137,10 +170,14 @@ fn same_request(
     token: Address,
     beneficiary: Address,
     amount: &U256,
+    expiration_timestamp: u64,
+    recovery: Address,
 ) -> bool {
     row.chain_id as u64 == chain_id
         && row.token_address.as_slice() == token.as_slice()
         && row.beneficiary_address.as_slice() == beneficiary.as_slice()
+        && row.expiration_timestamp as u64 == expiration_timestamp
+        && row.recovery_address.as_slice() == recovery.as_slice()
         && U256::from_str_radix(&row.amount, 10)
             .map(|a| &a == amount)
             .unwrap_or(false)

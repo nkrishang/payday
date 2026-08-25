@@ -6,8 +6,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    Amount, BeneficiaryAddress, ChainId, FactoryAddress, PaymentAddress, Salt, TokenAddress,
-    generate_salt, predict_payment_address,
+    Amount, BeneficiaryAddress, ChainId, FactoryAddress, PaymentAddress, RecoveryAddress, Salt,
+    TokenAddress, generate_salt, predict_payment_address,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,6 +77,8 @@ pub struct Invoice {
     pub chain_id: ChainId,
     pub token: TokenAddress,
     pub beneficiary: BeneficiaryAddress,
+    pub expiration_timestamp: u64,
+    pub recovery: RecoveryAddress,
     pub factory: FactoryAddress,
     pub amount: Amount,
     pub salt: Salt,
@@ -91,6 +93,8 @@ impl Invoice {
         token: TokenAddress,
         beneficiary: BeneficiaryAddress,
         amount: Amount,
+        expiration_timestamp: u64,
+        recovery: RecoveryAddress,
     ) -> Self {
         let salt = generate_salt();
         Invoice {
@@ -98,10 +102,20 @@ impl Invoice {
             chain_id,
             token,
             beneficiary,
+            expiration_timestamp,
+            recovery,
             factory,
             amount,
             salt,
-            payment_address: predict_payment_address(factory, token, amount, beneficiary, salt),
+            payment_address: predict_payment_address(
+                factory,
+                token,
+                amount,
+                beneficiary,
+                expiration_timestamp,
+                recovery,
+                salt,
+            ),
             status: InvoiceStatus::Created,
         }
     }
@@ -141,7 +155,8 @@ mod tests {
     }
 
     use crate::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, TokenAddress, predict_payment_address,
+        Amount, BeneficiaryAddress, ChainId, FactoryAddress, RecoveryAddress, TokenAddress,
+        predict_payment_address,
     };
     use alloy_primitives::{U256, address};
 
@@ -152,6 +167,8 @@ mod tests {
             TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6")),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
+            1_900_000_000,
+            RecoveryAddress(address!("0x0000000000000000000000000000000000000002")),
         )
     }
 
@@ -198,14 +215,26 @@ mod tests {
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(100));
+        let expiration_timestamp = 1_900_000_000;
+        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
 
-        let invoice = Invoice::new(factory, chain_id, token, beneficiary, amount);
+        let invoice = Invoice::new(
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            recovery,
+        );
 
         assert_eq!(invoice.factory, factory);
         assert_eq!(invoice.chain_id, chain_id);
         assert_eq!(invoice.token, token);
         assert_eq!(invoice.beneficiary, beneficiary);
         assert_eq!(invoice.amount, amount);
+        assert_eq!(invoice.expiration_timestamp, expiration_timestamp);
+        assert_eq!(invoice.recovery, recovery);
     }
 
     #[test]
@@ -220,6 +249,8 @@ mod tests {
             invoice.token,
             invoice.amount,
             invoice.beneficiary,
+            invoice.expiration_timestamp,
+            invoice.recovery,
             invoice.salt,
         );
 
@@ -237,9 +268,27 @@ mod tests {
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(100));
+        let expiration_timestamp = 1_900_000_000;
+        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
 
-        let a = Invoice::new(factory, chain_id, token, beneficiary, amount);
-        let b = Invoice::new(factory, chain_id, token, beneficiary, amount);
+        let a = Invoice::new(
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            recovery,
+        );
+        let b = Invoice::new(
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            recovery,
+        );
 
         assert_ne!(a.salt, b.salt, "salts must differ");
         assert_ne!(a.id, b.id, "IDs must differ");
@@ -247,5 +296,31 @@ mod tests {
             a.payment_address, b.payment_address,
             "addresses must differ"
         );
+    }
+
+    #[test]
+    fn expiration_and_recovery_are_address_parameters() {
+        let invoice = sample_invoice();
+        let later_expiration = predict_payment_address(
+            invoice.factory,
+            invoice.token,
+            invoice.amount,
+            invoice.beneficiary,
+            invoice.expiration_timestamp + 1,
+            invoice.recovery,
+            invoice.salt,
+        );
+        let other_recovery = predict_payment_address(
+            invoice.factory,
+            invoice.token,
+            invoice.amount,
+            invoice.beneficiary,
+            invoice.expiration_timestamp,
+            RecoveryAddress(address!("0x0000000000000000000000000000000000000003")),
+            invoice.salt,
+        );
+
+        assert_ne!(invoice.payment_address, later_expiration);
+        assert_ne!(invoice.payment_address, other_recovery);
     }
 }

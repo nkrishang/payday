@@ -7,8 +7,14 @@ import {SafeTransferLib} from "foundry/lib/solady/src/utils/SafeTransferLib.sol"
 contract Payment {
     error InsufficientTokenBalance(uint256 balance, uint256 required);
 
-    constructor(address token, uint256 amount, address receiver) {
+    constructor(address token, uint256 amount, address receiver, uint64 expirationTimestamp, address recovery) {
         uint256 balance = ERC20(token).balanceOf(address(this));
+
+        if (block.timestamp > expirationTimestamp) {
+            SafeTransferLib.safeTransfer({token: token, to: recovery, amount: balance});
+            return;
+        }
+
         if (balance < amount) revert InsufficientTokenBalance(balance, amount);
 
         // Sweep the complete balance so an overpayment is never stranded at

@@ -240,6 +240,8 @@ mod tests {
             token_address: "0x0000000000000000000000000000000000000001".into(),
             beneficiary_address: "0x0000000000000000000000000000000000000002".into(),
             amount: "1".into(),
+            expiration_timestamp: "1900000000".into(),
+            recovery_address: "0x0000000000000000000000000000000000000003".into(),
         };
 
         assert!(

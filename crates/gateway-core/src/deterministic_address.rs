@@ -6,7 +6,9 @@
 use alloy_primitives::{Address, B256, b256, keccak256};
 use alloy_sol_types::{SolType, sol};
 
-use crate::{Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, Salt, TokenAddress};
+use crate::{
+    Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
+};
 
 /// Hash of Solady's CREATE3 proxy init code.
 /// `keccak256(abi.encodePacked(hex"67363d3d37363d34f03d5260086018f3"))`
@@ -14,22 +16,31 @@ pub const PROXY_INITCODE_HASH: B256 =
     b256!("0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f");
 
 /// Solidity tuple type matching `PaymentFactory.deploymentSalt`'s abi.encode parameters.
-type DeploymentSaltInput = sol! { tuple(address, uint256, address, bytes32) };
+type DeploymentSaltInput = sol! { tuple(address, uint256, address, uint64, address, bytes32) };
 
 /// Compute the deterministic CREATE3 payment address.
 ///
-/// This must match `PaymentFactory.paymentAddress(token, amount, receiver, salt)`
+/// This must match `PaymentFactory.paymentAddress(token, amount, receiver,
+/// expirationTimestamp, recovery, salt)`
 /// in Solidity for the same inputs.
 pub fn predict_payment_address(
     factory: FactoryAddress,
     token: TokenAddress,
     amount: Amount,
     receiver: BeneficiaryAddress,
+    expiration_timestamp: u64,
+    recovery: RecoveryAddress,
     salt: Salt,
 ) -> PaymentAddress {
-    // Step 1: abi.encode(token, amount, receiver, salt) — 32-byte-word-padded.
-    let encoded =
-        DeploymentSaltInput::abi_encode_sequence(&(token.0, amount.0, receiver.0, salt.0));
+    // Step 1: hash the factory's ABI-encoded payment parameters.
+    let encoded = DeploymentSaltInput::abi_encode_sequence(&(
+        token.0,
+        amount.0,
+        receiver.0,
+        expiration_timestamp,
+        recovery.0,
+        salt.0,
+    ));
     let deployment_salt = keccak256(&encoded);
 
     // Step 2: CREATE2 to compute the proxy address.
