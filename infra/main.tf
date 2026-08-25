@@ -5,6 +5,7 @@ locals {
   common_environment = [
     { name = "GATEWAY_CHAIN_ID", value = tostring(var.chain_id) },
     { name = "GATEWAY_FACTORY_ADDRESS", value = var.factory_address },
+    { name = "GATEWAY_BATCH_SWEEPER_ADDRESS", value = var.batch_sweeper_address },
     { name = "GATEWAY_USDC_ADDRESS", value = var.usdc_address },
     { name = "RUST_LOG", value = "info" }
   ]

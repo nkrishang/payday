@@ -79,9 +79,10 @@ aws sts get-caller-identity
 Never run production Terraform while authenticated to an account you have not
 explicitly verified.
 
-## 2. Deploy PaymentFactory to Monad
+## 2. Deploy PaymentFactory and BatchSweeper to Monad
 
-`PaymentFactory` has no owner or privileged administrative key. Use a dedicated
+`PaymentFactory` and its immutable `BatchSweeper` helper have no owner or
+privileged administrative key. Use a dedicated
 deployment wallet rather than the KMS sweep key, and retain its transaction
 record even though it has no post-deployment authority.
 
@@ -91,7 +92,7 @@ For an encrypted Foundry keystore:
 cast wallet import payday-deployer --interactive
 ```
 
-Fund the displayed address with enough MON for one contract deployment. Then:
+Fund the displayed address with enough MON for two contract deployments. Then:
 
 ```bash
 export GATEWAY_CHAIN_ID=143
@@ -103,14 +104,16 @@ forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
   --broadcast
 ```
 
-The script aborts if the RPC chain ID is not 143. Save the resulting factory
-address and deployment transaction. Verify that code exists:
+The script aborts if the RPC chain ID is not 143. Save both resulting addresses
+and deployment transactions. Verify that code exists at each address:
 
 ```bash
 cast code <FACTORY_ADDRESS> --rpc-url "$MONAD_RPC_URL"
+cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$MONAD_RPC_URL"
 ```
 
-An empty `0x` result means deployment verification failed; stop there.
+An empty `0x` result means deployment verification failed; stop there. Configure
+the helper address as `batch_sweeper_address` in Terraform.
 
 ## 3. Create protected Terraform state storage
 
