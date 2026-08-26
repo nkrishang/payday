@@ -94,6 +94,16 @@ variable "log_range_size" {
   }
 }
 
+variable "indexer_poll_interval_ms" {
+  description = "Indexer poll interval in milliseconds. Higher values reduce RPC calls and QuickNode credit usage at the cost of payment detection latency."
+  type        = number
+  default     = 60000
+  validation {
+    condition     = var.indexer_poll_interval_ms >= 1000 && var.indexer_poll_interval_ms <= 300000 && floor(var.indexer_poll_interval_ms) == var.indexer_poll_interval_ms
+    error_message = "indexer_poll_interval_ms must be an integer from 1000 through 300000."
+  }
+}
+
 variable "rpc_url" {
   description = "Paid HTTPS JSON-RPC endpoint. WARNING: sensitive values remain in Terraform state."
   type        = string

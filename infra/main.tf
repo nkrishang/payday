@@ -293,7 +293,8 @@ resource "aws_ecs_task_definition" "indexer" {
       { name = "GATEWAY_KMS_KEY_ID", value = aws_kms_key.signer.arn },
       { name = "GATEWAY_USDC_START_BLOCK", value = tostring(var.usdc_start_block) },
       { name = "GATEWAY_FINALITY_CONFIRMATIONS", value = tostring(var.finality_confirmations) },
-      { name = "GATEWAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) }
+      { name = "GATEWAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) },
+      { name = "GATEWAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) }
     ]),
     secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }, { name = "GATEWAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn }],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
