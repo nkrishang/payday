@@ -3,6 +3,7 @@
 use std::str::FromStr;
 
 use alloy_primitives::{Address, U256};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -15,7 +16,7 @@ use gateway_core::{
 
 use crate::api::error::ApiError;
 use crate::state::AppState;
-use gateway_db::{CreateInvoiceInput, DbInvoice};
+use gateway_db::{AccountId, CreateInvoiceInput, DbInvoice};
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
@@ -32,6 +33,7 @@ fn to_response(row: DbInvoice) -> Result<InvoiceResponse, ApiError> {
 
 pub async fn create_invoice(
     State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
     headers: HeaderMap,
     Json(req): Json<CreateInvoiceRequest>,
 ) -> Result<(axum::http::StatusCode, Json<InvoiceResponse>), ApiError> {
@@ -88,7 +90,11 @@ pub async fn create_invoice(
     }
 
     // 5. Check for existing idempotency key before generating anything.
-    if let Some(existing) = state.repo.find_by_idempotency_key(&idempotency_key).await? {
+    if let Some(existing) = state
+        .repo
+        .find_by_idempotency_key(account, &idempotency_key)
+        .await?
+    {
         if same_request(
             &existing,
             chain_id,
@@ -116,7 +122,8 @@ pub async fn create_invoice(
     );
 
     // 7. Persist. ON CONFLICT handles the race between our check and insert.
-    let input = CreateInvoiceInput::from_invoice(&invoice, idempotency_key.clone(), decimals);
+    let input =
+        CreateInvoiceInput::from_invoice(&invoice, account, idempotency_key.clone(), decimals);
 
     let inserted = state.repo.insert(&input).await?;
 
@@ -126,7 +133,7 @@ pub async fn create_invoice(
             // Race: another request won. Fetch their row and compare.
             let existing = state
                 .repo
-                .find_by_idempotency_key(&idempotency_key)
+                .find_by_idempotency_key(account, &idempotency_key)
                 .await?
                 .expect("idempotency key must exist after ON CONFLICT");
 
@@ -149,6 +156,7 @@ pub async fn create_invoice(
 
 pub async fn get_invoice(
     State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, ApiError> {
     let uuid =
@@ -156,7 +164,7 @@ pub async fn get_invoice(
 
     let row = state
         .repo
-        .find_by_id(uuid)
+        .find_by_id_for_account(account, uuid)
         .await?
         .ok_or_else(ApiError::invoice_not_found)?;
 

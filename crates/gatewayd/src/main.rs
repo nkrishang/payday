@@ -19,14 +19,29 @@ async fn main() {
         .expect("failed to connect to database");
 
     let repo = gateway_db::InvoiceRepository::new(pool.clone());
+    let accounts = gateway_db::AccountRepository::new(pool.clone());
+    let identity_verifier = match config.auth0() {
+        Some(auth0) => Some(
+            api::Auth0Verifier::new(
+                auth0.issuer.clone(),
+                auth0.audience.clone(),
+                auth0.client_id.clone(),
+            )
+            .await
+            .expect("failed to initialize Auth0 JWT verification"),
+        ),
+        None => None,
+    };
     let state = state::AppState::new(
         repo,
+        accounts,
+        identity_verifier,
         config.chain_id(),
         config.factory_address(),
         config.usdc_address(),
     );
 
-    let app = api::router(state, config.api_key());
+    let app = api::router(state);
 
     let listener = TcpListener::bind(config.bind_addr())
         .await

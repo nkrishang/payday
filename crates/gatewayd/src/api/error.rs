@@ -21,6 +21,46 @@ impl ApiError {
         }
     }
 
+    pub fn identity_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "identity_unauthorized",
+            message: "A valid Auth0 access token is required".into(),
+        }
+    }
+
+    pub fn identity_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "identity_unavailable",
+            message: "Account authentication is temporarily unavailable".into(),
+        }
+    }
+
+    pub fn authentication_event_already_used() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "authentication_event_already_used",
+            message: "This authentication event was already used; authenticate again".into(),
+        }
+    }
+
+    pub fn account_not_provisioned() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "account_not_provisioned",
+            message: "This identity does not have an account".into(),
+        }
+    }
+
+    pub fn api_key_generation_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "api_key_generation_conflict",
+            message: "The API key changed after confirmation; authenticate and try again".into(),
+        }
+    }
+
     pub fn missing_idempotency_key() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

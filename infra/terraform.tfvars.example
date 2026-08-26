@@ -1,5 +1,8 @@
 aws_region       = "us-east-1"
 domain_name      = "api.payday.sh"
+auth0_issuer     = "https://your-tenant.us.auth0.com/"
+auth0_audience   = "https://api.payday.sh"
+auth0_client_id  = "your-native-application-client-id"
 route53_zone_id  = "Z0123456789EXAMPLE"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
 alarm_email      = "operator@example.com"

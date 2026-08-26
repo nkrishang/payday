@@ -1,6 +1,8 @@
+mod accounts;
 mod cursor;
 mod invoices;
 
+pub use accounts::{AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError, IssuedApiKey};
 pub use cursor::{CursorRepository, IndexerCursor};
 pub use invoices::{
     CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository, PaymentObservation,

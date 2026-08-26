@@ -4,7 +4,6 @@ output "indexer_ecr_repository_url" { value = aws_ecr_repository.indexer.reposit
 output "kms_key_arn" { value = aws_kms_key.signer.arn }
 output "kms_public_key_note" { value = "AWS KMS exposes the secp256k1 public key via GetPublicKey, not an Ethereum address; derive and independently verify the address before funding." }
 output "database_url_secret_arn" { value = aws_secretsmanager_secret.database_url.arn }
-output "api_key_secret_arn" { value = aws_secretsmanager_secret.api_key.arn }
 output "rpc_url_secret_arn" { value = aws_secretsmanager_secret.rpc_url.arn }
 output "ecs_cluster_name" { value = aws_ecs_cluster.this.name }
 output "api_service_name" { value = aws_ecs_service.api.name }

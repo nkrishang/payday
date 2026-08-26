@@ -1,5 +1,42 @@
+CREATE TABLE accounts (
+    id UUID PRIMARY KEY,
+    api_key_hash BYTEA NOT NULL UNIQUE,
+    api_key_hint TEXT NOT NULL,
+    api_key_generation BIGINT NOT NULL DEFAULT 1,
+    key_created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    key_rotated_at TIMESTAMPTZ,
+    disabled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT accounts_api_key_hash_length CHECK (octet_length(api_key_hash) = 32),
+    CONSTRAINT accounts_api_key_generation_positive CHECK (api_key_generation > 0),
+    CONSTRAINT accounts_api_key_hint_length CHECK (octet_length(api_key_hint) BETWEEN 1 AND 32)
+);
+
+CREATE TABLE account_identities (
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    account_id UUID NOT NULL REFERENCES accounts(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (issuer, subject),
+    CONSTRAINT account_identities_issuer_length CHECK (octet_length(issuer) BETWEEN 1 AND 2048),
+    CONSTRAINT account_identities_subject_length CHECK (octet_length(subject) BETWEEN 1 AND 255)
+);
+
+CREATE TABLE account_key_authentication_events (
+    account_id UUID NOT NULL REFERENCES accounts(id),
+    event_id TEXT NOT NULL,
+    used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (account_id, event_id),
+    CONSTRAINT account_key_authentication_events_event_id_length
+        CHECK (octet_length(event_id) BETWEEN 1 AND 255)
+);
+
 CREATE TABLE invoices (
     id UUID PRIMARY KEY,
+    account_id UUID NOT NULL REFERENCES accounts(id),
     idempotency_key TEXT NOT NULL,
 
     chain_id BIGINT NOT NULL,
@@ -34,8 +71,8 @@ CREATE TABLE invoices (
 
     CONSTRAINT invoices_idempotency_key_length
         CHECK (octet_length(idempotency_key) BETWEEN 1 AND 255),
-    CONSTRAINT invoices_idempotency_key_unique
-        UNIQUE (idempotency_key),
+    CONSTRAINT invoices_account_id_idempotency_key_unique
+        UNIQUE (account_id, idempotency_key),
     CONSTRAINT invoices_factory_address_length
         CHECK (octet_length(factory_address) = 20),
     CONSTRAINT invoices_token_address_length
@@ -84,6 +121,8 @@ CREATE UNIQUE INDEX invoices_chain_token_payment_address_unique
 CREATE INDEX invoices_active_payment_address
     ON invoices (chain_id, token_address, payment_address)
     WHERE status = 'created';
+
+CREATE INDEX invoices_account_id_id ON invoices (account_id, id);
 
 CREATE TABLE indexer_cursor (
     chain_id BIGINT PRIMARY KEY,

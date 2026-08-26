@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::AccountId;
 use crate::cursor::IndexerCursor;
 use gateway_core::{
     Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, InvoiceId,
@@ -21,6 +22,7 @@ use gateway_core::{
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbInvoice {
     pub id: Uuid,
+    pub account_id: Uuid,
     pub idempotency_key: String,
     pub chain_id: i64,
     pub factory_address: Vec<u8>,
@@ -175,6 +177,7 @@ pub struct InvoiceRepository {
 /// Input for creating an invoice in the DB.
 pub struct CreateInvoiceInput {
     pub id: Uuid,
+    pub account_id: AccountId,
     pub idempotency_key: String,
     pub chain_id: u64,
     pub factory_address: [u8; 20],
@@ -207,9 +210,15 @@ impl CreateInvoiceInput {
     /// idempotency key and token decimals are not part of the domain model, so
     /// they are supplied by the caller. Status is not included — the INSERT
     /// hardcodes `'created'`.
-    pub fn from_invoice(invoice: &Invoice, idempotency_key: String, token_decimals: u8) -> Self {
+    pub fn from_invoice(
+        invoice: &Invoice,
+        account_id: AccountId,
+        idempotency_key: String,
+        token_decimals: u8,
+    ) -> Self {
         Self {
             id: invoice.id.0,
+            account_id,
             idempotency_key,
             chain_id: invoice.chain_id.0,
             factory_address: invoice.factory.0.into(),
@@ -239,26 +248,27 @@ impl InvoiceRepository {
         let row = sqlx::query_as::<_, DbInvoice>(
             r#"
             INSERT INTO invoices
-                (id, idempotency_key, chain_id, factory_address, token_address,
+                (id, account_id, idempotency_key, chain_id, factory_address, token_address,
                  token_decimals, beneficiary_address, expiration_timestamp,
                  recovery_address, amount, salt, payment_address, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'created')
-            ON CONFLICT (idempotency_key) DO NOTHING
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created')
+            ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
         )
         .bind(input.id)
+        .bind(input.account_id.0)
         .bind(&input.idempotency_key)
         .bind(input.chain_id as i64)
-        .bind(&input.factory_address)
-        .bind(&input.token_address)
+        .bind(input.factory_address)
+        .bind(input.token_address)
         .bind(input.token_decimals as i16)
-        .bind(&input.beneficiary_address)
+        .bind(input.beneficiary_address)
         .bind(input.expiration_timestamp as i64)
-        .bind(&input.recovery_address)
+        .bind(input.recovery_address)
         .bind(&input.amount)
-        .bind(&input.salt)
-        .bind(&input.payment_address)
+        .bind(input.salt)
+        .bind(input.payment_address)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -268,15 +278,36 @@ impl InvoiceRepository {
     /// Fetch an existing invoice by its idempotency key.
     pub async fn find_by_idempotency_key(
         &self,
+        account: AccountId,
         key: &str,
     ) -> Result<Option<DbInvoice>, sqlx::Error> {
-        sqlx::query_as::<_, DbInvoice>(r#"SELECT * FROM invoices WHERE idempotency_key = $1"#)
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await
+        sqlx::query_as::<_, DbInvoice>(
+            r#"SELECT * FROM invoices WHERE account_id = $1 AND idempotency_key = $2"#,
+        )
+        .bind(account.0)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
     }
 
     /// Fetch an invoice by its ID.
+    pub async fn find_by_id_for_account(
+        &self,
+        account: AccountId,
+        id: Uuid,
+    ) -> Result<Option<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(
+            r#"SELECT * FROM invoices WHERE account_id = $1 AND id = $2"#,
+        )
+        .bind(account.0)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Operational lookup used by the indexer, whose payment processing is
+    /// intentionally account-agnostic. Customer API handlers must use
+    /// `find_by_id_for_account` instead.
     pub async fn find_by_id(&self, id: Uuid) -> Result<Option<DbInvoice>, sqlx::Error> {
         sqlx::query_as::<_, DbInvoice>(r#"SELECT * FROM invoices WHERE id = $1"#)
             .bind(id)
@@ -865,6 +896,7 @@ mod tests {
     fn valid_row() -> DbInvoice {
         DbInvoice {
             id: Uuid::now_v7(),
+            account_id: Uuid::from_u128(1),
             idempotency_key: "key".to_string(),
             chain_id: 1,
             factory_address: vec![1u8; 20],

@@ -12,9 +12,7 @@ Terminal states: `blocked`, `failed` (unused).
 
 ```bash
 export GATEWAY_API_URL="https://api.payday.sh"
-export GATEWAY_API_KEY="$(aws secretsmanager get-secret-value \
-  --secret-id "$(terraform -chdir=infra output -raw api_key_secret_arn)" \
-  --query SecretString --output text --region "$AWS_REGION")"
+export GATEWAY_API_KEY="<API-key-for-the-account-that-created-the-invoice>"
 
 ./target/release/gateway-cli invoice get <INVOICE_ID>
 ```

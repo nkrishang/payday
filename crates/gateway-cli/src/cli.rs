@@ -23,6 +23,18 @@ pub struct Cli {
     #[arg(long, global = true, env = "GATEWAY_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
 
+    /// Auth0 tenant issuer used for account signup and key management.
+    #[arg(long, global = true, env = "GATEWAY_AUTH0_ISSUER")]
+    pub auth0_issuer: Option<String>,
+
+    /// Public Auth0 Native application client ID.
+    #[arg(long, global = true, env = "GATEWAY_AUTH0_CLIENT_ID")]
+    pub auth0_client_id: Option<String>,
+
+    /// Auth0 API audience for api.payday.sh.
+    #[arg(long, global = true, env = "GATEWAY_AUTH0_AUDIENCE")]
+    pub auth0_audience: Option<String>,
+
     /// Emit machine-readable JSON instead of a human-readable summary.
     #[arg(long, global = true)]
     pub json: bool,
@@ -31,14 +43,32 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Create and query invoices.
     #[command(subcommand)]
     Invoice(InvoiceCommand),
+    /// Sign up, sign in, and manage the account's single API key.
+    #[command(subcommand)]
+    Account(AccountCommand),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Authenticate with email OTP and create or replace the account's API key.
+    Create(CreateAccountArgs),
+    /// Show non-secret metadata for the current API key.
+    Get,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct CreateAccountArgs {
+    /// Replace an existing API key without asking for confirmation.
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Subcommand)]
 pub enum InvoiceCommand {
     /// Create a new invoice and print its payment instructions.
     Create(CreateArgs),
@@ -46,7 +76,7 @@ pub enum InvoiceCommand {
     Get(GetArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct CreateArgs {
     /// Chain ID the invoice is scoped to.
     #[arg(long)]
@@ -77,7 +107,7 @@ pub struct CreateArgs {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct GetArgs {
     /// Invoice ID (UUID).
     pub id: String,

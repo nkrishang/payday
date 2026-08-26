@@ -22,6 +22,33 @@ variable "domain_name" {
   }
 }
 
+variable "auth0_issuer" {
+  description = "Auth0 tenant issuer URL, including https://."
+  type        = string
+  validation {
+    condition     = can(regex("^https://[^[:space:]]+/?$", var.auth0_issuer))
+    error_message = "auth0_issuer must be an HTTPS URL."
+  }
+}
+
+variable "auth0_audience" {
+  description = "Identifier of the Auth0 API configured for api.payday.sh."
+  type        = string
+  validation {
+    condition     = length(trimspace(var.auth0_audience)) > 0
+    error_message = "auth0_audience must not be empty."
+  }
+}
+
+variable "auth0_client_id" {
+  description = "Public client ID of the Auth0 Native application used by gateway-cli."
+  type        = string
+  validation {
+    condition     = length(trimspace(var.auth0_client_id)) > 0
+    error_message = "auth0_client_id must not be empty."
+  }
+}
+
 variable "route53_zone_id" {
   description = "ID of an existing public Route53 hosted zone containing domain_name."
   type        = string

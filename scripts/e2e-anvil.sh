@@ -26,6 +26,7 @@ export GATEWAY_FINALITY_CONFIRMATIONS="${GATEWAY_FINALITY_CONFIRMATIONS:-0}"
 export GATEWAY_INDEXER_POLL_INTERVAL_MS="${GATEWAY_INDEXER_POLL_INTERVAL_MS:-100}"
 export GATEWAY_SIGNER_KEY="$SIGNER_KEY"
 export GATEWAY_API_KEY="${GATEWAY_API_KEY:-0123456789abcdef0123456789abcdef}"
+SECOND_API_KEY="second-account-0123456789abcdef0123456789abcdef"
 
 logs="$(mktemp -d)"
 pids=()
@@ -51,7 +52,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for command in anvil cast curl forge jq psql; do
+for command in anvil cast curl forge jq psql sha256sum; do
   command -v "$command" >/dev/null || {
     echo "required command not found: $command" >&2
     exit 1
@@ -174,6 +175,15 @@ echo "Starting gateway services"
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
+primary_key_hash="$(printf %s "$GATEWAY_API_KEY" | sha256sum | awk '{print $1}')"
+second_key_hash="$(printf %s "$SECOND_API_KEY" | sha256sum | awk '{print $1}')"
+psql "$DATABASE_URL" --quiet --command "
+  INSERT INTO accounts (id, api_key_hash, api_key_hint)
+  VALUES
+    ('00000000-0000-0000-0000-000000000001', decode('$primary_key_hash', 'hex'), '…abcdef'),
+    ('00000000-0000-0000-0000-000000000002', decode('$second_key_hash', 'hex'), '…abcdef')
+  ON CONFLICT (id) DO NOTHING
+" >/dev/null
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")
@@ -186,6 +196,14 @@ exact="$(create_invoice 1.5 "$BENEFICIARY_EXACT" "$expiration" "exact-payment-$r
 exact_replay="$(create_invoice 1.5 "$BENEFICIARY_EXACT" "$expiration" "exact-payment-$run_id")"
 exact_id="$(jq -r .id <<<"$exact")"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
+second_account_invoice="$(GATEWAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" "$expiration" "exact-payment-$run_id")"
+[[ "$(jq -r .id <<<"$second_account_invoice")" != "$exact_id" ]] || {
+  echo "account-scoped idempotency returned another account's invoice" >&2
+  exit 1
+}
+cross_account_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header "Authorization: Bearer $SECOND_API_KEY" "$API_URL/v1/invoices/$exact_id")"
+assert_eq 404 "$cross_account_status" "cross-account invoice lookup leaked an invoice"
 exact_address="$(jq -r .payment_address <<<"$exact")"
 exact_before="$(token_balance "$BENEFICIARY_EXACT")"
 send_usdc "$exact_address" 1500000

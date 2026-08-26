@@ -48,6 +48,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
 
+  auth0-action-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: node --test auth0/actions/payday-email-otp.test.js
+
   forge-test:
     runs-on: ubuntu-24.04
     steps:
