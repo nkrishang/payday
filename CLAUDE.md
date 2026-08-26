@@ -93,23 +93,27 @@ Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
 ### 3. Build and start the services
 
 Ensure `.env` contains the local addresses, database URL, RPC URL, confirmation
-depth, and Anvil signer key. Generate one API key and add it to the file so the
-API server and every CLI shell use the same credential:
-
-```bash
-chmod 600 .env
-printf '\nGATEWAY_API_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
-```
-
-Do this once rather than generating a different key in each terminal. In
-production, provide the key through secret management and only access the API
-over HTTPS.
+depth, and Anvil signer key. Start `gatewayd` so it applies the schema:
 
 ```bash
 cargo build --workspace
 set -a; source .env; set +a
 ./target/debug/gatewayd
 ```
+
+For a manual local run without Auth0, seed one test account in another shell:
+
+```bash
+set -a; source .env; set +a
+export GATEWAY_API_KEY="$(openssl rand -hex 32)"
+key_hash="$(printf %s "$GATEWAY_API_KEY" | sha256sum | awk '{print $1}')"
+psql "$DATABASE_URL" -c "INSERT INTO accounts (id, api_key_hash, api_key_hint)
+  VALUES ('00000000-0000-0000-0000-000000000001', decode('$key_hash', 'hex'), 'local')"
+```
+
+Use `scripts/e2e-anvil.sh` for the automated version. Production users obtain
+keys through Auth0 email OTP with `gateway-cli account create`; Auth0 sends OTP
+mail through Resend as documented in `docs/authentication.md`.
 
 In another terminal:
 
@@ -167,8 +171,11 @@ overpayment sweeping.
 ## Configuration
 
 - `DATABASE_URL`
-- `GATEWAY_API_KEY` — bearer credential shared by `gatewayd` and authorized CLI
-  clients; minimum 32 bytes
+- `GATEWAY_API_KEY` — CLI-only per-account bearer key for invoice requests
+- `GATEWAY_AUTH0_ISSUER` — Auth0 tenant issuer for account-management JWTs
+- `GATEWAY_AUTH0_AUDIENCE` — Auth0 API audience for `api.payday.sh`
+- `GATEWAY_AUTH0_CLIENT_ID` — public Auth0 Native application client ID; required
+  by both the API and CLI
 - `GATEWAY_CHAIN_ID`
 - `GATEWAY_FACTORY_ADDRESS`
 - `GATEWAY_BATCH_SWEEPER_ADDRESS`

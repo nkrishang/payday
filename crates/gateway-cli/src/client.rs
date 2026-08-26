@@ -94,7 +94,7 @@ impl GatewayClient {
     }
 }
 
-fn require_secure_transport(url: &reqwest::Url) -> Result<(), CliError> {
+pub(crate) fn require_secure_transport(url: &reqwest::Url) -> Result<(), CliError> {
     if url.scheme() == "https" || (url.scheme() == "http" && is_loopback(url)) {
         return Ok(());
     }

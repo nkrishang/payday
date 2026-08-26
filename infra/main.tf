@@ -118,10 +118,6 @@ resource "random_password" "db" {
   length  = 32
   special = false
 }
-resource "random_password" "api_key" {
-  length  = 48
-  special = false
-}
 
 resource "aws_db_subnet_group" "this" {
   name       = var.name
@@ -157,11 +153,6 @@ resource "aws_secretsmanager_secret" "database_url" { name = "${var.name}/databa
 resource "aws_secretsmanager_secret_version" "database_url" {
   secret_id     = aws_secretsmanager_secret.database_url.id
   secret_string = "postgresql://gateway:${random_password.db.result}@${aws_db_instance.this.address}:5432/gateway?sslmode=verify-full&sslrootcert=/usr/local/share/ca-certificates/aws-rds-global-bundle.pem"
-}
-resource "aws_secretsmanager_secret" "api_key" { name = "${var.name}/api-key" }
-resource "aws_secretsmanager_secret_version" "api_key" {
-  secret_id     = aws_secretsmanager_secret.api_key.id
-  secret_string = random_password.api_key.result
 }
 resource "aws_secretsmanager_secret" "rpc_url" { name = "${var.name}/rpc-url" }
 resource "aws_secretsmanager_secret_version" "rpc_url" {
@@ -231,7 +222,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.api_key.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn] }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
@@ -267,9 +258,14 @@ resource "aws_ecs_task_definition" "api" {
     name                   = "api", image = "${aws_ecr_repository.api.repository_url}:${var.image_tag}", essential = true,
     readonlyRootFilesystem = true,
     portMappings           = [{ containerPort = var.api_port, protocol = "tcp" }],
-    environment            = concat(local.common_environment, [{ name = "GATEWAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" }]),
-    secrets                = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }, { name = "GATEWAY_API_KEY", valueFrom = aws_secretsmanager_secret.api_key.arn }],
-    logConfiguration       = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
+    environment = concat(local.common_environment, [
+      { name = "GATEWAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
+      { name = "GATEWAY_AUTH0_ISSUER", value = var.auth0_issuer },
+      { name = "GATEWAY_AUTH0_AUDIENCE", value = var.auth0_audience },
+      { name = "GATEWAY_AUTH0_CLIENT_ID", value = var.auth0_client_id }
+    ]),
+    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }],
+    logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 }
 

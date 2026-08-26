@@ -2,6 +2,11 @@
 
 Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, and a secp256k1 KMS signing key. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
 
+The API task also requires an externally configured Auth0 tenant issuer, API
+audience, and Native application client ID. Terraform passes these non-secret
+identifiers to ECS; embedded email OTP and connection setup are documented in
+`docs/authentication.md`.
+
 ## Remote state bootstrap
 
 Create a versioned, encrypted, public-access-blocked S3 bucket (and optionally a DynamoDB lock table) separately. Do **not** add that bucket to this state. Then create `backend.hcl` (untracked) such as:
@@ -38,7 +43,14 @@ After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do n
 
 ## Secrets and operational notes
 
-Terraform state contains the RPC URL, generated database password/URL, and API key in plaintext within encrypted state despite `sensitive` markings. Secure state, plans, CI logs, and access accordingly; never commit `terraform.tfvars`, `backend.hcl`, or plans. ECS injects secrets at task startup, so rotate a secret and redeploy tasks. The API execution role can read only database/API secrets; indexer execution can read only database/RPC secrets. The indexer task role can only `kms:GetPublicKey` and `kms:Sign` on its key. RDS connections use hostname and certificate verification against the checksum-pinned AWS global RDS CA bundle in the image.
+Terraform state contains the RPC URL and generated database password/URL in
+plaintext within encrypted state despite `sensitive` markings. Secure state,
+plans, CI logs, and access accordingly; never commit `terraform.tfvars`,
+`backend.hcl`, or plans. ECS injects infrastructure secrets at task startup.
+The API execution role can read only the database secret; indexer execution can
+read only database/RPC secrets. The indexer task role can only `kms:GetPublicKey`
+and `kms:Sign` on its key. RDS connections use hostname and certificate
+verification against the checksum-pinned AWS global RDS CA bundle in the image.
 
 KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization.
 

@@ -27,6 +27,10 @@ Required:
 6. **A wallet with a small amount of native Monad USDC** for the production
    smoke payment. Circle Mint is not required; USDC can come from a supported
    exchange or bridge.
+7. **Auth0 tenant and Resend account** configured for embedded passwordless
+   email OTP as described in
+   [authentication.md](authentication.md). Resend must verify a Payday-owned
+   sending domain before real users authenticate.
 
 No Docker Hub, Terraform Cloud, separate PostgreSQL vendor, Circle account, or
 third-party key-management account is required.
@@ -152,6 +156,7 @@ Replace every placeholder in `terraform.tfvars`, including:
 - `image_tag = "git-<full commit SHA>"`
 - deployed factory address
 - current `usdc_start_block`
+- Auth0 issuer, API audience, and Native application client ID
 
 Supply the RPC URL without writing it to the tfvars file:
 
@@ -185,6 +190,12 @@ worktree. Commit and review every source change before building. This makes the
 image-to-source relationship and rollback deterministic.
 
 ## 7. Create the complete AWS stack
+
+This is a clean pre-production cutover. If a pre-release RDS database already
+exists, stop the API and indexer and recreate the `gateway` database/schema
+empty **immediately before this step**. The initial migration now includes
+account ownership and deliberately does not upgrade the old global-key test
+data. Do not start this release against the prior test schema.
 
 ```bash
 terraform -chdir=infra fmt -check
@@ -226,13 +237,17 @@ USDC; it pays gas to invoke the permissionless factory.
 
 ## 9. Configure and test the CLI
 
-Retrieve the generated API key without printing it in shared logs:
+Authenticate through Auth0 and create the operator account's API key. Store the
+returned key immediately in the operator's password/secret manager; it cannot
+be retrieved later:
 
 ```bash
 export GATEWAY_API_URL="$(terraform -chdir=infra output -raw api_url)"
-api_key_secret="$(terraform -chdir=infra output -raw api_key_secret_arn)"
-export GATEWAY_API_KEY="$(aws secretsmanager get-secret-value \
-  --secret-id "$api_key_secret" --query SecretString --output text)"
+export GATEWAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
+export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
+export GATEWAY_AUTH0_CLIENT_ID="<native-application-client-id>"
+account_json="$(cargo run --release -p gateway-cli -- --json account create)"
+export GATEWAY_API_KEY="$(jq -r .api_key <<<"$account_json")"
 
 curl --fail "$GATEWAY_API_URL/health"
 cargo run --release -p gateway-cli -- invoice create \
@@ -277,8 +292,8 @@ and creates the GitHub Release.
   capacity, RPC errors, signer MON balance, oldest unfulfilled invoice, and
   indexer cursor lag. Permanent safety errors and loss of the retained database
   advisory-lock connection terminate the worker instead of appearing healthy.
-- Rotate the API key by updating Secrets Manager and restarting API tasks; this
-  single-operator version does not provide overlapping-key rotation.
+- Replace account API keys with `gateway-cli account create` as described in the
+  secrets-rotation runbook; replacement is immediate and does not restart services.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
   bypasses ECS and starts another task. Keep the ECS service at one task as an
   additional control.
