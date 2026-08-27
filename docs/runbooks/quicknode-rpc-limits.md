@@ -37,11 +37,14 @@ when switching to a provider with a larger window.
 ## Fix: request budget
 
 With the 100-block cap and Monad's ~0.4 s blocks, steady-state indexing needs
-about 90 `eth_getLogs` calls per hour plus two cheap calls per idle poll. If
+about 90 `eth_getLogs` calls per hour, finality and cursor-header calls, and one
+header lookup for each distinct block containing a USDC transfer. Transfer-block
+lookups run concurrently within a range but are still billed RPC requests. If
 the endpoint's request-rate limit is being hit (`429` / `-32007` errors,
-counted by the `payday-indexer-retryable-failures` alarm), raise
-`indexer_poll_interval_ms` before considering a plan change: the poll
-interval only affects detection latency.
+counted by the `payday-indexer-retryable-failures` alarm), distinguish idle-poll
+traffic from catch-up and transfer-header traffic before changing
+`indexer_poll_interval_ms`: the poll interval affects detection latency and idle
+calls, not the request volume required to process a backlog.
 
 ## Fix: switch provider window
 

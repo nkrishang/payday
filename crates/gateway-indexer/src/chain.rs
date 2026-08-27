@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -117,11 +118,6 @@ pub enum ChainError {
     #[error("eth_getLogs range is too large: {0}")]
     LogRangeTooLarge(String),
 
-    /// The submitted nonce is already mined: either an earlier submission for
-    /// this batch landed or another transaction from the signer consumed it.
-    #[error("nonce already consumed: {0}")]
-    NonceConsumed(String),
-
     /// Previously committed canonical history no longer agrees with the RPC.
     /// All irreversible activity for this chain must halt.
     #[error("finality violation: {0}")]
@@ -206,6 +202,13 @@ fn is_nonce_consumed(err: &TransportError) -> bool {
     })
 }
 
+fn is_known_transaction(err: &TransportError) -> bool {
+    err.as_error_resp().is_some_and(|payload| {
+        let message = payload.message.to_ascii_lowercase();
+        message.contains("already known") || message.contains("known transaction")
+    })
+}
+
 fn is_log_range_too_large(err: &TransportError) -> bool {
     if err
         .as_transport_err()
@@ -256,7 +259,16 @@ pub struct SweepReceipt {
     pub succeeded: bool,
     pub block: u64,
     pub block_hash: B256,
+    pub transaction_index: u64,
     pub outcomes: HashMap<Address, SweepOutcome>,
+}
+
+/// An exact signed helper transaction. Persist this before broadcasting it so
+/// a restart can safely resend the same nonce, calldata, fees, and signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedSweepTransaction {
+    pub hash: B256,
+    pub raw: Bytes,
 }
 
 /// Token-level facts read at a pinned block to classify a failed item.
@@ -307,16 +319,21 @@ pub trait ChainClient: Send + Sync {
 
     async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError>;
 
-    /// Submit one helper transaction with an explicit nonce and fees so the
-    /// same call can replace an unconfirmed submission.
-    async fn submit_sweep_batch(
+    /// Sign one helper transaction without broadcasting it.
+    async fn prepare_sweep_batch(
         &self,
         batch_sweeper: Address,
         sweeps: &[SweepRequest],
         nonce: u64,
         gas_limit: u64,
         fees: FeeEstimate,
-    ) -> Result<B256, ChainError>;
+    ) -> Result<PreparedSweepTransaction, ChainError>;
+
+    /// Idempotently broadcast a transaction that is already durable.
+    async fn broadcast_sweep_transaction(
+        &self,
+        transaction: &PreparedSweepTransaction,
+    ) -> Result<(), ChainError>;
 
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
@@ -337,7 +354,9 @@ pub trait ChainClient: Send + Sync {
 /// wallet for the sweep transactions.
 pub struct AlloyChainClient {
     provider: DynProvider,
+    wallet: EthereumWallet,
     signer: Address,
+    chain_id: u64,
 }
 
 impl AlloyChainClient {
@@ -347,13 +366,22 @@ impl AlloyChainClient {
     pub async fn connect(rpc_url: &str, wallet: EthereumWallet) -> Result<Self, ChainError> {
         let signer = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
         let provider = ProviderBuilder::new()
-            .wallet(wallet)
+            .wallet(wallet.clone())
             .connect(rpc_url)
             .await
             .map_err(|error| ChainError::rpc("connect", error))?
             .erased();
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .map_err(|error| ChainError::rpc("eth_chainId", error))?;
 
-        Ok(Self { provider, signer })
+        Ok(Self {
+            provider,
+            wallet,
+            signer,
+            chain_id,
+        })
     }
 
     /// Fetch the chain ID reported by the node. Used for a startup assertion
@@ -552,6 +580,9 @@ impl ChainClient for AlloyChainClient {
         let block_hash = receipt.block_hash.ok_or_else(|| {
             ChainError::Transient("execute receipt has no block hash".to_string())
         })?;
+        let transaction_index = receipt.transaction_index.ok_or_else(|| {
+            ChainError::Transient("execute receipt has no transaction index".to_string())
+        })?;
 
         let malformed = |event: &str, error: alloy_sol_types::Error| {
             ChainError::Transient(format!("malformed {event} event in {tx_hash}: {error}"))
@@ -607,6 +638,7 @@ impl ChainClient for AlloyChainClient {
             succeeded: receipt.status(),
             block,
             block_hash,
+            transaction_index,
             outcomes,
         }))
     }
@@ -639,29 +671,48 @@ impl ChainClient for AlloyChainClient {
             .map_err(|error| ChainError::rpc("eth_feeHistory", error))
     }
 
-    async fn submit_sweep_batch(
+    async fn prepare_sweep_batch(
         &self,
         batch_sweeper: Address,
         sweeps: &[SweepRequest],
         nonce: u64,
         gas_limit: u64,
         fees: FeeEstimate,
-    ) -> Result<B256, ChainError> {
+    ) -> Result<PreparedSweepTransaction, ChainError> {
         let tx = TransactionRequest::default()
             .with_to(batch_sweeper)
+            .with_chain_id(self.chain_id)
             .with_nonce(nonce)
             .with_gas_limit(gas_limit)
             .with_max_fee_per_gas(fees.max_fee_per_gas)
             .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
             .with_input(Self::execute_batch_calldata(sweeps));
-        let pending = self.provider.send_transaction(tx).await.map_err(|error| {
-            if is_nonce_consumed(&error) {
-                ChainError::NonceConsumed(error.to_string())
-            } else {
-                ChainError::rpc("eth_sendRawTransaction", error)
-            }
+        let envelope = tx.build(&self.wallet).await.map_err(|error| {
+            ChainError::Transient(format!("could not sign sweep transaction: {error}"))
         })?;
-        Ok(*pending.tx_hash())
+        let raw: Bytes = envelope.encoded_2718().into();
+        Ok(PreparedSweepTransaction {
+            hash: keccak256(&raw),
+            raw,
+        })
+    }
+
+    async fn broadcast_sweep_transaction(
+        &self,
+        transaction: &PreparedSweepTransaction,
+    ) -> Result<(), ChainError> {
+        match self.provider.send_raw_transaction(&transaction.raw).await {
+            Ok(pending) if *pending.tx_hash() == transaction.hash => Ok(()),
+            Ok(pending) => Err(ChainError::FinalityViolation(format!(
+                "RPC returned transaction hash {} for signed transaction {}",
+                pending.tx_hash(),
+                transaction.hash
+            ))),
+            // Resending the exact signed bytes after a crash is successful if
+            // the node already knows them or has mined their nonce.
+            Err(error) if is_known_transaction(&error) || is_nonce_consumed(&error) => Ok(()),
+            Err(error) => Err(ChainError::rpc("eth_sendRawTransaction", error)),
+        }
     }
 
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError> {

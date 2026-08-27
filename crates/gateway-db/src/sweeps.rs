@@ -6,7 +6,7 @@
 //! `sweep_batches` row owns one signer nonce; replacements for that nonce
 //! append their hashes so a receipt for any of them resolves the batch.
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use gateway_core::InvoiceStatus;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -32,9 +32,14 @@ pub struct SweepBatch {
     pub gas_limit: u64,
     pub max_fee_per_gas: u128,
     pub max_priority_fee_per_gas: u128,
-    /// Every transaction hash submitted for this nonce, oldest first.
+    /// Every signed transaction hash prepared for this nonce, oldest first.
     pub tx_hashes: Vec<B256>,
-    /// When the newest submission was sent.
+    /// Signed EIP-2718 bytes corresponding one-for-one with `tx_hashes`.
+    pub raw_transactions: Vec<Bytes>,
+    /// None means the newest signed transaction is durable but not yet known
+    /// to have been broadcast.
+    pub broadcast_at: Option<DateTime<Utc>>,
+    /// When the newest transaction was broadcast.
     pub submitted_at: DateTime<Utc>,
     /// Receipt seen for one of the submissions, awaiting finality.
     pub mined: Option<MinedBatch>,
@@ -45,6 +50,7 @@ pub struct MinedBatch {
     pub tx_hash: B256,
     pub block: u64,
     pub block_hash: B256,
+    pub transaction_index: u64,
 }
 
 /// How a batch ended without finalizing its invoices.
@@ -102,10 +108,13 @@ struct SweepBatchRow {
     max_fee_per_gas: String,
     max_priority_fee_per_gas: String,
     tx_hashes: Vec<Vec<u8>>,
+    raw_transactions: Vec<Vec<u8>>,
     submitted_at: DateTime<Utc>,
+    broadcast_at: Option<DateTime<Utc>>,
     mined_tx_hash: Option<Vec<u8>>,
     mined_block: Option<i64>,
     mined_block_hash: Option<Vec<u8>>,
+    mined_transaction_index: Option<i64>,
 }
 
 impl TryFrom<SweepBatchRow> for SweepBatch {
@@ -130,12 +139,16 @@ impl TryFrom<SweepBatchRow> for SweepBatch {
             decode("mined_tx_hash", row.mined_tx_hash)?,
             row.mined_block,
             decode("mined_block_hash", row.mined_block_hash)?,
+            row.mined_transaction_index,
         ) {
-            (Some(tx_hash), Some(block), Some(block_hash)) => Some(MinedBatch {
-                tx_hash,
-                block: block as u64,
-                block_hash,
-            }),
+            (Some(tx_hash), Some(block), Some(block_hash), Some(transaction_index)) => {
+                Some(MinedBatch {
+                    tx_hash,
+                    block: block as u64,
+                    block_hash,
+                    transaction_index: transaction_index as u64,
+                })
+            }
             _ => None,
         };
         Ok(SweepBatch {
@@ -153,7 +166,9 @@ impl TryFrom<SweepBatchRow> for SweepBatch {
                 .into_iter()
                 .map(|hash| decode("tx_hash", Some(hash)).map(Option::unwrap))
                 .collect::<Result<_, _>>()?,
+            raw_transactions: row.raw_transactions.into_iter().map(Bytes::from).collect(),
             submitted_at: row.submitted_at,
+            broadcast_at: row.broadcast_at,
             mined,
         })
     }
@@ -249,7 +264,7 @@ impl InvoiceRepository {
         .map(|result| result.rows_affected() > 0)
     }
 
-    /// Open a batch for a submitted helper transaction and attach every
+    /// Open a batch for a signed helper transaction and attach every
     /// claimed invoice to it. The partial unique index on open batches makes a
     /// second in-flight batch per chain impossible; a partial attachment rolls
     /// back so batch membership is never ambiguous.
@@ -263,14 +278,16 @@ impl InvoiceRepository {
         max_fee_per_gas: u128,
         max_priority_fee_per_gas: u128,
         tx_hash: B256,
+        raw_transaction: &[u8],
     ) -> Result<Uuid, sqlx::Error> {
         let mut tx = self.pool().begin().await?;
         let id = Uuid::now_v7();
         sqlx::query(
             r#"
             INSERT INTO sweep_batches
-                (id, chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, tx_hashes)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (id, chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas,
+                 tx_hashes, raw_transactions)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(id)
@@ -280,6 +297,7 @@ impl InvoiceRepository {
         .bind(max_fee_per_gas.to_string())
         .bind(max_priority_fee_per_gas.to_string())
         .bind(vec![tx_hash.to_vec()])
+        .bind(vec![raw_transaction])
         .execute(&mut *tx)
         .await?;
 
@@ -327,28 +345,53 @@ impl InvoiceRepository {
         .await
     }
 
-    /// A same-nonce replacement was sent for an unconfirmed batch.
+    /// Persist a signed same-nonce replacement before broadcasting it.
     pub async fn record_batch_replacement(
         &self,
         batch_id: Uuid,
         tx_hash: B256,
         max_fee_per_gas: u128,
         max_priority_fee_per_gas: u128,
+        raw_transaction: &[u8],
     ) -> Result<bool, sqlx::Error> {
         sqlx::query(
             r#"
             UPDATE sweep_batches
             SET tx_hashes = array_append(tx_hashes, $2),
-                max_fee_per_gas = $3,
-                max_priority_fee_per_gas = $4,
-                submitted_at = now()
+                raw_transactions = array_append(raw_transactions, $3),
+                max_fee_per_gas = $4,
+                max_priority_fee_per_gas = $5,
+                broadcast_at = NULL
             WHERE id = $1 AND resolved_at IS NULL
             "#,
         )
         .bind(batch_id)
         .bind(tx_hash.as_slice())
+        .bind(raw_transaction)
         .bind(max_fee_per_gas.to_string())
         .bind(max_priority_fee_per_gas.to_string())
+        .execute(self.pool())
+        .await
+        .map(|result| result.rows_affected() > 0)
+    }
+
+    /// Mark the newest durable transaction as broadcast. Re-sending the same
+    /// signed bytes before this update is safe and closes the RPC/DB crash gap.
+    pub async fn record_batch_broadcast(
+        &self,
+        batch_id: Uuid,
+        tx_hash: B256,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE sweep_batches
+            SET broadcast_at = now(), submitted_at = now()
+            WHERE id = $1 AND resolved_at IS NULL AND broadcast_at IS NULL
+              AND tx_hashes[cardinality(tx_hashes)] = $2
+            "#,
+        )
+        .bind(batch_id)
+        .bind(tx_hash.as_slice())
         .execute(self.pool())
         .await
         .map(|result| result.rows_affected() > 0)
@@ -363,7 +406,8 @@ impl InvoiceRepository {
         sqlx::query(
             r#"
             UPDATE sweep_batches
-            SET mined_tx_hash = $2, mined_block = $3, mined_block_hash = $4
+            SET mined_tx_hash = $2, mined_block = $3, mined_block_hash = $4,
+                mined_transaction_index = $5
             WHERE id = $1 AND resolved_at IS NULL
             "#,
         )
@@ -371,6 +415,7 @@ impl InvoiceRepository {
         .bind(mined.tx_hash.as_slice())
         .bind(mined.block as i64)
         .bind(mined.block_hash.as_slice())
+        .bind(mined.transaction_index as i64)
         .execute(self.pool())
         .await
         .map(|result| result.rows_affected() > 0)
@@ -381,7 +426,8 @@ impl InvoiceRepository {
         sqlx::query(
             r#"
             UPDATE sweep_batches
-            SET mined_tx_hash = NULL, mined_block = NULL, mined_block_hash = NULL, submitted_at = now()
+            SET mined_tx_hash = NULL, mined_block = NULL, mined_block_hash = NULL,
+                mined_transaction_index = NULL, submitted_at = now()
             WHERE id = $1 AND resolved_at IS NULL
             "#,
         )
@@ -433,15 +479,16 @@ impl InvoiceRepository {
     }
 
     /// Apply a finalized helper-transaction receipt: every invoice of the batch
-    /// must have an outcome. Drained invoices have their observations up to the
-    /// receipt block marked collected and their queue count recomputed from
-    /// the ledger, so a later-indexed transfer from an earlier block cannot
-    /// re-queue funds the sweep already moved.
+    /// must have an outcome. Drained invoices have observations before the
+    /// receipt's exact transaction position marked collected and their queue
+    /// count recomputed from the ledger, so later indexing cannot re-queue
+    /// funds the sweep already moved.
     pub async fn finalize_batch(
         &self,
         batch_id: Uuid,
         tx_hash: B256,
         block: u64,
+        transaction_index: u64,
         outcomes: &[(Uuid, InvoiceOutcome)],
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool().begin().await?;
@@ -451,25 +498,28 @@ impl InvoiceRepository {
                     sqlx::query(
                         r#"
                         UPDATE payment_observations
-                        SET collected_at_block = $2
+                        SET collected_at_block = $2,
+                            collected_at_transaction_index = $3
                         WHERE invoice_id = $1
                           AND collected_at_block IS NULL
                           AND disposition <> 'error'
-                          AND block_number <= $2
+                          AND (block_number, transaction_index) < ($2, $3)
                         "#,
                     )
                     .bind(invoice_id)
                     .bind(block as i64)
+                    .bind(transaction_index as i64)
                     .execute(&mut *tx)
                     .await?;
                     sqlx::query(
                         r#"
                         UPDATE invoices
-                        SET status = COALESCE($3, status),
-                            execute_tx_hash = CASE WHEN $4 THEN $5 ELSE execute_tx_hash END,
-                            resolved_at_block = CASE WHEN $3 IS NULL THEN resolved_at_block
+                        SET status = COALESCE($4, status),
+                            execute_tx_hash = CASE WHEN $5 THEN $6 ELSE execute_tx_hash END,
+                            resolved_at_block = CASE WHEN $4 IS NULL THEN resolved_at_block
                                                      ELSE COALESCE(resolved_at_block, $2) END,
                             drained_at_block = $2,
+                            drained_at_transaction_index = $3,
                             uncollected_count = (
                                 SELECT count(*) FROM payment_observations
                                 WHERE invoice_id = $1
@@ -479,11 +529,12 @@ impl InvoiceRepository {
                             sweep_batch_id = NULL,
                             sweep_attempts = 0,
                             updated_at = now()
-                        WHERE id = $1 AND sweep_batch_id = $6
+                        WHERE id = $1 AND sweep_batch_id = $7
                         "#,
                     )
                     .bind(invoice_id)
                     .bind(block as i64)
+                    .bind(transaction_index as i64)
                     .bind(status.map(|status| status.as_str()))
                     .bind(execute_tx)
                     .bind(tx_hash.as_slice())

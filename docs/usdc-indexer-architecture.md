@@ -94,7 +94,8 @@ Credit an observation only when:
 4. The recipient is a known payment address for that chain and token.
 5. The value is valid `uint256` data.
 6. The containing block is at the configured finalized boundary.
-7. The observation has not already been recorded.
+7. The containing block's timestamp is no later than the invoice deadline.
+8. The observation has not already been recorded.
 
 Any genuine nonzero inbound USDC credit to a `created` or `funded` invoice,
 including a mint with `from == address(0)`, is credited because the resulting
@@ -102,10 +103,10 @@ USDC is spendable by the payment contract. A zero-value transfer is retained
 with an `error` disposition. A transfer to an invoice in any other status is
 retained with a `late` disposition: it never counts toward the amount, but it
 sits at the address and is queued for recovery through `Payment.recover`.
-Every nonzero observation also records the block of the sweep that collected
-it, so the ledger always says which funds are still at the address. If payer
-identity or compliance policy requires a nonzero sender, make that an explicit
-product rule rather than an indexer assumption.
+Every nonzero observation also records the block and transaction index of the
+sweep that collected it, so the ledger always says which funds are still at the
+address. If payer identity or compliance policy requires a nonzero sender, make
+that an explicit product rule rather than an indexer assumption.
 
 Use `(chain_id, token_address, tx_hash, log_index)` as the observation identity.
 A transaction can emit multiple USDC transfers, so transaction hash alone is not
@@ -135,10 +136,12 @@ For each enabled chain/asset:
 4. Verify the stored cursor hash still matches the provider's canonical hash.
 5. Request logs for `cursor + 1 .. finalized_head` in bounded ranges.
 6. Sort results by block number, transaction index, and log index.
-7. Decode and validate every log strictly.
-8. Intersect unique recipients with known invoice addresses in one indexed DB
+7. Fetch and verify the header of every distinct transfer-bearing block. These
+   bounded lookups run concurrently and provide the timestamp used for expiry.
+8. Decode and validate every log strictly.
+9. Intersect unique recipients with known invoice addresses in one indexed DB
    query; status controls projection transitions, not ledger retention.
-9. Commit observations, projections, status changes, and cursor advancement in
+10. Commit observations, projections, status changes, and cursor advancement in
    one database transaction per range.
 
 The implementation uses adaptive range sizing up to a configured ceiling (100
@@ -308,8 +311,11 @@ after settlement.
 Every invoice with uncollected funds at its payment address is queued,
 whatever its status: `funded` (settle), `expired` (recover the balance), and
 `fulfilled`/`recovered` (forward a late transfer). One helper transaction is in
-flight per signer; its `sweep_batches` row owns the nonce and every hash
-submitted for it, so a receipt for any submission resolves the batch. A batch
+flight per signer. Each exact signed transaction is persisted in its
+`sweep_batches` outbox before broadcast, so a crash can only cause an
+idempotent resend of the same bytes. The row owns the nonce, raw transactions,
+and every hash submitted for it, so a receipt for any submission resolves the
+batch. A batch
 without a receipt after the pending timeout is replaced on the same nonce with
 fees bumped by 12.5%, and after the configured number of submissions the sweep
 worker pauses and alarms while block indexing continues. A mined nonce ahead of
@@ -317,8 +323,11 @@ the batch's nonce without a visible receipt means nothing it sent can mine any
 more (Monad returns no receipt for an in-flight transaction and forgets dropped
 ones), so the batch is abandoned and its invoices re-queued.
 
-The finalized receipt is the single source of truth. `BatchSweeper` deploys
-`Payment` through the factory for an address without code and calls
+The finalized receipt is the single source of truth, including for reverted
+transactions; no batch is released from a merely unfinalized revert. The worker
+checks the receipt block's canonical hash before and after its pinned
+classification reads. `BatchSweeper` deploys `Payment` through the factory for
+an address without code and calls
 `Payment.recover` for one that already has code; it never attempts the CREATE2
 collision that a second `execute` would hit, which burns every unit of gas
 forwarded to it. Per item the receipt carries exactly one of:
@@ -339,22 +348,28 @@ forwarded to it. Per item the receipt carries exactly one of:
   blacklisted destination, a balance below the credited amount, or an
   exhausted ceiling blocks the invoice with a reason an operator can act on.
 
-Finalization marks every nonzero observation up to the receipt block as
-collected and recomputes the invoice's uncollected count from the ledger, and
-a transfer indexed later from a block the drain already covered is recorded as
-collected on insert, so the lag between the two loops can never re-queue funds
-a finalized sweep already moved. A drained invoice's status changes only when
-it was open; late collections leave `fulfilled`/`recovered` untouched.
+Finalization marks every nonzero observation before the receipt's exact
+`(block number, transaction index)` position as collected and recomputes the
+invoice's uncollected count from the ledger. A transfer indexed later from a
+position the drain already covered is recorded as collected on insert, while a
+later transaction in the same block remains queued. The lag between the two
+loops therefore cannot re-queue funds a finalized sweep already moved. A
+drained invoice's status changes only when it was open; late collections leave
+`fulfilled`/`recovered` untouched.
 
-Expiry is decided by chain time: an open invoice whose deadline precedes the
-timestamp of a committed range's end block becomes `expired` in the same
-commit, and its balance is recovered through the same batch path. The API
+Expiry is decided by chain time: each observation is classified against its
+own block timestamp, independent of range boundaries. An open invoice whose
+deadline precedes the timestamp of a committed range's end block becomes
+`expired` in the same commit, and its balance is recovered through the same
+batch path. The API
 refuses deadlines closer than ten minutes so a payment always has room to
 settle before the contract starts routing to recovery.
 
-Use a separate per-chain/per-signer leader lock. Persist nonce ownership before
-submission so replicas cannot race retries. Prefer a direct safe ERC-20 transfer
-from the Payment contract over self-approval followed by `transferFrom`.
+Use a separate per-chain/per-signer leader lock. Persist nonce ownership and the
+exact signed bytes before broadcast so replicas cannot race retries and a crash
+cannot lose the only copy of an already-submitted transaction. Prefer a direct
+safe ERC-20 transfer from the Payment contract over self-approval followed by
+`transferFrom`.
 
 ## Build versus QuickNode
 

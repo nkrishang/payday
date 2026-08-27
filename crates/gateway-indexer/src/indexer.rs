@@ -13,11 +13,13 @@
 //! sweep worker, which keeps reporting it every tick until it clears, so
 //! payment detection never stops because a transaction is stuck.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use gateway_core::{ChainId, Invoice, InvoiceStatus};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
@@ -30,8 +32,8 @@ use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use crate::chain::{
-    BlockHeader, ChainClient, ChainError, FeeEstimate, SweepOutcome, SweepReceipt, SweepRequest,
-    sweep_batch_gas_limit,
+    BlockHeader, ChainClient, ChainError, FeeEstimate, PreparedSweepTransaction, SweepOutcome,
+    SweepReceipt, SweepRequest, sweep_batch_gas_limit,
 };
 use crate::config::FinalitySource;
 
@@ -283,13 +285,6 @@ impl Indexer {
                 }
                 Err(error) => return Err(error.into()),
             };
-            if self.chain.block_header(to_block).await?.hash != end.hash {
-                return Err(ChainError::Transient(format!(
-                    "block {to_block} changed while fetching USDC logs"
-                ))
-                .into());
-            }
-
             transfers.sort_by_key(|transfer| {
                 (
                     transfer.block_number,
@@ -297,11 +292,38 @@ impl Indexer {
                     transfer.log_index,
                 )
             });
+            let transfer_blocks: HashSet<_> = transfers
+                .iter()
+                .map(|transfer| transfer.block_number)
+                .collect();
+            let transfer_headers: HashMap<_, _> =
+                stream::iter(transfer_blocks.into_iter().map(|block| async move {
+                    Ok::<_, ChainError>((block, self.chain.block_header(block).await?))
+                }))
+                .buffer_unordered(10)
+                .try_collect()
+                .await?;
+            for transfer in &transfers {
+                if transfer_headers[&transfer.block_number].hash != transfer.block_hash {
+                    return Err(ChainError::Transient(format!(
+                        "USDC transfer block {} changed while indexing",
+                        transfer.block_number
+                    ))
+                    .into());
+                }
+            }
+            if self.chain.block_header(to_block).await?.hash != end.hash {
+                return Err(ChainError::Transient(format!(
+                    "block {to_block} changed while fetching USDC logs and headers"
+                ))
+                .into());
+            }
             let observations: Vec<PaymentObservation> = transfers
                 .into_iter()
                 .map(|transfer| PaymentObservation {
                     block_number: transfer.block_number,
                     block_hash: transfer.block_hash,
+                    block_timestamp: transfer_headers[&transfer.block_number].timestamp,
                     transaction_hash: transfer.transaction_hash,
                     transaction_index: transfer.transaction_index,
                     log_index: transfer.log_index,
@@ -352,9 +374,46 @@ impl Indexer {
             self.report_sweep_health().await?;
         }
         match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
+            Some(batch) if batch.broadcast_at.is_none() => self.broadcast_batch(&batch).await,
             Some(batch) => self.reconcile_batch(batch).await,
             None => self.submit_next_batch().await,
         }
+    }
+
+    async fn broadcast_prepared(
+        &self,
+        batch_id: uuid::Uuid,
+        transaction: &PreparedSweepTransaction,
+    ) -> Result<(), IndexerError> {
+        self.chain.broadcast_sweep_transaction(transaction).await?;
+        if !self
+            .repo
+            .record_batch_broadcast(batch_id, transaction.hash)
+            .await?
+        {
+            return Err(IndexerError::Configuration(format!(
+                "durable transaction {} is not the pending broadcast for batch {batch_id}",
+                transaction.hash
+            )));
+        }
+        Ok(())
+    }
+
+    async fn broadcast_batch(&self, batch: &SweepBatch) -> Result<(), IndexerError> {
+        let transaction = PreparedSweepTransaction {
+            hash: *batch.tx_hashes.last().ok_or_else(|| {
+                IndexerError::Configuration(format!("sweep batch {} has no transaction", batch.id))
+            })?,
+            raw: batch.raw_transactions.last().cloned().ok_or_else(|| {
+                IndexerError::Configuration(format!(
+                    "sweep batch {} has no raw transaction",
+                    batch.id
+                ))
+            })?,
+        };
+        self.broadcast_prepared(batch.id, &transaction).await?;
+        info!(batch_id = %batch.id, tx_hash = %transaction.hash, nonce = batch.nonce, "durable helper transaction broadcast");
+        Ok(())
     }
 
     async fn reconcile_batch(&self, batch: SweepBatch) -> Result<(), IndexerError> {
@@ -378,19 +437,11 @@ impl Indexer {
         tx_hash: alloy_primitives::B256,
         receipt: SweepReceipt,
     ) -> Result<(), IndexerError> {
-        if !receipt.succeeded {
-            let requeued = self
-                .repo
-                .resolve_batch(batch.id, BatchResolution::Reverted)
-                .await?;
-            warn!(batch_id = %batch.id, %tx_hash, requeued, "helper transaction reverted; invoices returned to the queue");
-            return Ok(());
-        }
-
         let mined = MinedBatch {
             tx_hash,
             block: receipt.block,
             block_hash: receipt.block_hash,
+            transaction_index: receipt.transaction_index,
         };
         if batch.mined != Some(mined) {
             self.repo.record_batch_mined(batch.id, mined).await?;
@@ -402,6 +453,19 @@ impl Indexer {
         if header.hash != receipt.block_hash {
             self.repo.clear_batch_mined(batch.id).await?;
             warn!(batch_id = %batch.id, %tx_hash, block = receipt.block, "helper transaction receipt is no longer canonical; waiting for a new receipt");
+            return Ok(());
+        }
+
+        if !receipt.succeeded {
+            if self.chain.block_header(receipt.block).await?.hash != receipt.block_hash {
+                self.repo.clear_batch_mined(batch.id).await?;
+                return Ok(());
+            }
+            let requeued = self
+                .repo
+                .resolve_batch(batch.id, BatchResolution::Reverted)
+                .await?;
+            warn!(batch_id = %batch.id, %tx_hash, requeued, "finalized helper transaction reverted; invoices returned to the queue");
             return Ok(());
         }
 
@@ -420,8 +484,19 @@ impl Indexer {
                 .await?;
             outcomes.push((row.id, outcome));
         }
+        if self.chain.block_header(receipt.block).await?.hash != receipt.block_hash {
+            self.repo.clear_batch_mined(batch.id).await?;
+            warn!(batch_id = %batch.id, %tx_hash, block = receipt.block, "helper transaction changed during classification; discarding results");
+            return Ok(());
+        }
         self.repo
-            .finalize_batch(batch.id, tx_hash, receipt.block, &outcomes)
+            .finalize_batch(
+                batch.id,
+                tx_hash,
+                receipt.block,
+                receipt.transaction_index,
+                &outcomes,
+            )
             .await?;
         for (invoice_id, outcome) in &outcomes {
             match outcome {
@@ -560,35 +635,34 @@ impl Indexer {
             .iter()
             .map(|row| decode(row).map(|invoice| sweep_request(&invoice)))
             .collect::<Result<Vec<_>, _>>()?;
-        match self
+        let transaction = self
             .chain
-            .submit_sweep_batch(
+            .prepare_sweep_batch(
                 self.cfg.batch_sweeper,
                 &requests,
                 batch.nonce,
                 batch.gas_limit,
                 fees,
             )
-            .await
+            .await?;
+        if !self
+            .repo
+            .record_batch_replacement(
+                batch.id,
+                transaction.hash,
+                fees.max_fee_per_gas,
+                fees.max_priority_fee_per_gas,
+                &transaction.raw,
+            )
+            .await?
         {
-            Ok(tx_hash) => {
-                self.repo
-                    .record_batch_replacement(
-                        batch.id,
-                        tx_hash,
-                        fees.max_fee_per_gas,
-                        fees.max_priority_fee_per_gas,
-                    )
-                    .await?;
-                warn!(batch_id = %batch.id, nonce = batch.nonce, %tx_hash, submission = batch.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed helper transaction");
-            }
-            Err(ChainError::NonceConsumed(message)) => {
-                // Our earlier submission or a foreign transaction mined in the
-                // meantime; the next pass finds the receipt or abandons the batch.
-                info!(batch_id = %batch.id, nonce = batch.nonce, message, "nonce consumed while replacing; awaiting receipt");
-            }
-            Err(error) => return Err(error.into()),
+            return Err(IndexerError::Configuration(format!(
+                "could not persist replacement for open sweep batch {}",
+                batch.id
+            )));
         }
+        self.broadcast_prepared(batch.id, &transaction).await?;
+        warn!(batch_id = %batch.id, nonce = batch.nonce, tx_hash = %transaction.hash, submission = batch.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed helper transaction");
         Ok(())
     }
 
@@ -639,12 +713,12 @@ impl Indexer {
         let nonce = self.chain.signer_nonce(true).await?;
         let fees = self.chain.estimate_fees().await?;
         let gas_limit = sweep_batch_gas_limit(requests.len());
-        let tx_hash = match self
+        let transaction = match self
             .chain
-            .submit_sweep_batch(self.cfg.batch_sweeper, &requests, nonce, gas_limit, fees)
+            .prepare_sweep_batch(self.cfg.batch_sweeper, &requests, nonce, gas_limit, fees)
             .await
         {
-            Ok(tx_hash) => tx_hash,
+            Ok(transaction) => transaction,
             Err(error) => {
                 self.repo.release_claim(&ids).await?;
                 return Err(error.into());
@@ -659,10 +733,12 @@ impl Indexer {
                 gas_limit,
                 fees.max_fee_per_gas,
                 fees.max_priority_fee_per_gas,
-                tx_hash,
+                transaction.hash,
+                &transaction.raw,
             )
             .await?;
-        info!(%batch_id, %tx_hash, nonce, invoices = ids.len(), gas_limit, "helper transaction submitted");
+        self.broadcast_prepared(batch_id, &transaction).await?;
+        info!(%batch_id, tx_hash = %transaction.hash, nonce, invoices = ids.len(), gas_limit, "helper transaction submitted");
         Ok(())
     }
 
@@ -778,6 +854,8 @@ mod tests {
         /// Block the next submission's receipt lands in; `None` leaves it unmined.
         mine_at: Option<u64>,
         next_receipt_succeeds: bool,
+        prepared: HashMap<B256, Submission>,
+        next_transaction_id: u8,
         submissions: Vec<Submission>,
         mined_nonce: u64,
         submit_error: Option<fn() -> ChainError>,
@@ -786,6 +864,7 @@ mod tests {
         settled: HashMap<Address, bool>,
         probes: HashMap<Address, FailureProbe>,
         header_requests: usize,
+        reorg_on_header_request: Option<usize>,
     }
 
     struct MockChain {
@@ -844,11 +923,18 @@ mod tests {
             }
             Ok(BlockHeader {
                 number,
-                hash: state
-                    .hashes
-                    .get(&number)
-                    .copied()
-                    .unwrap_or_else(|| block_hash(number)),
+                hash: if state
+                    .reorg_on_header_request
+                    .is_some_and(|request| state.header_requests >= request)
+                {
+                    B256::repeat_byte(0xEE)
+                } else {
+                    state
+                        .hashes
+                        .get(&number)
+                        .copied()
+                        .unwrap_or_else(|| block_hash(number))
+                },
                 timestamp: block_timestamp(number),
             })
         }
@@ -898,26 +984,51 @@ mod tests {
             Ok(self.state.lock().unwrap().fees)
         }
 
-        async fn submit_sweep_batch(
+        async fn prepare_sweep_batch(
             &self,
             _batch_sweeper: Address,
             sweeps: &[SweepRequest],
             nonce: u64,
             gas_limit: u64,
             fees: FeeEstimate,
-        ) -> Result<B256, ChainError> {
+        ) -> Result<PreparedSweepTransaction, ChainError> {
+            let mut state = self.state.lock().unwrap();
+            state.next_transaction_id += 1;
+            let tx_hash = B256::with_last_byte(state.next_transaction_id);
+            let raw = alloy_primitives::Bytes::copy_from_slice(tx_hash.as_slice());
+            state.prepared.insert(
+                tx_hash,
+                Submission {
+                    nonce,
+                    gas_limit,
+                    fees,
+                    sweeps: sweeps.to_vec(),
+                    tx_hash,
+                },
+            );
+            Ok(PreparedSweepTransaction { hash: tx_hash, raw })
+        }
+
+        async fn broadcast_sweep_transaction(
+            &self,
+            transaction: &PreparedSweepTransaction,
+        ) -> Result<(), ChainError> {
             let mut state = self.state.lock().unwrap();
             if let Some(error) = state.submit_error.take() {
                 return Err(error());
             }
-            let tx_hash = B256::with_last_byte((state.submissions.len() + 1) as u8);
-            state.submissions.push(Submission {
-                nonce,
-                gas_limit,
-                fees,
-                sweeps: sweeps.to_vec(),
-                tx_hash,
-            });
+            if state
+                .submissions
+                .iter()
+                .any(|submission| submission.tx_hash == transaction.hash)
+            {
+                return Ok(());
+            }
+            let submission = state.prepared[&transaction.hash].clone();
+            let tx_hash = submission.tx_hash;
+            let nonce = submission.nonce;
+            let sweeps = submission.sweeps.clone();
+            state.submissions.push(submission);
             if let Some(block) = state.mine_at {
                 let outcomes =
                     sweeps
@@ -949,11 +1060,12 @@ mod tests {
                         succeeded,
                         block,
                         block_hash: block_hash(block),
+                        transaction_index: 1,
                         outcomes,
                     },
                 );
             }
-            Ok(tx_hash)
+            Ok(())
         }
 
         async fn payment_settled(&self, payment: Address, _block: u64) -> Result<bool, ChainError> {
@@ -1038,11 +1150,23 @@ mod tests {
     }
 
     fn transfer(recipient: Address, amount: u64, block: u64, log_index: u64) -> UsdcTransfer {
+        transfer_at(recipient, amount, block, 0, log_index)
+    }
+
+    fn transfer_at(
+        recipient: Address,
+        amount: u64,
+        block: u64,
+        transaction_index: u64,
+        log_index: u64,
+    ) -> UsdcTransfer {
         UsdcTransfer {
             block_number: block,
             block_hash: block_hash(block),
-            transaction_hash: B256::from(U256::from(block * 1000 + log_index + 1)),
-            transaction_index: 0,
+            transaction_hash: B256::from(U256::from(
+                block * 1_000_000 + transaction_index * 1000 + log_index + 1,
+            )),
+            transaction_index,
             log_index,
             sender: address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
             recipient,
@@ -1468,8 +1592,8 @@ mod tests {
                 state.transfers = vec![transfer(invoice.payment_address.0, 100, 2, 0)]
             }));
         let worker = indexer(&pool, chain.clone());
-        // The range containing block 2 also expires the invoice, so the transfer
-        // is credited within the same commit; a later one is late.
+        // The first transfer is already after the deadline even though the
+        // invoice's persisted status changes later in the same range.
         worker.tick().await.unwrap();
         assert_eq!(fetch(&pool, &invoice).await.status, "expired");
 
@@ -1491,12 +1615,12 @@ mod tests {
         assert_eq!(
             dispositions,
             vec![
-                ("credited".to_string(), None),
+                ("late".to_string(), Some("invoice_expired".to_string())),
                 ("late".to_string(), Some("invoice_expired".to_string()))
             ]
         );
         let row = fetch(&pool, &invoice).await;
-        assert_eq!(row.confirmed_received, "100");
+        assert_eq!(row.confirmed_received, "0");
         assert_eq!(row.uncollected_count, 2);
     }
 
@@ -1590,10 +1714,24 @@ mod tests {
         let second = make_invoice(200);
         insert_funded(&pool, &first, "key-1", 1).await;
         insert_funded(&pool, &second, "key-2", 1).await;
-        let chain = Arc::new(MockChain::new(7).with(|state| state.next_receipt_succeeds = false));
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.finalized = 5;
+            state.next_receipt_succeeds = false;
+        }));
         let worker = indexer(&pool, chain.clone());
 
         worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        for invoice in [&first, &second] {
+            assert!(fetch(&pool, invoice).await.sweep_batch_id.is_some());
+        }
+        assert_eq!(
+            open_batches(&pool).await,
+            1,
+            "a non-final revert still owns its nonce"
+        );
+
+        chain.set(|state| state.finalized = 7);
         worker.sweep_tick().await.unwrap();
         for invoice in [&first, &second] {
             let row = fetch(&pool, invoice).await;
@@ -1609,6 +1747,28 @@ mod tests {
         assert_eq!(fetch(&pool, &first).await.status, "fulfilled");
         assert_eq!(fetch(&pool, &second).await.status, "fulfilled");
         assert_eq!(chain.submissions().len(), 2);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn reorg_during_receipt_classification_does_not_commit_outcomes(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            // First receipt-header read is canonical; the pre-commit recheck changes.
+            state.reorg_on_header_request = Some(2);
+        }));
+        let worker = indexer(&pool, chain);
+
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "deploying");
+        assert!(row.sweep_batch_id.is_some());
+        let mined: Option<i64> = sqlx::query_scalar("SELECT mined_block FROM sweep_batches")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mined, None);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1767,6 +1927,45 @@ mod tests {
         assert_eq!(collected_at, Some(5));
         worker.sweep_tick().await.unwrap();
         assert_eq!(chain.submissions().len(), 1, "nothing to sweep");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn same_block_transfers_are_collected_only_when_before_the_sweep(pool: PgPool) {
+        let before = make_invoice(100);
+        let after = make_invoice(200);
+        insert_funded(&pool, &before, "before", 1).await;
+        insert_funded(&pool, &after, "after", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            fetch(&pool, &before).await.drained_at_transaction_index,
+            Some(1)
+        );
+
+        // These logs are deliberately indexed after sweep finalization. The
+        // first was present when transaction 1 drained the address; the second
+        // arrived too late and must remain queued for another recovery.
+        chain.set(|state| {
+            state.transfers = vec![
+                transfer_at(before.payment_address.0, 11, 7, 0, 0),
+                transfer_at(after.payment_address.0, 22, 7, 2, 0),
+            ];
+        });
+        worker.tick().await.unwrap();
+
+        assert_eq!(fetch(&pool, &before).await.uncollected_count, 0);
+        assert_eq!(fetch(&pool, &after).await.uncollected_count, 1);
+        let positions: Vec<(i64, Option<i64>)> = sqlx::query_as(
+            "SELECT transaction_index, collected_at_transaction_index
+             FROM payment_observations WHERE block_number = 7 ORDER BY transaction_index",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(positions, vec![(0, Some(1)), (2, None)]);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1969,6 +2168,7 @@ mod tests {
                     succeeded: true,
                     block: 7,
                     block_hash: block_hash(7),
+                    transaction_index: 1,
                     outcomes: HashMap::from([(
                         invoice.payment_address.0,
                         SweepOutcome::Settled {
@@ -2006,6 +2206,7 @@ mod tests {
                     succeeded: true,
                     block: 7,
                     block_hash: block_hash(7),
+                    transaction_index: 1,
                     outcomes: HashMap::from([(
                         invoice.payment_address.0,
                         SweepOutcome::Settled {
@@ -2045,27 +2246,6 @@ mod tests {
         chain.set(|state| state.mine_at = Some(8));
         worker.sweep_tick().await.unwrap();
         assert_eq!(chain.submissions()[1].nonce, 1);
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn nonce_consumed_during_replacement_defers_to_the_next_pass(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1", 1).await;
-        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
-        let worker = indexer(&pool, chain.clone());
-        worker.sweep_tick().await.unwrap();
-
-        set_submitted_at_in_the_past(&pool).await;
-        chain.set(|state| {
-            state.submit_error = Some(|| ChainError::NonceConsumed("nonce too low".into()))
-        });
-        worker.sweep_tick().await.unwrap();
-        assert_eq!(chain.submissions().len(), 1);
-        assert_eq!(
-            open_batches(&pool).await,
-            1,
-            "still waiting for the receipt"
-        );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -2110,6 +2290,7 @@ mod tests {
                     succeeded: true,
                     block: 8,
                     block_hash: block_hash(8),
+                    transaction_index: 1,
                     outcomes: HashMap::from([(
                         invoice.payment_address.0,
                         SweepOutcome::Settled {
@@ -2168,7 +2349,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn failed_submission_releases_the_claim_behind_backoff(pool: PgPool) {
+    async fn failed_broadcast_keeps_the_signed_transaction_durable_for_retry(pool: PgPool) {
         let invoice = make_invoice(100);
         insert_funded(&pool, &invoice, "key-1", 1).await;
         let chain = Arc::new(MockChain::new(7).with(|state| {
@@ -2183,10 +2364,19 @@ mod tests {
         ));
         let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "deploying");
-        assert_eq!(row.sweep_attempts, 1);
-        assert_eq!(row.sweep_batch_id, None);
-        assert_eq!(open_batches(&pool).await, 0);
+        assert_eq!(row.sweep_attempts, 0);
+        assert!(row.sweep_batch_id.is_some());
+        assert_eq!(open_batches(&pool).await, 1);
+        let (raw_count, broadcast_at): (i32, Option<sqlx::types::chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT cardinality(raw_transactions), broadcast_at FROM sweep_batches")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(raw_count, 1);
+        assert_eq!(broadcast_at, None);
 
+        // The next pass broadcasts the exact durable bytes; only a subsequent
+        // pass reconciles their receipt.
         worker.sweep_tick().await.unwrap();
         worker.sweep_tick().await.unwrap();
         assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");

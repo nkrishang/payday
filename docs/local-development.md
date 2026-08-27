@@ -40,15 +40,17 @@ The acquisition path uses standard EVM JSON-RPC:
 - one `eth_getLogs` per bounded range, filtered to the USDC address and
   `Transfer` topic, draining up to `GATEWAY_INDEXER_MAX_RANGES_PER_TICK` ranges
   per pass so a backlog clears independently of the poll interval;
-- header lookups to verify and persist canonical cursor hashes and read block
-  timestamps for expiry.
+- header lookups to verify and persist canonical cursor hashes, plus one lookup
+  for each distinct transfer-bearing block to classify payments by that
+  block's timestamp. These lookups run concurrently within each bounded range.
 
 Observations, invoice projections, and the hash-bearing cursor commit
 atomically. Every transfer to a known invoice address is retained: `credited`
 transfers count toward the amount, `late` transfers (after settlement, expiry,
 or a block) are queued for recovery, and zero-value transfers are `error`.
-Each observation records the block of the sweep that collected it, so a
-lagging cursor can never re-queue funds a finalized sweep already moved.
+Each observation records the block and transaction index of the sweep that
+collected it, so a lagging cursor can never re-queue funds a finalized sweep
+already moved, including when payment and sweep transactions share a block.
 
 Log ranges start at `GATEWAY_LOG_RANGE_SIZE` (100 by default, QuickNode's cap
 on Monad), halve when the provider reports a range/result-size error, and grow

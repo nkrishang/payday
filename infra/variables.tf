@@ -123,7 +123,7 @@ variable "log_range_size" {
 }
 
 variable "indexer_poll_interval_ms" {
-  description = "Idle poll interval in milliseconds for both worker loops. Each tick drains every finalized range up to GATEWAY_INDEXER_MAX_RANGES_PER_TICK, so this only sets detection latency: the eth_getLogs volume is fixed by Monad's block rate (~90 calls/hour at QuickNode's 100-block cap) and an idle tick costs two cheap calls."
+  description = "Idle poll interval in milliseconds for both worker loops. Each tick drains every finalized range up to GATEWAY_INDEXER_MAX_RANGES_PER_TICK. Increasing this reduces idle polling but not catch-up traffic: indexing uses about 90 eth_getLogs calls/hour at QuickNode's 100-block cap, plus finality/cursor reads and one header lookup per distinct transfer-bearing block."
   type        = number
   default     = 5000
   validation {

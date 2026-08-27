@@ -2432,6 +2432,7 @@ dependencies = [
 name = "gateway-indexer"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",

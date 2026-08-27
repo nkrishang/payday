@@ -10,6 +10,7 @@ members = [
 
 [workspace.dependencies]
 alloy-primitives = { version = "1.6.1", features = ["serde"] }
+alloy-eips = "1"
 alloy-json-rpc = "1"
 alloy-sol-types = "1.6.1"
 alloy-provider = { version = "1", features = ["reqwest-rustls-tls"] }

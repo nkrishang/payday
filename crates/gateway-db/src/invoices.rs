@@ -48,6 +48,8 @@ pub struct DbInvoice {
     pub sweep_batch_id: Option<Uuid>,
     /// Block of the last finalized transaction that emptied the payment address.
     pub drained_at_block: Option<i64>,
+    /// Position within `drained_at_block` of the transaction that emptied it.
+    pub drained_at_transaction_index: Option<i64>,
     /// Nonzero observations not yet known to have been drained; the sweep
     /// queue is exactly the invoices where this is positive.
     pub uncollected_count: i32,
@@ -198,6 +200,7 @@ pub struct CreateInvoiceInput {
 pub struct PaymentObservation {
     pub block_number: u64,
     pub block_hash: B256,
+    pub block_timestamp: u64,
     pub transaction_hash: B256,
     pub transaction_index: u64,
     pub log_index: u64,
@@ -424,9 +427,10 @@ impl InvoiceRepository {
         struct InvoiceCredit {
             id: Uuid,
             status: String,
+            expiration_timestamp: u64,
             required: U256,
             received: U256,
-            drained_at_block: Option<i64>,
+            drained_at: Option<(i64, i64)>,
             uncollected: i32,
             touched: bool,
             crossing: Option<(U256, u64, B256)>,
@@ -445,9 +449,10 @@ impl InvoiceRepository {
                 InvoiceCredit {
                     id: row.id,
                     status: row.status,
+                    expiration_timestamp: row.expiration_timestamp as u64,
                     required,
                     received,
-                    drained_at_block: row.drained_at_block,
+                    drained_at: row.drained_at_block.zip(row.drained_at_transaction_index),
                     uncollected: row.uncollected_count,
                     touched: false,
                     crossing: None,
@@ -461,27 +466,35 @@ impl InvoiceRepository {
             };
 
             let zero = observation.amount.is_zero();
-            let accepting = matches!(credit.status.as_str(), "created" | "funded");
+            let open = matches!(credit.status.as_str(), "created" | "funded");
+            let accepting = open && observation.block_timestamp <= credit.expiration_timestamp;
             let (disposition, disposition_reason) = if zero {
                 ("error", Some("zero_amount".to_string()))
             } else if accepting {
                 ("credited", None)
+            } else if open {
+                ("late", Some("invoice_expired".to_string()))
             } else {
                 ("late", Some(format!("invoice_{}", credit.status)))
             };
-            let collected_at_block = (!zero)
-                .then_some(credit.drained_at_block)
-                .flatten()
-                .filter(|drained| observation.block_number as i64 <= *drained);
+            let collected_at = (!zero).then_some(credit.drained_at).flatten().filter(
+                |&(block, transaction_index)| {
+                    (
+                        observation.block_number as i64,
+                        observation.transaction_index as i64,
+                    ) < (block, transaction_index)
+                },
+            );
 
             let inserted = sqlx::query(
                 r#"
                 INSERT INTO payment_observations
-                    (chain_id, token_address, block_number, block_hash,
+                    (chain_id, token_address, block_number, block_hash, block_timestamp,
                      transaction_hash, transaction_index, log_index,
                      sender_address, recipient_address, invoice_id, amount,
-                     disposition, disposition_reason, collected_at_block)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     disposition, disposition_reason, collected_at_block,
+                     collected_at_transaction_index)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 ON CONFLICT DO NOTHING
                 "#,
             )
@@ -489,6 +502,7 @@ impl InvoiceRepository {
             .bind(token.as_slice())
             .bind(observation.block_number as i64)
             .bind(observation.block_hash.as_slice())
+            .bind(observation.block_timestamp as i64)
             .bind(observation.transaction_hash.as_slice())
             .bind(observation.transaction_index as i64)
             .bind(observation.log_index as i64)
@@ -498,7 +512,8 @@ impl InvoiceRepository {
             .bind(observation.amount.to_string())
             .bind(disposition)
             .bind(disposition_reason)
-            .bind(collected_at_block)
+            .bind(collected_at.map(|position| position.0))
+            .bind(collected_at.map(|position| position.1))
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -508,7 +523,7 @@ impl InvoiceRepository {
                 continue;
             }
             credit.touched = true;
-            if collected_at_block.is_none() {
+            if collected_at.is_none() {
                 credit.uncollected += 1;
             }
             if disposition != "credited" {
@@ -653,6 +668,7 @@ mod tests {
             confirmed_received: "0".to_string(),
             sweep_batch_id: None,
             drained_at_block: None,
+            drained_at_transaction_index: None,
             uncollected_count: 0,
             execute_tx_hash: None,
             resolved_at_block: None,
