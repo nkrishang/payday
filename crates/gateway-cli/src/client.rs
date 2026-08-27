@@ -5,6 +5,7 @@
 //! definitions the server uses, so the two cannot drift apart.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
 use gateway_core::{CreateInvoiceRequest, InvoiceResponse};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -45,6 +46,7 @@ impl GatewayClient {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|source| CliError::Transport {
                 url: base_url.clone(),

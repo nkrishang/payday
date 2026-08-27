@@ -1,36 +1,57 @@
 //! Payment indexer worker.
 //!
-//! A supervised worker that ingests finalized USDC `Transfer` logs and advances
-//! invoices `created -> funded -> deploying -> fulfilled`.
+//! Two independently scheduled loops share the invoice table as a durable
+//! queue. The block indexer ingests finalized USDC `Transfer` logs and moves
+//! invoices `created -> funded` or `-> expired`. The sweep worker turns every
+//! invoice with uncollected funds into a helper transaction and lets the
+//! finalized receipt decide the outcome: `Settled` -> `fulfilled`, `Recovered`
+//! -> `recovered`, `SweepRecovered` -> late funds collected, `SweepFailed` ->
+//! classified into a retry or a block.
+//!
+//! A fatal block-indexer error ends the process (finalized history no longer
+//! matches; the operator must look). A fatal sweep condition only pauses the
+//! sweep worker, which keeps reporting it every tick until it clears, so
+//! payment detection never stops because a transaction is stuck.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
-use gateway_core::{ChainId, Invoice};
+use alloy_primitives::{Address, U256};
+use gateway_core::{ChainId, Invoice, InvoiceStatus};
+use gateway_db::{
+    BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
+    MinedBatch, PaymentObservation, SweepBatch,
+};
+use sqlx::types::chrono::Utc;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::chain::{ChainClient, ChainError, SweepReceipt, SweepRequest};
-use gateway_db::{CursorRepository, InvoiceRepository, PaymentObservation};
+use crate::chain::{
+    BlockHeader, ChainClient, ChainError, FeeEstimate, SweepOutcome, SweepReceipt, SweepRequest,
+    sweep_batch_gas_limit,
+};
+use crate::config::FinalitySource;
 
 /// Maximum invoices included in one helper transaction.
-const SWEEP_BATCH_LIMIT: i64 = 20;
+pub const SWEEP_BATCH_LIMIT: i64 = 20;
 
 /// Exponential backoff for retrying a transient sweep failure: the nth retry
 /// waits `min(BASE * 2^attempts, CAP)` seconds, so a struggling RPC is not
 /// hammered while a brief blip still recovers quickly.
-const SWEEP_BACKOFF_BASE_SECS: f64 = 2.0;
-const SWEEP_BACKOFF_CAP_SECS: f64 = 300.0;
-const SWEEP_PENDING_TIMEOUT: Duration = Duration::from_secs(300);
+pub const SWEEP_BACKOFF_BASE_SECS: f64 = 2.0;
+pub const SWEEP_BACKOFF_CAP_SECS: f64 = 300.0;
 
-/// Errors that can abort a poll pass. Transient failures are retried; permanent
-/// RPC and finality failures escape the run loop so ECS restarts and alerts
-/// rather than leaving an inert process marked healthy.
+/// Warn once the cursor trails finality by this many blocks (~7 minutes on Monad).
+const CURSOR_LAG_WARN_BLOCKS: u64 = 1_000;
+/// Warn once collectable funds have waited this long.
+const SWEEP_BACKLOG_WARN_SECS: f64 = 900.0;
+/// Emit sweep health telemetry every this many sweep ticks.
+const TELEMETRY_EVERY_TICKS: usize = 30;
+
+/// Errors that can abort a poll pass.
 #[derive(Debug, Error)]
 pub enum IndexerError {
     #[error("chain error: {0}")]
@@ -39,16 +60,38 @@ pub enum IndexerError {
     Db(#[from] sqlx::Error),
     #[error("configuration invariant failed: {0}")]
     Configuration(String),
-    #[error("pending sweep requires operator intervention: {0}")]
-    PendingSweep(String),
+    /// A sweep condition an operator must resolve. The sweep worker reports it
+    /// every tick and retries; block indexing is unaffected.
+    #[error("{0}")]
+    SweepStalled(String),
 }
 
 impl IndexerError {
     fn requires_halt(&self) -> bool {
         matches!(self, Self::Chain(ChainError::FinalityViolation(_)))
             || matches!(self, Self::Chain(error) if error.is_permanent_rpc())
-            || matches!(self, Self::Configuration(_) | Self::PendingSweep(_))
+            || matches!(self, Self::Configuration(_) | Self::SweepStalled(_))
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexerConfig {
+    pub chain_id: ChainId,
+    pub factory: Address,
+    pub batch_sweeper: Address,
+    pub usdc: Address,
+    pub usdc_start_block: u64,
+    pub finality_source: FinalitySource,
+    pub finality_confirmations: u64,
+    pub log_range_size: u64,
+    pub max_ranges_per_tick: u64,
+    pub poll_interval: Duration,
+    pub sweep_pending_timeout: Duration,
+    pub sweep_max_submissions: u32,
+    pub sweep_max_attempts: u32,
+    pub sweep_backoff_base_secs: f64,
+    pub sweep_backoff_cap_secs: f64,
+    pub signer_low_balance_wei: U256,
 }
 
 /// The payment indexer. Owns its own repository handles and chain client; it is
@@ -57,53 +100,31 @@ pub struct Indexer {
     repo: InvoiceRepository,
     cursor: CursorRepository,
     chain: Arc<dyn ChainClient>,
-    chain_id: ChainId,
-    factory: Address,
-    batch_sweeper: Address,
-    usdc: Address,
-    usdc_start_block: u64,
-    finality_confirmations: u64,
-    max_log_range_size: u64,
+    cfg: IndexerConfig,
     current_log_range_size: AtomicU64,
-    poll_interval: Duration,
-    pending_sweep_timeout: Duration,
+    sweep_ticks: AtomicUsize,
 }
 
 impl Indexer {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repo: InvoiceRepository,
         cursor: CursorRepository,
         chain: Arc<dyn ChainClient>,
-        chain_id: ChainId,
-        factory: Address,
-        batch_sweeper: Address,
-        usdc: Address,
-        usdc_start_block: u64,
-        finality_confirmations: u64,
-        log_range_size: u64,
-        poll_interval: Duration,
+        cfg: IndexerConfig,
     ) -> Self {
         Self {
             repo,
             cursor,
             chain,
-            chain_id,
-            factory,
-            batch_sweeper,
-            usdc,
-            usdc_start_block,
-            finality_confirmations,
-            max_log_range_size: log_range_size,
-            current_log_range_size: AtomicU64::new(log_range_size),
-            poll_interval,
-            pending_sweep_timeout: SWEEP_PENDING_TIMEOUT,
+            current_log_range_size: AtomicU64::new(cfg.log_range_size),
+            sweep_ticks: AtomicUsize::new(0),
+            cfg,
         }
     }
 
-    /// Run the poll loop until `shutdown` is set to `true`. Permanent RPC and
-    /// finality errors are returned so the process supervisor cannot mistake a
-    /// halted payment worker for a healthy one.
+    /// Run both loops until `shutdown` is set to `true`. A fatal block-indexer
+    /// error is returned so the process supervisor cannot mistake a halted
+    /// payment worker for a healthy one; the sweep loop never fails the process.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), IndexerError> {
         let worker = Arc::new(self);
         let index_loop = Arc::clone(&worker).run_index_loop(shutdown.clone());
@@ -112,7 +133,7 @@ impl Indexer {
 
         tokio::select! {
             result = &mut index_loop => result,
-            result = &mut sweep_loop => result,
+            () = &mut sweep_loop => Ok(()),
         }
     }
 
@@ -120,16 +141,17 @@ impl Indexer {
         self: Arc<Self>,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), IndexerError> {
-        let mut interval = tokio::time::interval(self.poll_interval);
+        let mut interval = tokio::time::interval(self.cfg.poll_interval);
         // If a tick is delayed (e.g. a slow RPC pass), don't fire a burst of
         // catch-up ticks afterwards; just resume the cadence.
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         info!(
-            chain_id = self.chain_id.0,
-            usdc = %self.usdc,
-            finality_confirmations = self.finality_confirmations,
-            poll_interval_ms = self.poll_interval.as_millis() as u64,
+            chain_id = self.cfg.chain_id.0,
+            usdc = %self.cfg.usdc,
+            finality_source = ?self.cfg.finality_source,
+            finality_confirmations = self.cfg.finality_confirmations,
+            poll_interval_ms = self.cfg.poll_interval.as_millis() as u64,
             "block indexer started"
         );
 
@@ -156,22 +178,22 @@ impl Indexer {
         Ok(())
     }
 
-    async fn run_sweep_loop(
-        self: Arc<Self>,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), IndexerError> {
-        let mut interval = tokio::time::interval(self.poll_interval);
+    async fn run_sweep_loop(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
+        let mut interval = tokio::time::interval(self.cfg.poll_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        info!(batch_sweeper = %self.batch_sweeper, "sweep worker started");
+        info!(batch_sweeper = %self.cfg.batch_sweeper, "sweep worker started");
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(error) = self.sweep_tick().await {
-                        if error.requires_halt() {
-                            return Err(error);
+                    match self.sweep_tick().await {
+                        Ok(()) => {}
+                        // Logged every tick so the alarm stays raised until the
+                        // condition clears; the next tick re-evaluates it.
+                        Err(error) if error.requires_halt() => {
+                            error!(error = %error, "sweep worker paused");
                         }
-                        warn!(error = %error, "sweep pass failed; retrying next tick");
+                        Err(error) => warn!(error = %error, "sweep pass failed; retrying next tick"),
                     }
                 }
                 changed = shutdown.changed() => {
@@ -182,21 +204,26 @@ impl Indexer {
                 }
             }
         }
-        Ok(())
     }
 
-    /// Ingest one bounded, finalized range of USDC Transfer logs.
+    /// Highest block whose logs and state this worker treats as irreversible.
+    async fn finality_boundary(&self) -> Result<u64, IndexerError> {
+        let anchor = match self.cfg.finality_source {
+            FinalitySource::FinalizedTag => self.chain.finalized_block_number().await?,
+            FinalitySource::Latest => self.chain.latest_block_number().await?,
+        };
+        Ok(anchor.saturating_sub(self.cfg.finality_confirmations))
+    }
+
+    /// Ingest finalized USDC ranges until the cursor reaches the finality
+    /// boundary or the per-tick range budget is spent.
     async fn tick(&self) -> Result<(), IndexerError> {
-        let head = self.chain.get_block_number().await?;
-        if head < self.finality_confirmations {
-            return Ok(());
-        }
-        let finalized_head = head - self.finality_confirmations;
-        let cursor = self.cursor.get(self.chain_id.0, self.usdc).await?;
+        let boundary = self.finality_boundary().await?;
+        let mut cursor = self.cursor.get(self.cfg.chain_id.0, self.cfg.usdc).await?;
 
         if let Some(cursor) = cursor {
-            let canonical_hash = self.chain.get_block_hash(cursor.block).await?;
-            if canonical_hash != cursor.block_hash {
+            let canonical = self.chain.block_header(cursor.block).await?;
+            if canonical.hash != cursor.block_hash {
                 return Err(ChainError::FinalityViolation(format!(
                     "finalized cursor hash mismatch at block {}; refusing to continue",
                     cursor.block
@@ -205,424 +232,481 @@ impl Indexer {
             }
         }
 
-        let from_block = cursor
-            .map(|cursor| cursor.block.saturating_add(1))
-            .unwrap_or(self.usdc_start_block);
-        if from_block > finalized_head {
-            return Ok(());
+        for _ in 0..self.cfg.max_ranges_per_tick {
+            let from_block = cursor
+                .map(|cursor| cursor.block.saturating_add(1))
+                .unwrap_or(self.cfg.usdc_start_block);
+            if from_block > boundary {
+                break;
+            }
+            cursor = Some(self.index_range(cursor, from_block, boundary).await?);
         }
-        let (to_block, end_block_hash, mut transfers) = loop {
-            let range_size = self.current_log_range_size.load(Ordering::Relaxed).max(1);
-            let to_block = from_block
-                .saturating_add(range_size - 1)
-                .min(finalized_head);
 
-            // Bracket the log request with the range-end hash. If a reorg happens
+        let indexed = cursor.map_or(self.cfg.usdc_start_block, |cursor| cursor.block);
+        let lag = boundary.saturating_sub(indexed);
+        if lag > CURSOR_LAG_WARN_BLOCKS {
+            warn!(
+                cursor_lag_blocks = lag,
+                boundary, indexed, "indexer cursor lagging"
+            );
+        }
+        Ok(())
+    }
+
+    /// Fetch and commit one bounded range starting at `from_block`.
+    async fn index_range(
+        &self,
+        cursor: Option<IndexerCursor>,
+        from_block: u64,
+        boundary: u64,
+    ) -> Result<IndexerCursor, IndexerError> {
+        loop {
+            let range_size = self.current_log_range_size.load(Ordering::Relaxed).max(1);
+            let to_block = from_block.saturating_add(range_size - 1).min(boundary);
+
+            // Bracket the log request with the range-end header. If a reorg happens
             // while the provider is producing the response, do not pair old logs
             // with a new canonical cursor; retry the whole uncommitted range.
-            let end_block_hash = self.chain.get_block_hash(to_block).await?;
-            match self
+            let end = self.chain.block_header(to_block).await?;
+            let mut transfers = match self
                 .chain
-                .get_usdc_transfers(self.usdc, from_block, to_block)
+                .usdc_transfers(self.cfg.usdc, from_block, to_block)
                 .await
             {
-                Ok(transfers) => break (to_block, end_block_hash, transfers),
+                Ok(transfers) => transfers,
                 Err(ChainError::LogRangeTooLarge(message)) if range_size > 1 => {
                     let smaller = (range_size / 2).max(1);
                     self.current_log_range_size
                         .store(smaller, Ordering::Relaxed);
                     warn!(from_block, to_block, smaller, error = %message, "provider rejected USDC log range; splitting it");
+                    continue;
                 }
                 Err(error) => return Err(error.into()),
+            };
+            if self.chain.block_header(to_block).await?.hash != end.hash {
+                return Err(ChainError::Transient(format!(
+                    "block {to_block} changed while fetching USDC logs"
+                ))
+                .into());
             }
-        };
-        if self.chain.get_block_hash(to_block).await? != end_block_hash {
-            return Err(ChainError::Transient(format!(
-                "block {to_block} changed while fetching USDC logs"
-            ))
-            .into());
+
+            transfers.sort_by_key(|transfer| {
+                (
+                    transfer.block_number,
+                    transfer.transaction_index,
+                    transfer.log_index,
+                )
+            });
+            let observations: Vec<PaymentObservation> = transfers
+                .into_iter()
+                .map(|transfer| PaymentObservation {
+                    block_number: transfer.block_number,
+                    block_hash: transfer.block_hash,
+                    transaction_hash: transfer.transaction_hash,
+                    transaction_index: transfer.transaction_index,
+                    log_index: transfer.log_index,
+                    sender: transfer.sender,
+                    recipient: transfer.recipient,
+                    amount: transfer.amount,
+                })
+                .collect();
+            let outcome = self
+                .repo
+                .apply_finalized_usdc_range(
+                    self.cfg.chain_id.0,
+                    self.cfg.usdc,
+                    cursor,
+                    to_block,
+                    end.hash,
+                    end.timestamp,
+                    &observations,
+                )
+                .await?;
+            for invoice_id in &outcome.funded {
+                info!(%invoice_id, block = to_block, "invoice funded by finalized USDC transfers");
+            }
+            for invoice_id in &outcome.expired {
+                info!(%invoice_id, block = to_block, block_timestamp = end.timestamp, "invoice expired");
+            }
+
+            let range_size = self.current_log_range_size.load(Ordering::Relaxed);
+            self.current_log_range_size.store(
+                range_size
+                    .saturating_add((range_size / 4).max(1))
+                    .min(self.cfg.log_range_size),
+                Ordering::Relaxed,
+            );
+            return Ok(IndexerCursor {
+                block: to_block,
+                block_hash: end.hash,
+            });
         }
-        transfers.sort_by_key(|transfer| {
-            (
-                transfer.block_number,
-                transfer.transaction_index,
-                transfer.log_index,
-            )
-        });
-        let observations: Vec<PaymentObservation> = transfers
-            .into_iter()
-            .map(|transfer| PaymentObservation {
-                block_number: transfer.block_number,
-                block_hash: transfer.block_hash,
-                transaction_hash: transfer.transaction_hash,
-                transaction_index: transfer.transaction_index,
-                log_index: transfer.log_index,
-                sender: transfer.sender,
-                recipient: transfer.recipient,
-                amount: transfer.amount,
-            })
-            .collect();
-        let funded = self
-            .repo
-            .apply_finalized_usdc_range(
-                self.chain_id.0,
-                self.usdc,
-                cursor,
-                to_block,
-                end_block_hash,
-                &observations,
-            )
-            .await?;
-        for invoice_id in funded {
-            info!(%invoice_id, block = to_block, "invoice funded by finalized USDC transfers");
-        }
-        let range_size = self.current_log_range_size.load(Ordering::Relaxed);
-        self.current_log_range_size.store(
-            range_size
-                .saturating_add((range_size / 4).max(1))
-                .min(self.max_log_range_size),
-            Ordering::Relaxed,
-        );
-        Ok(())
     }
 
-    /// Reconcile prior submissions, then claim and submit at most one new batch.
-    /// The database rows are the durable queue shared with the block indexer.
+    /// Reconcile the in-flight batch if there is one, otherwise claim and
+    /// submit the next. The signer owns one nonce stream, so a new batch is
+    /// never sent while a prior one is unresolved.
     async fn sweep_tick(&self) -> Result<(), IndexerError> {
-        let existing = self.repo.list_sweeps_to_reconcile(self.chain_id.0).await?;
-        let mut submitted: HashMap<B256, Vec<(Invoice, gateway_db::DbInvoice)>> = HashMap::new();
-        for row in existing {
-            let invoice = Invoice::try_from(&row).map_err(|error| {
-                IndexerError::Configuration(format!("corrupt invoice {}: {error}", row.id))
-            })?;
-            if let Some(tx_hash) = row.execute_tx_hash.as_deref() {
-                let tx_hash = B256::try_from(tx_hash)
-                    .map_err(|_| sqlx::Error::Decode("invalid execute transaction hash".into()))?;
-                submitted.entry(tx_hash).or_default().push((invoice, row));
-            } else {
-                self.reconcile_sweep(&invoice, &row).await?;
-            }
+        let tick = self.sweep_ticks.fetch_add(1, Ordering::Relaxed);
+        if tick.is_multiple_of(TELEMETRY_EVERY_TICKS) {
+            self.report_sweep_health().await?;
         }
-        let mut unresolved_submission = false;
-        for (tx_hash, invoices) in submitted {
-            let receipt = self
+        match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
+            Some(batch) => self.reconcile_batch(batch).await,
+            None => self.submit_next_batch().await,
+        }
+    }
+
+    async fn reconcile_batch(&self, batch: SweepBatch) -> Result<(), IndexerError> {
+        // A replacement and the submission it replaced share a nonce; whichever
+        // mined resolves the batch. Newest first: it is the likeliest.
+        for &tx_hash in batch.tx_hashes.iter().rev() {
+            if let Some(receipt) = self
                 .chain
-                .get_sweep_receipt(tx_hash, self.batch_sweeper)
-                .await?;
-            if let Some(receipt) = &receipt {
-                for (invoice, _) in invoices {
-                    self.apply_batch_receipt(&invoice, tx_hash, receipt).await?;
-                }
-            } else if invoices
-                .iter()
-                .any(|(_, row)| row.sweep_detected_at_block.is_some())
+                .sweep_receipt(tx_hash, self.cfg.batch_sweeper)
+                .await?
             {
-                for (invoice, row) in &invoices {
-                    self.handle_missing_receipt(invoice, row).await?;
-                }
-                unresolved_submission = true;
-            } else if self.submission_timed_out(&invoices)? {
-                if self.chain.transaction_known(tx_hash).await? {
-                    return Err(IndexerError::PendingSweep(format!(
-                        "transaction {tx_hash} is still pending after {} seconds",
-                        self.pending_sweep_timeout.as_secs()
-                    )));
-                }
-                let retried = self
-                    .repo
-                    .retry_dropped_sweep_batch(self.chain_id.0, tx_hash.as_slice())
-                    .await?;
-                warn!(%tx_hash, retried, "dropped batch transaction returned to retry queue");
-                unresolved_submission = true;
-            } else {
-                unresolved_submission = true;
+                return self.apply_receipt(&batch, tx_hash, receipt).await;
             }
         }
-        // The signer owns one nonce stream. Never submit a higher nonce while a
-        // prior transaction has no receipt; wait, recover it, or halt first.
-        if unresolved_submission {
+        self.handle_unmined(&batch).await
+    }
+
+    async fn apply_receipt(
+        &self,
+        batch: &SweepBatch,
+        tx_hash: alloy_primitives::B256,
+        receipt: SweepReceipt,
+    ) -> Result<(), IndexerError> {
+        if !receipt.succeeded {
+            let requeued = self
+                .repo
+                .resolve_batch(batch.id, BatchResolution::Reverted)
+                .await?;
+            warn!(batch_id = %batch.id, %tx_hash, requeued, "helper transaction reverted; invoices returned to the queue");
             return Ok(());
         }
 
+        let mined = MinedBatch {
+            tx_hash,
+            block: receipt.block,
+            block_hash: receipt.block_hash,
+        };
+        if batch.mined != Some(mined) {
+            self.repo.record_batch_mined(batch.id, mined).await?;
+        }
+        if receipt.block > self.finality_boundary().await? {
+            return Ok(());
+        }
+        let header = self.chain.block_header(receipt.block).await?;
+        if header.hash != receipt.block_hash {
+            self.repo.clear_batch_mined(batch.id).await?;
+            warn!(batch_id = %batch.id, %tx_hash, block = receipt.block, "helper transaction receipt is no longer canonical; waiting for a new receipt");
+            return Ok(());
+        }
+
+        let rows = self.repo.batch_invoices(batch.id).await?;
+        let mut outcomes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let invoice = decode(row)?;
+            let outcome = self
+                .classify(
+                    &invoice,
+                    row,
+                    tx_hash,
+                    receipt.outcomes.get(&invoice.payment_address.0),
+                    &header,
+                )
+                .await?;
+            outcomes.push((row.id, outcome));
+        }
+        self.repo
+            .finalize_batch(batch.id, tx_hash, receipt.block, &outcomes)
+            .await?;
+        for (invoice_id, outcome) in &outcomes {
+            match outcome {
+                InvoiceOutcome::Drained { status, .. } => {
+                    info!(%invoice_id, %tx_hash, block = receipt.block, status = ?status, "sweep finalized")
+                }
+                InvoiceOutcome::Retry => {
+                    warn!(%invoice_id, %tx_hash, "sweep item failed for a transient reason; retrying")
+                }
+                InvoiceOutcome::Blocked { reason } => {
+                    warn!(%invoice_id, %tx_hash, reason, "sweep item blocked")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Translate one item's receipt outcome into the invoice's next state.
+    async fn classify(
+        &self,
+        invoice: &Invoice,
+        row: &DbInvoice,
+        tx_hash: alloy_primitives::B256,
+        outcome: Option<&SweepOutcome>,
+        header: &BlockHeader,
+    ) -> Result<InvoiceOutcome, IndexerError> {
+        let payment = invoice.payment_address.0;
+        match outcome {
+            Some(SweepOutcome::Settled { .. }) => Ok(InvoiceOutcome::Drained {
+                status: Some(InvoiceStatus::Fulfilled),
+                execute_tx: true,
+            }),
+            Some(SweepOutcome::Recovered { .. }) => Ok(InvoiceOutcome::Drained {
+                status: Some(InvoiceStatus::Recovered),
+                execute_tx: true,
+            }),
+            Some(SweepOutcome::Collected { .. }) => {
+                // The contract already existed. For an open invoice that means
+                // someone else deployed it; the contract recorded how it routed
+                // the balance it found.
+                let status = if invoice.status.is_terminal() {
+                    None
+                } else if self.chain.payment_settled(payment, header.number).await? {
+                    Some(InvoiceStatus::Fulfilled)
+                } else {
+                    Some(InvoiceStatus::Recovered)
+                };
+                Ok(InvoiceOutcome::Drained {
+                    status,
+                    execute_tx: false,
+                })
+            }
+            Some(SweepOutcome::Failed { .. }) => {
+                let expired = header.timestamp > invoice.expiration_timestamp;
+                let probe = self
+                    .chain
+                    .probe_failure(
+                        invoice.token.0,
+                        payment,
+                        invoice.beneficiary.0,
+                        invoice.recovery.0,
+                        header.number,
+                    )
+                    .await?;
+                let to_recovery = probe.code_present || expired;
+                let blocked = |reason: &str| InvoiceOutcome::Blocked {
+                    reason: reason.to_string(),
+                };
+                Ok(if probe.paused == Some(true) {
+                    InvoiceOutcome::Retry
+                } else if probe.payment_blacklisted == Some(true) {
+                    blocked("payment_address_blacklisted")
+                } else if to_recovery && probe.recovery_blacklisted == Some(true) {
+                    blocked("recovery_blacklisted")
+                } else if !to_recovery && probe.receiver_blacklisted == Some(true) {
+                    blocked("beneficiary_blacklisted")
+                } else if !to_recovery
+                    && probe
+                        .balance
+                        .is_some_and(|balance| balance < invoice.amount.0)
+                {
+                    blocked("balance_below_amount")
+                } else if row.sweep_attempts.saturating_add(1) as u32 >= self.cfg.sweep_max_attempts
+                {
+                    blocked("retries_exhausted")
+                } else {
+                    InvoiceOutcome::Retry
+                })
+            }
+            None => Err(IndexerError::SweepStalled(format!(
+                "helper transaction {tx_hash} carries no outcome for invoice {}; batch cannot be finalized",
+                invoice.id.0
+            ))),
+        }
+    }
+
+    /// No submission for the batch has a receipt yet.
+    async fn handle_unmined(&self, batch: &SweepBatch) -> Result<(), IndexerError> {
+        let age = Utc::now()
+            .signed_duration_since(batch.submitted_at)
+            .to_std()
+            .unwrap_or_default();
+        if age < self.cfg.sweep_pending_timeout {
+            return Ok(());
+        }
+
+        // Monad reports no receipt for a transaction still in flight and forgets
+        // one it dropped, so after the timeout the mined nonce is the signal: if
+        // it moved past ours without a receipt, nothing we sent can mine any more.
+        if self.chain.signer_nonce(false).await? > batch.nonce {
+            let requeued = self
+                .repo
+                .resolve_batch(batch.id, BatchResolution::Abandoned)
+                .await?;
+            warn!(batch_id = %batch.id, nonce = batch.nonce, requeued, "sweep batch nonce was consumed without a visible receipt; invoices returned to the queue");
+            return Ok(());
+        }
+
+        if batch.tx_hashes.len() as u32 >= self.cfg.sweep_max_submissions {
+            return Err(IndexerError::SweepStalled(format!(
+                "sweep batch {} (nonce {}) is unconfirmed after {} submissions; check the signer balance and fee market, then replace or cancel nonce {} manually",
+                batch.id,
+                batch.nonce,
+                batch.tx_hashes.len(),
+                batch.nonce
+            )));
+        }
+
+        let previous = FeeEstimate {
+            max_fee_per_gas: batch.max_fee_per_gas,
+            max_priority_fee_per_gas: batch.max_priority_fee_per_gas,
+        };
+        let fees = self.chain.estimate_fees().await?.max(previous.bumped());
+        let rows = self.repo.batch_invoices(batch.id).await?;
+        let requests = rows
+            .iter()
+            .map(|row| decode(row).map(|invoice| sweep_request(&invoice)))
+            .collect::<Result<Vec<_>, _>>()?;
+        match self
+            .chain
+            .submit_sweep_batch(
+                self.cfg.batch_sweeper,
+                &requests,
+                batch.nonce,
+                batch.gas_limit,
+                fees,
+            )
+            .await
+        {
+            Ok(tx_hash) => {
+                self.repo
+                    .record_batch_replacement(
+                        batch.id,
+                        tx_hash,
+                        fees.max_fee_per_gas,
+                        fees.max_priority_fee_per_gas,
+                    )
+                    .await?;
+                warn!(batch_id = %batch.id, nonce = batch.nonce, %tx_hash, submission = batch.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed helper transaction");
+            }
+            Err(ChainError::NonceConsumed(message)) => {
+                // Our earlier submission or a foreign transaction mined in the
+                // meantime; the next pass finds the receipt or abandons the batch.
+                info!(batch_id = %batch.id, nonce = batch.nonce, message, "nonce consumed while replacing; awaiting receipt");
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    async fn submit_next_batch(&self) -> Result<(), IndexerError> {
         let claimed = self
             .repo
             .claim_sweep_batch(
-                self.chain_id.0,
+                self.cfg.chain_id.0,
                 SWEEP_BATCH_LIMIT,
-                SWEEP_BACKOFF_BASE_SECS,
-                SWEEP_BACKOFF_CAP_SECS,
+                self.cfg.sweep_backoff_base_secs,
+                self.cfg.sweep_backoff_cap_secs,
             )
-            .await?
-            .into_iter()
-            .map(|row| {
-                Invoice::try_from(&row).map_err(|error| {
-                    IndexerError::Configuration(format!("corrupt invoice {}: {error}", row.id))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .await?;
         if claimed.is_empty() {
             return Ok(());
         }
 
-        let mut batch = Vec::with_capacity(claimed.len());
-        for invoice in claimed {
-            if invoice.factory.0 != self.factory || invoice.token.0 != self.usdc {
-                return Err(IndexerError::Configuration(format!(
-                    "invoice {} does not match configured factory/token",
-                    invoice.id.0
-                )));
-            }
-            if self
-                .chain
-                .payment_deployed(invoice.payment_address.0)
-                .await?
+        let mut ids = Vec::with_capacity(claimed.len());
+        let mut requests = Vec::with_capacity(claimed.len());
+        for row in &claimed {
+            let invoice = match decode(row) {
+                Ok(invoice) => invoice,
+                Err(error) => {
+                    self.repo.block_invoice(row.id, "corrupt_row").await?;
+                    error!(invoice_id = %row.id, %error, "invoice row cannot be decoded; blocked");
+                    continue;
+                }
+            };
+            // The address commits every parameter, so a row that no longer
+            // derives its own address would sweep an address nobody paid.
+            if invoice.factory.0 != self.cfg.factory
+                || invoice.token.0 != self.cfg.usdc
+                || !invoice.address_matches_parameters()
             {
-                let block = self.chain.get_block_number().await?;
-                let hash = self.chain.get_block_hash(block).await?;
                 self.repo
-                    .record_sweep_detection(invoice.id.0, None, block, hash.as_slice())
+                    .block_invoice(row.id, "parameters_mismatch")
                     .await?;
-                self.finalize_detected_sweep(&invoice, block, hash, None)
-                    .await?;
-            } else {
-                batch.push(invoice);
+                error!(invoice_id = %row.id, "invoice parameters do not derive its payment address for this deployment; blocked");
+                continue;
             }
+            ids.push(row.id);
+            requests.push(sweep_request(&invoice));
         }
-        if batch.is_empty() {
+        if ids.is_empty() {
             return Ok(());
         }
 
-        // Covers the unavoidable crash window after RPC acceptance but before
-        // the batch hash is committed to PostgreSQL.
-        if self.chain.signer_has_pending_transaction().await? {
-            return Err(IndexerError::PendingSweep(
-                "signer has an untracked pending transaction".to_string(),
-            ));
-        }
-
-        let requests = batch
-            .iter()
-            .map(|invoice| SweepRequest {
-                token: invoice.token.0,
-                amount: invoice.amount.0,
-                receiver: invoice.beneficiary.0,
-                expiration_timestamp: invoice.expiration_timestamp,
-                recovery: invoice.recovery.0,
-                salt: invoice.salt.0,
-            })
-            .collect::<Vec<_>>();
+        let nonce = self.chain.signer_nonce(true).await?;
+        let fees = self.chain.estimate_fees().await?;
+        let gas_limit = sweep_batch_gas_limit(requests.len());
         let tx_hash = match self
             .chain
-            .submit_sweep_batch(self.batch_sweeper, &requests)
+            .submit_sweep_batch(self.cfg.batch_sweeper, &requests, nonce, gas_limit, fees)
             .await
         {
             Ok(tx_hash) => tx_hash,
             Err(error) => {
-                for invoice in &batch {
-                    self.repo.record_sweep_retry(invoice.id.0).await?;
-                }
+                self.repo.release_claim(&ids).await?;
                 return Err(error.into());
             }
         };
-        let ids = batch.iter().map(|invoice| invoice.id.0).collect::<Vec<_>>();
-        self.repo
-            .record_batch_sweep_submission(&ids, tx_hash.as_slice())
-            .await?;
-
-        if let Some(receipt) = self
-            .chain
-            .get_sweep_receipt(tx_hash, self.batch_sweeper)
-            .await?
-        {
-            for invoice in &batch {
-                self.apply_batch_receipt(invoice, tx_hash, &receipt).await?;
-            }
-        }
-        Ok(())
-    }
-
-    fn submission_timed_out(
-        &self,
-        invoices: &[(Invoice, gateway_db::DbInvoice)],
-    ) -> Result<bool, IndexerError> {
-        let submitted_at = invoices
-            .iter()
-            .map(|(_, row)| {
-                row.sweep_submitted_at.ok_or_else(|| {
-                    IndexerError::Configuration(format!(
-                        "invoice {} has an execute hash without sweep_submitted_at",
-                        row.id
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .min()
-            .ok_or_else(|| IndexerError::Configuration("empty submitted batch".to_string()))?;
-        Ok(sqlx::types::chrono::Utc::now()
-            .signed_duration_since(submitted_at)
-            .to_std()
-            .is_ok_and(|elapsed| elapsed >= self.pending_sweep_timeout))
-    }
-
-    async fn reconcile_sweep(
-        &self,
-        invoice: &Invoice,
-        row: &gateway_db::DbInvoice,
-    ) -> Result<(), IndexerError> {
-        if let (Some(block), Some(hash)) = (
-            row.sweep_detected_at_block,
-            row.sweep_detected_at_block_hash.as_deref(),
-        ) {
-            let block_hash = B256::try_from(hash)
-                .map_err(|_| sqlx::Error::Decode("invalid sweep detection block hash".into()))?;
-            return self
-                .finalize_detected_sweep(invoice, block as u64, block_hash, None)
-                .await;
-        }
-        Ok(())
-    }
-
-    async fn handle_missing_receipt(
-        &self,
-        invoice: &Invoice,
-        row: &gateway_db::DbInvoice,
-    ) -> Result<(), IndexerError> {
-        let (Some(block), Some(hash)) = (
-            row.sweep_detected_at_block,
-            row.sweep_detected_at_block_hash.as_deref(),
-        ) else {
-            return Ok(());
-        };
-        let block = block as u64;
-        if self.chain.get_block_number().await? < block.saturating_add(self.finality_confirmations)
-        {
-            return Ok(());
-        }
-        let detected_hash = B256::try_from(hash)
-            .map_err(|_| sqlx::Error::Decode("invalid sweep detection block hash".into()))?;
-        if self.chain.get_block_hash(block).await? != detected_hash {
-            self.repo.clear_sweep_detection(invoice.id.0).await?;
-            warn!(invoice_id = %invoice.id.0, block, "missing batch receipt was orphaned; retrying execution");
-        }
-        Ok(())
-    }
-
-    async fn apply_batch_receipt(
-        &self,
-        invoice: &Invoice,
-        tx_hash: B256,
-        receipt: &SweepReceipt,
-    ) -> Result<(), IndexerError> {
-        if !receipt.succeeded {
-            self.repo.clear_sweep_submission(invoice.id.0).await?;
-            self.repo.record_sweep_retry(invoice.id.0).await?;
-            warn!(invoice_id = %invoice.id.0, %tx_hash, "batch transaction reverted; retrying invoice");
-            return Ok(());
-        }
-
-        self.repo
-            .record_sweep_detection(
-                invoice.id.0,
-                Some(tx_hash.as_slice()),
-                receipt.block,
-                receipt.block_hash.as_slice(),
+        let batch_id = self
+            .repo
+            .record_batch_submission(
+                self.cfg.chain_id.0,
+                &ids,
+                nonce,
+                gas_limit,
+                fees.max_fee_per_gas,
+                fees.max_priority_fee_per_gas,
+                tx_hash,
             )
             .await?;
-        let head = self.chain.get_block_number().await?;
-        if head < receipt.block.saturating_add(self.finality_confirmations) {
-            return Ok(());
-        }
-        if self.chain.get_block_hash(receipt.block).await? != receipt.block_hash {
-            self.repo.clear_sweep_detection(invoice.id.0).await?;
-            warn!(invoice_id = %invoice.id.0, "batch receipt was orphaned; retrying execution");
-            return Ok(());
-        }
-
-        let matching_failures = receipt
-            .failures
-            .iter()
-            .filter(|(payment, token)| {
-                *payment == invoice.payment_address.0 && *token == invoice.token.0
-            })
-            .count();
-        if matching_failures > 1 {
-            return Err(ChainError::FinalityViolation(format!(
-                "batch receipt contains duplicate failure events for {}",
-                invoice.payment_address.0
-            ))
-            .into());
-        }
-        let deployed = self
-            .chain
-            .payment_deployed_at(invoice.payment_address.0, receipt.block_hash)
-            .await?;
-        match (matching_failures == 1, deployed) {
-            (true, false) => {
-                self.repo
-                    .mark_blocked(invoice.id.0, "token_transfer_failed")
-                    .await?;
-                warn!(invoice_id = %invoice.id.0, "batch item failed and was marked blocked");
-            }
-            (true, true) => {
-                self.repo
-                    .mark_fulfilled(invoice.id.0, None, Some(receipt.block))
-                    .await?;
-                info!(invoice_id = %invoice.id.0, "batch item was already executed");
-            }
-            (false, true) => {
-                self.repo
-                    .mark_fulfilled(invoice.id.0, Some(tx_hash.as_slice()), Some(receipt.block))
-                    .await?;
-                info!(invoice_id = %invoice.id.0, "batched invoice sweep finalized");
-            }
-            (false, false) => {
-                return Err(ChainError::FinalityViolation(format!(
-                    "successful batch item left no code at {}",
-                    invoice.payment_address.0
-                ))
-                .into());
-            }
-        }
+        info!(%batch_id, %tx_hash, nonce, invoices = ids.len(), gas_limit, "helper transaction submitted");
         Ok(())
     }
 
-    async fn finalize_detected_sweep(
-        &self,
-        invoice: &Invoice,
-        detected_block: u64,
-        detected_hash: B256,
-        tx_hash: Option<&[u8]>,
-    ) -> Result<(), IndexerError> {
-        let head = self.chain.get_block_number().await?;
-        if head < detected_block.saturating_add(self.finality_confirmations) {
-            return Ok(());
+    async fn report_sweep_health(&self) -> Result<(), IndexerError> {
+        let stats = self.repo.sweep_queue_stats(self.cfg.chain_id.0).await?;
+        let balance = self.chain.signer_balance().await?;
+        info!(
+            queued = stats.queued,
+            in_flight = stats.in_flight,
+            oldest_uncollected_secs = stats.oldest_uncollected_secs,
+            signer_balance_wei = %balance,
+            "sweep worker health"
+        );
+        if balance < self.cfg.signer_low_balance_wei {
+            warn!(signer_balance_wei = %balance, threshold_wei = %self.cfg.signer_low_balance_wei, "sweep signer balance low");
         }
-
-        let canonical_hash = self.chain.get_block_hash(detected_block).await?;
-        if canonical_hash != detected_hash {
-            self.repo.clear_sweep_detection(invoice.id.0).await?;
-            warn!(invoice_id = %invoice.id.0, detected_block, "sweep detection was orphaned; retrying execution");
-            return Ok(());
-        }
-        let still_deployed = self
-            .chain
-            .payment_deployed_at(invoice.payment_address.0, detected_hash)
-            .await?;
-        if !still_deployed {
-            self.repo.clear_sweep_detection(invoice.id.0).await?;
-            warn!(invoice_id = %invoice.id.0, detected_block, "sweep detection was orphaned; retrying execution");
-            return Ok(());
-        }
-
-        if self
-            .repo
-            .mark_fulfilled(invoice.id.0, tx_hash, Some(detected_block))
-            .await?
+        if stats
+            .oldest_uncollected_secs
+            .is_some_and(|age| age > SWEEP_BACKLOG_WARN_SECS)
         {
-            info!(invoice_id = %invoice.id.0, detected_block, "invoice sweep finalized");
+            warn!(
+                oldest_uncollected_secs = stats.oldest_uncollected_secs,
+                queued = stats.queued,
+                "sweep backlog stale"
+            );
         }
         Ok(())
+    }
+}
+
+fn decode(row: &DbInvoice) -> Result<Invoice, IndexerError> {
+    Invoice::try_from(row).map_err(|error| {
+        IndexerError::Configuration(format!("corrupt invoice {}: {error}", row.id))
+    })
+}
+
+fn sweep_request(invoice: &Invoice) -> SweepRequest {
+    SweepRequest {
+        token: invoice.token.0,
+        amount: invoice.amount.0,
+        receiver: invoice.beneficiary.0,
+        expiration_timestamp: invoice.expiration_timestamp,
+        recovery: invoice.recovery.0,
+        salt: invoice.salt.0,
     }
 }
 
@@ -630,247 +714,325 @@ impl Indexer {
 mod tests {
     use super::*;
 
-    use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::AtomicBool;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
-    use alloy_primitives::{Address, B256, U256, address};
+    use alloy_primitives::{Address, B256, Bytes, U256, address};
     use async_trait::async_trait;
     use gateway_core::{
         Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, RecoveryAddress,
         TokenAddress, USDC_DECIMALS,
     };
     use sqlx::PgPool;
-    use tokio::sync::{Mutex, Notify};
 
-    use crate::chain::{SweepReceipt, UsdcTransfer};
+    use crate::chain::{FailureProbe, UsdcTransfer};
     use gateway_db::{CreateInvoiceInput, InvoiceRepository};
 
-    /// Scripted sweep result for a given payment address.
-    #[derive(Clone, Copy)]
-    enum MockSweep {
-        Executed,
-        AlreadyDeployed,
-        Blocked,
-        Transient,
-    }
-
-    /// Fixed transaction hash the mock reports for an `Executed` sweep.
-    const MOCK_TX_HASH: B256 = B256::repeat_byte(0xAB);
-
-    /// In-memory [`ChainClient`] with a fixed head, USDC logs, and scripted sweeps.
-    struct MockChain {
-        block: u64,
-        transfers: Vec<UsdcTransfer>,
-        sweeps: HashMap<Address, MockSweep>,
-        max_log_range: Option<u64>,
-        hash_mismatch: bool,
-        receipt_pending: bool,
-        receipt_block: Option<u64>,
-        submitted: AtomicBool,
-        receipt_observed: AtomicBool,
-        transaction_known: bool,
-        signer_pending: bool,
-        latest_only_code: HashSet<Address>,
-    }
-
-    impl MockChain {
-        fn new(block: u64, transfers: Vec<UsdcTransfer>) -> Self {
-            Self {
-                block,
-                transfers,
-                sweeps: HashMap::new(),
-                max_log_range: None,
-                hash_mismatch: false,
-                receipt_pending: false,
-                receipt_block: None,
-                submitted: AtomicBool::new(false),
-                receipt_observed: AtomicBool::new(false),
-                transaction_known: true,
-                signer_pending: false,
-                latest_only_code: HashSet::new(),
-            }
-        }
-
-        /// Script the sweep outcome for one payment address.
-        fn with_sweep(mut self, addr: Address, outcome: MockSweep) -> Self {
-            self.sweeps.insert(addr, outcome);
-            self
-        }
-
-        fn with_max_log_range(mut self, max: u64) -> Self {
-            self.max_log_range = Some(max);
-            self
-        }
-
-        fn with_hash_mismatch(mut self) -> Self {
-            self.hash_mismatch = true;
-            self
-        }
-
-        fn with_pending_receipt(mut self) -> Self {
-            self.receipt_pending = true;
-            self
-        }
-
-        fn with_receipt_block(mut self, block: u64) -> Self {
-            self.receipt_block = Some(block);
-            self
-        }
-
-        fn with_dropped_transaction(mut self) -> Self {
-            self.transaction_known = false;
-            self
-        }
-
-        fn with_latest_only_code(mut self, address: Address) -> Self {
-            self.latest_only_code.insert(address);
-            self
-        }
-
-        fn with_pending_signer_nonce(mut self) -> Self {
-            self.signer_pending = true;
-            self
-        }
-    }
-
-    #[async_trait]
-    impl ChainClient for MockChain {
-        async fn get_block_number(&self) -> Result<u64, ChainError> {
-            Ok(self.block)
-        }
-
-        async fn get_block_hash(&self, block: u64) -> Result<B256, ChainError> {
-            Ok(if self.hash_mismatch {
-                B256::repeat_byte(0xFF)
-            } else {
-                block_hash(block)
-            })
-        }
-
-        async fn payment_deployed(&self, address: Address) -> Result<bool, ChainError> {
-            Ok(self.latest_only_code.contains(&address)
-                || matches!(
-                    self.sweeps
-                        .get(&address)
-                        .copied()
-                        .unwrap_or(MockSweep::Executed),
-                    MockSweep::AlreadyDeployed
-                )
-                || (matches!(
-                    self.sweeps
-                        .get(&address)
-                        .copied()
-                        .unwrap_or(MockSweep::Executed),
-                    MockSweep::Executed
-                ) && (self.submitted.load(Ordering::Relaxed)
-                    || self.receipt_observed.load(Ordering::Relaxed))))
-        }
-
-        async fn payment_deployed_at(
-            &self,
-            address: Address,
-            _block_hash: B256,
-        ) -> Result<bool, ChainError> {
-            if self.latest_only_code.contains(&address) {
-                return Ok(false);
-            }
-            self.payment_deployed(address).await
-        }
-
-        async fn transaction_known(&self, _tx_hash: B256) -> Result<bool, ChainError> {
-            Ok(self.transaction_known)
-        }
-
-        async fn signer_has_pending_transaction(&self) -> Result<bool, ChainError> {
-            Ok(self.signer_pending)
-        }
-
-        async fn get_sweep_receipt(
-            &self,
-            _tx_hash: B256,
-            _batch_sweeper: Address,
-        ) -> Result<Option<SweepReceipt>, ChainError> {
-            if self.receipt_pending {
-                return Ok(None);
-            }
-            self.receipt_observed.store(true, Ordering::Relaxed);
-            let receipt_block = self.receipt_block.unwrap_or(self.block);
-            Ok(Some(SweepReceipt {
-                succeeded: true,
-                block: receipt_block,
-                block_hash: block_hash(receipt_block),
-                failures: self
-                    .sweeps
-                    .iter()
-                    .filter(|(_, outcome)| matches!(outcome, MockSweep::Blocked))
-                    .map(|(payment, _)| (*payment, usdc()))
-                    .collect(),
-            }))
-        }
-
-        async fn get_usdc_transfers(
-            &self,
-            _token: Address,
-            from_block: u64,
-            to_block: u64,
-        ) -> Result<Vec<UsdcTransfer>, ChainError> {
-            let requested = to_block - from_block + 1;
-            if self.max_log_range.is_some_and(|max| requested > max) {
-                return Err(ChainError::LogRangeTooLarge(format!(
-                    "mock limit is {} blocks",
-                    self.max_log_range.unwrap()
-                )));
-            }
-            Ok(self
-                .transfers
-                .iter()
-                .filter(|transfer| {
-                    transfer.block_number >= from_block && transfer.block_number <= to_block
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn submit_sweep_batch(
-            &self,
-            _batch_sweeper: Address,
-            _sweeps: &[SweepRequest],
-        ) -> Result<B256, ChainError> {
-            if self
-                .sweeps
-                .values()
-                .any(|outcome| matches!(outcome, MockSweep::Transient))
-            {
-                return Err(ChainError::Transient("mock transient failure".to_string()));
-            }
-            self.submitted.store(true, Ordering::Relaxed);
-            Ok(MOCK_TX_HASH)
-        }
-    }
-
     const CHAIN_ID: u64 = 31337;
+    /// Block timestamps in the mock advance ten seconds per block from here.
+    const GENESIS_TIMESTAMP: u64 = 1_800_000_000;
+    /// Comfortably after every block the tests mine.
+    const FAR_EXPIRY: u64 = GENESIS_TIMESTAMP + 1_000_000;
 
     fn usdc() -> Address {
         address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")
-    }
-
-    fn block_hash(block: u64) -> B256 {
-        B256::with_last_byte(block as u8)
     }
 
     fn factory() -> FactoryAddress {
         FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"))
     }
 
+    fn batch_sweeper() -> Address {
+        address!("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+    }
+
+    fn block_hash(block: u64) -> B256 {
+        B256::with_last_byte(block as u8)
+    }
+
+    fn block_timestamp(block: u64) -> u64 {
+        GENESIS_TIMESTAMP + block * 10
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Submission {
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
+        sweeps: Vec<SweepRequest>,
+        tx_hash: B256,
+    }
+
+    #[derive(Default)]
+    struct MockState {
+        latest: u64,
+        finalized: u64,
+        transfers: Vec<UsdcTransfer>,
+        max_log_range: Option<u64>,
+        /// Hash overrides to simulate a reorg at a height.
+        hashes: HashMap<u64, B256>,
+        receipts: HashMap<B256, SweepReceipt>,
+        /// Outcomes attached to the receipt of the next submission, keyed by
+        /// payment address. Items without an entry get `Settled`.
+        next_outcomes: HashMap<Address, SweepOutcome>,
+        /// Block the next submission's receipt lands in; `None` leaves it unmined.
+        mine_at: Option<u64>,
+        next_receipt_succeeds: bool,
+        submissions: Vec<Submission>,
+        mined_nonce: u64,
+        submit_error: Option<fn() -> ChainError>,
+        fees: FeeEstimate,
+        balance: U256,
+        settled: HashMap<Address, bool>,
+        probes: HashMap<Address, FailureProbe>,
+        header_requests: usize,
+    }
+
+    struct MockChain {
+        state: Mutex<MockState>,
+    }
+
+    impl MockChain {
+        fn new(latest: u64) -> Self {
+            Self {
+                state: Mutex::new(MockState {
+                    latest,
+                    finalized: latest,
+                    mine_at: Some(latest),
+                    next_receipt_succeeds: true,
+                    fees: FeeEstimate {
+                        max_fee_per_gas: 100,
+                        max_priority_fee_per_gas: 2,
+                    },
+                    balance: U256::from(10u64).pow(U256::from(18u64)),
+                    ..MockState::default()
+                }),
+            }
+        }
+
+        fn with(self, apply: impl FnOnce(&mut MockState)) -> Self {
+            apply(&mut self.state.lock().unwrap());
+            self
+        }
+
+        fn set(&self, apply: impl FnOnce(&mut MockState)) {
+            apply(&mut self.state.lock().unwrap());
+        }
+
+        fn submissions(&self) -> Vec<Submission> {
+            self.state.lock().unwrap().submissions.clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChainClient for MockChain {
+        async fn latest_block_number(&self) -> Result<u64, ChainError> {
+            Ok(self.state.lock().unwrap().latest)
+        }
+
+        async fn finalized_block_number(&self) -> Result<u64, ChainError> {
+            Ok(self.state.lock().unwrap().finalized)
+        }
+
+        async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError> {
+            let mut state = self.state.lock().unwrap();
+            state.header_requests += 1;
+            if number > state.latest {
+                return Err(ChainError::Transient(format!(
+                    "block {number} is unavailable"
+                )));
+            }
+            Ok(BlockHeader {
+                number,
+                hash: state
+                    .hashes
+                    .get(&number)
+                    .copied()
+                    .unwrap_or_else(|| block_hash(number)),
+                timestamp: block_timestamp(number),
+            })
+        }
+
+        async fn usdc_transfers(
+            &self,
+            _token: Address,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<Vec<UsdcTransfer>, ChainError> {
+            let state = self.state.lock().unwrap();
+            let requested = to_block - from_block + 1;
+            if state.max_log_range.is_some_and(|max| requested > max) {
+                return Err(ChainError::LogRangeTooLarge(format!(
+                    "mock limit is {} blocks",
+                    state.max_log_range.unwrap()
+                )));
+            }
+            Ok(state
+                .transfers
+                .iter()
+                .filter(|transfer| (from_block..=to_block).contains(&transfer.block_number))
+                .cloned()
+                .collect())
+        }
+
+        async fn sweep_receipt(
+            &self,
+            tx_hash: B256,
+            _batch_sweeper: Address,
+        ) -> Result<Option<SweepReceipt>, ChainError> {
+            Ok(self.state.lock().unwrap().receipts.get(&tx_hash).cloned())
+        }
+
+        async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError> {
+            let state = self.state.lock().unwrap();
+            // Monad semantics: `pending` reads the same as `latest`.
+            let _ = pending;
+            Ok(state.mined_nonce)
+        }
+
+        async fn signer_balance(&self) -> Result<U256, ChainError> {
+            Ok(self.state.lock().unwrap().balance)
+        }
+
+        async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError> {
+            Ok(self.state.lock().unwrap().fees)
+        }
+
+        async fn submit_sweep_batch(
+            &self,
+            _batch_sweeper: Address,
+            sweeps: &[SweepRequest],
+            nonce: u64,
+            gas_limit: u64,
+            fees: FeeEstimate,
+        ) -> Result<B256, ChainError> {
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.submit_error.take() {
+                return Err(error());
+            }
+            let tx_hash = B256::with_last_byte((state.submissions.len() + 1) as u8);
+            state.submissions.push(Submission {
+                nonce,
+                gas_limit,
+                fees,
+                sweeps: sweeps.to_vec(),
+                tx_hash,
+            });
+            if let Some(block) = state.mine_at {
+                let outcomes =
+                    sweeps
+                        .iter()
+                        .map(|sweep| {
+                            let payment = gateway_core::predict_payment_address(
+                                factory(),
+                                TokenAddress(sweep.token),
+                                Amount(sweep.amount),
+                                BeneficiaryAddress(sweep.receiver),
+                                sweep.expiration_timestamp,
+                                RecoveryAddress(sweep.recovery),
+                                gateway_core::Salt(sweep.salt),
+                            )
+                            .0;
+                            let outcome = state.next_outcomes.remove(&payment).unwrap_or(
+                                SweepOutcome::Settled {
+                                    amount: sweep.amount,
+                                },
+                            );
+                            (payment, outcome)
+                        })
+                        .collect();
+                let succeeded = state.next_receipt_succeeds;
+                state.mined_nonce = nonce + 1;
+                state.receipts.insert(
+                    tx_hash,
+                    SweepReceipt {
+                        succeeded,
+                        block,
+                        block_hash: block_hash(block),
+                        outcomes,
+                    },
+                );
+            }
+            Ok(tx_hash)
+        }
+
+        async fn payment_settled(&self, payment: Address, _block: u64) -> Result<bool, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .settled
+                .get(&payment)
+                .copied()
+                .unwrap_or(true))
+        }
+
+        async fn probe_failure(
+            &self,
+            _token: Address,
+            payment: Address,
+            _receiver: Address,
+            _recovery: Address,
+            _block: u64,
+        ) -> Result<FailureProbe, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .probes
+                .get(&payment)
+                .copied()
+                .unwrap_or_default())
+        }
+    }
+
+    fn config() -> IndexerConfig {
+        IndexerConfig {
+            chain_id: ChainId(CHAIN_ID),
+            factory: factory().0,
+            batch_sweeper: batch_sweeper(),
+            usdc: usdc(),
+            usdc_start_block: 0,
+            finality_source: FinalitySource::FinalizedTag,
+            finality_confirmations: 0,
+            log_range_size: 100,
+            max_ranges_per_tick: 20,
+            poll_interval: Duration::from_millis(10),
+            sweep_pending_timeout: Duration::from_secs(60),
+            sweep_max_submissions: 3,
+            sweep_max_attempts: 3,
+            sweep_backoff_base_secs: 0.0,
+            sweep_backoff_cap_secs: 0.0,
+            signer_low_balance_wei: U256::ZERO,
+        }
+    }
+
+    fn indexer_with(pool: &PgPool, chain: Arc<MockChain>, cfg: IndexerConfig) -> Indexer {
+        Indexer::new(
+            InvoiceRepository::new(pool.clone()),
+            CursorRepository::new(pool.clone()),
+            chain,
+            cfg,
+        )
+    }
+
+    fn indexer(pool: &PgPool, chain: Arc<MockChain>) -> Indexer {
+        indexer_with(pool, chain, config())
+    }
+
     /// Build a USDC invoice for the test chain with the given atomic amount.
     fn make_invoice(amount: u64) -> Invoice {
+        make_invoice_expiring(amount, FAR_EXPIRY)
+    }
+
+    fn make_invoice_expiring(amount: u64, expiration: u64) -> Invoice {
         Invoice::new(
             factory(),
             ChainId(CHAIN_ID),
             TokenAddress(usdc()),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(amount)),
-            1_900_000_000,
+            expiration,
             RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
         )
     }
@@ -879,7 +1041,7 @@ mod tests {
         UsdcTransfer {
             block_number: block,
             block_hash: block_hash(block),
-            transaction_hash: B256::with_last_byte((log_index + 1) as u8),
+            transaction_hash: B256::from(U256::from(block * 1000 + log_index + 1)),
             transaction_index: 0,
             log_index,
             sender: address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
@@ -912,190 +1074,76 @@ mod tests {
             .expect("row should be inserted");
     }
 
-    /// Insert an invoice and advance it to `funded`, the starting state for the
-    /// sweep pass.
-    async fn insert_funded(pool: &PgPool, invoice: &Invoice, key: &str) {
+    /// Insert an invoice and credit it through the block indexer at `block`,
+    /// or at the first block the cursor has not yet passed.
+    async fn insert_funded(pool: &PgPool, invoice: &Invoice, key: &str, block: u64) {
         insert(pool, invoice, key).await;
-        let repo = InvoiceRepository::new(pool.clone());
-        repo.mark_funded(invoice.id.0, &invoice.amount.0.to_string(), 1)
+        let block = CursorRepository::new(pool.clone())
+            .get(CHAIN_ID, usdc())
             .await
-            .expect("mark_funded should succeed");
+            .unwrap()
+            .map_or(block, |cursor| block.max(cursor.block + 1));
+        let chain = Arc::new(MockChain::new(block).with(|state| {
+            state.transfers = vec![transfer(
+                invoice.payment_address.0,
+                invoice.amount.0.to::<u64>(),
+                block,
+                0,
+            )]
+        }));
+        indexer(pool, chain).tick().await.unwrap();
+        assert_eq!(fetch(pool, invoice).await.status, "funded");
     }
 
-    async fn insert_submitted(pool: &PgPool, invoice: &Invoice, key: &str) {
-        insert_funded(pool, invoice, key).await;
-        let repo = InvoiceRepository::new(pool.clone());
-        let claimed = repo.claim_sweep_batch(CHAIN_ID, 1, 0.0, 0.0).await.unwrap();
-        assert_eq!(claimed.len(), 1);
-        repo.record_batch_sweep_submission(&[invoice.id.0], MOCK_TX_HASH.as_slice())
+    async fn fetch(pool: &PgPool, invoice: &Invoice) -> DbInvoice {
+        InvoiceRepository::new(pool.clone())
+            .find_by_id(invoice.id.0)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn uncollected(pool: &PgPool, invoice: &Invoice) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM payment_observations WHERE invoice_id = $1 AND collected_at_block IS NULL AND disposition <> 'error'",
+        )
+        .bind(invoice.id.0)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn open_batches(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM sweep_batches WHERE resolved_at IS NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn set_submitted_at_in_the_past(pool: &PgPool) {
+        sqlx::query("UPDATE sweep_batches SET submitted_at = now() - interval '1 hour'")
+            .execute(pool)
             .await
             .unwrap();
     }
 
-    fn indexer_with(pool: &PgPool, chain: MockChain) -> Indexer {
-        Indexer::new(
-            InvoiceRepository::new(pool.clone()),
-            CursorRepository::new(pool.clone()),
-            Arc::new(chain),
-            ChainId(CHAIN_ID),
-            factory().0,
-            batch_sweeper(),
-            usdc(),
-            0,
-            0,
-            100,
-            Duration::from_millis(10),
-        )
-    }
-
-    fn batch_sweeper() -> Address {
-        address!("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
-    }
-
-    struct BlockingSweepChain {
-        block: AtomicU64,
-        transfers: Mutex<Vec<UsdcTransfer>>,
-        submit_started: Notify,
-        release_submit: Notify,
-    }
-
-    #[async_trait]
-    impl ChainClient for BlockingSweepChain {
-        async fn get_block_number(&self) -> Result<u64, ChainError> {
-            Ok(self.block.load(Ordering::Relaxed))
-        }
-
-        async fn get_block_hash(&self, block: u64) -> Result<B256, ChainError> {
-            Ok(block_hash(block))
-        }
-
-        async fn payment_deployed(&self, _address: Address) -> Result<bool, ChainError> {
-            Ok(false)
-        }
-
-        async fn payment_deployed_at(
-            &self,
-            _address: Address,
-            _block_hash: B256,
-        ) -> Result<bool, ChainError> {
-            Ok(false)
-        }
-
-        async fn transaction_known(&self, _tx_hash: B256) -> Result<bool, ChainError> {
-            Ok(true)
-        }
-
-        async fn signer_has_pending_transaction(&self) -> Result<bool, ChainError> {
-            Ok(false)
-        }
-
-        async fn get_sweep_receipt(
-            &self,
-            _tx_hash: B256,
-            _batch_sweeper: Address,
-        ) -> Result<Option<SweepReceipt>, ChainError> {
-            Ok(None)
-        }
-
-        async fn get_usdc_transfers(
-            &self,
-            _token: Address,
-            from_block: u64,
-            to_block: u64,
-        ) -> Result<Vec<UsdcTransfer>, ChainError> {
-            Ok(self
-                .transfers
-                .lock()
-                .await
-                .iter()
-                .filter(|transfer| (from_block..=to_block).contains(&transfer.block_number))
-                .cloned()
-                .collect())
-        }
-
-        async fn submit_sweep_batch(
-            &self,
-            _batch_sweeper: Address,
-            _sweeps: &[SweepRequest],
-        ) -> Result<B256, ChainError> {
-            self.submit_started.notify_one();
-            self.release_submit.notified().await;
-            Ok(MOCK_TX_HASH)
-        }
-    }
+    // --- Block indexer ------------------------------------------------------
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn block_indexing_continues_while_batch_submission_is_blocked(pool: PgPool) {
-        let sweep_invoice = make_invoice(100);
-        let later_invoice = make_invoice(200);
-        insert_funded(&pool, &sweep_invoice, "key-sweep").await;
-        insert(&pool, &later_invoice, "key-later").await;
-
-        let chain = Arc::new(BlockingSweepChain {
-            block: AtomicU64::new(1),
-            transfers: Mutex::new(Vec::new()),
-            submit_started: Notify::new(),
-            release_submit: Notify::new(),
-        });
-        let worker = Indexer::new(
-            InvoiceRepository::new(pool.clone()),
-            CursorRepository::new(pool.clone()),
-            chain.clone(),
-            ChainId(CHAIN_ID),
-            factory().0,
-            batch_sweeper(),
-            usdc(),
-            1,
-            0,
-            100,
-            Duration::from_millis(10),
-        );
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let task = tokio::spawn(worker.run(shutdown_rx));
-
-        chain.submit_started.notified().await;
-        chain
-            .transfers
-            .lock()
-            .await
-            .push(transfer(later_invoice.payment_address.0, 200, 2, 0));
-        chain.block.store(2, Ordering::Relaxed);
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let row = InvoiceRepository::new(pool.clone())
-                    .find_by_id(later_invoice.id.0)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                if row.status == "funded" {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("index loop must not wait for the blocked sweep worker");
-
-        chain.release_submit.notify_one();
-        shutdown_tx.send(true).unwrap();
-        task.await.unwrap().unwrap();
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn funds_invoice_from_usdc_transfer(pool: PgPool) {
+    async fn funds_invoice_from_finalized_usdc_transfer(pool: PgPool) {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
 
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 100, 1, 0)]),
-        );
+        let chain =
+            Arc::new(MockChain::new(1).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 100, 1, 0)]
+            }));
+        indexer(&pool, chain)
+            .tick()
+            .await
+            .expect("tick should succeed");
 
-        indexer.tick().await.expect("tick should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
+        let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "funded");
         assert_eq!(row.observed_amount.as_deref(), Some("100"));
         assert_eq!(row.confirmed_received, "100");
@@ -1104,6 +1152,91 @@ mod tests {
             row.funded_at_block_hash.as_deref(),
             Some(block_hash(1).as_slice())
         );
+        assert_eq!(row.uncollected_count, 1);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn finalized_tag_gates_crediting_not_the_latest_block(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
+        let chain = Arc::new(MockChain::new(5).with(|state| {
+            state.finalized = 2;
+            state.transfers = vec![transfer(invoice.payment_address.0, 100, 3, 0)];
+        }));
+        let worker = indexer(&pool, chain.clone());
+
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "created");
+        assert_eq!(
+            CursorRepository::new(pool.clone())
+                .get(CHAIN_ID, usdc())
+                .await
+                .unwrap()
+                .unwrap()
+                .block,
+            2
+        );
+
+        chain.set(|state| state.finalized = 5);
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "funded");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn confirmation_margin_is_subtracted_from_the_finality_anchor(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
+        let chain = Arc::new(MockChain::new(4).with(|state| {
+            state.transfers = vec![transfer(invoice.payment_address.0, 100, 3, 0)];
+        }));
+        let mut cfg = config();
+        cfg.finality_source = FinalitySource::Latest;
+        cfg.finality_confirmations = 2;
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+
+        worker.tick().await.unwrap();
+        assert_eq!(
+            fetch(&pool, &invoice).await.status,
+            "created",
+            "block 3 is inside the margin"
+        );
+
+        chain.set(|state| state.latest = 5);
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "funded");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn one_tick_drains_many_ranges_up_to_its_budget(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(1_000));
+        let mut cfg = config();
+        cfg.log_range_size = 100;
+        cfg.max_ranges_per_tick = 4;
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+        let cursor = CursorRepository::new(pool.clone());
+
+        worker.tick().await.unwrap();
+        assert_eq!(
+            cursor.get(CHAIN_ID, usdc()).await.unwrap().unwrap().block,
+            399
+        );
+        worker.tick().await.unwrap();
+        assert_eq!(
+            cursor.get(CHAIN_ID, usdc()).await.unwrap().unwrap().block,
+            799
+        );
+        worker.tick().await.unwrap();
+        assert_eq!(
+            cursor.get(CHAIN_ID, usdc()).await.unwrap().unwrap().block,
+            1_000
+        );
+        let requests_before = chain.state.lock().unwrap().header_requests;
+        worker.tick().await.unwrap();
+        assert_eq!(
+            chain.state.lock().unwrap().header_requests - requests_before,
+            1,
+            "an idle tick only verifies the cursor hash"
+        );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1111,42 +1244,35 @@ mod tests {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
 
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 150, 1, 0)]),
-        );
+        let chain =
+            Arc::new(MockChain::new(1).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 150, 1, 0)]
+            }));
+        indexer(&pool, chain).tick().await.unwrap();
 
-        indexer.tick().await.expect("tick should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
+        let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "funded");
         assert_eq!(row.observed_amount.as_deref(), Some("150"));
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn partial_transfers_accumulate(pool: PgPool) {
+    async fn partial_transfers_accumulate_across_blocks(pool: PgPool) {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
 
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(
-                2,
-                vec![
-                    transfer(invoice.payment_address.0, 40, 1, 0),
-                    transfer(invoice.payment_address.0, 60, 2, 1),
-                ],
-            ),
-        );
+        let chain = Arc::new(MockChain::new(2).with(|state| {
+            state.transfers = vec![
+                transfer(invoice.payment_address.0, 40, 1, 0),
+                transfer(invoice.payment_address.0, 60, 2, 1),
+            ]
+        }));
+        indexer(&pool, chain).tick().await.unwrap();
 
-        indexer.tick().await.expect("tick should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
+        let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "funded");
         assert_eq!(row.confirmed_received, "100");
         assert_eq!(row.funded_at_block, Some(2));
+        assert_eq!(row.uncollected_count, 2);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1155,64 +1281,29 @@ mod tests {
         insert(&pool, &invoice, "key-1").await;
 
         let logs = vec![transfer(invoice.payment_address.0, 100, 1, 0)];
-        let indexer = indexer_with(&pool, MockChain::new(1, logs.clone()));
-        indexer.tick().await.expect("first tick");
+        let chain = Arc::new(MockChain::new(1).with(|state| state.transfers = logs.clone()));
+        indexer(&pool, chain).tick().await.expect("first tick");
 
-        let indexer2 = indexer_with(&pool, MockChain::new(5, logs));
-        indexer2.tick().await.expect("second tick");
+        let chain = Arc::new(MockChain::new(5).with(|state| state.transfers = logs));
+        indexer(&pool, chain).tick().await.expect("second tick");
 
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
+        let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "funded");
         assert_eq!(row.funded_at_block, Some(1), "funding block must be stable");
         assert_eq!(row.confirmed_received, "100");
+        assert_eq!(row.uncollected_count, 1);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn transfers_after_funding_remain_in_the_observation_ledger(pool: PgPool) {
+    async fn zero_value_transfer_is_an_error_observation_and_never_queued(pool: PgPool) {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
 
-        indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 100, 1, 0)]),
-        )
-        .tick()
-        .await
-        .unwrap();
-        indexer_with(
-            &pool,
-            MockChain::new(2, vec![transfer(invoice.payment_address.0, 50, 2, 1)]),
-        )
-        .tick()
-        .await
-        .unwrap();
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "funded");
-        assert_eq!(row.confirmed_received, "150");
-        let observations: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM payment_observations WHERE invoice_id = $1")
-                .bind(invoice.id.0)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(observations, 2);
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn zero_value_transfer_is_durably_marked_as_error(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert(&pool, &invoice, "key-1").await;
-
-        indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 0, 1, 0)]),
-        )
-        .tick()
-        .await
-        .unwrap();
+        let chain =
+            Arc::new(MockChain::new(1).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 0, 1, 0)]
+            }));
+        indexer(&pool, chain).tick().await.unwrap();
 
         let observation: (String, Option<String>) = sqlx::query_as(
             "SELECT disposition, disposition_reason FROM payment_observations WHERE invoice_id = $1",
@@ -1225,66 +1316,9 @@ mod tests {
             observation,
             ("error".to_string(), Some("zero_amount".to_string()))
         );
-
-        let row = InvoiceRepository::new(pool.clone())
-            .find_by_id(invoice.id.0)
-            .await
-            .unwrap()
-            .unwrap();
+        let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "created");
-        assert_eq!(row.confirmed_received, "0");
-        assert_eq!(
-            CursorRepository::new(pool)
-                .get(CHAIN_ID, usdc())
-                .await
-                .unwrap()
-                .unwrap()
-                .block,
-            1,
-            "error disposition and cursor must commit together"
-        );
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn transfer_to_terminal_invoice_is_durably_blocked(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert(&pool, &invoice, "key-1").await;
-        sqlx::query("UPDATE invoices SET status = 'fulfilled' WHERE id = $1")
-            .bind(invoice.id.0)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 50, 1, 0)]),
-        )
-        .tick()
-        .await
-        .unwrap();
-
-        let observation: (String, Option<String>) = sqlx::query_as(
-            "SELECT disposition, disposition_reason FROM payment_observations WHERE invoice_id = $1",
-        )
-        .bind(invoice.id.0)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            observation,
-            (
-                "blocked".to_string(),
-                Some("invoice_not_accepting_payments".to_string())
-            )
-        );
-
-        let row = InvoiceRepository::new(pool)
-            .find_by_id(invoice.id.0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.status, "fulfilled");
-        assert_eq!(row.confirmed_received, "0");
+        assert_eq!(row.uncollected_count, 0);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1298,13 +1332,11 @@ mod tests {
             .await
             .unwrap();
 
-        let error = indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 1, 1, 0)]),
-        )
-        .tick()
-        .await
-        .unwrap_err();
+        let chain =
+            Arc::new(MockChain::new(1).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 1, 1, 0)]
+            }));
+        let error = indexer(&pool, chain).tick().await.unwrap_err();
         assert!(error.to_string().contains("overflowed uint256"));
 
         let observations: i64 = sqlx::query_scalar("SELECT count(*) FROM payment_observations")
@@ -1323,33 +1355,29 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn finalized_cursor_mismatch_halts_before_sweeping(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
+    async fn finalized_cursor_mismatch_halts_the_indexer(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(1));
+        indexer(&pool, chain.clone()).tick().await.unwrap();
 
-        let repo = InvoiceRepository::new(pool.clone());
-        repo.apply_finalized_usdc_range(CHAIN_ID, usdc(), None, 1, block_hash(1), &[])
-            .await
-            .unwrap();
-
-        let indexer = indexer_with(&pool, MockChain::new(2, vec![]).with_hash_mismatch());
-        let error = indexer.tick().await.unwrap_err();
-
+        chain.set(|state| {
+            state.latest = 2;
+            state.finalized = 2;
+            state.hashes.insert(1, B256::repeat_byte(0xFF));
+        });
+        let error = indexer(&pool, chain).tick().await.unwrap_err();
         assert!(error.requires_halt());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "funded", "halt must happen before sweep");
+        assert!(error.to_string().contains("cursor hash mismatch"));
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn oversized_log_ranges_are_split_and_then_grow(pool: PgPool) {
-        let mut indexer = indexer_with(&pool, MockChain::new(10, vec![]).with_max_log_range(2));
-        indexer.max_log_range_size = 8;
-        indexer.current_log_range_size.store(8, Ordering::Relaxed);
+        let chain = Arc::new(MockChain::new(10).with(|state| state.max_log_range = Some(2)));
+        let mut cfg = config();
+        cfg.log_range_size = 8;
+        cfg.max_ranges_per_tick = 1;
+        let worker = indexer_with(&pool, chain, cfg);
 
-        indexer
-            .tick()
-            .await
-            .expect("range should split and succeed");
+        worker.tick().await.expect("range should split and succeed");
 
         let cursor = CursorRepository::new(pool)
             .get(CHAIN_ID, usdc())
@@ -1358,482 +1386,947 @@ mod tests {
             .unwrap();
         assert_eq!(cursor.block, 1, "the successful range was blocks 0..=1");
         assert_eq!(
-            indexer.current_log_range_size.load(Ordering::Relaxed),
+            worker.current_log_range_size.load(Ordering::Relaxed),
             3,
             "a successful small range should cautiously grow"
         );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn confirmation_depth_gates_funding(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert(&pool, &invoice, "key-1").await;
-
-        let mut indexer = indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 100, 1, 0)]),
-        );
-        indexer.finality_confirmations = 1;
-
-        indexer.tick().await.expect("tick should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "created");
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn ignores_invoices_on_other_chains(pool: PgPool) {
-        // An invoice on a different chain must not be reconciled by this indexer.
         let invoice = Invoice::new(
             factory(),
             ChainId(1), // not CHAIN_ID
             TokenAddress(usdc()),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
-            1_900_000_000,
+            FAR_EXPIRY,
             RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
         );
         insert(&pool, &invoice, "key-1").await;
 
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(1, vec![transfer(invoice.payment_address.0, 100, 1, 0)]),
-        );
+        let chain =
+            Arc::new(MockChain::new(1).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 100, 1, 0)]
+            }));
+        indexer(&pool, chain).tick().await.unwrap();
 
-        indexer.tick().await.expect("tick should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "created");
+        assert_eq!(fetch(&pool, &invoice).await.status, "created");
     }
 
-    // --- Sweep pass ---------------------------------------------------------
+    // --- Expiry ---------------------------------------------------------------
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn sweeps_funded_invoice_to_fulfilled(pool: PgPool) {
+    async fn open_invoices_expire_by_block_timestamp(pool: PgPool) {
+        // Expires between the timestamps of blocks 2 and 3.
+        let expiration = block_timestamp(2) + 5;
+        let unpaid = make_invoice_expiring(100, expiration);
+        let partial = make_invoice_expiring(100, expiration);
+        let funded = make_invoice_expiring(100, expiration);
+        let live = make_invoice_expiring(100, FAR_EXPIRY);
+        for (invoice, key) in [
+            (&unpaid, "a"),
+            (&partial, "b"),
+            (&funded, "c"),
+            (&live, "d"),
+        ] {
+            insert(&pool, invoice, key).await;
+        }
+        let chain = Arc::new(MockChain::new(2).with(|state| {
+            state.transfers = vec![
+                transfer(partial.payment_address.0, 40, 1, 0),
+                transfer(funded.payment_address.0, 100, 1, 1),
+            ]
+        }));
+        let worker = indexer(&pool, chain.clone());
+
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &partial).await.status, "created");
+        assert_eq!(fetch(&pool, &funded).await.status, "funded");
+
+        chain.set(|state| {
+            state.latest = 3;
+            state.finalized = 3;
+        });
+        worker.tick().await.unwrap();
+        for invoice in [&unpaid, &partial, &funded] {
+            assert_eq!(fetch(&pool, invoice).await.status, "expired");
+        }
+        assert_eq!(fetch(&pool, &live).await.status, "created");
+        // Only balances can be recovered: the partial and funded ones queue.
+        assert_eq!(fetch(&pool, &unpaid).await.uncollected_count, 0);
+        assert_eq!(fetch(&pool, &partial).await.uncollected_count, 1);
+        assert_eq!(fetch(&pool, &funded).await.uncollected_count, 1);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn transfer_after_expiry_is_late_and_credited_to_nothing(pool: PgPool) {
+        let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
+        insert(&pool, &invoice, "key-1").await;
+        let chain =
+            Arc::new(MockChain::new(2).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 100, 2, 0)]
+            }));
+        let worker = indexer(&pool, chain.clone());
+        // The range containing block 2 also expires the invoice, so the transfer
+        // is credited within the same commit; a later one is late.
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "expired");
+
+        chain.set(|state| {
+            state.latest = 3;
+            state.finalized = 3;
+            state
+                .transfers
+                .push(transfer(invoice.payment_address.0, 5, 3, 0));
+        });
+        worker.tick().await.unwrap();
+        let dispositions: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT disposition, disposition_reason FROM payment_observations WHERE invoice_id = $1 ORDER BY block_number",
+        )
+        .bind(invoice.id.0)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            dispositions,
+            vec![
+                ("credited".to_string(), None),
+                ("late".to_string(), Some("invoice_expired".to_string()))
+            ]
+        );
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.confirmed_received, "100");
+        assert_eq!(row.uncollected_count, 2);
+    }
+
+    // --- Sweep worker ---------------------------------------------------------
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn settles_a_funded_invoice_through_a_finalized_helper_transaction(pool: PgPool) {
         let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
 
-        // Default mock sweep is Executed at the mock head block.
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]));
-        indexer.sweep_tick().await.expect("sweep should succeed");
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].nonce, 0);
+        assert_eq!(submissions[0].gas_limit, sweep_batch_gas_limit(1));
+        assert_eq!(submissions[0].sweeps, vec![sweep_request(&invoice)]);
+        assert_eq!(fetch(&pool, &invoice).await.status, "deploying");
+        assert_eq!(open_batches(&pool).await, 1);
 
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
+        worker.sweep_tick().await.unwrap();
+        let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "fulfilled");
         assert_eq!(
             row.execute_tx_hash.as_deref(),
-            Some(MOCK_TX_HASH.as_slice())
+            Some(submissions[0].tx_hash.as_slice())
         );
-        assert_eq!(row.fulfilled_at_block, Some(7));
+        assert_eq!(row.resolved_at_block, Some(7));
+        assert_eq!(row.drained_at_block, Some(7));
+        assert_eq!(row.uncollected_count, 0);
+        assert_eq!(row.sweep_batch_id, None);
+        assert_eq!(uncollected(&pool, &invoice).await, 0);
+        assert_eq!(open_batches(&pool).await, 0);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn sweep_rejects_invoice_from_another_factory(pool: PgPool) {
-        let invoice_factory =
-            FactoryAddress(address!("0x0000000000000000000000000000000000000009"));
-        let invoice = Invoice::new(
-            invoice_factory,
-            ChainId(CHAIN_ID),
-            TokenAddress(usdc()),
-            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
-            Amount(U256::from(100)),
-            1_900_000_000,
-            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
-        );
-        insert_funded(&pool, &invoice, "key-1").await;
+    async fn mined_sweep_waits_for_finality_and_survives_restarts(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.finalized = 5));
 
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]));
-        let error = indexer.sweep_tick().await.unwrap_err();
-        assert!(error.requires_halt());
-
-        let row = InvoiceRepository::new(pool)
-            .find_by_id(invoice.id.0)
+        indexer(&pool, chain.clone()).sweep_tick().await.unwrap();
+        indexer(&pool, chain.clone()).sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "deploying");
+        let mined: Option<i64> = sqlx::query_scalar("SELECT mined_block FROM sweep_batches")
+            .fetch_one(&pool)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(row.status, "deploying");
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn already_deployed_marks_fulfilled_without_tx(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(7, vec![])
-                .with_sweep(invoice.payment_address.0, MockSweep::AlreadyDeployed),
-        );
-        indexer.sweep_tick().await.expect("sweep should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "fulfilled");
-        // No transaction of ours landed it, so no transaction hash is recorded.
-        assert_eq!(row.execute_tx_hash, None);
-        assert_eq!(row.fulfilled_at_block, Some(7));
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn mined_sweep_waits_for_finality(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let mut indexer = indexer_with(&pool, MockChain::new(7, vec![]));
-        indexer.finality_confirmations = 2;
-        indexer
-            .sweep_tick()
-            .await
-            .expect("submission should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "deploying");
-        assert_eq!(row.sweep_detected_at_block, Some(7));
-
-        let mut later = indexer_with(&pool, MockChain::new(9, vec![]).with_receipt_block(7));
-        later.finality_confirmations = 2;
-        later
-            .sweep_tick()
-            .await
-            .expect("finalization should succeed");
-
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "fulfilled");
-        assert_eq!(row.fulfilled_at_block, Some(7));
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn submitted_sweep_hash_is_persisted_before_receipt(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]).with_pending_receipt());
-        indexer
-            .sweep_tick()
-            .await
-            .expect("submission should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "deploying");
         assert_eq!(
-            row.execute_tx_hash.as_deref(),
-            Some(MOCK_TX_HASH.as_slice())
+            mined,
+            Some(7),
+            "the receipt block is persisted while finality is pending"
         );
-        assert!(row.sweep_submitted_at.is_some());
-        assert_eq!(row.sweep_detected_at_block, None);
 
-        let later = indexer_with(&pool, MockChain::new(8, vec![]));
-        later
-            .sweep_tick()
-            .await
-            .expect("receipt recovery should succeed");
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "fulfilled");
+        chain.set(|state| state.finalized = 7);
+        indexer(&pool, chain).sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn pending_batch_prevents_a_higher_nonce_submission(pool: PgPool) {
-        let pending = make_invoice(100);
-        let waiting = make_invoice(200);
-        insert_submitted(&pool, &pending, "key-pending").await;
-        insert_funded(&pool, &waiting, "key-waiting").await;
-
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]).with_pending_receipt());
-        indexer.sweep_tick().await.unwrap();
-
-        let waiting = InvoiceRepository::new(pool)
-            .find_by_id(waiting.id.0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(waiting.status, "funded");
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn untracked_pending_signer_nonce_halts_before_submission(pool: PgPool) {
+    async fn orphaned_receipt_is_forgotten_and_the_batch_keeps_waiting(pool: PgPool) {
         let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-funded").await;
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]).with_pending_signer_nonce());
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
 
-        let error = indexer.sweep_tick().await.unwrap_err();
-        assert!(matches!(error, IndexerError::PendingSweep(_)));
-        let row = InvoiceRepository::new(pool)
-            .find_by_id(invoice.id.0)
+        chain.set(|state| {
+            state.hashes.insert(7, B256::repeat_byte(0xEE));
+        });
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "deploying");
+        let mined: Option<i64> = sqlx::query_scalar("SELECT mined_block FROM sweep_batches")
+            .fetch_one(&pool)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(row.execute_tx_hash, None);
+        assert_eq!(mined, None);
+        assert_eq!(open_batches(&pool).await, 1);
+
+        chain.set(|state| {
+            state.hashes.clear();
+        });
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn dropped_batch_returns_all_members_to_retry_queue(pool: PgPool) {
+    async fn reverted_helper_transaction_requeues_every_invoice(pool: PgPool) {
         let first = make_invoice(100);
         let second = make_invoice(200);
-        insert_funded(&pool, &first, "key-first").await;
-        insert_funded(&pool, &second, "key-second").await;
-        let repo = InvoiceRepository::new(pool.clone());
-        let claimed = repo.claim_sweep_batch(CHAIN_ID, 2, 0.0, 0.0).await.unwrap();
-        assert_eq!(claimed.len(), 2);
-        repo.record_batch_sweep_submission(&[first.id.0, second.id.0], MOCK_TX_HASH.as_slice())
-            .await
-            .unwrap();
+        insert_funded(&pool, &first, "key-1", 1).await;
+        insert_funded(&pool, &second, "key-2", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.next_receipt_succeeds = false));
+        let worker = indexer(&pool, chain.clone());
 
-        let mut indexer = indexer_with(
-            &pool,
-            MockChain::new(7, vec![])
-                .with_pending_receipt()
-                .with_dropped_transaction(),
-        );
-        indexer.pending_sweep_timeout = Duration::ZERO;
-        indexer.sweep_tick().await.unwrap();
-
-        for id in [first.id.0, second.id.0] {
-            let row = repo.find_by_id(id).await.unwrap().unwrap();
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        for invoice in [&first, &second] {
+            let row = fetch(&pool, invoice).await;
             assert_eq!(row.status, "deploying");
-            assert_eq!(row.execute_tx_hash, None);
+            assert_eq!(row.sweep_batch_id, None);
             assert_eq!(row.sweep_attempts, 1);
         }
+        assert_eq!(open_batches(&pool).await, 0);
+
+        chain.set(|state| state.next_receipt_succeeds = true);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &first).await.status, "fulfilled");
+        assert_eq!(fetch(&pool, &second).await.status, "fulfilled");
+        assert_eq!(chain.submissions().len(), 2);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn stale_but_known_pending_batch_halts(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_submitted(&pool, &invoice, "key-pending").await;
-        let mut indexer = indexer_with(&pool, MockChain::new(7, vec![]).with_pending_receipt());
-        indexer.pending_sweep_timeout = Duration::ZERO;
+    async fn expired_balance_is_recovered_and_reported_as_such(pool: PgPool) {
+        let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
+        insert(&pool, &invoice, "key-1").await;
+        let chain = Arc::new(MockChain::new(2).with(|state| {
+            state.transfers = vec![transfer(invoice.payment_address.0, 40, 1, 0)];
+        }));
+        let worker = indexer(&pool, chain.clone());
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "expired");
 
-        let error = indexer.sweep_tick().await.unwrap_err();
-        assert!(matches!(error, IndexerError::PendingSweep(_)));
-        assert!(error.requires_halt());
+        chain.set(|state| {
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Recovered {
+                    amount: U256::from(40),
+                },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            fetch(&pool, &invoice).await.status,
+            "expired",
+            "no status flip while in flight"
+        );
+        worker.sweep_tick().await.unwrap();
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "recovered");
+        assert!(row.execute_tx_hash.is_some());
+        assert_eq!(row.uncollected_count, 0);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn failure_classification_reads_code_at_receipt_block(pool: PgPool) {
+    async fn funded_invoice_swept_after_its_deadline_reports_recovered_not_fulfilled(pool: PgPool) {
         let invoice = make_invoice(100);
-        insert_submitted(&pool, &invoice, "key-failure").await;
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(7, vec![])
-                .with_sweep(invoice.payment_address.0, MockSweep::Blocked)
-                .with_latest_only_code(invoice.payment_address.0),
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Recovered {
+                    amount: U256::from(100),
+                },
+            );
+        }));
+        let worker = indexer(&pool, chain);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "recovered");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn third_party_execution_is_classified_from_the_contract(pool: PgPool) {
+        let settled = make_invoice(100);
+        let recovered = make_invoice(200);
+        insert_funded(&pool, &settled, "key-1", 1).await;
+        insert_funded(&pool, &recovered, "key-2", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            for invoice in [&settled, &recovered] {
+                state.next_outcomes.insert(
+                    invoice.payment_address.0,
+                    SweepOutcome::Collected { amount: U256::ZERO },
+                );
+            }
+            state.settled.insert(recovered.payment_address.0, false);
+        }));
+        let worker = indexer(&pool, chain);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let settled_row = fetch(&pool, &settled).await;
+        assert_eq!(settled_row.status, "fulfilled");
+        assert_eq!(settled_row.execute_tx_hash, None, "not our transaction");
+        assert_eq!(fetch(&pool, &recovered).await.status, "recovered");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn late_funds_on_a_settled_invoice_are_collected_without_changing_its_status(
+        pool: PgPool,
+    ) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
+
+        // A repeat payment lands after the settlement block.
+        chain.set(|state| {
+            state.latest = 9;
+            state.finalized = 9;
+            state.mine_at = Some(9);
+            state
+                .transfers
+                .push(transfer(invoice.payment_address.0, 30, 8, 0));
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Collected {
+                    amount: U256::from(30),
+                },
+            );
+        });
+        worker.tick().await.unwrap();
+        let queued = fetch(&pool, &invoice).await;
+        assert_eq!(queued.status, "fulfilled");
+        assert_eq!(queued.uncollected_count, 1);
+        assert_eq!(
+            queued.confirmed_received, "100",
+            "late funds never count toward the invoice"
         );
 
-        indexer.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        let collected = fetch(&pool, &invoice).await;
+        assert_eq!(collected.status, "fulfilled");
+        assert_eq!(collected.uncollected_count, 0);
+        assert_eq!(collected.drained_at_block, Some(9));
+        assert_eq!(
+            collected.resolved_at_block,
+            Some(7),
+            "the settlement block is kept"
+        );
+        assert_eq!(chain.submissions().len(), 2);
+    }
 
-        let row = InvoiceRepository::new(pool)
-            .find_by_id(invoice.id.0)
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn transfer_indexed_after_the_drain_that_moved_it_is_never_requeued(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = Some(5)));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.drained_at_block, Some(5));
+
+        // The block indexer only now reaches a transfer from block 3, which the
+        // sweep at block 5 already forwarded.
+        chain.set(|state| {
+            state
+                .transfers
+                .push(transfer(invoice.payment_address.0, 20, 3, 0));
+        });
+        worker.tick().await.unwrap();
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.uncollected_count, 0);
+        assert_eq!(uncollected(&pool, &invoice).await, 0);
+        let collected_at: Option<i64> = sqlx::query_scalar(
+            "SELECT collected_at_block FROM payment_observations WHERE invoice_id = $1 AND block_number = 3",
+        )
+        .bind(invoice.id.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(collected_at, Some(5));
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions().len(), 1, "nothing to sweep");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn failure_classification_retries_transient_and_blocks_permanent_causes(pool: PgPool) {
+        let paused = make_invoice(100);
+        let blacklisted = make_invoice(200);
+        let underfunded = make_invoice(300);
+        let unknown = make_invoice(400);
+        for (invoice, key) in [
+            (&paused, "a"),
+            (&blacklisted, "b"),
+            (&underfunded, "c"),
+            (&unknown, "d"),
+        ] {
+            insert_funded(&pool, invoice, key, 1).await;
+        }
+        let failed = SweepOutcome::Failed {
+            revert_data: Bytes::from_static(&[0x30, 0x11, 0x64, 0x25]),
+        };
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            for invoice in [&paused, &blacklisted, &underfunded, &unknown] {
+                state
+                    .next_outcomes
+                    .insert(invoice.payment_address.0, failed.clone());
+            }
+            state.probes.insert(
+                paused.payment_address.0,
+                FailureProbe {
+                    paused: Some(true),
+                    ..FailureProbe::default()
+                },
+            );
+            state.probes.insert(
+                blacklisted.payment_address.0,
+                FailureProbe {
+                    paused: Some(false),
+                    receiver_blacklisted: Some(true),
+                    ..FailureProbe::default()
+                },
+            );
+            state.probes.insert(
+                underfunded.payment_address.0,
+                FailureProbe {
+                    paused: Some(false),
+                    balance: Some(U256::from(299)),
+                    ..FailureProbe::default()
+                },
+            );
+        }));
+        let worker = indexer(&pool, chain);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let paused_row = fetch(&pool, &paused).await;
+        assert_eq!(paused_row.status, "deploying");
+        assert_eq!(paused_row.sweep_attempts, 1);
+        assert_eq!(paused_row.blocked_reason, None);
+
+        let blacklisted_row = fetch(&pool, &blacklisted).await;
+        assert_eq!(blacklisted_row.status, "blocked");
+        assert_eq!(
+            blacklisted_row.blocked_reason.as_deref(),
+            Some("beneficiary_blacklisted")
+        );
+
+        let underfunded_row = fetch(&pool, &underfunded).await;
+        assert_eq!(underfunded_row.status, "blocked");
+        assert_eq!(
+            underfunded_row.blocked_reason.as_deref(),
+            Some("balance_below_amount")
+        );
+
+        let unknown_row = fetch(&pool, &unknown).await;
+        assert_eq!(unknown_row.status, "deploying");
+        assert_eq!(unknown_row.sweep_attempts, 1);
+        assert_eq!(
+            unknown_row.uncollected_count, 1,
+            "funds are still at the address"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn unknown_failures_block_once_retries_are_exhausted(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        let fail = |state: &mut MockState| {
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Failed {
+                    revert_data: Bytes::new(),
+                },
+            );
+        };
+
+        for attempt in 1..=3 {
+            chain.set(fail);
+            worker.sweep_tick().await.unwrap();
+            worker.sweep_tick().await.unwrap();
+            let row = fetch(&pool, &invoice).await;
+            assert_eq!(row.sweep_attempts, attempt);
+            if attempt < 3 {
+                assert_eq!(row.status, "deploying");
+            }
+        }
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "blocked");
+        assert_eq!(row.blocked_reason.as_deref(), Some("retries_exhausted"));
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            chain.submissions().len(),
+            3,
+            "blocked invoices leave the queue"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn failed_late_collection_keeps_the_terminal_status_but_leaves_the_queue(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        chain.set(|state| {
+            state.latest = 9;
+            state.finalized = 9;
+            state.mine_at = Some(9);
+            state
+                .transfers
+                .push(transfer(invoice.payment_address.0, 30, 8, 0));
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Failed {
+                    revert_data: Bytes::new(),
+                },
+            );
+            state.probes.insert(
+                invoice.payment_address.0,
+                FailureProbe {
+                    code_present: true,
+                    recovery_blacklisted: Some(true),
+                    ..FailureProbe::default()
+                },
+            );
+        });
+        worker.tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
+        assert_eq!(row.blocked_reason.as_deref(), Some("recovery_blacklisted"));
+        assert_eq!(row.uncollected_count, 1);
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            chain.submissions().len(),
+            2,
+            "a blocked reason removes the invoice from the queue"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn unconfirmed_batch_is_replaced_with_bumped_fees_on_the_same_nonce(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            chain.submissions().len(),
+            1,
+            "nothing happens before the timeout"
+        );
+
+        set_submitted_at_in_the_past(&pool).await;
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(submissions[1].nonce, submissions[0].nonce);
+        assert_eq!(submissions[1].sweeps, submissions[0].sweeps);
+        assert_eq!(submissions[1].fees, submissions[0].fees.bumped());
+        let hashes: Vec<Vec<u8>> = sqlx::query_scalar("SELECT tx_hashes FROM sweep_batches")
+            .fetch_one(&pool)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(row.status, "blocked");
-    }
+        assert_eq!(hashes.len(), 2);
 
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn deterministic_token_failure_marks_blocked(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(7, vec![]).with_sweep(invoice.payment_address.0, MockSweep::Blocked),
-        );
-        indexer.sweep_tick().await.expect("sweep should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "blocked");
-        assert_eq!(row.blocked_reason.as_deref(), Some("token_transfer_failed"));
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn mixed_invoices_share_one_batch_hash_and_resolve_independently(pool: PgPool) {
-        let successful = make_invoice(100);
-        let blocked = make_invoice(200);
-        insert_funded(&pool, &successful, "key-success").await;
-        insert_funded(&pool, &blocked, "key-blocked").await;
-
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(7, vec![]).with_sweep(blocked.payment_address.0, MockSweep::Blocked),
-        );
-        indexer.sweep_tick().await.expect("batch should succeed");
-
-        let repo = InvoiceRepository::new(pool);
-        let successful_row = repo.find_by_id(successful.id.0).await.unwrap().unwrap();
-        let blocked_row = repo.find_by_id(blocked.id.0).await.unwrap().unwrap();
-        assert_eq!(successful_row.status, "fulfilled");
-        assert_eq!(blocked_row.status, "blocked");
+        // The replacement mines; the batch resolves through its newer hash.
+        chain.set(|state| {
+            let tx_hash = state.submissions[1].tx_hash;
+            state.mined_nonce = 1;
+            state.receipts.insert(
+                tx_hash,
+                SweepReceipt {
+                    succeeded: true,
+                    block: 7,
+                    block_hash: block_hash(7),
+                    outcomes: HashMap::from([(
+                        invoice.payment_address.0,
+                        SweepOutcome::Settled {
+                            amount: U256::from(100),
+                        },
+                    )]),
+                },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
         assert_eq!(
-            successful_row.execute_tx_hash, blocked_row.execute_tx_hash,
-            "both invoice outcomes must come from one helper transaction"
-        );
-        assert_eq!(
-            successful_row.execute_tx_hash.as_deref(),
-            Some(MOCK_TX_HASH.as_slice())
+            row.execute_tx_hash.as_deref(),
+            Some(submissions[1].tx_hash.as_slice())
         );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn transient_failure_increments_attempts_and_stays_deploying(pool: PgPool) {
+    async fn original_submission_mining_after_a_replacement_still_resolves_the_batch(pool: PgPool) {
         let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        set_submitted_at_in_the_past(&pool).await;
+        worker.sweep_tick().await.unwrap();
 
-        let indexer = indexer_with(
-            &pool,
-            MockChain::new(7, vec![]).with_sweep(invoice.payment_address.0, MockSweep::Transient),
+        chain.set(|state| {
+            let tx_hash = state.submissions[0].tx_hash;
+            state.mined_nonce = 1;
+            state.receipts.insert(
+                tx_hash,
+                SweepReceipt {
+                    succeeded: true,
+                    block: 7,
+                    block_hash: block_hash(7),
+                    outcomes: HashMap::from([(
+                        invoice.payment_address.0,
+                        SweepOutcome::Settled {
+                            amount: U256::from(100),
+                        },
+                    )]),
+                },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
+        assert_eq!(open_batches(&pool).await, 0);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn batch_whose_nonce_was_consumed_elsewhere_is_abandoned_and_requeued(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+
+        set_submitted_at_in_the_past(&pool).await;
+        chain.set(|state| state.mined_nonce = 1);
+        worker.sweep_tick().await.unwrap();
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "deploying");
+        assert_eq!(row.sweep_batch_id, None);
+        assert_eq!(row.sweep_attempts, 1);
+        let resolution: String = sqlx::query_scalar("SELECT resolution FROM sweep_batches")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(resolution, "abandoned");
+
+        // The next batch uses the next nonce and lets the contract decide.
+        chain.set(|state| state.mine_at = Some(8));
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions()[1].nonce, 1);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn nonce_consumed_during_replacement_defers_to_the_next_pass(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+
+        set_submitted_at_in_the_past(&pool).await;
+        chain.set(|state| {
+            state.submit_error = Some(|| ChainError::NonceConsumed("nonce too low".into()))
+        });
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions().len(), 1);
+        assert_eq!(
+            open_batches(&pool).await,
+            1,
+            "still waiting for the receipt"
         );
-        let error = indexer.sweep_tick().await.unwrap_err();
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn exhausted_replacements_pause_the_sweep_worker_without_touching_indexing(pool: PgPool) {
+        let invoice = make_invoice(100);
+        let later = make_invoice(200);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        insert(&pool, &later, "key-2").await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        for _ in 0..2 {
+            set_submitted_at_in_the_past(&pool).await;
+            worker.sweep_tick().await.unwrap();
+        }
+        assert_eq!(chain.submissions().len(), 3);
+
+        set_submitted_at_in_the_past(&pool).await;
+        let error = worker.sweep_tick().await.unwrap_err();
+        assert!(matches!(error, IndexerError::SweepStalled(_)));
+        assert!(error.requires_halt());
+        assert_eq!(chain.submissions().len(), 3, "no further replacements");
+
+        // Indexing keeps going while the sweep worker is paused.
+        chain.set(|state| {
+            state.latest = 8;
+            state.finalized = 8;
+            state
+                .transfers
+                .push(transfer(later.payment_address.0, 200, 8, 0));
+        });
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &later).await.status, "funded");
+
+        // ...and resumes the moment the stuck transaction is found mined.
+        chain.set(|state| {
+            let tx_hash = state.submissions[2].tx_hash;
+            state.mined_nonce = 1;
+            state.receipts.insert(
+                tx_hash,
+                SweepReceipt {
+                    succeeded: true,
+                    block: 8,
+                    block_hash: block_hash(8),
+                    outcomes: HashMap::from([(
+                        invoice.payment_address.0,
+                        SweepOutcome::Settled {
+                            amount: U256::from(100),
+                        },
+                    )]),
+                },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn run_keeps_indexing_while_the_sweep_worker_is_paused(pool: PgPool) {
+        let stuck = make_invoice(100);
+        let later = make_invoice(200);
+        insert_funded(&pool, &stuck, "key-1", 1).await;
+        insert(&pool, &later, "key-2").await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let mut cfg = config();
+        cfg.sweep_max_submissions = 1;
+        cfg.sweep_pending_timeout = Duration::ZERO;
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(worker.run(shutdown_rx));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while chain.submissions().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the sweep worker must submit the stuck batch");
+        chain.set(|state| {
+            state.latest = 8;
+            state.finalized = 8;
+            state
+                .transfers
+                .push(transfer(later.payment_address.0, 200, 8, 0));
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if fetch(&pool, &later).await.status == "funded" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("indexing must continue while the sweep worker is paused");
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(chain.submissions().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn failed_submission_releases_the_claim_behind_backoff(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.submit_error = Some(|| ChainError::Transient("mock transient failure".into()))
+        }));
+        let worker = indexer(&pool, chain.clone());
+
+        let error = worker.sweep_tick().await.unwrap_err();
         assert!(matches!(
             error,
             IndexerError::Chain(ChainError::Transient(_))
         ));
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(
-            row.status, "deploying",
-            "claimed but not resolved -> retryable"
-        );
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "deploying");
         assert_eq!(row.sweep_attempts, 1);
-        assert!(row.last_attempt_at.is_some());
-        assert_eq!(row.blocked_reason, None);
+        assert_eq!(row.sweep_batch_id, None);
+        assert_eq!(open_batches(&pool).await, 0);
+
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn sweep_ignores_created_invoices(pool: PgPool) {
-        // A `created` (unfunded) invoice must not be swept.
+    async fn a_second_batch_is_never_submitted_while_one_is_in_flight(pool: PgPool) {
+        let pending = make_invoice(100);
+        let waiting = make_invoice(200);
+        insert_funded(&pool, &pending, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        insert_funded(&pool, &waiting, "key-2", 2).await;
+
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions().len(), 1);
+        assert_eq!(fetch(&pool, &waiting).await.status, "funded");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn claimed_invoices_left_by_a_crash_are_reclaimed(pool: PgPool) {
         let invoice = make_invoice(100);
-        insert(&pool, &invoice, "key-1").await;
-
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]));
-        indexer.sweep_tick().await.expect("sweep should succeed");
-
+        insert_funded(&pool, &invoice, "key-1", 1).await;
         let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "created");
+        // Claimed by a worker that died before recording its submission.
+        let claimed = repo
+            .claim_sweep_batch(CHAIN_ID, 20, 0.0, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].status, "deploying");
+
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn sweep_ignores_other_chains(pool: PgPool) {
-        // A funded invoice on another chain must not be swept by this indexer.
-        let invoice = Invoice::new(
+    async fn tampered_parameters_are_blocked_before_any_transaction(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        sqlx::query("UPDATE invoices SET beneficiary_address = $2 WHERE id = $1")
+            .bind(invoice.id.0)
+            .bind([9u8; 20].as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+
+        worker.sweep_tick().await.unwrap();
+        assert!(chain.submissions().is_empty());
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "blocked");
+        assert_eq!(row.blocked_reason.as_deref(), Some("parameters_mismatch"));
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn sweep_ignores_invoices_that_are_not_ready(pool: PgPool) {
+        let created = make_invoice(100);
+        let partial = make_invoice(100);
+        let other_chain = Invoice::new(
             factory(),
-            ChainId(1), // not CHAIN_ID
+            ChainId(1),
             TokenAddress(usdc()),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
-            1_900_000_000,
+            FAR_EXPIRY,
             RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
         );
-        insert_funded(&pool, &invoice, "key-1").await;
+        insert(&pool, &created, "a").await;
+        insert(&pool, &partial, "b").await;
+        insert(&pool, &other_chain, "c").await;
+        sqlx::query("UPDATE invoices SET status = 'funded', uncollected_count = 1 WHERE id = $1")
+            .bind(other_chain.id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let chain =
+            Arc::new(MockChain::new(2).with(|state| {
+                state.transfers = vec![transfer(partial.payment_address.0, 40, 1, 0)]
+            }));
+        let worker = indexer(&pool, chain.clone());
+        worker.tick().await.unwrap();
 
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]));
-        indexer.sweep_tick().await.expect("sweep should succeed");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(
-            row.status, "funded",
-            "other-chain invoice must be untouched"
-        );
+        worker.sweep_tick().await.unwrap();
+        assert!(chain.submissions().is_empty());
+        assert_eq!(fetch(&pool, &created).await.status, "created");
+        assert_eq!(fetch(&pool, &partial).await.status, "created");
+        assert_eq!(fetch(&pool, &other_chain).await.status, "funded");
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn claim_is_idempotent(pool: PgPool) {
-        // funded -> deploying claims exactly once; a second claim is empty.
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let first = repo
-            .claim_sweep_batch(CHAIN_ID, 1, 2.0, 300.0)
-            .await
-            .unwrap();
-        let second = repo
-            .claim_sweep_batch(CHAIN_ID, 1, 2.0, 300.0)
-            .await
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        assert!(second.is_empty());
-
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "deploying");
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn retryable_failures_never_make_an_invoice_terminal(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let repo = InvoiceRepository::new(pool.clone());
-        repo.claim_sweep_batch(CHAIN_ID, 1, 2.0, 300.0)
-            .await
-            .unwrap();
-
-        for _ in 0..20 {
-            assert!(repo.record_sweep_retry(invoice.id.0).await.unwrap());
+    async fn a_full_batch_settles_together_and_the_rest_waits(pool: PgPool) {
+        let invoices: Vec<Invoice> = (1..=(SWEEP_BATCH_LIMIT as u64 + 1))
+            .map(|i| make_invoice(i * 100))
+            .collect();
+        let chain = Arc::new(MockChain::new(7));
+        for (index, invoice) in invoices.iter().enumerate() {
+            insert(&pool, invoice, &format!("key-{index}")).await;
+            chain.set(|state| {
+                state.transfers.push(transfer(
+                    invoice.payment_address.0,
+                    invoice.amount.0.to::<u64>(),
+                    1,
+                    index as u64,
+                ))
+            });
         }
+        let worker = indexer(&pool, chain.clone());
+        worker.tick().await.unwrap();
 
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "deploying");
-        assert_eq!(row.blocked_reason, None);
-        assert_eq!(row.sweep_attempts, 20);
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn backoff_gates_deploying_reselection(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        let repo = InvoiceRepository::new(pool.clone());
-        repo.claim_sweep_batch(CHAIN_ID, 1, 2.0, 300.0)
-            .await
-            .unwrap();
-        // One failure just now: attempts=1, last_attempt_at=now().
-        repo.record_sweep_retry(invoice.id.0).await.unwrap();
-
-        // With a large base the backoff has not elapsed -> excluded.
-        let excluded = repo
-            .claim_sweep_batch(CHAIN_ID, 10, 1000.0, 100_000.0)
-            .await
-            .unwrap();
-        assert!(
-            !excluded.iter().any(|r| r.id == invoice.id.0),
-            "recently-failed invoice must wait for backoff"
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].sweeps.len(), SWEEP_BATCH_LIMIT as usize);
+        assert_eq!(
+            submissions[0].gas_limit,
+            sweep_batch_gas_limit(SWEEP_BATCH_LIMIT as usize)
+        );
+        let fulfilled: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM invoices WHERE status = 'fulfilled'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(fulfilled, SWEEP_BATCH_LIMIT);
+        assert_eq!(
+            fetch(&pool, invoices.last().unwrap()).await.status,
+            "funded"
         );
 
-        // With a zero base it is immediately eligible again -> included.
-        let included = repo
-            .claim_sweep_batch(CHAIN_ID, 10, 0.0, 0.0)
-            .await
-            .unwrap();
-        assert!(
-            included.iter().any(|r| r.id == invoice.id.0),
-            "invoice must be reselected once backoff elapses"
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            fetch(&pool, invoices.last().unwrap()).await.status,
+            "fulfilled"
         );
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn fulfilled_invoice_is_not_reswept(pool: PgPool) {
-        let invoice = make_invoice(100);
-        insert_funded(&pool, &invoice, "key-1").await;
-
-        // First pass fulfills it.
-        let indexer = indexer_with(&pool, MockChain::new(7, vec![]));
-        indexer.sweep_tick().await.expect("first sweep");
-
-        // A second pass must leave it fulfilled with the original tx hash/block
-        // (list_sweepable excludes terminal states).
-        let indexer2 = indexer_with(&pool, MockChain::new(9, vec![]));
-        indexer2.sweep_tick().await.expect("second sweep");
-
-        let repo = InvoiceRepository::new(pool.clone());
-        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
-        assert_eq!(row.status, "fulfilled");
-        assert_eq!(row.fulfilled_at_block, Some(7), "must not be re-fulfilled");
     }
 }

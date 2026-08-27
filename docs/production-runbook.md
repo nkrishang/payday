@@ -63,8 +63,20 @@ delegation is publicly visible.
   `0x754704Bc059F8C67012fEd69BC8A327a5aafb603`
 - USDC decimals: `6`
 - [Monad full finality](https://docs.monad.xyz/monad-arch/consensus/block-states):
-  block `N` is finalized when `N+2` is proposed, so this stack sets
-  `GATEWAY_FINALITY_CONFIRMATIONS=2`.
+  the node's `finalized` tag is "irreversible without a hard fork", so this
+  stack sets `GATEWAY_FINALITY_SOURCE=finalized` and subtracts
+  `GATEWAY_FINALITY_CONFIRMATIONS=2` more blocks as a margin against replica
+  skew behind the provider's load balancer. `latest` on Monad is the
+  speculatively executed proposed block and is never used for commits.
+- [Monad RPC differences](https://docs.monad.xyz/reference/rpc-differences):
+  QuickNode allows 100 blocks per `eth_getLogs` (`GATEWAY_LOG_RANGE_SIZE`),
+  `eth_getTransactionByHash` returns nothing for a transaction still in
+  flight, and the `pending` tag reads like `latest`. The sweep worker
+  therefore treats a helper transaction without a receipt after
+  `GATEWAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
+  detects a consumed nonce from the signer's mined transaction count.
+- Monad bills the gas *limit*: every helper transaction reserves
+  `100k + 400k × items` gas of MON from the sweep signer.
 
 Reconfirm the USDC address against Circle's official contract-address page
 before every new production environment.
@@ -89,6 +101,13 @@ explicitly verified.
 privileged administrative key. Use a dedicated
 deployment wallet rather than the KMS sweep key, and retain its transaction
 record even though it has no post-deployment authority.
+
+Every counterfactual payment address is derived from the factory address, so
+a factory can never be replaced once a real invoice exists: deploy the final
+`Payment`/`PaymentFactory` code before the first production invoice, and
+treat any later contract change as a new deployment with its own database.
+`BatchSweeper` holds no state and may be redeployed at any time; the indexer
+verifies at startup that it points at the configured factory.
 
 For an encrypted Foundry keystore:
 
@@ -261,12 +280,15 @@ cargo run --release -p gateway-cli -- invoice create \
 
 Pay exactly 0.01 native USDC to the returned payment address. Confirm that:
 
-1. CLI status progresses `created → funded → deploying → fulfilled`.
+1. CLI status progresses `created → funded → deploying → fulfilled`, with
+   `received_base_units`, `execute_tx_hash`, and `resolved_at_block` set.
 2. The beneficiary receives the USDC.
 3. `balanceOf(payment_address)` becomes zero.
-4. `cast code payment_address` is non-empty.
-5. API and indexer logs contain no repeated errors.
-6. CloudWatch alarms and RDS backups are configured.
+4. `cast call payment_address 'settled()(bool)'` returns `true`.
+5. Send a second, small payment to the same address and confirm it reaches
+   the recovery wallet within a minute while the status stays `fulfilled`.
+6. API and indexer logs contain no repeated errors.
+7. CloudWatch alarms and RDS backups are configured.
 
 Do not advertise or depend on the service until this succeeds.
 
@@ -288,10 +310,12 @@ and creates the GitHub Release.
 
 - Keep RDS deletion protection enabled and periodically test point-in-time
   restoration into a non-production database.
-- Monitor indexer task count, fatal-worker alarm, target health, database
-  capacity, RPC errors, signer MON balance, oldest unfulfilled invoice, and
-  indexer cursor lag. Permanent safety errors and loss of the retained database
-  advisory-lock connection terminate the worker instead of appearing healthy.
+- The worker raises its own alarms for a paused sweep, a low signer balance,
+  cursor lag, a stale sweep backlog, and sustained retryable failures; see
+  `docs/runbooks/daily-monitoring.md`. Permanent safety errors in the block
+  indexer and loss of the retained database advisory-lock connection
+  terminate the worker instead of appearing healthy; a stuck helper
+  transaction only pauses the sweep worker.
 - Replace account API keys with `gateway-cli account create` as described in the
   secrets-rotation runbook; replacement is immediate and does not restart services.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone

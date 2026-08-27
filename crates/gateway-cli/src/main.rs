@@ -186,10 +186,13 @@ fn format_invoice(inv: &InvoiceResponse, as_json: bool) -> String {
     if as_json {
         return serde_json::to_string_pretty(inv).expect("invoice response must serialize");
     }
+    let optional = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".into());
     format!(
-        "Invoice {}\n  status           {}\n  chain id         {}\n  payment address  {}\n  amount           {} ({} base units)\n  token            {} [{}, {} decimals]\n  beneficiary      {}\n  expires at       {}\n  recovery         {}\n  factory          {}\n  salt             {}",
+        "Invoice {}\n  status           {}\n  received         {} ({} base units)\n  chain id         {}\n  payment address  {} (single use; valid while status is created)\n  amount           {} ({} base units)\n  token            {} [{}, {} decimals]\n  beneficiary      {}\n  expires at       {}\n  recovery         {}\n  factory          {}\n  salt             {}\n  execute tx       {}\n  resolved block   {}\n  blocked reason   {}",
         inv.id,
         inv.status,
+        inv.received,
+        inv.received_base_units,
         inv.chain_id,
         inv.payment_address,
         inv.amount,
@@ -201,7 +204,10 @@ fn format_invoice(inv: &InvoiceResponse, as_json: bool) -> String {
         inv.expiration_timestamp,
         inv.recovery_address,
         inv.factory_address,
-        inv.salt
+        inv.salt,
+        optional(&inv.execute_tx_hash),
+        optional(&inv.resolved_at_block),
+        optional(&inv.blocked_reason),
     )
 }
 

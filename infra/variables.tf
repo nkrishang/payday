@@ -104,8 +104,9 @@ variable "usdc_start_block" {
 }
 
 variable "finality_confirmations" {
-  type    = number
-  default = 2
+  description = "Blocks subtracted from the node's finalized tag before a range is committed; a small margin against replica skew behind the provider's load balancer."
+  type        = number
+  default     = 2
   validation {
     condition     = var.finality_confirmations >= 0 && var.finality_confirmations <= 10000 && floor(var.finality_confirmations) == var.finality_confirmations
     error_message = "finality_confirmations must be an integer from 0 through 10000."
@@ -122,9 +123,9 @@ variable "log_range_size" {
 }
 
 variable "indexer_poll_interval_ms" {
-  description = "Indexer poll interval in milliseconds. Higher values reduce RPC calls and QuickNode credit usage at the cost of payment detection latency."
+  description = "Idle poll interval in milliseconds for both worker loops. Each tick drains every finalized range up to GATEWAY_INDEXER_MAX_RANGES_PER_TICK, so this only sets detection latency: the eth_getLogs volume is fixed by Monad's block rate (~90 calls/hour at QuickNode's 100-block cap) and an idle tick costs two cheap calls."
   type        = number
-  default     = 60000
+  default     = 5000
   validation {
     condition     = var.indexer_poll_interval_ms >= 1000 && var.indexer_poll_interval_ms <= 300000 && floor(var.indexer_poll_interval_ms) == var.indexer_poll_interval_ms
     error_message = "indexer_poll_interval_ms must be an integer from 1000 through 300000."

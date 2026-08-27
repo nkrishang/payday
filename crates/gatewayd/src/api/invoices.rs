@@ -1,6 +1,7 @@
 //! POST /v1/invoices and GET /v1/invoices/:id handlers.
 
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, U256};
 use axum::Extension;
@@ -17,6 +18,15 @@ use gateway_core::{
 use crate::api::error::ApiError;
 use crate::state::AppState;
 use gateway_db::{AccountId, CreateInvoiceInput, DbInvoice};
+
+/// An invoice must stay payable for at least this long. It leaves room for
+/// the payer to act and for finality plus a sweep to land before the contract
+/// starts routing to the recovery address.
+pub const MIN_EXPIRATION_LEAD_SECS: u64 = 10 * 60;
+/// Upper bound on the deadline. Catches timestamps given in milliseconds or
+/// otherwise nonsensical values while still allowing long-lived invoices.
+pub const MAX_EXPIRATION_LEAD_SECS: u64 = 366 * 24 * 60 * 60;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
@@ -43,6 +53,11 @@ pub async fn create_invoice(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .ok_or_else(ApiError::missing_idempotency_key)?;
+    if idempotency_key.is_empty() || idempotency_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        return Err(ApiError::invalid_request(format!(
+            "Idempotency-Key must be 1 to {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
+        )));
+    }
 
     // 2. Parse and validate request fields.
     let chain_id: u64 = req
@@ -54,14 +69,15 @@ pub async fn create_invoice(
         .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))?;
     let beneficiary_addr = Address::from_str(&req.beneficiary_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid beneficiary_address: {e}")))?;
+    if beneficiary_addr.is_zero() {
+        return Err(ApiError::invalid_request(
+            "beneficiary_address must not be the zero address",
+        ));
+    }
     let expiration_timestamp: u64 = req.expiration_timestamp.parse().map_err(|_| {
         ApiError::invalid_request("expiration_timestamp must be a uint64 Unix timestamp string")
     })?;
-    if expiration_timestamp > i64::MAX as u64 {
-        return Err(ApiError::invalid_request(
-            "expiration_timestamp exceeds the supported Unix timestamp range",
-        ));
-    }
+    validate_expiration(expiration_timestamp, unix_now())?;
     let recovery_addr = Address::from_str(&req.recovery_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid recovery_address: {e}")))?;
     if recovery_addr.is_zero() {
@@ -171,6 +187,29 @@ pub async fn get_invoice(
     Ok(Json(to_response(row)?))
 }
 
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// The deadline must give the payer and the sweep pipeline room, and must be
+/// a plausible seconds-based timestamp.
+fn validate_expiration(expiration_timestamp: u64, now: u64) -> Result<(), ApiError> {
+    if expiration_timestamp < now.saturating_add(MIN_EXPIRATION_LEAD_SECS) {
+        return Err(ApiError::invalid_request(format!(
+            "expiration_timestamp must be at least {MIN_EXPIRATION_LEAD_SECS} seconds in the future"
+        )));
+    }
+    if expiration_timestamp > now.saturating_add(MAX_EXPIRATION_LEAD_SECS) {
+        return Err(ApiError::invalid_request(format!(
+            "expiration_timestamp must be at most {MAX_EXPIRATION_LEAD_SECS} seconds in the future (Unix seconds, not milliseconds)"
+        )));
+    }
+    Ok(())
+}
+
 /// Compare a persisted DB row against request parameters for idempotency replay.
 fn same_request(
     row: &DbInvoice,
@@ -189,4 +228,30 @@ fn same_request(
         && U256::from_str_radix(&row.amount, 10)
             .map(|a| &a == amount)
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expiration_must_sit_inside_the_allowed_window() {
+        let now = 1_800_000_000;
+        assert!(validate_expiration(now + MIN_EXPIRATION_LEAD_SECS, now).is_ok());
+        assert!(validate_expiration(now + MAX_EXPIRATION_LEAD_SECS, now).is_ok());
+        for invalid in [
+            0,
+            now - 1,
+            now,
+            now + MIN_EXPIRATION_LEAD_SECS - 1,
+            now + MAX_EXPIRATION_LEAD_SECS + 1,
+            (now + 3600) * 1000, // milliseconds by mistake
+            u64::MAX,
+        ] {
+            assert!(
+                validate_expiration(invalid, now).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
+    }
 }

@@ -288,6 +288,7 @@ resource "aws_ecs_task_definition" "indexer" {
     environment = concat(local.common_environment, [
       { name = "GATEWAY_KMS_KEY_ID", value = aws_kms_key.signer.arn },
       { name = "GATEWAY_USDC_START_BLOCK", value = tostring(var.usdc_start_block) },
+      { name = "GATEWAY_FINALITY_SOURCE", value = "finalized" },
       { name = "GATEWAY_FINALITY_CONFIRMATIONS", value = tostring(var.finality_confirmations) },
       { name = "GATEWAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) },
       { name = "GATEWAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) }
@@ -514,6 +515,66 @@ resource "aws_cloudwatch_metric_alarm" "indexer_fatal" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
+# Worker conditions that do not end the process. Each is logged on every
+# pass while it holds, so the alarm stays raised until the condition clears.
+locals {
+  indexer_log_alarms = {
+    sweep_paused = {
+      pattern     = "\"sweep worker paused\""
+      period      = 60
+      description = "The sweep worker cannot resolve its in-flight batch; see docs/runbooks/stuck-invoice.md"
+    }
+    signer_low_balance = {
+      pattern     = "\"sweep signer balance low\""
+      period      = 300
+      description = "The KMS sweep signer is below GATEWAY_SIGNER_LOW_BALANCE_WEI; fund it"
+    }
+    cursor_lagging = {
+      pattern     = "\"indexer cursor lagging\""
+      period      = 60
+      description = "The block indexer trails finality by more than a thousand blocks"
+    }
+    sweep_backlog_stale = {
+      pattern     = "\"sweep backlog stale\""
+      period      = 300
+      description = "Collectable funds have waited more than fifteen minutes"
+    }
+    retryable_failures = {
+      pattern     = "?\"sweep pass failed\" ?\"indexer poll failed\""
+      period      = 300
+      description = "Sustained retryable RPC or database failures in the worker"
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "indexer" {
+  for_each       = local.indexer_log_alarms
+  name           = "${var.name}-indexer-${replace(each.key, "_", "-")}"
+  log_group_name = aws_cloudwatch_log_group.indexer.name
+  pattern        = each.value.pattern
+  metric_transformation {
+    name      = "Indexer${title(replace(each.key, "_", ""))}"
+    namespace = var.name
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "indexer" {
+  for_each            = local.indexer_log_alarms
+  alarm_name          = "${var.name}-indexer-${replace(each.key, "_", "-")}"
+  alarm_description   = each.value.description
+  namespace           = var.name
+  metric_name         = aws_cloudwatch_log_metric_filter.indexer[each.key].metric_transformation[0].name
+  statistic           = "Sum"
+  period              = each.value.period
+  evaluation_periods  = 1
+  threshold           = each.key == "retryable_failures" ? 10 : 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
 resource "aws_cloudwatch_metric_alarm" "db_cpu" {
   alarm_name          = "${var.name}-db-high-cpu"
   namespace           = "AWS/RDS"

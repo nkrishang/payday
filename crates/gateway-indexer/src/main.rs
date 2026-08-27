@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 use chain::ChainClient;
 use config::SignerConfig;
+use indexer::{IndexerConfig, SWEEP_BACKOFF_BASE_SECS, SWEEP_BACKOFF_CAP_SECS};
 
 const INDEXER_ADVISORY_LOCK_ID: i64 = 0x5041_5944_4159;
 
@@ -74,6 +75,11 @@ async fn main() {
         config.factory_address(),
         "configured BatchSweeper is bound to a different PaymentFactory"
     );
+    // The finality source must be answerable before any range is committed.
+    chain_client
+        .finalized_block_number()
+        .await
+        .expect("failed to query the finalized block from RPC");
 
     let repo = gateway_db::InvoiceRepository::new(pool.clone());
     let cursor = gateway_db::CursorRepository::new(pool.clone());
@@ -86,14 +92,24 @@ async fn main() {
         repo,
         cursor,
         chain,
-        config.chain_id(),
-        config.factory_address(),
-        config.batch_sweeper_address(),
-        config.usdc_address(),
-        config.usdc_start_block(),
-        config.finality_confirmations(),
-        config.log_range_size(),
-        Duration::from_millis(config.indexer_poll_interval_ms()),
+        IndexerConfig {
+            chain_id: config.chain_id(),
+            factory: config.factory_address(),
+            batch_sweeper: config.batch_sweeper_address(),
+            usdc: config.usdc_address(),
+            usdc_start_block: config.usdc_start_block(),
+            finality_source: config.finality_source(),
+            finality_confirmations: config.finality_confirmations(),
+            log_range_size: config.log_range_size(),
+            max_ranges_per_tick: config.max_ranges_per_tick(),
+            poll_interval: config.indexer_poll_interval(),
+            sweep_pending_timeout: config.sweep_pending_timeout(),
+            sweep_max_submissions: config.sweep_max_submissions(),
+            sweep_max_attempts: config.sweep_max_attempts(),
+            sweep_backoff_base_secs: SWEEP_BACKOFF_BASE_SECS,
+            sweep_backoff_cap_secs: SWEEP_BACKOFF_CAP_SECS,
+            signer_low_balance_wei: config.signer_low_balance_wei(),
+        },
     );
     let worker = worker.run(shutdown_rx);
     let lock_monitor = monitor_indexer_lock(&mut lock_connection);

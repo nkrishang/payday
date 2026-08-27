@@ -5,6 +5,12 @@
 //! RPC. [`AlloyChainClient`] is the production implementation backed by an Alloy
 //! HTTP provider with a signing wallet (the backend key that calls
 //! `BatchSweeper.executeBatch`).
+//!
+//! Only standard JSON-RPC is used, and state reads pin a block *number* whose
+//! canonical hash the caller has already verified, so nothing depends on
+//! EIP-1898 block-hash parameters being supported by the provider.
+
+use std::collections::HashMap;
 
 use alloy_network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -15,11 +21,13 @@ use alloy_transport::TransportError;
 use async_trait::async_trait;
 use thiserror::Error;
 
-/// Gas provisioned for each isolated factory execution. Estimation cannot infer
-/// this safely because an out-of-gas inner call is caught by BatchSweeper and
-/// therefore looks like a successful outer transaction.
-const SWEEP_BATCH_BASE_GAS: u64 = 100_000;
-const SWEEP_GAS_PER_ITEM: u64 = 300_000;
+/// Gas provisioned for each isolated item. The helper transaction is not
+/// simulated: an out-of-gas item is caught by BatchSweeper and would look like
+/// a successful outer transaction, so the budget is fixed and verified by
+/// `BatchSweeper.t.sol` against a full batch. Monad bills the limit, so this is
+/// also the price of a sweep.
+pub const SWEEP_BATCH_BASE_GAS: u64 = 100_000;
+pub const SWEEP_GAS_PER_ITEM: u64 = 400_000;
 
 sol! {
     struct Sweep {
@@ -32,10 +40,16 @@ sol! {
     }
 
     function executeBatch(Sweep[] sweeps);
-
     function factory() view returns (address);
+    function settled() view returns (bool);
+    function paused() view returns (bool);
+    function isBlacklisted(address account) view returns (bool);
+    function balanceOf(address account) view returns (uint256);
 
     event SweepFailed(address indexed paymentAddress, address indexed token, bytes revertData);
+    event SweepRecovered(address indexed paymentAddress, address indexed token, uint256 amount);
+    event Settled(address indexed receiver, uint256 amount);
+    event Recovered(address indexed recovery, uint256 amount);
 }
 
 /// A validated USDC `Transfer` log with the metadata needed for durable ordering.
@@ -49,6 +63,40 @@ pub struct UsdcTransfer {
     pub sender: Address,
     pub recipient: Address,
     pub amount: U256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockHeader {
+    pub number: u64,
+    pub hash: B256,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeeEstimate {
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+}
+
+impl FeeEstimate {
+    /// The smallest bump most nodes accept for a same-nonce replacement is
+    /// 10%; use 12.5% so rounding can never fall short.
+    pub fn bumped(self) -> Self {
+        let bump = |fee: u128| fee + fee / 8 + 1;
+        Self {
+            max_fee_per_gas: bump(self.max_fee_per_gas),
+            max_priority_fee_per_gas: bump(self.max_priority_fee_per_gas),
+        }
+    }
+
+    pub fn max(self, other: Self) -> Self {
+        Self {
+            max_fee_per_gas: self.max_fee_per_gas.max(other.max_fee_per_gas),
+            max_priority_fee_per_gas: self
+                .max_priority_fee_per_gas
+                .max(other.max_priority_fee_per_gas),
+        }
+    }
 }
 
 /// Errors from talking to the chain over RPC.
@@ -69,15 +117,18 @@ pub enum ChainError {
     #[error("eth_getLogs range is too large: {0}")]
     LogRangeTooLarge(String),
 
+    /// The submitted nonce is already mined: either an earlier submission for
+    /// this batch landed or another transaction from the signer consumed it.
+    #[error("nonce already consumed: {0}")]
+    NonceConsumed(String),
+
     /// Previously committed canonical history no longer agrees with the RPC.
     /// All irreversible activity for this chain must halt.
     #[error("finality violation: {0}")]
     FinalityViolation(String),
 
-    /// A sweep did not confirm for a non-deterministic reason (the transaction
-    /// was not mined, or a read failed) and should be retried. Distinct from a
-    /// per-item contract revert, which is reported in the batch receipt.
-    #[error("transient sweep failure: {0}")]
+    /// A read failed for a non-deterministic reason and should be retried.
+    #[error("transient chain failure: {0}")]
     Transient(String),
 }
 
@@ -148,16 +199,11 @@ impl ChainError {
     }
 }
 
-fn is_execution_revert(err: &TransportError) -> bool {
-    let Some(payload) = err.as_error_resp() else {
-        return false;
-    };
-    let message = payload.message.to_ascii_lowercase();
-    payload.code == 3
-        || payload.code == -32015
-        || (payload.code == -32000
-            && (message.contains("execution reverted") || message.contains("vm execution error")))
-        || payload.as_revert_data().is_some()
+fn is_nonce_consumed(err: &TransportError) -> bool {
+    err.as_error_resp().is_some_and(|payload| {
+        let message = payload.message.to_ascii_lowercase();
+        message.contains("nonce too low") || message.contains("nonce is too low")
+    })
 }
 
 fn is_log_range_too_large(err: &TransportError) -> bool {
@@ -190,63 +236,101 @@ pub struct SweepRequest {
     pub salt: B256,
 }
 
+/// What one helper-transaction item did to its payment address, decoded from
+/// the batch receipt. Exactly one applies per item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SweepOutcome {
+    /// `Payment` was deployed and paid the receiver.
+    Settled { amount: U256 },
+    /// `Payment` was deployed after expiry and paid the recovery address.
+    Recovered { amount: U256 },
+    /// `Payment` already existed; `recover` forwarded `amount` (possibly zero).
+    Collected { amount: U256 },
+    /// `execute` or `recover` reverted. The bytes are `DeploymentFailed()` for
+    /// any constructor failure, so they cannot classify the cause.
+    Failed { revert_data: Bytes },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweepReceipt {
     pub succeeded: bool,
     pub block: u64,
     pub block_hash: B256,
-    /// Per-item failures emitted by the configured BatchSweeper. Revert bytes
-    /// are deliberately not used for classification.
-    pub failures: Vec<(Address, Address)>,
+    pub outcomes: HashMap<Address, SweepOutcome>,
+}
+
+/// Token-level facts read at a pinned block to classify a failed item.
+/// `None` means the token does not expose that view (or the call failed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailureProbe {
+    /// A `Payment` exists, so the failed call was `recover` (destination: recovery).
+    pub code_present: bool,
+    pub paused: Option<bool>,
+    pub payment_blacklisted: Option<bool>,
+    pub receiver_blacklisted: Option<bool>,
+    pub recovery_blacklisted: Option<bool>,
+    pub balance: Option<U256>,
 }
 
 /// Chain access needed by the indexer. Standard Ethereum JSON-RPC methods keep
 /// the implementation compatible with QuickNode and local Anvil.
 #[async_trait]
 pub trait ChainClient: Send + Sync {
-    /// Current canonical head block number.
-    async fn get_block_number(&self) -> Result<u64, ChainError>;
+    /// Newest block number the node reports.
+    async fn latest_block_number(&self) -> Result<u64, ChainError>;
 
-    /// Canonical block hash at an exact height.
-    async fn get_block_hash(&self, block: u64) -> Result<B256, ChainError>;
+    /// Block number behind the node's `finalized` tag.
+    async fn finalized_block_number(&self) -> Result<u64, ChainError>;
 
-    /// Whether the deterministic Payment contract currently exists.
-    async fn payment_deployed(&self, address: Address) -> Result<bool, ChainError>;
-
-    /// Whether Payment code existed at an exact canonical block.
-    async fn payment_deployed_at(
-        &self,
-        address: Address,
-        block_hash: B256,
-    ) -> Result<bool, ChainError>;
-
-    /// Whether a submitted transaction is still known to the node/mempool.
-    async fn transaction_known(&self, tx_hash: B256) -> Result<bool, ChainError>;
-
-    /// Whether the signer has a transaction occupying the next mined nonce.
-    async fn signer_has_pending_transaction(&self) -> Result<bool, ChainError>;
-
-    /// Mined receipt for a submitted sweep, or `None` while still pending.
-    async fn get_sweep_receipt(
-        &self,
-        tx_hash: B256,
-        batch_sweeper: Address,
-    ) -> Result<Option<SweepReceipt>, ChainError>;
+    /// Canonical header at an exact height; `Transient` if the node lacks it.
+    async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError>;
 
     /// Successful USDC `Transfer` logs in an inclusive block range.
-    async fn get_usdc_transfers(
+    async fn usdc_transfers(
         &self,
         token: Address,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<UsdcTransfer>, ChainError>;
 
-    /// Submit one helper transaction that independently executes every sweep.
+    /// Mined receipt for a helper transaction, or `None` while unmined.
+    async fn sweep_receipt(
+        &self,
+        tx_hash: B256,
+        batch_sweeper: Address,
+    ) -> Result<Option<SweepReceipt>, ChainError>;
+
+    /// The signer's mined (`latest`) or queued (`pending`) transaction count.
+    async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError>;
+
+    async fn signer_balance(&self) -> Result<U256, ChainError>;
+
+    async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError>;
+
+    /// Submit one helper transaction with an explicit nonce and fees so the
+    /// same call can replace an unconfirmed submission.
     async fn submit_sweep_batch(
         &self,
         batch_sweeper: Address,
         sweeps: &[SweepRequest],
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
     ) -> Result<B256, ChainError>;
+
+    /// `Payment.settled()` at a block whose hash the caller verified.
+    async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
+
+    /// Read the token facts that distinguish a transient failure from a
+    /// permanent one, at a block whose hash the caller verified.
+    async fn probe_failure(
+        &self,
+        token: Address,
+        payment: Address,
+        receiver: Address,
+        recovery: Address,
+        block: u64,
+    ) -> Result<FailureProbe, ChainError>;
 }
 
 /// Production [`ChainClient`] backed by an Alloy HTTP provider with a signing
@@ -263,7 +347,6 @@ impl AlloyChainClient {
     pub async fn connect(rpc_url: &str, wallet: EthereumWallet) -> Result<Self, ChainError> {
         let signer = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
         let provider = ProviderBuilder::new()
-            .with_simple_nonce_management()
             .wallet(wallet)
             .connect(rpc_url)
             .await
@@ -287,12 +370,8 @@ impl AlloyChainClient {
         &self,
         batch_sweeper: Address,
     ) -> Result<Address, ChainError> {
-        let tx = TransactionRequest::default()
-            .with_to(batch_sweeper)
-            .with_input(factoryCall {}.abi_encode());
         let output = self
-            .provider
-            .call(tx)
+            .call_at(batch_sweeper, factoryCall {}.abi_encode().into(), None)
             .await
             .map_err(|error| ChainError::rpc("eth_call BatchSweeper.factory", error))?;
         factoryCall::abi_decode_returns(&output).map_err(|error| {
@@ -302,16 +381,24 @@ impl AlloyChainClient {
         })
     }
 
-    /// Whether an address has contract code deployed. `execute` deploying the
-    /// `Payment` contract is the only way code lands at a payment address, so
-    /// code present means the sweep already happened.
-    async fn has_code(&self, addr: Address) -> Result<bool, ChainError> {
-        let code = self
-            .provider
-            .get_code_at(addr)
-            .await
-            .map_err(|error| ChainError::rpc("eth_getCode", error))?;
-        Ok(!code.is_empty())
+    async fn call_at(
+        &self,
+        to: Address,
+        input: Bytes,
+        block: Option<u64>,
+    ) -> Result<Bytes, TransportError> {
+        let tx = TransactionRequest::default().with_to(to).with_input(input);
+        let call = self.provider.call(tx);
+        match block {
+            Some(number) => call.block(BlockId::number(number)).await,
+            None => call.await,
+        }
+    }
+
+    /// A view call whose absence on the token is a fact, not a failure.
+    async fn optional_bool(&self, to: Address, input: Bytes, block: u64) -> Option<bool> {
+        let output = self.call_at(to, input, Some(block)).await.ok()?;
+        (output.len() == 32).then(|| output[31] == 1)
     }
 
     fn execute_batch_calldata(sweeps: &[SweepRequest]) -> Bytes {
@@ -332,121 +419,47 @@ impl AlloyChainClient {
         .into()
     }
 
-    fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
-        SWEEP_BATCH_BASE_GAS.saturating_add(
-            SWEEP_GAS_PER_ITEM.saturating_mul(u64::try_from(sweep_count).unwrap_or(u64::MAX)),
-        )
+    async fn header(&self, tag: BlockNumberOrTag) -> Result<BlockHeader, ChainError> {
+        self.provider
+            .get_block_by_number(tag)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getBlockByNumber", error))?
+            .map(|block| BlockHeader {
+                number: block.header.number,
+                hash: block.header.hash,
+                timestamp: block.header.timestamp,
+            })
+            .ok_or_else(|| ChainError::Transient(format!("block {tag} is unavailable")))
     }
+}
+
+/// Gas limit for a helper transaction carrying `sweep_count` items.
+pub fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
+    SWEEP_BATCH_BASE_GAS.saturating_add(
+        SWEEP_GAS_PER_ITEM.saturating_mul(u64::try_from(sweep_count).unwrap_or(u64::MAX)),
+    )
 }
 
 #[async_trait]
 impl ChainClient for AlloyChainClient {
-    async fn get_block_number(&self) -> Result<u64, ChainError> {
+    async fn latest_block_number(&self) -> Result<u64, ChainError> {
         self.provider
             .get_block_number()
             .await
             .map_err(|error| ChainError::rpc("eth_blockNumber", error))
     }
 
-    async fn get_block_hash(&self, block: u64) -> Result<B256, ChainError> {
-        self.provider
-            .get_block_by_number(BlockNumberOrTag::Number(block))
+    async fn finalized_block_number(&self) -> Result<u64, ChainError> {
+        self.header(BlockNumberOrTag::Finalized)
             .await
-            .map_err(|error| ChainError::rpc("eth_getBlockByNumber", error))?
-            .map(|block| block.header.hash)
-            .ok_or_else(|| ChainError::Transient(format!("block {block} is unavailable")))
+            .map(|header| header.number)
     }
 
-    async fn payment_deployed(&self, address: Address) -> Result<bool, ChainError> {
-        self.has_code(address).await
+    async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError> {
+        self.header(BlockNumberOrTag::Number(number)).await
     }
 
-    async fn payment_deployed_at(
-        &self,
-        address: Address,
-        block_hash: B256,
-    ) -> Result<bool, ChainError> {
-        let code = self
-            .provider
-            .get_code_at(address)
-            .block_id(BlockId::hash_canonical(block_hash))
-            .await
-            .map_err(|error| ChainError::rpc("eth_getCode", error))?;
-        Ok(!code.is_empty())
-    }
-
-    async fn transaction_known(&self, tx_hash: B256) -> Result<bool, ChainError> {
-        self.provider
-            .get_transaction_by_hash(tx_hash)
-            .await
-            .map(|transaction| transaction.is_some())
-            .map_err(|error| ChainError::rpc("eth_getTransactionByHash", error))
-    }
-
-    async fn signer_has_pending_transaction(&self) -> Result<bool, ChainError> {
-        let latest = self
-            .provider
-            .get_transaction_count(self.signer)
-            .await
-            .map_err(|error| ChainError::rpc("eth_getTransactionCount latest", error))?;
-        let pending = self
-            .provider
-            .get_transaction_count(self.signer)
-            .pending()
-            .await
-            .map_err(|error| ChainError::rpc("eth_getTransactionCount pending", error))?;
-        Ok(pending > latest)
-    }
-
-    async fn get_sweep_receipt(
-        &self,
-        tx_hash: B256,
-        batch_sweeper: Address,
-    ) -> Result<Option<SweepReceipt>, ChainError> {
-        let Some(receipt) = self
-            .provider
-            .get_transaction_receipt(tx_hash)
-            .await
-            .map_err(|error| ChainError::rpc("eth_getTransactionReceipt", error))?
-        else {
-            return Ok(None);
-        };
-        if receipt.to != Some(batch_sweeper) {
-            return Err(ChainError::FinalityViolation(format!(
-                "sweep transaction {tx_hash} targeted {:?}, not configured BatchSweeper {batch_sweeper}",
-                receipt.to
-            )));
-        }
-        let block = receipt.block_number.ok_or_else(|| {
-            ChainError::Transient("execute receipt has no block number".to_string())
-        })?;
-        let block_hash = receipt.block_hash.ok_or_else(|| {
-            ChainError::Transient("execute receipt has no block hash".to_string())
-        })?;
-        let failures = receipt
-            .logs()
-            .iter()
-            .filter(|log| log.address() == batch_sweeper)
-            .filter(|log| log.topics().first() == Some(&SweepFailed::SIGNATURE_HASH))
-            .map(|log| {
-                SweepFailed::decode_log(&log.inner)
-                    .map(|log| (log.data.paymentAddress, log.data.token))
-                    .map_err(|error| {
-                        ChainError::Transient(format!(
-                            "malformed SweepFailed event in {tx_hash}: {error}"
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(SweepReceipt {
-            succeeded: receipt.status(),
-            block,
-            block_hash,
-            failures,
-        }))
-    }
-
-    async fn get_usdc_transfers(
+    async fn usdc_transfers(
         &self,
         token: Address,
         from_block: u64,
@@ -514,23 +527,195 @@ impl ChainClient for AlloyChainClient {
             .collect()
     }
 
+    async fn sweep_receipt(
+        &self,
+        tx_hash: B256,
+        batch_sweeper: Address,
+    ) -> Result<Option<SweepReceipt>, ChainError> {
+        let Some(receipt) = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionReceipt", error))?
+        else {
+            return Ok(None);
+        };
+        if receipt.to != Some(batch_sweeper) {
+            return Err(ChainError::FinalityViolation(format!(
+                "sweep transaction {tx_hash} targeted {:?}, not configured BatchSweeper {batch_sweeper}",
+                receipt.to
+            )));
+        }
+        let block = receipt.block_number.ok_or_else(|| {
+            ChainError::Transient("execute receipt has no block number".to_string())
+        })?;
+        let block_hash = receipt.block_hash.ok_or_else(|| {
+            ChainError::Transient("execute receipt has no block hash".to_string())
+        })?;
+
+        let malformed = |event: &str, error: alloy_sol_types::Error| {
+            ChainError::Transient(format!("malformed {event} event in {tx_hash}: {error}"))
+        };
+        let mut outcomes = HashMap::new();
+        // Payment events describe fresh deployments; sweeper events describe
+        // items that hit an existing deployment or failed. A `Recovered`
+        // emitted by `recover` is superseded by the sweeper's `SweepRecovered`.
+        for log in receipt.logs() {
+            let Some(topic) = log.topics().first() else {
+                continue;
+            };
+            if log.address() == batch_sweeper {
+                if *topic == SweepFailed::SIGNATURE_HASH {
+                    let event = SweepFailed::decode_log(&log.inner)
+                        .map_err(|error| malformed("SweepFailed", error))?;
+                    outcomes.insert(
+                        event.data.paymentAddress,
+                        SweepOutcome::Failed {
+                            revert_data: event.data.revertData.clone(),
+                        },
+                    );
+                } else if *topic == SweepRecovered::SIGNATURE_HASH {
+                    let event = SweepRecovered::decode_log(&log.inner)
+                        .map_err(|error| malformed("SweepRecovered", error))?;
+                    outcomes.insert(
+                        event.data.paymentAddress,
+                        SweepOutcome::Collected {
+                            amount: event.data.amount,
+                        },
+                    );
+                }
+            } else if *topic == Settled::SIGNATURE_HASH {
+                let event =
+                    Settled::decode_log(&log.inner).map_err(|error| malformed("Settled", error))?;
+                outcomes.insert(
+                    log.address(),
+                    SweepOutcome::Settled {
+                        amount: event.data.amount,
+                    },
+                );
+            } else if *topic == Recovered::SIGNATURE_HASH {
+                let event = Recovered::decode_log(&log.inner)
+                    .map_err(|error| malformed("Recovered", error))?;
+                outcomes
+                    .entry(log.address())
+                    .or_insert(SweepOutcome::Recovered {
+                        amount: event.data.amount,
+                    });
+            }
+        }
+        Ok(Some(SweepReceipt {
+            succeeded: receipt.status(),
+            block,
+            block_hash,
+            outcomes,
+        }))
+    }
+
+    async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError> {
+        let count = self.provider.get_transaction_count(self.signer);
+        if pending {
+            count.pending().await
+        } else {
+            count.await
+        }
+        .map_err(|error| ChainError::rpc("eth_getTransactionCount", error))
+    }
+
+    async fn signer_balance(&self) -> Result<U256, ChainError> {
+        self.provider
+            .get_balance(self.signer)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getBalance", error))
+    }
+
+    async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError> {
+        self.provider
+            .estimate_eip1559_fees()
+            .await
+            .map(|estimate| FeeEstimate {
+                max_fee_per_gas: estimate.max_fee_per_gas,
+                max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
+            })
+            .map_err(|error| ChainError::rpc("eth_feeHistory", error))
+    }
+
     async fn submit_sweep_batch(
         &self,
         batch_sweeper: Address,
         sweeps: &[SweepRequest],
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
     ) -> Result<B256, ChainError> {
         let tx = TransactionRequest::default()
             .with_to(batch_sweeper)
-            .with_gas_limit(Self::sweep_batch_gas_limit(sweeps.len()))
+            .with_nonce(nonce)
+            .with_gas_limit(gas_limit)
+            .with_max_fee_per_gas(fees.max_fee_per_gas)
+            .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
             .with_input(Self::execute_batch_calldata(sweeps));
         let pending = self.provider.send_transaction(tx).await.map_err(|error| {
-            if is_execution_revert(&error) {
-                ChainError::Transient(format!("batch sweep reverted during submission: {error}"))
+            if is_nonce_consumed(&error) {
+                ChainError::NonceConsumed(error.to_string())
             } else {
-                ChainError::rpc("eth_sendTransaction", error)
+                ChainError::rpc("eth_sendRawTransaction", error)
             }
         })?;
         Ok(*pending.tx_hash())
+    }
+
+    async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError> {
+        let output = self
+            .call_at(payment, settledCall {}.abi_encode().into(), Some(block))
+            .await
+            .map_err(|error| ChainError::rpc("eth_call Payment.settled", error))?;
+        settledCall::abi_decode_returns(&output).map_err(|error| {
+            ChainError::Transient(format!(
+                "could not decode Payment.settled response: {error}"
+            ))
+        })
+    }
+
+    async fn probe_failure(
+        &self,
+        token: Address,
+        payment: Address,
+        receiver: Address,
+        recovery: Address,
+        block: u64,
+    ) -> Result<FailureProbe, ChainError> {
+        let code = self
+            .provider
+            .get_code_at(payment)
+            .block_id(BlockId::number(block))
+            .await
+            .map_err(|error| ChainError::rpc("eth_getCode", error))?;
+        let balance = self
+            .call_at(
+                token,
+                balanceOfCall { account: payment }.abi_encode().into(),
+                Some(block),
+            )
+            .await
+            .ok()
+            .and_then(|output| balanceOfCall::abi_decode_returns(&output).ok());
+        let blacklisted = |account: Address| {
+            self.optional_bool(
+                token,
+                isBlacklistedCall { account }.abi_encode().into(),
+                block,
+            )
+        };
+        Ok(FailureProbe {
+            code_present: !code.is_empty(),
+            paused: self
+                .optional_bool(token, pausedCall {}.abi_encode().into(), block)
+                .await,
+            payment_blacklisted: blacklisted(payment).await,
+            receiver_blacklisted: blacklisted(receiver).await,
+            recovery_blacklisted: blacklisted(recovery).await,
+            balance,
+        })
     }
 }
 
@@ -556,25 +741,16 @@ mod tests {
     }
 
     #[test]
-    fn only_execution_errors_are_contract_reverts() {
-        assert!(is_execution_revert(&rpc_error(
-            3,
-            "execution reverted",
-            Some("0x12345678")
-        )));
-        assert!(is_execution_revert(&rpc_error(
-            -32015,
-            "VM execution error",
+    fn consumed_nonces_are_recognised_from_the_node_message() {
+        assert!(is_nonce_consumed(&rpc_error(-32000, "nonce too low", None)));
+        assert!(is_nonce_consumed(&rpc_error(
+            -32000,
+            "Nonce is too low: next nonce 7, tx nonce 6",
             None
         )));
-        assert!(!is_execution_revert(&rpc_error(
-            429,
-            "Too Many Requests",
-            None
-        )));
-        assert!(!is_execution_revert(&rpc_error(
-            -32603,
-            "Internal error",
+        assert!(!is_nonce_consumed(&rpc_error(
+            -32000,
+            "replacement transaction underpriced",
             None
         )));
     }
@@ -638,7 +814,33 @@ mod tests {
 
     #[test]
     fn batch_gas_limit_scales_per_isolated_sweep() {
-        assert_eq!(AlloyChainClient::sweep_batch_gas_limit(1), 400_000);
-        assert_eq!(AlloyChainClient::sweep_batch_gas_limit(20), 6_100_000);
+        assert_eq!(sweep_batch_gas_limit(1), 500_000);
+        assert_eq!(sweep_batch_gas_limit(20), 8_100_000);
+    }
+
+    #[test]
+    fn replacement_fees_bump_by_at_least_an_eighth() {
+        let fees = FeeEstimate {
+            max_fee_per_gas: 800,
+            max_priority_fee_per_gas: 8,
+        };
+        assert_eq!(
+            fees.bumped(),
+            FeeEstimate {
+                max_fee_per_gas: 901,
+                max_priority_fee_per_gas: 10
+            }
+        );
+        let fresh = FeeEstimate {
+            max_fee_per_gas: 1_000,
+            max_priority_fee_per_gas: 1,
+        };
+        assert_eq!(
+            fees.bumped().max(fresh),
+            FeeEstimate {
+                max_fee_per_gas: 1_000,
+                max_priority_fee_per_gas: 10
+            }
+        );
     }
 }

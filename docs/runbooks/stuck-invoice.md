@@ -4,9 +4,26 @@ An invoice is not progressing through its lifecycle. The normal flow is:
 
 ```
 created → funded → deploying → fulfilled
+   │                    │
+   └──► expired ◄───────┘──► recovered
 ```
 
-Terminal states: `blocked`, `failed` (unused).
+- `created`: awaiting finalized USDC.
+- `funded`: finalized credit reached the amount; queued for a helper transaction.
+- `deploying`: claimed by the sweep worker; a helper transaction is in flight
+  or being retried.
+- `fulfilled`: the `Payment` contract paid the beneficiary.
+- `recovered`: the `Payment` contract paid the recovery address (the invoice
+  expired before it could be settled).
+- `expired`: chain time passed the deadline while the invoice was open. Any
+  balance at the address is recovered automatically; the status becomes
+  `recovered` when that finalizes.
+- `blocked`: the worker gave up on the invoice; `blocked_reason` says why.
+
+Funds that arrive after the contract exists are forwarded to the recovery
+address automatically and never change the status. The API reports
+`received_base_units`, `execute_tx_hash`, `resolved_at_block`, and
+`blocked_reason` for every invoice.
 
 ## Step 1: Check the invoice status
 
@@ -24,7 +41,8 @@ curl -s -H "Authorization: Bearer $GATEWAY_API_KEY" \
   "$GATEWAY_API_URL/v1/invoices/<INVOICE_ID>" | python3 -m json.tool
 ```
 
-Note the `status` and `payment_address` from the response.
+Note the `status`, `received_base_units`, `blocked_reason`, and
+`payment_address` from the response.
 
 ## Step 2: Verify the USDC transfer landed on-chain
 
@@ -34,9 +52,9 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
-If the balance is 0, the payer has not sent USDC yet (or sent to the wrong
-address). The invoice will remain in `created` until a transfer is detected
-by the indexer.
+If the balance is 0 and `received_base_units` is 0, the payer has not sent
+USDC yet (or sent to the wrong address). The invoice will remain in `created`
+until a transfer is detected by the indexer.
 
 ## Step 3: Stuck in `created` (USDC was sent)
 
@@ -47,11 +65,14 @@ The indexer hasn't processed the block containing the transfer yet.
 
    ```bash
    aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
-     | grep -E "WARN|ERROR|fatal"
+     | grep -E "WARN|ERROR|fatal|lagging"
    ```
 
-3. Check if the indexer is far behind — if the cursor is much earlier than the
-   transfer block, see [indexer-cursor-reset.md](indexer-cursor-reset.md).
+3. If the `payday-indexer-cursor-lagging` alarm is raised the indexer is
+   catching up; each pass drains up to `GATEWAY_INDEXER_MAX_RANGES_PER_TICK`
+   ranges, so a backlog clears on its own. See
+   [indexer-cursor-reset.md](indexer-cursor-reset.md) only if the cursor
+   itself is wrong.
 
 4. If the indexer is running, caught up, and still not detecting the transfer,
    verify the transfer actually exists by searching for USDC Transfer logs to
@@ -59,58 +80,91 @@ The indexer hasn't processed the block containing the transfer yet.
 
    ```bash
    RECIPIENT_TOPIC=$(python3 -c "print('0x' + '<PAYMENT_ADDRESS>'.lower()[2:].zfill(64))")
-   FROM=$((CURRENT_BLOCK - 1000))
+   FROM=$((CURRENT_BLOCK - 100))
    curl -s -X POST "$MONAD_RPC_URL" \
      -H "Content-Type: application/json" \
      -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"$(python3 -c "print(hex($FROM))")\",\"toBlock\":\"latest\",\"address\":\"0x754704Bc059F8C67012fEd69BC8A327a5aafb603\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",null,null,\"$RECIPIENT_TOPIC\"]}],\"id\":1}"
    ```
 
-## Step 4: Stuck in `funded`
+## Step 4: Stuck in `funded`, `expired`, or `deploying`
 
-The indexer detected the payment but the sweep worker hasn't submitted a batch
-transaction. Check sweep worker logs:
+The invoice is in the sweep queue. The worker submits one helper transaction
+at a time, so check whether that pipeline is moving:
 
 ```bash
 aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
-  | grep -E "sweep|batch|funded|deploying|blocked"
+  | grep -E "helper transaction|sweep|batch|paused|blocked"
 ```
 
 Possible causes:
 
-- **KMS signer out of MON**: See [daily-monitoring.md](daily-monitoring.md) step 7.
-- **Sweep transaction failed**: Look for `reverted` or `blocked` in logs. The
-  invoice may need manual intervention.
-- **Indexer crashed after funding**: Restart it — see
-  [service-restart.md](service-restart.md). The indexer will pick up funded
-  invoices on restart.
+- **KMS signer out of MON**: the `payday-indexer-signer-low-balance` alarm
+  fires and submissions fail with an insufficient-funds error until the signer
+  is funded. See [daily-monitoring.md](daily-monitoring.md) step 7.
+- **Helper transaction unconfirmed**: the worker replaces it on the same nonce
+  with fees bumped by 12.5% every `GATEWAY_SWEEP_PENDING_TIMEOUT_SECS`, up to
+  `GATEWAY_SWEEP_MAX_SUBMISSIONS` times, then pauses and raises
+  `payday-indexer-sweep-paused`. See "Sweep worker paused" below.
+- **Transient item failure** (USDC paused, unknown revert): the invoice stays
+  `deploying` with `sweep_attempts` incrementing behind exponential backoff
+  (2 s doubling, capped at 5 minutes). After `GATEWAY_SWEEP_MAX_ATTEMPTS` it
+  becomes `blocked` with reason `retries_exhausted`.
+- **Indexer crashed after funding**: restart it — see
+  [service-restart.md](service-restart.md). The queue is durable; an in-flight
+  batch is reconciled from its receipt on restart.
 
-## Step 5: Stuck in `deploying`
+## Step 5: Status is `blocked`
 
-The sweep transaction was submitted but not yet finalized. This is normal for
-a few minutes while waiting for block confirmations.
+The worker stopped trying. `blocked_reason` is one of:
 
-```bash
-aws logs tail /ecs/payday/indexer --since 60m --region "$AWS_REGION" \
-  | grep -E "deploying|fulfilled|batch.*finalized|receipt|orphan|revert"
+| Reason | Meaning | Action |
+|--------|---------|--------|
+| `beneficiary_blacklisted` | Circle blacklisted the beneficiary | Agree a new destination with the merchant; after expiry the balance can be recovered to the recovery address instead |
+| `recovery_blacklisted` | Circle blacklisted the recovery address | The merchant must resolve with Circle |
+| `payment_address_blacklisted` | Circle blacklisted the payment address itself | Compliance escalation; nothing can move the funds |
+| `balance_below_amount` | The chain balance is below the credited amount | Finalized history disagreed with the ledger; investigate the RPC provider before anything else |
+| `retries_exhausted` | Repeated unclassified failures | Read the receipts of the batches in `sweep_batches` for this invoice |
+| `parameters_mismatch` | The row no longer derives its own payment address | Database corruption or tampering; do not touch the funds until understood |
+| `corrupt_row` | The row failed to decode | As above |
+
+Once the cause is resolved, release the invoice back to the queue. This is
+the only manual state change the worker expects:
+
+```sql
+UPDATE invoices
+SET blocked_reason = NULL,
+    status = CASE WHEN expiration_timestamp < extract(epoch FROM now()) THEN 'expired' ELSE 'deploying' END,
+    updated_at = now()
+WHERE id = '<INVOICE_ID>'::uuid AND status = 'blocked';
 ```
 
-If stuck for more than 10 minutes:
+A terminal (`fulfilled`/`recovered`) invoice can also carry a `blocked_reason`
+when a *late* transfer could not be forwarded to the recovery address; clear
+only the reason in that case.
 
-- The transaction may be stuck in the mempool. Check the indexer logs for
-  `dropped batch transaction` or `pending` warnings.
-- The sweep transaction may have been orphaned. The indexer will retry after
-  5 minutes and return it to the queue.
+Run SQL through the procedure in [db-access.md](db-access.md).
 
-## Step 6: Status is `blocked`
+## Sweep worker paused
 
-A blocked invoice means a sweep execution failed terminally. This requires
-manual investigation. Check the indexer logs for the specific invoice ID:
+`payday-indexer-sweep-paused` means the worker logged `sweep worker paused`
+on every pass. Block indexing continues; only helper transactions stop. The
+log line carries the reason:
 
-```bash
-aws logs tail /ecs/payday/indexer --since 24h --region "$AWS_REGION" \
-  | grep "<INVOICE_ID>"
-```
+- **Unconfirmed after N submissions**: every replacement of the batch's
+  nonce failed to mine. Check the signer balance and the fee market. To
+  resolve manually, send any transaction from the KMS key with that nonce and
+  a higher fee (for example a zero-value self-transfer) — the worker then sees
+  the nonce consumed, abandons the batch, and re-queues its invoices:
 
-The Payment contract can still be executed permissionlessly by anyone calling
-`PaymentFactory.execute` with the invoice parameters, since the factory has no
-owner gate.
+  ```bash
+  export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw kms_key_arn)"
+  cast send "$(cast wallet address --aws)" --value 0 --nonce <NONCE> \
+    --gas-price <HIGHER_FEE> --aws --rpc-url "$MONAD_RPC_URL"
+  ```
+
+- **No outcome for invoice**: the finalized receipt of the helper transaction
+  carries no event for an invoice it should contain. This is an invariant
+  violation; capture the transaction hash from the log and escalate.
+
+The worker retries on the next pass, so once the condition clears the alarm
+returns to OK on its own.
