@@ -11,12 +11,17 @@ path = "src/main.rs"
 [dependencies]
 gateway-core = { path = "../gateway-core" }
 clap = { workspace = true }
+clap_complete = "4.5"
+anstyle = "1"
+chrono = { workspace = true }
+flate2 = "1"
 reqwest = { workspace = true }
+sha2 = { workspace = true }
+tar = "0.4"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 toml = "0.9"
 rpassword = "7"

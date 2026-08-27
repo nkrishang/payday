@@ -16,6 +16,7 @@ pub fn router(state: AppState) -> Router {
             post(invoices::create_payment).get(invoices::list_payments),
         )
         .route("/v1/payments/{id}", get(invoices::get_payment))
+        .route("/v1/payments/{id}/cancel", post(invoices::cancel_payment))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -421,6 +422,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn relative_expiry_replays_after_wall_clock_moves(pool: PgPool) {
+        let app = app(pool).await;
+        let body = valid_body();
+        let first = app
+            .clone()
+            .oneshot(create_request(KEY, "relative-replay", &body))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first = json_body(first).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        let replay = app
+            .oneshot(create_request(KEY, "relative-replay", &body))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = json_body(replay).await;
+        assert_eq!(replay["id"], first["id"]);
+        assert_eq!(replay["expires_at"], first["expires_at"]);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn address_lookup_cancel_and_bounded_list_shape_work(pool: PgPool) {
+        let app = app(pool).await;
+        let body = json!({
+            "payout_address": "0x0000000000000000000000000000000000000002",
+            "amount": "1",
+            "memo": "Order 1234"
+        });
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "lookup-and-cancel", &body))
+            .await
+            .unwrap();
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap();
+        let address = created["address"].as_str().unwrap();
+        assert_eq!(created["chain"]["id"], "1");
+        assert_eq!(created["token"]["address"], Address::ZERO.to_checksum(None));
+        assert_eq!(created["refund_address"], body["payout_address"]);
+        assert_eq!(created["memo"], "Order 1234");
+        assert_eq!(created["expires_in"], 86_400);
+
+        let found = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payments/{address}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.status(), StatusCode::OK);
+        assert_eq!(json_body(found).await["id"], id);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/payments")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = json_body(listed).await;
+        assert_eq!(listed["payments"][0]["id"], id);
+        assert!(listed["payments"][0].get("transfers").is_none());
+
+        let cancelled = app
+            .oneshot(
+                Request::post(format!("/v1/payments/{id}/cancel"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancelled = json_body(cancelled).await;
+        assert_eq!(cancelled["payment"]["status"], "awaiting_payment");
+        assert!(cancelled["payment"]["cancellation_requested_at"].is_string());
+        assert!(
+            cancelled["advisory"]
+                .as_str()
+                .unwrap()
+                .contains("does not alter")
+        );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]

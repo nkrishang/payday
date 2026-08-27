@@ -3,17 +3,26 @@ mod cli;
 mod client;
 mod credentials;
 mod error;
+mod presentation;
 
 use std::io::{self, IsTerminal, Write};
+use std::str::FromStr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
-use gateway_core::{CreatePaymentRequest, PaymentResponse, PaymentStatus};
+use clap::{CommandFactory, Parser, error::ErrorKind};
+use gateway_core::{
+    Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentResponse, PaymentStatus,
+    RecoveryAddress, TokenAddress, USDC_DECIMALS, resolve_expiration,
+};
 use uuid::Uuid;
 
 use account::{AccountClient, ApiKeyMetadata};
-use cli::{Cli, Command, CreateArgs, GetArgs, KeyActionArgs, KeysCommand, LoginArgs, RevokeArgs};
+use cli::{
+    Cli, Command, CreateArgs, DocsTopic, GetArgs, KeyActionArgs, KeysCommand, LoginArgs, RevokeArgs,
+};
 use client::GatewayClient;
 use error::CliError;
+use presentation::{Presentation, terminal};
 
 const PRODUCTION_AUTH0_ISSUER: &str = "https://dev-5ojfw164vnkjnk6m.us.auth0.com/";
 const PRODUCTION_AUTH0_CLIENT_ID: &str = "vL8df7gnvLdQtNllctp8FWkZZGuYjzsq";
@@ -27,21 +36,47 @@ struct Output {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            error.exit()
+        }
+        Err(error) if std::env::args().any(|arg| arg == "--json") => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":{"code":"invalid_input","message":error.to_string()}})
+            );
+            std::process::exit(2);
+        }
+        Err(error) => error.exit(),
+    };
     let result = match cli.command.clone() {
-        command @ (Command::Create(_) | Command::Get(_) | Command::List(_)) => {
+        command
+        @ (Command::Create(_) | Command::Get(_) | Command::List(_) | Command::Cancel(_)) => {
             run_payment(&cli, command).await
         }
         Command::Login(args) => run_login(&cli, args).await.map(account_output),
         Command::Logout => run_logout(&cli).map(account_output),
         Command::Whoami => run_whoami(&cli).await.map(account_output),
         Command::Keys(command) => run_keys(&cli, command).await.map(account_output),
+        Command::Completions { shell } => completions(shell).map(account_output),
+        Command::Docs { topic } => Ok(account_output(docs(topic).into())),
+        Command::Upgrade => upgrade().await.map(account_output),
     };
 
     match result {
         Ok(output) => print_output(output, cli.json, io::stdout().is_terminal()),
         Err(err) => {
-            eprintln!("error: {err}");
+            if cli.json {
+                eprintln!("{}", err.json());
+            } else {
+                eprintln!("error: {err}");
+            }
             if cli.verbose
                 && let Some(detail) = err.diagnostic()
             {
@@ -59,7 +94,9 @@ fn print_output(output: Output, json: bool, interactive: bool) {
             println!("Signed in as {email}.\n");
         }
     }
-    println!("{}", output.body);
+    if !output.body.is_empty() {
+        println!("{}", output.body);
+    }
     if !json
         && interactive
         && let Some(next) = output.next
@@ -76,44 +113,223 @@ fn account_output(body: String) -> Output {
     }
 }
 
+fn completions(shell: clap_complete::Shell) -> Result<String, CliError> {
+    let mut output = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "payday", &mut output);
+    String::from_utf8(output)
+        .map_err(|error| CliError::InvalidInput(format!("failed to generate completions: {error}")))
+}
+
+fn docs(topic: Option<DocsTopic>) -> &'static str {
+    match topic {
+        None => {
+            "Payday guides\n\n  getting-started  Create and inspect your first payment\n  authentication   Sign in and manage API keys\n  environment      Configure Payday\n\nRun `payday docs <topic>` to read a guide."
+        }
+        Some(DocsTopic::GettingStarted) => {
+            "Getting started\n\n1. Run `payday login`.\n2. Create a payment with `payday create --amount 25 --to 0x…`.\n3. Follow it with `payday get <PAYMENT_ID> --watch`.\n\nAdd `--json` for machine-readable output."
+        }
+        Some(DocsTopic::Authentication) => {
+            "Authentication\n\nRun `payday login` to authenticate by email and save a profile for the current API. Use `payday whoami`, `payday keys rotate`, `payday keys revoke`, and `payday logout` to manage it. PAYDAY_API_KEY overrides saved credentials for scripts."
+        }
+        Some(DocsTopic::Environment) => {
+            "Environment\n\nPAYDAY_API_URL      Payday API endpoint\nPAYDAY_API_KEY      Bearer API key override\nNO_COLOR            Disable colored output\n\nCommand-line flags override environment values."
+        }
+    }
+}
+
+async fn upgrade() -> Result<String, CliError> {
+    #[cfg(windows)]
+    return Err(CliError::InvalidInput(
+        "Automatic upgrades are not supported on Windows; install the latest release archive"
+            .into(),
+    ));
+
+    #[cfg(not(windows))]
+    {
+        use std::fs::{self, OpenOptions};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "payday-linux-x86_64.tar.gz",
+            ("macos", "x86_64") => "payday-macos-x86_64.tar.gz",
+            ("macos", "aarch64") => "payday-macos-aarch64.tar.gz",
+            (os, arch) => {
+                return Err(CliError::InvalidInput(format!(
+                    "Automatic upgrades are not available for {os}-{arch}"
+                )));
+            }
+        };
+        let base = "https://github.com/nkrishang/payday/releases/latest/download";
+        let sums = download(&format!("{base}/SHA256SUMS"), 1024 * 1024).await?;
+        let archive = download(&format!("{base}/{asset}"), 100 * 1024 * 1024).await?;
+        let binary = verified_binary(asset, &sums, &archive)?;
+
+        let executable = std::env::current_exe()
+            .map_err(|error| CliError::InvalidInput(format!("Could not locate Payday: {error}")))?;
+        let staged = executable.with_file_name(format!(".payday.new.{}", std::process::id()));
+        let install = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            file.write_all(&binary)?;
+            file.sync_all()?;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+            fs::rename(&staged, &executable)
+        })();
+        if let Err(error) = install {
+            let _ = fs::remove_file(&staged);
+            return Err(CliError::InvalidInput(format!(
+                "Could not install upgrade: {error}"
+            )));
+        }
+        Ok("Payday is up to date.".into())
+    }
+}
+
+#[cfg(not(windows))]
+fn verified_binary(asset: &str, sums: &[u8], archive: &[u8]) -> Result<Vec<u8>, CliError> {
+    use std::io::{Cursor, Read};
+    use std::path::Path;
+
+    use flate2::read::GzDecoder;
+    use sha2::{Digest, Sha256};
+
+    const MAX_BINARY_BYTES: u64 = 100 * 1024 * 1024;
+    let expected = std::str::from_utf8(sums)
+        .ok()
+        .and_then(|sums| {
+            sums.lines().find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let hash = fields.next()?;
+                (fields.next()? == asset).then_some(hash)
+            })
+        })
+        .ok_or_else(|| CliError::InvalidInput(format!("Release checksum missing for {asset}")))?;
+    let actual = format!("{:x}", Sha256::digest(archive));
+    if actual != expected {
+        return Err(CliError::InvalidInput(
+            "Release checksum did not match".into(),
+        ));
+    }
+
+    for entry in tar::Archive::new(GzDecoder::new(Cursor::new(archive)))
+        .entries()
+        .map_err(|error| CliError::InvalidInput(format!("Invalid release archive: {error}")))?
+    {
+        let entry = entry
+            .map_err(|error| CliError::InvalidInput(format!("Invalid release archive: {error}")))?;
+        if entry.path().is_ok_and(|path| path == Path::new("payday")) {
+            let mut binary = Vec::new();
+            entry
+                .take(MAX_BINARY_BYTES + 1)
+                .read_to_end(&mut binary)
+                .map_err(|error| {
+                    CliError::InvalidInput(format!("Invalid release binary: {error}"))
+                })?;
+            if binary.is_empty() || binary.len() as u64 > MAX_BINARY_BYTES {
+                return Err(CliError::InvalidInput(
+                    "Release binary has an invalid size".into(),
+                ));
+            }
+            return Ok(binary);
+        }
+    }
+    Err(CliError::InvalidInput(
+        "Release archive did not contain payday".into(),
+    ))
+}
+
+#[cfg(not(windows))]
+async fn download(url: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|source| CliError::Transport {
+            url: url.into(),
+            source,
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(CliError::UnexpectedResponse {
+            status: status.as_u16(),
+            body: format!("could not download {url}"),
+        });
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > max_bytes)
+    {
+        return Err(CliError::InvalidInput(
+            "Release download is unexpectedly large".into(),
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|source| CliError::Transport {
+            url: url.into(),
+            source,
+        })?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(CliError::InvalidInput(
+            "Release download is unexpectedly large".into(),
+        ));
+    }
+    Ok(bytes.to_vec())
+}
+
 async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
     let api_key = api_key(cli)?;
     let client = GatewayClient::new(&cli.api_url, &api_key)?;
+    let presentation = Presentation::new(cli.color, cli.plain, cli.verbose);
     match command {
         Command::Create(args) => {
             let payment = create(&client, args).await?;
             Ok(Output {
-                body: format_payment(&payment, cli.json),
+                body: if cli.json {
+                    json(&payment)?
+                } else {
+                    presentation.payment(&payment, true)
+                },
                 signed_in: None,
-                next: Some(format!(
-                    "Send {} {} to {}.",
-                    payment.amount, payment.currency, payment.address
-                )),
+                next: None,
             })
         }
+        Command::Get(args) if args.watch => Ok(Output {
+            body: watch(&client, &presentation, args, !cli.plain).await?,
+            signed_in: None,
+            next: None,
+        }),
         Command::Get(args) => {
-            let payment = get(&client, args).await?;
-            let next = Some(payment_next(&payment));
+            let payment = get(&client, &args.reference).await?;
             Ok(Output {
-                body: format_payment(&payment, cli.json),
+                body: if cli.json {
+                    json(&payment)?
+                } else {
+                    presentation.payment(&payment, false)
+                },
                 signed_in: None,
-                next,
+                next: None,
             })
         }
         Command::List(args) => {
+            if let Some(status) = &args.status {
+                PaymentStatus::from_str(status).map_err(|_| {
+                    CliError::InvalidInput(format!("Unknown payment status '{status}'"))
+                })?;
+            }
             let page = client
-                .list_payments(args.limit, args.starting_after.as_deref())
+                .list_payments(
+                    args.status.as_deref(),
+                    args.limit,
+                    args.starting_after.as_deref(),
+                )
                 .await?;
             let body = if cli.json {
-                serde_json::to_string_pretty(&page).expect("payments must serialize")
-            } else if page.payments.is_empty() {
-                "No payments yet.".into()
+                json(&page)?
             } else {
-                page.payments
-                    .iter()
-                    .map(format_payment_line)
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                presentation.list(&page.payments)
             };
             let next = page
                 .next_cursor
@@ -130,130 +346,126 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
                 next,
             })
         }
-        Command::Login(_) | Command::Logout | Command::Whoami | Command::Keys(_) => unreachable!(),
-    }
-}
-
-fn payment_next(payment: &PaymentResponse) -> String {
-    match payment.status {
-        PaymentStatus::AwaitingPayment => format!(
-            "Send {} {} to {}.",
-            payment.amount, payment.currency, payment.address
-        ),
-        PaymentStatus::PartiallyPaid => format!(
-            "Send the remaining {} {} to {}.",
-            payment.remaining, payment.currency, payment.address
-        ),
-        PaymentStatus::Paid => format!(
-            "Run `payday get {}` again to refresh its status.",
-            payment.id
-        ),
-        _ => "Run `payday create` to create another payment.".into(),
+        Command::Cancel(args) => {
+            require_nonblank("reference", &args.reference)?;
+            let cancelled = client.cancel_payment(&args.reference).await?;
+            Ok(Output {
+                body: if cli.json {
+                    json(&cancelled)?
+                } else {
+                    format!(
+                        "✓ Payment {} cancelled (advisory)\n\n{}\nThe address keeps its on-chain settlement terms.",
+                        cancelled.payment.id, cancelled.advisory
+                    )
+                },
+                signed_in: None,
+                next: None,
+            })
+        }
+        Command::Login(_)
+        | Command::Logout
+        | Command::Whoami
+        | Command::Keys(_)
+        | Command::Completions { .. }
+        | Command::Docs { .. }
+        | Command::Upgrade => unreachable!(),
     }
 }
 
 async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentResponse, CliError> {
-    require_nonblank("token", &args.token)?;
-    require_nonblank("payout", &args.payout)?;
-    require_nonblank("refund", &args.refund)?;
     require_nonblank("amount", &args.amount)?;
+    let amount = Amount::from_decimal_str(&args.amount, USDC_DECIMALS)
+        .map_err(|error| CliError::InvalidInput(format!("Amount {error}")))?;
+    if amount.0.is_zero() {
+        return Err(CliError::InvalidInput(
+            "Amount must be greater than zero".into(),
+        ));
+    }
+    BeneficiaryAddress::from_str(&args.to)
+        .map_err(|error| CliError::InvalidInput(format!("Payout address {error}")))?;
+    if let Some(refund) = &args.refund_to {
+        RecoveryAddress::from_str(refund)
+            .map_err(|error| CliError::InvalidInput(format!("Refund address {error}")))?;
+    }
+    if let Some(token) = &args.token {
+        TokenAddress::from_str(token)
+            .map_err(|error| CliError::InvalidInput(format!("Token address {error}")))?;
+    }
+    let relative = args
+        .expires_in
+        .as_deref()
+        .or_else(|| args.expires_at.is_none().then_some("24h"));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expiration = resolve_expiration(relative, args.expires_at.as_deref(), None, now)
+        .map_err(|error| CliError::InvalidInput(format!("Expiry {error}")))?;
+    let expires_in = expiration
+        .intent
+        .strip_prefix("in:")
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| CliError::InvalidInput("Expiry is too large".into()))?;
     let idempotency_key = args
         .idempotency_key
         .unwrap_or_else(|| Uuid::now_v7().to_string());
     let req = CreatePaymentRequest {
-        chain_id: args.chain_id.to_string(),
+        chain_id: args.chain_id.map(|value| value.to_string()),
         token_address: args.token,
-        payout_address: args.payout,
+        payout_address: args.to.clone(),
         amount: args.amount,
-        expires_in: args.expires_in,
-        refund_address: args.refund,
+        expires_in,
+        expires_at: args.expires_at,
+        refund_address: Some(args.refund_to.unwrap_or(args.to)),
+        memo: args.memo,
     };
-    eprintln!("using idempotency key: {idempotency_key}");
     client.create_payment(&req, &idempotency_key).await
 }
 
-async fn get(client: &GatewayClient, args: GetArgs) -> Result<PaymentResponse, CliError> {
-    require_nonblank("id", &args.id)?;
-    client.get_payment(&args.id).await
+async fn get(client: &GatewayClient, reference: &str) -> Result<PaymentResponse, CliError> {
+    require_nonblank("reference", reference)?;
+    client.get_payment(reference).await
 }
 
-fn format_payment(payment: &PaymentResponse, json: bool) -> String {
-    if json {
-        return serde_json::to_string_pretty(payment).expect("payment must serialize");
+async fn watch(
+    client: &GatewayClient,
+    output: &Presentation,
+    args: GetArgs,
+    allow_redraw: bool,
+) -> Result<String, CliError> {
+    if args.interval == 0 {
+        return Err(CliError::InvalidInput(
+            "Watch interval must be at least one second".into(),
+        ));
     }
-    let destination = short(&payment.payout_address);
-    match payment.status {
-        PaymentStatus::AwaitingPayment => format!(
-            "Waiting for {} {} · expires {}\n{}\n{}",
-            payment.amount, payment.currency, payment.expires_at, payment.id, payment.address
-        ),
-        PaymentStatus::PartiallyPaid => format!(
-            "{} of {} {} received · {} remaining\n{}",
-            payment.received, payment.amount, payment.currency, payment.remaining, payment.id
-        ),
-        PaymentStatus::Paid => format!(
-            "Payment confirmed — settling to {destination}\n{}",
-            payment.id
-        ),
-        PaymentStatus::Settled => format!(
-            "{} {} sent to {destination} · tx {}\n{}",
-            payment.received,
-            payment.currency,
-            payment
-                .settlement_tx_hash
-                .as_deref()
-                .unwrap_or("external settlement"),
-            payment.id
-        ),
-        PaymentStatus::Expired => format!(
-            "Expired {} · received funds are being returned to {}\n{}",
-            payment.expires_at,
-            short(&payment.refund_address),
-            payment.id
-        ),
-        PaymentStatus::Returned => format!(
-            "{} {} returned to {} · tx {}\n{}",
-            payment.received,
-            payment.currency,
-            short(&payment.refund_address),
-            payment
-                .settlement_tx_hash
-                .as_deref()
-                .unwrap_or("external settlement"),
-            payment.id
-        ),
-        PaymentStatus::NeedsAttention => {
-            let attention = payment.attention.as_ref();
-            format!(
-                "Payout paused: {}\n{}\n{}",
-                attention
-                    .map(|a| a.message.as_str())
-                    .unwrap_or("Settlement needs attention."),
-                attention
-                    .map(|a| a.action.as_str())
-                    .unwrap_or("Contact support."),
-                payment.id
-            )
+    let interactive = allow_redraw && io::stdout().is_terminal();
+    let mut previous = String::new();
+    loop {
+        let payment = get(client, &args.reference).await?;
+        let frame = output.payment(&payment, false);
+        if interactive {
+            print!("\x1b[2J\x1b[H{frame}");
+            io::stdout()
+                .flush()
+                .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        } else if frame != previous {
+            if !previous.is_empty() {
+                println!();
+            }
+            println!("{frame}");
+            previous = frame;
         }
+        if terminal(payment.status) {
+            return Ok(String::new());
+        }
+        tokio::time::sleep(Duration::from_secs(args.interval)).await;
     }
 }
 
-fn format_payment_line(payment: &PaymentResponse) -> String {
-    format!(
-        "{}  {:<17}  {} {}",
-        payment.id,
-        payment.status.as_str(),
-        payment.amount,
-        payment.currency
-    )
-}
-
-fn short(value: &str) -> String {
-    if value.len() > 12 {
-        format!("{}…{}", &value[..6], &value[value.len() - 4..])
-    } else {
-        value.into()
-    }
+fn json(value: &impl serde::Serialize) -> Result<String, CliError> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| CliError::InvalidInput(format!("failed to serialize response: {error}")))
 }
 
 fn require_nonblank(field: &str, value: &str) -> Result<(), CliError> {
@@ -565,39 +777,8 @@ fn confirm(prompt: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_client, mask_email, payment_next, short, valid_code, validate_email};
-    use crate::cli::{Cli, Command};
-    use gateway_core::PaymentResponse;
-    #[test]
-    fn abbreviates_addresses_without_hiding_identity() {
-        assert_eq!(
-            short("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
-            "0x7099…79C8"
-        );
-    }
-
-    #[test]
-    fn partially_paid_hint_requests_only_the_remaining_balance() {
-        let payment: PaymentResponse = serde_json::from_value(serde_json::json!({
-            "id": "pay_0198f80c-8d2f-7dc1-a369-90556a64f700",
-            "address": "0x0000000000000000000000000000000000000001",
-            "payout_address": "0x0000000000000000000000000000000000000002",
-            "refund_address": "0x0000000000000000000000000000000000000003",
-            "expires_at": "2030-03-17T17:46:40Z",
-            "amount": "1.000000", "amount_base_units": "1000000",
-            "received": "0.400000", "received_base_units": "400000",
-            "remaining": "0.600000", "remaining_base_units": "600000",
-            "currency": "USDC", "status": "partially_paid",
-            "token": {"symbol": "USDC", "address": "0x0000000000000000000000000000000000000004", "decimals": 6},
-            "chain": {"id": "143", "name": "Monad"},
-            "settlement_tx_hash": null, "settled_at": null, "settled_block": null,
-            "self_settlement": {"factory": "0x0000000000000000000000000000000000000005", "salt": "0x00"},
-            "attention": null
-        })).unwrap();
-        let hint = payment_next(&payment);
-        assert!(hint.contains("0.600000 USDC"));
-        assert!(!hint.contains("1.000000 USDC"));
-    }
+    use super::{account_client, mask_email, valid_code, validate_email};
+    use crate::cli::{Cli, ColorChoice, Command};
 
     #[test]
     fn login_input_helpers_are_strict() {
@@ -618,6 +799,8 @@ mod tests {
             auth0_audience: None,
             json: false,
             verbose: false,
+            plain: false,
+            color: ColorChoice::Auto,
             command: Command::Logout,
         };
         assert!(account_client(&cli).is_err());
@@ -626,5 +809,42 @@ mod tests {
         cli.auth0_client_id = Some("local-client".into());
         cli.auth0_audience = Some("local-api".into());
         assert!(account_client(&cli).is_ok());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn upgrade_extracts_only_a_checksum_verified_binary() {
+        use std::io::Write;
+
+        use flate2::{Compression, write::GzEncoder};
+        use sha2::{Digest, Sha256};
+
+        let mut archive = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut tar = tar::Builder::new(&mut archive);
+            let bytes = b"payday binary";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, "payday", &bytes[..]).unwrap();
+            tar.finish().unwrap();
+        }
+        archive.flush().unwrap();
+        let archive = archive.finish().unwrap();
+        let asset = "payday-linux-x86_64.tar.gz";
+        let sums = format!("{:x}  {asset}\n", Sha256::digest(&archive));
+        assert_eq!(
+            super::verified_binary(asset, sums.as_bytes(), &archive).unwrap(),
+            b"payday binary"
+        );
+        assert!(
+            super::verified_binary(
+                asset,
+                format!("{}  {asset}\n", "0".repeat(64)).as_bytes(),
+                &archive
+            )
+            .is_err()
+        );
     }
 }

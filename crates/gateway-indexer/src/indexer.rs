@@ -1192,7 +1192,9 @@ mod tests {
             gateway_db::AccountId(account_id),
             key.to_string(),
             USDC_DECIMALS,
-            3_600,
+            None,
+            invoice.expiration_timestamp,
+            format!("at:{}", invoice.expiration_timestamp),
         );
         repo.insert(&input)
             .await

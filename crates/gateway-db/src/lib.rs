@@ -9,8 +9,8 @@ pub use accounts::{
 };
 pub use cursor::{CursorRepository, IndexerCursor};
 pub use invoices::{
-    CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository, PaymentObservation,
-    RangeOutcome,
+    CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
+    InvoiceRepository, PaymentObservation, RangeOutcome,
 };
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;

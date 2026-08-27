@@ -41,3 +41,4 @@ tower = "0.5"
 base64 = "0.22"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+humantime = "2"

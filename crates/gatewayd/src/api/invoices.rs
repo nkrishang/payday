@@ -1,42 +1,30 @@
-//! Customer-facing payment handlers backed by the internal invoice domain.
+//! Customer invoice handlers.
 
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::utils::format_units;
+use alloy_primitives::{Address, B256, U256};
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use serde::Deserialize;
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, BeneficiaryAddress, ChainId, CreatePaymentRequest, FactoryAddress, Invoice,
-    PaymentListResponse, PaymentResponse, RecoveryAddress, TokenAddress, USDC_DECIMALS,
-    payment_id_prefix,
+    Amount, BeneficiaryAddress, CancelPaymentResponse, ChainId, CreatePaymentRequest,
+    FactoryAddress, IndexerFreshnessDto, Invoice, PaymentListResponse, PaymentResponse,
+    PaymentStatus, PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto,
+    USDC_DECIMALS, resolve_expiration,
 };
+use serde::Deserialize;
 
 use crate::api::error::ApiError;
 use crate::state::AppState;
 use gateway_db::{AccountId, CreateInvoiceInput, DbInvoice};
 
-/// An invoice must stay payable for at least this long. It leaves room for
-/// the payer to act and for finality plus a sweep to land before the contract
-/// starts routing to the recovery address.
-pub const MIN_EXPIRATION_LEAD_SECS: u64 = 10 * 60;
-/// Upper bound on the deadline. Catches timestamps given in milliseconds or
-/// otherwise nonsensical values while still allowing long-lived invoices.
-pub const MAX_EXPIRATION_LEAD_SECS: u64 = 366 * 24 * 60 * 60;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
-const DEFAULT_LIST_LIMIT: u32 = 20;
-const MAX_LIST_LIMIT: u32 = 100;
-
-#[derive(Debug, Deserialize)]
-pub struct ListPaymentsQuery {
-    limit: Option<u32>,
-    starting_after: Option<String>,
-}
+const MAX_MEMO_BYTES: usize = 2000;
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
@@ -45,11 +33,63 @@ pub struct ListPaymentsQuery {
 /// A free function rather than a `TryFrom` impl: the orphan rule forbids
 /// implementing a foreign trait for the foreign `PaymentResponse` from a row
 /// type that now also lives outside this crate.
-fn to_response(row: DbInvoice, expires_in: Option<u64>) -> Result<PaymentResponse, ApiError> {
-    Ok(PaymentResponse::from_invoice(
-        Invoice::try_from(&row)?,
-        expires_in,
-    ))
+async fn to_response(
+    state: &AppState,
+    account: AccountId,
+    row: DbInvoice,
+) -> Result<PaymentResponse, ApiError> {
+    let (transfers, freshness) = state
+        .repo
+        .response_metadata_for_account(account, &[row.id])
+        .await?;
+    enrich_response(row, transfers, freshness)
+}
+
+fn enrich_response(
+    row: DbInvoice,
+    transfers: Vec<gateway_db::DbInvoiceTransfer>,
+    freshness: Vec<gateway_db::DbIndexerFreshness>,
+) -> Result<PaymentResponse, ApiError> {
+    let expires_in = row
+        .expiration_intent
+        .strip_prefix("in:")
+        .and_then(|v| v.parse().ok());
+    let mut response = PaymentResponse::from_invoice(Invoice::try_from(&row)?, expires_in);
+    response.memo = row.memo.clone();
+    response.created_at = row.created_at.to_rfc3339();
+    response.updated_at = row.updated_at.to_rfc3339();
+    response.transfers = transfers
+        .into_iter()
+        .filter(|t| t.invoice_id == row.id)
+        .map(|t| {
+            let sender = Address::try_from(t.sender_address.as_slice())
+                .map_err(|_| ApiError::internal("invalid transfer sender"))?;
+            let hash = B256::try_from(t.transaction_hash.as_slice())
+                .map_err(|_| ApiError::internal("invalid transfer hash"))?;
+            let timestamp = sqlx::types::chrono::DateTime::from_timestamp(t.block_timestamp, 0)
+                .ok_or_else(|| ApiError::internal("invalid transfer timestamp"))?;
+            let units = U256::from_str_radix(&t.amount, 10)
+                .map_err(|_| ApiError::internal("invalid transfer amount"))?;
+            Ok(TransferDto {
+                timestamp: timestamp.to_rfc3339(),
+                amount: format_units(units, USDC_DECIMALS).unwrap_or_default(),
+                amount_base_units: t.amount,
+                sender: sender.to_checksum(None),
+                transaction_hash: hash.to_string(),
+                block: t.block_number.to_string(),
+                disposition: t.disposition,
+            })
+        })
+        .collect::<Result<_, ApiError>>()?;
+    let cursor = freshness
+        .into_iter()
+        .find(|f| f.chain_id == row.chain_id && f.token_address == row.token_address);
+    response.indexer_freshness = IndexerFreshnessDto {
+        last_indexed_block: cursor.as_ref().map(|c| c.last_block.to_string()),
+        last_finalized_block: cursor.as_ref().map(|c| c.last_block.to_string()),
+        cursor_updated_at: cursor.map(|c| c.updated_at.to_rfc3339()),
+    };
+    Ok(response)
 }
 
 // --- Handlers ---
@@ -60,6 +100,7 @@ pub async fn create_payment(
     headers: HeaderMap,
     Json(req): Json<CreatePaymentRequest>,
 ) -> Result<(axum::http::StatusCode, Json<PaymentResponse>), ApiError> {
+    let memo = req.memo.clone();
     // 1. Extract idempotency key from header.
     let idempotency_key = headers
         .get("idempotency-key")
@@ -71,15 +112,32 @@ pub async fn create_payment(
             "Idempotency-Key must be 1 to {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
         )));
     }
+    if memo
+        .as_ref()
+        .is_some_and(|memo| memo.len() > MAX_MEMO_BYTES)
+    {
+        return Err(ApiError::invalid_request(format!(
+            "memo must be at most {MAX_MEMO_BYTES} bytes"
+        )));
+    }
 
     // 2. Parse and validate request fields.
     let chain_id: u64 = req
         .chain_id
-        .parse()
-        .map_err(|_| ApiError::invalid_request("chain_id must be a non-negative integer string"))?;
+        .as_deref()
+        .map_or(Ok(state.chain_id.0), |value| {
+            value.parse().map_err(|_| {
+                ApiError::invalid_request("chain_id must be a non-negative integer string")
+            })
+        })?;
 
-    let token_addr = Address::from_str(&req.token_address)
-        .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))?;
+    let token_addr = req
+        .token_address
+        .as_deref()
+        .map_or(Ok(state.usdc_address), |value| {
+            Address::from_str(value)
+                .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))
+        })?;
     let beneficiary_addr = Address::from_str(&req.payout_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid payout_address: {e}")))?;
     if beneficiary_addr.is_zero() {
@@ -87,12 +145,23 @@ pub async fn create_payment(
             "payout_address must not be the zero address",
         ));
     }
-    validate_expiration(req.expires_in)?;
-    let expiration_timestamp = unix_now()
-        .checked_add(req.expires_in)
-        .ok_or_else(|| ApiError::invalid_request("expires_in is too large"))?;
-    let recovery_addr = Address::from_str(&req.refund_address)
-        .map_err(|e| ApiError::invalid_request(format!("invalid refund_address: {e}")))?;
+    let expires_in_text = req.expires_in.map(|value| format!("{value}s"));
+    let now = unix_now();
+    let expiration = resolve_expiration(
+        expires_in_text.as_deref(),
+        req.expires_at.as_deref(),
+        None,
+        now,
+    )
+    .map_err(|error| ApiError::invalid_request(error.to_string()))?;
+    let expiration_timestamp = expiration.timestamp;
+    let recovery_addr = req
+        .refund_address
+        .as_deref()
+        .map_or(Ok(beneficiary_addr), |value| {
+            Address::from_str(value)
+                .map_err(|e| ApiError::invalid_request(format!("invalid refund_address: {e}")))
+        })?;
     if recovery_addr.is_zero() {
         return Err(ApiError::invalid_request(
             "refund_address must not be the zero address",
@@ -117,6 +186,15 @@ pub async fn create_payment(
     if amount.0 == U256::ZERO {
         return Err(ApiError::invalid_amount("amount must be positive"));
     }
+    let requested = RequestedInvoice {
+        chain_id,
+        token: token_addr,
+        beneficiary: beneficiary_addr,
+        amount: amount.0,
+        expiration_intent: &expiration.intent,
+        recovery: recovery_addr,
+        memo: memo.as_deref(),
+    };
 
     // 5. Check for existing idempotency key before generating anything.
     if let Some(existing) = state
@@ -124,21 +202,10 @@ pub async fn create_payment(
         .find_by_idempotency_key(account, &idempotency_key)
         .await?
     {
-        if same_request(
-            &existing,
-            chain_id,
-            token_addr,
-            beneficiary_addr,
-            &amount.0,
-            req.expires_in,
-            recovery_addr,
-        ) {
+        if same_request(&existing, &requested) {
             return Ok((
                 axum::http::StatusCode::OK,
-                Json(to_response(
-                    existing.clone(),
-                    Some(existing.expires_in_secs as u64),
-                )?),
+                Json(to_response(&state, account, existing).await?),
             ));
         } else {
             return Err(ApiError::idempotency_conflict());
@@ -162,19 +229,18 @@ pub async fn create_payment(
         account,
         idempotency_key.clone(),
         decimals,
-        req.expires_in,
+        memo.clone(),
+        expiration_timestamp - now,
+        expiration.intent.clone(),
     );
 
     let inserted = state.repo.insert(&input).await?;
 
     match inserted {
-        Some(row) => {
-            let expires_in = row.expires_in_secs as u64;
-            Ok((
-                axum::http::StatusCode::CREATED,
-                Json(to_response(row, Some(expires_in))?),
-            ))
-        }
+        Some(row) => Ok((
+            axum::http::StatusCode::CREATED,
+            Json(to_response(&state, account, row).await?),
+        )),
         None => {
             // Race: another request won. Fetch their row and compare.
             let existing = state
@@ -183,19 +249,10 @@ pub async fn create_payment(
                 .await?
                 .expect("idempotency key must exist after ON CONFLICT");
 
-            if same_request(
-                &existing,
-                chain_id,
-                token_addr,
-                beneficiary_addr,
-                &amount.0,
-                req.expires_in,
-                recovery_addr,
-            ) {
-                let expires_in = existing.expires_in_secs as u64;
+            if same_request(&existing, &requested) {
                 Ok((
                     axum::http::StatusCode::OK,
-                    Json(to_response(existing, Some(expires_in))?),
+                    Json(to_response(&state, account, existing).await?),
                 ))
             } else {
                 Err(ApiError::idempotency_conflict())
@@ -207,32 +264,34 @@ pub async fn create_payment(
 pub async fn get_payment(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
-    Path(id): Path<String>,
+    Path(reference): Path<String>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    let prefix = payment_id_prefix(&id).ok_or_else(|| {
-        ApiError::invalid_request("payment ID must start with pay_ and contain a UUIDv7 prefix")
-    })?;
-    let mut rows = state
-        .repo
-        .find_by_prefix_for_account(account, prefix)
-        .await?;
-    match rows.len() {
-        0 => Err(ApiError::payment_not_found()),
-        1 => Ok(Json(to_response(rows.pop().unwrap(), None)?)),
-        _ => Err(ApiError::ambiguous_payment_id()),
-    }
+    let row = resolve_payment(&state, account, &reference).await?;
+
+    Ok(Json(to_response(&state, account, row).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    status: Option<String>,
+    limit: Option<u32>,
+    starting_after: Option<String>,
 }
 
 pub async fn list_payments(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
-    Query(query): Query<ListPaymentsQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<PaymentListResponse>, ApiError> {
-    let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
-        return Err(ApiError::invalid_request(format!(
-            "limit must be between 1 and {MAX_LIST_LIMIT}"
-        )));
+    let status = query
+        .status
+        .as_deref()
+        .map(str::parse::<PaymentStatus>)
+        .transpose()
+        .map_err(|_| ApiError::invalid_request("unknown payment status"))?;
+    let limit = query.limit.unwrap_or(20);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::invalid_request("limit must be between 1 and 100"));
     }
     let starting_after = query
         .starting_after
@@ -252,15 +311,31 @@ pub async fn list_payments(
     }
     let mut rows = state
         .repo
-        .list_for_account(account, starting_after, limit)
+        .list_for_account(
+            account,
+            status.map(PaymentStatus::as_str),
+            starting_after,
+            limit,
+        )
         .await?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = has_more.then(|| format!("pay_{}", rows.last().expect("nonzero limit").id));
     let payments = rows
         .into_iter()
-        .map(|row| to_response(row, None))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|row| -> Result<_, ApiError> {
+            let response = PaymentResponse::from_invoice(Invoice::try_from(&row)?, None);
+            Ok(PaymentSummaryResponse {
+                id: response.id,
+                memo: row.memo,
+                created_at: row.created_at.to_rfc3339(),
+                status: response.status,
+                amount: response.amount,
+                received: response.received,
+                cancellation_requested_at: row.cancellation_requested_at.map(|v| v.to_rfc3339()),
+            })
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Json(PaymentListResponse {
         payments,
         next_cursor,
@@ -268,13 +343,64 @@ pub async fn list_payments(
 }
 
 fn full_payment_id(value: &str) -> Result<Uuid, ApiError> {
-    let suffix = payment_id_prefix(value)
-        .filter(|suffix| suffix.len() == 36)
-        .ok_or_else(|| {
-            ApiError::invalid_request("starting_after must be a complete pay_ payment ID")
-        })?;
+    let suffix = value.strip_prefix("pay_").ok_or_else(|| {
+        ApiError::invalid_request("starting_after must be a complete pay_ payment ID")
+    })?;
     Uuid::parse_str(suffix)
         .map_err(|_| ApiError::invalid_request("starting_after must be a complete pay_ payment ID"))
+}
+
+pub async fn cancel_payment(
+    State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
+    Path(reference): Path<String>,
+) -> Result<Json<CancelPaymentResponse>, ApiError> {
+    let invoice = resolve_payment(&state, account, &reference).await?;
+    let row = state
+        .repo
+        .request_cancellation(account, invoice.id)
+        .await?
+        .ok_or_else(ApiError::payment_not_found)?;
+    Ok(Json(CancelPaymentResponse {
+        payment: to_response(&state, account, row).await?,
+        advisory: "Cancellation is advisory only and does not alter the payment contract or its encoded settlement terms".into(),
+    }))
+}
+
+async fn resolve_payment(
+    state: &AppState,
+    account: AccountId,
+    reference: &str,
+) -> Result<DbInvoice, ApiError> {
+    let unprefixed = reference.strip_prefix("pay_").unwrap_or(reference);
+    if let Ok(uuid) = Uuid::parse_str(unprefixed) {
+        return state
+            .repo
+            .find_by_id_for_account(account, uuid)
+            .await?
+            .ok_or_else(ApiError::payment_not_found);
+    }
+    if let Ok(address) = Address::from_str(reference) {
+        return state
+            .repo
+            .find_by_payment_address_for_account(account, address.as_slice())
+            .await?
+            .ok_or_else(ApiError::payment_not_found);
+    }
+    let prefix = gateway_core::payment_id_prefix(reference).ok_or_else(|| {
+        ApiError::invalid_request(
+            "reference must be a payment ID, canonical pay_ prefix, or payment address",
+        )
+    })?;
+    let matches = state
+        .repo
+        .find_by_id_prefix_for_account(account, prefix)
+        .await?;
+    match matches.len() {
+        0 => Err(ApiError::payment_not_found()),
+        1 => Ok(matches.into_iter().next().unwrap()),
+        _ => Err(ApiError::ambiguous_payment_id()),
+    }
 }
 
 fn unix_now() -> u64 {
@@ -284,39 +410,26 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// The deadline must give the payer and the sweep pipeline room, and must be
-/// a plausible seconds-based timestamp.
-fn validate_expiration(expires_in: u64) -> Result<(), ApiError> {
-    if expires_in < MIN_EXPIRATION_LEAD_SECS {
-        return Err(ApiError::invalid_request(format!(
-            "expires_in must be at least {MIN_EXPIRATION_LEAD_SECS} seconds"
-        )));
-    }
-    if expires_in > MAX_EXPIRATION_LEAD_SECS {
-        return Err(ApiError::invalid_request(format!(
-            "expires_in must be at most {MAX_EXPIRATION_LEAD_SECS} seconds"
-        )));
-    }
-    Ok(())
-}
-
 /// Compare a persisted DB row against request parameters for idempotency replay.
-fn same_request(
-    row: &DbInvoice,
+struct RequestedInvoice<'a> {
     chain_id: u64,
     token: Address,
     beneficiary: Address,
-    amount: &U256,
-    expires_in: u64,
+    amount: U256,
+    expiration_intent: &'a str,
     recovery: Address,
-) -> bool {
-    row.chain_id as u64 == chain_id
-        && row.token_address.as_slice() == token.as_slice()
-        && row.beneficiary_address.as_slice() == beneficiary.as_slice()
-        && row.expires_in_secs as u64 == expires_in
-        && row.recovery_address.as_slice() == recovery.as_slice()
+    memo: Option<&'a str>,
+}
+
+fn same_request(row: &DbInvoice, request: &RequestedInvoice<'_>) -> bool {
+    row.chain_id as u64 == request.chain_id
+        && row.token_address.as_slice() == request.token.as_slice()
+        && row.beneficiary_address.as_slice() == request.beneficiary.as_slice()
+        && row.expiration_intent == request.expiration_intent
+        && row.recovery_address.as_slice() == request.recovery.as_slice()
+        && row.memo.as_deref() == request.memo
         && U256::from_str_radix(&row.amount, 10)
-            .map(|a| &a == amount)
+            .map(|amount| amount == request.amount)
             .unwrap_or(false)
 }
 
@@ -325,19 +438,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expiration_must_sit_inside_the_allowed_window() {
-        assert!(validate_expiration(MIN_EXPIRATION_LEAD_SECS).is_ok());
-        assert!(validate_expiration(MAX_EXPIRATION_LEAD_SECS).is_ok());
-        for invalid in [
-            0,
-            MIN_EXPIRATION_LEAD_SECS - 1,
-            MAX_EXPIRATION_LEAD_SECS + 1,
-            u64::MAX,
-        ] {
-            assert!(
-                validate_expiration(invalid).is_err(),
-                "{invalid} must be rejected"
-            );
-        }
+    fn create_wire_shape_accepts_optional_defaults_and_memo() {
+        let json = serde_json::json!({
+            "chain_id": "1", "token_address": "0x0000000000000000000000000000000000000001",
+            "payout_address": "0x0000000000000000000000000000000000000002",
+            "amount": "1", "expires_in": 3600,
+            "refund_address": "0x0000000000000000000000000000000000000003",
+            "memo": "order-42"
+        });
+        let request: CreatePaymentRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(request.memo.as_deref(), Some("order-42"));
+        assert_eq!(request.amount, "1");
     }
 }

@@ -6,17 +6,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Invoice, InvoiceStatus, USDC_DECIMALS};
 
-/// Parameters for `POST /v1/payments`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePaymentRequest {
-    pub chain_id: String,
-    pub token_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_address: Option<String>,
     pub payout_address: String,
     pub amount: String,
-    /// Lifetime in seconds. Replays with the same idempotency key retain the
-    /// deadline established by the first request.
-    pub expires_in: u64,
-    pub refund_address: String,
+    /// Lifetime in seconds. Idempotent retries retain the original deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferDto {
+    pub timestamp: String,
+    pub amount: String,
+    pub amount_base_units: String,
+    pub sender: String,
+    pub transaction_hash: String,
+    pub block: String,
+    pub disposition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexerFreshnessDto {
+    pub last_indexed_block: Option<String>,
+    pub last_finalized_block: Option<String>,
+    pub cursor_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,17 +63,39 @@ pub struct PaymentResponse {
     pub token: TokenDto,
     pub chain: ChainDto,
     pub settlement_tx_hash: Option<String>,
-    /// Timestamp of the finalized settlement block.
     pub settled_at: Option<String>,
     pub settled_block: Option<String>,
     pub self_settlement: SelfSettlementDto,
     pub attention: Option<AttentionDto>,
+    pub memo: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub cancellation_requested_at: Option<String>,
+    pub transfers: Vec<TransferDto>,
+    pub indexer_freshness: IndexerFreshnessDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentSummaryResponse {
+    pub id: String,
+    pub memo: Option<String>,
+    pub created_at: String,
+    pub status: PaymentStatus,
+    pub amount: String,
+    pub received: String,
+    pub cancellation_requested_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentListResponse {
-    pub payments: Vec<PaymentResponse>,
+    pub payments: Vec<PaymentSummaryResponse>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelPaymentResponse {
+    pub payment: PaymentResponse,
+    pub advisory: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +109,6 @@ pub enum PaymentStatus {
     Returned,
     NeedsAttention,
 }
-
 impl PaymentStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -78,25 +123,40 @@ impl PaymentStatus {
     }
 }
 
+impl std::str::FromStr for PaymentStatus {
+    type Err = ();
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [
+            Self::AwaitingPayment,
+            Self::PartiallyPaid,
+            Self::Paid,
+            Self::Settled,
+            Self::Expired,
+            Self::Returned,
+            Self::NeedsAttention,
+        ]
+        .into_iter()
+        .find(|status| status.as_str() == value)
+        .ok_or(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenDto {
     pub symbol: String,
     pub address: String,
     pub decimals: u8,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainDto {
     pub id: String,
     pub name: String,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfSettlementDto {
     pub factory: String,
     pub salt: String,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttentionDto {
     pub code: String,
@@ -108,32 +168,16 @@ impl PaymentResponse {
     pub fn from_invoice(inv: Invoice, expires_in: Option<u64>) -> Self {
         let human = |units| format_units(units, USDC_DECIMALS).unwrap_or_default();
         let remaining = inv.amount.0.saturating_sub(inv.received.0);
-        let status = if inv.blocked_reason.is_some() || inv.status == InvoiceStatus::Blocked {
-            PaymentStatus::NeedsAttention
-        } else {
-            match inv.status {
-                InvoiceStatus::Created if inv.received.0.is_zero() => {
-                    PaymentStatus::AwaitingPayment
-                }
-                InvoiceStatus::Created => PaymentStatus::PartiallyPaid,
-                InvoiceStatus::Funded | InvoiceStatus::Deploying => PaymentStatus::Paid,
-                InvoiceStatus::Fulfilled => PaymentStatus::Settled,
-                InvoiceStatus::Expired => PaymentStatus::Expired,
-                InvoiceStatus::Recovered => PaymentStatus::Returned,
-                InvoiceStatus::Blocked => PaymentStatus::NeedsAttention,
-            }
-        };
+        let status = payment_status(&inv);
         let attention = inv.blocked_reason.as_deref().map(attention);
-        let expires_at = DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
-            .expect("validated payment timestamp")
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
-
         Self {
             id: inv.id.to_string(),
             address: inv.payment_address.0.to_checksum(None),
             payout_address: inv.beneficiary.0.to_checksum(None),
             refund_address: inv.recovery.0.to_checksum(None),
-            expires_at,
+            expires_at: DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
+                .expect("validated timestamp")
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
             expires_in,
             amount: human(inv.amount.0),
             amount_base_units: inv.amount.0.to_string(),
@@ -152,21 +196,45 @@ impl PaymentResponse {
                 id: inv.chain_id.0.to_string(),
                 name: chain_name(inv.chain_id.0).into(),
             },
-            settlement_tx_hash: inv.execute_tx_hash.map(|hash| hash.to_string()),
-            settled_at: inv.settled_at_timestamp.and_then(|timestamp| {
-                DateTime::<Utc>::from_timestamp(timestamp as i64, 0)
-                    .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+            settlement_tx_hash: inv.execute_tx_hash.map(|h| h.to_string()),
+            settled_at: inv.settled_at_timestamp.and_then(|t| {
+                DateTime::<Utc>::from_timestamp(t as i64, 0)
+                    .map(|d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
             }),
-            settled_block: inv.resolved_at_block.map(|block| block.to_string()),
+            settled_block: inv.resolved_at_block.map(|b| b.to_string()),
             self_settlement: SelfSettlementDto {
                 factory: inv.factory.0.to_checksum(None),
                 salt: inv.salt.0.to_string(),
             },
             attention,
+            memo: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            cancellation_requested_at: inv.cancellation_requested_at,
+            transfers: Vec::new(),
+            indexer_freshness: IndexerFreshnessDto {
+                last_indexed_block: None,
+                last_finalized_block: None,
+                cursor_updated_at: None,
+            },
         }
     }
 }
 
+fn payment_status(inv: &Invoice) -> PaymentStatus {
+    if inv.blocked_reason.is_some() || inv.status == InvoiceStatus::Blocked {
+        return PaymentStatus::NeedsAttention;
+    }
+    match inv.status {
+        InvoiceStatus::Created if inv.received.0.is_zero() => PaymentStatus::AwaitingPayment,
+        InvoiceStatus::Created => PaymentStatus::PartiallyPaid,
+        InvoiceStatus::Funded | InvoiceStatus::Deploying => PaymentStatus::Paid,
+        InvoiceStatus::Fulfilled => PaymentStatus::Settled,
+        InvoiceStatus::Expired => PaymentStatus::Expired,
+        InvoiceStatus::Recovered => PaymentStatus::Returned,
+        InvoiceStatus::Blocked => PaymentStatus::NeedsAttention,
+    }
+}
 fn chain_name(id: u64) -> &'static str {
     match id {
         1 => "Ethereum",
@@ -175,7 +243,6 @@ fn chain_name(id: u64) -> &'static str {
         _ => "Unknown",
     }
 }
-
 fn attention(code: &str) -> AttentionDto {
     let (message, action) = match code {
         "beneficiary_blacklisted" => (
@@ -244,25 +311,41 @@ mod tests {
         ] {
             assert_eq!(payment(internal, received, None).status, expected);
         }
-        assert_eq!(
-            payment(
-                InvoiceStatus::Fulfilled,
-                1_000_000,
-                Some("retries_exhausted")
-            )
-            .status,
-            PaymentStatus::NeedsAttention
+        let blocked = payment(
+            InvoiceStatus::Fulfilled,
+            1_000_000,
+            Some("beneficiary_blacklisted"),
+        );
+        assert_eq!(blocked.status, PaymentStatus::NeedsAttention);
+        assert!(
+            blocked
+                .attention
+                .unwrap()
+                .action
+                .contains("compliant payout address")
         );
     }
 
     #[test]
-    fn wire_shape_uses_merchant_vocabulary() {
-        let json = serde_json::to_value(payment(InvoiceStatus::Created, 0, None)).unwrap();
+    fn wire_shape_keeps_customer_vocabulary_and_list_summaries_bounded() {
+        let payment = payment(InvoiceStatus::Created, 0, None);
+        let json = serde_json::to_value(&payment).unwrap();
         assert!(json["id"].as_str().unwrap().starts_with("pay_"));
         assert_eq!(json["status"], "awaiting_payment");
         assert_eq!(json["currency"], "USDC");
-        assert_eq!(json["chain"]["name"], "Monad");
         assert!(json.get("beneficiary_address").is_none());
-        assert!(json.get("expires_in").is_none());
+
+        let summary = PaymentSummaryResponse {
+            id: payment.id,
+            memo: None,
+            created_at: String::new(),
+            status: payment.status,
+            amount: payment.amount,
+            received: payment.received,
+            cancellation_requested_at: None,
+        };
+        let summary = serde_json::to_value(summary).unwrap();
+        assert!(summary.get("transfers").is_none());
+        assert!(summary.get("self_settlement").is_none());
     }
 }

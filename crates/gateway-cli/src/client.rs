@@ -7,7 +7,9 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use gateway_core::{CreatePaymentRequest, PaymentListResponse, PaymentResponse};
+use gateway_core::{
+    CancelPaymentResponse, CreatePaymentRequest, PaymentListResponse, PaymentResponse,
+};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use crate::account::ApiKeyMetadata;
@@ -98,11 +100,15 @@ impl GatewayClient {
 
     pub async fn list_payments(
         &self,
+        status: Option<&str>,
         limit: u32,
         starting_after: Option<&str>,
     ) -> Result<PaymentListResponse, CliError> {
         let url = format!("{}/v1/payments", self.base_url);
         let mut query = vec![("limit", limit.to_string())];
+        if let Some(status) = status {
+            query.push(("status", status.to_owned()));
+        }
         if let Some(cursor) = starting_after {
             query.push(("starting_after", cursor.to_owned()));
         }
@@ -117,6 +123,20 @@ impl GatewayClient {
                 source,
             })?;
         parse_typed_response(resp, "payments").await
+    }
+
+    pub async fn cancel_payment(&self, reference: &str) -> Result<CancelPaymentResponse, CliError> {
+        let url = format!("{}/v1/payments/{reference}/cancel", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        parse_response(response).await
     }
 
     pub async fn account(&self) -> Result<ApiKeyMetadata, CliError> {
@@ -297,12 +317,14 @@ mod tests {
         .await;
         let client = GatewayClient::new(base_url, KEY).unwrap();
         let create = CreatePaymentRequest {
-            chain_id: "31337".into(),
-            token_address: "0x0000000000000000000000000000000000000001".into(),
+            chain_id: Some("31337".into()),
+            token_address: Some("0x0000000000000000000000000000000000000001".into()),
             payout_address: "0x0000000000000000000000000000000000000002".into(),
             amount: "1".into(),
-            expires_in: 3_600,
-            refund_address: "0x0000000000000000000000000000000000000003".into(),
+            expires_in: Some(3_600),
+            expires_at: None,
+            refund_address: Some("0x0000000000000000000000000000000000000003".into()),
+            memo: None,
         };
 
         assert!(
@@ -314,7 +336,7 @@ mod tests {
         assert!(client.get_payment("pay_test").await.is_err());
         assert!(
             client
-                .list_payments(7, Some("pay_0198f80c-8d2f-7dc1-a369-90556a64f700"))
+                .list_payments(None, 7, Some("pay_0198f80c-8d2f-7dc1-a369-90556a64f700"),)
                 .await
                 .is_err()
         );
