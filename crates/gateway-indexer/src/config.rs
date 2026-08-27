@@ -1,22 +1,47 @@
-use alloy_primitives::Address;
+use std::time::Duration;
+
+use alloy_primitives::{Address, U256};
 use gateway_core::ChainId;
 
 /// Default indexer poll interval when `GATEWAY_INDEXER_POLL_INTERVAL_MS` is unset.
 const DEFAULT_INDEXER_POLL_INTERVAL_MS: u64 = 2000;
-const DEFAULT_FINALITY_CONFIRMATIONS: u64 = 12;
+const DEFAULT_FINALITY_CONFIRMATIONS: u64 = 2;
 const DEFAULT_LOG_RANGE_SIZE: u64 = 100;
+const DEFAULT_MAX_RANGES_PER_TICK: u64 = 20;
+const DEFAULT_SWEEP_PENDING_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_SWEEP_MAX_SUBMISSIONS: u32 = 5;
+const DEFAULT_SWEEP_MAX_ATTEMPTS: u32 = 8;
+/// 0.05 native tokens: roughly a hundred batches at Monad's fee levels.
+const DEFAULT_SIGNER_LOW_BALANCE_WEI: u128 = 50_000_000_000_000_000;
+
+/// Which chain reading anchors the finality boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalitySource {
+    /// The node's `finalized` block tag. Monad maps it to "irreversible
+    /// without a hard fork"; this is the production setting.
+    FinalizedTag,
+    /// The latest block. Only for chains or local nodes without a meaningful
+    /// `finalized` tag, combined with a reviewed confirmation depth.
+    Latest,
+}
 
 pub struct Config {
     database_url: String,
     chain_id: ChainId,
     rpc_url: String,
-    indexer_poll_interval_ms: u64,
+    indexer_poll_interval: Duration,
+    finality_source: FinalitySource,
     finality_confirmations: u64,
     log_range_size: u64,
+    max_ranges_per_tick: u64,
     usdc_start_block: u64,
     factory_address: Address,
     batch_sweeper_address: Address,
     usdc_address: Address,
+    sweep_pending_timeout: Duration,
+    sweep_max_submissions: u32,
+    sweep_max_attempts: u32,
+    signer_low_balance_wei: U256,
     signer: SignerConfig,
 }
 
@@ -34,20 +59,17 @@ impl Config {
             .parse()
             .unwrap_or_else(|e| panic!("invalid GATEWAY_CHAIN_ID: {e}"));
 
-        let indexer_poll_interval_ms = match std::env::var("GATEWAY_INDEXER_POLL_INTERVAL_MS") {
-            Ok(v) => v
-                .parse()
-                .unwrap_or_else(|e| panic!("invalid GATEWAY_INDEXER_POLL_INTERVAL_MS: {e}")),
-            Err(_) => DEFAULT_INDEXER_POLL_INTERVAL_MS,
-        };
-
-        let usdc_address = std::env::var("GATEWAY_USDC_ADDRESS")
-            .expect("GATEWAY_USDC_ADDRESS must be set")
-            .parse()
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_ADDRESS: {e}"));
+        let usdc_address = parse_address_env("GATEWAY_USDC_ADDRESS");
         let factory_address = parse_address_env("GATEWAY_FACTORY_ADDRESS");
         let batch_sweeper_address = parse_address_env("GATEWAY_BATCH_SWEEPER_ADDRESS");
 
+        let finality_source = match std::env::var("GATEWAY_FINALITY_SOURCE").as_deref() {
+            Ok("finalized") | Err(_) => FinalitySource::FinalizedTag,
+            Ok("latest") => FinalitySource::Latest,
+            Ok(other) => {
+                panic!("invalid GATEWAY_FINALITY_SOURCE '{other}': expected finalized or latest")
+            }
+        };
         let finality_confirmations = parse_u64_env(
             "GATEWAY_FINALITY_CONFIRMATIONS",
             DEFAULT_FINALITY_CONFIRMATIONS,
@@ -57,7 +79,20 @@ impl Config {
             log_range_size > 0,
             "GATEWAY_LOG_RANGE_SIZE must be positive"
         );
-        let usdc_start_block = parse_u64_env("GATEWAY_USDC_START_BLOCK", 0);
+        let max_ranges_per_tick = parse_u64_env(
+            "GATEWAY_INDEXER_MAX_RANGES_PER_TICK",
+            DEFAULT_MAX_RANGES_PER_TICK,
+        );
+        assert!(
+            max_ranges_per_tick > 0,
+            "GATEWAY_INDEXER_MAX_RANGES_PER_TICK must be positive"
+        );
+        // No default: a fresh database with the variable missing must not
+        // start a backfill from genesis.
+        let usdc_start_block = std::env::var("GATEWAY_USDC_START_BLOCK")
+            .expect("GATEWAY_USDC_START_BLOCK must be set")
+            .parse()
+            .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_START_BLOCK: {e}"));
 
         let signer = match (
             std::env::var("GATEWAY_SIGNER_KEY").ok(),
@@ -77,13 +112,44 @@ impl Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             chain_id: ChainId(chain_id),
             rpc_url: std::env::var("GATEWAY_RPC_URL").expect("GATEWAY_RPC_URL must be set"),
-            indexer_poll_interval_ms,
+            indexer_poll_interval: Duration::from_millis(parse_u64_env(
+                "GATEWAY_INDEXER_POLL_INTERVAL_MS",
+                DEFAULT_INDEXER_POLL_INTERVAL_MS,
+            )),
+            finality_source,
             finality_confirmations,
             log_range_size,
+            max_ranges_per_tick,
             usdc_start_block,
             factory_address,
             batch_sweeper_address,
             usdc_address,
+            sweep_pending_timeout: Duration::from_secs(parse_u64_env(
+                "GATEWAY_SWEEP_PENDING_TIMEOUT_SECS",
+                DEFAULT_SWEEP_PENDING_TIMEOUT_SECS,
+            )),
+            sweep_max_submissions: parse_u64_env(
+                "GATEWAY_SWEEP_MAX_SUBMISSIONS",
+                DEFAULT_SWEEP_MAX_SUBMISSIONS as u64,
+            )
+            .try_into()
+            .expect("GATEWAY_SWEEP_MAX_SUBMISSIONS is too large"),
+            sweep_max_attempts: parse_u64_env(
+                "GATEWAY_SWEEP_MAX_ATTEMPTS",
+                DEFAULT_SWEEP_MAX_ATTEMPTS as u64,
+            )
+            .try_into()
+            .expect("GATEWAY_SWEEP_MAX_ATTEMPTS is too large"),
+            signer_low_balance_wei: U256::from(
+                std::env::var("GATEWAY_SIGNER_LOW_BALANCE_WEI")
+                    .ok()
+                    .map(|value| {
+                        value.parse::<u128>().unwrap_or_else(|e| {
+                            panic!("invalid GATEWAY_SIGNER_LOW_BALANCE_WEI: {e}")
+                        })
+                    })
+                    .unwrap_or(DEFAULT_SIGNER_LOW_BALANCE_WEI),
+            ),
             signer,
         }
     }
@@ -100,8 +166,12 @@ impl Config {
         &self.rpc_url
     }
 
-    pub fn indexer_poll_interval_ms(&self) -> u64 {
-        self.indexer_poll_interval_ms
+    pub fn indexer_poll_interval(&self) -> Duration {
+        self.indexer_poll_interval
+    }
+
+    pub fn finality_source(&self) -> FinalitySource {
+        self.finality_source
     }
 
     pub fn finality_confirmations(&self) -> u64 {
@@ -110,6 +180,10 @@ impl Config {
 
     pub fn log_range_size(&self) -> u64 {
         self.log_range_size
+    }
+
+    pub fn max_ranges_per_tick(&self) -> u64 {
+        self.max_ranges_per_tick
     }
 
     pub fn usdc_start_block(&self) -> u64 {
@@ -126,6 +200,22 @@ impl Config {
 
     pub fn batch_sweeper_address(&self) -> Address {
         self.batch_sweeper_address
+    }
+
+    pub fn sweep_pending_timeout(&self) -> Duration {
+        self.sweep_pending_timeout
+    }
+
+    pub fn sweep_max_submissions(&self) -> u32 {
+        self.sweep_max_submissions
+    }
+
+    pub fn sweep_max_attempts(&self) -> u32 {
+        self.sweep_max_attempts
+    }
+
+    pub fn signer_low_balance_wei(&self) -> U256 {
+        self.signer_low_balance_wei
     }
 
     pub fn signer(&self) -> &SignerConfig {

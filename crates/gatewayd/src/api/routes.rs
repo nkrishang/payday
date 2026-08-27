@@ -38,6 +38,8 @@ pub fn router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use alloy_primitives::Address;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
@@ -46,6 +48,7 @@ mod tests {
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
     use serde::Serialize;
+    use serde_json::{Value, json};
     use sqlx::PgPool;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -101,6 +104,39 @@ mod tests {
         router(state)
     }
 
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// A request body that passes every validation rule; tests override one field.
+    fn valid_body() -> Value {
+        json!({
+            "chain_id": "1",
+            "token_address": "0x0000000000000000000000000000000000000000",
+            "beneficiary_address": "0x0000000000000000000000000000000000000002",
+            "amount": "1",
+            "expiration_timestamp": (unix_now() + 3600).to_string(),
+            "recovery_address": "0x0000000000000000000000000000000000000003"
+        })
+    }
+
+    fn create_request(key: &str, idempotency_key: &str, body: &Value) -> Request<Body> {
+        Request::post("/v1/invoices")
+            .header(header::AUTHORIZATION, format!("Bearer {key}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn json_body(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     fn identity_verifier_and_tokens() -> (auth::Auth0Verifier, String, String) {
         let private = rsa::RsaPrivateKey::new(&mut rand_08::thread_rng(), 2048).unwrap();
         let private_pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
@@ -118,10 +154,7 @@ mod tests {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("test-key".into());
         let key = EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap();
-        let authenticated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let authenticated_at = unix_now();
         let token = |event_id| {
             encode(
                 &header,
@@ -144,14 +177,21 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn health_is_public(pool: PgPool) {
-        let response = app(pool)
-            .await
+    async fn health_reflects_database_reachability(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let response = app
+            .clone()
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
-
         assert_eq!(response.status(), StatusCode::OK);
+
+        pool.close().await;
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     async fn assert_unauthorized(app: Router, request: Request<Body>) {
@@ -251,6 +291,110 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn create_invoice_returns_settlement_fields_and_a_single_use_address(pool: PgPool) {
+        let response = app(pool)
+            .await
+            .oneshot(create_request(KEY, "fields", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+        assert_eq!(body["status"], "created");
+        assert_eq!(body["amount"], "1.000000");
+        assert_eq!(body["amount_base_units"], "1000000");
+        assert_eq!(body["received"], "0.000000");
+        assert_eq!(body["received_base_units"], "0");
+        assert!(body["execute_tx_hash"].is_null());
+        assert!(body["resolved_at_block"].is_null());
+        assert!(body["blocked_reason"].is_null());
+        assert!(body["payment_address"].as_str().unwrap().starts_with("0x"));
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn create_invoice_rejects_malformed_parameters(pool: PgPool) {
+        let app = app(pool).await;
+        let now = unix_now();
+        let cases: Vec<(&str, Value, &str)> = vec![
+            ("negative amount", json!("-1.5"), "invalid_amount"),
+            ("signed amount", json!("+1"), "invalid_amount"),
+            ("zero amount", json!("0"), "invalid_amount"),
+            ("too many decimals", json!("1.0000001"), "invalid_amount"),
+        ];
+        for (name, amount, code) in cases {
+            let mut body = valid_body();
+            body["amount"] = amount;
+            let response = app
+                .clone()
+                .oneshot(create_request(KEY, name, &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert_eq!(json_body(response).await["error"]["code"], code, "{name}");
+        }
+
+        let expiration_cases = [
+            ("expired deadline", (now - 60).to_string()),
+            ("deadline too soon", (now + 60).to_string()),
+            ("milliseconds", ((now + 3600) * 1000).to_string()),
+            ("beyond a year", (now + 400 * 24 * 3600).to_string()),
+        ];
+        for (name, expiration) in expiration_cases {
+            let mut body = valid_body();
+            body["expiration_timestamp"] = json!(expiration);
+            let response = app
+                .clone()
+                .oneshot(create_request(KEY, name, &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert_eq!(
+                json_body(response).await["error"]["code"],
+                "invalid_request",
+                "{name}"
+            );
+        }
+
+        let mut body = valid_body();
+        body["beneficiary_address"] = json!("0x0000000000000000000000000000000000000000");
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "zero beneficiary", &body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(response).await["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("beneficiary_address")
+        );
+
+        for (name, key) in [("empty key", String::new()), ("long key", "k".repeat(256))] {
+            let response = app
+                .clone()
+                .oneshot(create_request(KEY, &key, &valid_body()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert_eq!(
+                json_body(response).await["error"]["code"],
+                "invalid_request",
+                "{name}"
+            );
+        }
+
+        let response = app
+            .oneshot(create_request(KEY, "k".repeat(255).as_str(), &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "255-byte keys are allowed"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn invoices_and_idempotency_keys_are_isolated_by_account(pool: PgPool) {
         const FIRST: &str = "first-account-0123456789abcdef0123456789abcdef";
         const SECOND: &str = "second-account-0123456789abcdef0123456789abcdef";
@@ -276,38 +420,22 @@ mod tests {
             .await
             .unwrap();
         let app = app(pool).await;
-        let body = serde_json::json!({
-            "chain_id": "1",
-            "token_address": "0x0000000000000000000000000000000000000000",
-            "beneficiary_address": "0x0000000000000000000000000000000000000002",
-            "amount": "1",
-            "expiration_timestamp": "1900000000",
-            "recovery_address": "0x0000000000000000000000000000000000000003"
-        })
-        .to_string();
+        let body = valid_body();
 
-        let create = |key: &'static str| {
-            Request::post("/v1/invoices")
-                .header(header::AUTHORIZATION, format!("Bearer {key}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("idempotency-key", "same-key")
-                .body(Body::from(body.clone()))
-                .unwrap()
-        };
-        let first = app.clone().oneshot(create(FIRST)).await.unwrap();
-        let second = app.clone().oneshot(create(SECOND)).await.unwrap();
+        let first = app
+            .clone()
+            .oneshot(create_request(FIRST, "same-key", &body))
+            .await
+            .unwrap();
+        let second = app
+            .clone()
+            .oneshot(create_request(SECOND, "same-key", &body))
+            .await
+            .unwrap();
         assert_eq!(first.status(), StatusCode::CREATED);
         assert_eq!(second.status(), StatusCode::CREATED);
-        let first_body = to_bytes(first.into_body(), 16 * 1024).await.unwrap();
-        let second_body = to_bytes(second.into_body(), 16 * 1024).await.unwrap();
-        let first_id = serde_json::from_slice::<serde_json::Value>(&first_body).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let second_id = serde_json::from_slice::<serde_json::Value>(&second_body).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let first_id = json_body(first).await["id"].as_str().unwrap().to_string();
+        let second_id = json_body(second).await["id"].as_str().unwrap().to_string();
         assert_ne!(first_id, second_id);
 
         let cross_account = app
@@ -355,16 +483,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(provisioned.status(), StatusCode::CREATED);
-        let provisioned_body = to_bytes(provisioned.into_body(), 4096).await.unwrap();
-        let provisioned_json =
-            serde_json::from_slice::<serde_json::Value>(&provisioned_body).unwrap();
+        let provisioned_json = json_body(provisioned).await;
         assert_eq!(provisioned_json["generation"], 1);
         assert_eq!(provisioned_json["replaced_previous_key"], false);
-        let first_key =
-            serde_json::from_slice::<serde_json::Value>(&provisioned_body).unwrap()["api_key"]
-                .as_str()
-                .unwrap()
-                .to_string();
+        let first_key = provisioned_json["api_key"].as_str().unwrap().to_string();
 
         let duplicate = app
             .clone()
@@ -376,9 +498,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
-        let duplicate_body = to_bytes(duplicate.into_body(), 4096).await.unwrap();
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&duplicate_body).unwrap()["error"]["code"],
+            json_body(duplicate).await["error"]["code"],
             "api_key_generation_conflict"
         );
 
@@ -394,15 +515,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replaced.status(), StatusCode::OK);
-        let rotated_body = to_bytes(replaced.into_body(), 4096).await.unwrap();
-        let replaced_json = serde_json::from_slice::<serde_json::Value>(&rotated_body).unwrap();
+        let replaced_json = json_body(replaced).await;
         assert_eq!(replaced_json["generation"], 2);
         assert_eq!(replaced_json["replaced_previous_key"], true);
-        let second_key =
-            serde_json::from_slice::<serde_json::Value>(&rotated_body).unwrap()["api_key"]
-                .as_str()
-                .unwrap()
-                .to_string();
+        let second_key = replaced_json["api_key"].as_str().unwrap().to_string();
         assert_ne!(first_key, second_key);
 
         let invoice_request = |key: &str| {

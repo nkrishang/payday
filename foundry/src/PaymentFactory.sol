@@ -4,8 +4,10 @@ pragma solidity ^0.8.13;
 import {CREATE3} from "foundry/lib/solady/src/utils/CREATE3.sol";
 import {Payment} from "foundry/src/Payment.sol";
 
-event PaymentExecuted(address indexed source, address indexed receiver, address indexed token, uint256 amount);
-
+/// @notice Ownerless CREATE3 deployer for `Payment`. Every invoice parameter is
+/// committed into the deployment salt, so the counterfactual address fixes the
+/// destination of funds before anyone pays. Execution is permissionless; the
+/// deployed `Payment` reports the outcome through its `Settled`/`Recovered` events.
 contract PaymentFactory {
     function paymentAddress(
         address token,
@@ -28,14 +30,12 @@ contract PaymentFactory {
         address recovery,
         bytes32 salt
     ) external {
-        address source = CREATE3.deployDeterministic({
+        CREATE3.deployDeterministic({
             salt: deploymentSalt(token, amount, receiver, expirationTimestamp, recovery, salt),
             initCode: abi.encodePacked(
                 type(Payment).creationCode, abi.encode(token, amount, receiver, expirationTimestamp, recovery)
             )
         });
-
-        emit PaymentExecuted(source, receiver, token, amount);
     }
 
     function deploymentSalt(

@@ -11,6 +11,9 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [[bin]]
 name = "derive-address"
 path = "test-helpers/derive_address.rs"

@@ -1,14 +1,21 @@
 # Indexer fatal halt
 
-The indexer intentionally halts when it detects a condition that could cause
-incorrect payment processing. This triggers the `payday-indexer-fatal` CloudWatch
-alarm via a log metric filter.
+The block indexer intentionally halts when it detects a condition that could
+cause incorrect payment processing. This triggers the `payday-indexer-fatal`
+CloudWatch alarm via a log metric filter and ECS restarts the task, which
+halts again until the cause is fixed.
+
+A stuck *sweep* is not fatal: the sweep worker pauses on its own and raises
+`payday-indexer-sweep-paused` while block indexing continues. See
+[stuck-invoice.md](stuck-invoice.md#sweep-worker-paused) for that case.
 
 ## Common causes
 
 | Error in logs | Meaning |
 |---------------|---------|
 | `FinalityViolation` / `cursor hash mismatch` | A finalized block changed hash (reorg). The cursor no longer matches the canonical chain. |
+| `RPC error (…)` marked permanent (HTTP 400/401/403/404/413) | The provider rejected the request outright; usually a rotated or exhausted endpoint. |
+| `sweep transaction … targeted …, not configured BatchSweeper` | A recorded helper transaction hash points at a foreign transaction; the database was edited. |
 | `exclusive indexer database lock` failure | Another indexer process is running or the lock is stuck. |
 | `indexer fatal` | Generic fatal error from the poll loop. |
 
@@ -23,7 +30,10 @@ aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
 
 This means the block at the cursor's `last_block` has a different hash than
 when it was originally processed. The indexer refuses to continue because
-observations paired with the old hash may be invalid.
+observations paired with the old hash may be invalid. With
+`GATEWAY_FINALITY_SOURCE=finalized` this should never happen on Monad without a
+hard fork; a provider serving a different chain or a database restored from a
+different environment is the likelier explanation.
 
 1. Check the current canonical hash at the cursor's block:
 
@@ -65,4 +75,6 @@ aws ecs update-service --cluster payday --service indexer \
   --force-new-deployment --region "$AWS_REGION"
 ```
 
-See [service-restart.md](service-restart.md) for details.
+See [service-restart.md](service-restart.md) for details. On restart the
+worker reconciles any in-flight helper transaction from its receipt before
+submitting a new one.

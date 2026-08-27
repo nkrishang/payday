@@ -7,6 +7,7 @@ edition = "2024"
 gateway-core = { path = "../gateway-core" }
 gateway-db = { path = "../gateway-db" }
 alloy-primitives = { workspace = true }
+alloy-eips = { workspace = true }
 alloy-json-rpc = { workspace = true }
 alloy-provider = { workspace = true }
 alloy-sol-types = { workspace = true }

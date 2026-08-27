@@ -94,16 +94,19 @@ Credit an observation only when:
 4. The recipient is a known payment address for that chain and token.
 5. The value is valid `uint256` data.
 6. The containing block is at the configured finalized boundary.
-7. The observation has not already been recorded.
+7. The containing block's timestamp is no later than the invoice deadline.
+8. The observation has not already been recorded.
 
 Any genuine nonzero inbound USDC credit to a `created` or `funded` invoice,
 including a mint with `from == address(0)`, is credited because the resulting
 USDC is spendable by the payment contract. A zero-value transfer is retained
-with an `error` disposition. A transfer to an invoice that is already
-`deploying` or terminal is retained with a `blocked` disposition for manual
-resolution, because the automatic sweep can no longer be assumed to include it.
-If payer identity or compliance policy requires a nonzero sender, make that an
-explicit product rule rather than an indexer assumption.
+with an `error` disposition. A transfer to an invoice in any other status is
+retained with a `late` disposition: it never counts toward the amount, but it
+sits at the address and is queued for recovery through `Payment.recover`.
+Every nonzero observation also records the block and transaction index of the
+sweep that collected it, so the ledger always says which funds are still at the
+address. If payer identity or compliance policy requires a nonzero sender, make
+that an explicit product rule rather than an indexer assumption.
 
 Use `(chain_id, token_address, tx_hash, log_index)` as the observation identity.
 A transaction can emit multiple USDC transfers, so transaction hash alone is not
@@ -113,18 +116,17 @@ unique.
 
 Block acquisition and sweeping run as independently scheduled workers. The
 invoice table is their durable queue: the acquisition worker atomically commits
-finalized observations and `funded` transitions, while the sweep worker claims
-eligible rows without delaying the next log poll. It sends one BatchSweeper
-transaction for each claimed group of up to 20 invoices. The helper isolates
-every factory call with `try/catch`, and failure events plus deployed Payment
-code determine each invoice's outcome after finality.
+finalized observations, `funded` transitions, and `expired` transitions by
+block timestamp, while the sweep worker claims eligible rows without delaying
+the next log poll. It sends one BatchSweeper transaction for each claimed group
+of up to 20 invoices; the finalized receipt's events determine each invoice's
+outcome (see "Sweep architecture under USDC").
 
-The signer uses pending-chain nonce reads rather than a local nonce cache and
-never submits a higher nonce while a prior batch lacks a receipt. After five
-minutes, an absent transaction is atomically returned to the retry queue; a
-transaction still known to the mempool halts the worker for operator-directed
-same-nonce fee replacement. Receipt outcomes query Payment code by canonical
-block hash, so later unfinalized deployments cannot affect classification.
+The finality boundary is the node's `finalized` tag minus a small margin; each
+pass drains every range up to it, so catch-up throughput does not depend on the
+poll interval. State reads that classify outcomes pin a block number whose
+canonical hash was verified first, so nothing relies on EIP-1898 block-hash
+parameters being supported by the provider.
 
 For each enabled chain/asset:
 
@@ -134,10 +136,12 @@ For each enabled chain/asset:
 4. Verify the stored cursor hash still matches the provider's canonical hash.
 5. Request logs for `cursor + 1 .. finalized_head` in bounded ranges.
 6. Sort results by block number, transaction index, and log index.
-7. Decode and validate every log strictly.
-8. Intersect unique recipients with known invoice addresses in one indexed DB
+7. Fetch and verify the header of every distinct transfer-bearing block. These
+   bounded lookups run concurrently and provide the timestamp used for expiry.
+8. Decode and validate every log strictly.
+9. Intersect unique recipients with known invoice addresses in one indexed DB
    query; status controls projection transitions, not ledger retention.
-9. Commit observations, projections, status changes, and cursor advancement in
+10. Commit observations, projections, status changes, and cursor advancement in
    one database transaction per range.
 
 The implementation uses adaptive range sizing up to a configured ceiling (100
@@ -293,45 +297,79 @@ amount. Both the expiration timestamp and recovery address are committed into
 the deterministic address.
 
 Factory execution is permissionless, so anyone can recover an expired partial
-payment. The indexer only automatically executes finalized-funded invoices;
-operators or a separate automation path must execute expired underfunded
-invoices.
+payment; the indexer also does it automatically once the invoice is `expired`,
+reporting the outcome as `recovered`.
 
-Transfers sent after the Payment contract has executed can still become
-stranded: constructor-based recovery runs only at deployment. Stop presenting
-the address after funding and use a different deployed-contract design if those
-late transfers must be recoverable.
+Transfers sent after the Payment contract has executed are forwarded to the
+recovery address by `Payment.recover`, which anyone may call and which the
+sweep worker calls automatically; they are never credited to the invoice. The
+API still describes the address as single-use so merchants do not present it
+after settlement.
 
 ## Sweep architecture under USDC
 
-Sweep only finalized-funded invoices. The funding finality gate does not make the
-sweep transaction final.
+Every invoice with uncollected funds at its payment address is queued,
+whatever its status: `funded` (settle), `expired` (recover the balance), and
+`fulfilled`/`recovered` (forward a late transfer). One helper transaction is in
+flight per signer. Each exact signed transaction is persisted in its
+`sweep_batches` outbox before broadcast, so a crash can only cause an
+idempotent resend of the same bytes. The row owns the nonce, raw transactions,
+and every hash submitted for it, so a receipt for any submission resolves the
+batch. A batch
+without a receipt after the pending timeout is replaced on the same nonce with
+fees bumped by 12.5%, and after the configured number of submissions the sweep
+worker pauses and alarms while block indexing continues. A mined nonce ahead of
+the batch's nonce without a visible receipt means nothing it sent can mine any
+more (Monad returns no receipt for an in-flight transaction and forgets dropped
+ones), so the batch is abandoned and its invoices re-queued.
 
-The implementation persists a submitted transaction hash before receipt polling,
-then persists its inclusion block/hash when mined. It keeps the invoice
-`deploying` and marks it `fulfilled` only after that detection passes the same
-confirmation depth and Payment code remains present. A restart resumes receipt
-polling or recovers permissionless execution from deterministic code presence.
-Persisted signer nonce ownership and replacement history remain required before
-running multiple sweep workers.
+The finalized receipt is the single source of truth, including for reverted
+transactions; no batch is released from a merely unfinalized revert. The worker
+checks the receipt block's canonical hash before and after its pinned
+classification reads. `BatchSweeper` deploys `Payment` through the factory for
+an address without code and calls
+`Payment.recover` for one that already has code; it never attempts the CREATE2
+collision that a second `execute` would hit, which burns every unit of gas
+forwarded to it. Per item the receipt carries exactly one of:
 
-The native-token failure classifier cannot be reused. For USDC, a failed CREATE3
-deployment with no code may mean:
+- `Settled` from the payment address: the deployment paid the beneficiary
+  (`fulfilled`);
+- `Recovered` from the payment address: the deployment paid the recovery
+  address after expiry (`recovered`);
+- `SweepRecovered` from the helper: the contract pre-existed and `recover`
+  forwarded the reported amount; an open invoice in this position was executed
+  by someone else and `Payment.settled()` at the receipt block says how;
+- `SweepFailed` from the helper: `execute` or `recover` reverted. Solady's
+  CREATE3 reduces every constructor failure to `DeploymentFailed()`, so the
+  revert bytes cannot classify the cause; the worker reads `paused()`,
+  `isBlacklisted()` for the payment address and its destination, `balanceOf`,
+  and code presence at the receipt block instead. A paused token or an
+  unclassified revert is retried behind exponential backoff up to a ceiling; a
+  blacklisted destination, a balance below the credited amount, or an
+  exhausted ceiling blocks the invoice with a reason an operator can act on.
 
-- USDC is globally paused;
-- payment address or beneficiary is blacklisted;
-- the payment address became underfunded;
-- an unreviewed proxy implementation changed behavior;
-- the RPC or submission path failed.
+Finalization marks every nonzero observation before the receipt's exact
+`(block number, transaction index)` position as collected and recomputes the
+invoice's uncollected count from the ledger. A transfer indexed later from a
+position the drain already covered is recorded as collected on insert, while a
+later transaction in the same block remains queued. The lag between the two
+loops therefore cannot re-queue funds a finalized sweep already moved. A
+drained invoice's status changes only when it was open; late collections leave
+`fulfilled`/`recovered` untouched.
 
-ERC-20 receipt does not invoke a beneficiary callback, so `receiver_rejected` is
-not an accurate reason. Classify with targeted `balanceOf`, pause/blacklist reads,
-code checks, and a simulation at a pinned block. Infrastructure failures remain
-retryable and alertable rather than becoming a terminal invoice failure.
+Expiry is decided by chain time: each observation is classified against its
+own block timestamp, independent of range boundaries. An open invoice whose
+deadline precedes the timestamp of a committed range's end block becomes
+`expired` in the same commit, and its balance is recovered through the same
+batch path. The API
+refuses deadlines closer than ten minutes so a payment always has room to
+settle before the contract starts routing to recovery.
 
-Use a separate per-chain/per-signer leader lock. Persist nonce ownership before
-submission so replicas cannot race retries. Prefer a direct safe ERC-20 transfer
-from the Payment contract over self-approval followed by `transferFrom`.
+Use a separate per-chain/per-signer leader lock. Persist nonce ownership and the
+exact signed bytes before broadcast so replicas cannot race retries and a crash
+cannot lose the only copy of an already-submitted transaction. Prefer a direct
+safe ERC-20 transfer from the Payment contract over self-approval followed by
+`transferFrom`.
 
 ## Build versus QuickNode
 

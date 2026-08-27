@@ -1,15 +1,20 @@
 mod accounts;
 mod cursor;
 mod invoices;
+mod sweeps;
 
 pub use accounts::{AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError, IssuedApiKey};
 pub use cursor::{CursorRepository, IndexerCursor};
 pub use invoices::{
     CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository, PaymentObservation,
+    RangeOutcome,
 };
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
+pub use sweeps::{
+    BatchResolution, InvoiceOutcome, MinedBatch, SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats,
+};
 
 /// The gateway's schema migrations, embedded at compile time. This crate owns
 /// the migrations for the shared database; both services run them on startup via

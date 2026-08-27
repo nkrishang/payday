@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use alloy_primitives::{B256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -17,6 +18,20 @@ pub fn generate_invoice_id() -> InvoiceId {
     InvoiceId(Uuid::now_v7())
 }
 
+/// Invoice lifecycle.
+///
+/// ```text
+/// created ──(finalized credit ≥ amount)──▶ funded ──(claimed)──▶ deploying ──▶ fulfilled
+///    │                                       │                        │
+///    └──(chain time > expiration)──▶ expired ◀┘                       └──▶ recovered
+///                                       │                                    ▲
+///                                       └──(balance swept after expiry)──────┘
+/// ```
+///
+/// `blocked` is reached from `deploying` or `expired` when a sweep fails for
+/// a reason the worker classifies as permanent. Funds arriving after
+/// `fulfilled`/`recovered` are forwarded to the recovery address without
+/// changing the status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InvoiceStatus {
@@ -24,7 +39,8 @@ pub enum InvoiceStatus {
     Funded,
     Deploying,
     Fulfilled,
-    Failed,
+    Recovered,
+    Expired,
     Blocked,
 }
 
@@ -34,6 +50,16 @@ pub enum InvoiceStatus {
 pub struct InvoiceStatusParseError(pub String);
 
 impl InvoiceStatus {
+    pub const ALL: [InvoiceStatus; 7] = [
+        InvoiceStatus::Created,
+        InvoiceStatus::Funded,
+        InvoiceStatus::Deploying,
+        InvoiceStatus::Fulfilled,
+        InvoiceStatus::Recovered,
+        InvoiceStatus::Expired,
+        InvoiceStatus::Blocked,
+    ];
+
     /// The canonical lowercase string form used on the wire and in the database.
     /// This is the single source of truth for the string mapping; [`Display`],
     /// [`FromStr`], and the DB CHECK constraint all agree with it.
@@ -43,9 +69,19 @@ impl InvoiceStatus {
             InvoiceStatus::Funded => "funded",
             InvoiceStatus::Deploying => "deploying",
             InvoiceStatus::Fulfilled => "fulfilled",
-            InvoiceStatus::Failed => "failed",
+            InvoiceStatus::Recovered => "recovered",
+            InvoiceStatus::Expired => "expired",
             InvoiceStatus::Blocked => "blocked",
         }
+    }
+
+    /// Whether the invoice's own payment has reached its final destination.
+    /// Late transfers can still be collected from a terminal invoice.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            InvoiceStatus::Fulfilled | InvoiceStatus::Recovered | InvoiceStatus::Blocked
+        )
     }
 }
 
@@ -59,15 +95,10 @@ impl FromStr for InvoiceStatus {
     type Err = InvoiceStatusParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "created" => Ok(InvoiceStatus::Created),
-            "funded" => Ok(InvoiceStatus::Funded),
-            "deploying" => Ok(InvoiceStatus::Deploying),
-            "fulfilled" => Ok(InvoiceStatus::Fulfilled),
-            "failed" => Ok(InvoiceStatus::Failed),
-            "blocked" => Ok(InvoiceStatus::Blocked),
-            other => Err(InvoiceStatusParseError(other.to_string())),
-        }
+        InvoiceStatus::ALL
+            .into_iter()
+            .find(|status| status.as_str() == s)
+            .ok_or_else(|| InvoiceStatusParseError(s.to_string()))
     }
 }
 
@@ -84,6 +115,14 @@ pub struct Invoice {
     pub salt: Salt,
     pub payment_address: PaymentAddress,
     pub status: InvoiceStatus,
+    /// Finalized transfers credited toward `amount`, in base units.
+    pub received: Amount,
+    /// Transaction that deployed the `Payment` contract, when this service sent it.
+    pub execute_tx_hash: Option<B256>,
+    /// Block at which the invoice reached `fulfilled` or `recovered`.
+    pub resolved_at_block: Option<u64>,
+    /// Why automatic sweeping stopped for this invoice, if it did.
+    pub blocked_reason: Option<String>,
 }
 
 impl Invoice {
@@ -117,7 +156,26 @@ impl Invoice {
                 salt,
             ),
             status: InvoiceStatus::Created,
+            received: Amount(U256::ZERO),
+            execute_tx_hash: None,
+            resolved_at_block: None,
+            blocked_reason: None,
         }
+    }
+
+    /// Recompute the counterfactual address from the stored parameters. A
+    /// mismatch means the row no longer describes the address payers were
+    /// given and must never be swept.
+    pub fn address_matches_parameters(&self) -> bool {
+        predict_payment_address(
+            self.factory,
+            self.token,
+            self.amount,
+            self.beneficiary,
+            self.expiration_timestamp,
+            self.recovery,
+            self.salt,
+        ) == self.payment_address
     }
 }
 
@@ -174,14 +232,7 @@ mod tests {
 
     #[test]
     fn status_str_roundtrips_for_all_variants() {
-        for status in [
-            InvoiceStatus::Created,
-            InvoiceStatus::Funded,
-            InvoiceStatus::Deploying,
-            InvoiceStatus::Fulfilled,
-            InvoiceStatus::Failed,
-            InvoiceStatus::Blocked,
-        ] {
+        for status in InvoiceStatus::ALL {
             let parsed = status.as_str().parse::<InvoiceStatus>().unwrap();
             assert_eq!(parsed, status);
             // Display and as_str agree.
@@ -190,15 +241,39 @@ mod tests {
     }
 
     #[test]
-    fn status_from_str_rejects_unknown() {
-        let err = "bogus".parse::<InvoiceStatus>().unwrap_err();
-        assert_eq!(err, InvoiceStatusParseError("bogus".to_string()));
+    fn status_from_str_rejects_unknown_and_retired_values() {
+        for retired in ["bogus", "failed", "FULFILLED"] {
+            assert_eq!(
+                retired.parse::<InvoiceStatus>().unwrap_err(),
+                InvoiceStatusParseError(retired.to_string())
+            );
+        }
     }
 
     #[test]
-    fn new_invoice_has_created_status() {
+    fn terminal_statuses_are_exactly_the_settled_and_given_up_states() {
+        let terminal: Vec<_> = InvoiceStatus::ALL
+            .into_iter()
+            .filter(InvoiceStatus::is_terminal)
+            .collect();
+        assert_eq!(
+            terminal,
+            [
+                InvoiceStatus::Fulfilled,
+                InvoiceStatus::Recovered,
+                InvoiceStatus::Blocked
+            ]
+        );
+    }
+
+    #[test]
+    fn new_invoice_has_created_status_and_no_operational_state() {
         let invoice = sample_invoice();
         assert_eq!(invoice.status, InvoiceStatus::Created);
+        assert_eq!(invoice.received, Amount(U256::ZERO));
+        assert_eq!(invoice.execute_tx_hash, None);
+        assert_eq!(invoice.resolved_at_block, None);
+        assert_eq!(invoice.blocked_reason, None);
     }
 
     #[test]
@@ -255,6 +330,15 @@ mod tests {
         );
 
         assert_eq!(invoice.payment_address, expected);
+        assert!(invoice.address_matches_parameters());
+    }
+
+    #[test]
+    fn tampered_parameters_no_longer_match_the_stored_address() {
+        let mut invoice = sample_invoice();
+        invoice.beneficiary =
+            BeneficiaryAddress(address!("0x0000000000000000000000000000000000000009"));
+        assert!(!invoice.address_matches_parameters());
     }
 
     #[test]
