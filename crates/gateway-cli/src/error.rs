@@ -39,6 +39,15 @@ pub enum CliError {
     /// Local input the CLI rejected before making a request.
     #[error("{0}")]
     InvalidInput(String),
+
+    #[error("{0}")]
+    Config(String),
+
+    #[error("{message}")]
+    Auth {
+        message: String,
+        detail: Option<String>,
+    },
 }
 
 impl CliError {
@@ -46,9 +55,16 @@ impl CliError {
     /// so scripts can branch on the outcome.
     pub fn exit_code(&self) -> i32 {
         match self {
-            CliError::InvalidInput(_) => 2,
+            CliError::InvalidInput(_) | CliError::Config(_) => 2,
             CliError::Transport { .. } => 3,
-            CliError::Api { .. } | CliError::UnexpectedResponse { .. } => 1,
+            CliError::Api { .. } | CliError::UnexpectedResponse { .. } | CliError::Auth { .. } => 1,
+        }
+    }
+
+    pub fn diagnostic(&self) -> Option<&str> {
+        match self {
+            CliError::Auth { detail, .. } => detail.as_deref(),
+            _ => None,
         }
     }
 }

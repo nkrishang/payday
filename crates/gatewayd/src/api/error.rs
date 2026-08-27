@@ -61,6 +61,14 @@ impl ApiError {
         }
     }
 
+    pub fn account_disabled() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "account_disabled",
+            message: "This account is disabled".into(),
+        }
+    }
+
     pub fn missing_idempotency_key() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

@@ -10,6 +10,7 @@ use std::time::Duration;
 use gateway_core::{CreatePaymentRequest, PaymentListResponse, PaymentResponse};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
+use crate::account::ApiKeyMetadata;
 use crate::error::{ApiErrorBody, CliError};
 
 /// Thin wrapper around a `reqwest::Client` bound to one gateway base URL.
@@ -56,7 +57,7 @@ impl GatewayClient {
         Ok(Self { base_url, http })
     }
 
-    /// Create an invoice. `idempotency_key` is sent as the `Idempotency-Key`
+    /// Create a payment. `idempotency_key` is sent as the `Idempotency-Key`
     /// header, which the server requires.
     pub async fn create_payment(
         &self,
@@ -79,7 +80,7 @@ impl GatewayClient {
         parse_response(resp).await
     }
 
-    /// Fetch an invoice by ID.
+    /// Fetch a payment by ID.
     pub async fn get_payment(&self, id: &str) -> Result<PaymentResponse, CliError> {
         let url = format!("{}/v1/payments/{id}", self.base_url);
         let resp = self
@@ -117,6 +118,20 @@ impl GatewayClient {
             })?;
         parse_typed_response(resp, "payments").await
     }
+
+    pub async fn account(&self) -> Result<ApiKeyMetadata, CliError> {
+        let url = format!("{}/v1/account", self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        parse_response(response).await
+    }
 }
 
 pub(crate) fn require_secure_transport(url: &reqwest::Url) -> Result<(), CliError> {
@@ -144,11 +159,20 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 
 /// Turn a response into either a decoded body or a typed error, preserving the
 /// server's stable error code when present.
-async fn parse_response(resp: reqwest::Response) -> Result<PaymentResponse, CliError> {
-    parse_typed_response(resp, "payment").await
+async fn parse_typed_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    noun: &str,
+) -> Result<T, CliError> {
+    parse_response_with_noun(resp, noun).await
 }
 
-async fn parse_typed_response<T: serde::de::DeserializeOwned>(
+async fn parse_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, CliError> {
+    parse_response_with_noun(resp, "response").await
+}
+
+async fn parse_response_with_noun<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
     noun: &str,
 ) -> Result<T, CliError> {
@@ -304,6 +328,34 @@ mod tests {
         assert_bearer_header(&requests[0]);
         assert_bearer_header(&requests[1]);
         assert_bearer_header(&requests[2]);
+    }
+
+    #[tokio::test]
+    async fn whoami_decodes_account_metadata_with_rotation_grace() {
+        let body = serde_json::json!({
+            "account_id": "0198ec14-39df-7dd0-9994-92b510a89e85",
+            "key_hint": "…abcdef",
+            "generation": 2,
+            "created_at": "2026-08-27T12:00:00Z",
+            "rotated_at": "2026-08-27T12:00:00Z",
+            "previous_key_expires_at": "2026-08-28T12:00:00Z",
+            "revoked_at": null
+        })
+        .to_string();
+        let ok = response("200 OK", "Content-Type: application/json\r\n", &body);
+        let (base_url, requests) = capture_server(vec![ok]).await;
+        let metadata = GatewayClient::new(base_url, KEY)
+            .unwrap()
+            .account()
+            .await
+            .unwrap();
+
+        assert_eq!(metadata.generation, 2);
+        assert_eq!(metadata.key_hint.as_deref(), Some("…abcdef"));
+        assert!(metadata.previous_key_expires_at.is_some());
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /v1/account HTTP/1.1"));
+        assert_bearer_header(&requests[0]);
     }
 
     #[tokio::test]

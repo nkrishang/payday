@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     let authenticated = Router::new()
+        .route("/v1/account", get(accounts::get_account))
         .route(
             "/v1/payments",
             post(invoices::create_payment).get(invoices::list_payments),
@@ -24,7 +25,9 @@ pub fn router(state: AppState) -> Router {
     let account_management = Router::new()
         .route(
             "/v1/account/api-key",
-            post(accounts::issue).get(accounts::metadata),
+            post(accounts::issue)
+                .get(accounts::metadata)
+                .delete(accounts::revoke),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -140,7 +143,7 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    fn identity_verifier_and_tokens() -> (auth::Auth0Verifier, String, String) {
+    fn identity_verifier_and_tokens() -> (auth::Auth0Verifier, String, String, String) {
         let private = rsa::RsaPrivateKey::new(&mut rand_08::thread_rng(), 2048).unwrap();
         let private_pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
         let public_pem = private
@@ -176,7 +179,12 @@ mod tests {
             )
             .unwrap()
         };
-        (verifier, token("event-1"), token("event-2"))
+        (
+            verifier,
+            token("event-1"),
+            token("event-2"),
+            token("event-3"),
+        )
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -553,8 +561,8 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn authenticated_user_can_create_and_replace_one_key(pool: PgPool) {
-        let (verifier, token, replacement_token) = identity_verifier_and_tokens();
+    async fn authenticated_user_can_rotate_inspect_and_revoke_keys(pool: PgPool) {
+        let (verifier, token, replacement_token, revocation_token) = identity_verifier_and_tokens();
         let accounts = AccountRepository::new(pool.clone());
         let state = AppState::new(
             InvoiceRepository::new(pool),
@@ -623,6 +631,24 @@ mod tests {
         let second_key = replaced_json["api_key"].as_str().unwrap().to_string();
         assert_ne!(first_key, second_key);
 
+        let metadata = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/account")
+                    .header(header::AUTHORIZATION, format!("Bearer {second_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata = json_body(metadata).await;
+        assert_eq!(metadata["generation"], 2);
+        assert!(metadata["account_id"].is_string());
+        assert!(metadata["key_hint"].is_string());
+        assert!(metadata["previous_key_expires_at"].is_string());
+        assert!(metadata["revoked_at"].is_null());
+
         let invoice_request = |key: &str| {
             Request::get("/v1/payments/not-an-id")
                 .header(header::AUTHORIZATION, format!("Bearer {key}"))
@@ -635,14 +661,35 @@ mod tests {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            app.clone()
+                .oneshot(invoice_request(&second_key))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::delete("/v1/account/api-key")
+                    .header(header::AUTHORIZATION, format!("Bearer {revocation_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"expected_generation":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             app.oneshot(invoice_request(&second_key))
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::UNAUTHORIZED
         );
     }
 }

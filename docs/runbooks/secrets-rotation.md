@@ -4,33 +4,37 @@ How to rotate an account API key and infrastructure secrets.
 
 ## Rotate the API key
 
-API-key replacement requires a fresh email OTP and invalidates the old key
-immediately. Run:
+API-key rotation requires a fresh email OTP. Production API and Auth0 defaults
+are compiled into the CLI. Run:
 
 ```bash
-export PAYDAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
-export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export PAYDAY_AUTH0_CLIENT_ID="<native-application-client-id>"
-./target/release/payday account create
+./target/release/payday keys rotate
 ```
 
-The CLI displays the existing key hint and generation, warns that replacement
-is immediate, and asks `Proceed? [y/N]`. After confirmation, its success message
-explicitly states that the old key is invalid. To capture JSON without printing
-the secret in shared logs:
+The CLI asks for confirmation (`-y` skips it), saves the replacement securely,
+and masks it by default. Use `--show` only to transfer it directly to an approved
+secret manager. The previous key remains valid for 24 hours:
 
 ```bash
-rotation_json="$(./target/release/payday --json account create --yes)"
-export PAYDAY_API_KEY="$(jq -r .api_key <<<"$rotation_json")"
+./target/release/payday keys rotate --show -y
 ```
 
 Store and distribute the new key through the account owner's approved secret
 management process. The service does not retain recoverable plaintext and does
-not need a restart. Verify the new key against an invoice owned by this account:
+not need a restart. Verify the new key against a payment owned by this account:
 
 ```bash
-./target/release/payday get <INVOICE_ID>
+./target/release/payday get <PAYMENT_ID>
 ```
+
+CI should receive `PAYDAY_API_KEY` from its secret store rather than performing
+an OTP login. Once consumers migrate, the prior key expires after 24 hours.
+
+## Revoke API keys
+
+For compromise or decommissioning, `payday keys revoke` immediately invalidates
+the current and grace-period keys and removes the saved credential. Use `-y` to
+skip confirmation. `payday logout` only removes the local profile.
 
 ## Rotate the Resend API key
 
@@ -38,7 +42,7 @@ The Resend API key is held by Auth0, not by Payday's services or Terraform.
 Create a replacement sending-only key in Resend, update **Branding → Email
 Provider** in Auth0, and send a test email before revoking the old key. Then run
 one complete staging email-OTP login. A failed rotation prevents login but does
-not affect existing invoice API keys.
+not affect existing Payday API keys.
 
 ## Rotate the RPC URL
 

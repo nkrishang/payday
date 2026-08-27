@@ -21,15 +21,23 @@ pub struct IssuedApiKey {
 
 #[derive(Serialize)]
 pub struct ApiKeyMetadataResponse {
-    hint: String,
+    account_id: String,
+    key_hint: Option<String>,
     generation: i64,
     created_at: String,
     rotated_at: Option<String>,
+    previous_key_expires_at: Option<String>,
+    revoked_at: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct IssueApiKeyRequest {
     expected_generation: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct RevokeApiKeyRequest {
+    expected_generation: i64,
 }
 
 pub async fn issue(
@@ -58,6 +66,7 @@ pub async fn issue(
                 ApiError::authentication_event_already_used()
             }
             IssueApiKeyError::GenerationConflict => ApiError::api_key_generation_conflict(),
+            IssueApiKeyError::AccountDisabled => ApiError::account_disabled(),
             IssueApiKeyError::Database(error) => ApiError::from(error),
         })?;
     let status = if issued.replaced_previous_key {
@@ -81,12 +90,60 @@ pub async fn metadata(
 ) -> Result<Json<ApiKeyMetadataResponse>, ApiError> {
     let account = account_for_identity(&state, &identity).await?;
     let metadata = state.accounts.metadata(account).await?;
-    Ok(Json(ApiKeyMetadataResponse {
-        hint: metadata.hint,
+    Ok(Json(metadata_response(metadata)))
+}
+
+pub async fn get_account(
+    State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
+) -> Result<Json<ApiKeyMetadataResponse>, ApiError> {
+    Ok(Json(metadata_response(
+        state.accounts.metadata(account).await?,
+    )))
+}
+
+pub async fn revoke(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<RevokeApiKeyRequest>,
+) -> Result<StatusCode, ApiError> {
+    if request.expected_generation < 1 {
+        return Err(ApiError::invalid_request(
+            "expected_generation must be positive",
+        ));
+    }
+    state
+        .accounts
+        .revoke_api_key(
+            &identity.issuer,
+            &identity.subject,
+            request.expected_generation,
+            &identity.authentication_event_id,
+        )
+        .await
+        .map_err(|error| match error {
+            IssueApiKeyError::AuthenticationEventAlreadyUsed => {
+                ApiError::authentication_event_already_used()
+            }
+            IssueApiKeyError::GenerationConflict => ApiError::api_key_generation_conflict(),
+            IssueApiKeyError::AccountDisabled => ApiError::account_disabled(),
+            IssueApiKeyError::Database(error) => ApiError::from(error),
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn metadata_response(metadata: gateway_db::ApiKeyMetadata) -> ApiKeyMetadataResponse {
+    ApiKeyMetadataResponse {
+        account_id: metadata.account_id.to_string(),
+        key_hint: metadata.hint,
         generation: metadata.generation,
         created_at: metadata.created_at.to_rfc3339(),
         rotated_at: metadata.rotated_at.map(|value| value.to_rfc3339()),
-    }))
+        previous_key_expires_at: metadata
+            .previous_key_expires_at
+            .map(|value| value.to_rfc3339()),
+        revoked_at: metadata.revoked_at.map(|value| value.to_rfc3339()),
+    }
 }
 
 async fn account_for_identity(

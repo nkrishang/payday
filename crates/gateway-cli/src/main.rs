@@ -1,6 +1,7 @@
 mod account;
 mod cli;
 mod client;
+mod credentials;
 mod error;
 
 use std::io::{self, IsTerminal, Write};
@@ -9,10 +10,14 @@ use clap::Parser;
 use gateway_core::{CreatePaymentRequest, PaymentResponse, PaymentStatus};
 use uuid::Uuid;
 
-use account::AccountClient;
-use cli::{AccountCommand, Cli, Command, CreateArgs, GetArgs};
+use account::{AccountClient, ApiKeyMetadata};
+use cli::{Cli, Command, CreateArgs, GetArgs, KeyActionArgs, KeysCommand, LoginArgs, RevokeArgs};
 use client::GatewayClient;
 use error::CliError;
+
+const PRODUCTION_AUTH0_ISSUER: &str = "https://dev-5ojfw164vnkjnk6m.us.auth0.com/";
+const PRODUCTION_AUTH0_CLIENT_ID: &str = "vL8df7gnvLdQtNllctp8FWkZZGuYjzsq";
+const PRODUCTION_AUTH0_AUDIENCE: &str = "https://api.payday.sh";
 
 struct Output {
     body: String,
@@ -24,14 +29,24 @@ struct Output {
 async fn main() {
     let cli = Cli::parse();
     let result = match cli.command.clone() {
-        Command::Account(command) => run_account(&cli, command).await,
-        command => run_payment(&cli, command).await,
+        command @ (Command::Create(_) | Command::Get(_) | Command::List(_)) => {
+            run_payment(&cli, command).await
+        }
+        Command::Login(args) => run_login(&cli, args).await.map(account_output),
+        Command::Logout => run_logout(&cli).map(account_output),
+        Command::Whoami => run_whoami(&cli).await.map(account_output),
+        Command::Keys(command) => run_keys(&cli, command).await.map(account_output),
     };
 
     match result {
         Ok(output) => print_output(output, cli.json, io::stdout().is_terminal()),
         Err(err) => {
             eprintln!("error: {err}");
+            if cli.verbose
+                && let Some(detail) = err.diagnostic()
+            {
+                eprintln!("detail: {detail}");
+            }
             std::process::exit(err.exit_code());
         }
     }
@@ -53,11 +68,17 @@ fn print_output(output: Output, json: bool, interactive: bool) {
     }
 }
 
+fn account_output(body: String) -> Output {
+    Output {
+        body,
+        signed_in: None,
+        next: None,
+    }
+}
+
 async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
-    let api_key = cli.api_key.as_deref().ok_or_else(|| {
-        CliError::InvalidInput("API key is required; set PAYDAY_API_KEY or pass --api-key".into())
-    })?;
-    let client = GatewayClient::new(&cli.api_url, api_key)?;
+    let api_key = api_key(cli)?;
+    let client = GatewayClient::new(&cli.api_url, &api_key)?;
     match command {
         Command::Create(args) => {
             let payment = create(&client, args).await?;
@@ -109,7 +130,7 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
                 next,
             })
         }
-        Command::Account(_) => unreachable!(),
+        Command::Login(_) | Command::Logout | Command::Whoami | Command::Keys(_) => unreachable!(),
     }
 }
 
@@ -129,85 +150,6 @@ fn payment_next(payment: &PaymentResponse) -> String {
         ),
         _ => "Run `payday create` to create another payment.".into(),
     }
-}
-
-async fn run_account(cli: &Cli, command: AccountCommand) -> Result<Output, CliError> {
-    let issuer = required(cli.auth0_issuer.as_deref(), "PAYDAY_AUTH0_ISSUER")?;
-    let client_id = required(cli.auth0_client_id.as_deref(), "PAYDAY_AUTH0_CLIENT_ID")?;
-    let audience = required(cli.auth0_audience.as_deref(), "PAYDAY_AUTH0_AUDIENCE")?;
-    let client = AccountClient::new(&cli.api_url, issuer, client_id, audience)?;
-    let email = prompt_line("Email: ")?;
-    client.send_otp(&email).await?;
-    eprintln!("A one-time code was sent to {email}. Check your email.");
-    let otp = prompt_line("One-time code: ")?;
-    let token = client.authenticate(&email, &otp).await?;
-    let (body, next) = match command {
-        AccountCommand::Create(args) => {
-            let expected_generation =
-                if let Some(metadata) = client.metadata_optional(&token).await? {
-                    eprintln!(
-                        "WARNING: a new API key immediately invalidates {} (generation {}).",
-                        metadata.hint, metadata.generation
-                    );
-                    if !args.yes && !confirm("Proceed? [y/N]: ")? {
-                        return Ok(Output {
-                            body: "API key replacement cancelled.".into(),
-                            signed_in: Some(email),
-                            next: None,
-                        });
-                    }
-                    Some(metadata.generation)
-                } else {
-                    None
-                };
-            let issued = client.create(&token, expected_generation).await?;
-            let body = if cli.json {
-                serde_json::to_string_pretty(&issued).expect("API key response must serialize")
-            } else {
-                format!(
-                    "API key {} (generation {}).\n\n{}\n\nStore it securely; it cannot be retrieved later.",
-                    if issued.replaced_previous_key {
-                        "replaced"
-                    } else {
-                        "created"
-                    },
-                    issued.generation,
-                    issued.api_key
-                )
-            };
-            (
-                body,
-                Some("Set PAYDAY_API_KEY to the API key shown above.".into()),
-            )
-        }
-        AccountCommand::Get => {
-            let metadata = client.metadata(&token).await?;
-            let body = if cli.json {
-                serde_json::to_string_pretty(&metadata).expect("account metadata must serialize")
-            } else {
-                format!(
-                    "API key {} · generation {} · created {} · replaced {}",
-                    metadata.hint,
-                    metadata.generation,
-                    metadata.created_at,
-                    metadata.rotated_at.as_deref().unwrap_or("never")
-                )
-            };
-            (
-                body,
-                Some("Run `payday create` to accept a payment.".into()),
-            )
-        }
-    };
-    Ok(Output {
-        body,
-        signed_in: Some(email),
-        next,
-    })
-}
-
-fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, CliError> {
-    value.ok_or_else(|| CliError::InvalidInput(format!("{name} is required for account commands")))
 }
 
 async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentResponse, CliError> {
@@ -324,6 +266,236 @@ fn require_nonblank(field: &str, value: &str) -> Result<(), CliError> {
     }
 }
 
+fn api_key(cli: &Cli) -> Result<String, CliError> {
+    if let Some(key) = std::env::var("PAYDAY_API_KEY")
+        .ok()
+        .filter(|key| !key.is_empty())
+    {
+        return Ok(key);
+    }
+    credentials::load(
+        &credentials::path()?,
+        credentials::profile(&cli.api_url),
+        &cli.api_url,
+    )?
+    .ok_or_else(|| {
+        CliError::InvalidInput("not signed in; run `payday login` or set PAYDAY_API_KEY".into())
+    })
+}
+
+fn auth_setting<'a>(
+    value: Option<&'a str>,
+    fallback: &'a str,
+    name: &str,
+) -> Result<&'a str, CliError> {
+    value
+        .filter(|v| !v.is_empty())
+        .or((!fallback.is_empty()).then_some(fallback))
+        .ok_or_else(|| {
+            CliError::Config(format!(
+                "Auth0 {name} is required for this API; set PAYDAY_AUTH0_{} (see docs/authentication.md)",
+                name.to_ascii_uppercase()
+            ))
+        })
+}
+
+async fn run_login(cli: &Cli, args: LoginArgs) -> Result<String, CliError> {
+    let client = account_client(cli)?;
+    let (email, token) = authenticate(&client).await?;
+    let existing = client.metadata_optional(&token).await?;
+    if let Some(metadata) = &existing {
+        let key = metadata.key_hint.as_deref().unwrap_or("revoked key");
+        eprintln!(
+            "  ! Account already has {key} (generation {}).",
+            metadata.generation
+        );
+        if !args.yes && !confirm("  Rotate it? [y/N] ")? {
+            return Ok("  No changes made.".into());
+        }
+    }
+    let path = credentials::path()?;
+    credentials::prepare(&path)?;
+    let issued = client
+        .create(&token, existing.map(|metadata| metadata.generation))
+        .await?;
+    credentials::save(
+        &path,
+        credentials::profile(&cli.api_url),
+        &cli.api_url,
+        &issued.api_key,
+    )?;
+    let display_key = if args.show {
+        issued.api_key.clone()
+    } else {
+        key_hint(&issued.api_key)
+    };
+    Ok(format!(
+        "  ✓ Signed in as {email}\n  ✓ API key saved to {} ({display_key})\n\n  Create your first payment:\n    payday create --help",
+        path.display()
+    ))
+}
+
+fn account_client(cli: &Cli) -> Result<AccountClient, CliError> {
+    let production = credentials::normalized_api_url(&cli.api_url)?
+        == credentials::normalized_api_url("https://api.payday.sh")?;
+    let issuer = auth_setting(
+        cli.auth0_issuer.as_deref(),
+        if production {
+            PRODUCTION_AUTH0_ISSUER
+        } else {
+            ""
+        },
+        "issuer",
+    )?;
+    let client_id = auth_setting(
+        cli.auth0_client_id.as_deref(),
+        if production {
+            PRODUCTION_AUTH0_CLIENT_ID
+        } else {
+            ""
+        },
+        "client_id",
+    )?;
+    let audience = auth_setting(
+        cli.auth0_audience.as_deref(),
+        if production {
+            PRODUCTION_AUTH0_AUDIENCE
+        } else {
+            ""
+        },
+        "audience",
+    )?;
+    AccountClient::new(&cli.api_url, issuer, client_id, audience)
+}
+
+async fn authenticate(client: &AccountClient) -> Result<(String, String), CliError> {
+    let email = prompt_line("  Email  › ")?;
+    validate_email(&email)?;
+    client.send_otp(&email).await?;
+    eprintln!(
+        "  ✓ Code sent to {} · expires in 3 min · r to resend",
+        mask_email(&email)
+    );
+    let token = 'otp: loop {
+        let mut wrong = 0;
+        loop {
+            let code = prompt_secret("  Code   › ")?;
+            if code.eq_ignore_ascii_case("r") {
+                client.send_otp(&email).await?;
+                eprintln!("  ✓ Fresh code sent · expires in 3 min");
+                break;
+            }
+            if !valid_code(&code) {
+                eprintln!("  ! Enter the 6-digit code, or r to resend.");
+                continue;
+            }
+            match client.authenticate(&email, &code).await {
+                Ok(token) => break 'otp token,
+                Err(CliError::Auth { message, .. }) if message == "That code didn't match." => {
+                    wrong += 1;
+                    if wrong == 3 {
+                        return Err(CliError::Auth {
+                            message:
+                                "That code didn't match. Run `payday login` to request a new code."
+                                    .into(),
+                            detail: None,
+                        });
+                    }
+                    eprintln!("  ✗ That code didn't match. {} attempts left.", 3 - wrong);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    Ok((email, token))
+}
+
+fn run_logout(cli: &Cli) -> Result<String, CliError> {
+    let removed = credentials::remove(&credentials::path()?, credentials::profile(&cli.api_url))?;
+    Ok(if removed {
+        "Signed out. Saved credentials removed."
+    } else {
+        "Already signed out."
+    }
+    .into())
+}
+
+async fn run_whoami(cli: &Cli) -> Result<String, CliError> {
+    let key = api_key(cli)?;
+    let metadata = GatewayClient::new(&cli.api_url, &key)?.account().await?;
+    format_metadata(&metadata, cli.json)
+}
+
+async fn run_keys(cli: &Cli, command: KeysCommand) -> Result<String, CliError> {
+    let client = account_client(cli)?;
+    let (_, token) = authenticate(&client).await?;
+    let metadata = client.metadata(&token).await?;
+    match command {
+        KeysCommand::Rotate(KeyActionArgs { show, yes }) => {
+            if !yes && !confirm("  Rotate the current key? [y/N] ")? {
+                return Ok("  No changes made.".into());
+            }
+            let path = credentials::path()?;
+            credentials::prepare(&path)?;
+            let issued = client.create(&token, Some(metadata.generation)).await?;
+            credentials::save(
+                &path,
+                credentials::profile(&cli.api_url),
+                &cli.api_url,
+                &issued.api_key,
+            )?;
+            let key = if show {
+                issued.api_key.clone()
+            } else {
+                key_hint(&issued.api_key)
+            };
+            Ok(format!(
+                "  ✓ API key rotated (generation {})\n  ✓ Saved to {} ({key})\n  ! Previous key remains valid for 24 hours.",
+                issued.generation,
+                path.display()
+            ))
+        }
+        KeysCommand::Revoke(RevokeArgs { yes }) => {
+            if !yes && !confirm("  Revoke the current and previous key immediately? [y/N] ")? {
+                return Ok("  No changes made.".into());
+            }
+            client.revoke(&token, metadata.generation).await?;
+            credentials::remove(&credentials::path()?, credentials::profile(&cli.api_url))?;
+            Ok("  ✓ API keys revoked. Saved credentials removed.".into())
+        }
+    }
+}
+
+fn format_metadata(metadata: &ApiKeyMetadata, json: bool) -> Result<String, CliError> {
+    if json {
+        return serde_json::to_string_pretty(metadata).map_err(|error| {
+            CliError::InvalidInput(format!("failed to serialize response: {error}"))
+        });
+    }
+    Ok(format!(
+        "Account {}\n  key          {}\n  generation   {}\n  created      {}\n  rotated      {}\n  previous key {}",
+        metadata.account_id,
+        metadata.key_hint.as_deref().unwrap_or("revoked"),
+        metadata.generation,
+        metadata.created_at,
+        metadata.rotated_at.as_deref().unwrap_or("never"),
+        metadata
+            .previous_key_expires_at
+            .as_deref()
+            .map(|expiry| format!("valid until {expiry}"))
+            .unwrap_or_else(|| "none".into())
+    ))
+}
+
+fn key_hint(key: &str) -> String {
+    let suffix = key.chars().rev().take(4).collect::<String>();
+    format!(
+        "{}…{}",
+        &key[..key.len().min(12)],
+        suffix.chars().rev().collect::<String>()
+    )
+}
+
 fn prompt_line(prompt: &str) -> Result<String, CliError> {
     eprint!("{prompt}");
     io::stderr()
@@ -338,6 +510,42 @@ fn prompt_line(prompt: &str) -> Result<String, CliError> {
         return Err(CliError::InvalidInput("input must not be empty".into()));
     }
     Ok(value.into())
+}
+
+fn prompt_secret(prompt: &str) -> Result<String, CliError> {
+    if io::stdin().is_terminal() {
+        rpassword::prompt_password(prompt)
+            .map_err(|e| CliError::InvalidInput(format!("failed to read code: {e}")))
+    } else {
+        eprintln!("Input is not a terminal; reading the code from standard input.");
+        prompt_line(prompt)
+    }
+}
+
+fn validate_email(value: &str) -> Result<(), CliError> {
+    let (local, domain) = value.split_once('@').unwrap_or(("", ""));
+    if local.is_empty()
+        || domain.contains('@')
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || value.chars().any(char::is_whitespace)
+    {
+        Err(CliError::InvalidInput("enter a valid email address".into()))
+    } else {
+        Ok(())
+    }
+}
+fn mask_email(value: &str) -> String {
+    let (local, domain) = value.split_once('@').unwrap_or((value, ""));
+    let first = local.chars().next().unwrap_or('*');
+    format!(
+        "{first}{}@{domain}",
+        "*".repeat(local.chars().count().saturating_sub(1))
+    )
+}
+fn valid_code(value: &str) -> bool {
+    value.len() == 6 && value.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn confirm(prompt: &str) -> Result<bool, CliError> {
@@ -357,7 +565,8 @@ fn confirm(prompt: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{payment_next, short};
+    use super::{account_client, mask_email, payment_next, short, valid_code, validate_email};
+    use crate::cli::{Cli, Command};
     use gateway_core::PaymentResponse;
     #[test]
     fn abbreviates_addresses_without_hiding_identity() {
@@ -388,5 +597,34 @@ mod tests {
         let hint = payment_next(&payment);
         assert!(hint.contains("0.600000 USDC"));
         assert!(!hint.contains("1.000000 USDC"));
+    }
+
+    #[test]
+    fn login_input_helpers_are_strict() {
+        assert!(validate_email("person@example.com").is_ok());
+        assert!(validate_email("no-at-sign").is_err());
+        assert!(validate_email("person@example.com@evil.test").is_err());
+        assert_eq!(mask_email("person@example.com"), "p*****@example.com");
+        assert!(valid_code("123456"));
+        assert!(!valid_code("12345x"));
+    }
+
+    #[test]
+    fn non_production_api_requires_explicit_identity_configuration() {
+        let mut cli = Cli {
+            api_url: "http://localhost:3000".into(),
+            auth0_issuer: None,
+            auth0_client_id: None,
+            auth0_audience: None,
+            json: false,
+            verbose: false,
+            command: Command::Logout,
+        };
+        assert!(account_client(&cli).is_err());
+
+        cli.auth0_issuer = Some("http://localhost:3001".into());
+        cli.auth0_client_id = Some("local-client".into());
+        cli.auth0_audience = Some("local-api".into());
+        assert!(account_client(&cli).is_ok());
     }
 }

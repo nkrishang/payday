@@ -256,19 +256,13 @@ USDC; it pays gas to invoke the permissionless factory.
 
 ## 9. Configure and test the CLI
 
-Authenticate through Auth0 and create the operator account's API key. Store the
-returned key immediately in the operator's password/secret manager; it cannot
-be retrieved later:
+Authenticate through Auth0. Production API and Auth0 defaults are compiled into
+the CLI, and the key is saved securely in its XDG-aware credentials file:
 
 ```bash
-export PAYDAY_API_URL="$(terraform -chdir=infra output -raw api_url)"
-export PAYDAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
-export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export PAYDAY_AUTH0_CLIENT_ID="<native-application-client-id>"
-account_json="$(cargo run --release -p gateway-cli --bin payday -- --json account create)"
-export PAYDAY_API_KEY="$(jq -r .api_key <<<"$account_json")"
+cargo run --release -p gateway-cli --bin payday -- login
 
-curl --fail "$PAYDAY_API_URL/health"
+curl --fail "https://api.payday.sh/health"
 cargo run --release -p gateway-cli --bin payday -- create \
   --chain-id 143 \
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
@@ -316,8 +310,9 @@ and creates the GitHub Release.
   indexer and loss of the retained database advisory-lock connection
   terminate the worker instead of appearing healthy; a stuck helper
   transaction only pauses the sweep worker.
-- Replace account API keys with `payday account create` as described in the
-  secrets-rotation runbook; replacement is immediate and does not restart services.
+- Rotate account API keys with `payday keys rotate` as described in the
+  secrets-rotation runbook. The previous key has a 24-hour grace period;
+  `payday keys revoke` invalidates current and grace-period keys immediately.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
   bypasses ECS and starts another task. Keep the ECS service at one task as an
   additional control.

@@ -13,21 +13,21 @@ pub struct Cli {
         default_value = "https://api.payday.sh"
     )]
     pub api_url: String,
-    /// Bearer API key. Prefer PAYDAY_API_KEY so it stays out of shell history.
-    #[arg(long, global = true, env = "PAYDAY_API_KEY", hide_env_values = true)]
-    pub api_key: Option<String>,
     /// Auth0 tenant issuer used for account signup and key management.
-    #[arg(long, global = true, env = "PAYDAY_AUTH0_ISSUER")]
+    #[arg(long, global = true, env = "PAYDAY_AUTH0_ISSUER", hide = true)]
     pub auth0_issuer: Option<String>,
     /// Public Auth0 Native application client ID.
-    #[arg(long, global = true, env = "PAYDAY_AUTH0_CLIENT_ID")]
+    #[arg(long, global = true, env = "PAYDAY_AUTH0_CLIENT_ID", hide = true)]
     pub auth0_client_id: Option<String>,
     /// Auth0 API audience for api.payday.sh.
-    #[arg(long, global = true, env = "PAYDAY_AUTH0_AUDIENCE")]
+    #[arg(long, global = true, env = "PAYDAY_AUTH0_AUDIENCE", hide = true)]
     pub auth0_audience: Option<String>,
     /// Emit machine-readable JSON.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Include diagnostic details in errors.
+    #[arg(long, global = true)]
+    pub verbose: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -40,22 +40,50 @@ pub enum Command {
     Get(GetArgs),
     /// List payments, newest first.
     List(ListArgs),
-    /// Sign in and manage your account API key.
+    /// Sign in with an email one-time code and save your API key.
+    Login(LoginArgs),
+    /// Remove saved credentials for the current API.
+    Logout,
+    /// Show the account associated with the current API key.
+    Whoami,
+    /// Rotate or revoke API keys.
     #[command(subcommand)]
-    Account(AccountCommand),
-}
-
-#[derive(Clone, Debug, Subcommand)]
-pub enum AccountCommand {
-    /// Sign in and create or replace the account's API key.
-    Create(CreateAccountArgs),
-    /// Show non-secret metadata for the current API key.
-    Get,
+    Keys(KeysCommand),
 }
 
 #[derive(Clone, Debug, Args)]
-pub struct CreateAccountArgs {
-    /// Replace an existing API key without asking for confirmation.
+pub struct LoginArgs {
+    /// Print the new API key after saving it.
+    #[arg(long)]
+    pub show: bool,
+
+    /// Rotate an existing key without confirmation.
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum KeysCommand {
+    /// Replace the API key after email verification.
+    Rotate(KeyActionArgs),
+    /// Immediately revoke the current and grace-period API keys.
+    Revoke(RevokeArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct KeyActionArgs {
+    /// Print the new API key after saving it.
+    #[arg(long)]
+    pub show: bool,
+
+    /// Rotate without confirmation.
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct RevokeArgs {
+    /// Revoke without confirmation.
     #[arg(short, long)]
     pub yes: bool,
 }

@@ -3,7 +3,10 @@ mod cursor;
 mod invoices;
 mod sweeps;
 
-pub use accounts::{AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError, IssuedApiKey};
+pub use accounts::{
+    API_KEY_GRACE_HOURS, AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError,
+    IssuedApiKey,
+};
 pub use cursor::{CursorRepository, IndexerCursor};
 pub use invoices::{
     CreateInvoiceInput, DbInvoice, DbInvoiceError, InvoiceRepository, PaymentObservation,
