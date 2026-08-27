@@ -13,13 +13,13 @@ export AWS_REGION=eu-north-1
 export MONAD_RPC_URL='https://your-quicknode-endpoint'
 ```
 
-Some runbooks also need the API key and CLI:
+Some runbooks also need an account API key and CLI. Load the key from the
+operator's approved secret store; Terraform does not create or retain user API
+keys:
 
 ```bash
 export GATEWAY_API_URL="https://api.payday.sh"
-export GATEWAY_API_KEY="$(aws secretsmanager get-secret-value \
-  --secret-id "$(terraform -chdir=infra output -raw api_key_secret_arn)" \
-  --query SecretString --output text --region "$AWS_REGION")"
+export GATEWAY_API_KEY="<operator-account-api-key>"
 ```
 
 ## Runbooks
@@ -34,5 +34,5 @@ export GATEWAY_API_KEY="$(aws secretsmanager get-secret-value \
 | [acm-certificate-failure.md](acm-certificate-failure.md) | ACM certificate validation fails (CAA error) |
 | [quicknode-rpc-limits.md](quicknode-rpc-limits.md) | RPC provider rejects log ranges with HTTP 413 |
 | [end-to-end-smoke-test.md](end-to-end-smoke-test.md) | Verifying a full payment cycle works |
-| [secrets-rotation.md](secrets-rotation.md) | Rotating the API key or other secrets |
+| [secrets-rotation.md](secrets-rotation.md) | Rotating an account API key or infrastructure secrets |
 | [db-access.md](db-access.md) | Running SQL against the private RDS instance |

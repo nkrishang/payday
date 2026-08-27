@@ -1,52 +1,44 @@
 # Secrets rotation
 
-How to rotate the API key and other secrets stored in AWS Secrets Manager.
+How to rotate an account API key and infrastructure secrets.
 
 ## Rotate the API key
 
-### Step 1: Generate a new key
+API-key replacement requires a fresh email OTP and invalidates the old key
+immediately. Run:
 
 ```bash
-NEW_KEY=$(openssl rand -hex 32)
-echo "New key generated (not shown here for security)"
+export GATEWAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
+export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
+export GATEWAY_AUTH0_CLIENT_ID="<native-application-client-id>"
+./target/release/gateway-cli account create
 ```
 
-### Step 2: Update Secrets Manager
+The CLI displays the existing key hint and generation, warns that replacement
+is immediate, and asks `Proceed? [y/N]`. After confirmation, its success message
+explicitly states that the old key is invalid. To capture JSON without printing
+the secret in shared logs:
 
 ```bash
-API_KEY_SECRET_ARN="$(terraform -chdir=infra output -raw api_key_secret_arn)"
-
-aws secretsmanager put-secret-value \
-  --secret-id "$API_KEY_SECRET_ARN" \
-  --secret-string "$NEW_KEY" \
-  --region "$AWS_REGION"
+rotation_json="$(./target/release/gateway-cli --json account create --yes)"
+export GATEWAY_API_KEY="$(jq -r .api_key <<<"$rotation_json")"
 ```
 
-### Step 3: Restart the API service
-
-The API reads the secret at task startup. Restart to pick up the new value:
+Store and distribute the new key through the account owner's approved secret
+management process. The service does not retain recoverable plaintext and does
+not need a restart. Verify the new key against an invoice owned by this account:
 
 ```bash
-aws ecs update-service --cluster payday --service api \
-  --force-new-deployment --region "$AWS_REGION"
+./target/release/gateway-cli invoice get <INVOICE_ID>
 ```
 
-### Step 4: Update your local environment
+## Rotate the Resend API key
 
-```bash
-export GATEWAY_API_KEY="$NEW_KEY"
-```
-
-Any CLI clients or integrations using the old key will stop working
-immediately. Distribute the new key through your secret management process
-before rotating.
-
-### Step 5: Verify
-
-```bash
-curl -sf -H "Authorization: Bearer $GATEWAY_API_KEY" \
-  "$GATEWAY_API_URL/health" && echo " OK" || echo " FAIL"
-```
+The Resend API key is held by Auth0, not by Payday's services or Terraform.
+Create a replacement sending-only key in Resend, update **Branding → Email
+Provider** in Auth0, and send a test email before revoking the old key. Then run
+one complete staging email-OTP login. A failed rotation prevents login but does
+not affect existing invoice API keys.
 
 ## Rotate the RPC URL
 
@@ -115,5 +107,4 @@ planned carefully as it causes a brief downtime.
   markings. Rotating a secret outside Terraform creates state drift — run
   `terraform plan` afterward and import/update the secret version as needed.
 - The API key must be at least 32 bytes.
-- There is no overlapping-key rotation in this single-operator setup. Plan
-  rotation during a low-traffic window.
+- There is no overlapping-key replacement. Plan it during a low-traffic window.

@@ -3,12 +3,10 @@ use std::str::FromStr;
 use alloy_primitives::Address;
 use gateway_core::ChainId;
 
-use crate::api::ApiKey;
-
 pub struct Config {
     bind_addr: String,
     database_url: String,
-    api_key: ApiKey,
+    auth0: Option<Auth0Config>,
     chain_id: ChainId,
     factory_address: Address,
     usdc_address: Address,
@@ -16,8 +14,20 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let api_key = std::env::var("GATEWAY_API_KEY").expect("GATEWAY_API_KEY must be set");
-        let api_key = ApiKey::new(&api_key).unwrap_or_else(|message| panic!("{message}"));
+        let auth0_issuer = std::env::var("GATEWAY_AUTH0_ISSUER").ok();
+        let auth0_audience = std::env::var("GATEWAY_AUTH0_AUDIENCE").ok();
+        let auth0_client_id = std::env::var("GATEWAY_AUTH0_CLIENT_ID").ok();
+        let auth0 = match (auth0_issuer, auth0_audience, auth0_client_id) {
+            (Some(issuer), Some(audience), Some(client_id)) => Some(Auth0Config {
+                issuer,
+                audience,
+                client_id,
+            }),
+            (None, None, None) => None,
+            _ => panic!(
+                "GATEWAY_AUTH0_ISSUER, GATEWAY_AUTH0_AUDIENCE, and GATEWAY_AUTH0_CLIENT_ID must be set together"
+            ),
+        };
 
         let factory_address =
             std::env::var("GATEWAY_FACTORY_ADDRESS").expect("GATEWAY_FACTORY_ADDRESS must be set");
@@ -38,7 +48,7 @@ impl Config {
             bind_addr: std::env::var("GATEWAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
-            api_key,
+            auth0,
             chain_id: ChainId(chain_id),
             factory_address,
             usdc_address,
@@ -53,8 +63,8 @@ impl Config {
         &self.database_url
     }
 
-    pub fn api_key(&self) -> ApiKey {
-        self.api_key.clone()
+    pub fn auth0(&self) -> Option<&Auth0Config> {
+        self.auth0.as_ref()
     }
 
     pub fn chain_id(&self) -> ChainId {
@@ -68,4 +78,10 @@ impl Config {
     pub fn usdc_address(&self) -> Address {
         self.usdc_address
     }
+}
+
+pub struct Auth0Config {
+    pub issuer: String,
+    pub audience: String,
+    pub client_id: String,
 }

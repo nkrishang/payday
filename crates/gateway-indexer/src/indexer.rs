@@ -890,7 +890,22 @@ mod tests {
 
     async fn insert(pool: &PgPool, invoice: &Invoice, key: &str) {
         let repo = InvoiceRepository::new(pool.clone());
-        let input = CreateInvoiceInput::from_invoice(invoice, key.to_string(), USDC_DECIMALS);
+        let account_id = uuid::Uuid::from_u128(1);
+        sqlx::query(
+            r#"INSERT INTO accounts (id, api_key_hash, api_key_hint)
+               VALUES ($1, $2, 'test') ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(account_id)
+        .bind([1_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect("test account should be inserted");
+        let input = CreateInvoiceInput::from_invoice(
+            invoice,
+            gateway_db::AccountId(account_id),
+            key.to_string(),
+            USDC_DECIMALS,
+        );
         repo.insert(&input)
             .await
             .expect("insert should succeed")

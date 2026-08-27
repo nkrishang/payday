@@ -14,9 +14,7 @@ and confirm the funds reach the beneficiary.
 
 ```bash
 export GATEWAY_API_URL="https://api.payday.sh"
-export GATEWAY_API_KEY="$(aws secretsmanager get-secret-value \
-  --secret-id "$(terraform -chdir=infra output -raw api_key_secret_arn)" \
-  --query SecretString --output text --region "$AWS_REGION")"
+export GATEWAY_API_KEY="<operator-account-api-key>"
 
 ./target/release/gateway-cli --json invoice create \
   --chain-id 143 \
