@@ -45,7 +45,7 @@ plan's daily sending limit.
 ## 2. Configure Auth0
 
 1. Create an Auth0 tenant in the desired production region. Record its domain as
-   `GATEWAY_AUTH0_ISSUER=https://<tenant-domain>/`.
+   `PAYDAY_AUTH0_ISSUER=https://<tenant-domain>/`.
 2. Open **Applications → APIs → Create API**:
    - Name: `Payday API`
    - Identifier: `https://api.payday.sh`
@@ -54,7 +54,7 @@ plan's daily sending limit.
 3. Open **Applications → Applications → Create Application**:
    - Name: `Payday CLI`
    - Type: **Native**
-   Record its public Client ID as `GATEWAY_AUTH0_CLIENT_ID`.
+   Record its public Client ID as `PAYDAY_AUTH0_CLIENT_ID`.
 4. In that application's **Advanced Settings → Grant Types**, enable
    **Passwordless OTP**. Disable grants the CLI does not use, especially
    Password and Client Credentials. Do not create or distribute a client
@@ -100,9 +100,9 @@ For local shells, put the public Auth0 values in an untracked `.env` or export
 them directly:
 
 ```bash
-export GATEWAY_AUTH0_ISSUER="https://<tenant-domain>/"
-export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export GATEWAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
+export PAYDAY_AUTH0_ISSUER="https://<tenant-domain>/"
+export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
+export PAYDAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
 ```
 
 The same three values are required by `gatewayd`. For AWS, set
@@ -115,9 +115,9 @@ the three environment variables directly.
 Build the CLI, set the API URL, and run:
 
 ```bash
-cargo build -p gateway-cli
-export GATEWAY_API_URL="https://api.payday.sh"
-./target/debug/gateway-cli account create
+cargo build -p gateway-cli --bin payday
+export PAYDAY_API_URL="https://api.payday.sh"
+./target/debug/payday account create
 ```
 
 The interaction is terminal-native:
@@ -135,18 +135,18 @@ Entering the OTP calls Auth0 directly and does not open a browser. Store the key
 in a password manager, then use it without putting it in shell history:
 
 ```bash
-export GATEWAY_API_KEY="payday_live_..."
-./target/debug/gateway-cli invoice create \
+export PAYDAY_API_KEY="payday_live_..."
+./target/debug/payday create \
   --chain-id 143 \
   --token <USDC_ADDRESS> \
-  --beneficiary <BENEFICIARY_ADDRESS> \
+  --payout <PAYOUT_ADDRESS> \
   --amount 1.00 \
-  --expiration-timestamp "$(($(date +%s) + 3600))" \
-  --recovery <RECOVERY_ADDRESS>
-./target/debug/gateway-cli invoice get <INVOICE_ID>
+  --expires-in 3600 \
+  --refund <REFUND_ADDRESS>
+./target/debug/payday get <PAYMENT_ID>
 ```
 
-`gateway-cli account get` repeats email OTP authentication and returns only the
+`payday account get` repeats email OTP authentication and returns only the
 key hint, generation, and timestamps—not the key itself.
 
 ## 6. Replace a key
@@ -154,7 +154,7 @@ key hint, generation, and timestamps—not the key itself.
 Run the same creation command again:
 
 ```bash
-./target/debug/gateway-cli account create
+./target/debug/payday account create
 ```
 
 After email OTP authentication, an existing account gets an explicit warning:
@@ -172,8 +172,8 @@ still written to stderr. With `--json`, stdout is machine-readable and includes
 `replaced_previous_key`; prompts and warnings remain on stderr:
 
 ```bash
-key_json="$(./target/debug/gateway-cli --json account create --yes)"
-export GATEWAY_API_KEY="$(jq -r .api_key <<<"$key_json")"
+key_json="$(./target/debug/payday --json account create --yes)"
+export PAYDAY_API_KEY="$(jq -r .api_key <<<"$key_json")"
 ```
 
 The server checks the generation shown in the warning inside the same database

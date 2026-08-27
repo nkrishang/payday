@@ -7,7 +7,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use gateway_core::{CreateInvoiceRequest, InvoiceResponse};
+use gateway_core::{CreatePaymentRequest, PaymentListResponse, PaymentResponse};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use crate::error::{ApiErrorBody, CliError};
@@ -58,12 +58,12 @@ impl GatewayClient {
 
     /// Create an invoice. `idempotency_key` is sent as the `Idempotency-Key`
     /// header, which the server requires.
-    pub async fn create_invoice(
+    pub async fn create_payment(
         &self,
-        req: &CreateInvoiceRequest,
+        req: &CreatePaymentRequest,
         idempotency_key: &str,
-    ) -> Result<InvoiceResponse, CliError> {
-        let url = format!("{}/v1/invoices", self.base_url);
+    ) -> Result<PaymentResponse, CliError> {
+        let url = format!("{}/v1/payments", self.base_url);
         let resp = self
             .http
             .post(&url)
@@ -80,8 +80,8 @@ impl GatewayClient {
     }
 
     /// Fetch an invoice by ID.
-    pub async fn get_invoice(&self, id: &str) -> Result<InvoiceResponse, CliError> {
-        let url = format!("{}/v1/invoices/{id}", self.base_url);
+    pub async fn get_payment(&self, id: &str) -> Result<PaymentResponse, CliError> {
+        let url = format!("{}/v1/payments/{id}", self.base_url);
         let resp = self
             .http
             .get(&url)
@@ -93,6 +93,29 @@ impl GatewayClient {
             })?;
 
         parse_response(resp).await
+    }
+
+    pub async fn list_payments(
+        &self,
+        limit: u32,
+        starting_after: Option<&str>,
+    ) -> Result<PaymentListResponse, CliError> {
+        let url = format!("{}/v1/payments", self.base_url);
+        let mut query = vec![("limit", limit.to_string())];
+        if let Some(cursor) = starting_after {
+            query.push(("starting_after", cursor.to_owned()));
+        }
+        let resp = self
+            .http
+            .get(&url)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        parse_typed_response(resp, "payments").await
     }
 }
 
@@ -121,7 +144,14 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 
 /// Turn a response into either a decoded body or a typed error, preserving the
 /// server's stable error code when present.
-async fn parse_response(resp: reqwest::Response) -> Result<InvoiceResponse, CliError> {
+async fn parse_response(resp: reqwest::Response) -> Result<PaymentResponse, CliError> {
+    parse_typed_response(resp, "payment").await
+}
+
+async fn parse_typed_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    noun: &str,
+) -> Result<T, CliError> {
     let status = resp.status();
     let url = resp.url().to_string();
     let body = resp
@@ -132,7 +162,7 @@ async fn parse_response(resp: reqwest::Response) -> Result<InvoiceResponse, CliE
     if status.is_success() {
         return serde_json::from_str(&body).map_err(|e| CliError::UnexpectedResponse {
             status: status.as_u16(),
-            body: format!("could not decode invoice: {e}; body was: {body}"),
+            body: format!("could not decode {noun}: {e}; body was: {body}"),
         });
     }
 
@@ -235,30 +265,45 @@ mod tests {
             "Content-Type: application/json\r\n",
             "{}",
         );
-        let (base_url, requests) = capture_server(vec![unauthorized.clone(), unauthorized]).await;
+        let (base_url, requests) = capture_server(vec![
+            unauthorized.clone(),
+            unauthorized.clone(),
+            unauthorized,
+        ])
+        .await;
         let client = GatewayClient::new(base_url, KEY).unwrap();
-        let create = CreateInvoiceRequest {
+        let create = CreatePaymentRequest {
             chain_id: "31337".into(),
             token_address: "0x0000000000000000000000000000000000000001".into(),
-            beneficiary_address: "0x0000000000000000000000000000000000000002".into(),
+            payout_address: "0x0000000000000000000000000000000000000002".into(),
             amount: "1".into(),
-            expiration_timestamp: "1900000000".into(),
-            recovery_address: "0x0000000000000000000000000000000000000003".into(),
+            expires_in: 3_600,
+            refund_address: "0x0000000000000000000000000000000000000003".into(),
         };
 
         assert!(
             client
-                .create_invoice(&create, "test-request")
+                .create_payment(&create, "test-request")
                 .await
                 .is_err()
         );
-        assert!(client.get_invoice("test-invoice").await.is_err());
+        assert!(client.get_payment("pay_test").await.is_err());
+        assert!(
+            client
+                .list_payments(7, Some("pay_0198f80c-8d2f-7dc1-a369-90556a64f700"))
+                .await
+                .is_err()
+        );
 
         let requests = requests.await.unwrap();
-        assert!(requests[0].starts_with("POST /v1/invoices HTTP/1.1"));
-        assert!(requests[1].starts_with("GET /v1/invoices/test-invoice HTTP/1.1"));
+        assert!(requests[0].starts_with("POST /v1/payments HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/payments/pay_test HTTP/1.1"));
+        assert!(requests[2].starts_with(
+            "GET /v1/payments?limit=7&starting_after=pay_0198f80c-8d2f-7dc1-a369-90556a64f700 HTTP/1.1"
+        ));
         assert_bearer_header(&requests[0]);
         assert_bearer_header(&requests[1]);
+        assert_bearer_header(&requests[2]);
     }
 
     #[tokio::test]
@@ -267,7 +312,7 @@ mod tests {
         let (base_url, requests) = capture_server(vec![redirect]).await;
         let client = GatewayClient::new(base_url, KEY).unwrap();
 
-        let error = client.get_invoice("test-invoice").await.unwrap_err();
+        let error = client.get_payment("pay_test").await.unwrap_err();
         assert!(matches!(
             error,
             CliError::UnexpectedResponse { status: 302, .. }

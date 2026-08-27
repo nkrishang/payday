@@ -41,7 +41,7 @@ variable "auth0_audience" {
 }
 
 variable "auth0_client_id" {
-  description = "Public client ID of the Auth0 Native application used by gateway-cli."
+  description = "Public client ID of the Auth0 Native application used by payday."
   type        = string
   validation {
     condition     = length(trimspace(var.auth0_client_id)) > 0
@@ -123,7 +123,7 @@ variable "log_range_size" {
 }
 
 variable "indexer_poll_interval_ms" {
-  description = "Idle poll interval in milliseconds for both worker loops. Each tick drains every finalized range up to GATEWAY_INDEXER_MAX_RANGES_PER_TICK. Increasing this reduces idle polling but not catch-up traffic: indexing uses about 90 eth_getLogs calls/hour at QuickNode's 100-block cap, plus finality/cursor reads and one header lookup per distinct transfer-bearing block."
+  description = "Idle poll interval in milliseconds for both worker loops. Each tick drains every finalized range up to PAYDAY_INDEXER_MAX_RANGES_PER_TICK. Increasing this reduces idle polling but not catch-up traffic: indexing uses about 90 eth_getLogs calls/hour at QuickNode's 100-block cap, plus finality/cursor reads and one header lookup per distinct transfer-bearing block."
   type        = number
   default     = 5000
   validation {

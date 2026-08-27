@@ -13,21 +13,21 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-24.04
-            artifact: gateway-cli-linux-x86_64
+            artifact: payday-linux-x86_64
           - runner: macos-26-intel
-            artifact: gateway-cli-macos-x86_64
+            artifact: payday-macos-x86_64
           - runner: macos-26
-            artifact: gateway-cli-macos-aarch64
+            artifact: payday-macos-aarch64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release -p gateway-cli
+      - run: cargo build --locked --release -p gateway-cli --bin payday
       - run: |
           mkdir dist
-          cp target/release/gateway-cli dist/gateway-cli
-          tar -C dist -czf "${{ matrix.artifact }}.tar.gz" gateway-cli
+          cp target/release/payday dist/payday
+          tar -C dist -czf "${{ matrix.artifact }}.tar.gz" payday
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -39,13 +39,13 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release -p gateway-cli
+      - run: cargo build --locked --release -p gateway-cli --bin payday
       - shell: pwsh
-        run: Compress-Archive target/release/gateway-cli.exe gateway-cli-windows-x86_64.zip
+        run: Compress-Archive target/release/payday.exe payday-windows-x86_64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: gateway-cli-windows-x86_64
-          path: gateway-cli-windows-x86_64.zip
+          name: payday-windows-x86_64
+          path: payday-windows-x86_64.zip
 
   release:
     needs: [unix, windows]

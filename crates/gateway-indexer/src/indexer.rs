@@ -494,6 +494,7 @@ impl Indexer {
                 batch.id,
                 tx_hash,
                 receipt.block,
+                header.timestamp,
                 receipt.transaction_index,
                 &outcomes,
             )
@@ -1191,6 +1192,7 @@ mod tests {
             gateway_db::AccountId(account_id),
             key.to_string(),
             USDC_DECIMALS,
+            3_600,
         );
         repo.insert(&input)
             .await

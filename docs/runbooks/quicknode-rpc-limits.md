@@ -15,7 +15,7 @@ error=HTTP error 413 with body: {"jsonrpc":"2.0","id":...,"error":{"code":-32615
 
 The indexer handles this gracefully by halving the range and retrying, then
 growing it again after successes. Catch-up throughput is
-`range × GATEWAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, so a smaller
+`range × PAYDAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, so a smaller
 range mostly costs extra requests, not lag.
 
 ## Provider limits on Monad
@@ -30,7 +30,7 @@ allows, independent of plan:
 | Ankr | 1,000 |
 | Alchemy | 1,000 blocks / 10,000 logs |
 
-`GATEWAY_LOG_RANGE_SIZE` (`log_range_size` in Terraform) defaults to 100 for
+`PAYDAY_LOG_RANGE_SIZE` (`log_range_size` in Terraform) defaults to 100 for
 that reason. Raising it on QuickNode only produces rejections; it is useful
 when switching to a provider with a larger window.
 

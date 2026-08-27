@@ -488,6 +488,7 @@ impl InvoiceRepository {
         batch_id: Uuid,
         tx_hash: B256,
         block: u64,
+        block_timestamp: u64,
         transaction_index: u64,
         outcomes: &[(Uuid, InvoiceOutcome)],
     ) -> Result<(), sqlx::Error> {
@@ -518,6 +519,8 @@ impl InvoiceRepository {
                             execute_tx_hash = CASE WHEN $5 THEN $6 ELSE execute_tx_hash END,
                             resolved_at_block = CASE WHEN $4 IS NULL THEN resolved_at_block
                                                      ELSE COALESCE(resolved_at_block, $2) END,
+                            settled_at = CASE WHEN $4 IS NULL THEN settled_at
+                                              ELSE COALESCE(settled_at, to_timestamp($8)) END,
                             drained_at_block = $2,
                             drained_at_transaction_index = $3,
                             uncollected_count = (
@@ -539,6 +542,7 @@ impl InvoiceRepository {
                     .bind(execute_tx)
                     .bind(tx_hash.as_slice())
                     .bind(batch_id)
+                    .bind(block_timestamp as f64)
                     .execute(&mut *tx)
                     .await?
                 }

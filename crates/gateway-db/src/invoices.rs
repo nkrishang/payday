@@ -29,6 +29,7 @@ pub struct DbInvoice {
     pub token_decimals: i16,
     pub beneficiary_address: Vec<u8>,
     pub expiration_timestamp: i64,
+    pub expires_in_secs: i64,
     pub recovery_address: Vec<u8>,
     pub amount: String,
     pub salt: Vec<u8>,
@@ -57,6 +58,8 @@ pub struct DbInvoice {
     pub execute_tx_hash: Option<Vec<u8>>,
     /// Block at which the invoice reached `fulfilled` or `recovered`.
     pub resolved_at_block: Option<i64>,
+    /// Timestamp of the finalized block where it reached a terminal state.
+    pub settled_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     /// Consecutive unsuccessful sweep attempts; drives the exponential backoff.
     pub sweep_attempts: i32,
     /// Most recent sweep attempt; with `sweep_attempts` it gates the next retry.
@@ -168,6 +171,7 @@ impl TryFrom<&DbInvoice> for Invoice {
                 .map(|hash| word_from_col(row.id, "execute_tx_hash", hash))
                 .transpose()?,
             resolved_at_block: row.resolved_at_block.map(|block| block as u64),
+            settled_at_timestamp: row.settled_at.map(|time| time.timestamp() as u64),
             blocked_reason: row.blocked_reason.clone(),
         })
     }
@@ -189,6 +193,7 @@ pub struct CreateInvoiceInput {
     pub token_decimals: u8,
     pub beneficiary_address: [u8; 20],
     pub expiration_timestamp: u64,
+    pub expires_in_secs: u64,
     pub recovery_address: [u8; 20],
     pub amount: String,
     pub salt: [u8; 32],
@@ -227,6 +232,7 @@ impl CreateInvoiceInput {
         account_id: AccountId,
         idempotency_key: String,
         token_decimals: u8,
+        expires_in_secs: u64,
     ) -> Self {
         Self {
             id: invoice.id.0,
@@ -238,6 +244,7 @@ impl CreateInvoiceInput {
             token_decimals,
             beneficiary_address: invoice.beneficiary.0.into(),
             expiration_timestamp: invoice.expiration_timestamp,
+            expires_in_secs,
             recovery_address: invoice.recovery.0.into(),
             amount: invoice.amount.0.to_string(),
             salt: invoice.salt.0.into(),
@@ -273,9 +280,9 @@ impl InvoiceRepository {
             r#"
             INSERT INTO invoices
                 (id, account_id, idempotency_key, chain_id, factory_address, token_address,
-                 token_decimals, beneficiary_address, expiration_timestamp,
+                 token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
                  recovery_address, amount, salt, payment_address, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -289,6 +296,7 @@ impl InvoiceRepository {
         .bind(input.token_decimals as i16)
         .bind(input.beneficiary_address)
         .bind(input.expiration_timestamp as i64)
+        .bind(input.expires_in_secs as i64)
         .bind(input.recovery_address)
         .bind(&input.amount)
         .bind(input.salt)
@@ -326,6 +334,53 @@ impl InvoiceRepository {
         .bind(account.0)
         .bind(id)
         .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Resolve a validated customer-facing UUID prefix within one account.
+    /// At most two rows are needed to distinguish missing, unique, and
+    /// ambiguous prefixes without leaking another account's payments.
+    pub async fn find_by_prefix_for_account(
+        &self,
+        account: AccountId,
+        prefix: &str,
+    ) -> Result<Vec<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(
+            r#"
+            SELECT * FROM invoices
+            WHERE account_id = $1 AND id::text LIKE $2 || '%'
+            ORDER BY id
+            LIMIT 2
+            "#,
+        )
+        .bind(account.0)
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// List an account's payments newest first.
+    pub async fn list_for_account(
+        &self,
+        account: AccountId,
+        starting_after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<DbInvoice>, sqlx::Error> {
+        sqlx::query_as::<_, DbInvoice>(
+            r#"
+            SELECT candidate.* FROM invoices candidate
+            LEFT JOIN invoices cursor
+              ON cursor.account_id = $1 AND cursor.id = $2
+            WHERE candidate.account_id = $1
+              AND ($2 IS NULL OR (candidate.created_at, candidate.id) < (cursor.created_at, cursor.id))
+            ORDER BY candidate.created_at DESC, candidate.id DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(account.0)
+        .bind(starting_after)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&self.pool)
         .await
     }
 
@@ -655,6 +710,7 @@ mod tests {
             token_decimals: 18,
             beneficiary_address: vec![3u8; 20],
             expiration_timestamp: 1_900_000_000,
+            expires_in_secs: 3_600,
             recovery_address: vec![6u8; 20],
             amount: "100".to_string(),
             salt: vec![4u8; 32],
@@ -672,6 +728,7 @@ mod tests {
             uncollected_count: 0,
             execute_tx_hash: None,
             resolved_at_block: None,
+            settled_at: None,
             sweep_attempts: 0,
             last_attempt_at: None,
             blocked_reason: None,

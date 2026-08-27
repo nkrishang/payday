@@ -14,9 +14,9 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let auth0_issuer = std::env::var("GATEWAY_AUTH0_ISSUER").ok();
-        let auth0_audience = std::env::var("GATEWAY_AUTH0_AUDIENCE").ok();
-        let auth0_client_id = std::env::var("GATEWAY_AUTH0_CLIENT_ID").ok();
+        let auth0_issuer = std::env::var("PAYDAY_AUTH0_ISSUER").ok();
+        let auth0_audience = std::env::var("PAYDAY_AUTH0_AUDIENCE").ok();
+        let auth0_client_id = std::env::var("PAYDAY_AUTH0_CLIENT_ID").ok();
         let auth0 = match (auth0_issuer, auth0_audience, auth0_client_id) {
             (Some(issuer), Some(audience), Some(client_id)) => Some(Auth0Config {
                 issuer,
@@ -25,27 +25,27 @@ impl Config {
             }),
             (None, None, None) => None,
             _ => panic!(
-                "GATEWAY_AUTH0_ISSUER, GATEWAY_AUTH0_AUDIENCE, and GATEWAY_AUTH0_CLIENT_ID must be set together"
+                "PAYDAY_AUTH0_ISSUER, PAYDAY_AUTH0_AUDIENCE, and PAYDAY_AUTH0_CLIENT_ID must be set together"
             ),
         };
 
         let factory_address =
-            std::env::var("GATEWAY_FACTORY_ADDRESS").expect("GATEWAY_FACTORY_ADDRESS must be set");
+            std::env::var("PAYDAY_FACTORY_ADDRESS").expect("PAYDAY_FACTORY_ADDRESS must be set");
         let factory_address = Address::from_str(&factory_address)
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_FACTORY_ADDRESS '{factory_address}': {e}"));
+            .unwrap_or_else(|e| panic!("invalid PAYDAY_FACTORY_ADDRESS '{factory_address}': {e}"));
 
-        let chain_id: u64 = std::env::var("GATEWAY_CHAIN_ID")
-            .expect("GATEWAY_CHAIN_ID must be set")
+        let chain_id: u64 = std::env::var("PAYDAY_CHAIN_ID")
+            .expect("PAYDAY_CHAIN_ID must be set")
             .parse()
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_CHAIN_ID: {e}"));
+            .unwrap_or_else(|e| panic!("invalid PAYDAY_CHAIN_ID: {e}"));
 
         let usdc_address =
-            std::env::var("GATEWAY_USDC_ADDRESS").expect("GATEWAY_USDC_ADDRESS must be set");
+            std::env::var("PAYDAY_USDC_ADDRESS").expect("PAYDAY_USDC_ADDRESS must be set");
         let usdc_address = Address::from_str(&usdc_address)
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_ADDRESS '{usdc_address}': {e}"));
+            .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_ADDRESS '{usdc_address}': {e}"));
 
         Config {
-            bind_addr: std::env::var("GATEWAY_BIND_ADDR")
+            bind_addr: std::env::var("PAYDAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             auth0,

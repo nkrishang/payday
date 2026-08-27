@@ -109,11 +109,20 @@ impl ApiError {
         }
     }
 
-    pub fn invoice_not_found() -> Self {
+    pub fn payment_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "invoice_not_found",
-            message: "Invoice not found".into(),
+            code: "payment_not_found",
+            message: "Payment not found".into(),
+        }
+    }
+
+    pub fn ambiguous_payment_id() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "ambiguous_payment_id",
+            message: "Payment ID prefix matches more than one payment; provide more characters"
+                .into(),
         }
     }
 

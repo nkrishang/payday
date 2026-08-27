@@ -16,24 +16,24 @@ pub struct ApiErrorDetail {
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    /// Could not reach the gateway or the transport failed.
-    #[error("failed to reach gateway at {url}: {source}")]
+    /// Could not reach Payday or the transport failed.
+    #[error("failed to reach Payday at {url}: {source}")]
     Transport {
         url: String,
         #[source]
         source: reqwest::Error,
     },
 
-    /// The gateway returned a non-success status with a structured error body.
-    #[error("gateway returned {status} [{code}]: {message}")]
+    /// Payday returned a non-success status with a structured error body.
+    #[error("Payday returned {status} [{code}]: {message}")]
     Api {
         status: u16,
         code: String,
         message: String,
     },
 
-    /// The gateway returned a non-success status we could not parse.
-    #[error("gateway returned {status}: {body}")]
+    /// Payday returned a non-success status we could not parse.
+    #[error("Payday returned {status}: {body}")]
     UnexpectedResponse { status: u16, body: String },
 
     /// Local input the CLI rejected before making a request.

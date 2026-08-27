@@ -8,10 +8,10 @@ API-key replacement requires a fresh email OTP and invalidates the old key
 immediately. Run:
 
 ```bash
-export GATEWAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
-export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export GATEWAY_AUTH0_CLIENT_ID="<native-application-client-id>"
-./target/release/gateway-cli account create
+export PAYDAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
+export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
+export PAYDAY_AUTH0_CLIENT_ID="<native-application-client-id>"
+./target/release/payday account create
 ```
 
 The CLI displays the existing key hint and generation, warns that replacement
@@ -20,8 +20,8 @@ explicitly states that the old key is invalid. To capture JSON without printing
 the secret in shared logs:
 
 ```bash
-rotation_json="$(./target/release/gateway-cli --json account create --yes)"
-export GATEWAY_API_KEY="$(jq -r .api_key <<<"$rotation_json")"
+rotation_json="$(./target/release/payday --json account create --yes)"
+export PAYDAY_API_KEY="$(jq -r .api_key <<<"$rotation_json")"
 ```
 
 Store and distribute the new key through the account owner's approved secret
@@ -29,7 +29,7 @@ management process. The service does not retain recoverable plaintext and does
 not need a restart. Verify the new key against an invoice owned by this account:
 
 ```bash
-./target/release/gateway-cli invoice get <INVOICE_ID>
+./target/release/payday get <INVOICE_ID>
 ```
 
 ## Rotate the Resend API key

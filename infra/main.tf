@@ -3,10 +3,10 @@ data "aws_availability_zones" "available" { state = "available" }
 locals {
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
   common_environment = [
-    { name = "GATEWAY_CHAIN_ID", value = tostring(var.chain_id) },
-    { name = "GATEWAY_FACTORY_ADDRESS", value = var.factory_address },
-    { name = "GATEWAY_BATCH_SWEEPER_ADDRESS", value = var.batch_sweeper_address },
-    { name = "GATEWAY_USDC_ADDRESS", value = var.usdc_address },
+    { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
+    { name = "PAYDAY_FACTORY_ADDRESS", value = var.factory_address },
+    { name = "PAYDAY_BATCH_SWEEPER_ADDRESS", value = var.batch_sweeper_address },
+    { name = "PAYDAY_USDC_ADDRESS", value = var.usdc_address },
     { name = "RUST_LOG", value = "info" }
   ]
 }
@@ -259,10 +259,10 @@ resource "aws_ecs_task_definition" "api" {
     readonlyRootFilesystem = true,
     portMappings           = [{ containerPort = var.api_port, protocol = "tcp" }],
     environment = concat(local.common_environment, [
-      { name = "GATEWAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
-      { name = "GATEWAY_AUTH0_ISSUER", value = var.auth0_issuer },
-      { name = "GATEWAY_AUTH0_AUDIENCE", value = var.auth0_audience },
-      { name = "GATEWAY_AUTH0_CLIENT_ID", value = var.auth0_client_id }
+      { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
+      { name = "PAYDAY_AUTH0_ISSUER", value = var.auth0_issuer },
+      { name = "PAYDAY_AUTH0_AUDIENCE", value = var.auth0_audience },
+      { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id }
     ]),
     secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
@@ -286,14 +286,14 @@ resource "aws_ecs_task_definition" "indexer" {
     readonlyRootFilesystem = true,
     stopTimeout            = 120,
     environment = concat(local.common_environment, [
-      { name = "GATEWAY_KMS_KEY_ID", value = aws_kms_key.signer.arn },
-      { name = "GATEWAY_USDC_START_BLOCK", value = tostring(var.usdc_start_block) },
-      { name = "GATEWAY_FINALITY_SOURCE", value = "finalized" },
-      { name = "GATEWAY_FINALITY_CONFIRMATIONS", value = tostring(var.finality_confirmations) },
-      { name = "GATEWAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) },
-      { name = "GATEWAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) }
+      { name = "PAYDAY_KMS_KEY_ID", value = aws_kms_key.signer.arn },
+      { name = "PAYDAY_USDC_START_BLOCK", value = tostring(var.usdc_start_block) },
+      { name = "PAYDAY_FINALITY_SOURCE", value = "finalized" },
+      { name = "PAYDAY_FINALITY_CONFIRMATIONS", value = tostring(var.finality_confirmations) },
+      { name = "PAYDAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) },
+      { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) }
     ]),
-    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }, { name = "GATEWAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn }],
+    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }, { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn }],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
   }])
 }
@@ -527,7 +527,7 @@ locals {
     signer_low_balance = {
       pattern     = "\"sweep signer balance low\""
       period      = 300
-      description = "The KMS sweep signer is below GATEWAY_SIGNER_LOW_BALANCE_WEI; fund it"
+      description = "The KMS sweep signer is below PAYDAY_SIGNER_LOW_BALANCE_WEI; fund it"
     }
     cursor_lagging = {
       pattern     = "\"indexer cursor lagging\""

@@ -1,31 +1,31 @@
 # End-to-end smoke test
 
-Verify the full payment lifecycle: create an invoice, pay it with real USDC,
+Verify the full payment lifecycle: create a payment, fund it with real USDC,
 and confirm the funds reach the beneficiary.
 
 ## Prerequisites
 
 - API key and CLI configured (see [README.md](README.md) prerequisites)
 - A wallet with USDC on Monad and its private key
-- The CLI binary built: `cargo build --release -p gateway-cli`
+- The CLI binary built: `cargo build --release -p gateway-cli --bin payday`
 - The indexer running and caught up (see [daily-monitoring.md](daily-monitoring.md))
 
-## Step 1: Create an invoice
+## Step 1: Create a payment
 
 ```bash
-export GATEWAY_API_URL="https://api.payday.sh"
-export GATEWAY_API_KEY="<operator-account-api-key>"
+export PAYDAY_API_URL="https://api.payday.sh"
+export PAYDAY_API_KEY="<operator-account-api-key>"
 
-./target/release/gateway-cli --json invoice create \
+./target/release/payday --json create \
   --chain-id 143 \
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  --beneficiary <BENEFICIARY_ADDRESS> \
-  --expiration-timestamp "$(($(date +%s) + 3600))" \
-  --recovery <RECOVERY_ADDRESS> \
+  --payout <PAYOUT_ADDRESS> \
+  --expires-in 3600 \
+  --refund <REFUND_ADDRESS> \
   --amount 0.01
 ```
 
-Copy `id` and `payment_address` from the JSON output.
+Copy `id` and `address` from the JSON output.
 
 ## Step 2: Send USDC to the payment address
 
@@ -38,17 +38,17 @@ cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 
 `10000` is 0.01 USDC in base units (6 decimals).
 
-## Step 3: Monitor the invoice
+## Step 3: Monitor the payment
 
 ```bash
 # One-time check:
-./target/release/gateway-cli invoice get <INVOICE_ID>
+./target/release/payday get <PAYMENT_ID>
 
 # Poll every 5 seconds:
-watch -n 5 './target/release/gateway-cli invoice get <INVOICE_ID>'
+watch -n 5 './target/release/payday get <PAYMENT_ID>'
 ```
 
-The status should progress: `created → funded → deploying → fulfilled`.
+The status should progress: `awaiting_payment → paid → settled`.
 
 With the indexer caught up, this typically takes under 30 seconds.
 
@@ -63,9 +63,9 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 # Payment contract should be deployed (non-empty code):
 cast code <PAYMENT_ADDRESS> --rpc-url "$MONAD_RPC_URL"
 
-# Beneficiary should have received the USDC:
+# Payout address should have received the USDC:
 cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  'balanceOf(address)(uint256)' <BENEFICIARY_ADDRESS> \
+  'balanceOf(address)(uint256)' <PAYOUT_ADDRESS> \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
@@ -73,10 +73,10 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 
 | Check | Expected |
 |-------|----------|
-| Invoice status | `fulfilled` |
+| Payment status | `settled` |
 | Payment address USDC balance | `0` |
 | Payment address code | Non-empty (contract deployed) |
-| Beneficiary USDC balance | Increased by the invoice amount |
+| Payout address USDC balance | Increased by the payment amount |
 
 ## Understanding the sweep transaction
 

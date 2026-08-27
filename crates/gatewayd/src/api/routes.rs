@@ -10,8 +10,11 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     let authenticated = Router::new()
-        .route("/v1/invoices", post(invoices::create_invoice))
-        .route("/v1/invoices/{id}", get(invoices::get_invoice))
+        .route(
+            "/v1/payments",
+            post(invoices::create_payment).get(invoices::list_payments),
+        )
+        .route("/v1/payments/{id}", get(invoices::get_payment))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -116,15 +119,15 @@ mod tests {
         json!({
             "chain_id": "1",
             "token_address": "0x0000000000000000000000000000000000000000",
-            "beneficiary_address": "0x0000000000000000000000000000000000000002",
+            "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
-            "expiration_timestamp": (unix_now() + 3600).to_string(),
-            "recovery_address": "0x0000000000000000000000000000000000000003"
+            "expires_in": 3600,
+            "refund_address": "0x0000000000000000000000000000000000000003"
         })
     }
 
     fn create_request(key: &str, idempotency_key: &str, body: &Value) -> Request<Body> {
-        Request::post("/v1/invoices")
+        Request::post("/v1/payments")
             .header(header::AUTHORIZATION, format!("Bearer {key}"))
             .header(header::CONTENT_TYPE, "application/json")
             .header("idempotency-key", idempotency_key)
@@ -215,14 +218,14 @@ mod tests {
     async fn get_invoice_rejects_missing_and_wrong_credentials(pool: PgPool) {
         assert_unauthorized(
             app(pool.clone()).await,
-            Request::get("/v1/invoices/not-an-id")
+            Request::get("/v1/payments/not-an-id")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
         assert_unauthorized(
             app(pool).await,
-            Request::get("/v1/invoices/not-an-id")
+            Request::get("/v1/payments/not-an-id")
                 .header(
                     header::AUTHORIZATION,
                     "Bearer fedcba9876543210fedcba9876543210",
@@ -237,14 +240,14 @@ mod tests {
     async fn create_invoice_rejects_missing_and_wrong_credentials(pool: PgPool) {
         assert_unauthorized(
             app(pool.clone()).await,
-            Request::post("/v1/invoices")
+            Request::post("/v1/payments")
                 .body(Body::from("{}"))
                 .unwrap(),
         )
         .await;
         assert_unauthorized(
             app(pool).await,
-            Request::post("/v1/invoices")
+            Request::post("/v1/payments")
                 .header(
                     header::AUTHORIZATION,
                     "Bearer fedcba9876543210fedcba9876543210",
@@ -260,7 +263,7 @@ mod tests {
         let response = app(pool)
             .await
             .oneshot(
-                Request::get("/v1/invoices/not-an-id")
+                Request::get("/v1/payments/not-an-id")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -278,7 +281,7 @@ mod tests {
         let response = app(pool)
             .await
             .oneshot(
-                Request::post("/v1/invoices")
+                Request::post("/v1/payments")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(vec![b'x'; 64 * 1024 + 1]))
@@ -292,28 +295,129 @@ mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn create_invoice_returns_settlement_fields_and_a_single_use_address(pool: PgPool) {
-        let response = app(pool)
-            .await
+        let app = app(pool).await;
+        let response = app
+            .clone()
             .oneshot(create_request(KEY, "fields", &valid_body()))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = json_body(response).await;
-        assert_eq!(body["status"], "created");
+        assert_eq!(body["status"], "awaiting_payment");
         assert_eq!(body["amount"], "1.000000");
         assert_eq!(body["amount_base_units"], "1000000");
         assert_eq!(body["received"], "0.000000");
         assert_eq!(body["received_base_units"], "0");
-        assert!(body["execute_tx_hash"].is_null());
-        assert!(body["resolved_at_block"].is_null());
-        assert!(body["blocked_reason"].is_null());
-        assert!(body["payment_address"].as_str().unwrap().starts_with("0x"));
+        assert!(body["settlement_tx_hash"].is_null());
+        assert!(body["settled_block"].is_null());
+        assert!(body["attention"].is_null());
+        assert!(body["address"].as_str().unwrap().starts_with("0x"));
+        let id = body["id"].as_str().unwrap();
+        assert!(id.starts_with("pay_"));
+
+        let replay = app
+            .clone()
+            .oneshot(create_request(KEY, "fields", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = json_body(replay).await;
+        assert_eq!(replay["id"], id);
+        assert_eq!(replay["expires_at"], body["expires_at"]);
+        assert_eq!(replay["expires_in"], 3_600);
+
+        let prefix_response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payments/{}", &id[..16]))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prefix_response.status(), StatusCode::OK);
+        assert_eq!(json_body(prefix_response).await["id"], id);
+
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/payments")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+        assert_eq!(json_body(list_response).await["payments"][0]["id"], id);
+
+        let second = app
+            .clone()
+            .oneshot(create_request(KEY, "second-fields", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CREATED);
+        let second_id = json_body(second).await["id"].as_str().unwrap().to_owned();
+        let ambiguous = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/payments/pay_0")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ambiguous.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(ambiguous).await["error"]["code"],
+            "ambiguous_payment_id"
+        );
+
+        let first_page = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/payments?limit=1")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_page = json_body(first_page).await;
+        assert_eq!(first_page["payments"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["payments"][0]["id"], second_id);
+        assert_eq!(first_page["next_cursor"], second_id);
+        let second_page = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payments?limit=1&starting_after={second_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second_page = json_body(second_page).await;
+        assert_eq!(second_page["payments"][0]["id"], id);
+        assert!(second_page["next_cursor"].is_null());
+
+        let legacy_route = app
+            .oneshot(
+                Request::get("/v1/invoices")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_route.status(), StatusCode::NOT_FOUND);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn create_invoice_rejects_malformed_parameters(pool: PgPool) {
         let app = app(pool).await;
-        let now = unix_now();
         let cases: Vec<(&str, Value, &str)> = vec![
             ("negative amount", json!("-1.5"), "invalid_amount"),
             ("signed amount", json!("+1"), "invalid_amount"),
@@ -333,14 +437,12 @@ mod tests {
         }
 
         let expiration_cases = [
-            ("expired deadline", (now - 60).to_string()),
-            ("deadline too soon", (now + 60).to_string()),
-            ("milliseconds", ((now + 3600) * 1000).to_string()),
-            ("beyond a year", (now + 400 * 24 * 3600).to_string()),
+            ("deadline too soon", 60),
+            ("beyond a year", 400 * 24 * 3600),
         ];
         for (name, expiration) in expiration_cases {
             let mut body = valid_body();
-            body["expiration_timestamp"] = json!(expiration);
+            body["expires_in"] = json!(expiration);
             let response = app
                 .clone()
                 .oneshot(create_request(KEY, name, &body))
@@ -355,7 +457,7 @@ mod tests {
         }
 
         let mut body = valid_body();
-        body["beneficiary_address"] = json!("0x0000000000000000000000000000000000000000");
+        body["payout_address"] = json!("0x0000000000000000000000000000000000000000");
         let response = app
             .clone()
             .oneshot(create_request(KEY, "zero beneficiary", &body))
@@ -366,7 +468,7 @@ mod tests {
             json_body(response).await["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("beneficiary_address")
+                .contains("payout_address")
         );
 
         for (name, key) in [("empty key", String::new()), ("long key", "k".repeat(256))] {
@@ -440,7 +542,7 @@ mod tests {
 
         let cross_account = app
             .oneshot(
-                Request::get(format!("/v1/invoices/{first_id}"))
+                Request::get(format!("/v1/payments/{first_id}"))
                     .header(header::AUTHORIZATION, format!("Bearer {SECOND}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -522,7 +624,7 @@ mod tests {
         assert_ne!(first_key, second_key);
 
         let invoice_request = |key: &str| {
-            Request::get("/v1/invoices/not-an-id")
+            Request::get("/v1/payments/not-an-id")
                 .header(header::AUTHORIZATION, format!("Bearer {key}"))
                 .body(Body::empty())
                 .unwrap()

@@ -77,7 +77,7 @@ If the indexer was stopped, restart it — see [service-restart.md](service-rest
 ## Step 5: Verify invoices are progressing
 
 ```bash
-./target/release/gateway-cli invoice get <INVOICE_ID>
+./target/release/payday get <INVOICE_ID>
 ```
 
 The status should advance from `created` to `funded` within a few seconds.

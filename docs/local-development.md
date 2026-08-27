@@ -25,7 +25,7 @@ created → funded → deploying → fulfilled
    └──► expired ◄───────┘──► recovered        blocked (operator review)
 ```
 
-Only the exact `GATEWAY_USDC_ADDRESS` is accepted. USDC amounts use six decimal
+Only the exact `PAYDAY_USDC_ADDRESS` is accepted. USDC amounts use six decimal
 places. Production should configure Circle's chain-specific native USDC proxy;
 the local setup deploys a mintable six-decimal fixture with the same
 `paused()`/`isBlacklisted()` views.
@@ -35,10 +35,10 @@ the local setup deploys a mintable six-decimal fixture with the same
 The acquisition path uses standard EVM JSON-RPC:
 
 - one `eth_getBlockByNumber("finalized")` per poll to anchor the boundary
-  (`GATEWAY_FINALITY_SOURCE=finalized`, minus `GATEWAY_FINALITY_CONFIRMATIONS`
-  blocks of margin), or `eth_blockNumber` with `GATEWAY_FINALITY_SOURCE=latest`;
+  (`PAYDAY_FINALITY_SOURCE=finalized`, minus `PAYDAY_FINALITY_CONFIRMATIONS`
+  blocks of margin), or `eth_blockNumber` with `PAYDAY_FINALITY_SOURCE=latest`;
 - one `eth_getLogs` per bounded range, filtered to the USDC address and
-  `Transfer` topic, draining up to `GATEWAY_INDEXER_MAX_RANGES_PER_TICK` ranges
+  `Transfer` topic, draining up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges
   per pass so a backlog clears independently of the poll interval;
 - header lookups to verify and persist canonical cursor hashes, plus one lookup
   for each distinct transfer-bearing block to classify payments by that
@@ -52,7 +52,7 @@ Each observation records the block and transaction index of the sweep that
 collected it, so a lagging cursor can never re-queue funds a finalized sweep
 already moved, including when payment and sweep transactions share a block.
 
-Log ranges start at `GATEWAY_LOG_RANGE_SIZE` (100 by default, QuickNode's cap
+Log ranges start at `PAYDAY_LOG_RANGE_SIZE` (100 by default, QuickNode's cap
 on Monad), halve when the provider reports a range/result-size error, and grow
 after a successful response. A one-block failure is retried rather than
 skipped.
@@ -123,38 +123,41 @@ For a manual local run without Auth0, seed one test account in another shell:
 
 ```bash
 set -a; source .env; set +a
-export GATEWAY_API_KEY="$(openssl rand -hex 32)"
-key_hash="$(printf %s "$GATEWAY_API_KEY" | shasum -a 256 | awk '{print $1}')"
+export PAYDAY_API_KEY="$(openssl rand -hex 32)"
+key_hash="$(printf %s "$PAYDAY_API_KEY" | shasum -a 256 | awk '{print $1}')"
 psql "$DATABASE_URL" -c "INSERT INTO accounts (id, api_key_hash, api_key_hint)
   VALUES ('00000000-0000-0000-0000-000000000001', decode('$key_hash', 'hex'), 'local')"
 ```
 
 Production users obtain keys through Auth0 email OTP with
-`gateway-cli account create`; see `docs/authentication.md`.
+`payday account create`; see `docs/authentication.md`.
 
 In another terminal:
 
 ```bash
 set -a; source .env; set +a
-GATEWAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
+PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
 ```
 
-### 4. Create and pay an invoice
+### 4. Create a payment
 
 Expirations must be at least ten minutes and at most a year ahead.
 
 ```bash
-./target/debug/gateway-cli --json invoice create \
+./target/debug/payday --json create \
   --chain-id 31337 \
   --token 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
-  --beneficiary 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
-  --expiration-timestamp "$(($(date +%s) + 3600))" \
-  --recovery 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
+  --payout 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --expires-in 3600 \
+  --refund 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
   --amount 1.5
 ```
 
-Copy `id` and `payment_address` from the response, then transfer 1.5 USDC
+Copy `id` and `address` from the response, then transfer 1.5 USDC
 (`1500000` atomic units):
+
+The `self_settlement` object contains the factory and salt needed for anyone
+to settle the payment on-chain if Payday is unavailable.
 
 ```bash
 cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
@@ -162,10 +165,10 @@ cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --rpc-url http://127.0.0.1:8545
 
-./target/debug/gateway-cli invoice get <id>
+./target/debug/payday get <id>
 ```
 
-The status should reach `fulfilled` with `execute_tx_hash` set. Verify the
+The status should reach `settled` with `settlement_tx_hash` set. Verify the
 payment address was emptied and the Payment contract was deployed:
 
 ```bash
@@ -193,33 +196,33 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 ## Configuration
 
 - `DATABASE_URL`
-- `GATEWAY_API_KEY` — CLI-only per-account bearer key for invoice requests
-- `GATEWAY_AUTH0_ISSUER`, `GATEWAY_AUTH0_AUDIENCE`, `GATEWAY_AUTH0_CLIENT_ID` —
+- `PAYDAY_API_KEY` — CLI-only per-account bearer key for invoice requests
+- `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
   Auth0 account-management settings (see `docs/authentication.md`)
-- `GATEWAY_CHAIN_ID`
-- `GATEWAY_FACTORY_ADDRESS`
-- `GATEWAY_BATCH_SWEEPER_ADDRESS`
-- `GATEWAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
-- `GATEWAY_USDC_START_BLOCK` — required; the block to start indexing from on a
+- `PAYDAY_CHAIN_ID`
+- `PAYDAY_FACTORY_ADDRESS`
+- `PAYDAY_BATCH_SWEEPER_ADDRESS`
+- `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
+- `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
   fresh database (the current block at first deployment)
-- `GATEWAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
-- `GATEWAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
+- `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
+- `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
   or `latest`
-- `GATEWAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality
+- `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality
   anchor; defaults to 2, local Anvil uses 0
-- `GATEWAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
-- `GATEWAY_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
-- `GATEWAY_INDEXER_POLL_INTERVAL_MS` — idle interval for both loops, default 2000
-- `GATEWAY_SWEEP_PENDING_TIMEOUT_SECS` — seconds without a receipt before a
+- `PAYDAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
+- `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
+- `PAYDAY_INDEXER_POLL_INTERVAL_MS` — idle interval for both loops, default 2000
+- `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` — seconds without a receipt before a
   helper transaction is replaced on the same nonce, default 60
-- `GATEWAY_SWEEP_MAX_SUBMISSIONS` — replacements before the sweep worker
+- `PAYDAY_SWEEP_MAX_SUBMISSIONS` — replacements before the sweep worker
   pauses and alarms, default 5
-- `GATEWAY_SWEEP_MAX_ATTEMPTS` — unclassified item failures before an invoice
+- `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified item failures before an invoice
   is `blocked`, default 8
-- `GATEWAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
+- `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
   default 0.05 native tokens
-- `GATEWAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
-- `GATEWAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
+- `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
+- `PAYDAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
   uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
 
 The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
@@ -231,7 +234,7 @@ Terraform source is under `infra/`.
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.
 - One helper transaction is in flight at a time; replacements share its nonce.
-  After `GATEWAY_SWEEP_MAX_SUBMISSIONS` unconfirmed submissions the sweep
+  After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed submissions the sweep
   worker pauses and alarms while block indexing continues.
 - `blocked` invoices are released by an operator (`docs/runbooks/stuck-invoice.md`);
   the worker never retries them on its own.

@@ -2391,6 +2391,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 name = "gateway-cli"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "gateway-core",
  "reqwest 0.12.28",
@@ -2407,6 +2408,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "chrono",
  "rand 0.9.5",
  "serde",
  "serde_json",
@@ -2464,6 +2466,7 @@ dependencies = [
  "alloy-primitives",
  "axum",
  "base64",
+ "chrono",
  "gateway-core",
  "gateway-db",
  "jsonwebtoken",

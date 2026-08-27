@@ -14,6 +14,33 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InvoiceId(pub Uuid);
 
+impl fmt::Display for InvoiceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "pay_{}", self.0)
+    }
+}
+
+/// Validate a customer-facing `pay_…` ID or unambiguous prefix and return the
+/// UUID portion used by the account-scoped database lookup.
+pub fn payment_id_prefix(value: &str) -> Option<&str> {
+    let suffix = value.strip_prefix("pay_")?;
+    if suffix.is_empty() || suffix.len() > 36 {
+        return None;
+    }
+    let canonical = "00000000-0000-0000-0000-000000000000".as_bytes();
+    suffix
+        .bytes()
+        .zip(canonical)
+        .all(|(byte, template)| {
+            if *template == b'-' {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+        .then_some(suffix)
+}
+
 pub fn generate_invoice_id() -> InvoiceId {
     InvoiceId(Uuid::now_v7())
 }
@@ -121,6 +148,8 @@ pub struct Invoice {
     pub execute_tx_hash: Option<B256>,
     /// Block at which the invoice reached `fulfilled` or `recovered`.
     pub resolved_at_block: Option<u64>,
+    /// Timestamp of that finalized block.
+    pub settled_at_timestamp: Option<u64>,
     /// Why automatic sweeping stopped for this invoice, if it did.
     pub blocked_reason: Option<String>,
 }
@@ -159,6 +188,7 @@ impl Invoice {
             received: Amount(U256::ZERO),
             execute_tx_hash: None,
             resolved_at_block: None,
+            settled_at_timestamp: None,
             blocked_reason: None,
         }
     }
@@ -185,6 +215,19 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn public_payment_ids_are_prefixed_and_validate_canonical_prefixes() {
+        let id = InvoiceId(Uuid::parse_str("0198f80c-8d2f-7dc1-a369-90556a64f700").unwrap());
+        assert_eq!(id.to_string(), "pay_0198f80c-8d2f-7dc1-a369-90556a64f700");
+        assert_eq!(
+            payment_id_prefix("pay_0198f80c-8d2f"),
+            Some("0198f80c-8d2f")
+        );
+        for invalid in ["", "pay_", "0198f80c", "pay_0198F", "pay_0198-", "pay_%"] {
+            assert_eq!(payment_id_prefix(invalid), None, "{invalid}");
+        }
+    }
     use uuid::Version;
 
     #[test]

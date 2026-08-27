@@ -18,8 +18,8 @@ operator's approved secret store; Terraform does not create or retain user API
 keys:
 
 ```bash
-export GATEWAY_API_URL="https://api.payday.sh"
-export GATEWAY_API_KEY="<operator-account-api-key>"
+export PAYDAY_API_URL="https://api.payday.sh"
+export PAYDAY_API_KEY="<operator-account-api-key>"
 ```
 
 ## Runbooks

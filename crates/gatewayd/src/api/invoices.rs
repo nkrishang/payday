@@ -1,4 +1,4 @@
-//! POST /v1/invoices and GET /v1/invoices/:id handlers.
+//! Customer-facing payment handlers backed by the internal invoice domain.
 
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,13 +6,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use alloy_primitives::{Address, U256};
 use axum::Extension;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, BeneficiaryAddress, ChainId, CreateInvoiceRequest, FactoryAddress, Invoice,
-    InvoiceResponse, RecoveryAddress, TokenAddress, USDC_DECIMALS,
+    Amount, BeneficiaryAddress, ChainId, CreatePaymentRequest, FactoryAddress, Invoice,
+    PaymentListResponse, PaymentResponse, RecoveryAddress, TokenAddress, USDC_DECIMALS,
+    payment_id_prefix,
 };
 
 use crate::api::error::ApiError;
@@ -27,26 +29,37 @@ pub const MIN_EXPIRATION_LEAD_SECS: u64 = 10 * 60;
 /// otherwise nonsensical values while still allowing long-lived invoices.
 pub const MAX_EXPIRATION_LEAD_SECS: u64 = 366 * 24 * 60 * 60;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
+const DEFAULT_LIST_LIMIT: u32 = 20;
+const MAX_LIST_LIMIT: u32 = 100;
+
+#[derive(Debug, Deserialize)]
+pub struct ListPaymentsQuery {
+    limit: Option<u32>,
+    starting_after: Option<String>,
+}
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
 /// outside the schema contract (see [`gateway_db::DbInvoiceError`]).
 ///
 /// A free function rather than a `TryFrom` impl: the orphan rule forbids
-/// implementing a foreign trait for the foreign `InvoiceResponse` from a row
+/// implementing a foreign trait for the foreign `PaymentResponse` from a row
 /// type that now also lives outside this crate.
-fn to_response(row: DbInvoice) -> Result<InvoiceResponse, ApiError> {
-    Ok(Invoice::try_from(&row)?.into())
+fn to_response(row: DbInvoice, expires_in: Option<u64>) -> Result<PaymentResponse, ApiError> {
+    Ok(PaymentResponse::from_invoice(
+        Invoice::try_from(&row)?,
+        expires_in,
+    ))
 }
 
 // --- Handlers ---
 
-pub async fn create_invoice(
+pub async fn create_payment(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     headers: HeaderMap,
-    Json(req): Json<CreateInvoiceRequest>,
-) -> Result<(axum::http::StatusCode, Json<InvoiceResponse>), ApiError> {
+    Json(req): Json<CreatePaymentRequest>,
+) -> Result<(axum::http::StatusCode, Json<PaymentResponse>), ApiError> {
     // 1. Extract idempotency key from header.
     let idempotency_key = headers
         .get("idempotency-key")
@@ -67,22 +80,22 @@ pub async fn create_invoice(
 
     let token_addr = Address::from_str(&req.token_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))?;
-    let beneficiary_addr = Address::from_str(&req.beneficiary_address)
-        .map_err(|e| ApiError::invalid_request(format!("invalid beneficiary_address: {e}")))?;
+    let beneficiary_addr = Address::from_str(&req.payout_address)
+        .map_err(|e| ApiError::invalid_request(format!("invalid payout_address: {e}")))?;
     if beneficiary_addr.is_zero() {
         return Err(ApiError::invalid_request(
-            "beneficiary_address must not be the zero address",
+            "payout_address must not be the zero address",
         ));
     }
-    let expiration_timestamp: u64 = req.expiration_timestamp.parse().map_err(|_| {
-        ApiError::invalid_request("expiration_timestamp must be a uint64 Unix timestamp string")
-    })?;
-    validate_expiration(expiration_timestamp, unix_now())?;
-    let recovery_addr = Address::from_str(&req.recovery_address)
-        .map_err(|e| ApiError::invalid_request(format!("invalid recovery_address: {e}")))?;
+    validate_expiration(req.expires_in)?;
+    let expiration_timestamp = unix_now()
+        .checked_add(req.expires_in)
+        .ok_or_else(|| ApiError::invalid_request("expires_in is too large"))?;
+    let recovery_addr = Address::from_str(&req.refund_address)
+        .map_err(|e| ApiError::invalid_request(format!("invalid refund_address: {e}")))?;
     if recovery_addr.is_zero() {
         return Err(ApiError::invalid_request(
-            "recovery_address must not be the zero address",
+            "refund_address must not be the zero address",
         ));
     }
 
@@ -117,10 +130,16 @@ pub async fn create_invoice(
             token_addr,
             beneficiary_addr,
             &amount.0,
-            expiration_timestamp,
+            req.expires_in,
             recovery_addr,
         ) {
-            return Ok((axum::http::StatusCode::OK, Json(to_response(existing)?)));
+            return Ok((
+                axum::http::StatusCode::OK,
+                Json(to_response(
+                    existing.clone(),
+                    Some(existing.expires_in_secs as u64),
+                )?),
+            ));
         } else {
             return Err(ApiError::idempotency_conflict());
         }
@@ -138,13 +157,24 @@ pub async fn create_invoice(
     );
 
     // 7. Persist. ON CONFLICT handles the race between our check and insert.
-    let input =
-        CreateInvoiceInput::from_invoice(&invoice, account, idempotency_key.clone(), decimals);
+    let input = CreateInvoiceInput::from_invoice(
+        &invoice,
+        account,
+        idempotency_key.clone(),
+        decimals,
+        req.expires_in,
+    );
 
     let inserted = state.repo.insert(&input).await?;
 
     match inserted {
-        Some(row) => Ok((axum::http::StatusCode::CREATED, Json(to_response(row)?))),
+        Some(row) => {
+            let expires_in = row.expires_in_secs as u64;
+            Ok((
+                axum::http::StatusCode::CREATED,
+                Json(to_response(row, Some(expires_in))?),
+            ))
+        }
         None => {
             // Race: another request won. Fetch their row and compare.
             let existing = state
@@ -159,10 +189,14 @@ pub async fn create_invoice(
                 token_addr,
                 beneficiary_addr,
                 &amount.0,
-                expiration_timestamp,
+                req.expires_in,
                 recovery_addr,
             ) {
-                Ok((axum::http::StatusCode::OK, Json(to_response(existing)?)))
+                let expires_in = existing.expires_in_secs as u64;
+                Ok((
+                    axum::http::StatusCode::OK,
+                    Json(to_response(existing, Some(expires_in))?),
+                ))
             } else {
                 Err(ApiError::idempotency_conflict())
             }
@@ -170,21 +204,77 @@ pub async fn create_invoice(
     }
 }
 
-pub async fn get_invoice(
+pub async fn get_payment(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
-) -> Result<Json<InvoiceResponse>, ApiError> {
-    let uuid =
-        Uuid::from_str(&id).map_err(|_| ApiError::invalid_request("invalid invoice ID format"))?;
-
-    let row = state
+) -> Result<Json<PaymentResponse>, ApiError> {
+    let prefix = payment_id_prefix(&id).ok_or_else(|| {
+        ApiError::invalid_request("payment ID must start with pay_ and contain a UUIDv7 prefix")
+    })?;
+    let mut rows = state
         .repo
-        .find_by_id_for_account(account, uuid)
-        .await?
-        .ok_or_else(ApiError::invoice_not_found)?;
+        .find_by_prefix_for_account(account, prefix)
+        .await?;
+    match rows.len() {
+        0 => Err(ApiError::payment_not_found()),
+        1 => Ok(Json(to_response(rows.pop().unwrap(), None)?)),
+        _ => Err(ApiError::ambiguous_payment_id()),
+    }
+}
 
-    Ok(Json(to_response(row)?))
+pub async fn list_payments(
+    State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
+    Query(query): Query<ListPaymentsQuery>,
+) -> Result<Json<PaymentListResponse>, ApiError> {
+    let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(ApiError::invalid_request(format!(
+            "limit must be between 1 and {MAX_LIST_LIMIT}"
+        )));
+    }
+    let starting_after = query
+        .starting_after
+        .as_deref()
+        .map(full_payment_id)
+        .transpose()?;
+    if let Some(cursor) = starting_after
+        && state
+            .repo
+            .find_by_id_for_account(account, cursor)
+            .await?
+            .is_none()
+    {
+        return Err(ApiError::invalid_request(
+            "starting_after does not identify one of your payments",
+        ));
+    }
+    let mut rows = state
+        .repo
+        .list_for_account(account, starting_after, limit)
+        .await?;
+    let has_more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next_cursor = has_more.then(|| format!("pay_{}", rows.last().expect("nonzero limit").id));
+    let payments = rows
+        .into_iter()
+        .map(|row| to_response(row, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(PaymentListResponse {
+        payments,
+        next_cursor,
+    }))
+}
+
+fn full_payment_id(value: &str) -> Result<Uuid, ApiError> {
+    let suffix = payment_id_prefix(value)
+        .filter(|suffix| suffix.len() == 36)
+        .ok_or_else(|| {
+            ApiError::invalid_request("starting_after must be a complete pay_ payment ID")
+        })?;
+    Uuid::parse_str(suffix)
+        .map_err(|_| ApiError::invalid_request("starting_after must be a complete pay_ payment ID"))
 }
 
 fn unix_now() -> u64 {
@@ -196,15 +286,15 @@ fn unix_now() -> u64 {
 
 /// The deadline must give the payer and the sweep pipeline room, and must be
 /// a plausible seconds-based timestamp.
-fn validate_expiration(expiration_timestamp: u64, now: u64) -> Result<(), ApiError> {
-    if expiration_timestamp < now.saturating_add(MIN_EXPIRATION_LEAD_SECS) {
+fn validate_expiration(expires_in: u64) -> Result<(), ApiError> {
+    if expires_in < MIN_EXPIRATION_LEAD_SECS {
         return Err(ApiError::invalid_request(format!(
-            "expiration_timestamp must be at least {MIN_EXPIRATION_LEAD_SECS} seconds in the future"
+            "expires_in must be at least {MIN_EXPIRATION_LEAD_SECS} seconds"
         )));
     }
-    if expiration_timestamp > now.saturating_add(MAX_EXPIRATION_LEAD_SECS) {
+    if expires_in > MAX_EXPIRATION_LEAD_SECS {
         return Err(ApiError::invalid_request(format!(
-            "expiration_timestamp must be at most {MAX_EXPIRATION_LEAD_SECS} seconds in the future (Unix seconds, not milliseconds)"
+            "expires_in must be at most {MAX_EXPIRATION_LEAD_SECS} seconds"
         )));
     }
     Ok(())
@@ -217,13 +307,13 @@ fn same_request(
     token: Address,
     beneficiary: Address,
     amount: &U256,
-    expiration_timestamp: u64,
+    expires_in: u64,
     recovery: Address,
 ) -> bool {
     row.chain_id as u64 == chain_id
         && row.token_address.as_slice() == token.as_slice()
         && row.beneficiary_address.as_slice() == beneficiary.as_slice()
-        && row.expiration_timestamp as u64 == expiration_timestamp
+        && row.expires_in_secs as u64 == expires_in
         && row.recovery_address.as_slice() == recovery.as_slice()
         && U256::from_str_radix(&row.amount, 10)
             .map(|a| &a == amount)
@@ -236,20 +326,16 @@ mod tests {
 
     #[test]
     fn expiration_must_sit_inside_the_allowed_window() {
-        let now = 1_800_000_000;
-        assert!(validate_expiration(now + MIN_EXPIRATION_LEAD_SECS, now).is_ok());
-        assert!(validate_expiration(now + MAX_EXPIRATION_LEAD_SECS, now).is_ok());
+        assert!(validate_expiration(MIN_EXPIRATION_LEAD_SECS).is_ok());
+        assert!(validate_expiration(MAX_EXPIRATION_LEAD_SECS).is_ok());
         for invalid in [
             0,
-            now - 1,
-            now,
-            now + MIN_EXPIRATION_LEAD_SECS - 1,
-            now + MAX_EXPIRATION_LEAD_SECS + 1,
-            (now + 3600) * 1000, // milliseconds by mistake
+            MIN_EXPIRATION_LEAD_SECS - 1,
+            MAX_EXPIRATION_LEAD_SECS + 1,
             u64::MAX,
         ] {
             assert!(
-                validate_expiration(invalid, now).is_err(),
+                validate_expiration(invalid).is_err(),
                 "{invalid} must be rejected"
             );
         }
