@@ -33,6 +33,12 @@ async fn main() {
         ),
         None => None,
     };
+    let payer = api::payer::PayerAccess::new(
+        config.public_base_url(),
+        config.explorer_base_url().map(str::to_owned),
+        config.payer_token_secret(),
+    )
+    .expect("invalid payer link configuration");
     let state = state::AppState::new(
         repo,
         accounts,
@@ -40,6 +46,7 @@ async fn main() {
         config.chain_id(),
         config.factory_address(),
         config.usdc_address(),
+        payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),
     );

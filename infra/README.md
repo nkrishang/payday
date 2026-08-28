@@ -7,6 +7,11 @@ audience, and Native application client ID. Terraform passes these non-secret
 identifiers to ECS; embedded email OTP and connection setup are documented in
 `docs/authentication.md`.
 
+The same ALB and certificate serve `payment_domain_name`. Gatewayd embeds the
+cacheable payment page, signs each scoped payer URL with a generated Secrets
+Manager value, and links Monad addresses and settlement transactions through
+the configured explorer origin.
+
 ## Remote state bootstrap
 
 Create a versioned, encrypted, public-access-blocked S3 bucket (and optionally a DynamoDB lock table) separately. Do **not** add that bucket to this state. Then create `backend.hcl` (untracked) such as:
@@ -50,11 +55,12 @@ state. The examples document planning only and do not change external state.
 
 ## Secrets and operational notes
 
-Terraform state contains the RPC URL and generated database password/URL in
-plaintext within encrypted state despite `sensitive` markings. Secure state,
+Terraform state contains the RPC URL, payer-link signing secret, and generated
+database password/URL in plaintext within encrypted state despite `sensitive`
+markings. Secure state,
 plans, CI logs, and access accordingly; never commit `terraform.tfvars`,
 `backend.hcl`, or plans. ECS injects infrastructure secrets at task startup.
-The API execution role can read only the database and webhook encryption secrets; indexer execution can
+The API execution role can read only the database, payer-link, and webhook encryption secrets; indexer execution can
 read only database/RPC secrets. The indexer task role can only `kms:GetPublicKey`
 and `kms:Sign` on its key. RDS connections use hostname and certificate
 verification against the checksum-pinned AWS global RDS CA bundle in the image.

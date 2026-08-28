@@ -3,6 +3,7 @@ use std::io::IsTerminal;
 use anstyle::{AnsiColor, Color, Style};
 use chrono::{DateTime, Utc};
 use gateway_core::{PaymentResponse, PaymentStatus, PaymentSummaryResponse};
+use supports_hyperlinks::Stream;
 
 use crate::cli::ColorChoice;
 
@@ -51,13 +52,25 @@ impl Presentation {
                 payment.currency
             ),
         };
-        let mut lines = vec![title, progress, String::new()];
+        let mut lines = if created {
+            vec![
+                format!(
+                    "Share    {}",
+                    hyperlink(&payment.payment_url, &payment.payment_url)
+                ),
+                title,
+                progress,
+                String::new(),
+            ]
+        } else {
+            vec![title, progress, String::new()]
+        };
         if created {
             lines.extend([
-                format!("Share    https://pay.payday.sh/{}", payment.id),
                 format!(
-                    "Address  {}  {} · native {} only",
-                    payment.address, payment.chain.name, payment.currency
+                    "Address  {}{}",
+                    payment.address,
+                    explorer_suffix(payment.address_explorer_url.as_deref())
                 ),
                 format!(
                     "Wallet   ethereum:{}@{}/transfer?address={}&uint256={}",
@@ -65,6 +78,10 @@ impl Presentation {
                     payment.chain.id,
                     payment.address,
                     payment.amount_base_units
+                ),
+                format!(
+                    "Only Circle-issued native {} on {} (chain {}). Wrong-chain or late funds may not reach the payout wallet.",
+                    payment.currency, payment.chain.name, payment.chain.id
                 ),
                 format!("Follow it:  payday get {} --watch", payment.id),
             ]);
@@ -75,9 +92,12 @@ impl Presentation {
                     payment.address,
                     payment.chain.name,
                     payment.currency,
-                    address_link(&payment.chain.id, &payment.address)
+                    explorer_suffix(payment.address_explorer_url.as_deref())
                 ),
-                format!("Link       https://pay.payday.sh/{}", payment.id),
+                format!(
+                    "Link       {}",
+                    hyperlink(&payment.payment_url, &payment.payment_url)
+                ),
                 format!("Expires    {}", expiry(&payment.expires_at)),
                 format!(
                     "Payout     {}  late or leftover funds → {}",
@@ -100,7 +120,10 @@ impl Presentation {
                 ));
             }
             if let Some(hash) = &payment.settlement_tx_hash {
-                lines.push(format!("Settlement {}", tx_link(&payment.chain.id, hash)));
+                lines.push(format!(
+                    "Settlement {}",
+                    explorer_link(hash, payment.settlement_explorer_url.as_deref())
+                ));
             }
             if !payment.transfers.is_empty() {
                 lines.extend([String::new(), "Transfers".into()]);
@@ -116,7 +139,7 @@ impl Presentation {
                         short_time(&transfer.timestamp),
                         description,
                         shorten(&transfer.sender),
-                        tx_link(&payment.chain.id, &transfer.transaction_hash)
+                        explorer_link(&transfer.transaction_hash, transfer.explorer_url.as_deref())
                     )
                 }));
             }
@@ -282,19 +305,21 @@ fn shorten(value: &str) -> String {
     }
 }
 
-fn tx_link(chain: &str, hash: &str) -> String {
-    if chain == "143" {
-        format!("https://monadvision.com/tx/{hash}")
-    } else {
-        shorten(hash)
-    }
+fn explorer_link(value: &str, url: Option<&str>) -> String {
+    url.map(|url| hyperlink(url, url))
+        .unwrap_or_else(|| shorten(value))
 }
 
-fn address_link(chain: &str, address: &str) -> String {
-    if chain == "143" {
-        format!("  https://monadvision.com/address/{address}")
+fn explorer_suffix(url: Option<&str>) -> String {
+    url.map(|url| format!("  {}", hyperlink(url, url)))
+        .unwrap_or_default()
+}
+
+fn hyperlink(url: &str, label: &str) -> String {
+    if supports_hyperlinks::on(Stream::Stdout) {
+        format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\")
     } else {
-        String::new()
+        label.into()
     }
 }
 
@@ -313,7 +338,9 @@ mod tests {
     fn payment(status: PaymentStatus, received: &str) -> PaymentResponse {
         PaymentResponse {
             id: "pay_0191c8e0-5b3a-7c4d-9e2f-1a2b3c4d5e6f".into(),
+            payment_url: "https://pay.payday.sh/pay/pay_0191c8e0?token=test".into(),
             address: "0x8F2aB1c4D5e6F7a8B9c0D1e2F3a4B5c6D7e8F9A0".into(),
+            address_explorer_url: Some("https://monadvision.com/address/0x8F2a".into()),
             payout_address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into(),
             refund_address: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC".into(),
             expires_at: "2030-03-17T17:46:40Z".into(),
@@ -340,6 +367,7 @@ mod tests {
                 name: "Monad".into(),
             },
             settlement_tx_hash: None,
+            settlement_explorer_url: None,
             settled_at: None,
             settled_block: None,
             self_settlement: SelfSettlementDto {
@@ -389,6 +417,7 @@ mod tests {
             sender: "0xa1b200000000000000000000000000000000c3d4".into(),
             transaction_hash: "0x9b1e00000000000000000000000000000000000000000000000000000000a0f2"
                 .into(),
+            explorer_url: Some("https://monadvision.com/tx/0x9b1e".into()),
             block: "123".into(),
             disposition: disposition.into(),
             collected: false,

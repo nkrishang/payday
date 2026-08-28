@@ -42,10 +42,11 @@ async fn to_response(
         .repo
         .response_metadata_for_account(account, &[row.id])
         .await?;
-    enrich_response(row, transfers, freshness)
+    enrich_response(state, row, transfers, freshness)
 }
 
 fn enrich_response(
+    state: &AppState,
     row: DbInvoice,
     transfers: Vec<gateway_db::DbInvoiceTransfer>,
     freshness: Vec<gateway_db::DbIndexerFreshness>,
@@ -54,7 +55,10 @@ fn enrich_response(
         .expiration_intent
         .strip_prefix("in:")
         .and_then(|v| v.parse().ok());
-    let mut response = PaymentResponse::from_invoice(Invoice::try_from(&row)?, expires_in);
+    let invoice = Invoice::try_from(&row)?;
+    let mut response = PaymentResponse::from_invoice(invoice.clone(), expires_in);
+    response.payment_url = state.payer.payment_url(&invoice)?;
+    response.address_explorer_url = state.payer.address_url(&response.address);
     response.memo = row.memo.clone();
     response.reference = row.reference.clone();
     response.metadata = row.metadata.0.clone();
@@ -70,6 +74,10 @@ fn enrich_response(
         .transpose()
         .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
         .map(|value| value.to_string());
+    response.settlement_explorer_url = response
+        .settlement_tx_hash
+        .as_deref()
+        .and_then(|hash| state.payer.transaction_url(hash));
     response.transfers = transfers
         .into_iter()
         .filter(|t| t.invoice_id == row.id)
@@ -88,6 +96,7 @@ fn enrich_response(
                 amount_base_units: t.amount,
                 sender: sender.to_checksum(None),
                 transaction_hash: hash.to_string(),
+                explorer_url: state.payer.transaction_url(&hash.to_string()),
                 block: t.block_number.to_string(),
                 disposition: if t.disposition == "error" {
                     "zero".into()

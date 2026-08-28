@@ -21,6 +21,13 @@ also returned in integer base units. The current fee is explicitly zero, so
 cannot disable the deposit address or prevent detection and collection of
 on-chain transfers.
 
+Every payment includes a signed `payment_url` that can be shared directly with
+the payer. Its checkout page shows the remaining amount, a copyable one-time
+address, an EIP-681 wallet request and QR code, a server-clock countdown, and
+live finalized status. Treat the full URL as sensitive: its token grants read
+access to that payment until 30 days after expiry. Address, settlement, and
+transfer explorer URLs are included when the configured chain has an explorer.
+
 `GET /v1/payments` accepts `status`, `reference`, `starting_after`, and `limit`.
 `GET /v1/payments/{id}/transfers` returns finalized transfer provenance.
 `GET /v1/payments/{id}?wait_for=change&timeout=30` waits until the payment

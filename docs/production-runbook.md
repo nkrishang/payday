@@ -39,21 +39,24 @@ third-party key-management account is required.
 
 - `https://api.payday.sh` is the public API behind AWS WAF and the Application
   Load Balancer. The CLI uses this as `PAYDAY_API_URL`.
+- `https://pay.payday.sh` serves scoped payer checkout links through the same
+  load balancer.
 - The indexer/sweeper and PostgreSQL database have no public hostname or inbound
   internet access.
 - `payday.sh` and `www.payday.sh` remain available for a Vercel-hosted website or
   documentation. They are not required to run the payment service.
 
-Create a **public hosted zone named `api.payday.sh`** in Route53. AWS assigns
-four authoritative nameservers. In Vercel's DNS settings for `payday.sh`, add
-four separate `NS` records with name `api`, one for each AWS nameserver. Do not
-change the nameservers for the whole `payday.sh` domain. Use the Route53 hosted
-zone ID as `route53_zone_id`; Terraform then creates the API alias and ACM
-certificate-validation records inside that delegated zone.
+Create two **public hosted zones**, `api.payday.sh` and `pay.payday.sh`, in
+Route53. AWS assigns four authoritative nameservers to each. In Vercel's DNS
+settings for `payday.sh`, add each zone's four separate `NS` records: name
+`api` for the API zone and name `pay` for the payment zone. Do not change the
+nameservers for the whole `payday.sh` domain. Set `route53_zone_id` to the API
+zone ID and `payment_route53_zone_id` to the payment zone ID; Terraform creates
+each alias and ACM validation record in the zone that owns its hostname.
 
-Wait until `dig NS api.payday.sh` returns the four AWS nameservers before the
-full Terraform apply, because ACM cannot validate the certificate until the
-delegation is publicly visible.
+Wait until `dig NS api.payday.sh` and `dig NS pay.payday.sh` return their
+respective AWS nameservers before the full Terraform apply, because ACM cannot
+validate the certificate until both delegations are publicly visible.
 
 ## Fixed Monad values
 

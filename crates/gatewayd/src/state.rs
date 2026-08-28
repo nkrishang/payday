@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::api::Auth0Verifier;
+use crate::api::{Auth0Verifier, payer::PayerAccess};
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
 #[derive(Clone)]
@@ -18,6 +18,7 @@ pub struct AppState {
     pub chain_id: ChainId,
     pub factory_address: Address,
     pub usdc_address: Address,
+    pub payer: PayerAccess,
     pub webhooks: WebhookRepository,
     /// 256-bit AEAD key. Webhook APIs remain unavailable when not configured.
     pub webhook_encryption_key: Option<[u8; 32]>,
@@ -34,6 +35,7 @@ impl AppState {
         chain_id: ChainId,
         factory_address: Address,
         usdc_address: Address,
+        payer: PayerAccess,
         api_key_prefix: String,
         webhook_encryption_key: Option<[u8; 32]>,
     ) -> Self {
@@ -45,6 +47,7 @@ impl AppState {
             chain_id,
             factory_address,
             usdc_address,
+            payer,
             webhooks,
             webhook_encryption_key,
             api_key_prefix,

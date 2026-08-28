@@ -46,3 +46,4 @@ jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 humantime = "2"
 utoipa = { version = "5", features = ["uuid"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }

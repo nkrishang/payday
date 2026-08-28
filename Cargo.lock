@@ -2501,6 +2501,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "supports-hyperlinks",
  "tar",
  "thiserror",
  "tokio",
@@ -2581,6 +2582,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "jsonwebtoken",
+ "qrcode",
  "rand 0.8.7",
  "rand 0.9.5",
  "reqwest 0.12.28",
@@ -3933,6 +3935,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5146,6 +5154,12 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "supports-hyperlinks"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e396b6523b11ccb83120b115a0b7366de372751aa6edf19844dfb13a6af97e91"
 
 [[package]]
 name = "syn"
