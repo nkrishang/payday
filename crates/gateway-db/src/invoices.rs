@@ -192,6 +192,16 @@ pub struct InvoiceRepository {
     pool: PgPool,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ReleasePaymentError {
+    #[error("payment not found")]
+    NotFound,
+    #[error("payment does not need attention")]
+    NotBlocked,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
 /// Input for creating an invoice in the DB.
 pub struct CreateInvoiceInput {
     pub id: Uuid,
@@ -302,6 +312,35 @@ impl InvoiceRepository {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    pub async fn release_blocked(&self, id: Uuid) -> Result<DbInvoice, ReleasePaymentError> {
+        let row = sqlx::query_as::<_, DbInvoice>(
+            r#"UPDATE invoices SET
+                 blocked_reason=NULL,
+                 status=CASE WHEN status IN ('fulfilled','recovered') THEN status
+                   WHEN expiration_timestamp < extract(epoch FROM now()) THEN 'expired'
+                   ELSE 'deploying' END,
+                 sweep_attempts=0,last_attempt_at=NULL,updated_at=now()
+               WHERE id=$1 AND blocked_reason IS NOT NULL AND sweep_batch_id IS NULL
+               RETURNING *"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return Ok(row);
+        }
+        match sqlx::query_scalar::<_, Option<String>>(
+            "SELECT blocked_reason FROM invoices WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            None => Err(ReleasePaymentError::NotFound),
+            Some(_) => Err(ReleasePaymentError::NotBlocked),
+        }
     }
 
     /// Round-trip a trivial query so `/health` reflects database reachability.
@@ -1081,5 +1120,123 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn attention_transition_notifies_once_and_release_is_guarded(pool: PgPool) {
+        let account = AccountId(Uuid::now_v7());
+        sqlx::query("INSERT INTO accounts(id,api_key_hash,api_key_hint,email) VALUES($1,$2,'hint','merchant@example.com')")
+            .bind(account.0).bind(account.0.as_bytes().repeat(2)).execute(&pool).await.unwrap();
+        let id = Uuid::now_v7();
+        let repo = InvoiceRepository::new(pool.clone());
+        repo.insert(&CreateInvoiceInput {
+            id,
+            account_id: account,
+            idempotency_key: "attention".into(),
+            memo: None,
+            reference: Some("order-42".into()),
+            metadata: serde_json::json!({"source":"checkout"}),
+            chain_id: 1,
+            factory_address: [1; 20],
+            token_address: [2; 20],
+            token_decimals: 6,
+            beneficiary_address: [3; 20],
+            expiration_timestamp: 4_000_000_000,
+            expires_in_secs: 3_600,
+            expiration_intent: "at:4000000000".into(),
+            recovery_address: [4; 20],
+            amount: "1000000".into(),
+            salt: [5; 32],
+            payment_address: [6; 20],
+        })
+        .await
+        .unwrap();
+        sqlx::query("UPDATE invoices SET status='deploying' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(repo.block_invoice(id, "retries_exhausted").await.unwrap());
+        assert!(!repo.block_invoice(id, "retries_exhausted").await.unwrap());
+        let (email_count, webhook_count): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM notification_outbox WHERE invoice_id=$1), (SELECT count(*) FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention')",
+        ).bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!((email_count, webhook_count), (1, 1));
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention'",
+        ).bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            payload["data"]["payment"]["attention"]["reason_code"],
+            "retries_exhausted"
+        );
+        assert!(
+            payload["data"]["payment"]["attention"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Funds remain safe")
+        );
+
+        let released = repo.release_blocked(id).await.unwrap();
+        assert_eq!(released.status, "deploying");
+        assert!(released.blocked_reason.is_none());
+        assert!(matches!(
+            repo.release_blocked(id).await,
+            Err(ReleasePaymentError::NotBlocked)
+        ));
+
+        sqlx::query("DELETE FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention'")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE invoices SET status='fulfilled' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE notification_outbox SET delivered_at=now() WHERE invoice_id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE accounts SET email=NULL WHERE id=$1")
+            .bind(account.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.block_invoice(id, "recovery_blacklisted")
+                .await
+                .unwrap()
+        );
+        let terminal = repo.release_blocked(id).await.unwrap();
+        assert_eq!(terminal.status, "fulfilled");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention'")
+                .bind(id).fetch_one(&pool).await.unwrap(),
+            1
+        );
+        let notifications = crate::NotificationRepository::new(pool.clone());
+        let missing = notifications.claim().await.unwrap().unwrap();
+        assert!(missing.email.is_none());
+        assert!(
+            notifications
+                .report_missing_email(missing.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !notifications
+                .report_missing_email(missing.id)
+                .await
+                .unwrap()
+        );
+        assert!(notifications.claim().await.unwrap().is_none());
+
+        assert!(matches!(
+            repo.release_blocked(Uuid::now_v7()).await,
+            Err(ReleasePaymentError::NotFound)
+        ));
     }
 }

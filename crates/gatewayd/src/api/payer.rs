@@ -162,6 +162,9 @@ fn payer_response(
     let now = unix_now();
     let (remaining, payable) = payment_state(&invoice, now);
     let payment_uri = payable.then(|| payment_uri(&invoice, remaining));
+    let payer_message = invoice.blocked_reason.as_ref().map(|_| {
+        "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second payment.".into()
+    });
     let response = PaymentResponse::from_invoice(invoice, None);
     let settlement_explorer_url = settlement_tx_hash
         .as_deref()
@@ -185,6 +188,7 @@ fn payer_response(
         payment_uri,
         settlement_tx_hash,
         settlement_explorer_url,
+        payer_message,
     }
 }
 

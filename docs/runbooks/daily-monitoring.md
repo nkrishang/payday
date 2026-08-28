@@ -18,6 +18,7 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 |-------|---------|---------|
 | `payday-unhealthy-targets` | API `/health` is failing (the check includes a database round-trip) | [service-restart.md](service-restart.md) |
 | `payday-api-task-count` | API container is not running | [service-restart.md](service-restart.md) |
+| `payday-status-unhealthy-targets` / `payday-status-task-count` | The independently deployed public status page is unavailable | [service-restart.md](service-restart.md) |
 | `payday-indexer-task-count` | Indexer container is not running | [service-restart.md](service-restart.md) |
 | `payday-indexer-fatal` | Block indexer hit a permanent halt (cursor mismatch, etc.) | [indexer-fatal-halt.md](indexer-fatal-halt.md) |
 | `payday-indexer-sweep-paused` | Sweep worker cannot resolve its in-flight helper transaction; indexing continues | [stuck-invoice.md](stuck-invoice.md#sweep-worker-paused) |
@@ -25,6 +26,8 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 | `payday-indexer-cursor-lagging` | Cursor trails finality by more than 1,000 blocks | [stuck-invoice.md](stuck-invoice.md) step 3 |
 | `payday-indexer-sweep-backlog-stale` | Collectable funds have waited more than 15 minutes | [stuck-invoice.md](stuck-invoice.md) step 4 |
 | `payday-indexer-retryable-failures` | More than ten retryable RPC/database failures in five minutes | check the provider status page and indexer logs |
+| `payday-notification-delivery-failures` | Merchant email or webhook delivery repeatedly failed | inspect gatewayd logs and pending rows in `notification_outbox`; delivery retries automatically |
+| `payday-notification-missing-contact` | A blocked legacy invoice has neither an email nor webhook snapshot | recover the account contact, notify the merchant manually, and inspect `notification_outbox` |
 | `payday-db-high-cpu` | RDS CPU > 80% for 15 min | scale the instance |
 | `payday-db-low-storage` | RDS has < 5 GB free storage | raise `db_max_allocated_storage` |
 
@@ -34,7 +37,7 @@ stops reporting the condition.
 ## 2. Check service health
 
 ```bash
-aws ecs describe-services --cluster payday --services api indexer \
+aws ecs describe-services --cluster payday --services api status indexer \
   --region "$AWS_REGION" \
   --query 'services[*].{Service:serviceName,Running:runningCount,Desired:desiredCount,Status:status}' \
   --output table

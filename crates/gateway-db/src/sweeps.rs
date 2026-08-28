@@ -257,20 +257,28 @@ impl InvoiceRepository {
 
     /// Remove an invoice from automation with a reason, outside any batch.
     pub async fn block_invoice(&self, id: Uuid, reason: &str) -> Result<bool, sqlx::Error> {
-        sqlx::query(
+        let mut tx = self.pool().begin().await?;
+        let account: Option<Uuid> = sqlx::query_scalar(
             r#"
             UPDATE invoices
             SET status = CASE WHEN status IN ('deploying', 'expired') THEN 'blocked' ELSE status END,
                 blocked_reason = $2,
                 updated_at = now()
-            WHERE id = $1 AND sweep_batch_id IS NULL
+            WHERE id = $1 AND sweep_batch_id IS NULL AND blocked_reason IS NULL
+            RETURNING account_id
             "#,
         )
         .bind(id)
         .bind(reason)
-        .execute(self.pool())
-        .await
-        .map(|result| result.rows_affected() > 0)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(account) = account {
+            sqlx::query("INSERT INTO notification_outbox(id,account_id,invoice_id,reason,email) SELECT $1,$2,$3,$4,email FROM accounts WHERE id=$2")
+                .bind(Uuid::now_v7()).bind(account).bind(id).bind(reason)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(account.is_some())
     }
 
     /// Open a batch for a signed helper transaction and attach every

@@ -1,6 +1,7 @@
 mod accounts;
 mod cursor;
 mod invoices;
+mod notifications;
 mod sweeps;
 mod webhooks;
 
@@ -11,8 +12,9 @@ pub use accounts::{
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
-    InvoiceRepository, PaymentObservation, RangeOutcome,
+    InvoiceRepository, PaymentObservation, RangeOutcome, ReleasePaymentError,
 };
+pub use notifications::{NotificationEvent, NotificationRepository};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -42,4 +44,13 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     tracing::info!("database migrations applied");
 
     Ok(pool)
+}
+
+/// Build a short-timeout pool without opening a connection. The independently
+/// deployed public status process must start even while RDS is unavailable.
+pub fn connect_lazy(database_url: &str) -> Result<PgPool, sqlx::Error> {
+    PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy(database_url)
 }

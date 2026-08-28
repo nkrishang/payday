@@ -166,6 +166,20 @@ impl GatewayClient {
         parse_response(response).await
     }
 
+    pub async fn release_payment(&self, id: &str) -> Result<PaymentResponse, CliError> {
+        let url = format!("{}/v1/admin/payments/{id}/release", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        parse_response(response).await
+    }
+
     pub async fn account(&self) -> Result<ApiKeyMetadata, CliError> {
         let url = format!("{}/v1/account", self.base_url);
         let response = self

@@ -18,6 +18,8 @@ exports.onExecutePostLogin = async (event, api) => {
   const isPaydayEmailOtp =
     event.client?.client_id === event.secrets.PAYDAY_CLIENT_ID &&
     event.connection?.strategy === "email" &&
+    event.user?.email_verified === true &&
+    typeof event.user?.email === "string" &&
     Number.isFinite(authenticatedAt) &&
     authenticatedAt <= now + 30 &&
     now - authenticatedAt <= MAX_AUTHENTICATION_AGE_SECONDS;
@@ -28,6 +30,7 @@ exports.onExecutePostLogin = async (event, api) => {
   }
 
   api.accessToken.setCustomClaim(`${CLAIM_NAMESPACE}/method`, "email_otp");
+  api.accessToken.setCustomClaim(`${CLAIM_NAMESPACE}/email`, event.user.email);
   api.accessToken.setCustomClaim(
     `${CLAIM_NAMESPACE}/client_id`,
     event.client.client_id,

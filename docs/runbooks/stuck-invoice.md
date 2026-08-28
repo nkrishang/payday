@@ -128,22 +128,32 @@ The worker stopped trying. `blocked_reason` is one of:
 | `parameters_mismatch` | The row no longer derives its own payment address | Database corruption or tampering; do not touch the funds until understood |
 | `corrupt_row` | The row failed to decode | As above |
 
-Once the cause is resolved, release the invoice back to the queue. This is
-the only manual state change the worker expects:
+Once the cause is resolved, release the invoice through the audited operator
+API. The operator credential is distinct from merchant API keys; retrieve it
+from Secrets Manager into an environment variable without printing it:
 
-```sql
-UPDATE invoices
-SET blocked_reason = NULL,
-    status = CASE WHEN expiration_timestamp < extract(epoch FROM now()) THEN 'expired' ELSE 'deploying' END,
-    updated_at = now()
-WHERE id = '<PAYMENT_UUID_WITHOUT_PAY_PREFIX>'::uuid AND status = 'blocked';
+```bash
+export PAYDAY_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
+  --secret-id payday/admin-bearer --query SecretString --output text)"
+payday ops release <PAYMENT_ID>
+unset PAYDAY_ADMIN_SECRET
 ```
 
 A terminal (`fulfilled`/`recovered`) invoice can also carry a `blocked_reason`
 when a *late* transfer could not be forwarded to the recovery address; clear
 only the reason in that case.
 
-Run SQL through the procedure in [db-access.md](db-access.md).
+The API atomically rejects unknown or already-released invoices, uses database
+time to choose `expired` or `deploying`, and only clears the reason on terminal
+late-transfer blocks. Do not use direct SQL for normal recovery.
+
+The payment page tells payers that payout is paused and their funds remain
+safe, and asks them not to send a second payment.
+
+Configure merchant webhooks with `POST /v1/webhooks`; see
+[`webhooks.md`](../webhooks.md) for signing and retry semantics. Gatewayd
+snapshots verified email into a separate outbox and sends through SES. Set
+`PAYDAY_NOTIFICATION_FROM_ADDRESS`; AWS credentials require `ses:SendEmail`.
 
 ## Sweep worker paused
 

@@ -260,6 +260,10 @@ pub async fn create_payment(
         }
     }
 
+    if !state.accounts.has_verified_email(account).await? {
+        return Err(ApiError::account_contact_required());
+    }
+
     // 6. Create the domain invoice (generates ID, salt, payment address).
     let invoice = Invoice::new(
         FactoryAddress(state.factory_address),

@@ -19,7 +19,7 @@ use uuid::Uuid;
 use account::{AccountClient, ApiKeyMetadata};
 use cli::{
     Cli, Command, CreateArgs, DocsTopic, GetArgs, KeyActionArgs, KeysCommand, LoginArgs,
-    RevokeArgs, WebhooksCommand,
+    OpsCommand, RevokeArgs, WebhooksCommand,
 };
 use client::GatewayClient;
 use error::CliError;
@@ -67,6 +67,7 @@ async fn main() {
         Command::Whoami => run_whoami(&cli).await.map(account_output),
         Command::Keys(command) => run_keys(&cli, command).await.map(account_output),
         Command::Webhooks(command) => run_webhooks(&cli, command).await,
+        Command::Ops(command) => run_ops(&cli, command).await,
         Command::Completions { shell } => completions(shell).map(account_output),
         Command::Docs { topic } => Ok(account_output(docs(topic).into())),
         Command::Upgrade => upgrade().await.map(account_output),
@@ -88,6 +89,26 @@ async fn main() {
             std::process::exit(err.exit_code());
         }
     }
+}
+
+async fn run_ops(cli: &Cli, command: OpsCommand) -> Result<Output, CliError> {
+    let secret = cli.admin_secret.as_deref().ok_or_else(|| {
+        CliError::InvalidInput("operator credential is required; set PAYDAY_ADMIN_SECRET".into())
+    })?;
+    let client = GatewayClient::new(&cli.api_url, secret)?;
+    let payment = match command {
+        OpsCommand::Release { payment } => client.release_payment(&payment).await?,
+    };
+    let presentation = Presentation::new(cli.color, cli.plain, cli.verbose);
+    Ok(Output {
+        body: if cli.json {
+            json(&payment)?
+        } else {
+            presentation.payment(&payment, false)
+        },
+        signed_in: None,
+        next: None,
+    })
 }
 
 async fn run_webhooks(cli: &Cli, command: WebhooksCommand) -> Result<Output, CliError> {
@@ -436,6 +457,7 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
         | Command::Whoami
         | Command::Keys(_)
         | Command::Webhooks(_)
+        | Command::Ops(_)
         | Command::Completions { .. }
         | Command::Docs { .. }
         | Command::Upgrade => unreachable!(),
@@ -876,6 +898,7 @@ mod tests {
             auth0_issuer: None,
             auth0_client_id: None,
             auth0_audience: None,
+            admin_secret: None,
             json: false,
             verbose: false,
             plain: false,

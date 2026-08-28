@@ -21,6 +21,7 @@ alloy-signer-local = "1"
 alloy-transport = "1"
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-sesv2 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }

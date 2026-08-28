@@ -1,3 +1,5 @@
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +30,7 @@ pub struct Identity {
     pub issuer: String,
     pub subject: String,
     pub authentication_event_id: String,
+    pub email: String,
 }
 
 #[derive(Clone)]
@@ -64,6 +67,8 @@ struct Claims {
     authenticated_at: u64,
     #[serde(rename = "https://api.payday.sh/auth/event_id")]
     authentication_event_id: String,
+    #[serde(rename = "https://api.payday.sh/auth/email")]
+    email: String,
 }
 
 impl Auth0Verifier {
@@ -143,6 +148,7 @@ impl Auth0Verifier {
             || !claims.sub.starts_with("email|")
             || claims.authentication_event_id.is_empty()
             || claims.authentication_event_id.len() > 255
+            || !valid_email(&claims.email)
             || claims.authenticated_at > now + CLOCK_SKEW.as_secs()
             || now.saturating_sub(claims.authenticated_at) > AUTHENTICATION_MAX_AGE.as_secs()
         {
@@ -152,6 +158,7 @@ impl Auth0Verifier {
             issuer: claims.iss,
             subject: claims.sub,
             authentication_event_id: claims.authentication_event_id,
+            email: claims.email,
         })
     }
 
@@ -214,6 +221,17 @@ impl Auth0Verifier {
             }),
         }
     }
+}
+
+fn valid_email(value: &str) -> bool {
+    value.len() <= 254
+        && !value.chars().any(char::is_whitespace)
+        && value.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        })
 }
 
 fn refresh_is_due(cached: &CachedKeys, kid: &str) -> bool {
@@ -329,6 +347,24 @@ pub async fn require_identity(
     Ok(next.run(request).await)
 }
 
+pub async fn require_admin(mut request: Request, next: Next) -> Result<Response, ApiError> {
+    let supplied = bearer_from_request(&request).ok_or_else(ApiError::admin_unauthorized)?;
+    let expected =
+        std::env::var("PAYDAY_ADMIN_BEARER_SECRET").map_err(|_| ApiError::admin_unauthorized())?;
+    let mut expected_mac =
+        Hmac::<Sha256>::new_from_slice(b"Payday admin credential comparison").unwrap();
+    expected_mac.update(expected.as_bytes());
+    let expected_tag = expected_mac.finalize().into_bytes();
+    let mut supplied_mac =
+        Hmac::<Sha256>::new_from_slice(b"Payday admin credential comparison").unwrap();
+    supplied_mac.update(supplied.as_bytes());
+    if expected.len() < 32 || supplied_mac.verify_slice(&expected_tag).is_err() {
+        return Err(ApiError::admin_unauthorized());
+    }
+    request.extensions_mut().insert(());
+    Ok(next.run(request).await)
+}
+
 fn bearer_from_request(request: &Request) -> Option<&str> {
     request
         .headers()
@@ -372,6 +408,8 @@ mod tests {
         authenticated_at: u64,
         #[serde(rename = "https://api.payday.sh/auth/event_id")]
         authentication_event_id: &'a str,
+        #[serde(rename = "https://api.payday.sh/auth/email")]
+        email: &'a str,
     }
 
     #[test]
@@ -468,6 +506,7 @@ mod tests {
                     .unwrap()
                     .as_secs(),
                 authentication_event_id: "authentication-event",
+                email: "merchant@example.com",
             },
             key,
         )
@@ -580,6 +619,7 @@ mod tests {
                     authentication_client_id: client_id,
                     authenticated_at,
                     authentication_event_id: event_id,
+                    email: "merchant@example.com",
                 },
                 &key,
             )

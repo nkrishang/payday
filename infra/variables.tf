@@ -46,6 +46,22 @@ variable "explorer_base_url" {
   }
 }
 
+variable "status_domain_name" {
+  description = "Public status page DNS name."
+  type        = string
+  default     = "status.payday.sh"
+}
+
+variable "status_indexer_stale_seconds" {
+  description = "Age at which an unchanged payment cursor makes public status degraded."
+  type        = number
+  default     = 120
+  validation {
+    condition     = var.status_indexer_stale_seconds >= 30 && floor(var.status_indexer_stale_seconds) == var.status_indexer_stale_seconds
+    error_message = "status_indexer_stale_seconds must be an integer of at least 30."
+  }
+}
+
 variable "auth0_issuer" {
   description = "Auth0 tenant issuer URL, including https://."
   type        = string
@@ -247,5 +263,25 @@ variable "alarm_email" {
   validation {
     condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.alarm_email))
     error_message = "alarm_email must be a valid email address."
+  }
+}
+
+variable "notification_from_address" {
+  description = "Sender address used for merchant payout notifications. Its domain must equal notification_domain_name."
+  type        = string
+  default     = "alerts@payday.sh"
+  validation {
+    condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.notification_from_address))
+    error_message = "notification_from_address must be a valid email address."
+  }
+}
+
+variable "notification_domain_name" {
+  description = "SES Easy DKIM domain for merchant notification email."
+  type        = string
+  default     = "payday.sh"
+  validation {
+    condition     = endswith(var.notification_from_address, "@${var.notification_domain_name}")
+    error_message = "notification_from_address must belong to notification_domain_name."
   }
 }

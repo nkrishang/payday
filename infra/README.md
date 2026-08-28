@@ -7,7 +7,11 @@ audience, and Native application client ID. Terraform passes these non-secret
 identifiers to ECS; embedded email OTP and connection setup are documented in
 `docs/authentication.md`.
 
-The same ALB and certificate serve `payment_domain_name`. Gatewayd embeds the
+The same ALB and certificate serve `payment_domain_name` and
+`status_domain_name`. The status hostname routes to an independent ECS service
+and target group whose `/live` check reports process health without requiring
+the database; the public status response checks database-backed state lazily.
+Gatewayd embeds the
 cacheable payment page, signs each scoped payer URL with a generated Secrets
 Manager value, and links Monad addresses and settlement transactions through
 the configured explorer origin.
@@ -45,6 +49,9 @@ terraform apply deploy.tfplan
 
 Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address or USDC start block is defaulted. Retrieve generated values from Secrets Manager rather than Terraform output.
 After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do not deliver until it is confirmed.
+The stack verifies `notification_domain_name` with SES Easy DKIM. Before launch,
+also move the SES account out of the sandbox in this region and verify a test
+message from `notification_from_address` reaches an external recipient.
 
 ## Sandbox deployment
 
@@ -60,13 +67,16 @@ database password/URL in plaintext within encrypted state despite `sensitive`
 markings. Secure state,
 plans, CI logs, and access accordingly; never commit `terraform.tfvars`,
 `backend.hcl`, or plans. ECS injects infrastructure secrets at task startup.
-The API execution role can read only the database, payer-link, and webhook encryption secrets; indexer execution can
-read only database/RPC secrets. The indexer task role can only `kms:GetPublicKey`
-and `kms:Sign` on its key. RDS connections use hostname and certificate
-verification against the checksum-pinned AWS global RDS CA bundle in the image.
-Secrets Manager version rotation is not observed by running ECS tasks. Force a
-new API deployment after rotating the webhook key, and retain prior application
-key material until ciphertext associated with its key ID has been re-encrypted.
+The API execution role can read only the database, payer-link, webhook
+encryption, and generated operator credential secrets; its task role can send
+mail only from the verified SES identity. The status execution role can read
+only the database secret. Indexer execution can read only database/RPC secrets.
+The indexer task role can only `kms:GetPublicKey` and `kms:Sign` on its key. RDS
+connections use hostname and certificate verification against the
+checksum-pinned AWS global RDS CA bundle in the image. Secrets Manager version
+rotation is not observed by running ECS tasks. Force a new API deployment after
+rotating the webhook key, and retain prior application key material until
+ciphertext associated with its key ID has been re-encrypted.
 
 KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization.
 
