@@ -61,10 +61,14 @@ plan's daily sending limit.
    **Passwordless OTP**. Disable grants the CLI does not use, especially
    Password and Client Credentials. Do not create or distribute a client
    secret.
-5. Open **Authentication → Passwordless → Email**. Enable it, select **Code**
-   rather than magic link, retain a short expiry (three minutes is the Auth0
-   default), and enable signups. In its **Applications** tab, enable only
-   `Payday CLI`.
+5. Follow [`auth0/README.md`](../auth0/README.md) to import the existing Email
+   connection and apply the tracked Terraform configuration. The CLI selects
+   Code on each passwordless request; Terraform fixes the code at six digits
+   and the expiry at three minutes, enables signups and brute-force protection,
+   and installs the branded template. This connection does not prohibit another
+   authorized client from requesting a magic link. Auth0 supports HTML only for
+   passwordless templates; it cannot attach a separate plain-text MIME part. In
+   the connection's **Applications** tab, enable only `Payday CLI`.
 6. In `Payday CLI`'s **Connections** tab, enable only passwordless **Email**.
    Disable every database, social, and enterprise connection.
 7. In the Payday API's application access settings, authorize only
@@ -210,6 +214,11 @@ launch, additionally:
 3. Confirm the first access token cannot issue two keys.
 4. Confirm old API keys remain valid during the 24-hour rotation grace period
    and fail immediately after `payday keys revoke`.
-5. Inspect received headers for SPF, DKIM, and DMARC alignment.
-6. Revoke a staging Resend key and confirm login fails closed while already
+5. Deliver real OTPs to Gmail and one other mailbox; inspect the raw received
+   headers and require `spf=pass`, `dkim=pass`, and `dmarc=pass` with the Payday
+   From domain aligned. Also confirm the preheader, mobile layout, code block,
+   expiry copy, ignore copy, and support link render correctly.
+6. Send a message to `support@payday.sh` and confirm it reaches the operator who
+   owns authentication support.
+7. Revoke a staging Resend key and confirm login fails closed while already
    issued Payday API keys continue to work.

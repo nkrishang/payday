@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - run: node --test auth0/actions/payday-email-otp.test.js
+      - run: node --test auth0/actions/*.test.js auth0/email/*.test.js
 
   forge-test:
     runs-on: ubuntu-24.04
@@ -137,6 +137,9 @@ jobs:
       - run: terraform -chdir=infra fmt -check -recursive
       - run: terraform -chdir=infra init -backend=false
       - run: terraform -chdir=infra validate
+      - run: terraform -chdir=auth0 fmt -check -recursive
+      - run: terraform -chdir=auth0 init -backend=false
+      - run: terraform -chdir=auth0 validate
 
   scripts:
     runs-on: ubuntu-24.04
