@@ -1,88 +1,92 @@
-# Payday concepts
+# Payment concepts
 
-## Virtual accounts and counterfactual addresses
+## One payment, one virtual account
 
-Each invoice is a virtual account represented by a unique EVM payment address.
-The address is *counterfactual*: Payday can calculate and return it before a
-contract exists there. The configured USDC can therefore be transferred to the
-address like any other EVM address.
+Every Payday payment receives a unique EVM address. It is *counterfactual*:
+Payday calculates it before deploying the payment contract, so a payer can send
+USDC to it immediately.
 
-The address commits to the token, requested amount, beneficiary, expiration,
-recovery address, and a unique salt. When the payment contract is deployed at
-that address, those terms determine where its USDC goes. Execution is not
-custodial discretion: anyone may trigger it, but cannot change its destinations.
+The address commits to the configured token, amount, payout address, deadline,
+refund address, and a unique salt. Deployment cannot change those terms.
+Anyone may execute the contract, but the caller cannot redirect its funds.
 
-## Finality and received amounts
+Treat the address as single-use. Share the signed `payment_url` or all returned
+payment instructions, and stop presenting the address after it is no longer
+payable. Never recycle it for another order.
 
-Payday credits only transfers that pass the deployment's chain-specific
-finality policy. The current implementation waits for a configured confirmation
-depth and has no provisional or “payment detected” state. A wallet may show a
-transaction before `received` changes.
+## Public lifecycle
 
-`received` is the cumulative finalized USDC credited while the invoice is open.
-Partial finalized transfers accumulate across transactions and blocks. A
-transfer is eligible only if its block timestamp is no later than the invoice's
-expiration timestamp. Settlement and recovery transactions are also considered
-complete only after finalization.
+| Status | Meaning |
+|---|---|
+| `awaiting_payment` | No finalized, on-time USDC has been credited. |
+| `partially_paid` | Some finalized USDC is credited, but less than the requested amount. |
+| `paid` | Finalized credits reached the amount; settlement is queued or pending finality. |
+| `settled` | The complete balance present at on-time execution reached the payout address. |
+| `expired` | The deadline passed before successful settlement; recovery is pending. |
+| `returned` | The complete balance at post-expiry execution reached the refund address. |
+| `needs_attention` | Automatic movement stopped; follow `attention.action` or contact support. |
 
-## Invoice statuses
+`paid` is not yet payout finality. Fulfil an order according to your own risk
+policy; `settled` is the strongest Payday state for completed routing.
 
-- `created` — open and waiting for enough finalized USDC. Finalized partial
-  payments accumulate in `received`.
-- `funded` — finalized credited transfers have reached or exceeded the requested
-  amount; settlement is ready.
-- `deploying` — the payment contract execution has been submitted and its final
-  result is pending.
-- `fulfilled` — execution occurred by the expiration timestamp and sent the
-  address's complete pre-execution USDC balance to the beneficiary.
-- `expired` — chain time has passed the deadline while the invoice remained
-  open. Any balance is awaiting recovery.
-- `recovered` — execution occurred after expiration and sent the address's
-  complete balance to the recovery address.
-- `blocked` — automatic settlement or recovery stopped because it cannot safely
-  complete. `blocked_reason` may provide a reason; contact support rather than
-  reusing the address.
+Cancellation is separate lifecycle metadata. It asks Payday clients to stop
+presenting the payment, but cannot disable an EVM address or alter its immutable
+settlement terms. A transfer sent afterward is still detected and routed.
 
-`execute_tx_hash` identifies the deployment transaction when Payday submitted
-it. `resolved_at_block` is set when an invoice becomes `fulfilled` or
-`recovered`.
+## Finality and freshness
 
-## Payment outcomes
+Payday credits only finalized transfers from the configured Circle-issued
+native USDC contract. A wallet may display a submitted, included, or confirmed
+transaction before `received` changes. There is intentionally no privileged
+“mark paid” endpoint.
 
-The contract uses chain time at execution. The expiration condition is strictly
-after the timestamp: execution at the expiration timestamp is still on time.
+Payment reads expose:
 
-| Situation | Result |
-| --- | --- |
-| Exact payment finalized and execution occurs by expiry | The complete balance goes to the beneficiary. |
-| Several partial payments finalize while open and cumulatively reach the amount | They accumulate; the invoice funds and the complete balance goes to the beneficiary if execution occurs by expiry. |
-| Partial total never reaches the amount before expiry | No underfunded settlement occurs. After expiry, the complete balance goes to recovery. |
-| Overpayment is present when execution occurs by expiry | The requested amount **and all excess USDC** go to the beneficiary. |
-| Execution occurs after chain-time expiry, whether under-, exactly, or overfunded | The complete balance goes to recovery. |
-| Transfer arrives after expiry | It is not credited toward the invoice and is recovered. |
-| Transfer arrives after the payment contract has executed | It goes to recovery when collected; it never goes to the beneficiary or changes a fulfilled/recovered outcome. |
+- `as_of`: the block and timestamp through which the payment projection is
+  committed;
+- `indexer_freshness`: indexed and finalized block positions plus cursor update
+  time;
+- `transfers`: finalized provenance, including sender, transaction, amount,
+  block, disposition, and whether funds were collected.
 
-There can be a delay between a transfer, its finalization, and execution. Pay
-early enough for all three to occur before expiry; a payment that was credited
-before the deadline can still go to recovery if execution occurs after it.
+Use these fields when diagnosing a payment that the payer can already see in a
+wallet. The authenticated `/v1/status` endpoint reports broader chain, indexer,
+and sweep-queue health.
 
-## Beneficiary and recovery
+## Exact, partial, excess, and late funds
 
-The **beneficiary** is the successful-payment destination. It receives every
-unit of configured USDC present when an adequately funded invoice executes on
-time—not merely the requested amount.
+Finalized transfers accumulate across transactions and blocks while a payment
+is open. Chain time—not the payer's device clock or submission time—decides
+whether a transfer and eventual execution are on time.
 
-The **recovery address** is the safety destination for expired balances and
-transfers made after execution. Choose an address you control and can reconcile;
-it is part of the invoice's immutable address derivation.
+| Situation | Routing |
+|---|---|
+| Exact amount reaches the address and execution occurs by the deadline | The complete balance goes to the payout address. |
+| Several partial transfers cumulatively reach the amount | They fund one payment; the complete balance goes to payout if execution remains on time. |
+| Partial total remains short at expiry | The complete balance goes to the refund address after expiry. |
+| More than requested is present at on-time execution | Payout receives the requested amount and all excess; Payday does not automatically refund it. |
+| Execution occurs after the deadline | The complete balance goes to the refund address, even if the requested amount arrived earlier. |
+| USDC arrives after execution | It is collected to the refund address and does not repeat the payout. |
 
-## One-time-address safety
+Execution at the exact expiration timestamp is on time; a later block timestamp
+is expired. Leave room for inclusion, finality, and sweeping rather than paying
+at the boundary.
 
-Treat `payment_address` as single-use and show it only while the invoice is
-`created`. Never recycle it for another order, even if the amount and customer
-are the same. Each new invoice receives a distinct address.
+The refund address is merchant-controlled exception handling, not necessarily
+the payer. Reconcile it and implement your own payer-refund process for partial,
+duplicate, excess, or late payments.
 
-Before paying, verify the chain, the exact native USDC contract, address, amount,
-and deadline from the invoice response. Unsupported tokens are not monitored or
-routed by the USDC payment contract. Sending again after settlement does not
-repeat the payment to the beneficiary; the later transfer is routed to recovery.
+## Safety boundaries
+
+- Only the exact `token.address` on the returned `chain.id` is monitored.
+  Bridged USDC, look-alike tokens, another network's USDC, and native gas do not
+  count and may be unrecoverable.
+- A signed payment link grants scoped read access until 30 days after expiry.
+  Share it with the payer, not publicly.
+- `needs_attention` pauses automatic settlement and recovery, including later
+  transfers, until an operator safely resolves and releases the payment.
+- Amounts have six USDC decimals. Use decimal or integer arithmetic, never
+  binary floating point; exact base-unit fields are provided on the API.
+
+See [Payment safety](payment-safety.md) for payer-facing instructions and the
+[FAQ](faq.md) for operational decisions.

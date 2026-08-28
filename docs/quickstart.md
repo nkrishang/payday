@@ -1,107 +1,100 @@
 # Payday quickstart
 
-Payday creates a new, one-time USDC address for each invoice. Send the requested
-USDC to that address; after the payment is finalized, Payday settles the address
-to your beneficiary.
+Create a one-time USDC payment, share its hosted checkout, and watch finalized
+funds settle to your wallet.
 
-> **Deployment values:** The API URL, Auth0 settings, chain ID, and USDC contract
-> below are placeholders. Get the values for your Payday deployment before
-> continuing. Do not substitute a similarly named or bridged token.
+## 1. Install and sign in
 
-## 1. Build the CLI
-
-The CLI is currently distributed from this source repository, not through a
-package manager. From the repository root, with a Rust toolchain installed:
+On Linux x86-64 or macOS, install the latest checksum-verified release:
 
 ```sh
-cargo build --release -p gateway-cli
+curl --fail --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/nkrishang/payday/main/scripts/install.sh | sh
 ```
 
-The executable is `./target/release/gateway-cli`.
-
-## 2. Configure access
-
-Set the deployment-provided values:
+See [Install the Payday CLI](install.md) for Cargo, Homebrew, Windows, pinned
+versions, and upgrades. Then authenticate with the emailed one-time code:
 
 ```sh
-export GATEWAY_API_URL="https://<PAYDAY-API-HOST>"
-export GATEWAY_AUTH0_ISSUER="https://<AUTH0-TENANT>/"
-export GATEWAY_AUTH0_CLIENT_ID="<AUTH0-NATIVE-APPLICATION-CLIENT-ID>"
-export GATEWAY_AUTH0_AUDIENCE="<AUTH0-API-AUDIENCE>"
+payday login
 ```
 
-The CLI requires HTTPS except when connecting to localhost.
+The CLI saves the API key in a private, API-bound credentials profile. Use
+`payday login --show` only when copying the key into an approved secret manager.
+For CI, set `PAYDAY_API_KEY` instead of running an interactive login.
 
-Create an API key with email OTP authentication:
+## 2. Create a payment
 
 ```sh
-./target/release/gateway-cli account create
+payday create \
+  --amount 25.00 \
+  --to 0x1111111111111111111111111111111111111111 \
+  --refund-to 0x2222222222222222222222222222222222222222 \
+  --expires-in 1h \
+  --memo 'Order 1042'
 ```
 
-Enter your email address, then the one-time code sent to it. The API key is
-shown only when it is issued, so store it securely and export it:
+- `--to` is the wallet that receives an on-time successful payment.
+- `--refund-to` receives expired, late, or post-settlement USDC. It defaults to
+  `--to` and is not an automatic refund to the payer.
+- Expiry defaults to 24 hours. Use a duration such as `30m`, `24h`, or `7d`, or
+  an RFC 3339 `--expires-at` value. The allowed window is 10 minutes to 366 days.
+- The deployment chooses the chain and exact Circle-issued native USDC contract.
+  Hidden chain/token overrides are intended for controlled deployments only.
+
+The result includes a `pay_…` ID, one-time address, amount, deadline, current
+status, and a signed `payment_url`. Add `--json` for the full API object.
+
+For scripted retries, supply a stable key and reuse it only with the same
+parameters:
 
 ```sh
-export GATEWAY_API_KEY="<NEW-API-KEY>"
+payday --json create \
+  --amount 25 --to 0x1111111111111111111111111111111111111111 \
+  --idempotency-key order-1042
 ```
 
-Running `account create` again replaces and immediately invalidates the current
-key after confirmation.
+Without `--idempotency-key`, each invocation generates a new UUIDv7 and can
+create a new payment.
 
-## 3. Create an invoice
+## 3. Share and track
 
-Choose an expiration at least 10 minutes and at most 366 days in the future.
-Timestamps are Unix **seconds**. Amounts are human-readable USDC with up to six
-decimal places.
+Send the returned `payment_url` to the payer. The hosted checkout displays the
+remaining amount, network, exact token, one-time address, QR code, wallet
+request, deadline, and live finalized status. Treat the full URL as sensitive:
+its signed token grants read access to that payment until 30 days after expiry.
+
+Track settlement in another terminal:
 
 ```sh
-export PAYDAY_CHAIN_ID="<DEPLOYMENT-CHAIN-ID>"
-export PAYDAY_USDC_ADDRESS="<DEPLOYMENT-NATIVE-USDC-CONTRACT>"
-export BENEFICIARY_ADDRESS="<EVM-ADDRESS-THAT-RECEIVES-SUCCESSFUL-PAYMENTS>"
-export RECOVERY_ADDRESS="<EVM-ADDRESS-THAT-RECEIVES-LATE-OR-EXPIRED-FUNDS>"
-export EXPIRATION_TIMESTAMP="$(($(date +%s) + 3600))"
-
-./target/release/gateway-cli invoice create \
-  --chain-id "$PAYDAY_CHAIN_ID" \
-  --token "$PAYDAY_USDC_ADDRESS" \
-  --beneficiary "$BENEFICIARY_ADDRESS" \
-  --amount "25.00" \
-  --expiration-timestamp "$EXPIRATION_TIMESTAMP" \
-  --recovery "$RECOVERY_ADDRESS" \
-  --idempotency-key "checkout-<YOUR-UNIQUE-ORDER-ID>"
+payday get <PAYMENT-ID> --watch
 ```
 
-Reuse an idempotency key only to retry the same request. Omitting the option
-makes the CLI generate a new UUID for that invocation.
+A normal payment moves through `awaiting_payment` → `paid` → `settled`.
+`partially_paid` appears when finalized transfers are still short. Payday does
+not credit wallet-submitted or merely included transactions; reads report the
+indexer's `as_of` block and freshness.
 
-The response includes the invoice `id`, `status`, `payment address`, requested
-amount, and token details. Save the `id` and use the returned payment address
-only for this invoice.
-
-## 4. Pay and observe settlement
-
-From a wallet on the configured chain, make an ERC-20 transfer of **only the
-native USDC contract shown in the invoice's `token` field** to `payment_address`.
-Do not send the chain's native gas currency, another stablecoin, bridged USDC,
-or USDC on another network.
-
-Fetch the invoice by its UUID:
+List recent payments or continue a page:
 
 ```sh
-./target/release/gateway-cli invoice get <INVOICE-ID>
+payday list --status partially_paid --limit 20
+payday list --limit 20 --starting-after <NEXT-CURSOR>
 ```
 
-For machine-readable output:
+Read [Payment concepts](concepts.md) before production integration, then use
+the [CLI reference](cli-reference.md), [HTTP API reference](api-reference.md),
+and [webhook guide](webhooks.md).
+
+## Try the sandbox
+
+`--sandbox` selects `https://api.sandbox.payday.sh` and sandbox credentials:
 
 ```sh
-./target/release/gateway-cli --json invoice get <INVOICE-ID>
+payday --sandbox login
+payday --sandbox create \
+  --amount 1 --to 0x1111111111111111111111111111111111111111
 ```
 
-A normal first payment progresses through `created` → `funded` → `deploying` →
-`fulfilled`. Only finalized transfers appear in `received`; detection is not
-instant. `fulfilled` means the complete balance present at execution was sent
-to the beneficiary. Stop presenting the payment address after the invoice
-leaves `created`.
-
-See [Concepts](concepts.md) for finality, partial and excess payments, expiry,
-recovery, and every invoice status.
+Sandbox is an isolated Monad testnet deployment using test USDC; it never marks
+a payment paid without a finalized on-chain transfer. See [Sandbox](sandbox.md).

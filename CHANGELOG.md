@@ -19,9 +19,12 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
-- Authenticated creation and account-scoped lookup of single-use USDC invoices,
-  with idempotent creation keys and deterministic counterfactual payment
-  addresses.
+- Authenticated creation, listing, filtering, pagination, cancellation, and
+  account-scoped lookup of single-use USDC payments by ID, prefix, or address.
+- Merchant references and metadata, finalized transfer provenance, indexer
+  freshness, explorer links, long polling, and signed hosted payer checkouts.
+- Signed lifecycle webhooks with test events, delivery/attempt visibility,
+  SSRF-resistant endpoints, and durable retries.
 - Support for one configured EVM chain and its exact Circle native-USDC proxy
   per deployment, using six-decimal amounts and bounded invoice expirations.
 - Finality-gated ERC-20 transfer indexing with cumulative partial payments,
@@ -29,21 +32,30 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - Batched on-chain sweeping to beneficiaries before expiry and recovery
   addresses after expiry, including collection of transfers sent after
   settlement.
-- Invoice lifecycle reporting for created, funded, deploying, fulfilled,
-  expired, recovered, and blocked states, with credited amounts and settlement
-  transaction details.
-- A CLI for email-OTP account provisioning, immediate single-key replacement,
-  invoice creation, invoice lookup, and JSON output.
+- Customer lifecycle reporting for awaiting, partial, paid, settled, expired,
+  returned, and attention states, with payout-support guidance.
+- A `payday` CLI with email-OTP login, private endpoint-bound credentials,
+  payment tracking/watch mode, key rotation/revocation, webhook management,
+  JSON output, completions, built-in guides, and verified upgrades.
+- OpenAPI 3.1 and interactive API references, a zero-runtime-dependency
+  TypeScript client, checksum-verified release archives, install script,
+  generated Homebrew formula, and isolated Monad testnet sandbox support.
+- Public and authenticated service-status views with request IDs and
+  per-account API rate limits.
 
 ### Security
 
-- API keys are returned once and stored as SHA-256 digests; invoice access is
-  isolated by account.
+- API keys are returned once and stored as SHA-256 digests; payment access is
+  isolated by account. Rotation has a 24-hour deployment grace period and
+  revocation immediately invalidates current and previous keys.
 - Production signing supports AWS KMS, while local development supports an
   explicit signer key.
 
 ### Known limitations
 
-- This is an initial pre-release. The API has no invoice list, webhook, or
-  refund endpoint.
+- This is an initial pre-release; compatibility is not yet guaranteed.
+- Payday does not initiate payer refunds. Cancellation is advisory and the
+  merchant controls the payment's refund address.
+- Accounts have one unscoped, unnamed key generation and no team/organization
+  membership or source-IP restrictions.
 - Each deployment supports one configured chain and one native-USDC contract.

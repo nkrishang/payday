@@ -107,15 +107,19 @@ impl GatewayClient {
         parse_response(resp).await
     }
 
-    /// Hold the request until the payment changes or the server's 30-second
-    /// long-poll window elapses. This keeps `--watch` responsive without a
-    /// client-side two-second polling loop.
-    pub async fn wait_for_payment_change(&self, id: &str) -> Result<PaymentResponse, CliError> {
+    /// Hold the request until the payment changes or the requested long-poll
+    /// window elapses. This keeps `--watch` responsive without blind polling.
+    pub async fn wait_for_payment_change(
+        &self,
+        id: &str,
+        timeout: u64,
+    ) -> Result<PaymentResponse, CliError> {
         let url = format!("{}/v1/payments/{id}", self.base_url);
+        let timeout = timeout.to_string();
         let resp = self
             .http
             .get(&url)
-            .query(&[("wait_for", "change"), ("timeout", "30")])
+            .query(&[("wait_for", "change"), ("timeout", timeout.as_str())])
             .send()
             .await
             .map_err(|source| CliError::Transport {
@@ -407,6 +411,7 @@ mod tests {
         let (base_url, requests) = capture_server(vec![
             unauthorized.clone(),
             unauthorized.clone(),
+            unauthorized.clone(),
             unauthorized,
         ])
         .await;
@@ -431,6 +436,7 @@ mod tests {
                 .is_err()
         );
         assert!(client.get_payment("pay_test").await.is_err());
+        assert!(client.wait_for_payment_change("pay_test", 7).await.is_err());
         assert!(
             client
                 .list_payments(None, 7, Some("pay_0198f80c-8d2f-7dc1-a369-90556a64f700"),)
@@ -441,12 +447,16 @@ mod tests {
         let requests = requests.await.unwrap();
         assert!(requests[0].starts_with("POST /v1/payments HTTP/1.1"));
         assert!(requests[1].starts_with("GET /v1/payments/pay_test HTTP/1.1"));
-        assert!(requests[2].starts_with(
+        assert!(
+            requests[2].starts_with("GET /v1/payments/pay_test?wait_for=change&timeout=7 HTTP/1.1")
+        );
+        assert!(requests[3].starts_with(
             "GET /v1/payments?limit=7&starting_after=pay_0198f80c-8d2f-7dc1-a369-90556a64f700 HTTP/1.1"
         ));
         assert_bearer_header(&requests[0]);
         assert_bearer_header(&requests[1]);
         assert_bearer_header(&requests[2]);
+        assert_bearer_header(&requests[3]);
     }
 
     #[tokio::test]

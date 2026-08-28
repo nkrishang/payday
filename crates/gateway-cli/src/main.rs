@@ -541,7 +541,9 @@ async fn watch(
             first = false;
             get(client, &args.reference).await?
         } else {
-            client.wait_for_payment_change(&args.reference).await?
+            client
+                .wait_for_payment_change(&args.reference, args.interval)
+                .await?
         };
         let frame = output.payment(&payment, false);
         if interactive {

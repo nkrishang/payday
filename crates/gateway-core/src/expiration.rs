@@ -35,6 +35,20 @@ pub fn resolve_expiration(
     expiration_timestamp: Option<&str>,
     now: u64,
 ) -> Result<ResolvedExpiration, ExpirationError> {
+    let expiration = parse_expiration(expires_in, expires_at, expiration_timestamp, now)?;
+    validate_expiration_window(&expiration, now)?;
+    Ok(expiration)
+}
+
+/// Parse and canonicalize expiration intent without applying the moving
+/// creation window. Servers use this to identify an idempotent replay before
+/// deciding whether the request would create a new payment.
+pub fn parse_expiration(
+    expires_in: Option<&str>,
+    expires_at: Option<&str>,
+    expiration_timestamp: Option<&str>,
+    now: u64,
+) -> Result<ResolvedExpiration, ExpirationError> {
     if [
         expires_in.is_some(),
         expires_at.is_some(),
@@ -75,12 +89,19 @@ pub fn resolve_expiration(
         )
     };
 
-    if timestamp < now.saturating_add(MIN_EXPIRATION_LEAD_SECS) {
+    Ok(ResolvedExpiration { timestamp, intent })
+}
+
+pub fn validate_expiration_window(
+    expiration: &ResolvedExpiration,
+    now: u64,
+) -> Result<(), ExpirationError> {
+    if expiration.timestamp < now.saturating_add(MIN_EXPIRATION_LEAD_SECS) {
         Err(ExpirationError::TooSoon)
-    } else if timestamp > now.saturating_add(MAX_EXPIRATION_LEAD_SECS) {
+    } else if expiration.timestamp > now.saturating_add(MAX_EXPIRATION_LEAD_SECS) {
         Err(ExpirationError::TooFar)
     } else {
-        Ok(ResolvedExpiration { timestamp, intent })
+        Ok(())
     }
 }
 
@@ -109,6 +130,12 @@ mod tests {
         );
         assert!(matches!(
             resolve_expiration(Some("1m"), None, None, now),
+            Err(ExpirationError::TooSoon)
+        ));
+        let parsed = parse_expiration(Some("1m"), None, None, now).unwrap();
+        assert_eq!(parsed.intent, "in:60");
+        assert!(matches!(
+            validate_expiration_window(&parsed, now),
             Err(ExpirationError::TooSoon)
         ));
         assert_eq!(

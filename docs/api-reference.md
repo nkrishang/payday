@@ -1,168 +1,205 @@
 # HTTP API reference
 
-Append the paths below to your deployment's HTTPS base URL. JSON request bodies must use `Content-Type: application/json`. Invoice routes have a 64 KiB request-body limit; account routes have a 16 KiB limit. The health route is plain text and unauthenticated.
+Production base URL: `https://api.payday.sh`. Sandbox uses
+`https://api.sandbox.payday.sh`. The live OpenAPI 3.1 document is available at
+`/openapi.json` and the interactive Scalar reference at `/docs` (also `/api`
+and `/api/openapi.json`). The TypeScript client is documented in
+[`sdk/typescript`](../sdk/typescript/README.md).
 
-## Authentication
+## Conventions
 
-There are two distinct bearer credential types:
+Authenticated customer routes require:
 
-* **Invoice API:** `POST /v1/invoices` and `GET /v1/invoices/{id}` require `Authorization: Bearer <API_KEY>`. Obtain the API key through the account flow. Missing, malformed, revoked, or unknown keys return `401 unauthorized`.
-* **Account management:** both `/v1/account/api-key` operations require `Authorization: Bearer <IDENTITY_ACCESS_TOKEN>`, a fresh Auth0 access token produced by the supported email-OTP sign-in flow. It is an identity proof used to issue or inspect API keys; it is not an invoice API key. Invalid identity tokens return `401 identity_unauthorized`, and identity verification being unavailable returns `503 identity_unavailable`.
+```http
+Authorization: Bearer payday_live_...
+Content-Type: application/json
+```
 
-Bearer scheme matching is case-insensitive, and the header must contain exactly one scheme and one credential. A `401` response includes `WWW-Authenticate: Bearer`.
+Sandbox keys use `payday_test_…`. Account-key issuance routes instead require a
+fresh Auth0 email-OTP access token. A credential grants full read/write access
+to its account; keys are not currently scoped.
 
-## Wire conventions
+Every response includes `X-Request-Id`. A printable caller value up to 128 bytes
+is echoed; otherwise Payday generates a UUIDv7. JSON errors include the same
+value:
 
-Invoice integer values that may exceed common JSON number precision are decimal **strings**, including `chain_id`, `expiration_timestamp`, `amount_base_units`, `received_base_units`, `salt`, and non-null `resolved_at_block`. `amount` and `received` are human-readable decimal strings. Account `generation` values are JSON integers. Account timestamps (`created_at` and `rotated_at`) are RFC 3339 strings; invoice expiration is Unix seconds encoded as a string.
+```json
+{"error":{"code":"invalid_request","message":"…"},"request_id":"…"}
+```
 
-EVM addresses are returned in checksummed `0x` form. Optional invoice fields and `rotated_at` are present as JSON `null` when unavailable.
+API-key traffic has a process-local per-account token bucket: capacity 60,
+refill one request per second. Responses include `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, and `X-RateLimit-Reset`. A rejected request returns
+`429 rate_limited` and `Retry-After: 1`.
 
-## Routes
+Invoice-sized integers and exact base-unit amounts are decimal strings. Human
+USDC values are decimal strings with six-decimal precision. Timestamps are RFC
+3339 unless explicitly described as Unix seconds.
 
-### `GET /health`
+## Payments
 
-No authentication. This checks service and database reachability.
+### `POST /v1/payments`
 
-| Status | Content type/body |
+Requires `Idempotency-Key` containing 1–255 bytes.
+
+```json
+{
+  "amount": "10.50",
+  "payout_address": "0x1111111111111111111111111111111111111111",
+  "refund_address": "0x2222222222222222222222222222222222222222",
+  "expires_in": 3600,
+  "reference": "order-42",
+  "metadata": {"customer":"cus_123"}
+}
+```
+
+| Field | Rules |
 |---|---|
-| `200 OK` | plain text `ok` |
-| `503 Service Unavailable` | plain text `database unavailable` |
+| `amount` | Required positive USDC decimal; at most six fractional digits |
+| `payout_address` | Required nonzero EVM address |
+| `refund_address` | Optional nonzero EVM address; defaults to payout |
+| `expires_in` | Optional lifetime in seconds |
+| `expires_at` | Optional RFC 3339 deadline; mutually exclusive with `expires_in` |
+| `chain_id`, `token_address` | Optional deployment overrides; otherwise configured chain/native USDC |
+| `reference` | Optional merchant reference, at most 128 characters |
+| `memo` | Compatibility alias for reference, at most 128 characters and 2,000 encoded bytes; if both are present they must match |
+| `metadata` | JSON object, at most 16 keys and 512 encoded bytes per value |
 
-### `POST /v1/invoices`
+Unknown fields are rejected. Expiry defaults to 24 hours and must be 10 minutes
+to 366 days ahead. A first request returns `201`; an identical retry returns the
+original payment with `200` and `Idempotency-Replayed: true`. Reuse with changed
+parameters returns `409 idempotency_conflict`. Relative-expiry retries retain
+the original resolved deadline. Payment creation also requires the account to
+have a verified support email from a recent login.
 
-Requires an API key, JSON, and an `Idempotency-Key` header containing 1–255 bytes.
+### `GET /v1/payments`
 
-```json
-{
-  "chain_id": "8453",
-  "token_address": "0x1111111111111111111111111111111111111111",
-  "beneficiary_address": "0x2222222222222222222222222222222222222222",
-  "amount": "100.5",
-  "expiration_timestamp": "1900000000",
-  "recovery_address": "0x3333333333333333333333333333333333333333"
-}
-```
+Lists newest first. Query parameters:
 
-Validation:
+- `status`: one public status;
+- `reference`: exact merchant reference filter;
+- `limit`: 1–100, default 20;
+- `starting_after`: complete `pay_…` cursor returned as `next_cursor`.
 
-* `chain_id` is an unsigned 64-bit decimal string and must equal the deployment's configured chain.
-* `token_address` must be a valid EVM address and equal the configured Circle-issued USDC contract.
-* `beneficiary_address` and `recovery_address` must be valid, nonzero EVM addresses.
-* `amount` is a positive, unsigned, ordinary decimal string (`digits` or `digits.digits`) with at most six fractional digits. Signs, whitespace, exponents, separators, and zero are rejected.
-* `expiration_timestamp` is an unsigned 64-bit Unix-seconds string. At request processing time it must be at least 600 seconds and at most 31,622,400 seconds (366 days) in the future, inclusively.
+Returns `{ "payments": [PaymentSummary], "next_cursor": null | "pay_…" }`.
+Summaries contain `id`, `memo`, `reference`, `metadata`, `created_at`, `status`,
+`amount`, `received`, and `cancellation_requested_at`.
 
-The first successful use of an idempotency key creates an invoice and returns `201 Created`. Repeating the same key under the same account with semantically identical request parameters returns the original invoice with `200 OK`. Reusing it with different parameters returns `409 idempotency_conflict`. Keys and invoices are scoped to an account, so another account may use the same key independently.
+### `GET /v1/payments/{reference}`
 
-Success returns the [invoice object](#invoice-object). Other documented statuses are `400` (`missing_idempotency_key`, `invalid_request`, or `invalid_amount`), `401 unauthorized`, `409 idempotency_conflict`, `422` (`unsupported_chain` or `unsupported_token`), and server errors listed below.
+`reference` may be a full ID, unambiguous canonical ID prefix, or payment
+address. Cross-account resources are returned as `404 payment_not_found`; an
+ambiguous prefix returns `409 ambiguous_payment_id`.
 
-### `GET /v1/invoices/{id}`
+For long polling, add `wait_for=change&timeout=30`. `wait_for` must be `change`;
+timeout is 1–30 seconds and defaults to 30. The request returns when
+`updated_at` changes or the window elapses.
 
-Requires an API key. `id` must be a UUID. Success is `200 OK` with the [invoice object](#invoice-object). A malformed UUID returns `400 invalid_request`. A missing invoice returns `404 invoice_not_found`.
+### `POST /v1/payments/{reference}/cancel`
 
-Invoice ownership is deliberately concealed: requesting an invoice belonging to another account also returns `404 invoice_not_found`, not that invoice's data.
+Returns `{ "payment": Payment, "advisory": "…" }`. Cancellation is
+presentation-only: it records `cancellation_requested_at` but cannot disable the
+address or change immutable settlement terms.
 
-### Invoice object
+### `GET /v1/payments/{reference}/transfers`
 
-```json
-{
-  "id": "019539a0-7e00-7000-8000-000000000000",
-  "chain_id": "8453",
-  "factory_address": "0x4444444444444444444444444444444444444444",
-  "token": {
-    "address": "0x1111111111111111111111111111111111111111",
-    "kind": "erc20",
-    "decimals": 6
-  },
-  "beneficiary_address": "0x2222222222222222222222222222222222222222",
-  "expiration_timestamp": "1900000000",
-  "recovery_address": "0x3333333333333333333333333333333333333333",
-  "amount": "100.500000",
-  "amount_base_units": "100500000",
-  "salt": "123456789",
-  "payment_address": "0x5555555555555555555555555555555555555555",
-  "status": "created",
-  "received": "0.000000",
-  "received_base_units": "0",
-  "execute_tx_hash": null,
-  "resolved_at_block": null,
-  "blocked_reason": null
-}
-```
+Returns finalized transfer provenance as an array. Each item has `timestamp`,
+`amount`, `amount_base_units`, `sender`, `transaction_hash`, optional
+`explorer_url`, `block`, `disposition`, and `collected`.
 
-`payment_address` is single-use and valid only while `status` is `created`; after settlement, funds sent there are forwarded to `recovery_address`, not the beneficiary. `received` is finalized USDC credited so far. `execute_tx_hash` identifies deployment/execution when sent by this service; `resolved_at_block` is populated when the invoice becomes `fulfilled` or `recovered`; `blocked_reason` explains why automatic sweeping stopped when applicable. Status and blocked-reason strings should be treated as values returned by the service rather than inferred client-side.
+## Payment object
 
-### `POST /v1/account/api-key`
+The full payment response contains:
 
-Requires an Auth0 identity access token and JSON. To create the first key:
+- identity and instructions: `id`, signed `payment_url`, `address`, optional
+  `address_explorer_url`, `chain`, `token`, `currency`, `payout_address`,
+  `refund_address`, and `expires_at`;
+- accounting: `amount`, `received`, `remaining`, `fee_amount`, and `net_amount`,
+  each with a corresponding `_base_units` field; current fees are zero;
+- state: `status`, `paid_at`, `paid_at_block`, `settled_at`, `settled_block`,
+  `expired_at`, `cancellation_requested_at`, `settlement_tx_hash`, optional
+  explorer URL, and optional `attention {code,message,action}`;
+- merchant data: `memo`, `reference`, `metadata`, `created_at`, `updated_at`;
+- audit/freshness: `transfers`, optional `as_of {block,at}`,
+  `indexer_freshness`, and `self_settlement {factory,salt}`.
 
-```json
-{}
-```
+Public status values are `awaiting_payment`, `partially_paid`, `paid`,
+`settled`, `expired`, `returned`, and `needs_attention`. Clients must tolerate
+new fields and should branch only on documented status values.
 
-To replace a known current generation:
+## Account and service status
 
-```json
-{ "expected_generation": 3 }
-```
+- `GET /v1/account` uses an API key and returns account ID, key hint,
+  generation, creation/rotation timestamps, previous-key grace expiry, and
+  revocation timestamp.
+- `GET /v1/status` uses an API key and returns chain finalized position,
+  indexer cursor/lag, and sweeper state/queue. It may return 503 when status
+  data cannot be read.
+- `GET /health` is unauthenticated readiness: plain `ok` on 200 or
+  `database unavailable` on 503.
 
-`expected_generation` may be omitted or `null`; if present it must be a positive JSON integer. Initial issuance returns `201 Created`; replacement returns `200 OK`:
+## Account-key API
 
-```json
-{
-  "api_key": "payday_live_…",
-  "generation": 4,
-  "replaced_previous_key": true
-}
-```
+These routes use a fresh Auth0 identity token, not a Payday API key:
 
-Only one API key is active per account. The plaintext key is shown only in this response and cannot be retrieved later. Replacement immediately invalidates the old key. For safe rotation, first read the current generation, obtain fresh identity authentication, and submit that generation: a stale or omitted generation when a key already exists returns `409 api_key_generation_conflict`. An identity authentication event can issue at most one key; reuse returns `409 authentication_event_already_used`.
+- `GET /v1/account/api-key` — non-secret metadata;
+- `POST /v1/account/api-key` with `{ "expected_generation": null | N }` —
+  first issuance (`201`) or safe rotation (`200`), returning the plaintext key
+  once; the previous key remains valid for 24 hours;
+- `DELETE /v1/account/api-key` with `{ "expected_generation": N }` — revoke
+  current and grace-period keys (`204`).
 
-### `GET /v1/account/api-key`
+Generation checks prevent racing an unexpected rotation. Each signed
+authentication event can mutate key state once.
 
-Requires an Auth0 identity access token. Returns `200 OK` with non-secret metadata:
+## Webhooks
 
-```json
-{
-  "hint": "payday_live_…abcd",
-  "generation": 4,
-  "created_at": "2026-08-27T12:00:00+00:00",
-  "rotated_at": "2026-08-27T12:30:00+00:00"
-}
-```
+- `POST /v1/webhooks` with `{ "url": "https://…" }` → `201`; secret returned once;
+- `GET /v1/webhooks` → active endpoints without secrets;
+- `DELETE /v1/webhooks/{uuid}` → disable endpoint;
+- `POST /v1/webhooks/{uuid}/test` → `202 {"delivery_id":"…"}`;
+- `GET /v1/webhook-deliveries` → delivery state and immutable attempt history.
 
-`rotated_at` is `null` before the first replacement. An identity with no provisioned account returns `404 account_not_provisioned`.
+URLs must be credential-free HTTPS public destinations; redirects and private,
+loopback, link-local, or reserved targets are rejected. See
+[Webhooks](webhooks.md) for signatures, event types, and retry policy.
 
-## Errors
+## Payer links and documentation
 
-Application errors use JSON:
+The signed `payment_url` opens `GET /pay/{id}?token=…`. Its page reads scoped
+payment data from `GET /v1/payer/payments/{id}?token=…` and QR SVG from
+`GET /v1/payer/payments/{id}/qr?token=…`. These routes do not accept account API
+keys; access is restricted by the payment token. JSON responses use
+`Cache-Control: no-store`, and QR requests return `410 payment_not_payable` once
+the address should no longer be presented.
 
-```json
-{
-  "error": {
-    "code": "invalid_request",
-    "message": "human-readable detail"
-  }
-}
-```
+## Stable error codes
 
-Use `error.code` for program logic; messages may include validation detail. Framework-level failures such as an unsupported media type, malformed JSON extraction, oversized body, unmatched route, or unsupported method are not created by this application error type and are not guaranteed to use this envelope.
-
-### Stable error codes
-
-| Code | HTTP status | Meaning |
+| Code | Typical status | Meaning |
 |---|---:|---|
-| `unauthorized` | 401 | A valid bearer API key is required. |
-| `identity_unauthorized` | 401 | A valid Auth0 identity access token is required. |
-| `identity_unavailable` | 503 | Account authentication is temporarily unavailable. |
-| `authentication_event_already_used` | 409 | This identity authentication event already issued a key; authenticate again. |
-| `account_not_provisioned` | 404 | The identity has no account/API key. |
-| `api_key_generation_conflict` | 409 | The expected API-key generation is absent/stale or the key changed concurrently. |
-| `missing_idempotency_key` | 400 | `Idempotency-Key` is missing or not a valid header string. |
-| `invalid_request` | 400 | A request field, invoice ID, idempotency-key length, or expected generation is invalid. |
-| `invalid_amount` | 400 | The amount syntax, precision, range, or positivity is invalid. |
-| `unsupported_chain` | 422 | The configured service does not support the requested chain. |
-| `unsupported_token` | 422 | The token is not the configured Circle-issued USDC contract. |
-| `idempotency_conflict` | 409 | The account already used this idempotency key with different parameters. |
-| `invoice_not_found` | 404 | The invoice does not exist or is owned by another account. |
-| `database_unavailable` | 503 | Persistent storage is unavailable. |
-| `internal_error` | 500 | Stored data or another internal condition could not be processed. |
+| `unauthorized` | 401 | Missing or invalid API key |
+| `identity_unauthorized` | 401 | Invalid Auth0 identity token |
+| `identity_unavailable` | 503 | Identity verification unavailable |
+| `account_disabled` | 403 | Account disabled |
+| `account_not_provisioned` | 404 | Identity has no Payday account |
+| `account_contact_required` | 409 | Login again to attach a verified merchant email |
+| `authentication_event_already_used` | 409 | Identity event already mutated key state |
+| `api_key_generation_conflict` | 409 | Key generation changed or was omitted incorrectly |
+| `missing_idempotency_key` | 400 | Create header absent |
+| `idempotency_conflict` | 409 | Key reused with different payment parameters |
+| `invalid_request` | 400 | Invalid field, query, JSON, or request shape |
+| `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
+| `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
+| `payment_not_found` | 404 | Missing or cross-account payment |
+| `ambiguous_payment_id` | 409 | Prefix matches multiple payments |
+| `invalid_payment_link` | 401 | Payer token invalid, mismatched, or expired |
+| `payment_not_payable` | 410 | QR/payment request is no longer available |
+| `rate_limited` | 429 | Per-account allowance exhausted |
+| `database_unavailable` | 503 | Persistent storage unavailable |
+| `payload_too_large` | 413 | Body exceeds route limit |
+| `not_found`, `method_not_allowed` | 404/405 | Route or method mismatch |
+| `internal_error` | 500 | Internal processing failed |
+
+Payment/webhook API bodies are limited to 64 KiB; account-key bodies to 16 KiB.
+Send `request_id` to `support@payday.sh` when requesting help—never credentials,
+OTP codes, webhook secrets, or unnecessary payment metadata.

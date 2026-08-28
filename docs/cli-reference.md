@@ -1,131 +1,139 @@
 # CLI reference
 
-`gateway-cli` is the command-line client for the payment gateway. Its syntax is:
+The executable is `payday`. Install it using [the distribution guide](install.md).
 
 ```text
-gateway-cli [GLOBAL OPTIONS] <invoice|account> <COMMAND> [OPTIONS]
+payday [GLOBAL OPTIONS] <COMMAND> [OPTIONS]
 ```
 
-## Global options and configuration
+## Connection and credentials
 
-| Option | Environment variable | Default | Purpose |
-|---|---|---|---|
-| `--api-url <URL>` | `GATEWAY_API_URL` | `http://127.0.0.1:3000` | Gateway base URL |
-| `--api-key <KEY>` | `GATEWAY_API_KEY` | none | Bearer API key for invoice commands |
-| `--auth0-issuer <URL>` | `GATEWAY_AUTH0_ISSUER` | none | Identity issuer used by account commands |
-| `--auth0-client-id <ID>` | `GATEWAY_AUTH0_CLIENT_ID` | none | Public Native application client ID used by account commands |
-| `--auth0-audience <AUDIENCE>` | `GATEWAY_AUTH0_AUDIENCE` | none | Identity-token audience used by account commands |
-| `--json` | none | off | Write the successful result as pretty-printed JSON |
-| `-h`, `--help` | none | — | Show help |
-| `-V`, `--version` | none | — | Show the version |
+| Option or variable | Behavior |
+|---|---|
+| default | `https://api.payday.sh` and the `default` saved credential profile |
+| `--sandbox` | `https://api.sandbox.payday.sh`; overridden by an explicit API URL |
+| `--profile production` | Production endpoint defaults |
+| `--profile local` | `http://127.0.0.1:3000`, local identity service, and `local` profile |
+| `--api-url URL` / `PAYDAY_API_URL` | Explicit endpoint; the option wins over the environment |
+| `PAYDAY_API_KEY` | Bearer-key override for scripts; wins over saved credentials |
+| `PAYDAY_CONFIG_DIR` | Override the credentials directory |
 
-An explicit command-line option wins over its environment variable; the environment variable wins over the default. Global options may appear before or after subcommands.
+The production CLI includes its public Auth0 configuration. Custom APIs need
+the deployment's `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_CLIENT_ID`, and
+`PAYDAY_AUTH0_AUDIENCE` for interactive account commands. HTTP is accepted only
+for localhost/loopback; redirects are not followed.
 
-The CLI accepts HTTPS gateway and identity URLs. Plain HTTP is accepted only when the host is `localhost` or a loopback IP address (for example `127.0.0.1` or `::1`). Requests do not follow redirects. Gateway requests time out after 30 seconds; identity/account-flow requests time out after 15 seconds.
+Credentials are stored in an XDG-aware private file, normally
+`~/.config/payday/credentials` (`%APPDATA%\payday\credentials` on Windows).
+Profiles are bound to their issuing API URL so a key cannot silently be sent to
+another host.
 
-Prefer `GATEWAY_API_KEY` to `--api-key`: a command-line secret can be retained in shell history and exposed in process listings. The CLI locally requires an API key of at least 32 visible ASCII characters.
+## Global output options
 
-## Invoice commands
+| Option | Behavior |
+|---|---|
+| `--json` | Machine-readable success output and structured errors |
+| `--verbose` | Additional operational detail and authentication diagnostics |
+| `--plain` | Disable colors, terminal redraws, and styling |
+| `--color auto|always|never` | Color policy; default `auto` |
 
-Invoice commands require an API key and use it as `Authorization: Bearer <KEY>`.
+`NO_COLOR` also disables color. Global options can appear before or after a
+subcommand.
 
-### `invoice create`
+## Payments
+
+### `payday create`
 
 ```text
-gateway-cli invoice create \
-  --chain-id <U64> \
-  --token <ADDRESS> \
-  --beneficiary <ADDRESS> \
-  --amount <DECIMAL> \
-  --expiration-timestamp <U64> \
-  --recovery <ADDRESS> \
-  [--idempotency-key <KEY>]
+payday create --amount AMOUNT --to ADDRESS
+  [--refund-to ADDRESS]
+  [--expires-in DURATION | --expires-at RFC3339]
+  [--memo TEXT]
+  [--idempotency-key KEY]
 ```
 
-All six main options are required. `--chain-id` selects the chain; `--token` is that chain's Circle-issued USDC contract; `--beneficiary` receives successful settlement; `--amount` is a human-readable USDC amount such as `100.5`; `--expiration-timestamp` is Unix seconds; and `--recovery` receives funds if execution occurs after expiration. Numeric options must fit an unsigned 64-bit integer. Token, beneficiary, recovery, and amount cannot be blank.
+Amounts are positive USDC decimals with at most six fractional digits.
+`--refund-to` defaults to `--to`; expiry defaults to 24 hours and must resolve
+between 10 minutes and 366 days ahead. `--memo` is the merchant-facing order
+reference. The deployment supplies chain and native-USDC defaults.
 
-The server applies the additional validation documented in the [API reference](api-reference.md). If `--idempotency-key` is omitted, the CLI generates a new UUIDv7 for that invocation. It always writes `using idempotency key: <KEY>` to stderr. Save or explicitly supply this key when retrying an uncertain request; a new invocation otherwise gets a new key and can create another invoice.
+The CLI validates input locally, generates a UUIDv7 idempotency key when none is
+supplied, and prints human payment instructions or the complete API response
+with `--json`. Pin the key when a script may retry an uncertain request.
 
-```bash
-GATEWAY_API_KEY='payday_live_…' gateway-cli \
-  --api-url https://api.example.com \
-  invoice create \
-  --chain-id 8453 \
-  --token 0x1111111111111111111111111111111111111111 \
-  --beneficiary 0x2222222222222222222222222222222222222222 \
-  --amount 100.5 \
-  --expiration-timestamp "$(($(date +%s) + 3600))" \
-  --recovery 0x3333333333333333333333333333333333333333 \
-  --idempotency-key order-2026-1042
-```
+### `payday get REFERENCE [--watch] [--interval SECONDS]`
 
-### `invoice get`
+`REFERENCE` may be a complete `pay_…` ID, an unambiguous canonical prefix, or
+the payment address. `--watch` waits for changes and exits at `settled`,
+`returned`, or `needs_attention`; terminal output redraws in place and plain or
+redirected output prints only changed frames. `--interval` controls the
+long-poll refresh window and requires `--watch`.
+
+### `payday list`
 
 ```text
-gateway-cli invoice get <ID>
+payday list [--status STATUS] [--limit 1..100]
+  [--starting-after PAY_ID]
 ```
 
-`ID` is an invoice UUID and cannot be blank.
+Returns newest first; default limit is 20. Status is one of
+`awaiting_payment`, `partially_paid`, `paid`, `settled`, `expired`, `returned`,
+or `needs_attention`. Continue with the API's complete `next_cursor`.
 
-```bash
-gateway-cli --api-url https://api.example.com --json \
-  invoice get 019539a0-7e00-7000-8000-000000000000
-```
+### `payday cancel REFERENCE`
 
-Without `--json`, both invoice commands print an aligned summary containing all invoice fields; unavailable optional values print as `-`. The payment address is labelled single-use and valid only while status is `created`. With `--json`, stdout is the exact invoice response object described in the API reference.
+Records an advisory cancellation and tells clients to stop presenting the
+payment. It cannot disable the address or change on-chain payout, refund, or
+expiry terms.
 
-## Account commands
+## Sign-in and keys
 
-Account commands require all three identity settings (`GATEWAY_AUTH0_ISSUER`, `GATEWAY_AUTH0_CLIENT_ID`, and `GATEWAY_AUTH0_AUDIENCE`, or their option equivalents). They do **not** use the gateway API key. Instead, each invocation prompts on stderr for an email, sends a one-time code, prompts for that code, and uses the resulting short-lived Auth0 identity access token only for account/key management.
+- `payday login [--show] [-y|--yes]` — email OTP sign-in and first key issuance.
+  If an account already has a key, confirmation rotates it. The plaintext is
+  masked unless `--show`; the saved profile always receives the full key.
+- `payday logout` — remove only the local profile; server keys remain valid.
+- `payday whoami` — show account ID, key hint, generation, creation/rotation,
+  previous-key expiry, and revocation metadata.
+- `payday keys rotate [--show] [-y|--yes]` — issue and save a replacement after
+  fresh email OTP. The previous key remains valid for 24 hours.
+- `payday keys revoke [-y|--yes]` — immediately revoke current and grace-period
+  keys and remove the local profile.
 
-Prompts are `Email: ` and `One-time code: `. Input is read from stdin, trimmed, and must not be empty. The notice that a code was sent is also written to stderr. These commands are interactive even with `--json`.
+OTP input is hidden on a terminal. Enter `r` instead of a code to resend; three
+wrong six-digit codes end the command. Confirmation defaults to no.
 
-### `account create`
+## Webhooks
 
-```text
-gateway-cli account create [-y|--yes]
-```
+| Command | Result |
+|---|---|
+| `payday webhooks add HTTPS_URL` | Register an endpoint; signing secret shown once |
+| `payday webhooks list` | List active endpoints without secrets |
+| `payday webhooks remove UUID` | Disable an endpoint |
+| `payday webhooks test UUID` | Queue a test delivery |
+| `payday webhooks deliveries` | List deliveries and immutable attempt history |
 
-Creates the account's first API key or replaces its one existing key. If a key exists, the CLI prints its hint and generation to stderr and asks `Proceed? [y/N]: `. Only `y` or `yes` (case-insensitive) confirms; every other answer cancels. `--yes` skips this replacement confirmation, but not email OTP authentication.
+Endpoint URLs must use HTTPS and pass the server's public-destination checks.
+See [Webhooks](webhooks.md) for signature verification and retries.
 
-On cancellation, stdout is `API key replacement cancelled.` (including when `--json` is set). On success, the new key is printed to stdout. JSON has this shape:
+## Utilities
 
-```json
-{
-  "api_key": "payday_live_…",
-  "generation": 2,
-  "replaced_previous_key": true
-}
-```
-
-The plaintext key is returned only when issued and cannot later be retrieved. Store it securely. Replacement invalidates the previous key immediately. The confirmed generation is sent with the replacement so a concurrent rotation fails rather than silently replacing an unexpected key. A fresh authentication event is required for another issuance attempt.
-
-### `account get`
-
-```text
-gateway-cli account get
-```
-
-Authenticates by email OTP and prints non-secret metadata. JSON has this shape:
-
-```json
-{
-  "hint": "payday_live_…abcd",
-  "generation": 2,
-  "created_at": "2026-08-27T12:00:00+00:00",
-  "rotated_at": "2026-08-27T12:30:00+00:00"
-}
-```
-
-`rotated_at` is `null` until replacement. Human output displays it as `never`.
+- `payday completions bash|elvish|fish|powershell|zsh` writes completion code.
+- `payday docs [getting-started|authentication|environment]` prints built-in
+  offline guidance.
+- `payday upgrade` verifies the latest release checksum and replaces the
+  current executable on supported Unix platforms. Windows upgrades use a new
+  release archive.
 
 ## Output and exit status
 
-Successful command results go to stdout with a trailing newline. Prompts, notices, replacement warnings, and the generated/selected invoice idempotency key go to stderr, keeping normal `--json` results parseable. Errors are written to stderr as `error: <message>`.
+Successful results go to stdout. Prompts and progress go to stderr. Interactive
+human output adds headings and next-step hints; redirected output stays clean.
+With `--json`, errors are emitted on stderr as
+`{"error":{"code":"…","message":"…"}}`.
 
-| Exit status | Meaning |
+| Status | Meaning |
 |---:|---|
-| `0` | Success, cancellation, help, or version output |
-| `1` | API error or an unexpected HTTP response |
-| `2` | Invalid/missing CLI argument or other locally rejected input (including clap usage errors) |
+| `0` | Success, help/version output, or a declined confirmation |
+| `1` | API, authentication, or unexpected-response failure |
+| `2` | Invalid input, usage, or configuration |
 | `3` | Network, TLS, timeout, or other transport failure |

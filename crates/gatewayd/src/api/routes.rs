@@ -528,6 +528,33 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn exact_expiry_replays_after_the_creation_window(pool: PgPool) {
+        let app = app(pool).await;
+        let mut body = valid_body();
+        body.as_object_mut().unwrap().remove("expires_in");
+        body["expires_at"] = json!(
+            sqlx::types::chrono::DateTime::from_timestamp((unix_now() + 602) as i64, 0)
+                .unwrap()
+                .to_rfc3339()
+        );
+        let first = app
+            .clone()
+            .oneshot(create_request(KEY, "exact-replay", &body))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first = json_body(first).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let replay = app
+            .oneshot(create_request(KEY, "exact-replay", &body))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(json_body(replay).await["id"], first["id"]);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn payment_freshness_distinguishes_indexed_cursor_from_finalized_head(pool: PgPool) {
         let app = app(pool.clone()).await;
         let created = app
