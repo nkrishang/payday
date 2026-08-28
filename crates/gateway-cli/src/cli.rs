@@ -2,6 +2,12 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Profile {
+    Production,
+    Local,
+}
+
 #[derive(Parser)]
 #[command(
     name = "payday",
@@ -10,8 +16,22 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     after_help = "Examples:\n  payday create --amount 25 --to 0x7099…79c8 --memo 'Order 1234'\n  payday get pay_0191c8e0 --watch\n  payday list --status partially_paid"
 )]
 pub struct Cli {
+    /// Select endpoint defaults; local uses services started by `just dev`.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        conflicts_with = "sandbox",
+        help_heading = "Connection"
+    )]
+    pub profile: Option<Profile>,
     /// Use the Payday sandbox (unless --api-url or PAYDAY_API_URL is set).
-    #[arg(long, global = true, help_heading = "Connection")]
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "profile",
+        help_heading = "Connection"
+    )]
     pub sandbox: bool,
     /// Base URL of the Payday API.
     #[arg(
@@ -51,7 +71,9 @@ pub struct Cli {
 impl Cli {
     pub fn resolve_connection(&mut self) {
         self.api_url = self.api_url_override.take().unwrap_or_else(|| {
-            if self.sandbox {
+            if self.profile == Some(Profile::Local) {
+                "http://127.0.0.1:3000"
+            } else if self.sandbox {
                 "https://api.sandbox.payday.sh"
             } else {
                 "https://api.payday.sh"
@@ -285,6 +307,15 @@ mod tests {
         .unwrap();
         cli.resolve_connection();
         assert_eq!(cli.api_url, "https://example.test");
+    }
+
+    #[test]
+    fn local_profile_selects_the_local_api() {
+        let mut cli =
+            Cli::try_parse_from(["payday", "--profile", "local", "login", "--yes"]).unwrap();
+        cli.resolve_connection();
+        assert_eq!(cli.profile, Some(Profile::Local));
+        assert_eq!(cli.api_url, "http://127.0.0.1:3000");
     }
 
     #[test]

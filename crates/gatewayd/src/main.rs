@@ -35,6 +35,7 @@ async fn main() {
                 auth0.issuer.clone(),
                 auth0.audience.clone(),
                 auth0.client_id.clone(),
+                config.dev_identity(),
             )
             .await
             .expect("failed to initialize Auth0 JWT verification"),

@@ -8,6 +8,7 @@ pub struct Config {
     database_url: String,
     status_only: bool,
     auth0: Option<Auth0Config>,
+    dev_identity: bool,
     chain_id: ChainId,
     factory_address: Address,
     usdc_address: Address,
@@ -23,6 +24,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         let status_only = std::env::var("PAYDAY_STATUS_ONLY").as_deref() == Ok("true");
+        let dev_identity = std::env::var("PAYDAY_DEV_IDENTITY").as_deref() == Ok("1");
         let auth0_issuer = std::env::var("PAYDAY_AUTH0_ISSUER").ok();
         let auth0_audience = std::env::var("PAYDAY_AUTH0_AUDIENCE").ok();
         let auth0_client_id = std::env::var("PAYDAY_AUTH0_CLIENT_ID").ok();
@@ -70,6 +72,7 @@ impl Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             status_only,
             auth0,
+            dev_identity,
             chain_id: ChainId(chain_id),
             factory_address,
             usdc_address,
@@ -110,6 +113,10 @@ impl Config {
 
     pub fn auth0(&self) -> Option<&Auth0Config> {
         self.auth0.as_ref()
+    }
+
+    pub fn dev_identity(&self) -> bool {
+        self.dev_identity
     }
 
     pub fn chain_id(&self) -> ChainId {
