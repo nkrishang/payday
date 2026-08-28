@@ -121,15 +121,17 @@ get_invoice() {
   ./target/debug/payday --json get "$1"
 }
 
-# Poll the API until a jq expression over the invoice is true.
+# Poll at the documented per-account rate until a jq expression is true. A
+# 100ms loop used to be harmless, but now tests the rate limiter instead of the
+# payment transition and can starve the rest of this end-to-end suite.
 wait_for_invoice() {
   local id=$1 expression=$2 description=$3 invoice
-  for _ in {1..600}; do
+  for _ in {1..60}; do
     invoice="$(get_invoice "$id")"
     if jq -e "$expression" <<<"$invoice" >/dev/null; then
       return
     fi
-    sleep 0.1
+    sleep 1
   done
   echo "invoice $id never satisfied '$description'; last state: $(jq -c . <<<"$invoice")" >&2
   return 1
@@ -375,12 +377,13 @@ third_address="$(jq -r .address <<<"$third")"
 third_salt="$(jq -r .self_settlement.salt <<<"$third")"
 third_expiration="$(jq -r '.expires_at | fromdateiso8601' <<<"$third")"
 send_usdc "$third_address" 2000000
-cast send "$FACTORY" \
+third_party_tx="$(cast send "$FACTORY" \
   'execute(address,uint256,address,uint64,address,bytes32)' \
   "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$third_expiration" "$RECOVERY" "$third_salt" \
-  --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
+  --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" --json | jq -r .transactionHash)"
 wait_for_status "$third_id" settled
-assert_eq null "$(get_invoice "$third_id" | jq -r .settlement_tx_hash)" "a third-party execution must not be attributed to the worker"
+assert_eq "$third_party_tx" "$(get_invoice "$third_id" | jq -r .settlement_tx_hash)" \
+  "third-party settlement transaction hash was not reported"
 assert_eq 2000000 "$(token_balance "$BENEFICIARY_THIRD_PARTY")" "third-party settlement balance mismatch"
 
 echo "Testing that a paused token is retried rather than blocked"
