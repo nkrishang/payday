@@ -36,7 +36,7 @@ async fn main() {
 
     let wallet = match config.signer() {
         SignerConfig::Local(key) => {
-            let signer: PrivateKeySigner = key.parse().expect("invalid GATEWAY_SIGNER_KEY");
+            let signer: PrivateKeySigner = key.parse().expect("invalid PAYDAY_SIGNER_KEY");
             tracing::info!(address = %signer.address(), signer = "local", "configured sweep signer");
             EthereumWallet::from(signer)
         }
@@ -45,7 +45,7 @@ async fn main() {
             let kms = aws_sdk_kms::Client::new(&sdk_config);
             let signer = AwsSigner::new(kms, key_id.clone(), Some(config.chain_id().0))
                 .await
-                .expect("failed to initialize GATEWAY_KMS_KEY_ID");
+                .expect("failed to initialize PAYDAY_KMS_KEY_ID");
             tracing::info!(address = %signer.address(), signer = "aws-kms", "configured sweep signer");
             EthereumWallet::from(signer)
         }
@@ -64,7 +64,7 @@ async fn main() {
     assert_eq!(
         node_chain_id,
         config.chain_id().0,
-        "configured GATEWAY_CHAIN_ID does not match the RPC node's chain id"
+        "configured PAYDAY_CHAIN_ID does not match the RPC node's chain id"
     );
     let helper_factory = chain_client
         .get_batch_sweeper_factory(config.batch_sweeper_address())

@@ -29,6 +29,14 @@ impl ApiError {
         }
     }
 
+    pub fn payer_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_payment_link",
+            message: "This payment link is invalid or expired".into(),
+        }
+    }
+
     pub fn identity_unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -58,6 +66,14 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "api_key_generation_conflict",
             message: "The API key changed after confirmation; authenticate and try again".into(),
+        }
+    }
+
+    pub fn account_disabled() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "account_disabled",
+            message: "This account is disabled".into(),
         }
     }
 
@@ -109,11 +125,28 @@ impl ApiError {
         }
     }
 
-    pub fn invoice_not_found() -> Self {
+    pub fn payment_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "invoice_not_found",
-            message: "Invoice not found".into(),
+            code: "payment_not_found",
+            message: "Payment not found".into(),
+        }
+    }
+
+    pub fn ambiguous_payment_id() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "ambiguous_payment_id",
+            message: "Payment ID prefix matches more than one payment; provide more characters"
+                .into(),
+        }
+    }
+
+    pub fn payment_not_payable() -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code: "payment_not_payable",
+            message: "This payment is no longer accepting funds".into(),
         }
     }
 
@@ -130,6 +163,14 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: msg.into(),
+        }
+    }
+
+    pub fn rate_limited() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: "Per-account request limit exceeded".into(),
         }
     }
 }

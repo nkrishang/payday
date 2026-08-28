@@ -12,7 +12,7 @@ contract PaymentFactoryScript is Script {
     function setUp() public {}
 
     function run() public {
-        uint256 expectedChainId = vm.envUint("GATEWAY_CHAIN_ID");
+        uint256 expectedChainId = vm.envUint("PAYDAY_CHAIN_ID");
         require(block.chainid == expectedChainId, "unexpected deployment chain");
 
         vm.startBroadcast();

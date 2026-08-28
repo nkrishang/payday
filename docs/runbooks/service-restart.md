@@ -48,7 +48,7 @@ Verify:
 
 ```bash
 # Wait ~30 seconds:
-curl -sf "$GATEWAY_API_URL/health" && echo " OK" || echo " FAIL"
+curl -sf "$PAYDAY_API_URL/health" && echo " OK" || echo " FAIL"
 ```
 
 ## Restart with a new task definition

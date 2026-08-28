@@ -3,7 +3,7 @@ use std::time::Duration;
 use alloy_primitives::{Address, U256};
 use gateway_core::ChainId;
 
-/// Default indexer poll interval when `GATEWAY_INDEXER_POLL_INTERVAL_MS` is unset.
+/// Default indexer poll interval when `PAYDAY_INDEXER_POLL_INTERVAL_MS` is unset.
 const DEFAULT_INDEXER_POLL_INTERVAL_MS: u64 = 2000;
 const DEFAULT_FINALITY_CONFIRMATIONS: u64 = 2;
 const DEFAULT_LOG_RANGE_SIZE: u64 = 100;
@@ -54,66 +54,63 @@ pub enum SignerConfig {
 
 impl Config {
     pub fn from_env() -> Self {
-        let chain_id: u64 = std::env::var("GATEWAY_CHAIN_ID")
-            .expect("GATEWAY_CHAIN_ID must be set")
+        let chain_id: u64 = std::env::var("PAYDAY_CHAIN_ID")
+            .expect("PAYDAY_CHAIN_ID must be set")
             .parse()
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_CHAIN_ID: {e}"));
+            .unwrap_or_else(|e| panic!("invalid PAYDAY_CHAIN_ID: {e}"));
 
-        let usdc_address = parse_address_env("GATEWAY_USDC_ADDRESS");
-        let factory_address = parse_address_env("GATEWAY_FACTORY_ADDRESS");
-        let batch_sweeper_address = parse_address_env("GATEWAY_BATCH_SWEEPER_ADDRESS");
+        let usdc_address = parse_address_env("PAYDAY_USDC_ADDRESS");
+        let factory_address = parse_address_env("PAYDAY_FACTORY_ADDRESS");
+        let batch_sweeper_address = parse_address_env("PAYDAY_BATCH_SWEEPER_ADDRESS");
 
-        let finality_source = match std::env::var("GATEWAY_FINALITY_SOURCE").as_deref() {
+        let finality_source = match std::env::var("PAYDAY_FINALITY_SOURCE").as_deref() {
             Ok("finalized") | Err(_) => FinalitySource::FinalizedTag,
             Ok("latest") => FinalitySource::Latest,
             Ok(other) => {
-                panic!("invalid GATEWAY_FINALITY_SOURCE '{other}': expected finalized or latest")
+                panic!("invalid PAYDAY_FINALITY_SOURCE '{other}': expected finalized or latest")
             }
         };
         let finality_confirmations = parse_u64_env(
-            "GATEWAY_FINALITY_CONFIRMATIONS",
+            "PAYDAY_FINALITY_CONFIRMATIONS",
             DEFAULT_FINALITY_CONFIRMATIONS,
         );
-        let log_range_size = parse_u64_env("GATEWAY_LOG_RANGE_SIZE", DEFAULT_LOG_RANGE_SIZE);
-        assert!(
-            log_range_size > 0,
-            "GATEWAY_LOG_RANGE_SIZE must be positive"
-        );
+        let log_range_size = parse_u64_env("PAYDAY_LOG_RANGE_SIZE", DEFAULT_LOG_RANGE_SIZE);
+        assert!(log_range_size > 0, "PAYDAY_LOG_RANGE_SIZE must be positive");
         let max_ranges_per_tick = parse_u64_env(
-            "GATEWAY_INDEXER_MAX_RANGES_PER_TICK",
+            "PAYDAY_INDEXER_MAX_RANGES_PER_TICK",
             DEFAULT_MAX_RANGES_PER_TICK,
         );
         assert!(
             max_ranges_per_tick > 0,
-            "GATEWAY_INDEXER_MAX_RANGES_PER_TICK must be positive"
+            "PAYDAY_INDEXER_MAX_RANGES_PER_TICK must be positive"
         );
         // No default: a fresh database with the variable missing must not
         // start a backfill from genesis.
-        let usdc_start_block = std::env::var("GATEWAY_USDC_START_BLOCK")
-            .expect("GATEWAY_USDC_START_BLOCK must be set")
+        let usdc_start_block = std::env::var("PAYDAY_USDC_START_BLOCK")
+            .expect("PAYDAY_USDC_START_BLOCK must be set")
             .parse()
-            .unwrap_or_else(|e| panic!("invalid GATEWAY_USDC_START_BLOCK: {e}"));
+            .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_START_BLOCK: {e}"));
 
         let signer = match (
-            std::env::var("GATEWAY_SIGNER_KEY").ok(),
-            std::env::var("GATEWAY_KMS_KEY_ID").ok(),
+            std::env::var("PAYDAY_SIGNER_KEY").ok(),
+            std::env::var("PAYDAY_KMS_KEY_ID").ok(),
         ) {
             (Some(key), None) => SignerConfig::Local(key),
             (None, Some(key_id)) => SignerConfig::AwsKms(key_id),
             (None, None) => {
-                panic!("exactly one of GATEWAY_SIGNER_KEY or GATEWAY_KMS_KEY_ID must be set")
+                panic!("exactly one of PAYDAY_SIGNER_KEY or PAYDAY_KMS_KEY_ID must be set")
             }
             (Some(_), Some(_)) => {
-                panic!("GATEWAY_SIGNER_KEY and GATEWAY_KMS_KEY_ID cannot both be set")
+                panic!("PAYDAY_SIGNER_KEY and PAYDAY_KMS_KEY_ID cannot both be set")
             }
         };
 
         Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             chain_id: ChainId(chain_id),
-            rpc_url: std::env::var("GATEWAY_RPC_URL").expect("GATEWAY_RPC_URL must be set"),
+            rpc_url: std::env::var("PAYDAY_RPC_URL").expect("PAYDAY_RPC_URL must be set"),
             indexer_poll_interval: Duration::from_millis(parse_u64_env(
-                "GATEWAY_INDEXER_POLL_INTERVAL_MS",
+                "PAYDAY_INDEXER_POLL_INTERVAL_MS",
                 DEFAULT_INDEXER_POLL_INTERVAL_MS,
             )),
             finality_source,
@@ -125,27 +122,27 @@ impl Config {
             batch_sweeper_address,
             usdc_address,
             sweep_pending_timeout: Duration::from_secs(parse_u64_env(
-                "GATEWAY_SWEEP_PENDING_TIMEOUT_SECS",
+                "PAYDAY_SWEEP_PENDING_TIMEOUT_SECS",
                 DEFAULT_SWEEP_PENDING_TIMEOUT_SECS,
             )),
             sweep_max_submissions: parse_u64_env(
-                "GATEWAY_SWEEP_MAX_SUBMISSIONS",
+                "PAYDAY_SWEEP_MAX_SUBMISSIONS",
                 DEFAULT_SWEEP_MAX_SUBMISSIONS as u64,
             )
             .try_into()
-            .expect("GATEWAY_SWEEP_MAX_SUBMISSIONS is too large"),
+            .expect("PAYDAY_SWEEP_MAX_SUBMISSIONS is too large"),
             sweep_max_attempts: parse_u64_env(
-                "GATEWAY_SWEEP_MAX_ATTEMPTS",
+                "PAYDAY_SWEEP_MAX_ATTEMPTS",
                 DEFAULT_SWEEP_MAX_ATTEMPTS as u64,
             )
             .try_into()
-            .expect("GATEWAY_SWEEP_MAX_ATTEMPTS is too large"),
+            .expect("PAYDAY_SWEEP_MAX_ATTEMPTS is too large"),
             signer_low_balance_wei: U256::from(
-                std::env::var("GATEWAY_SIGNER_LOW_BALANCE_WEI")
+                std::env::var("PAYDAY_SIGNER_LOW_BALANCE_WEI")
                     .ok()
                     .map(|value| {
                         value.parse::<u128>().unwrap_or_else(|e| {
-                            panic!("invalid GATEWAY_SIGNER_LOW_BALANCE_WEI: {e}")
+                            panic!("invalid PAYDAY_SIGNER_LOW_BALANCE_WEI: {e}")
                         })
                     })
                     .unwrap_or(DEFAULT_SIGNER_LOW_BALANCE_WEI),

@@ -23,10 +23,13 @@ pub struct IssuedApiKey {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ApiKeyMetadata {
-    pub hint: String,
+    pub account_id: String,
+    pub key_hint: Option<String>,
     pub generation: i64,
     pub created_at: String,
     pub rotated_at: Option<String>,
+    pub previous_key_expires_at: Option<String>,
+    pub revoked_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -84,11 +87,11 @@ impl AccountClient {
             }))
             .send()
             .await
-            .map_err(|source| CliError::Transport {
-                url: url.clone(),
-                source,
+            .map_err(|error| CliError::Auth {
+                message: "Couldn't reach the sign-in service.".into(),
+                detail: Some(error.to_string()),
             })?;
-        decode_empty_success(response).await
+        decode_auth0_empty(response).await
     }
 
     pub async fn authenticate(&self, email: &str, otp: &str) -> Result<String, CliError> {
@@ -107,11 +110,11 @@ impl AccountClient {
             }))
             .send()
             .await
-            .map_err(|source| CliError::Transport {
-                url: token_url.clone(),
-                source,
+            .map_err(|error| CliError::Auth {
+                message: "Couldn't reach the sign-in service.".into(),
+                detail: Some(error.to_string()),
             })?;
-        decode_success::<TokenResponse>(response)
+        decode_auth0::<TokenResponse>(response)
             .await
             .map(|value| value.access_token)
     }
@@ -145,6 +148,28 @@ impl AccountClient {
         }
     }
 
+    pub async fn revoke(&self, token: &str, expected_generation: i64) -> Result<(), CliError> {
+        let url = format!("{}/v1/account/api-key", self.api_url);
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "expected_generation": expected_generation }))
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            decode_success::<serde_json::Value>(response)
+                .await
+                .map(|_| ())
+        }
+    }
+
     async fn request<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,
@@ -165,13 +190,58 @@ impl AccountClient {
     }
 }
 
-async fn decode_empty_success(response: reqwest::Response) -> Result<(), CliError> {
+#[derive(Deserialize)]
+struct Auth0Error {
+    error: Option<String>,
+}
+
+async fn decode_auth0_empty(response: reqwest::Response) -> Result<(), CliError> {
     if response.status().is_success() {
         Ok(())
     } else {
-        decode_success::<serde_json::Value>(response)
+        decode_auth0::<serde_json::Value>(response)
             .await
             .map(|_| ())
+    }
+}
+
+async fn decode_auth0<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, CliError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|source| CliError::Transport {
+            url: "Auth0 response".into(),
+            source,
+        })?;
+    if status.is_success() {
+        return serde_json::from_str(&body).map_err(|error| CliError::Auth {
+            message: "The sign-in service returned an invalid response.".into(),
+            detail: Some(format!("{error}; body: {body}")),
+        });
+    }
+    let parsed = serde_json::from_str::<Auth0Error>(&body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|e| e.error.as_deref())
+        .unwrap_or("");
+    if status.as_u16() == 429 || code == "too_many_attempts" {
+        Err(CliError::Auth {
+            message: "Too many tries. Wait a minute and run `payday login` again.".into(),
+            detail: Some(body),
+        })
+    } else if code == "invalid_grant" {
+        Err(CliError::Auth {
+            message: "That code didn't match.".into(),
+            detail: Some(body),
+        })
+    } else {
+        Err(CliError::Auth {
+            message: "The sign-in service rejected the request.".into(),
+            detail: Some(format!("HTTP {status}; {body}")),
+        })
     }
 }
 
@@ -258,6 +328,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth0_errors_are_safe_and_distinct() {
+        let bad = "{\"error\":\"invalid_grant\",\"error_description\":\"secret raw detail\"}";
+        let limited = "{\"error\":\"too_many_attempts\"}";
+        let (url, _) = capture_server(vec![
+            format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bad}", bad.len()),
+            format!("HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{limited}", limited.len()),
+        ]).await;
+        let client = AccountClient::new(&url, &url, "client", "audience").unwrap();
+        let first = client
+            .authenticate("a@b.co", "000000")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(first, "That code didn't match.");
+        assert!(!first.contains("secret raw detail"));
+        assert!(
+            client
+                .authenticate("a@b.co", "000000")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Too many")
+        );
+    }
+
+    #[tokio::test]
     async fn email_otp_authenticates_and_sends_identity_token_to_gateway() {
         let token = serde_json::json!({ "access_token": "identity-jwt" }).to_string();
         let issued = serde_json::json!({
@@ -319,6 +415,21 @@ mod tests {
         assert_eq!(result.generation, 8);
         assert!(result.replaced_previous_key);
         let requests = requests.await.unwrap();
+        assert!(requests[0].contains(r#""expected_generation":7"#));
+    }
+
+    #[tokio::test]
+    async fn revocation_accepts_an_empty_no_content_response() {
+        let (base_url, requests) = capture_server(vec![
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".into(),
+        ])
+        .await;
+        let client =
+            AccountClient::new(&base_url, &base_url, "public-client", "payday-api").unwrap();
+
+        client.revoke("identity-jwt", 7).await.unwrap();
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("DELETE /v1/account/api-key HTTP/1.1"));
         assert!(requests[0].contains(r#""expected_generation":7"#));
     }
 

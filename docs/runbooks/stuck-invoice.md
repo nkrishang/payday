@@ -28,21 +28,22 @@ address automatically and never change the status. The API reports
 ## Step 1: Check the invoice status
 
 ```bash
-export GATEWAY_API_URL="https://api.payday.sh"
-export GATEWAY_API_KEY="<API-key-for-the-account-that-created-the-invoice>"
+export PAYDAY_API_URL="https://api.payday.sh"
+export PAYDAY_API_KEY="<API-key-for-the-account-that-created-the-invoice>"
 
-./target/release/gateway-cli invoice get <INVOICE_ID>
+./target/release/payday get <PAYMENT_ID>
 ```
 
 Or with curl:
 
 ```bash
-curl -s -H "Authorization: Bearer $GATEWAY_API_KEY" \
-  "$GATEWAY_API_URL/v1/invoices/<INVOICE_ID>" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $PAYDAY_API_KEY" \
+  "$PAYDAY_API_URL/v1/payments/<PAYMENT_ID>" | python3 -m json.tool
 ```
 
-Note the `status`, `received_base_units`, `blocked_reason`, and
-`payment_address` from the response.
+Note the customer-facing `status`, `received_base_units`, `attention`, and
+`address` from the response. Database queries below use the UUID portion after
+the `pay_` prefix and expose internal lifecycle names intentionally.
 
 ## Step 2: Verify the USDC transfer landed on-chain
 
@@ -69,7 +70,7 @@ The indexer hasn't processed the block containing the transfer yet.
    ```
 
 3. If the `payday-indexer-cursor-lagging` alarm is raised the indexer is
-   catching up; each pass drains up to `GATEWAY_INDEXER_MAX_RANGES_PER_TICK`
+   catching up; each pass drains up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`
    ranges, so a backlog clears on its own. See
    [indexer-cursor-reset.md](indexer-cursor-reset.md) only if the cursor
    itself is wrong.
@@ -102,12 +103,12 @@ Possible causes:
   fires and submissions fail with an insufficient-funds error until the signer
   is funded. See [daily-monitoring.md](daily-monitoring.md) step 7.
 - **Helper transaction unconfirmed**: the worker replaces it on the same nonce
-  with fees bumped by 12.5% every `GATEWAY_SWEEP_PENDING_TIMEOUT_SECS`, up to
-  `GATEWAY_SWEEP_MAX_SUBMISSIONS` times, then pauses and raises
+  with fees bumped by 12.5% every `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS`, up to
+  `PAYDAY_SWEEP_MAX_SUBMISSIONS` times, then pauses and raises
   `payday-indexer-sweep-paused`. See "Sweep worker paused" below.
 - **Transient item failure** (USDC paused, unknown revert): the invoice stays
   `deploying` with `sweep_attempts` incrementing behind exponential backoff
-  (2 s doubling, capped at 5 minutes). After `GATEWAY_SWEEP_MAX_ATTEMPTS` it
+  (2 s doubling, capped at 5 minutes). After `PAYDAY_SWEEP_MAX_ATTEMPTS` it
   becomes `blocked` with reason `retries_exhausted`.
 - **Indexer crashed after funding**: restart it — see
   [service-restart.md](service-restart.md). The queue is durable; an in-flight
@@ -135,7 +136,7 @@ UPDATE invoices
 SET blocked_reason = NULL,
     status = CASE WHEN expiration_timestamp < extract(epoch FROM now()) THEN 'expired' ELSE 'deploying' END,
     updated_at = now()
-WHERE id = '<INVOICE_ID>'::uuid AND status = 'blocked';
+WHERE id = '<PAYMENT_UUID_WITHOUT_PAY_PREFIX>'::uuid AND status = 'blocked';
 ```
 
 A terminal (`fulfilled`/`recovered`) invoice can also carry a `blocked_reason`

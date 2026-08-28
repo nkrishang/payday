@@ -31,7 +31,7 @@ aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
 This means the block at the cursor's `last_block` has a different hash than
 when it was originally processed. The indexer refuses to continue because
 observations paired with the old hash may be invalid. With
-`GATEWAY_FINALITY_SOURCE=finalized` this should never happen on Monad without a
+`PAYDAY_FINALITY_SOURCE=finalized` this should never happen on Monad without a
 hard fork; a provider serving a different chain or a database restored from a
 different environment is the likelier explanation.
 

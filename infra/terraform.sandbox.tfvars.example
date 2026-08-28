@@ -1,0 +1,31 @@
+# A second, isolated deployment of the existing stack. Use a separate backend
+# state key (sandbox/payday.tfstate) and never apply this file to production state.
+name             = "payday-sandbox"
+api_key_prefix   = "payday_test_"
+aws_region       = "us-east-1"
+domain_name      = "api.sandbox.payday.sh"
+payment_domain_name = "pay.sandbox.payday.sh"
+payment_route53_zone_id = "Z0987654321EXAMPLE"
+auth0_issuer     = "https://your-sandbox-tenant.us.auth0.com/"
+auth0_audience   = "https://api.sandbox.payday.sh"
+auth0_client_id  = "your-sandbox-native-application-client-id"
+route53_zone_id  = "Z0123456789EXAMPLE"
+explorer_base_url = "https://monadvision.com"
+image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
+alarm_email      = "operator@example.com"
+
+# Monad testnet and Circle test USDC.
+chain_id         = 10143
+usdc_address     = "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea"
+# Fill these from the sandbox contract deployment output; zero/guessed addresses
+# must not be deployed.
+factory_address       = "0x0000000000000000000000000000000000000001"
+batch_sweeper_address = "0x0000000000000000000000000000000000000002"
+# Set to the Monad testnet block immediately before deploying the services.
+usdc_start_block      = 0
+finality_confirmations = 2
+
+# Keep the sandbox inexpensive while retaining the same architecture.
+db_multi_az            = false
+db_deletion_protection = true
+# Supply TF_VAR_rpc_url securely; do not commit it here.

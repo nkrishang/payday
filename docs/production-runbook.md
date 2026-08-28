@@ -38,22 +38,25 @@ third-party key-management account is required.
 ## Production hostnames
 
 - `https://api.payday.sh` is the public API behind AWS WAF and the Application
-  Load Balancer. The CLI uses this as `GATEWAY_API_URL`.
+  Load Balancer. The CLI uses this as `PAYDAY_API_URL`.
+- `https://pay.payday.sh` serves scoped payer checkout links through the same
+  load balancer.
 - The indexer/sweeper and PostgreSQL database have no public hostname or inbound
   internet access.
 - `payday.sh` and `www.payday.sh` remain available for a Vercel-hosted website or
   documentation. They are not required to run the payment service.
 
-Create a **public hosted zone named `api.payday.sh`** in Route53. AWS assigns
-four authoritative nameservers. In Vercel's DNS settings for `payday.sh`, add
-four separate `NS` records with name `api`, one for each AWS nameserver. Do not
-change the nameservers for the whole `payday.sh` domain. Use the Route53 hosted
-zone ID as `route53_zone_id`; Terraform then creates the API alias and ACM
-certificate-validation records inside that delegated zone.
+Create two **public hosted zones**, `api.payday.sh` and `pay.payday.sh`, in
+Route53. AWS assigns four authoritative nameservers to each. In Vercel's DNS
+settings for `payday.sh`, add each zone's four separate `NS` records: name
+`api` for the API zone and name `pay` for the payment zone. Do not change the
+nameservers for the whole `payday.sh` domain. Set `route53_zone_id` to the API
+zone ID and `payment_route53_zone_id` to the payment zone ID; Terraform creates
+each alias and ACM validation record in the zone that owns its hostname.
 
-Wait until `dig NS api.payday.sh` returns the four AWS nameservers before the
-full Terraform apply, because ACM cannot validate the certificate until the
-delegation is publicly visible.
+Wait until `dig NS api.payday.sh` and `dig NS pay.payday.sh` return their
+respective AWS nameservers before the full Terraform apply, because ACM cannot
+validate the certificate until both delegations are publicly visible.
 
 ## Fixed Monad values
 
@@ -64,16 +67,16 @@ delegation is publicly visible.
 - USDC decimals: `6`
 - [Monad full finality](https://docs.monad.xyz/monad-arch/consensus/block-states):
   the node's `finalized` tag is "irreversible without a hard fork", so this
-  stack sets `GATEWAY_FINALITY_SOURCE=finalized` and subtracts
-  `GATEWAY_FINALITY_CONFIRMATIONS=2` more blocks as a margin against replica
+  stack sets `PAYDAY_FINALITY_SOURCE=finalized` and subtracts
+  `PAYDAY_FINALITY_CONFIRMATIONS=2` more blocks as a margin against replica
   skew behind the provider's load balancer. `latest` on Monad is the
   speculatively executed proposed block and is never used for commits.
 - [Monad RPC differences](https://docs.monad.xyz/reference/rpc-differences):
-  QuickNode allows 100 blocks per `eth_getLogs` (`GATEWAY_LOG_RANGE_SIZE`),
+  QuickNode allows 100 blocks per `eth_getLogs` (`PAYDAY_LOG_RANGE_SIZE`),
   `eth_getTransactionByHash` returns nothing for a transaction still in
   flight, and the `pending` tag reads like `latest`. The sweep worker
   therefore treats a helper transaction without a receipt after
-  `GATEWAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
+  `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
   detects a consumed nonce from the signer's mined transaction count.
 - Monad bills the gas *limit*: every helper transaction reserves
   `100k + 400k × items` gas of MON from the sweep signer.
@@ -118,7 +121,7 @@ cast wallet import payday-deployer --interactive
 Fund the displayed address with enough MON for two contract deployments. Then:
 
 ```bash
-export GATEWAY_CHAIN_ID=143
+export PAYDAY_CHAIN_ID=143
 export MONAD_RPC_URL='https://your-quicknode-endpoint'
 
 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
@@ -256,37 +259,31 @@ USDC; it pays gas to invoke the permissionless factory.
 
 ## 9. Configure and test the CLI
 
-Authenticate through Auth0 and create the operator account's API key. Store the
-returned key immediately in the operator's password/secret manager; it cannot
-be retrieved later:
+Authenticate through Auth0. Production API and Auth0 defaults are compiled into
+the CLI, and the key is saved securely in its XDG-aware credentials file:
 
 ```bash
-export GATEWAY_API_URL="$(terraform -chdir=infra output -raw api_url)"
-export GATEWAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
-export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export GATEWAY_AUTH0_CLIENT_ID="<native-application-client-id>"
-account_json="$(cargo run --release -p gateway-cli -- --json account create)"
-export GATEWAY_API_KEY="$(jq -r .api_key <<<"$account_json")"
+cargo run --release -p gateway-cli --bin payday -- login
 
-curl --fail "$GATEWAY_API_URL/health"
-cargo run --release -p gateway-cli -- invoice create \
+curl --fail "https://api.payday.sh/health"
+cargo run --release -p gateway-cli --bin payday -- create \
   --chain-id 143 \
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  --beneficiary <YOUR_BENEFICIARY_ADDRESS> \
-  --expiration-timestamp "$(($(date +%s) + 3600))" \
-  --recovery <YOUR_RECOVERY_ADDRESS> \
+  --payout <YOUR_PAYOUT_ADDRESS> \
+  --expires-in 3600 \
+  --refund <YOUR_REFUND_ADDRESS> \
   --amount 0.01
 ```
 
 Pay exactly 0.01 native USDC to the returned payment address. Confirm that:
 
-1. CLI status progresses `created → funded → deploying → fulfilled`, with
-   `received_base_units`, `execute_tx_hash`, and `resolved_at_block` set.
+1. CLI status progresses `awaiting_payment → paid → settled`, with
+   `received_base_units`, `settlement_tx_hash`, `settled_at`, and `settled_block` set.
 2. The beneficiary receives the USDC.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
 5. Send a second, small payment to the same address and confirm it reaches
-   the recovery wallet within a minute while the status stays `fulfilled`.
+   the refund wallet within a minute while the status stays `settled`.
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
 
@@ -316,8 +313,9 @@ and creates the GitHub Release.
   indexer and loss of the retained database advisory-lock connection
   terminate the worker instead of appearing healthy; a stuck helper
   transaction only pauses the sweep worker.
-- Replace account API keys with `gateway-cli account create` as described in the
-  secrets-rotation runbook; replacement is immediate and does not restart services.
+- Rotate account API keys with `payday keys rotate` as described in the
+  secrets-rotation runbook. The previous key has a 24-hour grace period;
+  `payday keys revoke` invalidates current and grace-period keys immediately.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
   bypasses ECS and starts another task. Keep the ECS service at one task as an
   additional control.
