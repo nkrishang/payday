@@ -26,6 +26,7 @@ aes-gcm = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
+qrcode = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

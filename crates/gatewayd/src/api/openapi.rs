@@ -68,11 +68,13 @@ struct CreatePayment {
 #[derive(Serialize, ToSchema)]
 struct Payment {
     id: String,
+    payment_url: String,
     status: PaymentStatus,
     chain: Chain,
     currency: String,
     token: Token,
     address: String,
+    address_explorer_url: Option<String>,
     payout_address: String,
     refund_address: String,
     expires_in: Option<u64>,
@@ -100,6 +102,7 @@ struct Payment {
     expired_at: Option<String>,
     cancellation_requested_at: Option<String>,
     settlement_tx_hash: Option<String>,
+    settlement_explorer_url: Option<String>,
     as_of: Option<AsOf>,
     self_settlement: SelfSettlement,
     attention: Option<Attention>,
@@ -139,6 +142,7 @@ struct PaymentSummary {
 struct Transfer {
     disposition: String,
     transaction_hash: String,
+    explorer_url: Option<String>,
     sender: String,
     amount: String,
     amount_base_units: String,

@@ -17,11 +17,13 @@ export interface CreatePayment {
 }
 export interface Payment {
   id: string;
+  payment_url: string;
   status: PaymentStatus;
   chain: Chain;
   currency: string;
   token: { symbol: string; address: string; decimals: number };
   address: string;
+  address_explorer_url: string | null;
   payout_address: string;
   refund_address: string;
   amount: string;
@@ -48,6 +50,7 @@ export interface Payment {
   expired_at: string | null;
   cancellation_requested_at: string | null;
   settlement_tx_hash: string | null;
+  settlement_explorer_url: string | null;
   as_of: AsOf | null;
   self_settlement: { factory: string; salt: string };
   attention: { code: string; message: string; action: string } | null;
@@ -58,7 +61,7 @@ export interface PaymentSummary { id: string; memo: string | null; reference: st
 export interface ListPaymentsParams { starting_after?: string; status?: PaymentStatus; reference?: string; limit?: number }
 export interface PaymentPage { payments: PaymentSummary[]; next_cursor: string | null }
 export interface Transfer {
-  transaction_hash: string; sender: string; amount: string; amount_base_units: string;
+  transaction_hash: string; explorer_url: string | null; sender: string; amount: string; amount_base_units: string;
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
 }
 export interface CancelPaymentResponse { payment: Payment; advisory: string }

@@ -10,6 +10,9 @@ pub struct Config {
     chain_id: ChainId,
     factory_address: Address,
     usdc_address: Address,
+    public_base_url: String,
+    explorer_base_url: Option<String>,
+    payer_token_secret: String,
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
 }
@@ -65,6 +68,11 @@ impl Config {
             chain_id: ChainId(chain_id),
             factory_address,
             usdc_address,
+            public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
+            explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
+            payer_token_secret: std::env::var("PAYDAY_PAYER_TOKEN_SECRET")
+                .expect("PAYDAY_PAYER_TOKEN_SECRET must be set"),
             api_key_prefix,
             webhook_encryption_key,
         }
@@ -92,6 +100,18 @@ impl Config {
 
     pub fn usdc_address(&self) -> Address {
         self.usdc_address
+    }
+
+    pub fn public_base_url(&self) -> &str {
+        &self.public_base_url
+    }
+
+    pub fn explorer_base_url(&self) -> Option<&str> {
+        self.explorer_base_url.as_deref()
+    }
+
+    pub fn payer_token_secret(&self) -> &[u8] {
+        self.payer_token_secret.as_bytes()
     }
 
     pub fn api_key_prefix(&self) -> &str {

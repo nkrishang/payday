@@ -29,6 +29,14 @@ impl ApiError {
         }
     }
 
+    pub fn payer_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_payment_link",
+            message: "This payment link is invalid or expired".into(),
+        }
+    }
+
     pub fn identity_unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -131,6 +139,14 @@ impl ApiError {
             code: "ambiguous_payment_id",
             message: "Payment ID prefix matches more than one payment; provide more characters"
                 .into(),
+        }
+    }
+
+    pub fn payment_not_payable() -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code: "payment_not_payable",
+            message: "This payment is no longer accepting funds".into(),
         }
     }
 

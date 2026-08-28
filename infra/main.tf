@@ -2,6 +2,10 @@ data "aws_availability_zones" "available" { state = "available" }
 
 locals {
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
+  certificate_validation_zone_ids = {
+    (var.domain_name)         = var.route53_zone_id
+    (var.payment_domain_name) = var.payment_route53_zone_id
+  }
   common_environment = [
     { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
     { name = "PAYDAY_FACTORY_ADDRESS", value = var.factory_address },
@@ -119,6 +123,11 @@ resource "random_password" "db" {
   special = false
 }
 
+resource "random_password" "payer_token" {
+  length  = 48
+  special = false
+}
+
 resource "aws_db_subnet_group" "this" {
   name       = var.name
   subnet_ids = aws_subnet.private[*].id
@@ -158,6 +167,11 @@ resource "aws_secretsmanager_secret" "rpc_url" { name = "${var.name}/rpc-url" }
 resource "aws_secretsmanager_secret_version" "rpc_url" {
   secret_id     = aws_secretsmanager_secret.rpc_url.id
   secret_string = var.rpc_url
+}
+resource "aws_secretsmanager_secret" "payer_token" { name = "${var.name}/payer-token" }
+resource "aws_secretsmanager_secret_version" "payer_token" {
+  secret_id     = aws_secretsmanager_secret.payer_token.id
+  secret_string = random_password.payer_token.result
 }
 
 # Webhook signing secrets need to be recoverable across worker restarts while
@@ -233,7 +247,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.payer_token.arn, aws_secretsmanager_secret.webhook_encryption_key.arn] }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
@@ -274,10 +288,13 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_AUTH0_ISSUER", value = var.auth0_issuer },
       { name = "PAYDAY_AUTH0_AUDIENCE", value = var.auth0_audience },
       { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id },
-      { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix }
+      { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
+      { name = "PAYDAY_PUBLIC_BASE_URL", value = "https://${var.payment_domain_name}" },
+      { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url }
     ]),
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "PAYDAY_PAYER_TOKEN_SECRET", valueFrom = aws_secretsmanager_secret.payer_token.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn }
     ],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
@@ -332,13 +349,14 @@ resource "aws_lb_target_group" "api" {
 }
 
 resource "aws_acm_certificate" "api" {
-  domain_name       = var.domain_name
-  validation_method = "DNS"
+  domain_name               = var.domain_name
+  subject_alternative_names = [var.payment_domain_name]
+  validation_method         = "DNS"
   lifecycle { create_before_destroy = true }
 }
 resource "aws_route53_record" "validation" {
   for_each = { for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => { name = dvo.resource_record_name, record = dvo.resource_record_value, type = dvo.resource_record_type } }
-  zone_id  = var.route53_zone_id
+  zone_id  = local.certificate_validation_zone_ids[each.key]
   name     = each.value.name
   type     = each.value.type
   records  = [each.value.record]
@@ -375,6 +393,16 @@ resource "aws_lb_listener" "https" {
 resource "aws_route53_record" "api" {
   zone_id = var.route53_zone_id
   name    = var.domain_name
+  type    = "A"
+  alias {
+    name                   = aws_lb.api.dns_name
+    zone_id                = aws_lb.api.zone_id
+    evaluate_target_health = true
+  }
+}
+resource "aws_route53_record" "payment" {
+  zone_id = var.payment_route53_zone_id
+  name    = var.payment_domain_name
   type    = "A"
   alias {
     name                   = aws_lb.api.dns_name
