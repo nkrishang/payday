@@ -5,6 +5,7 @@ use tower_http::trace::TraceLayer;
 use tracing::field;
 
 use crate::api::accounts;
+use crate::api::admin;
 use crate::api::auth;
 use crate::api::health;
 use crate::api::invoices;
@@ -48,6 +49,10 @@ pub fn router(state: AppState) -> Router {
         ))
         .layer(RequestBodyLimitLayer::new(16 * 1024));
 
+    let administration = Router::new()
+        .route("/v1/admin/payments/{id}/release", post(admin::release))
+        .route_layer(middleware::from_fn(auth::require_admin));
+
     Router::new()
         .route("/health", get(health::health))
         .route("/pay/{id}", get(payer::page))
@@ -61,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/openapi.json", get(openapi::spec))
         .merge(authenticated)
         .merge(account_management)
+        .merge(administration)
         .with_state(state)
         .layer(
             TraceLayer::new_for_http()
@@ -87,6 +93,14 @@ pub fn router(state: AppState) -> Router {
                 ),
         )
         .layer(middleware::from_fn(api_middleware::request_id))
+}
+
+pub fn status_router(state: AppState) -> Router {
+    Router::new()
+        .route("/live", get(health::live))
+        .route("/v1/status", get(status::public_json))
+        .route("/", get(status::html))
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -125,6 +139,8 @@ mod tests {
         authenticated_at: u64,
         #[serde(rename = "https://api.payday.sh/auth/event_id")]
         authentication_event_id: &'a str,
+        #[serde(rename = "https://api.payday.sh/auth/email")]
+        email: &'a str,
     }
 
     async fn app(pool: PgPool) -> Router {
@@ -136,12 +152,13 @@ mod tests {
             .is_none()
         {
             let _ = accounts
-                .issue_api_key(
+                .issue_api_key_with_email(
                     "https://test.issuer/",
                     "email|test-user",
                     None,
                     &Uuid::now_v7().to_string(),
                     KEY,
+                    "merchant@example.com",
                 )
                 .await
                 .unwrap();
@@ -156,6 +173,7 @@ mod tests {
             payer_access(),
             "payday_live_".into(),
             None,
+            120,
         );
         router(state)
     }
@@ -233,6 +251,7 @@ mod tests {
                     authentication_client_id: "payday-cli",
                     authenticated_at,
                     authentication_event_id: event_id,
+                    email: "merchant@example.com",
                 },
                 &key,
             )
@@ -535,6 +554,65 @@ mod tests {
         assert_eq!(payment["as_of"]["block"], "117");
         assert_eq!(payment["indexer_freshness"]["last_indexed_block"], "117");
         assert_eq!(payment["indexer_freshness"]["last_finalized_block"], "120");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn public_status_tracks_real_workers_and_liveness_survives_database_loss(pool: PgPool) {
+        sqlx::query("INSERT INTO api_status(chain_id) VALUES(1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO indexer_cursor(chain_id,token_address,last_block,last_block_hash,last_block_timestamp) VALUES(1,$1,100,$2,1700000000)")
+            .bind(Address::ZERO.as_slice()).bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO indexer_status(chain_id,token_address,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,$1,100,$2,1700000000)")
+            .bind(Address::ZERO.as_slice()).bind([2_u8; 32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sweeper_status(chain_id,state) VALUES(1,'running')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = AppState::new(
+            InvoiceRepository::new(pool.clone()),
+            AccountRepository::new(pool.clone()),
+            None,
+            ChainId(1),
+            Address::ZERO,
+            Address::ZERO,
+            payer_access(),
+            "payday_live_".into(),
+            None,
+            120,
+        );
+        let app = status_router(state);
+
+        let healthy = app
+            .clone()
+            .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(json_body(healthy).await["status"], "operational");
+
+        sqlx::query("UPDATE indexer_status SET finalized_block=1101 WHERE chain_id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let lagging = app
+            .clone()
+            .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let lagging = json_body(lagging).await;
+        assert_eq!(lagging["status"], "degraded");
+        assert_eq!(
+            lagging["components"]["payment_indexing_and_settlement"]["status"],
+            "degraded"
+        );
+
+        pool.close().await;
+        let live = app
+            .oneshot(Request::get("/live").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(live.status(), StatusCode::OK);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -853,22 +931,24 @@ mod tests {
         const SECOND: &str = "second-account-0123456789abcdef0123456789abcdef";
         let accounts = AccountRepository::new(pool.clone());
         accounts
-            .issue_api_key(
+            .issue_api_key_with_email(
                 "https://issuer.example/",
                 "email|first",
                 None,
                 "first-event",
                 FIRST,
+                "first@example.com",
             )
             .await
             .unwrap();
         accounts
-            .issue_api_key(
+            .issue_api_key_with_email(
                 "https://issuer.example/",
                 "email|second",
                 None,
                 "second-event",
                 SECOND,
+                "second@example.com",
             )
             .await
             .unwrap();
@@ -917,6 +997,7 @@ mod tests {
             payer_access(),
             "payday_live_".into(),
             None,
+            120,
         );
         let app = router(state);
         let identity_request = |method: &str, path: &str, body: Body| {

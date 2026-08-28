@@ -30,6 +30,8 @@ pub struct Cli {
     pub auth0_client_id: Option<String>,
     #[arg(long, global = true, env = "PAYDAY_AUTH0_AUDIENCE", hide = true)]
     pub auth0_audience: Option<String>,
+    #[arg(long, global = true, env = "PAYDAY_ADMIN_SECRET", hide = true)]
+    pub admin_secret: Option<String>,
     /// Emit machine-readable JSON.
     #[arg(long, global = true, help_heading = "Output")]
     pub json: bool,
@@ -88,6 +90,9 @@ pub enum Command {
     /// Manage webhook endpoints and inspect deliveries.
     #[command(subcommand)]
     Webhooks(WebhooksCommand),
+    /// Operator-only payment recovery actions.
+    #[command(subcommand, hide = true)]
+    Ops(OpsCommand),
     /// Generate shell completion code.
     Completions { shell: clap_complete::Shell },
     /// Read a built-in Payday guide.
@@ -97,6 +102,12 @@ pub enum Command {
     },
     /// Install the latest verified Payday release.
     Upgrade,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum OpsCommand {
+    /// Resume a payout after its attention condition has been resolved.
+    Release { payment: String },
 }
 
 #[derive(Clone, Debug, Args)]

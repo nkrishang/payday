@@ -54,12 +54,15 @@ pub fn validate_url(url: &reqwest::Url) -> Result<(), String> {
     {
         return Err("url must use HTTPS, have a host, and contain no credentials".into());
     }
+    if url.host_str().unwrap().parse::<IpAddr>().is_ok() {
+        return Err("url must use a DNS hostname".into());
+    }
     Ok(())
 }
 fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
-            let [a, b, ..] = ip.octets();
+            let [a, b, c, _] = ip.octets();
             !(ip.is_private()
                 || ip.is_loopback()
                 || ip.is_link_local()
@@ -69,23 +72,25 @@ fn public_ip(ip: IpAddr) -> bool {
                 || a == 0
                 || a >= 240
                 || (a == 100 && (64..=127).contains(&b))
-                || (a == 192 && b == 0)
-                || (a == 192 && b == 88)
+                || (a == 192 && b == 0 && (c == 0 || c == 2))
+                || (a == 192 && b == 31 && c == 196)
+                || (a == 192 && b == 52 && c == 193)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 175 && c == 48)
                 || (a == 198 && (b == 18 || b == 19))
-                || (a == 198 && b == 51)
-                || (a == 203 && b == 0))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113))
         }
         IpAddr::V6(ip) => {
             let s = ip.segments();
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || (s[0] & 0xfe00) == 0xfc00
-                || (s[0] & 0xffc0) == 0xfe80
-                || (s[0] == 0x2001 && s[1] == 0x0db8)
-                || ip
-                    .to_ipv4_mapped()
-                    .is_some_and(|v| !public_ip(IpAddr::V4(v))))
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return public_ip(IpAddr::V4(mapped));
+            }
+            (0x2000..=0x3fff).contains(&s[0])
+                && !(s[0] == 0x2001 && s[1] <= 0x01ff)
+                && !(s[0] == 0x2001 && s[1] == 0x0db8)
+                && s[0] != 0x2002
+                && !(s[0] == 0x3fff && s[1] <= 0x0fff)
         }
     }
 }
@@ -162,14 +167,22 @@ mod tests {
             "198.51.100.1",
             "203.0.113.1",
             "100.64.0.1",
+            "198.18.0.1",
+            "240.0.0.1",
             "::1",
             "fc00::1",
             "fe80::1",
             "2001:db8::1",
+            "2001::1",
+            "2002::1",
+            "3fff::1",
         ] {
             assert!(!public_ip(ip.parse().unwrap()), "{ip}");
         }
-        assert!(public_ip("8.8.8.8".parse().unwrap()));
+        for ip in ["8.8.8.8", "192.1.1.1", "198.52.1.1", "203.1.1.1"] {
+            assert!(public_ip(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
     #[test]
     fn rejects_credentials_and_non_https() {
@@ -179,11 +192,7 @@ mod tests {
             "https://127.0.0.1",
         ] {
             let url = reqwest::Url::parse(u).unwrap();
-            if u.contains("127") {
-                assert!(!public_ip(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-            } else {
-                assert!(validate_url(&url).is_err());
-            }
+            assert!(validate_url(&url).is_err());
         }
     }
     #[test]

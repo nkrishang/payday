@@ -132,6 +132,8 @@ pub struct PayerPaymentResponse {
     pub address_explorer_url: Option<String>,
     pub settlement_tx_hash: Option<String>,
     pub settlement_explorer_url: Option<String>,
+    /// Safety guidance shown only when payout needs operator attention.
+    pub payer_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -53,12 +53,13 @@ pub async fn issue(
     let key = generate_api_key(&state.api_key_prefix);
     let issued = state
         .accounts
-        .issue_api_key(
+        .issue_api_key_with_email(
             &identity.issuer,
             &identity.subject,
             request.expected_generation,
             &identity.authentication_event_id,
             &key,
+            &identity.email,
         )
         .await
         .map_err(|error| match error {

@@ -97,8 +97,10 @@ connection settings alone are not this security boundary.
 
 The Action denies tokens for the Payday audience unless the client, connection,
 email authentication method, and authentication age match. It adds a random,
-signed authentication-event ID. The API accepts that event for one key issuance
-only, so replaying the same access token cannot rotate a key twice.
+signed authentication-event ID and the verified email address. The API accepts
+that event for one key issuance only, so replaying the same access token cannot
+rotate a key twice. The verified address is stored with the account for urgent
+payout-support notifications.
 
 ## 4. Configure Payday
 

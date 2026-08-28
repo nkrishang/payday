@@ -27,6 +27,8 @@ hmac = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
 qrcode = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-sesv2 = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

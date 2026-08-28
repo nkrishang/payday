@@ -28,6 +28,20 @@ impl ApiError {
             message: "A valid Auth0 access token is required".into(),
         }
     }
+    pub fn admin_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "admin_unauthorized",
+            message: "A valid operator bearer credential is required".into(),
+        }
+    }
+    pub fn invoice_not_blocked() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "invoice_not_blocked",
+            message: "Invoice is not blocked".into(),
+        }
+    }
 
     pub fn payer_unauthorized() -> Self {
         Self {
@@ -58,6 +72,14 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             code: "account_not_provisioned",
             message: "This identity does not have an account".into(),
+        }
+    }
+
+    pub fn account_contact_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "account_contact_required",
+            message: "A verified merchant email is required before creating a payment; run `payday login` to authenticate again".into(),
         }
     }
 

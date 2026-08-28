@@ -73,6 +73,46 @@ impl AccountRepository {
         authentication_event_id: &str,
         key: &str,
     ) -> Result<IssuedApiKey, IssueApiKeyError> {
+        self.issue_api_key_inner(
+            issuer,
+            subject,
+            expected_generation,
+            authentication_event_id,
+            key,
+            None,
+        )
+        .await
+    }
+
+    pub async fn issue_api_key_with_email(
+        &self,
+        issuer: &str,
+        subject: &str,
+        expected_generation: Option<i64>,
+        authentication_event_id: &str,
+        key: &str,
+        verified_email: &str,
+    ) -> Result<IssuedApiKey, IssueApiKeyError> {
+        self.issue_api_key_inner(
+            issuer,
+            subject,
+            expected_generation,
+            authentication_event_id,
+            key,
+            Some(verified_email),
+        )
+        .await
+    }
+
+    async fn issue_api_key_inner(
+        &self,
+        issuer: &str,
+        subject: &str,
+        expected_generation: Option<i64>,
+        authentication_event_id: &str,
+        key: &str,
+        verified_email: Option<&str>,
+    ) -> Result<IssuedApiKey, IssueApiKeyError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
             .bind(issuer)
@@ -115,7 +155,7 @@ impl AccountRepository {
                            ELSE now() + make_interval(hours => $4) END,
                        api_key_hash = $1, api_key_hint = $2, key_created_at = now(),
                        api_key_generation = api_key_generation + 1, key_rotated_at = now(),
-                       key_revoked_at = NULL
+                       key_revoked_at = NULL, email = COALESCE($5, email)
                    WHERE id = $3
                    RETURNING api_key_generation"#,
             )
@@ -123,6 +163,7 @@ impl AccountRepository {
             .bind(key_hint(key))
             .bind(account_id)
             .bind(API_KEY_GRACE_HOURS as i32)
+            .bind(verified_email)
             .fetch_one(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -138,12 +179,15 @@ impl AccountRepository {
         }
         let id = Uuid::now_v7();
         let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
-        sqlx::query("INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(hash.as_slice())
-            .bind(key_hint(key))
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO accounts (id, api_key_hash, api_key_hint, email) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(hash.as_slice())
+        .bind(key_hint(key))
+        .bind(verified_email)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO account_identities (issuer, subject, account_id) VALUES ($1, $2, $3)",
         )
@@ -189,6 +233,13 @@ impl AccountRepository {
         .bind(account.0)
         .fetch_one(&self.pool)
         .await
+    }
+
+    pub async fn has_verified_email(&self, account: AccountId) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT email IS NOT NULL FROM accounts WHERE id = $1")
+            .bind(account.0)
+            .fetch_one(&self.pool)
+            .await
     }
 
     pub async fn revoke_api_key(

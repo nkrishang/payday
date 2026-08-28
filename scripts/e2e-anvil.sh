@@ -5,9 +5,8 @@
 # `finalized` tag advances on its own (finalized = latest - 2, one block per
 # second), which is the finality source the indexer uses in production.
 # Transactions wait for the next interval block, exactly like a real chain.
-# Every flow below is observed through the public API; PostgreSQL is only
-# consulted for the observation ledger and for the operator procedures the
-# runbooks describe.
+# Every flow below is exercised through the public or operator API; PostgreSQL
+# is consulted only for test-only ledger and queue invariants.
 set -euo pipefail
 
 RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
@@ -41,6 +40,8 @@ export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
 export PAYDAY_API_KEY="${PAYDAY_API_KEY:-0123456789abcdef0123456789abcdef}"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_PAYER_TOKEN_SECRET="${PAYDAY_PAYER_TOKEN_SECRET:-local-payer-token-secret-0123456789abcdef}"
+export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
 SECOND_API_KEY="second-account-0123456789abcdef0123456789abcdef"
 
 logs="$(mktemp -d)"
@@ -235,10 +236,10 @@ wait_for_api
 primary_key_hash="$(printf %s "$PAYDAY_API_KEY" | sha256_hex)"
 second_key_hash="$(printf %s "$SECOND_API_KEY" | sha256_hex)"
 psql "$DATABASE_URL" --quiet --command "
-  INSERT INTO accounts (id, api_key_hash, api_key_hint)
+  INSERT INTO accounts (id, api_key_hash, api_key_hint, email)
   VALUES
-    ('00000000-0000-0000-0000-000000000001', decode('$primary_key_hash', 'hex'), '…abcdef'),
-    ('00000000-0000-0000-0000-000000000002', decode('$second_key_hash', 'hex'), '…abcdef')
+    ('00000000-0000-0000-0000-000000000001', decode('$primary_key_hash', 'hex'), '…abcdef', 'primary@example.test'),
+    ('00000000-0000-0000-0000-000000000002', decode('$second_key_hash', 'hex'), '…abcdef', 'second@example.test')
   ON CONFLICT (id) DO NOTHING
 " >/dev/null
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
@@ -411,11 +412,8 @@ wait_for_status "$blacklisted_id" needs_attention
 assert_eq beneficiary_blacklisted "$(get_invoice "$blacklisted_id" | jq -r .attention.code)" "wrong attention code"
 assert_eq 250000 "$(token_balance "$blacklisted_address")" "funds must stay at the address while blocked"
 set_blacklisted "$BENEFICIARY_BLACKLISTED" false
-# Operator procedure from docs/runbooks/stuck-invoice.md.
-psql "$DATABASE_URL" --quiet --command "
-  UPDATE invoices SET blocked_reason = NULL, status = 'deploying', updated_at = now()
-  WHERE id = '${blacklisted_id#pay_}'::uuid AND status = 'blocked'
-" >/dev/null
+# Audited operator procedure from docs/runbooks/stuck-invoice.md.
+./target/debug/payday --json ops release "$blacklisted_id" >/dev/null
 wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
 

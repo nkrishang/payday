@@ -5,6 +5,7 @@ locals {
   certificate_validation_zone_ids = {
     (var.domain_name)         = var.route53_zone_id
     (var.payment_domain_name) = var.payment_route53_zone_id
+    (var.status_domain_name)  = var.route53_zone_id
   }
   common_environment = [
     { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
@@ -185,6 +186,16 @@ resource "aws_secretsmanager_secret_version" "webhook_encryption_key" {
   secret_string = random_id.webhook_encryption_key.b64_std
 }
 
+resource "random_password" "admin_bearer" {
+  length  = 48
+  special = false
+}
+resource "aws_secretsmanager_secret" "admin_bearer" { name = "${var.name}/admin-bearer" }
+resource "aws_secretsmanager_secret_version" "admin_bearer" {
+  secret_id     = aws_secretsmanager_secret.admin_bearer.id
+  secret_string = random_password.admin_bearer.result
+}
+
 resource "aws_kms_key" "signer" {
   description              = "${var.name} Ethereum transaction signer"
   key_usage                = "SIGN_VERIFY"
@@ -215,6 +226,10 @@ resource "aws_cloudwatch_log_group" "api" {
   name              = "/ecs/${var.name}/api"
   retention_in_days = 30
 }
+resource "aws_cloudwatch_log_group" "status" {
+  name              = "/ecs/${var.name}/status"
+  retention_in_days = 30
+}
 resource "aws_cloudwatch_log_group" "indexer" {
   name              = "/ecs/${var.name}/indexer"
   retention_in_days = 30
@@ -232,12 +247,20 @@ resource "aws_iam_role" "api_execution" {
   name               = "${var.name}-api-execution"
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "ecs-tasks.amazonaws.com" }, Action = "sts:AssumeRole" }] })
 }
+resource "aws_iam_role" "status_execution" {
+  name               = "${var.name}-status-execution"
+  assume_role_policy = aws_iam_role.api_execution.assume_role_policy
+}
 resource "aws_iam_role" "indexer_execution" {
   name               = "${var.name}-indexer-execution"
   assume_role_policy = aws_iam_role.api_execution.assume_role_policy
 }
 resource "aws_iam_role_policy_attachment" "api_execution" {
   role       = aws_iam_role.api_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+resource "aws_iam_role_policy_attachment" "status_execution" {
+  role       = aws_iam_role.status_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 resource "aws_iam_role_policy_attachment" "indexer_execution" {
@@ -247,7 +270,11 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.payer_token.arn, aws_secretsmanager_secret.webhook_encryption_key.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.payer_token.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
+}
+resource "aws_iam_role_policy" "status_secrets" {
+  role   = aws_iam_role.status_execution.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = aws_secretsmanager_secret.database_url.arn }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
@@ -257,6 +284,21 @@ resource "aws_iam_role_policy" "indexer_secrets" {
 resource "aws_iam_role" "api_task" {
   name               = "${var.name}-api-task"
   assume_role_policy = aws_iam_role.api_execution.assume_role_policy
+}
+resource "aws_sesv2_email_identity" "notifications" {
+  email_identity = var.notification_domain_name
+}
+resource "aws_route53_record" "ses_dkim" {
+  count   = 3
+  zone_id = var.route53_zone_id
+  name    = "${aws_sesv2_email_identity.notifications.dkim_signing_attributes[0].tokens[count.index]}._domainkey.${var.notification_domain_name}"
+  type    = "CNAME"
+  ttl     = 300
+  records = ["${aws_sesv2_email_identity.notifications.dkim_signing_attributes[0].tokens[count.index]}.dkim.amazonses.com"]
+}
+resource "aws_iam_role_policy" "api_ses" {
+  role   = aws_iam_role.api_task.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["ses:SendEmail"], Resource = aws_sesv2_email_identity.notifications.arn }] })
 }
 resource "aws_iam_role" "indexer_task" {
   name               = "${var.name}-indexer-task"
@@ -290,14 +332,42 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id },
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
       { name = "PAYDAY_PUBLIC_BASE_URL", value = "https://${var.payment_domain_name}" },
-      { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url }
+      { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
+      { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
+      { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address }
     ]),
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
       { name = "PAYDAY_PAYER_TOKEN_SECRET", valueFrom = aws_secretsmanager_secret.payer_token.arn },
-      { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn }
+      { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
+      { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
     ],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
+  }])
+}
+
+resource "aws_ecs_task_definition" "status" {
+  family                   = "${var.name}-status"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.status_execution.arn
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+  container_definitions = jsonencode([{
+    name                   = "status", image = "${aws_ecr_repository.api.repository_url}:${var.image_tag}", essential = true,
+    readonlyRootFilesystem = true,
+    portMappings           = [{ containerPort = var.api_port, protocol = "tcp" }],
+    environment = concat(local.common_environment, [
+      { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
+      { name = "PAYDAY_STATUS_ONLY", value = "true" },
+      { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) }
+    ]),
+    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }],
+    logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.status.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "status" } }
   }])
 }
 
@@ -347,10 +417,21 @@ resource "aws_lb_target_group" "api" {
     matcher = "200-399"
   }
 }
+resource "aws_lb_target_group" "status" {
+  name        = "${var.name}-status"
+  port        = var.api_port
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = aws_vpc.this.id
+  health_check {
+    path    = "/live"
+    matcher = "200-399"
+  }
+}
 
 resource "aws_acm_certificate" "api" {
   domain_name               = var.domain_name
-  subject_alternative_names = [var.payment_domain_name]
+  subject_alternative_names = [var.payment_domain_name, var.status_domain_name]
   validation_method         = "DNS"
   lifecycle { create_before_destroy = true }
 }
@@ -390,6 +471,17 @@ resource "aws_lb_listener" "https" {
     target_group_arn = aws_lb_target_group.api.arn
   }
 }
+resource "aws_lb_listener_rule" "status" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.status.arn
+  }
+  condition {
+    host_header { values = [var.status_domain_name] }
+  }
+}
 resource "aws_route53_record" "api" {
   zone_id = var.route53_zone_id
   name    = var.domain_name
@@ -403,6 +495,17 @@ resource "aws_route53_record" "api" {
 resource "aws_route53_record" "payment" {
   zone_id = var.payment_route53_zone_id
   name    = var.payment_domain_name
+  type    = "A"
+  alias {
+    name                   = aws_lb.api.dns_name
+    zone_id                = aws_lb.api.zone_id
+    evaluate_target_health = true
+  }
+}
+
+resource "aws_route53_record" "status" {
+  zone_id = var.route53_zone_id
+  name    = var.status_domain_name
   type    = "A"
   alias {
     name                   = aws_lb.api.dns_name
@@ -432,6 +535,28 @@ resource "aws_ecs_service" "api" {
     container_port   = var.api_port
   }
   depends_on = [aws_lb_listener.https]
+}
+resource "aws_ecs_service" "status" {
+  name            = "status"
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.status.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.api.id]
+    assign_public_ip = true
+  }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.status.arn
+    container_name   = "status"
+    container_port   = var.api_port
+  }
+  depends_on = [aws_lb_listener_rule.status]
 }
 resource "aws_ecs_service" "indexer" {
   name                               = "indexer"
@@ -523,6 +648,32 @@ resource "aws_cloudwatch_metric_alarm" "api_tasks" {
   dimensions          = { ClusterName = aws_ecs_cluster.this.name, ServiceName = aws_ecs_service.api.name }
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
+resource "aws_cloudwatch_metric_alarm" "status_unhealthy" {
+  alarm_name          = "${var.name}-status-unhealthy-targets"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "UnHealthyHostCount"
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 2
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "breaching"
+  dimensions          = { LoadBalancer = aws_lb.api.arn_suffix, TargetGroup = aws_lb_target_group.status.arn_suffix }
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+}
+resource "aws_cloudwatch_metric_alarm" "status_tasks" {
+  alarm_name          = "${var.name}-status-task-count"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "RunningTaskCount"
+  statistic           = "Minimum"
+  period              = 60
+  evaluation_periods  = 2
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+  dimensions          = { ClusterName = aws_ecs_cluster.this.name, ServiceName = aws_ecs_service.status.name }
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+}
 resource "aws_cloudwatch_metric_alarm" "indexer_tasks" {
   alarm_name          = "${var.name}-indexer-task-count"
   namespace           = "ECS/ContainerInsights"
@@ -558,6 +709,53 @@ resource "aws_cloudwatch_metric_alarm" "indexer_fatal" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
+resource "aws_cloudwatch_log_metric_filter" "notification_failures" {
+  name           = "${var.name}-notification-delivery-failures"
+  log_group_name = aws_cloudwatch_log_group.api.name
+  pattern        = "\"merchant notification delivery failed; retrying\""
+  metric_transformation {
+    name      = "NotificationDeliveryFailures"
+    namespace = var.name
+    value     = "1"
+  }
+}
+resource "aws_cloudwatch_metric_alarm" "notification_failures" {
+  alarm_name          = "${var.name}-notification-delivery-failures"
+  alarm_description   = "Merchant email or webhook delivery failed repeatedly; inspect gatewayd logs and notification_outbox"
+  namespace           = var.name
+  metric_name         = aws_cloudwatch_log_metric_filter.notification_failures.metric_transformation[0].name
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 5
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+resource "aws_cloudwatch_log_metric_filter" "notification_missing_contact" {
+  name           = "${var.name}-notification-missing-contact"
+  log_group_name = aws_cloudwatch_log_group.api.name
+  pattern        = "\"blocked payment notification has no merchant email\""
+  metric_transformation {
+    name      = "NotificationMissingContact"
+    namespace = var.name
+    value     = "1"
+  }
+}
+resource "aws_cloudwatch_metric_alarm" "notification_missing_contact" {
+  alarm_name          = "${var.name}-notification-missing-contact"
+  alarm_description   = "A blocked payment cannot notify its merchant by email; recover the account contact and contact the merchant manually"
+  namespace           = var.name
+  metric_name         = aws_cloudwatch_log_metric_filter.notification_missing_contact.metric_transformation[0].name
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+}
 # Worker conditions that do not end the process. Each is logged on every
 # pass while it holds, so the alarm stays raised until the condition clears.
 locals {
@@ -575,7 +773,7 @@ locals {
     cursor_lagging = {
       pattern     = "\"indexer cursor lagging\""
       period      = 60
-      description = "The block indexer trails finality by more than a thousand blocks"
+      description = "The block indexer trails finality by more than a thousand blocks; follow docs/runbooks/public-status-incident.md"
     }
     sweep_backlog_stale = {
       pattern     = "\"sweep backlog stale\""

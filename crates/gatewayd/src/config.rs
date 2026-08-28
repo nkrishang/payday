@@ -6,6 +6,7 @@ use gateway_core::ChainId;
 pub struct Config {
     bind_addr: String,
     database_url: String,
+    status_only: bool,
     auth0: Option<Auth0Config>,
     chain_id: ChainId,
     factory_address: Address,
@@ -15,10 +16,13 @@ pub struct Config {
     payer_token_secret: String,
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
+    notification_from_address: Option<String>,
+    status_stale_seconds: u64,
 }
 
 impl Config {
     pub fn from_env() -> Self {
+        let status_only = std::env::var("PAYDAY_STATUS_ONLY").as_deref() == Ok("true");
         let auth0_issuer = std::env::var("PAYDAY_AUTH0_ISSUER").ok();
         let auth0_audience = std::env::var("PAYDAY_AUTH0_AUDIENCE").ok();
         let auth0_client_id = std::env::var("PAYDAY_AUTH0_CLIENT_ID").ok();
@@ -64,6 +68,7 @@ impl Config {
             bind_addr: std::env::var("PAYDAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+            status_only,
             auth0,
             chain_id: ChainId(chain_id),
             factory_address,
@@ -71,10 +76,19 @@ impl Config {
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
             explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
-            payer_token_secret: std::env::var("PAYDAY_PAYER_TOKEN_SECRET")
-                .expect("PAYDAY_PAYER_TOKEN_SECRET must be set"),
+            payer_token_secret: std::env::var("PAYDAY_PAYER_TOKEN_SECRET").unwrap_or_else(|_| {
+                if status_only {
+                    "status-service-does-not-issue-links".into()
+                } else {
+                    panic!("PAYDAY_PAYER_TOKEN_SECRET must be set")
+                }
+            }),
             api_key_prefix,
             webhook_encryption_key,
+            notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
+            status_stale_seconds: std::env::var("PAYDAY_STATUS_INDEXER_STALE_SECONDS")
+                .map_or(Ok(120), |value| value.parse())
+                .expect("PAYDAY_STATUS_INDEXER_STALE_SECONDS must be an integer"),
         }
     }
 
@@ -84,6 +98,14 @@ impl Config {
 
     pub fn database_url(&self) -> &str {
         &self.database_url
+    }
+
+    pub fn status_only(&self) -> bool {
+        self.status_only
+    }
+
+    pub fn status_stale_seconds(&self) -> u64 {
+        self.status_stale_seconds
     }
 
     pub fn auth0(&self) -> Option<&Auth0Config> {
@@ -120,6 +142,10 @@ impl Config {
 
     pub fn webhook_encryption_key(&self) -> Option<[u8; 32]> {
         self.webhook_encryption_key
+    }
+
+    pub fn notification_from_address(&self) -> Option<&str> {
+        self.notification_from_address.as_deref()
     }
 }
 

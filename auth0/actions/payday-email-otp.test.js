@@ -28,6 +28,7 @@ function event(overrides = {}) {
     authentication: {
       methods: [{ name: "email", timestamp: new Date().toISOString() }],
     },
+    user: { email: "merchant@example.com", email_verified: true },
     ...overrides,
   };
 }
@@ -41,6 +42,7 @@ test("adds fresh email OTP claims for the Payday client", async () => {
     result.claims.get("https://api.payday.sh/auth/method"),
     "email_otp",
   );
+  assert.equal(result.claims.get("https://api.payday.sh/auth/email"), "merchant@example.com");
   assert.equal(
     result.claims.get("https://api.payday.sh/auth/client_id"),
     "payday-cli",

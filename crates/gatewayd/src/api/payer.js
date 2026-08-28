@@ -75,17 +75,20 @@ function renderPaymentActions(data) {
 
 function renderResolution(data) {
   const panel = $('settled');
-  const settled = data.status === 'settled' || data.status === 'returned';
-  panel.classList.toggle('hidden', !settled);
-  if (!settled) return;
+  const resolved = data.status === 'settled' || data.status === 'returned' || data.status === 'needs_attention';
+  panel.classList.toggle('hidden', !resolved);
+  if (!resolved) return;
 
   const recovered = data.status === 'returned';
-  $('resolution-title').textContent = recovered ? 'Funds sent to refund address' : 'Payment complete';
-  $('resolution-copy').textContent = recovered
+  const attention = data.status === 'needs_attention';
+  $('resolution-title').textContent = attention ? 'Payout needs attention' : recovered ? 'Funds sent to refund address' : 'Payment complete';
+  $('resolution-copy').textContent = attention
+    ? data.payer_message
+    : recovered
     ? 'This payment was not sent to the beneficiary. Contact the merchant for help.'
     : 'The payment has settled on-chain.';
-  $('resolution-icon').textContent = recovered ? '↩' : '✓';
-  panel.classList.toggle('problem', recovered);
+  $('resolution-icon').textContent = attention ? '!' : recovered ? '↩' : '✓';
+  panel.classList.toggle('problem', recovered || attention);
   const transaction = $('transaction');
   transaction.classList.toggle('hidden', !data.settlement_explorer_url);
   if (data.settlement_explorer_url) transaction.href = data.settlement_explorer_url;

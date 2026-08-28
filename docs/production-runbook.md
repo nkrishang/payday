@@ -291,6 +291,27 @@ Do not advertise or depend on the service until this succeeds.
 
 ## Updates and rollback
 
+### Notification contact rollout gate
+
+Migration `0010` adds the verified-email contact and notification outbox.
+Existing accounts begin without an email and must run `payday login` again;
+payment creation refuses to create additional unnotifiable payments until a
+verified email has been captured. During this
+rollout, query the production database through the procedure in
+[`db-access.md`](runbooks/db-access.md):
+
+```sql
+SELECT count(*) AS accounts_without_verified_email
+FROM accounts
+WHERE disabled_at IS NULL AND email IS NULL;
+```
+
+Contact each affected merchant through the existing support channel and have
+them authenticate again. Do not declare the notification rollout complete
+until this count is zero. If a legacy blocked invoice still snapshots no
+contact, `payday-notification-missing-contact` alarms immediately; notify that
+merchant manually and recover their verified contact before releasing it.
+
 For each application update, build and push a new `git-<SHA>` tag, change
 `image_tag`, review `terraform plan`, and apply it. ECS's deployment circuit
 breaker rolls back failed task startups. The indexer deployment stops the old
