@@ -39,21 +39,24 @@ third-party key-management account is required.
 
 - `https://api.payday.sh` is the public API behind AWS WAF and the Application
   Load Balancer. The CLI uses this as `PAYDAY_API_URL`.
+- `https://pay.payday.sh` serves scoped payer checkout links through the same
+  load balancer.
 - The indexer/sweeper and PostgreSQL database have no public hostname or inbound
   internet access.
 - `payday.sh` and `www.payday.sh` remain available for a Vercel-hosted website or
   documentation. They are not required to run the payment service.
 
-Create a **public hosted zone named `api.payday.sh`** in Route53. AWS assigns
-four authoritative nameservers. In Vercel's DNS settings for `payday.sh`, add
-four separate `NS` records with name `api`, one for each AWS nameserver. Do not
-change the nameservers for the whole `payday.sh` domain. Use the Route53 hosted
-zone ID as `route53_zone_id`; Terraform then creates the API alias and ACM
-certificate-validation records inside that delegated zone.
+Create two **public hosted zones**, `api.payday.sh` and `pay.payday.sh`, in
+Route53. AWS assigns four authoritative nameservers to each. In Vercel's DNS
+settings for `payday.sh`, add each zone's four separate `NS` records: name
+`api` for the API zone and name `pay` for the payment zone. Do not change the
+nameservers for the whole `payday.sh` domain. Set `route53_zone_id` to the API
+zone ID and `payment_route53_zone_id` to the payment zone ID; Terraform creates
+each alias and ACM validation record in the zone that owns its hostname.
 
-Wait until `dig NS api.payday.sh` returns the four AWS nameservers before the
-full Terraform apply, because ACM cannot validate the certificate until the
-delegation is publicly visible.
+Wait until `dig NS api.payday.sh` and `dig NS pay.payday.sh` return their
+respective AWS nameservers before the full Terraform apply, because ACM cannot
+validate the certificate until both delegations are publicly visible.
 
 ## Fixed Monad values
 
@@ -256,19 +259,13 @@ USDC; it pays gas to invoke the permissionless factory.
 
 ## 9. Configure and test the CLI
 
-Authenticate through Auth0 and create the operator account's API key. Store the
-returned key immediately in the operator's password/secret manager; it cannot
-be retrieved later:
+Authenticate through Auth0. Production API and Auth0 defaults are compiled into
+the CLI, and the key is saved securely in its XDG-aware credentials file:
 
 ```bash
-export PAYDAY_API_URL="$(terraform -chdir=infra output -raw api_url)"
-export PAYDAY_AUTH0_ISSUER="https://<tenant>.auth0.com/"
-export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export PAYDAY_AUTH0_CLIENT_ID="<native-application-client-id>"
-account_json="$(cargo run --release -p gateway-cli --bin payday -- --json account create)"
-export PAYDAY_API_KEY="$(jq -r .api_key <<<"$account_json")"
+cargo run --release -p gateway-cli --bin payday -- login
 
-curl --fail "$PAYDAY_API_URL/health"
+curl --fail "https://api.payday.sh/health"
 cargo run --release -p gateway-cli --bin payday -- create \
   --chain-id 143 \
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
@@ -316,8 +313,9 @@ and creates the GitHub Release.
   indexer and loss of the retained database advisory-lock connection
   terminate the worker instead of appearing healthy; a stuck helper
   transaction only pauses the sweep worker.
-- Replace account API keys with `payday account create` as described in the
-  secrets-rotation runbook; replacement is immediate and does not restart services.
+- Rotate account API keys with `payday keys rotate` as described in the
+  secrets-rotation runbook. The previous key has a 24-hour grace period;
+  `payday keys revoke` invalidates current and grace-period keys immediately.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
   bypasses ECS and starts another task. Keep the ECS service at one task as an
   additional control.

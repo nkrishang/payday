@@ -51,11 +51,13 @@ jobs:
     needs: [unix, windows]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - run: (cd dist && sha256sum -- * > SHA256SUMS)
+      - run: scripts/generate-homebrew-formula.sh "$GITHUB_REF_NAME" dist/SHA256SUMS > dist/payday.rb
       - run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}

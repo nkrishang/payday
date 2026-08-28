@@ -6,7 +6,7 @@ receives a password, generates an OTP, or stores an email address.
 
 Each Auth0 identity owns exactly one active Payday API key. Requesting another
 key atomically replaces the stored hash, increments its generation, and makes
-the old key fail immediately. Plaintext keys are returned once; PostgreSQL stores
+the prior key enter a 24-hour grace period. Plaintext keys are returned once; PostgreSQL stores
 only a SHA-256 digest and a final-six-character hint.
 
 ## Credentials and where they belong
@@ -54,7 +54,9 @@ plan's daily sending limit.
 3. Open **Applications → Applications → Create Application**:
    - Name: `Payday CLI`
    - Type: **Native**
-   Record its public Client ID as `PAYDAY_AUTH0_CLIENT_ID`.
+   Record its public Client ID. `gatewayd` uses it as
+   `GATEWAY_AUTH0_CLIENT_ID`; non-production CLI testing uses it as the hidden
+   `PAYDAY_AUTH0_CLIENT_ID` override.
 4. In that application's **Advanced Settings → Grant Types**, enable
    **Passwordless OTP**. Disable grants the CLI does not use, especially
    Password and Client Credentials. Do not create or distribute a client
@@ -96,46 +98,52 @@ only, so replaying the same access token cannot rotate a key twice.
 
 ## 4. Configure Payday
 
-For local shells, put the public Auth0 values in an untracked `.env` or export
-them directly:
+Configure `gatewayd` (or its untracked local `.env`) with:
 
 ```bash
-export PAYDAY_AUTH0_ISSUER="https://<tenant-domain>/"
-export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export PAYDAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
+export GATEWAY_AUTH0_ISSUER="https://<tenant-domain>/"
+export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
+export GATEWAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
 ```
 
-The same three values are required by `gatewayd`. For AWS, set
-`auth0_issuer`, `auth0_audience`, and `auth0_client_id` in the untracked
-`infra/terraform.tfvars`; Terraform passes them to the API task. The CLI reads
-the three environment variables directly.
+For AWS, set `auth0_issuer`, `auth0_audience`, and `auth0_client_id` in the
+untracked `infra/terraform.tfvars`; Terraform passes them to the API task.
+
+The production CLI includes the public Payday Auth0 issuer, native client ID,
+and `https://api.payday.sh` audience. A non-production `PAYDAY_API_URL` requires
+all three hidden identity overrides `PAYDAY_AUTH0_ISSUER`,
+`PAYDAY_AUTH0_CLIENT_ID`, and `PAYDAY_AUTH0_AUDIENCE`. This prevents production
+identity tokens from being forwarded to another API.
 
 ## 5. Test signup and first key creation from the CLI
 
-Build the CLI, set the API URL, and run:
+Build the CLI and sign in:
 
 ```bash
 cargo build -p gateway-cli --bin payday
-export PAYDAY_API_URL="https://api.payday.sh"
-./target/debug/payday account create
+./target/debug/payday login
 ```
 
 The interaction is terminal-native:
 
 ```text
-Email: user@example.com
-A one-time code was sent to user@example.com. Check your email.
-One-time code: 123456
-API key created (generation 1).
-API key: payday_live_...
-Store this key securely; it cannot be retrieved later.
+Payday — stablecoin virtual accounts for every payment
+Email  › user@example.com
+✓ Code sent to u***@example.com · expires in 3 min · r to resend
+Code   › 123456
+✓ Signed in as user@example.com
+✓ API key saved to ~/.config/payday/credentials (payday_live_…1234)
 ```
 
-Entering the OTP calls Auth0 directly and does not open a browser. Store the key
-in a password manager, then use it without putting it in shell history:
+Entering the OTP calls Auth0 directly and does not open a browser. The masked key
+is saved in an XDG-aware credentials file (`$XDG_CONFIG_HOME/payday/credentials`,
+or `~/.config/payday/credentials`; Windows uses `%APPDATA%\\payday\\credentials`).
+`PAYDAY_CONFIG_DIR` overrides the directory. Separate `default` and `local`
+profiles are bound to their issuing API URL. Use `payday login --show` only when
+the plaintext key must be copied to an approved secret manager. Payment commands
+load the saved profile automatically:
 
 ```bash
-export PAYDAY_API_KEY="payday_live_..."
 ./target/debug/payday create \
   --chain-id 143 \
   --token <USDC_ADDRESS> \
@@ -146,43 +154,34 @@ export PAYDAY_API_KEY="payday_live_..."
 ./target/debug/payday get <PAYMENT_ID>
 ```
 
-`payday account get` repeats email OTP authentication and returns only the
-key hint, generation, and timestamps—not the key itself.
+`payday whoami` shows the account, key hint, generation, timestamps, and any
+previous-key expiry. `payday logout` removes only the saved profile; it does not
+revoke a server-side key.
 
-## 6. Replace a key
+## 6. Rotate or revoke a key
 
-Run the same creation command again:
-
-```bash
-./target/debug/payday account create
-```
-
-After email OTP authentication, an existing account gets an explicit warning:
-
-```text
-WARNING: issuing a new API key immediately invalidates the existing key …abc123 (generation 1).
-Proceed? [y/N]: y
-API key replaced (generation 2).
-API key: payday_live_...
-Advisory: your previous API key is now invalid. Store this key securely; it cannot be retrieved later.
-```
-
-Enter `n` or press Enter to cancel. Automation may pass `--yes`; the warning is
-still written to stderr. With `--json`, stdout is machine-readable and includes
-`replaced_previous_key`; prompts and warnings remain on stderr:
+Rotation requires a fresh email OTP:
 
 ```bash
-key_json="$(./target/debug/payday --json account create --yes)"
-export PAYDAY_API_KEY="$(jq -r .api_key <<<"$key_json")"
+./target/debug/payday keys rotate
 ```
 
-The server checks the generation shown in the warning inside the same database
-transaction that replaces the key. If another command creates or replaces the
-key first, this command fails with a conflict without changing either key; run
-it again to review and confirm the new generation.
+Confirm the prompt (or pass `-y`). The new key replaces the saved profile and is
+masked unless `--show` is supplied. The previous key remains valid for 24 hours,
+allowing a safe deployment overlap. Concurrent rotations use generation checks
+and fail with a conflict rather than replacing an unexpected key.
 
-Verify the former key receives HTTP 401 and the replacement can still get an
-invoice owned by the account.
+For CI, inject a key from its secret store; do not perform routine interactive
+OTP login. `PAYDAY_API_KEY` takes precedence over saved credentials:
+
+```bash
+export PAYDAY_API_KEY="<key-from-CI-secret-store>"
+./target/debug/payday --json get <PAYMENT_ID>
+```
+
+For compromise or decommissioning, `payday keys revoke` (or `-y`) immediately
+invalidates current and grace-period keys and removes the saved profile. A later
+`payday login` issues a new generation.
 
 ## Clean pre-launch database
 
@@ -209,7 +208,8 @@ launch, additionally:
 2. Confirm a reused/expired/wrong OTP fails and Auth0 does not reveal whether an
    address already exists.
 3. Confirm the first access token cannot issue two keys.
-4. Confirm old API keys immediately return 401 after replacement.
+4. Confirm old API keys remain valid during the 24-hour rotation grace period
+   and fail immediately after `payday keys revoke`.
 5. Inspect received headers for SPF, DKIM, and DMARC alignment.
 6. Revoke a staging Resend key and confirm login fails closed while already
    issued Payday API keys continue to work.

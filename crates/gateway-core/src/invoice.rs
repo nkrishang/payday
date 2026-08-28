@@ -152,6 +152,9 @@ pub struct Invoice {
     pub settled_at_timestamp: Option<u64>,
     /// Why automatic sweeping stopped for this invoice, if it did.
     pub blocked_reason: Option<String>,
+    /// When the customer asked clients to stop using this invoice. This is
+    /// advisory metadata and does not alter the immutable payment contract.
+    pub cancellation_requested_at: Option<String>,
 }
 
 impl Invoice {
@@ -190,6 +193,7 @@ impl Invoice {
             resolved_at_block: None,
             settled_at_timestamp: None,
             blocked_reason: None,
+            cancellation_requested_at: None,
         }
     }
 

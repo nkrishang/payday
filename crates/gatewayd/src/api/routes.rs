@@ -1,20 +1,34 @@
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::trace::TraceLayer;
+use tracing::field;
 
 use crate::api::accounts;
 use crate::api::auth;
 use crate::api::health;
 use crate::api::invoices;
+use crate::api::payer;
+use crate::api::status;
+use crate::api::webhooks;
+use crate::api::{middleware as api_middleware, openapi};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     let authenticated = Router::new()
+        .route("/v1/account", get(accounts::get_account))
         .route(
             "/v1/payments",
             post(invoices::create_payment).get(invoices::list_payments),
         )
         .route("/v1/payments/{id}", get(invoices::get_payment))
+        .route("/v1/payments/{id}/cancel", post(invoices::cancel_payment))
+        .route("/v1/payments/{id}/transfers", get(invoices::transfers))
+        .route("/v1/status", get(status::get))
+        .route("/v1/webhooks", post(webhooks::add).get(webhooks::list))
+        .route("/v1/webhooks/{id}", delete(webhooks::remove))
+        .route("/v1/webhooks/{id}/test", post(webhooks::test))
+        .route("/v1/webhook-deliveries", get(webhooks::deliveries))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -24,7 +38,9 @@ pub fn router(state: AppState) -> Router {
     let account_management = Router::new()
         .route(
             "/v1/account/api-key",
-            post(accounts::issue).get(accounts::metadata),
+            post(accounts::issue)
+                .get(accounts::metadata)
+                .delete(accounts::revoke),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -34,9 +50,43 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health::health))
+        .route("/pay/{id}", get(payer::page))
+        .route("/assets/payer.css", get(payer::css))
+        .route("/assets/payer.js", get(payer::js))
+        .route("/v1/payer/payments/{id}", get(payer::get))
+        .route("/v1/payer/payments/{id}/qr", get(payer::qr))
+        .route("/openapi.json", get(openapi::spec))
+        .route("/docs", get(openapi::reference))
+        .route("/api", get(openapi::reference))
+        .route("/api/openapi.json", get(openapi::spec))
         .merge(authenticated)
         .merge(account_management)
         .with_state(state)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::extract::Request| {
+                    let request_id = request
+                        .extensions()
+                        .get::<api_middleware::RequestId>()
+                        .map(|value| value.0.as_str())
+                        .unwrap_or("unknown");
+                    tracing::info_span!(
+                        "http_request", method = %request.method(), path = %request.uri().path(),
+                        request_id, status = field::Empty, latency_ms = field::Empty,
+                        account_id = field::Empty
+                    )
+                })
+                .on_response(
+                    |response: &axum::response::Response,
+                     latency: std::time::Duration,
+                     span: &tracing::Span| {
+                        span.record("status", response.status().as_u16());
+                        span.record("latency_ms", latency.as_millis());
+                        tracing::info!(parent: span, "request completed");
+                    },
+                ),
+        )
+        .layer(middleware::from_fn(api_middleware::request_id))
 }
 
 #[cfg(test)]
@@ -103,8 +153,20 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            payer_access(),
+            "payday_live_".into(),
+            None,
         );
         router(state)
+    }
+
+    fn payer_access() -> payer::PayerAccess {
+        payer::PayerAccess::new(
+            "http://127.0.0.1:3000",
+            None,
+            b"0123456789abcdef0123456789abcdef",
+        )
+        .unwrap()
     }
 
     fn unix_now() -> u64 {
@@ -140,7 +202,7 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    fn identity_verifier_and_tokens() -> (auth::Auth0Verifier, String, String) {
+    fn identity_verifier_and_tokens() -> (auth::Auth0Verifier, String, String, String) {
         let private = rsa::RsaPrivateKey::new(&mut rand_08::thread_rng(), 2048).unwrap();
         let private_pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
         let public_pem = private
@@ -176,7 +238,12 @@ mod tests {
             )
             .unwrap()
         };
-        (verifier, token("event-1"), token("event-2"))
+        (
+            verifier,
+            token("event-1"),
+            token("event-2"),
+            token("event-3"),
+        )
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -203,8 +270,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let mut body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        body.as_object_mut().unwrap().remove("request_id");
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            body,
             serde_json::json!({
                 "error": {
                     "code": "unauthorized",
@@ -416,6 +486,287 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn relative_expiry_replays_after_wall_clock_moves(pool: PgPool) {
+        let app = app(pool).await;
+        let body = valid_body();
+        let first = app
+            .clone()
+            .oneshot(create_request(KEY, "relative-replay", &body))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first = json_body(first).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        let replay = app
+            .oneshot(create_request(KEY, "relative-replay", &body))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = json_body(replay).await;
+        assert_eq!(replay["id"], first["id"]);
+        assert_eq!(replay["expires_at"], first["expires_at"]);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn payment_freshness_distinguishes_indexed_cursor_from_finalized_head(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "freshness", &valid_body()))
+            .await
+            .unwrap();
+        let id = json_body(created).await["id"].as_str().unwrap().to_owned();
+        sqlx::query("INSERT INTO indexer_cursor(chain_id,token_address,last_block,last_block_hash,last_block_timestamp) VALUES(1,$1,117,$2,1700000000)")
+            .bind(Address::ZERO.as_slice()).bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO indexer_status(chain_id,token_address,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,$1,120,$2,1700000012)")
+            .bind(Address::ZERO.as_slice()).bind([2_u8; 32].as_slice()).execute(&pool).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/v1/payments/{id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let payment = json_body(response).await;
+        assert_eq!(payment["as_of"]["block"], "117");
+        assert_eq!(payment["indexer_freshness"]["last_indexed_block"], "117");
+        assert_eq!(payment["indexer_freshness"]["last_finalized_block"], "120");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn address_lookup_cancel_and_bounded_list_shape_work(pool: PgPool) {
+        let app = app(pool).await;
+        let body = json!({
+            "payout_address": "0x0000000000000000000000000000000000000002",
+            "amount": "1",
+            "memo": "Order 1234"
+        });
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "lookup-and-cancel", &body))
+            .await
+            .unwrap();
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap();
+        let address = created["address"].as_str().unwrap();
+        assert_eq!(created["chain"]["id"], "1");
+        assert_eq!(created["token"]["address"], Address::ZERO.to_checksum(None));
+        assert_eq!(created["refund_address"], body["payout_address"]);
+        assert_eq!(created["memo"], "Order 1234");
+        assert_eq!(created["expires_in"], 86_400);
+
+        let found = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payments/{address}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.status(), StatusCode::OK);
+        assert_eq!(json_body(found).await["id"], id);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/payments")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = json_body(listed).await;
+        assert_eq!(listed["payments"][0]["id"], id);
+        assert!(listed["payments"][0].get("transfers").is_none());
+
+        let cancelled = app
+            .oneshot(
+                Request::post(format!("/v1/payments/{id}/cancel"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancelled = json_body(cancelled).await;
+        assert_eq!(cancelled["payment"]["status"], "awaiting_payment");
+        assert!(cancelled["payment"]["cancellation_requested_at"].is_string());
+        assert!(
+            cancelled["advisory"]
+                .as_str()
+                .unwrap()
+                .contains("does not alter")
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn scoped_payment_link_serves_status_and_qr_without_merchant_data(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "payer-link", &valid_body()))
+            .await
+            .unwrap();
+        let created = json_body(created).await;
+        let payment_url = reqwest::Url::parse(created["payment_url"].as_str().unwrap()).unwrap();
+        let id = created["id"].as_str().unwrap();
+        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let token = payment_url
+            .query_pairs()
+            .find_map(|(name, value)| (name == "token").then(|| value.into_owned()))
+            .unwrap();
+
+        let page = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/pay/{id}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(page.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert!(
+            page.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .starts_with("public")
+        );
+        let page_body = to_bytes(page.into_body(), 64 * 1024).await.unwrap();
+        assert!(
+            !page_body
+                .windows(token.len())
+                .any(|window| window == token.as_bytes())
+        );
+
+        let status = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(status.headers()[header::CACHE_CONTROL], "no-store");
+        let status = json_body(status).await;
+        assert_eq!(status["id"], id);
+        assert_eq!(status["status"], "awaiting_payment");
+        assert_eq!(status["amount_base_units"], "1000000");
+        assert!(status["payment_uri"].as_str().unwrap().starts_with(
+            "ethereum:0x0000000000000000000000000000000000000000@1/transfer?address="
+        ));
+        for private in [
+            "payout_address",
+            "refund_address",
+            "self_settlement",
+            "metadata",
+        ] {
+            assert!(
+                status.get(private).is_none(),
+                "payer response leaked {private}"
+            );
+        }
+
+        let qr = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}/qr?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(qr.status(), StatusCode::OK);
+        assert_eq!(
+            qr.headers()[header::CONTENT_TYPE],
+            "image/svg+xml; charset=utf-8"
+        );
+        assert_eq!(qr.headers()[header::CACHE_CONTROL], "no-store");
+
+        sqlx::query("UPDATE invoices SET confirmed_received = '250000' WHERE id = $1")
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let partial = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let partial = json_body(partial).await;
+        assert_eq!(partial["remaining_base_units"], "750000");
+        assert_eq!(partial["status"], "partially_paid");
+        assert_eq!(partial["payable"], true);
+        assert!(
+            partial["payment_uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("uint256=750000")
+        );
+
+        sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = $1")
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let expired = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let expired = json_body(expired).await;
+        assert_eq!(expired["payable"], false);
+        assert!(expired["payment_uri"].is_null());
+        let closed_qr = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}/qr?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed_qr.status(), StatusCode::GONE);
+        assert_eq!(
+            json_body(closed_qr).await["error"]["code"],
+            "payment_not_payable"
+        );
+
+        let tampered = app
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}?token={token}x"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tampered.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(tampered).await["error"]["code"],
+            "invalid_payment_link"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn create_invoice_rejects_malformed_parameters(pool: PgPool) {
         let app = app(pool).await;
         let cases: Vec<(&str, Value, &str)> = vec![
@@ -553,8 +904,8 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn authenticated_user_can_create_and_replace_one_key(pool: PgPool) {
-        let (verifier, token, replacement_token) = identity_verifier_and_tokens();
+    async fn authenticated_user_can_rotate_inspect_and_revoke_keys(pool: PgPool) {
+        let (verifier, token, replacement_token, revocation_token) = identity_verifier_and_tokens();
         let accounts = AccountRepository::new(pool.clone());
         let state = AppState::new(
             InvoiceRepository::new(pool),
@@ -563,6 +914,9 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            payer_access(),
+            "payday_live_".into(),
+            None,
         );
         let app = router(state);
         let identity_request = |method: &str, path: &str, body: Body| {
@@ -623,6 +977,24 @@ mod tests {
         let second_key = replaced_json["api_key"].as_str().unwrap().to_string();
         assert_ne!(first_key, second_key);
 
+        let metadata = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/account")
+                    .header(header::AUTHORIZATION, format!("Bearer {second_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata = json_body(metadata).await;
+        assert_eq!(metadata["generation"], 2);
+        assert!(metadata["account_id"].is_string());
+        assert!(metadata["key_hint"].is_string());
+        assert!(metadata["previous_key_expires_at"].is_string());
+        assert!(metadata["revoked_at"].is_null());
+
         let invoice_request = |key: &str| {
             Request::get("/v1/payments/not-an-id")
                 .header(header::AUTHORIZATION, format!("Bearer {key}"))
@@ -635,14 +1007,35 @@ mod tests {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            app.clone()
+                .oneshot(invoice_request(&second_key))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::delete("/v1/account/api-key")
+                    .header(header::AUTHORIZATION, format!("Bearer {revocation_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"expected_generation":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             app.oneshot(invoice_request(&second_key))
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::UNAUTHORIZED
         );
     }
 }

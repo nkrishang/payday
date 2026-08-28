@@ -284,6 +284,13 @@ pub struct FailureProbe {
     pub balance: Option<U256>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementEvent {
+    pub transaction_hash: B256,
+    pub block_number: u64,
+    pub block_hash: B256,
+}
+
 /// Chain access needed by the indexer. Standard Ethereum JSON-RPC methods keep
 /// the implementation compatible with QuickNode and local Anvil.
 #[async_trait]
@@ -337,6 +344,15 @@ pub trait ChainClient: Send + Sync {
 
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
+
+    /// Transaction that created and drained `Payment`, searched only through
+    /// the finalized block whose hash the caller verified.
+    async fn payment_settlement_tx(
+        &self,
+        payment: Address,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<SettlementEvent, ChainError>;
 
     /// Read the token facts that distinguish a transient failure from a
     /// permanent one, at a block whose hash the caller verified.
@@ -553,6 +569,48 @@ impl ChainClient for AlloyChainClient {
                 })
             })
             .collect()
+    }
+
+    async fn payment_settlement_tx(
+        &self,
+        payment: Address,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<SettlementEvent, ChainError> {
+        let settled = Settled::SIGNATURE_HASH;
+        let recovered = Recovered::SIGNATURE_HASH;
+        let filter = Filter::new()
+            .address(payment)
+            .from_block(from_block)
+            .to_block(to_block);
+        let mut logs = self
+            .provider
+            .get_logs(&filter)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getLogs", error))?
+            .into_iter()
+            .filter(|log| {
+                !log.removed
+                    && log.address() == payment
+                    && log
+                        .topics()
+                        .first()
+                        .is_some_and(|topic| *topic == settled || *topic == recovered)
+            })
+            .collect::<Vec<_>>();
+        logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
+        logs.first()
+            .and_then(|log| Some((log.transaction_hash?, log.block_number?, log.block_hash?)))
+            .map(|(transaction_hash, block_number, block_hash)| SettlementEvent {
+                transaction_hash,
+                block_number,
+                block_hash,
+            })
+            .ok_or_else(|| {
+                ChainError::Transient(format!(
+                    "payment {payment} is deployed but has no finalized settlement event in blocks {from_block}..={to_block}"
+                ))
+            })
     }
 
     async fn sweep_receipt(

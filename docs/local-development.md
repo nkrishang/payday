@@ -130,7 +130,7 @@ psql "$DATABASE_URL" -c "INSERT INTO accounts (id, api_key_hash, api_key_hint)
 ```
 
 Production users obtain keys through Auth0 email OTP with
-`payday account create`; see `docs/authentication.md`.
+`payday login`; see `docs/authentication.md`.
 
 In another terminal:
 
@@ -196,13 +196,19 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 ## Configuration
 
 - `DATABASE_URL`
-- `PAYDAY_API_KEY` — CLI-only per-account bearer key for invoice requests
+- `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
 - `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
   Auth0 account-management settings (see `docs/authentication.md`)
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
+- `PAYDAY_PUBLIC_BASE_URL` — origin used in payment links; defaults to
+  `http://127.0.0.1:3000` locally
+- `PAYDAY_PAYER_TOKEN_SECRET` — random secret of at least 32 bytes used only
+  to scope payer reads; required by `gatewayd`
+- `PAYDAY_EXPLORER_BASE_URL` — optional HTTPS explorer origin; production
+  Monad uses `https://monadvision.com`, while Anvil leaves it unset
 - `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
   fresh database (the current block at first deployment)
 - `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
@@ -238,4 +244,4 @@ Terraform source is under `infra/`.
   worker pauses and alarms while block indexing continues.
 - `blocked` invoices are released by an operator (`docs/runbooks/stuck-invoice.md`);
   the worker never retries them on its own.
-- The API has no list endpoint; merchants track invoice IDs themselves.
+- Payment listing is cursor-paginated and bounded to 100 records per request.
