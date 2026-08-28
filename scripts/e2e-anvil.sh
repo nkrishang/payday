@@ -245,7 +245,8 @@ wait_for_api
 echo "Creating accounts through the real local email-OTP CLI flow"
 export PAYDAY_CONFIG_DIR="$logs/payday-config"
 primary_login="$(printf 'primary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
-export PAYDAY_API_KEY="$(jq -er .api_key <<<"$primary_login")"
+PAYDAY_API_KEY="$(jq -er .api_key <<<"$primary_login")"
+export PAYDAY_API_KEY
 second_login="$(printf 'secondary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
 SECOND_API_KEY="$(jq -er .api_key <<<"$second_login")"
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
