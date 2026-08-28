@@ -24,6 +24,12 @@ The CLI provides polished login, payment creation and tracking, payer links, acc
 
 ## Documentation
 
+- [Customer quickstart](docs/quickstart.md)
+- [Payment concepts and lifecycle](docs/concepts.md)
+- [CLI reference](docs/cli-reference.md)
+- [HTTP API reference](docs/api-reference.md)
+- [Customer FAQ](docs/faq.md)
+- [Changelog](CHANGELOG.md)
 - [Local development and configuration](docs/local-development.md)
 - [CLI installation](docs/install.md)
 - [Payments API](docs/payments-api.md)

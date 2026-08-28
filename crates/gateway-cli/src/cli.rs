@@ -174,8 +174,8 @@ pub struct GetArgs {
     /// Refresh until the payment reaches a terminal state.
     #[arg(long)]
     pub watch: bool,
-    /// Refresh interval in seconds.
-    #[arg(long, default_value_t = 2, requires = "watch")]
+    /// Long-poll refresh window in seconds.
+    #[arg(long, default_value_t = 2, requires = "watch", value_parser = clap::value_parser!(u64).range(1..=30))]
     pub interval: u64,
 }
 
@@ -325,5 +325,25 @@ mod tests {
             Cli::try_parse_from(["payday", "webhooks", "add", "https://example.test/hook"]).is_ok()
         );
         assert!(Cli::try_parse_from(["payday", "webhooks", "test", "not-a-uuid"]).is_err());
+    }
+
+    #[test]
+    fn watch_interval_matches_the_api_long_poll_window() {
+        assert!(
+            Cli::try_parse_from(["payday", "get", "pay_test", "--watch", "--interval", "1"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["payday", "get", "pay_test", "--watch", "--interval", "30"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["payday", "get", "pay_test", "--watch", "--interval", "0"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["payday", "get", "pay_test", "--watch", "--interval", "31"])
+                .is_err()
+        );
     }
 }

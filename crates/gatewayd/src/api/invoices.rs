@@ -15,7 +15,7 @@ use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, ChainId, CreatePaymentRequest,
     FactoryAddress, IndexerFreshnessDto, Invoice, PaymentListResponse, PaymentResponse,
     PaymentStatus, PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto,
-    USDC_DECIMALS, resolve_expiration,
+    USDC_DECIMALS, parse_expiration, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -190,7 +190,7 @@ pub async fn create_payment(
     }
     let expires_in_text = req.expires_in.map(|value| format!("{value}s"));
     let now = unix_now();
-    let expiration = resolve_expiration(
+    let expiration = parse_expiration(
         expires_in_text.as_deref(),
         req.expires_at.as_deref(),
         None,
@@ -263,6 +263,8 @@ pub async fn create_payment(
     if !state.accounts.has_verified_email(account).await? {
         return Err(ApiError::account_contact_required());
     }
+    validate_expiration_window(&expiration, now)
+        .map_err(|error| ApiError::invalid_request(error.to_string()))?;
 
     // 6. Create the domain invoice (generates ID, salt, payment address).
     let invoice = Invoice::new(
