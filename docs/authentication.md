@@ -18,8 +18,29 @@ only a SHA-256 digest and a final-six-character hint.
 | Auth0 client ID | Native application **Settings → Client ID** | API service, CLI, `infra/terraform.tfvars`; it is public |
 | Resend API key | Resend **API Keys → Create API Key** | Auth0 **Branding → Email Provider** only |
 
-There is no Auth0 client secret in this design. Never put the Resend API key in
-this repository, Terraform, ECS, or a user's CLI environment.
+The public Payday CLI application has no Auth0 client secret. The separate
+Terraform deployment identity is a confidential Management API application;
+keep that application's secret only in the approved deployment secret store and
+environment. Never put either it or the Resend API key in this repository, ECS,
+or a user's CLI environment.
+
+### Launch authorization limitations
+
+At launch, an Auth0 identity maps to one Payday account with one active,
+unnamed server-side API key. That key can both create payments and read every
+payment owned by the account. Payday does not yet provide read-only or otherwise
+scoped keys, multiple concurrent named keys, source-IP allowlists, or
+team/organization membership. Share it only with principals that may exercise
+the account's full authority; rotation eventually disrupts every user and
+integration that does not adopt the replacement during its grace period. These
+limitations are accepted for launch, not guarantees of the long-term
+authorization model.
+
+The credentials file stores named profile records (`default` and `local`), not
+a bare key, and binds each record to its issuing API URL. A future key name and
+scope set can be added as optional fields on that record without changing the
+file's profile structure. Profile names are currently environment selectors;
+they do not create or scope server-side keys.
 
 ## 1. Configure Resend
 
@@ -74,9 +95,12 @@ plan's daily sending limit.
 7. In the Payday API's application access settings, authorize only
    `Payday CLI`.
 
-Auth0's passwordless endpoint rate limits apply by end-user IP. Configure Auth0
-attack protection before launch, and keep the OTP email wording
-non-enumerating and free of invoice data.
+Auth0's passwordless endpoint rate limits apply by end-user IP. Apply and verify
+the reviewable tenant controls and operational checklist in
+[`auth0/README.md`](../auth0/README.md) before launch. That root enables
+brute-force and suspicious-IP blocking and notifications; breached-password
+detection is intentionally irrelevant to this passwordless-only tenant. Keep
+the OTP email wording non-enumerating and free of payment data.
 
 ## 3. Install the token-enforcement Action
 

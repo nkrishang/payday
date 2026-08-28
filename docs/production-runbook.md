@@ -30,7 +30,10 @@ Required:
 7. **Auth0 tenant and Resend account** configured for embedded passwordless
    email OTP as described in
    [authentication.md](authentication.md). Resend must verify a Payday-owned
-   sending domain before real users authenticate.
+   sending domain before real users authenticate. Apply the reviewable Auth0
+   attack-protection root and complete its launch checks in
+   [`auth0/README.md`](../auth0/README.md); enabled tenant
+   defaults alone are not deployment evidence.
 
 No Docker Hub, Terraform Cloud, separate PostgreSQL vendor, Circle account, or
 third-party key-management account is required.
