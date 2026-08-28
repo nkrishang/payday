@@ -37,12 +37,18 @@ export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
 export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
 export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
 export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
-export PAYDAY_API_KEY="${PAYDAY_API_KEY:-0123456789abcdef0123456789abcdef}"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_PAYER_TOKEN_SECRET="${PAYDAY_PAYER_TOKEN_SECRET:-local-payer-token-secret-0123456789abcdef}"
 export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
 export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
-SECOND_API_KEY="second-account-0123456789abcdef0123456789abcdef"
+export PAYDAY_API_KEY_PREFIX="payday_test_"
+export PAYDAY_DEV_IDENTITY=1
+export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
+export PAYDAY_DEV_IDENTITY_BIND="127.0.0.1:3001"
+export PAYDAY_DEV_IDENTITY_ISSUER="http://127.0.0.1:3001"
+export PAYDAY_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
+export PAYDAY_AUTH0_CLIENT_ID="payday-cli-local"
+export PAYDAY_AUTH0_AUDIENCE="payday-api-local"
 
 logs="$(mktemp -d)"
 pids=()
@@ -75,14 +81,6 @@ for command in anvil cast curl forge jq psql; do
   }
 done
 
-# GNU coreutils on Linux/CI, Perl's shasum on stock macOS.
-sha256_hex() {
-  if command -v sha256sum >/dev/null; then
-    sha256sum | awk '{print $1}'
-  else
-    shasum -a 256 | awk '{print $1}'
-  fi
-}
 [[ -n "${DATABASE_URL:-}" ]] || {
   echo "DATABASE_URL must be set" >&2
   exit 1
@@ -229,19 +227,28 @@ forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
   --rpc-url "$RPC_URL" --private-key "$SIGNER_KEY" --broadcast >/dev/null
 
 echo "Starting gateway services"
+./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
+identity_pid=$!
+pids+=("$identity_pid")
+for _ in {1..100}; do
+  curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" && break
+  sleep 0.1
+done
+curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" || {
+  echo "development identity provider did not become ready" >&2
+  exit 1
+}
 ./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
-primary_key_hash="$(printf %s "$PAYDAY_API_KEY" | sha256_hex)"
-second_key_hash="$(printf %s "$SECOND_API_KEY" | sha256_hex)"
-psql "$DATABASE_URL" --quiet --command "
-  INSERT INTO accounts (id, api_key_hash, api_key_hint, email)
-  VALUES
-    ('00000000-0000-0000-0000-000000000001', decode('$primary_key_hash', 'hex'), '…abcdef', 'primary@example.test'),
-    ('00000000-0000-0000-0000-000000000002', decode('$second_key_hash', 'hex'), '…abcdef', 'second@example.test')
-  ON CONFLICT (id) DO NOTHING
-" >/dev/null
+echo "Creating accounts through the real local email-OTP CLI flow"
+export PAYDAY_CONFIG_DIR="$logs/payday-config"
+primary_login="$(printf 'primary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
+PAYDAY_API_KEY="$(jq -er .api_key <<<"$primary_login")"
+export PAYDAY_API_KEY
+second_login="$(printf 'secondary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
+SECOND_API_KEY="$(jq -er .api_key <<<"$second_login")"
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")

@@ -59,8 +59,26 @@ skipped.
 
 ## Prerequisites
 
-- Rust, Foundry (`anvil`, `cast`, `forge`), PostgreSQL, and `jq`.
-- A running PostgreSQL server and `gateway` database. Migrations run at startup.
+- Rust, Foundry (`anvil`, `cast`, `forge`), Docker, `just`, the PostgreSQL
+  client, and `jq`.
+
+Copy `.env.example` to `.env` if you want to override the checked-in local
+defaults. Start PostgreSQL, Anvil, the development identity provider,
+`gatewayd`, and the indexer with multiplexed logs:
+
+```bash
+just dev
+```
+
+In another shell, create a local account through the real email-OTP flow:
+
+```bash
+just seed
+```
+
+The one-time code is printed in the `[identity]` log and the CLI saves the
+issued key in its local profile. Each run starts from a clean database and
+Anvil chain so their indexed histories cannot drift.
 
 ## Local Anvil end-to-end run
 
@@ -68,13 +86,12 @@ skipped.
 batched payments; late transfers; third-party execution; a paused token; a
 blacklisted beneficiary and its operator release; an expired partial payment
 recovered automatically and completed late) against a fresh Anvil started with
-`--slots-in-an-epoch 1 --mixed-mining --block-time 1`, which makes the node's
+`--slots-in-an-epoch 1 --block-time 1`, which makes the node's
 `finalized` tag advance like a real chain. Use it whenever the contracts or
 the worker change:
 
 ```bash
-cargo build --workspace
-DATABASE_URL=postgres:///gateway_e2e scripts/e2e-anvil.sh
+just e2e
 ```
 
 For a manual session, the key below is Anvil's public development account #0
@@ -107,30 +124,29 @@ It deploys:
 
 Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
 
-### 3. Build and start the services
+### 3. Build and start the services manually
 
 Ensure `.env` contains the local addresses, database URL, RPC URL, finality
-settings, start block, and Anvil signer key. Start `gatewayd` so it applies the
-schema:
+settings, start block, signer key, and identity settings. Start the identity
+provider:
 
 ```bash
 cargo build --workspace
 set -a; source .env; set +a
-./target/debug/gatewayd
+./target/debug/payday-dev-identity
 ```
 
-For a manual local run without Auth0, seed one test account in another shell:
+Start `gatewayd` in another shell so it fetches the local signing key and
+applies the database schema:
 
 ```bash
 set -a; source .env; set +a
-export PAYDAY_API_KEY="$(openssl rand -hex 32)"
-key_hash="$(printf %s "$PAYDAY_API_KEY" | shasum -a 256 | awk '{print $1}')"
-psql "$DATABASE_URL" -c "INSERT INTO accounts (id, api_key_hash, api_key_hint)
-  VALUES ('00000000-0000-0000-0000-000000000001', decode('$key_hash', 'hex'), 'local')"
+./target/debug/gatewayd
 ```
 
-Production users obtain keys through Auth0 email OTP with
-`payday login`; see `docs/authentication.md`.
+Then run `payday --profile local login` and enter the code from the identity
+provider log. Production uses the same flow against Auth0; see
+`docs/authentication.md`.
 
 In another terminal:
 
@@ -199,6 +215,11 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
 - `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
   Auth0 account-management settings (see `docs/authentication.md`)
+- `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
+  issuer; non-loopback HTTP issuers remain rejected
+- `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
+- `PAYDAY_DEV_IDENTITY_ISSUER` — token issuer; must exactly match
+  `PAYDAY_AUTH0_ISSUER`
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`

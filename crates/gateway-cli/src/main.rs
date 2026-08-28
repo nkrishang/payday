@@ -19,7 +19,7 @@ use uuid::Uuid;
 use account::{AccountClient, ApiKeyMetadata};
 use cli::{
     Cli, Command, CreateArgs, DocsTopic, GetArgs, KeyActionArgs, KeysCommand, LoginArgs,
-    OpsCommand, RevokeArgs, WebhooksCommand,
+    OpsCommand, Profile, RevokeArgs, WebhooksCommand,
 };
 use client::GatewayClient;
 use error::CliError;
@@ -612,7 +612,7 @@ fn auth_setting<'a>(
 
 async fn run_login(cli: &Cli, args: LoginArgs) -> Result<String, CliError> {
     let client = account_client(cli)?;
-    let (email, token) = authenticate(&client).await?;
+    let (email, token) = authenticate(&client, cli.profile == Some(Profile::Local)).await?;
     let existing = client.metadata_optional(&token).await?;
     if let Some(metadata) = &existing {
         let key = metadata.key_hint.as_deref().unwrap_or("revoked key");
@@ -635,6 +635,9 @@ async fn run_login(cli: &Cli, args: LoginArgs) -> Result<String, CliError> {
         &cli.api_url,
         &issued.api_key,
     )?;
+    if cli.json {
+        return json(&issued);
+    }
     let display_key = if args.show {
         issued.api_key.clone()
     } else {
@@ -647,11 +650,14 @@ async fn run_login(cli: &Cli, args: LoginArgs) -> Result<String, CliError> {
 }
 
 fn account_client(cli: &Cli) -> Result<AccountClient, CliError> {
+    let local = cli.profile == Some(Profile::Local);
     let production = credentials::normalized_api_url(&cli.api_url)?
         == credentials::normalized_api_url("https://api.payday.sh")?;
     let issuer = auth_setting(
         cli.auth0_issuer.as_deref(),
-        if production {
+        if local {
+            "http://127.0.0.1:3001"
+        } else if production {
             PRODUCTION_AUTH0_ISSUER
         } else {
             ""
@@ -660,7 +666,9 @@ fn account_client(cli: &Cli) -> Result<AccountClient, CliError> {
     )?;
     let client_id = auth_setting(
         cli.auth0_client_id.as_deref(),
-        if production {
+        if local {
+            "payday-cli-local"
+        } else if production {
             PRODUCTION_AUTH0_CLIENT_ID
         } else {
             ""
@@ -669,7 +677,9 @@ fn account_client(cli: &Cli) -> Result<AccountClient, CliError> {
     )?;
     let audience = auth_setting(
         cli.auth0_audience.as_deref(),
-        if production {
+        if local {
+            "payday-api-local"
+        } else if production {
             PRODUCTION_AUTH0_AUDIENCE
         } else {
             ""
@@ -679,14 +689,21 @@ fn account_client(cli: &Cli) -> Result<AccountClient, CliError> {
     AccountClient::new(&cli.api_url, issuer, client_id, audience)
 }
 
-async fn authenticate(client: &AccountClient) -> Result<(String, String), CliError> {
+async fn authenticate(client: &AccountClient, local: bool) -> Result<(String, String), CliError> {
     let email = prompt_line("  Email  › ")?;
     validate_email(&email)?;
     client.send_otp(&email).await?;
-    eprintln!(
-        "  ✓ Code sent to {} · expires in 3 min · r to resend",
-        mask_email(&email)
-    );
+    if local {
+        eprintln!(
+            "  ✓ Code issued for {} · check the [identity] dev log · r to resend",
+            mask_email(&email)
+        );
+    } else {
+        eprintln!(
+            "  ✓ Code sent to {} · expires in 3 min · r to resend",
+            mask_email(&email)
+        );
+    }
     let token = 'otp: loop {
         let mut wrong = 0;
         loop {
@@ -739,7 +756,7 @@ async fn run_whoami(cli: &Cli) -> Result<String, CliError> {
 
 async fn run_keys(cli: &Cli, command: KeysCommand) -> Result<String, CliError> {
     let client = account_client(cli)?;
-    let (_, token) = authenticate(&client).await?;
+    let (_, token) = authenticate(&client, cli.profile == Some(Profile::Local)).await?;
     let metadata = client.metadata(&token).await?;
     match command {
         KeysCommand::Rotate(KeyActionArgs { show, yes }) => {
@@ -877,7 +894,7 @@ fn confirm(prompt: &str) -> Result<bool, CliError> {
 #[cfg(test)]
 mod tests {
     use super::{account_client, mask_email, valid_code, validate_email};
-    use crate::cli::{Cli, ColorChoice, Command};
+    use crate::cli::{Cli, ColorChoice, Command, Profile};
 
     #[test]
     fn login_input_helpers_are_strict() {
@@ -892,6 +909,7 @@ mod tests {
     #[test]
     fn non_production_api_requires_explicit_identity_configuration() {
         let mut cli = Cli {
+            profile: None,
             sandbox: false,
             api_url_override: None,
             api_url: "http://localhost:3000".into(),
@@ -907,9 +925,7 @@ mod tests {
         };
         assert!(account_client(&cli).is_err());
 
-        cli.auth0_issuer = Some("http://localhost:3001".into());
-        cli.auth0_client_id = Some("local-client".into());
-        cli.auth0_audience = Some("local-api".into());
+        cli.profile = Some(Profile::Local);
         assert!(account_client(&cli).is_ok());
     }
 

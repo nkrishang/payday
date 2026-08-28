@@ -72,14 +72,21 @@ struct Claims {
 }
 
 impl Auth0Verifier {
-    pub async fn new(issuer: String, audience: String, client_id: String) -> Result<Self, String> {
+    pub async fn new(
+        issuer: String,
+        audience: String,
+        client_id: String,
+        allow_dev_identity: bool,
+    ) -> Result<Self, String> {
         let parsed_issuer = reqwest::Url::parse(&issuer)
             .map_err(|error| format!("invalid Auth0 issuer URL: {error}"))?;
-        if parsed_issuer.scheme() != "https"
+        if !issuer_transport_allowed(&parsed_issuer, allow_dev_identity)
             || parsed_issuer.query().is_some()
             || parsed_issuer.fragment().is_some()
         {
-            return Err("Auth0 issuer must be an HTTPS URL without query or fragment".into());
+            return Err(
+                "Auth0 issuer must be HTTPS; loopback HTTP requires PAYDAY_DEV_IDENTITY=1".into(),
+            );
         }
         for (name, value) in [("audience", &audience), ("client ID", &client_id)] {
             if value.trim().is_empty() {
@@ -232,6 +239,22 @@ fn valid_email(value: &str) -> bool {
                 && !domain.starts_with('.')
                 && !domain.ends_with('.')
         })
+}
+
+fn issuer_transport_allowed(issuer: &reqwest::Url, allow_dev_identity: bool) -> bool {
+    issuer.scheme() == "https"
+        || (allow_dev_identity
+            && issuer.scheme() == "http"
+            && issuer.host_str().is_some_and(|host| {
+                let host = host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host);
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            }))
 }
 
 fn refresh_is_due(cached: &CachedKeys, kid: &str) -> bool {
@@ -428,24 +451,43 @@ mod tests {
                 "http://issuer.example".into(),
                 "audience".into(),
                 "client".into(),
+                false,
             )
             .await
             .is_err()
         );
         assert!(
-            Auth0Verifier::new("https://issuer.example".into(), " ".into(), "client".into(),)
-                .await
-                .is_err()
+            Auth0Verifier::new(
+                "https://issuer.example".into(),
+                " ".into(),
+                "client".into(),
+                false,
+            )
+            .await
+            .is_err()
         );
         assert!(
             Auth0Verifier::new(
                 "https://issuer.example".into(),
                 "audience".into(),
                 " ".into(),
+                false,
             )
             .await
             .is_err()
         );
+        assert!(issuer_transport_allowed(
+            &reqwest::Url::parse("http://127.0.0.1:3001").unwrap(),
+            true
+        ));
+        assert!(issuer_transport_allowed(
+            &reqwest::Url::parse("http://[::1]:3001").unwrap(),
+            true
+        ));
+        assert!(!issuer_transport_allowed(
+            &reqwest::Url::parse("http://identity.example").unwrap(),
+            true
+        ));
     }
 
     fn verifier_and_key() -> (Auth0Verifier, EncodingKey) {
@@ -728,6 +770,25 @@ mod tests {
             verifier.verify(&new_token).await.unwrap().subject,
             "email|user"
         );
+        assert_eq!(requests.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_key_id_refreshes_a_fresh_jwks_cache() {
+        let (_, _, old_decoding) = rsa_key("old-key");
+        let (new_jwk, new_encoding, _) = rsa_key("new-key");
+        let (url, requests) = jwks_server(new_jwk).await;
+        let verifier = stale_verifier(url, "old-key", old_decoding);
+        verifier.inner.keys.write().await.refreshed_at = Instant::now();
+        let new_token = token_with_kid(
+            &new_encoding,
+            "new-key",
+            "https://issuer.example/",
+            "https://api.payday.sh",
+            u64::MAX,
+        );
+
+        assert!(verifier.verify(&new_token).await.is_ok());
         assert_eq!(requests.await.unwrap(), 1);
     }
 

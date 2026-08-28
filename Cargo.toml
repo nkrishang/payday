@@ -6,6 +6,7 @@ members = [
     "crates/gatewayd",
     "crates/gateway-indexer",
     "crates/gateway-cli",
+    "crates/dev-identity",
 ]
 
 [workspace.dependencies]
