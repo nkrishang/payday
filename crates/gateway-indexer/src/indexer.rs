@@ -189,13 +189,17 @@ impl Indexer {
             tokio::select! {
                 _ = interval.tick() => {
                     match self.sweep_tick().await {
-                        Ok(()) => {}
+                        Ok(()) => self.persist_sweeper_health("running").await,
                         // Logged every tick so the alarm stays raised until the
                         // condition clears; the next tick re-evaluates it.
                         Err(error) if error.requires_halt() => {
+                            self.persist_sweeper_health("paused").await;
                             error!(error = %error, "sweep worker paused");
                         }
-                        Err(error) => warn!(error = %error, "sweep pass failed; retrying next tick"),
+                        Err(error) => {
+                            self.persist_sweeper_health("degraded").await;
+                            warn!(error = %error, "sweep pass failed; retrying next tick");
+                        }
                     }
                 }
                 changed = shutdown.changed() => {
@@ -205,6 +209,16 @@ impl Indexer {
                     }
                 }
             }
+        }
+    }
+
+    async fn persist_sweeper_health(&self, state: &str) {
+        if let Err(error) = self
+            .repo
+            .record_sweeper_status(self.cfg.chain_id.0, state)
+            .await
+        {
+            warn!(%error, state, "failed to persist sweep worker health");
         }
     }
 
@@ -221,6 +235,16 @@ impl Indexer {
     /// boundary or the per-tick range budget is spent.
     async fn tick(&self) -> Result<(), IndexerError> {
         let boundary = self.finality_boundary().await?;
+        let boundary_header = self.chain.block_header(boundary).await?;
+        self.cursor
+            .record_finalized_head(
+                self.cfg.chain_id.0,
+                self.cfg.usdc,
+                boundary,
+                boundary_header.hash,
+                boundary_header.timestamp,
+            )
+            .await?;
         let mut cursor = self.cursor.get(self.cfg.chain_id.0, self.cfg.usdc).await?;
 
         if let Some(cursor) = cursor {
@@ -361,6 +385,7 @@ impl Indexer {
             return Ok(IndexerCursor {
                 block: to_block,
                 block_hash: end.hash,
+                block_timestamp: Some(end.timestamp),
             });
         }
     }
@@ -494,7 +519,6 @@ impl Indexer {
                 batch.id,
                 tx_hash,
                 receipt.block,
-                header.timestamp,
                 receipt.transaction_index,
                 &outcomes,
             )
@@ -529,10 +553,16 @@ impl Indexer {
             Some(SweepOutcome::Settled { .. }) => Ok(InvoiceOutcome::Drained {
                 status: Some(InvoiceStatus::Fulfilled),
                 execute_tx: true,
+                settlement_tx_hash: tx_hash,
+                settlement_block: header.number,
+                settlement_timestamp: header.timestamp,
             }),
             Some(SweepOutcome::Recovered { .. }) => Ok(InvoiceOutcome::Drained {
                 status: Some(InvoiceStatus::Recovered),
                 execute_tx: true,
+                settlement_tx_hash: tx_hash,
+                settlement_block: header.number,
+                settlement_timestamp: header.timestamp,
             }),
             Some(SweepOutcome::Collected { .. }) => {
                 // The contract already existed. For an open invoice that means
@@ -545,9 +575,29 @@ impl Indexer {
                 } else {
                     Some(InvoiceStatus::Recovered)
                 };
+                let from_block = self
+                    .repo
+                    .first_observed_block(row.id)
+                    .await?
+                    .unwrap_or(self.cfg.usdc_start_block);
+                let settlement = self
+                    .chain
+                    .payment_settlement_tx(payment, from_block, header.number)
+                    .await?;
+                let settlement_header = self.chain.block_header(settlement.block_number).await?;
+                if settlement_header.hash != settlement.block_hash {
+                    return Err(ChainError::FinalityViolation(format!(
+                        "settlement event block {} changed during classification",
+                        settlement.block_number
+                    ))
+                    .into());
+                }
                 Ok(InvoiceOutcome::Drained {
                     status,
                     execute_tx: false,
+                    settlement_tx_hash: settlement.transaction_hash,
+                    settlement_block: settlement.block_number,
+                    settlement_timestamp: settlement_header.timestamp,
                 })
             }
             Some(SweepOutcome::Failed { .. }) => {
@@ -802,7 +852,7 @@ mod tests {
     };
     use sqlx::PgPool;
 
-    use crate::chain::{FailureProbe, UsdcTransfer};
+    use crate::chain::{FailureProbe, SettlementEvent, UsdcTransfer};
     use gateway_db::{CreateInvoiceInput, InvoiceRepository};
 
     const CHAIN_ID: u64 = 31337;
@@ -863,6 +913,7 @@ mod tests {
         fees: FeeEstimate,
         balance: U256,
         settled: HashMap<Address, bool>,
+        settlement_events: HashMap<Address, SettlementEvent>,
         probes: HashMap<Address, FailureProbe>,
         header_requests: usize,
         reorg_on_header_request: Option<usize>,
@@ -1078,6 +1129,30 @@ mod tests {
                 .get(&payment)
                 .copied()
                 .unwrap_or(true))
+        }
+
+        async fn payment_settlement_tx(
+            &self,
+            payment: Address,
+            from_block: u64,
+            _to_block: u64,
+        ) -> Result<SettlementEvent, ChainError> {
+            self.state
+                .lock()
+                .unwrap()
+                .settlement_events
+                .get(&payment)
+                .copied()
+                .map_or_else(
+                    || {
+                        Ok(SettlementEvent {
+                            transaction_hash: B256::repeat_byte(0xCC),
+                            block_number: from_block,
+                            block_hash: block_hash(from_block),
+                        })
+                    },
+                    Ok,
+                )
         }
 
         async fn probe_failure(
@@ -1362,8 +1437,8 @@ mod tests {
         worker.tick().await.unwrap();
         assert_eq!(
             chain.state.lock().unwrap().header_requests - requests_before,
-            1,
-            "an idle tick only verifies the cursor hash"
+            2,
+            "an idle tick records the finalized head and verifies the cursor hash"
         );
     }
 
@@ -1653,6 +1728,10 @@ mod tests {
             row.execute_tx_hash.as_deref(),
             Some(submissions[0].tx_hash.as_slice())
         );
+        assert_eq!(
+            row.settlement_tx_hash.as_deref(),
+            Some(submissions[0].tx_hash.as_slice())
+        );
         assert_eq!(row.resolved_at_block, Some(7));
         assert_eq!(row.drained_at_block, Some(7));
         assert_eq!(row.uncollected_count, 0);
@@ -1832,6 +1911,22 @@ mod tests {
         insert_funded(&pool, &settled, "key-1", 1).await;
         insert_funded(&pool, &recovered, "key-2", 1).await;
         let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.settlement_events.insert(
+                settled.payment_address.0,
+                SettlementEvent {
+                    transaction_hash: B256::repeat_byte(0xA1),
+                    block_number: 3,
+                    block_hash: block_hash(3),
+                },
+            );
+            state.settlement_events.insert(
+                recovered.payment_address.0,
+                SettlementEvent {
+                    transaction_hash: B256::repeat_byte(0xA2),
+                    block_number: 4,
+                    block_hash: block_hash(4),
+                },
+            );
             for invoice in [&settled, &recovered] {
                 state.next_outcomes.insert(
                     invoice.payment_address.0,
@@ -1847,7 +1942,21 @@ mod tests {
         let settled_row = fetch(&pool, &settled).await;
         assert_eq!(settled_row.status, "fulfilled");
         assert_eq!(settled_row.execute_tx_hash, None, "not our transaction");
-        assert_eq!(fetch(&pool, &recovered).await.status, "recovered");
+        assert_eq!(
+            settled_row.settlement_tx_hash,
+            Some(vec![0xA1; 32]),
+            "the third party's transaction is still the settlement"
+        );
+        assert_eq!(settled_row.resolved_at_block, Some(3));
+        assert_eq!(
+            settled_row.settled_at.unwrap().timestamp(),
+            (GENESIS_TIMESTAMP + 30) as i64
+        );
+        let recovered_row = fetch(&pool, &recovered).await;
+        assert_eq!(recovered_row.status, "recovered");
+        assert_eq!(recovered_row.execute_tx_hash, None);
+        assert_eq!(recovered_row.settlement_tx_hash, Some(vec![0xA2; 32]));
+        assert_eq!(recovered_row.resolved_at_block, Some(4));
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]

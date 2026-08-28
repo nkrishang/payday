@@ -7,7 +7,7 @@ mod presentation;
 
 use std::io::{self, IsTerminal, Write};
 use std::str::FromStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use gateway_core::{
@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 use account::{AccountClient, ApiKeyMetadata};
 use cli::{
-    Cli, Command, CreateArgs, DocsTopic, GetArgs, KeyActionArgs, KeysCommand, LoginArgs, RevokeArgs,
+    Cli, Command, CreateArgs, DocsTopic, GetArgs, KeyActionArgs, KeysCommand, LoginArgs,
+    RevokeArgs, WebhooksCommand,
 };
 use client::GatewayClient;
 use error::CliError;
@@ -36,7 +37,7 @@ struct Output {
 
 #[tokio::main]
 async fn main() {
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error)
             if matches!(
@@ -55,6 +56,7 @@ async fn main() {
         }
         Err(error) => error.exit(),
     };
+    cli.resolve_connection();
     let result = match cli.command.clone() {
         command
         @ (Command::Create(_) | Command::Get(_) | Command::List(_) | Command::Cancel(_)) => {
@@ -64,6 +66,7 @@ async fn main() {
         Command::Logout => run_logout(&cli).map(account_output),
         Command::Whoami => run_whoami(&cli).await.map(account_output),
         Command::Keys(command) => run_keys(&cli, command).await.map(account_output),
+        Command::Webhooks(command) => run_webhooks(&cli, command).await,
         Command::Completions { shell } => completions(shell).map(account_output),
         Command::Docs { topic } => Ok(account_output(docs(topic).into())),
         Command::Upgrade => upgrade().await.map(account_output),
@@ -84,6 +87,72 @@ async fn main() {
             }
             std::process::exit(err.exit_code());
         }
+    }
+}
+
+async fn run_webhooks(cli: &Cli, command: WebhooksCommand) -> Result<Output, CliError> {
+    let client = GatewayClient::new(&cli.api_url, &api_key(cli)?)?;
+    let value = match command {
+        WebhooksCommand::Add { url } => serde_json::to_value(client.add_webhook(&url).await?),
+        WebhooksCommand::List => serde_json::to_value(client.list_webhooks().await?),
+        WebhooksCommand::Remove { id } => Ok(client.remove_webhook(id).await?),
+        WebhooksCommand::Test { id } => Ok(client.test_webhook(id).await?),
+        WebhooksCommand::Deliveries => serde_json::to_value(client.webhook_deliveries().await?),
+    }
+    .map_err(|error| CliError::InvalidInput(format!("could not encode response: {error}")))?;
+    let body = if cli.json {
+        json(&value)?
+    } else {
+        webhook_text(&value)
+    };
+    Ok(Output {
+        body,
+        signed_in: None,
+        next: None,
+    })
+}
+
+fn webhook_text(value: &serde_json::Value) -> String {
+    if let Some(items) = value.as_array() {
+        if items.is_empty() {
+            return "No webhooks or deliveries found.".into();
+        }
+        return items
+            .iter()
+            .map(webhook_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(secret) = value.get("secret").and_then(|v| v.as_str()) {
+        return format!(
+            "✓ Webhook {} added\nURL     {}\nSecret  {}\n\nSave this secret now; it will not be shown again.",
+            value["id"].as_str().unwrap_or(""),
+            value["url"].as_str().unwrap_or(""),
+            secret
+        );
+    }
+    if let Some(id) = value.get("delivery_id").and_then(|v| v.as_str()) {
+        return format!("✓ Test delivery {id} queued.");
+    }
+    if value.get("disabled").and_then(|v| v.as_bool()) == Some(true) {
+        return format!("✓ Webhook {} removed.", value["id"].as_str().unwrap_or(""));
+    }
+    webhook_line(value)
+}
+
+fn webhook_line(value: &serde_json::Value) -> String {
+    match (
+        value.get("url").and_then(|v| v.as_str()),
+        value.get("state").and_then(|v| v.as_str()),
+    ) {
+        (Some(url), _) => format!("{}  {}", value["id"].as_str().unwrap_or("—"), url),
+        (_, Some(state)) => format!(
+            "{}  {:<12} {} attempts",
+            value["id"].as_str().unwrap_or("—"),
+            state,
+            value["attempt_count"].as_u64().unwrap_or(0)
+        ),
+        _ => value.to_string(),
     }
 }
 
@@ -366,6 +435,7 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
         | Command::Logout
         | Command::Whoami
         | Command::Keys(_)
+        | Command::Webhooks(_)
         | Command::Completions { .. }
         | Command::Docs { .. }
         | Command::Upgrade => unreachable!(),
@@ -419,6 +489,8 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentRespo
         expires_at: args.expires_at,
         refund_address: Some(args.refund_to.unwrap_or(args.to)),
         memo: args.memo,
+        reference: None,
+        metadata: serde_json::json!({}),
     };
     client.create_payment(&req, &idempotency_key).await
 }
@@ -441,8 +513,14 @@ async fn watch(
     }
     let interactive = allow_redraw && io::stdout().is_terminal();
     let mut previous = String::new();
+    let mut first = true;
     loop {
-        let payment = get(client, &args.reference).await?;
+        let payment = if first {
+            first = false;
+            get(client, &args.reference).await?
+        } else {
+            client.wait_for_payment_change(&args.reference).await?
+        };
         let frame = output.payment(&payment, false);
         if interactive {
             print!("\x1b[2J\x1b[H{frame}");
@@ -459,7 +537,6 @@ async fn watch(
         if terminal(payment.status) {
             return Ok(String::new());
         }
-        tokio::time::sleep(Duration::from_secs(args.interval)).await;
     }
 }
 
@@ -793,6 +870,8 @@ mod tests {
     #[test]
     fn non_production_api_requires_explicit_identity_configuration() {
         let mut cli = Cli {
+            sandbox: false,
+            api_url_override: None,
             api_url: "http://localhost:3000".into(),
             auth0_issuer: None,
             auth0_client_id: None,

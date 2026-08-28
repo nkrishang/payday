@@ -68,6 +68,13 @@ pub struct DbInvoice {
     /// Why automatic sweeping stopped. Non-NULL rows are excluded from the queue.
     pub blocked_reason: Option<String>,
     pub cancellation_requested_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    pub reference: Option<String>,
+    pub metadata: sqlx::types::Json<serde_json::Value>,
+    pub paid_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    pub expired_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    pub settlement_tx_hash: Option<Vec<u8>>,
+    pub fee_amount: String,
+    pub net_amount: String,
 }
 
 /// A stored invoice row could not be decoded into the domain model. This
@@ -191,6 +198,8 @@ pub struct CreateInvoiceInput {
     pub account_id: AccountId,
     pub idempotency_key: String,
     pub memo: Option<String>,
+    pub reference: Option<String>,
+    pub metadata: serde_json::Value,
     pub chain_id: u64,
     pub factory_address: [u8; 20],
     pub token_address: [u8; 20],
@@ -228,6 +237,7 @@ pub struct DbInvoiceTransfer {
     pub transaction_hash: Vec<u8>,
     pub block_number: i64,
     pub disposition: String,
+    pub collected: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -235,7 +245,9 @@ pub struct DbIndexerFreshness {
     pub chain_id: i64,
     pub token_address: Vec<u8>,
     pub last_block: i64,
+    pub last_block_timestamp: Option<i64>,
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    pub finalized_block: Option<i64>,
 }
 
 /// Invoices whose status changed while a finalized range was applied.
@@ -265,6 +277,8 @@ impl CreateInvoiceInput {
             account_id,
             idempotency_key,
             memo,
+            reference: None,
+            metadata: serde_json::json!({}),
             chain_id: invoice.chain_id.0,
             factory_address: invoice.factory.0.into(),
             token_address: invoice.token.0.into(),
@@ -286,7 +300,7 @@ impl InvoiceRepository {
         Self { pool }
     }
 
-    pub(crate) fn pool(&self) -> &PgPool {
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
@@ -307,10 +321,10 @@ impl InvoiceRepository {
         let row = sqlx::query_as::<_, DbInvoice>(
             r#"
             INSERT INTO invoices
-                (id, account_id, idempotency_key, memo, chain_id, factory_address, token_address,
+                (id, account_id, idempotency_key, memo, reference, metadata, chain_id, factory_address, token_address,
                  token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
-                 expiration_intent, recovery_address, amount, salt, payment_address, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'created')
+                 expiration_intent, recovery_address, amount, net_amount, salt, payment_address, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -319,6 +333,8 @@ impl InvoiceRepository {
         .bind(input.account_id.0)
         .bind(&input.idempotency_key)
         .bind(&input.memo)
+        .bind(&input.reference)
+        .bind(&input.metadata)
         .bind(input.chain_id as i64)
         .bind(input.factory_address)
         .bind(input.token_address)
@@ -372,12 +388,13 @@ impl InvoiceRepository {
         &self,
         account: AccountId,
         status: Option<&str>,
+        reference: Option<&str>,
         starting_after: Option<Uuid>,
         limit: u32,
     ) -> Result<Vec<DbInvoice>, sqlx::Error> {
         sqlx::query_as::<_, DbInvoice>(
             r#"SELECT candidate.* FROM invoices candidate
-               LEFT JOIN invoices cursor ON cursor.account_id = $1 AND cursor.id = $3
+               LEFT JOIN invoices cursor ON cursor.account_id = $1 AND cursor.id = $4
                WHERE candidate.account_id = $1
                  AND ($2::text IS NULL OR
                     ($2 = 'awaiting_payment' AND candidate.status = 'created' AND candidate.confirmed_received = '0') OR
@@ -387,11 +404,13 @@ impl InvoiceRepository {
                     ($2 = 'expired' AND candidate.status = 'expired') OR
                     ($2 = 'returned' AND candidate.status = 'recovered') OR
                     ($2 = 'needs_attention' AND (candidate.status = 'blocked' OR candidate.blocked_reason IS NOT NULL)))
-                 AND ($3 IS NULL OR (candidate.created_at, candidate.id) < (cursor.created_at, cursor.id))
-               ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT $4"#,
+                 AND ($3::text IS NULL OR candidate.reference = $3)
+                 AND ($4 IS NULL OR (candidate.created_at, candidate.id) < (cursor.created_at, cursor.id))
+               ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT $5"#,
         )
         .bind(account.0)
         .bind(status)
+        .bind(reference)
         .bind(starting_after)
         .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
@@ -409,7 +428,8 @@ impl InvoiceRepository {
         }
         let transfers = sqlx::query_as::<_, DbInvoiceTransfer>(
             r#"SELECT o.invoice_id, o.block_timestamp, o.amount, o.sender_address,
-                      o.transaction_hash, o.block_number, o.disposition
+                      o.transaction_hash, o.block_number, o.disposition,
+                      o.collected_at_block IS NOT NULL AS collected
                FROM payment_observations o
                JOIN invoices i ON i.id = o.invoice_id
                WHERE i.account_id = $1 AND i.id = ANY($2::uuid[])
@@ -420,8 +440,11 @@ impl InvoiceRepository {
         .fetch_all(&self.pool)
         .await?;
         let freshness = sqlx::query_as::<_, DbIndexerFreshness>(
-            r#"SELECT DISTINCT c.chain_id, c.token_address, c.last_block, c.updated_at
+            r#"SELECT DISTINCT c.chain_id, c.token_address, c.last_block, c.last_block_timestamp,
+                      c.updated_at, s.finalized_block
                FROM indexer_cursor c
+               LEFT JOIN indexer_status s ON s.chain_id = c.chain_id
+                    AND s.token_address = c.token_address
                JOIN invoices i ON i.chain_id = c.chain_id AND i.token_address = c.token_address
                WHERE i.account_id = $1 AND i.id = ANY($2::uuid[])"#,
         )
@@ -492,6 +515,16 @@ impl InvoiceRepository {
             .await
     }
 
+    pub async fn first_observed_block(&self, invoice_id: Uuid) -> Result<Option<u64>, sqlx::Error> {
+        let block: Option<i64> = sqlx::query_scalar(
+            "SELECT min(block_number) FROM payment_observations WHERE invoice_id=$1 AND disposition <> 'error'",
+        )
+        .bind(invoice_id)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(block.map(|value| value as u64))
+    }
+
     /// Atomically apply one contiguous finalized log range and advance its
     /// canonical cursor.
     ///
@@ -516,9 +549,10 @@ impl InvoiceRepository {
     ) -> Result<RangeOutcome, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
-        let stored: Option<(Vec<u8>, i64, Vec<u8>)> = sqlx::query_as(
+        type StoredCursor = (Vec<u8>, i64, Vec<u8>, Option<i64>);
+        let stored: Option<StoredCursor> = sqlx::query_as(
             r#"
-            SELECT token_address, last_block, last_block_hash
+            SELECT token_address, last_block, last_block_hash, last_block_timestamp
             FROM indexer_cursor
             WHERE chain_id = $1
             FOR UPDATE
@@ -529,7 +563,7 @@ impl InvoiceRepository {
         .await?;
 
         let stored_cursor = stored
-            .map(|(stored_token, block, hash)| {
+            .map(|(stored_token, block, hash, timestamp)| {
                 if stored_token.as_slice() != token.as_slice() {
                     return Err(sqlx::Error::Protocol(
                         "indexer cursor belongs to a different token".into(),
@@ -541,6 +575,7 @@ impl InvoiceRepository {
                 Ok(IndexerCursor {
                     block: block as u64,
                     block_hash,
+                    block_timestamp: timestamp.map(|value| value as u64),
                 })
             })
             .transpose()?;
@@ -586,7 +621,7 @@ impl InvoiceRepository {
             drained_at: Option<(i64, i64)>,
             uncollected: i32,
             touched: bool,
-            crossing: Option<(U256, u64, B256)>,
+            crossing: Option<(U256, u64, B256, u64)>,
         }
 
         let mut credits = HashMap::<Vec<u8>, InvoiceCredit>::new();
@@ -697,13 +732,14 @@ impl InvoiceRepository {
                     credit.received,
                     observation.block_number,
                     observation.block_hash,
+                    observation.block_timestamp,
                 ));
             }
         }
 
         let mut outcome = RangeOutcome::default();
         for credit in credits.values().filter(|credit| credit.touched) {
-            if let Some((observed, block, block_hash)) = credit.crossing {
+            if let Some((observed, block, block_hash, block_timestamp)) = credit.crossing {
                 let result = sqlx::query(
                     r#"
                     UPDATE invoices
@@ -713,6 +749,7 @@ impl InvoiceRepository {
                         observed_amount = $4,
                         funded_at_block = $5,
                         funded_at_block_hash = $6,
+                        paid_at = to_timestamp($7),
                         updated_at = now()
                     WHERE id = $1 AND status = 'created'
                     "#,
@@ -723,6 +760,7 @@ impl InvoiceRepository {
                 .bind(observed.to_string())
                 .bind(block as i64)
                 .bind(block_hash.as_slice())
+                .bind(block_timestamp as f64)
                 .execute(&mut *tx)
                 .await?;
                 if result.rows_affected() > 0 {
@@ -749,7 +787,7 @@ impl InvoiceRepository {
         outcome.expired = sqlx::query_scalar(
             r#"
             UPDATE invoices
-            SET status = 'expired', updated_at = now()
+            SET status = 'expired', expired_at = to_timestamp($3), updated_at = now()
             WHERE chain_id = $1
               AND token_address = $2
               AND status IN ('created', 'funded')
@@ -766,12 +804,13 @@ impl InvoiceRepository {
         sqlx::query(
             r#"
             INSERT INTO indexer_cursor
-                (chain_id, token_address, last_block, last_block_hash, updated_at)
-            VALUES ($1, $2, $3, $4, now())
+                (chain_id, token_address, last_block, last_block_hash, last_block_timestamp, updated_at)
+            VALUES ($1, $2, $3, $4, $5, now())
             ON CONFLICT (chain_id) DO UPDATE
             SET token_address = EXCLUDED.token_address,
                 last_block = EXCLUDED.last_block,
                 last_block_hash = EXCLUDED.last_block_hash,
+                last_block_timestamp = EXCLUDED.last_block_timestamp,
                 updated_at = now()
             "#,
         )
@@ -779,6 +818,7 @@ impl InvoiceRepository {
         .bind(token.as_slice())
         .bind(end_block as i64)
         .bind(end_block_hash.as_slice())
+        .bind(end_block_timestamp as i64)
         .execute(&mut *tx)
         .await?;
 
@@ -833,6 +873,13 @@ mod tests {
             last_attempt_at: None,
             blocked_reason: None,
             cancellation_requested_at: None,
+            reference: None,
+            metadata: sqlx::types::Json(serde_json::json!({})),
+            paid_at: None,
+            expired_at: None,
+            settlement_tx_hash: None,
+            fee_amount: "0".into(),
+            net_amount: "100".into(),
         }
     }
 
@@ -935,6 +982,8 @@ mod tests {
             account_id: owner,
             idempotency_key: key.into(),
             memo: None,
+            reference: None,
+            metadata: serde_json::json!({}),
             chain_id: 1,
             factory_address: [1; 20],
             token_address: [2; 20],
@@ -953,24 +1002,34 @@ mod tests {
         repo.insert(&input(first, account, "one", 5)).await.unwrap();
         let mut second_input = input(second, account, "two", 6);
         second_input.memo = Some("customer reference".into());
+        second_input.reference = Some("order-2".into());
         repo.insert(&second_input).await.unwrap();
         repo.insert(&input(Uuid::now_v7(), other, "other", 7))
             .await
             .unwrap();
 
         assert_eq!(
-            repo.list_for_account(account, None, None, 20)
+            repo.list_for_account(account, None, None, None, 20)
                 .await
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            repo.list_for_account(account, Some("awaiting_payment"), None, 1)
+            repo.list_for_account(account, Some("awaiting_payment"), None, None, 1)
                 .await
                 .unwrap()
                 .len(),
             2
+        );
+        assert_eq!(
+            repo.list_for_account(account, None, Some("order-2"), None, 20)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [second]
         );
         assert_eq!(
             repo.find_by_id_for_account(account, second)

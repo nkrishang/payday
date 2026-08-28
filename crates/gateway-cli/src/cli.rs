@@ -10,15 +10,19 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     after_help = "Examples:\n  payday create --amount 25 --to 0x7099…79c8 --memo 'Order 1234'\n  payday get pay_0191c8e0 --watch\n  payday list --status partially_paid"
 )]
 pub struct Cli {
+    /// Use the Payday sandbox (unless --api-url or PAYDAY_API_URL is set).
+    #[arg(long, global = true, help_heading = "Connection")]
+    pub sandbox: bool,
     /// Base URL of the Payday API.
     #[arg(
-        long,
+        long = "api-url",
         global = true,
         env = "PAYDAY_API_URL",
         hide_env_values = true,
-        default_value = "https://api.payday.sh",
         help_heading = "Connection"
     )]
+    pub(crate) api_url_override: Option<String>,
+    #[arg(skip = String::new())]
     pub api_url: String,
     #[arg(long, global = true, env = "PAYDAY_AUTH0_ISSUER", hide = true)]
     pub auth0_issuer: Option<String>,
@@ -40,6 +44,19 @@ pub struct Cli {
     pub color: ColorChoice,
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    pub fn resolve_connection(&mut self) {
+        self.api_url = self.api_url_override.take().unwrap_or_else(|| {
+            if self.sandbox {
+                "https://api.sandbox.payday.sh"
+            } else {
+                "https://api.payday.sh"
+            }
+            .into()
+        });
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -68,6 +85,9 @@ pub enum Command {
     /// Rotate or revoke API keys.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Manage webhook endpoints and inspect deliveries.
+    #[command(subcommand)]
+    Webhooks(WebhooksCommand),
     /// Generate shell completion code.
     Completions { shell: clap_complete::Shell },
     /// Read a built-in Payday guide.
@@ -162,6 +182,31 @@ pub enum KeysCommand {
     Revoke(RevokeArgs),
 }
 
+#[derive(Clone, Debug, Subcommand)]
+pub enum WebhooksCommand {
+    /// Register an HTTPS endpoint. Its signing secret is shown only once.
+    Add {
+        #[arg(value_parser = parse_https_url)]
+        url: String,
+    },
+    /// List registered webhook endpoints.
+    List,
+    /// Disable a webhook endpoint.
+    Remove { id: uuid::Uuid },
+    /// Queue a test event for a webhook endpoint.
+    Test { id: uuid::Uuid },
+    /// List recent webhook deliveries and attempts.
+    Deliveries,
+}
+
+fn parse_https_url(value: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "must be a valid HTTPS URL".to_string())?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err("must be a valid HTTPS URL".into());
+    }
+    Ok(url.to_string())
+}
+
 #[derive(Clone, Debug, Args)]
 pub struct KeyActionArgs {
     #[arg(long)]
@@ -212,5 +257,31 @@ mod tests {
         };
         assert!(args.expires_in.is_none());
         assert!(args.refund_to.is_none());
+    }
+
+    #[test]
+    fn sandbox_is_a_default_that_explicit_api_url_overrides() {
+        let mut cli = Cli::try_parse_from(["payday", "--sandbox", "logout"]).unwrap();
+        cli.resolve_connection();
+        assert_eq!(cli.api_url, "https://api.sandbox.payday.sh");
+        let mut cli = Cli::try_parse_from([
+            "payday",
+            "--sandbox",
+            "--api-url",
+            "https://example.test",
+            "logout",
+        ])
+        .unwrap();
+        cli.resolve_connection();
+        assert_eq!(cli.api_url, "https://example.test");
+    }
+
+    #[test]
+    fn webhook_arguments_are_validated() {
+        assert!(Cli::try_parse_from(["payday", "webhooks", "add", "http://example.test"]).is_err());
+        assert!(
+            Cli::try_parse_from(["payday", "webhooks", "add", "https://example.test/hook"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["payday", "webhooks", "test", "not-a-uuid"]).is_err());
     }
 }

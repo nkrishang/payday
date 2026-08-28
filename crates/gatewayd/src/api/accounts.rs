@@ -50,7 +50,7 @@ pub async fn issue(
             "expected_generation must be positive",
         ));
     }
-    let key = generate_api_key();
+    let key = generate_api_key(&state.api_key_prefix);
     let issued = state
         .accounts
         .issue_api_key(
@@ -157,10 +157,10 @@ async fn account_for_identity(
         .ok_or_else(ApiError::account_not_provisioned)
 }
 
-fn generate_api_key() -> String {
+fn generate_api_key(prefix: &str) -> String {
     let mut random = [0_u8; 32];
     rand::rng().fill_bytes(&mut random);
-    format!("payday_live_{}", URL_SAFE_NO_PAD.encode(random))
+    format!("{prefix}{}", URL_SAFE_NO_PAD.encode(random))
 }
 
 #[cfg(test)]
@@ -168,11 +168,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_keys_have_a_prefix_and_256_bits_of_entropy() {
-        let first = generate_api_key();
-        let second = generate_api_key();
+    fn generated_keys_use_each_configured_prefix_and_256_bits_of_entropy() {
+        let first = generate_api_key("payday_live_");
+        let second = generate_api_key("payday_live_");
         assert!(first.starts_with("payday_live_"));
         assert_eq!(first.len(), 55);
         assert_ne!(first, second);
+        let test = generate_api_key("payday_test_");
+        assert!(test.starts_with("payday_test_"));
+        assert_eq!(test.len(), 55);
     }
 }

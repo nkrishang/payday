@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Invoice, InvoiceStatus, USDC_DECIMALS};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePaymentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_id: Option<String>,
@@ -23,6 +24,14 @@ pub struct CreatePaymentRequest {
     pub refund_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default = "empty_metadata")]
+    pub metadata: serde_json::Value,
+}
+
+fn empty_metadata() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,8 +41,10 @@ pub struct TransferDto {
     pub amount_base_units: String,
     pub sender: String,
     pub transaction_hash: String,
+    pub explorer_url: Option<String>,
     pub block: String,
     pub disposition: String,
+    pub collected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,10 +54,19 @@ pub struct IndexerFreshnessDto {
     pub cursor_updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsOfDto {
+    pub block: String,
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResponse {
     pub id: String,
+    /// Shareable, payment-scoped page for the payer.
+    pub payment_url: String,
     pub address: String,
+    pub address_explorer_url: Option<String>,
     pub payout_address: String,
     pub refund_address: String,
     pub expires_at: String,
@@ -59,26 +79,67 @@ pub struct PaymentResponse {
     pub remaining: String,
     pub remaining_base_units: String,
     pub currency: String,
+    pub fee_amount: String,
+    pub fee_amount_base_units: String,
+    pub net_amount: String,
+    pub net_amount_base_units: String,
     pub status: PaymentStatus,
     pub token: TokenDto,
     pub chain: ChainDto,
     pub settlement_tx_hash: Option<String>,
+    pub settlement_explorer_url: Option<String>,
     pub settled_at: Option<String>,
     pub settled_block: Option<String>,
     pub self_settlement: SelfSettlementDto,
     pub attention: Option<AttentionDto>,
     pub memo: Option<String>,
+    pub reference: Option<String>,
+    pub metadata: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
+    pub paid_at: Option<String>,
+    pub paid_at_block: Option<String>,
+    pub expired_at: Option<String>,
     pub cancellation_requested_at: Option<String>,
     pub transfers: Vec<TransferDto>,
     pub indexer_freshness: IndexerFreshnessDto,
+    pub as_of: Option<AsOfDto>,
+}
+
+/// Payment instructions and finalized status safe to expose to one payer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayerPaymentResponse {
+    pub id: String,
+    pub chain: ChainDto,
+    pub token: TokenDto,
+    pub amount: String,
+    pub amount_base_units: String,
+    pub received: String,
+    pub received_base_units: String,
+    pub remaining: String,
+    pub remaining_base_units: String,
+    pub address: String,
+    pub expires_at: String,
+    /// Gateway wall-clock time used by clients to render the deadline without
+    /// trusting the payer device's clock.
+    pub server_timestamp: String,
+    pub status: PaymentStatus,
+    /// Whether the gateway still considers this address payable.
+    pub payable: bool,
+    /// EIP-681 request for the amount still due, absent after the deadline or
+    /// after the payment has left the payable state.
+    pub payment_uri: Option<String>,
+    pub address_explorer_url: Option<String>,
+    pub settlement_tx_hash: Option<String>,
+    pub settlement_explorer_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentSummaryResponse {
     pub id: String,
     pub memo: Option<String>,
+    pub reference: Option<String>,
+    pub metadata: serde_json::Value,
     pub created_at: String,
     pub status: PaymentStatus,
     pub amount: String,
@@ -172,7 +233,9 @@ impl PaymentResponse {
         let attention = inv.blocked_reason.as_deref().map(attention);
         Self {
             id: inv.id.to_string(),
+            payment_url: String::new(),
             address: inv.payment_address.0.to_checksum(None),
+            address_explorer_url: None,
             payout_address: inv.beneficiary.0.to_checksum(None),
             refund_address: inv.recovery.0.to_checksum(None),
             expires_at: DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
@@ -186,6 +249,10 @@ impl PaymentResponse {
             remaining: human(remaining),
             remaining_base_units: remaining.to_string(),
             currency: "USDC".into(),
+            fee_amount: "0".into(),
+            fee_amount_base_units: "0".into(),
+            net_amount: human(inv.amount.0),
+            net_amount_base_units: inv.amount.0.to_string(),
             status,
             token: TokenDto {
                 symbol: "USDC".into(),
@@ -197,6 +264,7 @@ impl PaymentResponse {
                 name: chain_name(inv.chain_id.0).into(),
             },
             settlement_tx_hash: inv.execute_tx_hash.map(|h| h.to_string()),
+            settlement_explorer_url: None,
             settled_at: inv.settled_at_timestamp.and_then(|t| {
                 DateTime::<Utc>::from_timestamp(t as i64, 0)
                     .map(|d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
@@ -208,8 +276,13 @@ impl PaymentResponse {
             },
             attention,
             memo: None,
+            reference: None,
+            metadata: serde_json::json!({}),
             created_at: String::new(),
             updated_at: String::new(),
+            paid_at: None,
+            paid_at_block: None,
+            expired_at: None,
             cancellation_requested_at: inv.cancellation_requested_at,
             transfers: Vec::new(),
             indexer_freshness: IndexerFreshnessDto {
@@ -217,6 +290,7 @@ impl PaymentResponse {
                 last_finalized_block: None,
                 cursor_updated_at: None,
             },
+            as_of: None,
         }
     }
 }
@@ -239,6 +313,7 @@ fn chain_name(id: u64) -> &'static str {
     match id {
         1 => "Ethereum",
         143 => "Monad",
+        10_143 => "Monad Testnet",
         31_337 => "Local",
         _ => "Unknown",
     }
@@ -338,6 +413,8 @@ mod tests {
         let summary = PaymentSummaryResponse {
             id: payment.id,
             memo: None,
+            reference: None,
+            metadata: serde_json::json!({}),
             created_at: String::new(),
             status: payment.status,
             amount: payment.amount,

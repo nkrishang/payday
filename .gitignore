@@ -2,6 +2,10 @@
 target/
 .env
 
+# Node.js
+node_modules/
+sdk/typescript/dist/
+
 # Foundry broadcast logs (from forge script)
 /broadcast/
 

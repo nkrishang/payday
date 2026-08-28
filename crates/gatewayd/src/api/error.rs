@@ -29,6 +29,14 @@ impl ApiError {
         }
     }
 
+    pub fn payer_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_payment_link",
+            message: "This payment link is invalid or expired".into(),
+        }
+    }
+
     pub fn identity_unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -134,6 +142,14 @@ impl ApiError {
         }
     }
 
+    pub fn payment_not_payable() -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code: "payment_not_payable",
+            message: "This payment is no longer accepting funds".into(),
+        }
+    }
+
     pub fn database_unavailable(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -147,6 +163,14 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: msg.into(),
+        }
+    }
+
+    pub fn rate_limited() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: "Per-account request limit exceeded".into(),
         }
     }
 }
