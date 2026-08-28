@@ -22,6 +22,30 @@ variable "domain_name" {
   }
 }
 
+variable "payment_domain_name" {
+  description = "Public hostname used for payer checkout links (pay.payday.sh in production)."
+  type        = string
+  validation {
+    condition     = length(var.payment_domain_name) <= 253 && can(regex("^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}$", var.payment_domain_name))
+    error_message = "payment_domain_name must be a valid fully qualified DNS name without a scheme or path."
+  }
+}
+
+variable "payment_route53_zone_id" {
+  description = "ID of the public Route53 hosted zone containing payment_domain_name."
+  type        = string
+}
+
+variable "explorer_base_url" {
+  description = "Explorer origin for the configured chain; Monad production uses MonadVision."
+  type        = string
+  default     = "https://monadvision.com"
+  validation {
+    condition     = can(regex("^https://[^/?#]+/?$", var.explorer_base_url))
+    error_message = "explorer_base_url must be an HTTPS origin without a path, query, or fragment."
+  }
+}
+
 variable "auth0_issuer" {
   description = "Auth0 tenant issuer URL, including https://."
   type        = string
@@ -50,7 +74,7 @@ variable "auth0_client_id" {
 }
 
 variable "route53_zone_id" {
-  description = "ID of an existing public Route53 hosted zone containing domain_name."
+  description = "ID of the public Route53 hosted zone containing the API domain_name."
   type        = string
 }
 
@@ -170,6 +194,16 @@ variable "indexer_memory" {
 variable "api_port" {
   type    = number
   default = 8080
+}
+
+variable "api_key_prefix" {
+  description = "Prefix issued on account API keys for this deployment."
+  type        = string
+  default     = "payday_live_"
+  validation {
+    condition     = contains(["payday_live_", "payday_test_"], var.api_key_prefix)
+    error_message = "api_key_prefix must be exactly payday_live_ or payday_test_."
+  }
 }
 
 variable "db_instance_class" {

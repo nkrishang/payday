@@ -7,11 +7,22 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use gateway_core::{CreatePaymentRequest, PaymentListResponse, PaymentResponse};
+use gateway_core::{
+    CancelPaymentResponse, CreatePaymentRequest, PaymentListResponse, PaymentResponse,
+};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use crate::account::ApiKeyMetadata;
 use crate::error::{ApiErrorBody, CliError};
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct WebhookEndpoint {
+    pub id: uuid::Uuid,
+    pub url: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
 
 /// Thin wrapper around a `reqwest::Client` bound to one gateway base URL.
 pub struct GatewayClient {
@@ -96,13 +107,35 @@ impl GatewayClient {
         parse_response(resp).await
     }
 
+    /// Hold the request until the payment changes or the server's 30-second
+    /// long-poll window elapses. This keeps `--watch` responsive without a
+    /// client-side two-second polling loop.
+    pub async fn wait_for_payment_change(&self, id: &str) -> Result<PaymentResponse, CliError> {
+        let url = format!("{}/v1/payments/{id}", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("wait_for", "change"), ("timeout", "30")])
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        parse_response(resp).await
+    }
+
     pub async fn list_payments(
         &self,
+        status: Option<&str>,
         limit: u32,
         starting_after: Option<&str>,
     ) -> Result<PaymentListResponse, CliError> {
         let url = format!("{}/v1/payments", self.base_url);
         let mut query = vec![("limit", limit.to_string())];
+        if let Some(status) = status {
+            query.push(("status", status.to_owned()));
+        }
         if let Some(cursor) = starting_after {
             query.push(("starting_after", cursor.to_owned()));
         }
@@ -119,6 +152,20 @@ impl GatewayClient {
         parse_typed_response(resp, "payments").await
     }
 
+    pub async fn cancel_payment(&self, reference: &str) -> Result<CancelPaymentResponse, CliError> {
+        let url = format!("{}/v1/payments/{reference}/cancel", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        parse_response(response).await
+    }
+
     pub async fn account(&self) -> Result<ApiKeyMetadata, CliError> {
         let url = format!("{}/v1/account", self.base_url);
         let response = self
@@ -130,6 +177,60 @@ impl GatewayClient {
                 url: url.clone(),
                 source,
             })?;
+        parse_response(response).await
+    }
+
+    pub async fn add_webhook(&self, endpoint: &str) -> Result<WebhookEndpoint, CliError> {
+        self.request_json(
+            self.http
+                .post(format!("{}/v1/webhooks", self.base_url))
+                .json(&serde_json::json!({"url": endpoint})),
+        )
+        .await
+    }
+
+    pub async fn list_webhooks(&self) -> Result<Vec<WebhookEndpoint>, CliError> {
+        self.request_json(self.http.get(format!("{}/v1/webhooks", self.base_url)))
+            .await
+    }
+
+    pub async fn remove_webhook(&self, id: uuid::Uuid) -> Result<serde_json::Value, CliError> {
+        self.request_json(
+            self.http
+                .delete(format!("{}/v1/webhooks/{id}", self.base_url)),
+        )
+        .await
+    }
+
+    pub async fn test_webhook(&self, id: uuid::Uuid) -> Result<serde_json::Value, CliError> {
+        self.request_json(
+            self.http
+                .post(format!("{}/v1/webhooks/{id}/test", self.base_url)),
+        )
+        .await
+    }
+
+    pub async fn webhook_deliveries(&self) -> Result<Vec<serde_json::Value>, CliError> {
+        self.request_json(
+            self.http
+                .get(format!("{}/v1/webhook-deliveries", self.base_url)),
+        )
+        .await
+    }
+
+    async fn request_json<T: serde::de::DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, CliError> {
+        let url = request
+            .try_clone()
+            .and_then(|r| r.build().ok())
+            .map(|r| r.url().to_string())
+            .unwrap_or_else(|| self.base_url.clone());
+        let response = request
+            .send()
+            .await
+            .map_err(|source| CliError::Transport { url, source })?;
         parse_response(response).await
     }
 }
@@ -297,12 +398,16 @@ mod tests {
         .await;
         let client = GatewayClient::new(base_url, KEY).unwrap();
         let create = CreatePaymentRequest {
-            chain_id: "31337".into(),
-            token_address: "0x0000000000000000000000000000000000000001".into(),
+            chain_id: Some("31337".into()),
+            token_address: Some("0x0000000000000000000000000000000000000001".into()),
             payout_address: "0x0000000000000000000000000000000000000002".into(),
             amount: "1".into(),
-            expires_in: 3_600,
-            refund_address: "0x0000000000000000000000000000000000000003".into(),
+            expires_in: Some(3_600),
+            expires_at: None,
+            refund_address: Some("0x0000000000000000000000000000000000000003".into()),
+            memo: None,
+            reference: None,
+            metadata: serde_json::json!({}),
         };
 
         assert!(
@@ -314,7 +419,7 @@ mod tests {
         assert!(client.get_payment("pay_test").await.is_err());
         assert!(
             client
-                .list_payments(7, Some("pay_0198f80c-8d2f-7dc1-a369-90556a64f700"))
+                .list_payments(None, 7, Some("pay_0198f80c-8d2f-7dc1-a369-90556a64f700"),)
                 .await
                 .is_err()
         );
@@ -370,5 +475,20 @@ mod tests {
             CliError::UnexpectedResponse { status: 302, .. }
         ));
         assert_eq!(requests.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_client_uses_documented_routes_and_bearer_auth() {
+        let ok = response("200 OK", "Content-Type: application/json\r\n", "[]");
+        let (base_url, requests) = capture_server(vec![ok.clone(), ok]).await;
+        let client = GatewayClient::new(base_url, KEY).unwrap();
+        client.list_webhooks().await.unwrap();
+        client.webhook_deliveries().await.unwrap();
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /v1/webhooks HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/webhook-deliveries HTTP/1.1"));
+        requests
+            .iter()
+            .for_each(|request| assert_bearer_header(request));
     }
 }

@@ -51,6 +51,18 @@ pub enum CliError {
 }
 
 impl CliError {
+    pub fn json(&self) -> String {
+        let code = match self {
+            CliError::InvalidInput(_) => "invalid_input",
+            CliError::Transport { .. } => "transport_error",
+            CliError::Api { code, .. } => code,
+            CliError::UnexpectedResponse { .. } => "unexpected_response",
+            CliError::Config(_) => "configuration_error",
+            CliError::Auth { .. } => "authentication_error",
+        };
+        serde_json::json!({ "error": { "code": code, "message": self.to_string() } }).to_string()
+    }
+
     /// Stable process exit code. Distinguishes local misuse from remote failures
     /// so scripts can branch on the outcome.
     pub fn exit_code(&self) -> i32 {
@@ -66,5 +78,18 @@ impl CliError {
             CliError::Auth { detail, .. } => detail.as_deref(),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_errors_keep_stable_codes_and_messages() {
+        let value: serde_json::Value =
+            serde_json::from_str(&CliError::InvalidInput("bad expiry".into()).json()).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_input");
+        assert_eq!(value["error"]["message"], "bad expiry");
     }
 }

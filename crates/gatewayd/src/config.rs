@@ -10,6 +10,11 @@ pub struct Config {
     chain_id: ChainId,
     factory_address: Address,
     usdc_address: Address,
+    public_base_url: String,
+    explorer_base_url: Option<String>,
+    payer_token_secret: String,
+    api_key_prefix: String,
+    webhook_encryption_key: Option<[u8; 32]>,
 }
 
 impl Config {
@@ -44,6 +49,17 @@ impl Config {
         let usdc_address = Address::from_str(&usdc_address)
             .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_ADDRESS '{usdc_address}': {e}"));
 
+        let api_key_prefix =
+            std::env::var("PAYDAY_API_KEY_PREFIX").unwrap_or_else(|_| "payday_live_".into());
+        validate_api_key_prefix(&api_key_prefix).unwrap_or_else(|message| panic!("{message}"));
+        let webhook_encryption_key =
+            std::env::var("PAYDAY_WEBHOOK_ENCRYPTION_KEY")
+                .ok()
+                .map(|value| {
+                    decode_webhook_encryption_key(&value)
+                        .unwrap_or_else(|message| panic!("{message}"))
+                });
+
         Config {
             bind_addr: std::env::var("PAYDAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
@@ -52,6 +68,13 @@ impl Config {
             chain_id: ChainId(chain_id),
             factory_address,
             usdc_address,
+            public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
+            explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
+            payer_token_secret: std::env::var("PAYDAY_PAYER_TOKEN_SECRET")
+                .expect("PAYDAY_PAYER_TOKEN_SECRET must be set"),
+            api_key_prefix,
+            webhook_encryption_key,
         }
     }
 
@@ -78,10 +101,72 @@ impl Config {
     pub fn usdc_address(&self) -> Address {
         self.usdc_address
     }
+
+    pub fn public_base_url(&self) -> &str {
+        &self.public_base_url
+    }
+
+    pub fn explorer_base_url(&self) -> Option<&str> {
+        self.explorer_base_url.as_deref()
+    }
+
+    pub fn payer_token_secret(&self) -> &[u8] {
+        self.payer_token_secret.as_bytes()
+    }
+
+    pub fn api_key_prefix(&self) -> &str {
+        &self.api_key_prefix
+    }
+
+    pub fn webhook_encryption_key(&self) -> Option<[u8; 32]> {
+        self.webhook_encryption_key
+    }
+}
+
+fn validate_api_key_prefix(value: &str) -> Result<(), &'static str> {
+    match value {
+        "payday_live_" | "payday_test_" => Ok(()),
+        _ => Err("PAYDAY_API_KEY_PREFIX must be exactly payday_live_ or payday_test_"),
+    }
+}
+
+fn decode_webhook_encryption_key(value: &str) -> Result<[u8; 32], &'static str> {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| "PAYDAY_WEBHOOK_ENCRYPTION_KEY must be valid standard base64")?;
+    decoded
+        .try_into()
+        .map_err(|_| "PAYDAY_WEBHOOK_ENCRYPTION_KEY must decode to exactly 32 bytes")
 }
 
 pub struct Auth0Config {
     pub issuer: String,
     pub audience: String,
     pub client_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_supported_api_key_prefixes() {
+        assert!(validate_api_key_prefix("payday_live_").is_ok());
+        assert!(validate_api_key_prefix("payday_test_").is_ok());
+        assert!(validate_api_key_prefix("payday_dev_").is_err());
+        assert!(validate_api_key_prefix("payday_live").is_err());
+    }
+
+    #[test]
+    fn encryption_key_requires_standard_base64_of_32_bytes() {
+        assert_eq!(
+            decode_webhook_encryption_key("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+                .unwrap()
+                .len(),
+            32
+        );
+        assert!(decode_webhook_encryption_key("not base64").is_err());
+        assert!(decode_webhook_encryption_key("c2hvcnQ=").is_err());
+    }
 }
