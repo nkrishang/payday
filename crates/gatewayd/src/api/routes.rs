@@ -1,11 +1,16 @@
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::trace::TraceLayer;
+use tracing::field;
 
 use crate::api::accounts;
 use crate::api::auth;
 use crate::api::health;
 use crate::api::invoices;
+use crate::api::status;
+use crate::api::webhooks;
+use crate::api::{middleware as api_middleware, openapi};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
@@ -17,6 +22,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/payments/{id}", get(invoices::get_payment))
         .route("/v1/payments/{id}/cancel", post(invoices::cancel_payment))
+        .route("/v1/payments/{id}/transfers", get(invoices::transfers))
+        .route("/v1/status", get(status::get))
+        .route("/v1/webhooks", post(webhooks::add).get(webhooks::list))
+        .route("/v1/webhooks/{id}", delete(webhooks::remove))
+        .route("/v1/webhooks/{id}/test", post(webhooks::test))
+        .route("/v1/webhook-deliveries", get(webhooks::deliveries))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -38,9 +49,38 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health::health))
+        .route("/openapi.json", get(openapi::spec))
+        .route("/docs", get(openapi::reference))
+        .route("/api", get(openapi::reference))
+        .route("/api/openapi.json", get(openapi::spec))
         .merge(authenticated)
         .merge(account_management)
         .with_state(state)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::extract::Request| {
+                    let request_id = request
+                        .extensions()
+                        .get::<api_middleware::RequestId>()
+                        .map(|value| value.0.as_str())
+                        .unwrap_or("unknown");
+                    tracing::info_span!(
+                        "http_request", method = %request.method(), path = %request.uri().path(),
+                        request_id, status = field::Empty, latency_ms = field::Empty,
+                        account_id = field::Empty
+                    )
+                })
+                .on_response(
+                    |response: &axum::response::Response,
+                     latency: std::time::Duration,
+                     span: &tracing::Span| {
+                        span.record("status", response.status().as_u16());
+                        span.record("latency_ms", latency.as_millis());
+                        tracing::info!(parent: span, "request completed");
+                    },
+                ),
+        )
+        .layer(middleware::from_fn(api_middleware::request_id))
 }
 
 #[cfg(test)]
@@ -107,6 +147,8 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            "payday_live_".into(),
+            None,
         );
         router(state)
     }
@@ -212,8 +254,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let mut body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        body.as_object_mut().unwrap().remove("request_id");
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            body,
             serde_json::json!({
                 "error": {
                     "code": "unauthorized",
@@ -448,6 +493,35 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn payment_freshness_distinguishes_indexed_cursor_from_finalized_head(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "freshness", &valid_body()))
+            .await
+            .unwrap();
+        let id = json_body(created).await["id"].as_str().unwrap().to_owned();
+        sqlx::query("INSERT INTO indexer_cursor(chain_id,token_address,last_block,last_block_hash,last_block_timestamp) VALUES(1,$1,117,$2,1700000000)")
+            .bind(Address::ZERO.as_slice()).bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO indexer_status(chain_id,token_address,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,$1,120,$2,1700000012)")
+            .bind(Address::ZERO.as_slice()).bind([2_u8; 32].as_slice()).execute(&pool).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/v1/payments/{id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let payment = json_body(response).await;
+        assert_eq!(payment["as_of"]["block"], "117");
+        assert_eq!(payment["indexer_freshness"]["last_indexed_block"], "117");
+        assert_eq!(payment["indexer_freshness"]["last_finalized_block"], "120");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn address_lookup_cancel_and_bounded_list_shape_work(pool: PgPool) {
         let app = app(pool).await;
         let body = json!({
@@ -665,6 +739,8 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            "payday_live_".into(),
+            None,
         );
         let app = router(state);
         let identity_request = |method: &str, path: &str, body: Body| {

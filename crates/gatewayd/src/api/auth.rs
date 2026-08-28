@@ -5,7 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
+use axum::response::IntoResponse;
 use axum::response::Response;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
@@ -259,8 +261,57 @@ pub async fn require_api_key(
         .authenticate(supplied)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
+    // One independently refilled bucket per authenticated account. Authentication
+    // failures cannot consume another customer's allowance.
+    const LIMIT: f64 = 60.0;
+    let now = Instant::now();
+    let (allowed, remaining, seconds_until_full) = {
+        let mut buckets = state.rate_limits.lock().await;
+        let bucket = buckets.entry(account.0).or_insert((LIMIT, now));
+        bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64()).min(LIMIT);
+        bucket.1 = now;
+        let allowed = bucket.0 >= 1.0;
+        if allowed {
+            bucket.0 -= 1.0;
+        }
+        (
+            allowed,
+            bucket.0.floor() as u64,
+            (LIMIT - bucket.0).ceil() as u64,
+        )
+    };
     request.extensions_mut().insert(account);
-    Ok(next.run(request).await)
+    tracing::Span::current().record("account_id", tracing::field::display(account.0));
+    let mut response = if allowed {
+        next.run(request).await
+    } else {
+        ApiError::rate_limited().into_response()
+    };
+    response
+        .headers_mut()
+        .insert("x-ratelimit-limit", HeaderValue::from_static("60"));
+    response.headers_mut().insert(
+        "x-ratelimit-remaining",
+        HeaderValue::from_str(&remaining.to_string()).unwrap(),
+    );
+    response.headers_mut().insert(
+        "x-ratelimit-reset",
+        HeaderValue::from_str(
+            &(SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                + seconds_until_full)
+                .to_string(),
+        )
+        .unwrap(),
+    );
+    if !allowed {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    Ok(response)
 }
 
 pub async fn require_identity(

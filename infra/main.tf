@@ -160,6 +160,17 @@ resource "aws_secretsmanager_secret_version" "rpc_url" {
   secret_string = var.rpc_url
 }
 
+# Webhook signing secrets need to be recoverable across worker restarts while
+# remaining encrypted at rest. This key encrypts them before they reach Postgres.
+resource "random_id" "webhook_encryption_key" { byte_length = 32 }
+resource "aws_secretsmanager_secret" "webhook_encryption_key" {
+  name = "${var.name}/webhook-encryption-key"
+}
+resource "aws_secretsmanager_secret_version" "webhook_encryption_key" {
+  secret_id     = aws_secretsmanager_secret.webhook_encryption_key.id
+  secret_string = random_id.webhook_encryption_key.b64_std
+}
+
 resource "aws_kms_key" "signer" {
   description              = "${var.name} Ethereum transaction signer"
   key_usage                = "SIGN_VERIFY"
@@ -222,7 +233,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn] }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
@@ -262,9 +273,13 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
       { name = "PAYDAY_AUTH0_ISSUER", value = var.auth0_issuer },
       { name = "PAYDAY_AUTH0_AUDIENCE", value = var.auth0_audience },
-      { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id }
+      { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id },
+      { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix }
     ]),
-    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }],
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn }
+    ],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 }

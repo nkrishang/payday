@@ -84,8 +84,8 @@ impl Presentation {
                     payment.payout_address, payment.refund_address
                 ),
             ]);
-            if let Some(memo) = &payment.memo {
-                lines.push(format!("Reference  {memo}"));
+            if let Some(reference) = payment.reference.as_ref().or(payment.memo.as_ref()) {
+                lines.push(format!("Reference  {reference}"));
             }
             if payment.cancellation_requested_at.is_some() {
                 lines.push(
@@ -108,7 +108,7 @@ impl Presentation {
                     let description = match transfer.disposition.as_str() {
                         "credited" => format!("+{} USDC received", amount(&transfer.amount)),
                         "late" => format!("{} USDC late → refund wallet", amount(&transfer.amount)),
-                        "error" => format!("{} USDC ignored", amount(&transfer.amount)),
+                        "zero" => format!("{} USDC ignored", amount(&transfer.amount)),
                         other => format!("{} USDC ({other})", amount(&transfer.amount)),
                     };
                     format!(
@@ -127,9 +127,17 @@ impl Presentation {
                     .as_deref()
                     .map(cursor_age)
                     .unwrap_or_default();
+                let indexed = payment
+                    .as_of
+                    .as_ref()
+                    .map(|as_of| as_of.block.as_str())
+                    .or(payment.indexer_freshness.last_indexed_block.as_deref())
+                    .unwrap_or("unknown");
                 lines.extend([
                     String::new(),
-                    format!("As of finalized block {block}{age} · --watch to follow"),
+                    format!(
+                        "As of block {indexed} · finalized head {block}{age} · --watch to follow"
+                    ),
                 ]);
             }
         }
@@ -165,7 +173,11 @@ impl Presentation {
                 shorten(&payment.id),
                 status,
                 format!("{} USDC", amount(&payment.amount)),
-                payment.memo.as_deref().unwrap_or("—")
+                payment
+                    .reference
+                    .as_deref()
+                    .or(payment.memo.as_deref())
+                    .unwrap_or("—")
             )
         }));
         lines.join("\n")
@@ -313,6 +325,10 @@ mod tests {
             remaining: "0.600000".into(),
             remaining_base_units: "600000".into(),
             currency: "USDC".into(),
+            fee_amount: "0".into(),
+            fee_amount_base_units: "0".into(),
+            net_amount: "1".into(),
+            net_amount_base_units: "1000000".into(),
             status,
             token: TokenDto {
                 symbol: "USDC".into(),
@@ -332,8 +348,13 @@ mod tests {
             },
             attention: None,
             memo: Some("Order 1234".into()),
+            reference: Some("Order 1234".into()),
+            metadata: serde_json::json!({}),
             created_at: "2026-08-27T14:00:00Z".into(),
             updated_at: "2026-08-27T15:00:00Z".into(),
+            paid_at: None,
+            paid_at_block: None,
+            expired_at: None,
             cancellation_requested_at: None,
             transfers: vec![],
             indexer_freshness: IndexerFreshnessDto {
@@ -341,6 +362,7 @@ mod tests {
                 last_finalized_block: Some("12345678".into()),
                 cursor_updated_at: None,
             },
+            as_of: None,
         }
     }
 
@@ -369,8 +391,9 @@ mod tests {
                 .into(),
             block: "123".into(),
             disposition: disposition.into(),
+            collected: false,
         };
-        payment.transfers = vec![transfer("credited"), transfer("late"), transfer("error")];
+        payment.transfers = vec![transfer("credited"), transfer("late"), transfer("zero")];
         let output = Presentation {
             color: false,
             verbose: false,

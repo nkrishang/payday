@@ -2,12 +2,13 @@ mod accounts;
 mod cursor;
 mod invoices;
 mod sweeps;
+mod webhooks;
 
 pub use accounts::{
     API_KEY_GRACE_HOURS, AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError,
     IssuedApiKey,
 };
-pub use cursor::{CursorRepository, IndexerCursor};
+pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
     InvoiceRepository, PaymentObservation, RangeOutcome,
@@ -17,6 +18,11 @@ use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 pub use sweeps::{
     BatchResolution, InvoiceOutcome, MinedBatch, SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats,
+    SweeperStatus,
+};
+pub use webhooks::{
+    DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,
+    WebhookRepository,
 };
 
 /// The gateway's schema migrations, embedded at compile time. This crate owns

@@ -1,4 +1,5 @@
 aws_region       = "us-east-1"
+api_key_prefix   = "payday_live_"
 domain_name      = "api.payday.sh"
 auth0_issuer     = "https://your-tenant.us.auth0.com/"
 auth0_audience   = "https://api.payday.sh"

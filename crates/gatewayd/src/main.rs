@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod state;
+mod webhook_worker;
 
 use axum::serve;
 use tokio::net::TcpListener;
@@ -39,7 +40,16 @@ async fn main() {
         config.chain_id(),
         config.factory_address(),
         config.usdc_address(),
+        config.api_key_prefix().to_owned(),
+        config.webhook_encryption_key(),
     );
+    if let Some(key) = state.webhook_encryption_key {
+        tokio::spawn(webhook_worker::run(state.webhooks.clone(), key));
+    } else {
+        tracing::warn!(
+            "PAYDAY_WEBHOOK_ENCRYPTION_KEY is unset; webhook API and delivery are disabled"
+        );
+    }
 
     let app = api::router(state);
 

@@ -149,6 +149,14 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    pub fn rate_limited() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: "Per-account request limit exceeded".into(),
+        }
+    }
 }
 
 #[derive(Serialize)]

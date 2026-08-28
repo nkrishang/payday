@@ -1,18 +1,18 @@
 //! Customer invoice handlers.
 
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::utils::format_units;
 use alloy_primitives::{Address, B256, U256};
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue};
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, BeneficiaryAddress, CancelPaymentResponse, ChainId, CreatePaymentRequest,
+    Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, ChainId, CreatePaymentRequest,
     FactoryAddress, IndexerFreshnessDto, Invoice, PaymentListResponse, PaymentResponse,
     PaymentStatus, PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto,
     USDC_DECIMALS, resolve_expiration,
@@ -56,8 +56,20 @@ fn enrich_response(
         .and_then(|v| v.parse().ok());
     let mut response = PaymentResponse::from_invoice(Invoice::try_from(&row)?, expires_in);
     response.memo = row.memo.clone();
+    response.reference = row.reference.clone();
+    response.metadata = row.metadata.0.clone();
     response.created_at = row.created_at.to_rfc3339();
     response.updated_at = row.updated_at.to_rfc3339();
+    response.paid_at = row.paid_at.map(|value| value.to_rfc3339());
+    response.paid_at_block = row.funded_at_block.map(|value| value.to_string());
+    response.expired_at = row.expired_at.map(|value| value.to_rfc3339());
+    response.settlement_tx_hash = row
+        .settlement_tx_hash
+        .as_deref()
+        .map(B256::try_from)
+        .transpose()
+        .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
+        .map(|value| value.to_string());
     response.transfers = transfers
         .into_iter()
         .filter(|t| t.invoice_id == row.id)
@@ -77,16 +89,31 @@ fn enrich_response(
                 sender: sender.to_checksum(None),
                 transaction_hash: hash.to_string(),
                 block: t.block_number.to_string(),
-                disposition: t.disposition,
+                disposition: if t.disposition == "error" {
+                    "zero".into()
+                } else {
+                    t.disposition
+                },
+                collected: t.collected,
             })
         })
         .collect::<Result<_, ApiError>>()?;
     let cursor = freshness
         .into_iter()
         .find(|f| f.chain_id == row.chain_id && f.token_address == row.token_address);
+    response.as_of = cursor.as_ref().and_then(|cursor| {
+        Some(AsOfDto {
+            block: cursor.last_block.to_string(),
+            at: sqlx::types::chrono::DateTime::from_timestamp(cursor.last_block_timestamp?, 0)?
+                .to_rfc3339(),
+        })
+    });
     response.indexer_freshness = IndexerFreshnessDto {
         last_indexed_block: cursor.as_ref().map(|c| c.last_block.to_string()),
-        last_finalized_block: cursor.as_ref().map(|c| c.last_block.to_string()),
+        last_finalized_block: cursor
+            .as_ref()
+            .and_then(|c| c.finalized_block)
+            .map(|block| block.to_string()),
         cursor_updated_at: cursor.map(|c| c.updated_at.to_rfc3339()),
     };
     Ok(response)
@@ -99,8 +126,15 @@ pub async fn create_payment(
     Extension(account): Extension<AccountId>,
     headers: HeaderMap,
     Json(req): Json<CreatePaymentRequest>,
-) -> Result<(axum::http::StatusCode, Json<PaymentResponse>), ApiError> {
+) -> Result<(axum::http::StatusCode, HeaderMap, Json<PaymentResponse>), ApiError> {
     let memo = req.memo.clone();
+    if req.reference.is_some() && memo.is_some() && req.reference != memo {
+        return Err(ApiError::invalid_request(
+            "reference and memo must match when both are supplied",
+        ));
+    }
+    let reference = req.reference.clone().or_else(|| memo.clone());
+    validate_customer_fields(reference.as_deref(), &req.metadata)?;
     // 1. Extract idempotency key from header.
     let idempotency_key = headers
         .get("idempotency-key")
@@ -194,6 +228,8 @@ pub async fn create_payment(
         expiration_intent: &expiration.intent,
         recovery: recovery_addr,
         memo: memo.as_deref(),
+        reference: reference.as_deref(),
+        metadata: &req.metadata,
     };
 
     // 5. Check for existing idempotency key before generating anything.
@@ -203,8 +239,11 @@ pub async fn create_payment(
         .await?
     {
         if same_request(&existing, &requested) {
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert("Idempotency-Replayed", HeaderValue::from_static("true"));
             return Ok((
                 axum::http::StatusCode::OK,
+                response_headers,
                 Json(to_response(&state, account, existing).await?),
             ));
         } else {
@@ -224,7 +263,7 @@ pub async fn create_payment(
     );
 
     // 7. Persist. ON CONFLICT handles the race between our check and insert.
-    let input = CreateInvoiceInput::from_invoice(
+    let mut input = CreateInvoiceInput::from_invoice(
         &invoice,
         account,
         idempotency_key.clone(),
@@ -233,12 +272,15 @@ pub async fn create_payment(
         expiration_timestamp - now,
         expiration.intent.clone(),
     );
+    input.reference = reference.clone();
+    input.metadata = req.metadata.clone();
 
     let inserted = state.repo.insert(&input).await?;
 
     match inserted {
         Some(row) => Ok((
             axum::http::StatusCode::CREATED,
+            HeaderMap::new(),
             Json(to_response(&state, account, row).await?),
         )),
         None => {
@@ -250,8 +292,11 @@ pub async fn create_payment(
                 .expect("idempotency key must exist after ON CONFLICT");
 
             if same_request(&existing, &requested) {
+                let mut response_headers = HeaderMap::new();
+                response_headers.insert("Idempotency-Replayed", HeaderValue::from_static("true"));
                 Ok((
                     axum::http::StatusCode::OK,
+                    response_headers,
                     Json(to_response(&state, account, existing).await?),
                 ))
             } else {
@@ -265,15 +310,62 @@ pub async fn get_payment(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
+    Query(query): Query<GetQuery>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let mut row = resolve_payment(&state, account, &reference).await?;
+    if query.wait_for.is_none() && query.timeout.is_some() {
+        return Err(ApiError::invalid_request(
+            "timeout requires wait_for=change",
+        ));
+    }
+    if let Some(wait_for) = query.wait_for {
+        if wait_for != "change" {
+            return Err(ApiError::invalid_request("wait_for must be change"));
+        }
+        let timeout = query.timeout.unwrap_or(30);
+        if !(1..=30).contains(&timeout) {
+            return Err(ApiError::invalid_request(
+                "timeout must be between 1 and 30 seconds",
+            ));
+        }
+        let initial = row.updated_at;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+        loop {
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + Duration::from_millis(250)).min(deadline),
+            )
+            .await;
+            row = resolve_payment(&state, account, &reference).await?;
+            if row.updated_at != initial || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+    }
 
     Ok(Json(to_response(&state, account, row).await?))
 }
 
+pub async fn transfers(
+    State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
+    Path(reference): Path<String>,
+) -> Result<Json<Vec<TransferDto>>, ApiError> {
+    let row = resolve_payment(&state, account, &reference).await?;
+    Ok(Json(to_response(&state, account, row).await?.transfers))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetQuery {
+    wait_for: Option<String>,
+    timeout: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     status: Option<String>,
+    reference: Option<String>,
     limit: Option<u32>,
     starting_after: Option<String>,
 }
@@ -314,6 +406,7 @@ pub async fn list_payments(
         .list_for_account(
             account,
             status.map(PaymentStatus::as_str),
+            query.reference.as_deref(),
             starting_after,
             limit,
         )
@@ -328,6 +421,8 @@ pub async fn list_payments(
             Ok(PaymentSummaryResponse {
                 id: response.id,
                 memo: row.memo,
+                reference: row.reference,
+                metadata: row.metadata.0,
                 created_at: row.created_at.to_rfc3339(),
                 status: response.status,
                 amount: response.amount,
@@ -419,6 +514,8 @@ struct RequestedInvoice<'a> {
     expiration_intent: &'a str,
     recovery: Address,
     memo: Option<&'a str>,
+    reference: Option<&'a str>,
+    metadata: &'a serde_json::Value,
 }
 
 fn same_request(row: &DbInvoice, request: &RequestedInvoice<'_>) -> bool {
@@ -428,9 +525,39 @@ fn same_request(row: &DbInvoice, request: &RequestedInvoice<'_>) -> bool {
         && row.expiration_intent == request.expiration_intent
         && row.recovery_address.as_slice() == request.recovery.as_slice()
         && row.memo.as_deref() == request.memo
+        && row.reference.as_deref() == request.reference
+        && row.metadata.0 == *request.metadata
         && U256::from_str_radix(&row.amount, 10)
             .map(|amount| amount == request.amount)
             .unwrap_or(false)
+}
+
+fn validate_customer_fields(
+    reference: Option<&str>,
+    metadata: &serde_json::Value,
+) -> Result<(), ApiError> {
+    if reference.is_some_and(|value| value.chars().count() > 128) {
+        return Err(ApiError::invalid_request(
+            "reference must contain at most 128 characters",
+        ));
+    }
+    let serde_json::Value::Object(entries) = metadata else {
+        return Err(ApiError::invalid_request("metadata must be a JSON object"));
+    };
+    if entries.len() > 16 {
+        return Err(ApiError::invalid_request(
+            "metadata must contain at most 16 keys",
+        ));
+    }
+    if entries
+        .values()
+        .any(|value| serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() > 512))
+    {
+        return Err(ApiError::invalid_request(
+            "each metadata value must be at most 512 bytes",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -172,6 +172,16 @@ variable "api_port" {
   default = 8080
 }
 
+variable "api_key_prefix" {
+  description = "Prefix issued on account API keys for this deployment."
+  type        = string
+  default     = "payday_live_"
+  validation {
+    condition     = contains(["payday_live_", "payday_test_"], var.api_key_prefix)
+    error_message = "api_key_prefix must be exactly payday_live_ or payday_test_."
+  }
+}
+
 variable "db_instance_class" {
   type    = string
   default = "db.t4g.small"
