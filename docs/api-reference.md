@@ -111,7 +111,7 @@ Returns finalized transfer provenance as an array. Each item has `timestamp`,
 
 The full payment response contains:
 
-- identity and instructions: `id`, signed `payment_url`, `address`, optional
+- identity and instructions: `id`, `payment_url`, `address`, optional
   `address_explorer_url`, `chain`, `token`, `currency`, `payout_address`,
   `refund_address`, and `expires_at`;
 - accounting: `amount`, `received`, `remaining`, `fee_amount`, and `net_amount`,
@@ -166,10 +166,10 @@ loopback, link-local, or reserved targets are rejected. See
 
 ## Payer links and documentation
 
-The signed `payment_url` opens `GET /pay/{id}?token=…`. Its page reads scoped
-payment data from `GET /v1/payer/payments/{id}?token=…` and QR SVG from
-`GET /v1/payer/payments/{id}/qr?token=…`. These routes do not accept account API
-keys; access is restricted by the payment token. JSON responses use
+The `payment_url` opens `GET /pay/{id}`. Its page reads payment data from
+`GET /v1/payer/payments/{id}` and QR SVG from
+`GET /v1/payer/payments/{id}/qr`. These routes do not accept account API
+keys. JSON responses use
 `Cache-Control: no-store`, and QR requests return `410 payment_not_payable` once
 the address should no longer be presented.
 

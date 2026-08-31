@@ -43,7 +43,7 @@ payday create \
   Hidden chain/token overrides are intended for controlled deployments only.
 
 The result includes a `pay_…` ID, one-time address, amount, deadline, current
-status, and a signed `payment_url`. Add `--json` for the full API object.
+status, and a `payment_url`. Add `--json` for the full API object.
 
 For scripted retries, supply a stable key and reuse it only with the same
 parameters:

@@ -10,7 +10,7 @@ The address commits to the configured token, amount, payout address, deadline,
 refund address, and a unique salt. Deployment cannot change those terms.
 Anyone may execute the contract, but the caller cannot redirect its funds.
 
-Treat the address as single-use. Share the signed `payment_url` or all returned
+Treat the address as single-use. Share the `payment_url` or all returned
 payment instructions, and stop presenting the address after it is no longer
 payable. Never recycle it for another order.
 
@@ -81,8 +81,7 @@ duplicate, excess, or late payments.
 - Only the exact `token.address` on the returned `chain.id` is monitored.
   Bridged USDC, look-alike tokens, another network's USDC, and native gas do not
   count and may be unrecoverable.
-- A signed payment link grants scoped read access until 30 days after expiry.
-  Share it with the payer, not publicly.
+- A payment link grants read access to the payment page. Share it with the payer.
 - `needs_attention` pauses automatic settlement and recovery, including later
   transfers, until an operator safely resolves and releases the payment.
 - Amounts have six USDC decimals. Use decimal or integer arithmetic, never

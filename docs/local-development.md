@@ -226,8 +226,6 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `PAYDAY_PUBLIC_BASE_URL` — origin used in payment links; defaults to
   `http://127.0.0.1:3000` locally
-- `PAYDAY_PAYER_TOKEN_SECRET` — random secret of at least 32 bytes used only
-  to scope payer reads; required by `gatewayd`
 - `PAYDAY_EXPLORER_BASE_URL` — optional HTTPS explorer origin; production
   Monad uses `https://monadvision.com`, while Anvil leaves it unset
 - `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a

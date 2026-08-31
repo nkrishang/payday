@@ -21,7 +21,7 @@ also returned in integer base units. The current fee is explicitly zero, so
 cannot disable the deposit address or prevent detection and collection of
 on-chain transfers.
 
-Every payment includes a signed `payment_url` that can be shared directly with
+Every payment includes a `payment_url` that can be shared directly with
 the payer. Its checkout page shows the remaining amount, a copyable one-time
 address, an EIP-681 wallet request and QR code, a server-clock countdown, and
 live finalized status. Treat the full URL as sensitive: its token grants read

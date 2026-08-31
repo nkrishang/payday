@@ -3,52 +3,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, U256};
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{Html, IntoResponse, Response};
 use gateway_core::{Invoice, InvoiceStatus, PayerPaymentResponse, PaymentResponse};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use qrcode::{QrCode, render::svg};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::state::AppState;
 
-const ISSUER: &str = "payday-gateway";
-const AUDIENCE: &str = "payer-payment-read";
-const READ_GRACE_SECS: u64 = 30 * 24 * 60 * 60;
-
 #[derive(Clone)]
 pub struct PayerAccess {
     public_base_url: String,
     explorer_base_url: Option<String>,
-    encoding_key: EncodingKey,
-    decoding_key: DecodingKey,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    iss: String,
-    aud: String,
-    exp: u64,
-}
-
-#[derive(Deserialize)]
-pub struct AccessQuery {
-    token: String,
 }
 
 impl PayerAccess {
     pub fn new(
         public_base_url: impl Into<String>,
         explorer_base_url: Option<String>,
-        secret: &[u8],
     ) -> Result<Self, String> {
-        if secret.len() < 32 {
-            return Err("PAYDAY_PAYER_TOKEN_SECRET must be at least 32 bytes".into());
-        }
         let public_base_url = validate_base_url(public_base_url.into(), "public base URL", true)?;
         let explorer_base_url = explorer_base_url
             .map(|url| validate_base_url(url, "explorer base URL", false))
@@ -56,41 +31,14 @@ impl PayerAccess {
         Ok(Self {
             public_base_url,
             explorer_base_url,
-            encoding_key: EncodingKey::from_secret(secret),
-            decoding_key: DecodingKey::from_secret(secret),
         })
     }
 
     pub fn payment_url(&self, invoice: &Invoice) -> Result<String, ApiError> {
-        let token = encode(
-            &Header::new(Algorithm::HS256),
-            &Claims {
-                sub: invoice.id.to_string(),
-                iss: ISSUER.into(),
-                aud: AUDIENCE.into(),
-                exp: invoice.expiration_timestamp.saturating_add(READ_GRACE_SECS),
-            },
-            &self.encoding_key,
-        )
-        .map_err(|error| ApiError::internal(format!("failed to sign payment URL: {error}")))?;
         Ok(format!(
-            "{}/pay/{}?token={token}",
+            "{}/pay/{}",
             self.public_base_url, invoice.id
         ))
-    }
-
-    fn verify(&self, token: &str, id: &str) -> Result<(), ApiError> {
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_issuer(&[ISSUER]);
-        validation.set_audience(&[AUDIENCE]);
-        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-        let claims = decode::<Claims>(token, &self.decoding_key, &validation)
-            .map_err(|_| ApiError::payer_unauthorized())?
-            .claims;
-        if claims.sub != id {
-            return Err(ApiError::payer_unauthorized());
-        }
-        Ok(())
     }
 
     pub fn address_url(&self, address: &str) -> Option<String> {
@@ -195,13 +143,11 @@ fn payer_response(
 async fn authorized_invoice(
     state: &AppState,
     id: &str,
-    token: &str,
 ) -> Result<(Invoice, Option<String>), ApiError> {
     let uuid = id
         .strip_prefix("pay_")
         .and_then(|value| Uuid::from_str(value).ok())
         .ok_or_else(ApiError::payer_unauthorized)?;
-    state.payer.verify(token, id)?;
     let row = state
         .repo
         .find_by_id(uuid)
@@ -220,9 +166,8 @@ async fn authorized_invoice(
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(query): Query<AccessQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (invoice, settlement_tx_hash) = authorized_invoice(&state, &id, &query.token).await?;
+    let (invoice, settlement_tx_hash) = authorized_invoice(&state, &id).await?;
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
@@ -238,9 +183,8 @@ pub async fn get(
 pub async fn qr(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(query): Query<AccessQuery>,
 ) -> Result<Response, ApiError> {
-    let (invoice, _) = authorized_invoice(&state, &id, &query.token).await?;
+    let (invoice, _) = authorized_invoice(&state, &id).await?;
     let (remaining, payable) = payment_state(&invoice, unix_now());
     if !payable {
         return Err(ApiError::payment_not_payable());
@@ -317,29 +261,22 @@ mod tests {
             TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000002")),
             Amount(U256::from(1_500_000)),
-            u64::MAX - READ_GRACE_SECS,
+            u64::MAX / 2,
             RecoveryAddress(address!("0x0000000000000000000000000000000000000003")),
         )
     }
 
     #[test]
-    fn token_is_scoped_to_one_invoice_and_payment_uri_is_eip_681() {
+    fn payment_url_is_tokenless_and_payment_uri_is_eip_681() {
         let access = PayerAccess::new(
             "https://pay.payday.sh/",
             Some("https://monadvision.com/".into()),
-            b"0123456789abcdef0123456789abcdef",
         )
         .unwrap();
         let invoice = invoice();
         let url = access.payment_url(&invoice).unwrap();
-        let token = url.split("?token=").nth(1).unwrap();
-        assert!(url.starts_with(&format!("https://pay.payday.sh/pay/{}", invoice.id)));
-        assert!(access.verify(token, &invoice.id.to_string()).is_ok());
-        assert!(
-            access
-                .verify(token, &format!("pay_{}", Uuid::now_v7()))
-                .is_err()
-        );
+        assert_eq!(url, format!("https://pay.payday.sh/pay/{}", invoice.id));
+        assert!(!url.contains("token"));
         assert_eq!(
             payment_uri(&invoice, invoice.amount.0),
             format!(
@@ -364,17 +301,15 @@ mod tests {
     }
 
     #[test]
-    fn configuration_rejects_weak_secrets_and_insecure_remote_urls() {
-        assert!(PayerAccess::new("https://pay.payday.sh", None, b"short").is_err());
-        assert!(PayerAccess::new("http://pay.payday.sh", None, &[b'x'; 32]).is_err());
-        assert!(PayerAccess::new("https://pay.payday.sh/base", None, &[b'x'; 32]).is_err());
-        assert!(PayerAccess::new("https://user@pay.payday.sh", None, &[b'x'; 32]).is_err());
-        assert!(PayerAccess::new("http://127.0.0.1:3000", None, &[b'x'; 32]).is_ok());
+    fn configuration_rejects_insecure_remote_urls() {
+        assert!(PayerAccess::new("http://pay.payday.sh", None).is_err());
+        assert!(PayerAccess::new("https://pay.payday.sh/base", None).is_err());
+        assert!(PayerAccess::new("https://user@pay.payday.sh", None).is_err());
+        assert!(PayerAccess::new("http://127.0.0.1:3000", None).is_ok());
         assert!(
             PayerAccess::new(
                 "https://pay.payday.sh",
                 Some("http://monadvision.com".into()),
-                &[b'x'; 32]
             )
             .is_err()
         );

@@ -1,6 +1,5 @@
 const $ = id => document.getElementById(id);
 const id = location.pathname.split('/').filter(Boolean).pop();
-const token = new URLSearchParams(location.search).get('token');
 const labels = {
   awaiting_payment: 'Awaiting payment',
   partially_paid: 'Partially paid',
@@ -65,7 +64,7 @@ function renderPaymentActions(data) {
   if (data.payable && data.payment_uri) {
     wallet.href = data.payment_uri;
     wallet.removeAttribute('aria-disabled');
-    qr.src = `/v1/payer/payments/${encodeURIComponent(id)}/qr?token=${encodeURIComponent(token)}`;
+    qr.src = `/v1/payer/payments/${encodeURIComponent(id)}/qr`;
   } else {
     wallet.removeAttribute('href');
     wallet.setAttribute('aria-disabled', 'true');
@@ -131,7 +130,7 @@ function nextPoll(data) {
 async function refresh() {
   try {
     const response = await fetch(
-      `/v1/payer/payments/${encodeURIComponent(id)}?token=${encodeURIComponent(token || '')}`,
+      `/v1/payer/payments/${encodeURIComponent(id)}`,
       { cache: 'no-store' },
     );
     if (!response.ok) throw new Error('payment read failed');
@@ -155,5 +154,5 @@ $('copy').addEventListener('click', async () => {
   }
 });
 
-if (!id || !token) fail();
+if (!id) fail();
 else refresh();

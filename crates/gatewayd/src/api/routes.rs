@@ -182,7 +182,6 @@ mod tests {
         payer::PayerAccess::new(
             "http://127.0.0.1:3000",
             None,
-            b"0123456789abcdef0123456789abcdef",
         )
         .unwrap()
     }
@@ -721,18 +720,16 @@ mod tests {
             .await
             .unwrap();
         let created = json_body(created).await;
-        let payment_url = reqwest::Url::parse(created["payment_url"].as_str().unwrap()).unwrap();
+        let payment_url = created["payment_url"].as_str().unwrap();
         let id = created["id"].as_str().unwrap();
         let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
-        let token = payment_url
-            .query_pairs()
-            .find_map(|(name, value)| (name == "token").then(|| value.into_owned()))
-            .unwrap();
+        assert!(!payment_url.contains("token"));
+        assert!(payment_url.ends_with(&format!("/pay/{id}")));
 
         let page = app
             .clone()
             .oneshot(
-                Request::get(format!("/pay/{id}?token={token}"))
+                Request::get(format!("/pay/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -746,17 +743,11 @@ mod tests {
                 .unwrap()
                 .starts_with("public")
         );
-        let page_body = to_bytes(page.into_body(), 64 * 1024).await.unwrap();
-        assert!(
-            !page_body
-                .windows(token.len())
-                .any(|window| window == token.as_bytes())
-        );
 
         let status = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}?token={token}"))
+                Request::get(format!("/v1/payer/payments/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -786,7 +777,7 @@ mod tests {
         let qr = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}/qr?token={token}"))
+                Request::get(format!("/v1/payer/payments/{id}/qr"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -807,7 +798,7 @@ mod tests {
         let partial = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}?token={token}"))
+                Request::get(format!("/v1/payer/payments/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -832,7 +823,7 @@ mod tests {
         let expired = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}?token={token}"))
+                Request::get(format!("/v1/payer/payments/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -844,7 +835,7 @@ mod tests {
         let closed_qr = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}/qr?token={token}"))
+                Request::get(format!("/v1/payer/payments/{id}/qr"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -854,20 +845,6 @@ mod tests {
         assert_eq!(
             json_body(closed_qr).await["error"]["code"],
             "payment_not_payable"
-        );
-
-        let tampered = app
-            .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}?token={token}x"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(tampered.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            json_body(tampered).await["error"]["code"],
-            "invalid_payment_link"
         );
     }
 
