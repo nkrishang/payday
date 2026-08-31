@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(replay["expires_at"], body["expires_at"]);
         assert_eq!(replay["expires_in"], 3_600);
 
-        let prefix_response = app
+        let rejected_prefix = app
             .clone()
             .oneshot(
                 Request::get(format!("/v1/payments/{}", &id[..16]))
@@ -424,8 +424,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(prefix_response.status(), StatusCode::OK);
-        assert_eq!(json_body(prefix_response).await["id"], id);
+        assert_eq!(rejected_prefix.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(rejected_prefix).await["error"]["code"],
+            "invalid_request"
+        );
 
         let list_response = app
             .clone()
@@ -447,21 +450,6 @@ mod tests {
             .unwrap();
         assert_eq!(second.status(), StatusCode::CREATED);
         let second_id = json_body(second).await["id"].as_str().unwrap().to_owned();
-        let ambiguous = app
-            .clone()
-            .oneshot(
-                Request::get("/v1/payments/pay_0")
-                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(ambiguous.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            json_body(ambiguous).await["error"]["code"],
-            "ambiguous_payment_id"
-        );
 
         let first_page = app
             .clone()

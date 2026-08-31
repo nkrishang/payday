@@ -21,15 +21,36 @@ pub struct Presentation {
 
 impl Presentation {
     pub fn new(choice: ColorChoice, plain: bool, verbose: bool) -> Self {
+        Self::styled(choice, plain, verbose, std::io::stdout().is_terminal())
+    }
+
+    /// Styling for the failure stream, which is redirected independently of
+    /// stdout and must not receive escape codes when it is not a terminal.
+    pub fn for_stderr(choice: ColorChoice, plain: bool, verbose: bool) -> Self {
+        Self::styled(choice, plain, verbose, std::io::stderr().is_terminal())
+    }
+
+    fn styled(choice: ColorChoice, plain: bool, verbose: bool, is_terminal: bool) -> Self {
         let color = !plain
             && match choice {
                 ColorChoice::Always => true,
                 ColorChoice::Never => false,
-                ColorChoice::Auto => {
-                    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-                }
+                ColorChoice::Auto => is_terminal && std::env::var_os("NO_COLOR").is_none(),
             };
         Self { color, verbose }
+    }
+
+    /// Render a failure: the first line is the message, and any further lines
+    /// are next-step hints styled like the ones that follow a success.
+    pub fn error(&self, message: &str) -> String {
+        let mut lines = message.lines();
+        let summary = lines.next().unwrap_or_default();
+        let mut out = vec![format!(
+            "{} {summary}",
+            self.colored("error:", AnsiColor::Red)
+        )];
+        out.extend(lines.map(|line| self.hint(line)));
+        out.join("\n")
     }
 
     pub fn payment(&self, payment: &PaymentResponse, created: bool) -> String {
@@ -614,6 +635,20 @@ mod tests {
     use gateway_core::{
         ChainDto, IndexerFreshnessDto, SelfSettlementDto, TokenDto, TransferDto,
     };
+
+    #[test]
+    fn errors_lead_with_the_summary_and_indent_their_hints() {
+        let plain = Presentation::new(ColorChoice::Never, true, false);
+        assert_eq!(
+            plain.error("'pay_0198f80c' is not a complete payment ID\n→ Run `payday list`."),
+            "error: 'pay_0198f80c' is not a complete payment ID\n  → Run `payday list`."
+        );
+        assert!(
+            Presentation::new(ColorChoice::Always, false, false)
+                .error("no")
+                .contains("\u{1b}[")
+        );
+    }
 
     fn payment(status: PaymentStatus, received: &str) -> PaymentResponse {
         PaymentResponse {

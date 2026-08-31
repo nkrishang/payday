@@ -94,7 +94,7 @@ pub enum ColorChoice {
 pub enum Command {
     /// Create a one-time USDC payment address.
     Create(CreateArgs),
-    /// Check a payment by ID, prefix, or payment address.
+    /// Check a payment by ID or payment address.
     Get(GetArgs),
     /// List payments, newest first.
     List(ListArgs),
@@ -167,9 +167,9 @@ pub struct CreateArgs {
 }
 
 #[derive(Clone, Debug, Args)]
-#[command(after_help = "Example:\n  payday get pay_0191c8e0 --watch")]
+#[command(after_help = "Example:\n  payday get pay_0198f80c-8d2f-7dc1-a369-90556a64f700 --watch")]
 pub struct GetArgs {
-    /// Payment ID (`pay_…`), unambiguous prefix, or payment address.
+    /// Complete payment ID (`pay_…`) or payment address (`0x…`).
     pub reference: String,
     /// Refresh until the payment reaches a terminal state.
     #[arg(long)]
@@ -195,7 +195,7 @@ pub struct ListArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct CancelArgs {
-    /// Payment ID, prefix, or payment address.
+    /// Complete payment ID (`pay_…`) or payment address (`0x…`).
     pub reference: String,
 }
 

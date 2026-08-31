@@ -63,11 +63,11 @@ with `--json`. Pin the key when a script may retry an uncertain request.
 
 ### `payday get REFERENCE [--watch] [--interval SECONDS]`
 
-`REFERENCE` may be a complete `pay_…` ID, an unambiguous canonical prefix, or
-the payment address. `--watch` waits for changes and exits at `settled`,
-`returned`, or `needs_attention`; terminal output redraws in place and plain or
-redirected output prints only changed frames. `--interval` controls the
-long-poll refresh window and requires `--watch`.
+`REFERENCE` is a complete `pay_…` ID or the payment address; partial IDs are
+rejected locally with exit status 2. `--watch` waits for changes and exits at
+`settled`, `returned`, or `needs_attention`; terminal output redraws in place
+and plain or redirected output prints only changed frames. `--interval` controls
+the long-poll refresh window and requires `--watch`.
 
 ### `payday list`
 

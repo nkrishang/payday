@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use gateway_core::{
-    Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentResponse, PaymentStatus,
-    RecoveryAddress, TokenAddress, USDC_DECIMALS, resolve_expiration,
+    Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentAddress, PaymentResponse,
+    PaymentStatus, RecoveryAddress, TokenAddress, USDC_DECIMALS, payment_id, resolve_expiration,
 };
 use uuid::Uuid;
 
@@ -79,7 +79,11 @@ async fn main() {
             if cli.json {
                 eprintln!("{}", err.json());
             } else {
-                eprintln!("error: {err}");
+                eprintln!(
+                    "{}",
+                    Presentation::for_stderr(cli.color, cli.plain, cli.verbose)
+                        .error(&err.to_string())
+                );
             }
             if cli.verbose
                 && let Some(detail) = err.diagnostic()
@@ -460,8 +464,9 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
             })
         }
         Command::Cancel(args) => {
-            require_nonblank("reference", &args.reference)?;
-            let cancelled = client.cancel_payment(&args.reference).await?;
+            let cancelled = client
+                .cancel_payment(payment_reference(&args.reference)?)
+                .await?;
             Ok(Output {
                 body: if cli.json {
                     json(&cancelled)?
@@ -541,8 +546,38 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentRespo
 }
 
 async fn get(client: &GatewayClient, reference: &str) -> Result<PaymentResponse, CliError> {
-    require_nonblank("reference", reference)?;
-    client.get_payment(reference).await
+    client.get_payment(payment_reference(reference)?).await
+}
+
+/// A payment resolves only by its complete ID or its payment address, so reject
+/// anything else here rather than spending a round trip to learn the same.
+fn payment_reference(reference: &str) -> Result<&str, CliError> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(CliError::InvalidInput(
+            "A payment ID or payment address is required\n→ Run `payday list` to see your payments."
+                .into(),
+        ));
+    }
+    if payment_id(reference).is_some() || PaymentAddress::from_str(reference).is_ok() {
+        return Ok(reference);
+    }
+    Err(CliError::InvalidInput(format!(
+        "'{}' is not a complete payment ID or payment address\n\
+         → Payment ID:      pay_0198f80c-8d2f-7dc1-a369-90556a64f700\n\
+         → Payment address: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8\n\
+         → Run `payday list` to see your payments.",
+        elide(reference)
+    )))
+}
+
+/// Keep a pasted-in reference from overrunning the error it appears in.
+fn elide(value: &str) -> String {
+    let mut short: String = value.chars().take(46).collect();
+    if short.chars().count() < value.chars().count() {
+        short.push('…');
+    }
+    short
 }
 
 async fn watch(
@@ -556,16 +591,17 @@ async fn watch(
             "Watch interval must be at least one second".into(),
         ));
     }
+    let reference = payment_reference(&args.reference)?.to_owned();
     let interactive = allow_redraw && io::stdout().is_terminal();
     let mut previous = String::new();
     let mut first = true;
     loop {
         let payment = if first {
             first = false;
-            get(client, &args.reference).await?
+            get(client, &reference).await?
         } else {
             client
-                .wait_for_payment_change(&args.reference, args.interval)
+                .wait_for_payment_change(&reference, args.interval)
                 .await?
         };
         let frame = output.payment(&payment, false);
@@ -916,8 +952,32 @@ fn confirm(prompt: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_client, mask_email, valid_code, validate_email};
+    use super::{account_client, mask_email, payment_reference, valid_code, validate_email};
     use crate::cli::{Cli, ColorChoice, Command, Profile};
+
+    #[test]
+    fn references_resolve_only_as_complete_ids_or_addresses() {
+        let id = "pay_0198f80c-8d2f-7dc1-a369-90556a64f700";
+        assert_eq!(payment_reference(id).unwrap(), id);
+        assert_eq!(payment_reference(&format!(" {id}\n")).unwrap(), id);
+        let address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+        assert_eq!(payment_reference(address).unwrap(), address);
+
+        for rejected in [
+            "",
+            "   ",
+            "pay_0198f80c",
+            "pay_",
+            "0198f80c-8d2f-7dc1-a369-90556a64f700",
+        ] {
+            let error = payment_reference(rejected).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{rejected}");
+            assert!(
+                error.to_string().contains("payday list"),
+                "expected a next step for {rejected}"
+            );
+        }
+    }
 
     #[test]
     fn login_input_helpers_are_strict() {

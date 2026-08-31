@@ -87,9 +87,9 @@ Summaries contain `id`, `memo`, `reference`, `metadata`, `created_at`, `status`,
 
 ### `GET /v1/payments/{reference}`
 
-`reference` may be a full ID, unambiguous canonical ID prefix, or payment
-address. Cross-account resources are returned as `404 payment_not_found`; an
-ambiguous prefix returns `409 ambiguous_payment_id`.
+`reference` must be a complete `pay_…` ID in the canonical form the API emits,
+or the payment address. Partial IDs are rejected with `400 invalid_request`;
+cross-account resources are returned as `404 payment_not_found`.
 
 For long polling, add `wait_for=change&timeout=30`. `wait_for` must be `change`;
 timeout is 1–30 seconds and defaults to 30. The request returns when
@@ -191,7 +191,6 @@ the address should no longer be presented.
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
 | `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
 | `payment_not_found` | 404 | Missing or cross-account payment |
-| `ambiguous_payment_id` | 409 | Prefix matches multiple payments |
 | `invalid_payment_link` | 401 | Payer token invalid, mismatched, or expired |
 | `payment_not_payable` | 410 | QR/payment request is no longer available |
 | `rate_limited` | 429 | Per-account allowance exhausted |

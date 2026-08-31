@@ -494,22 +494,6 @@ impl InvoiceRepository {
         Ok((transfers, freshness))
     }
 
-    /// Find at most two matches so callers can distinguish a unique UUID
-    /// prefix from an ambiguous one without leaking another account's rows.
-    pub async fn find_by_id_prefix_for_account(
-        &self,
-        account: AccountId,
-        prefix: &str,
-    ) -> Result<Vec<DbInvoice>, sqlx::Error> {
-        sqlx::query_as::<_, DbInvoice>(
-            "SELECT * FROM invoices WHERE account_id = $1 AND id::text LIKE $2 ORDER BY id LIMIT 2",
-        )
-        .bind(account.0)
-        .bind(format!("{prefix}%"))
-        .fetch_all(&self.pool)
-        .await
-    }
-
     pub async fn find_by_payment_address_for_account(
         &self,
         account: AccountId,
@@ -1078,13 +1062,6 @@ mod tests {
                 .memo
                 .as_deref(),
             Some("customer reference")
-        );
-        assert_eq!(
-            repo.find_by_id_prefix_for_account(account, "aaaaaaaa")
-                .await
-                .unwrap()
-                .len(),
-            2
         );
         assert_eq!(
             repo.find_by_payment_address_for_account(account, &[5; 20])

@@ -482,8 +482,7 @@ async fn resolve_payment(
     account: AccountId,
     reference: &str,
 ) -> Result<DbInvoice, ApiError> {
-    let unprefixed = reference.strip_prefix("pay_").unwrap_or(reference);
-    if let Ok(uuid) = Uuid::parse_str(unprefixed) {
+    if let Some(uuid) = gateway_core::payment_id(reference) {
         return state
             .repo
             .find_by_id_for_account(account, uuid)
@@ -497,20 +496,7 @@ async fn resolve_payment(
             .await?
             .ok_or_else(ApiError::payment_not_found);
     }
-    let prefix = gateway_core::payment_id_prefix(reference).ok_or_else(|| {
-        ApiError::invalid_request(
-            "reference must be a payment ID, canonical pay_ prefix, or payment address",
-        )
-    })?;
-    let matches = state
-        .repo
-        .find_by_id_prefix_for_account(account, prefix)
-        .await?;
-    match matches.len() {
-        0 => Err(ApiError::payment_not_found()),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        _ => Err(ApiError::ambiguous_payment_id()),
-    }
+    Err(ApiError::invalid_payment_reference())
 }
 
 fn unix_now() -> u64 {

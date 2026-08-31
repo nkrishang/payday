@@ -155,13 +155,10 @@ impl ApiError {
         }
     }
 
-    pub fn ambiguous_payment_id() -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "ambiguous_payment_id",
-            message: "Payment ID prefix matches more than one payment; provide more characters"
-                .into(),
-        }
+    pub fn invalid_payment_reference() -> Self {
+        Self::invalid_request(
+            "reference must be a complete payment ID (pay_…) or payment address (0x…)",
+        )
     }
 
     pub fn payment_not_payable() -> Self {

@@ -6,8 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers. The project is currently
 pre-release software; the `0.1.0` version does not imply a stable public API.
 
-## [Unreleased]
-
 ### Documentation
 
 - Added a customer [quickstart](docs/quickstart.md),

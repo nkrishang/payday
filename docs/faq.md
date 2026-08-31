@@ -57,8 +57,8 @@ your own wallet/process after confirming where the funds settled.
 
 ## How do I find and reconcile payments?
 
-Save the `pay_…` ID and your own `reference`. Look up a payment by full ID,
-unambiguous ID prefix, or payment address. List newest-first with optional
+Save the `pay_…` ID and your own `reference`. Look up a payment by complete
+ID or payment address. List newest-first with optional
 status/reference filters and cursor pagination. The transfers endpoint provides
 finalized sender, transaction, amount, block, disposition, and collection state.
 
