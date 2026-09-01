@@ -787,8 +787,8 @@ mod tests {
 
     use alloy_primitives::{U256, address};
     use gateway_core::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, RecoveryAddress,
-        TokenAddress, USDC_DECIMALS,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
+        Party, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
     };
     use sqlx::PgPool;
 
@@ -814,28 +814,51 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let invoice = Invoice::new(
-            FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3")),
+        let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
+        let token = TokenAddress(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"));
+        let beneficiary =
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
+        let amount = Amount(U256::from(amount));
+        let recovery = RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
+        let party = |name: &str| Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        };
+        let snapshot = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            PayerPolicy::Permissionless,
+            factory,
             ChainId(CHAIN_ID),
-            TokenAddress(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")),
-            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")),
-            Amount(U256::from(amount)),
+            token,
+            beneficiary,
+            amount,
             1_900_000_000,
-            RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc")),
+            recovery,
         );
+        let invoice = Invoice::issue(
+            factory,
+            ChainId(CHAIN_ID),
+            token,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            recovery,
+            snapshot,
+        )
+        .unwrap();
         let input = CreateInvoiceInput::from_invoice(
             &invoice,
             AccountId(account_id),
             invoice.id.0.to_string(),
             USDC_DECIMALS,
-            None,
             3_600,
             "in:3600".into(),
         );
         InvoiceRepository::new(pool.clone())
-            .insert(&input)
+            .insert_issued(&input, None)
             .await
-            .unwrap()
             .expect("row should be inserted");
         invoice
     }

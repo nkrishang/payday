@@ -40,36 +40,64 @@ another host.
 `NO_COLOR` also disables color. Global options can appear before or after a
 subcommand.
 
-## Payments
+## Invoices
 
 ### `payday create`
 
 ```text
-payday create --amount AMOUNT --to ADDRESS
+payday create --amount AMOUNT --to ADDRESS --issuer NAME --bill-to NAME
+  [--heading TEXT] [--reference TEXT]
   [--expires-in DURATION | --expires-at RFC3339]
-  [--memo TEXT]
+  [--attachment FILE.pdf]
   [--idempotency-key KEY]
+
+payday create --from-file invoice.json [--attachment FILE.pdf] [--idempotency-key KEY]
 ```
 
-Amounts are positive USDC decimals with at most six fractional digits. Exactly
-the amount settles to `--to`. There is no recovery flag: overpayments, late
-transfers, and expired balances go to the Payday recovery wallet (reported as
-`recovery_address` with `--json`) and are returned by Payday after manual
-review. Expiry defaults to 24 hours and must resolve between 10 minutes and 366
-days ahead. `--memo` is the merchant-facing order reference. The deployment
-supplies chain and native-USDC defaults.
+The quick path issues a `permissionless` invoice from flags: `--issuer` and
+`--bill-to` become the parties' names. Anything richer — party emails and
+details, notes, a verified payer policy, a customer reference, metadata — is
+written as the API's create body in a JSON file and passed with `--from-file`,
+which rejects unknown fields exactly as the API does. The file is the whole
+body, so `--from-file` conflicts with every quick-path flag (`--amount`,
+`--to`, `--issuer`, `--bill-to`, `--heading`, `--reference`, `--expires-in`,
+`--expires-at`); only `--attachment` and `--idempotency-key` combine with it.
+
+Amounts are positive USDC decimals with at most six fractional digits, used
+directly; there are no line items. Exactly the amount settles to `--to`. There
+is no recovery flag: overpayments, late transfers, and expired balances go to
+the Payday recovery wallet (reported as `recovery_address` with `--json`) and
+are returned by Payday after manual review. Expiry defaults to 24 hours and
+must resolve between 10 minutes and 366 days ahead. The deployment supplies
+chain and native-USDC defaults.
+
+`--attachment` checks locally that the file starts with `%PDF-` and is at most
+5 MiB, uploads it through the presigned upload, polls finalization with
+backoff for up to two minutes while the malware scan runs (one status line on
+stderr), and injects the resulting `attachment_id` into the request. A
+rejected file, or a scan that has not reported in time
+(`attachment_scan_timeout`), fails the command before any invoice is created.
+A `--from-file` body that already carries `attachment_id` cannot also take
+`--attachment`.
 
 The CLI validates input locally, generates a UUIDv7 idempotency key when none is
-supplied, and prints human payment instructions or the complete API response
-with `--json`. Pin the key when a script may retry an uncertain request.
+supplied, and prints the invoice's payment instructions or the complete API
+response with `--json`. Pin the key when a script may retry an uncertain
+request; the key covers every immutable field, including the attachment's hash.
 
-### `payday get REFERENCE [--watch] [--interval SECONDS]`
+### `payday get REFERENCE [--watch] [--interval SECONDS] [--pdf FILE]`
 
 `REFERENCE` is a complete `pay_…` ID or the payment address; partial IDs are
-rejected locally with exit status 2. `--watch` waits for changes and exits at
-`settled`, `returned`, or `needs_attention`; terminal output redraws in place
-and plain or redirected output prints only changed frames. `--interval` controls
-the long-poll refresh window and requires `--watch`.
+rejected locally with exit status 2. Output shows the document (heading,
+issuer, bill-to, reference, attachment filename with its byte length and
+SHA-256 prefix, attribution hash), the payer policy mode and whether
+verification has completed, a likely-unsolicited marker when funds arrived
+before verification, and the payment state. `--watch` waits for changes and
+exits at `settled`, `returned`, or `needs_attention`; terminal output redraws
+in place and plain or redirected output prints only changed frames.
+`--interval` controls the long-poll refresh window and requires `--watch`.
+`--pdf FILE` also saves the deterministic Payday-rendered invoice PDF
+(`GET /v1/payments/{id}/invoice.pdf`); it conflicts with `--watch`.
 
 ### `payday list`
 
@@ -78,15 +106,65 @@ payday list [--status STATUS] [--limit 1..100]
   [--starting-after PAY_ID]
 ```
 
-Returns newest first; default limit is 20. Status is one of
+Returns newest first; default limit is 20. Each row shows the payment ID,
+status, amount, bill-to name, payer policy mode, and heading. Status is one of
 `awaiting_payment`, `partially_paid`, `paid`, `settled`, `expired`, `returned`,
 or `needs_attention`. Continue with the API's complete `next_cursor`.
 
 ### `payday cancel REFERENCE`
 
 Records an advisory cancellation and tells clients to stop presenting the
-payment. It cannot disable the address or change on-chain payout, recovery, or
-expiry terms.
+invoice. It cannot disable the address or change on-chain payout, recovery, or
+expiry terms. Because an issued invoice is immutable, cancel and reissue to
+change its content or policy.
+
+## Proof of Payment
+
+```text
+payday proof download REFERENCE --output proof.json
+payday proof verify proof.json [--attachment FILE.pdf]
+  [--trusted-attestor ADDRESS]... [--rpc-url URL]
+```
+
+`download` fetches the settled invoice's Proof of Payment and writes it to
+`--output`; it fails with `payment_not_settled` before settlement. `verify`
+needs no credentials and works offline: it recomputes the RFC 8785 canonical
+hash of the issuance snapshot, derives the salt from the nonce, recomputes the
+CREATE3 payment address, checks the attached PDF's length and SHA-256 when
+`--attachment` is supplied, checks the Payday verification attestation's
+signature and that it names this invoice's attribution hash, chain, and
+payment address — so an attestation issued for another invoice cannot be
+transplanted — and that its signer is one of `--trusted-attestor` when given
+(without a trust list any self-consistent signer is accepted), confirms every
+included transfer paid the payment address, and checks that the transfers sum
+to at least the invoice amount. The proof's `settlement_transaction_hash` is
+the fulfilment transaction that executed the `Payment` contract, not one of
+the transfers; offline it can only be checked for shape. With `--rpc-url` it
+additionally fetches each transfer's receipt with `eth_getTransactionReceipt`,
+requiring a successful transaction carrying a USDC `Transfer` log from the
+proof's sender to the payment address for that transfer's amount, and the
+settlement receipt, requiring a successful transaction carrying a USDC
+`Transfer` log from the payment address to the invoice's payout address for
+exactly the invoice amount. The settlement receipt is reported as its own
+named check.
+
+Human output lists every check with `✓`, `✗`, or `·` (skipped: no file, no
+RPC endpoint, or not reached after an earlier failure) and ends with the
+verdict; `--json` emits `{"checks":[{"name","status","detail"}],"ok":bool}`.
+Exit status 1 on any failed check.
+
+## Customers
+
+| Command | Result |
+|---|---|
+| `payday customers create --name NAME [--email EMAIL] [--details TEXT]` | Create a reusable counterparty record |
+| `payday customers get ID` | Show one customer |
+| `payday customers list [--limit 1..100] [--starting-after ID]` | List newest first |
+
+`ID` is the customer's UUID. Reference a customer in a `--from-file` body with
+`customer_id`; the invoice still stores its own immutable `bill_to` snapshot.
+Editing a customer (`PATCH /v1/customers/{id}`) is available through the API
+and SDK.
 
 ## Sign-in and keys
 
@@ -136,6 +214,6 @@ With `--json`, errors are emitted on stderr as
 | Status | Meaning |
 |---:|---|
 | `0` | Success, help/version output, or a declined confirmation |
-| `1` | API, authentication, or unexpected-response failure |
+| `1` | API, authentication, or unexpected-response failure; a failed `proof verify` check; an attachment scan that did not report in time |
 | `2` | Invalid input, usage, or configuration |
 | `3` | Network, TLS, timeout, or other transport failure |

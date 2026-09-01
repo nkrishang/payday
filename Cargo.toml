@@ -10,22 +10,25 @@ members = [
 ]
 
 [workspace.dependencies]
-alloy-primitives = { version = "1.6.1", features = ["serde"] }
+alloy-primitives = { version = "1.6.1", features = ["serde", "k256"] }
 alloy-eips = "1"
 alloy-json-rpc = "1"
 alloy-sol-types = "1.6.1"
 alloy-provider = { version = "1", features = ["reqwest-rustls-tls"] }
 alloy-network = "1"
 alloy-rpc-types-eth = "1"
+alloy-signer = "1"
 alloy-signer-aws = "1"
 alloy-signer-local = "1"
 alloy-transport = "1"
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-sesv2 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_jcs = "0.2"
 thiserror = "2.0.20"
 uuid = { version = "1.24.1", features = ["v7", "serde"] }
 rand = "0.9"
@@ -42,10 +45,12 @@ sha2 = "0.10"
 hmac = "0.12"
 aes-gcm = "0.10"
 hex = "0.4"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 tower = "0.5"
 base64 = "0.22"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 humantime = "2"
 utoipa = { version = "5", features = ["uuid"] }
+pdf-writer = "0.15"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

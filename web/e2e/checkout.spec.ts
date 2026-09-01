@@ -77,10 +77,7 @@ test("a partial payment asks for the remainder and re-codes the QR", async ({ pa
   // The card is labelled with what is being asked for, for assistive tech.
   await expect(page.getByRole("region", { name: "Send the remaining 15.00 USDC" })).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "40");
-  await expect(page.getByRole("img", { name: /QR code/i })).toHaveAttribute(
-    "src",
-    /v=15000000$/,
-  );
+  await expect(page.getByRole("img", { name: /QR code/i })).toHaveAttribute("src", /v=15000000$/);
 });
 
 test("polling moves the page without a reload", async ({ page, request }) => {
@@ -139,7 +136,9 @@ test("an expired payment holding funds says where they went", async ({ page }) =
   await page.goto("/pay/pay_expired-funded");
 
   await expect(page.getByText("The deadline passed before this payment completed")).toBeVisible();
-  await expect(page.getByText(/recovery wallet, which is not automatically the payer/)).toBeVisible();
+  await expect(
+    page.getByText(/recovery wallet, which is not automatically the payer/),
+  ).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -184,10 +183,125 @@ test("the countdown reaching zero does not itself declare the payment expired", 
   await expectNoInstructions(page);
 });
 
+test("a permissionless invoice shows the document and offers its attachment", async ({ page }) => {
+  const errors = watchConsole(page);
+  await page.goto("/pay/pay_invoice");
+
+  const invoice = page.getByRole("region", { name: "Invoice" });
+  await expect(invoice.getByRole("heading", { name: "Consulting — August" })).toBeVisible();
+  await expect(invoice).toContainText("Acme Corp");
+  await expect(invoice).toContainText("Globex Corporation");
+  await expect(invoice).toContainText("ap@globex.example");
+  await expect(invoice).toContainText("PO 7781");
+  await expect(invoice).toContainText("INV-1042");
+  await expect(invoice).toContainText("25.00 USDC");
+  await expect(invoice).toContainText("Net 30. Thank you for your business.");
+  await expect(invoice.getByRole("button", { name: /INV-1042\.pdf/ })).toBeVisible();
+  // The mechanics are still all there.
+  await expect(page.getByText(ADDRESS)).toBeVisible();
+  await expect(page.getByRole("img", { name: /QR code/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /pay with wallet/i })).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test("the attachment's signed URL is fetched on demand and never server-rendered", async ({
+  page,
+  request,
+}) => {
+  const html = await (await request.get("/pay/pay_invoice")).text();
+  expect(html).toContain("INV-1042.pdf");
+  expect(html).not.toContain("__download");
+
+  await page.addInitScript(() => {
+    (window as unknown as { __opened: string[] }).__opened = [];
+    window.open = (url) => {
+      (window as unknown as { __opened: string[] }).__opened.push(String(url));
+      return window;
+    };
+  });
+  await page.goto("/pay/pay_invoice");
+
+  const descriptor = page.waitForRequest(/\/v1\/payer\/payments\/pay_invoice\/attachment$/);
+  await page.getByRole("button", { name: /INV-1042\.pdf/ }).click();
+  await descriptor;
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened))
+    .toEqual([expect.stringContaining("/__download/")]);
+});
+
+const WITHHELD = [
+  "25.00",
+  "USDC",
+  "Globex",
+  "INV-1042",
+  "Net 30",
+  "Bill to",
+  ADDRESS,
+  "0x754704Bc",
+];
+
+async function expectLocked(page: Page, html: string) {
+  await expect(page.getByText("Verification required").first()).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Acme Corp");
+  await expect(page.getByText("Consulting — August")).toBeVisible();
+  await expect(page.getByText("a****@e***.com")).toBeVisible();
+  await expect(page.getByText(/verification is being enabled/i)).toBeVisible();
+  await expectNoInstructions(page);
+
+  // Absence from the tree, not hiding: nothing withheld is in the DOM, the
+  // server HTML, or offered as a control.
+  await expect(page.getByRole("region", { name: "Invoice" })).toHaveCount(0);
+  await expect(page.getByText(/Expires in/)).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  expect(await page.locator("form, input").count()).toBe(0);
+  const text = await page.locator("body").innerText();
+  for (const withheld of WITHHELD) {
+    expect(text, withheld).not.toContain(withheld);
+    // The site's own meta description mentions USDC; every other withheld
+    // string would only be in the HTML if the payment had put it there.
+    if (withheld !== "USDC") expect(html, withheld).not.toContain(withheld);
+  }
+  expect(html).not.toContain("alice");
+}
+
+test("an email-gated invoice reveals only the issuer, heading, and masked mailbox", async ({
+  page,
+  request,
+}) => {
+  const errors = watchConsole(page);
+  const html = await (await request.get("/pay/pay_gated-email")).text();
+  await page.goto("/pay/pay_gated-email");
+
+  await expectLocked(page, html);
+  await expect(page.getByText("Email ownership")).toBeVisible();
+  await expect(page.getByText("Identity document")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("identity-gated invoices say which checks are needed, matched or not", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/pay/pay_gated-identity");
+  await expectLocked(page, await (await request.get("/pay/pay_gated-identity")).text());
+  await expect(page.getByText("Identity document")).toBeVisible();
+  await expect(page.getByText("Name matches the invoice")).toBeVisible();
+  await expect(page.getByText(/matching the person it names/)).toBeVisible();
+
+  await page.goto("/pay/pay_gated-unattributed");
+  await expectLocked(page, await (await request.get("/pay/pay_gated-unattributed")).text());
+  await expect(page.getByText("Identity document")).toBeVisible();
+  await expect(page.getByText("Name matches the invoice")).toHaveCount(0);
+  await expect(page.getByText(/matching the person it names/)).toHaveCount(0);
+});
+
 test("the wallet button refuses a payment for another chain", async ({ page }) => {
   await page.goto("/pay/pay_other-chain");
 
-  await expect(page.getByText(/configured for Monad, but the payment asks for Ethereum/)).toBeVisible();
+  await expect(
+    page.getByText(/configured for Monad, but the payment asks for Ethereum/),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: /pay with wallet/i })).toHaveCount(0);
   // The address and QR remain, so the payment is still payable by hand.
   await expect(page.getByText(ADDRESS)).toBeVisible();
@@ -213,10 +327,7 @@ test("payment pages are not indexable and cannot be framed", async ({ page }) =>
   // unsafe-inline for scripts.
   expect(csp).toMatch(/script-src [^;]*'nonce-/);
   expect(csp).not.toMatch(/script-src [^;]*'unsafe-inline'/);
-  await expect(page.locator('meta[name="robots"]')).toHaveAttribute(
-    "content",
-    /noindex/,
-  );
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
 });
 
 test("the static landing page is not served a nonce it cannot satisfy", async ({ page }) => {

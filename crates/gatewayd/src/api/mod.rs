@@ -1,12 +1,15 @@
 mod accounts;
 mod admin;
+mod attachments;
 mod auth;
-mod error;
+mod customers;
+pub(crate) mod error;
 mod health;
 mod invoices;
 mod middleware;
 mod openapi;
 pub mod payer;
+mod proof;
 mod routes;
 mod status;
 mod webhooks;

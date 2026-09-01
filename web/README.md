@@ -1,12 +1,19 @@
 # payday.sh
 
-The landing page and the hosted checkout at `/pay/{id}`, which is where every
-`payment_url` points.
+The landing page, the hosted checkout at `/pay/{id}` (where every
+`payment_url` points), and the merchant dashboard at `/dashboard`.
 
 The checkout is built on Payday's own public payer API through
 [`@payday/sdk`](../sdk/typescript). Those routes take no API key and expose no
 merchant data, because a payment link is open by design: anyone holding it is
-allowed to fulfil the payment.
+allowed to fulfil the payment. For a gated invoice the API withholds the
+amount, parties, attachment, and address until the payer verifies, and the
+page renders only what it was sent — nothing withheld enters the React tree.
+
+The dashboard uses the merchant API with a short-lived identity token obtained
+from an emailed code, held in memory and this tab's `sessionStorage` only; no
+API key exists in the browser. Its pages render per request as empty shells
+and fetch everything client-side. See [docs/dashboard.md](../docs/dashboard.md).
 
 ## Running it locally
 
@@ -32,14 +39,18 @@ npx playwright install chromium          # once
 npm run test:e2e  --workspace @payday/web
 ```
 
-The browser suite runs against `e2e/stub-api.mjs`, a stand-in for the payer API
-whose scenario is chosen by the payment id — `/pay/pay_settled`,
-`/pay/pay_expired-funded`, and so on. Because the checkout renders on the
-server, intercepting in the browser would miss the first paint entirely, so the
-app itself is pointed at the stub. It covers what unit tests cannot: that the
-page hydrates, that polling moves the DOM on its own, that states which must not
-offer an address really do not, and that the CSP each route is served can
-actually be satisfied.
+The browser suite runs against `e2e/stub-api.mjs`, a stand-in for the Payday
+API. For the checkout the scenario is chosen by the payment id —
+`/pay/pay_settled`, `/pay/pay_gated-email`, and so on. Because the checkout
+renders on the server, intercepting in the browser would miss the first paint
+entirely, so the app itself is pointed at the stub. For the dashboard the same
+stub plays the merchant API behind a fake bearer check, the presigned upload
+target, and the OTP issuer (code `123456`). It covers what unit tests cannot:
+that the page hydrates, that polling moves the DOM on its own, that states
+which must not offer an address really do not, that a gated invoice's withheld
+fields are absent from both the HTML and the DOM, that a merchant can sign in,
+upload a PDF, issue an invoice, and download its proof, and that the CSP each
+route is served can actually be satisfied.
 
 ## Configuration
 
@@ -49,6 +60,13 @@ public endpoint, never the operator RPC the gateway reads from Secrets Manager.
 See [`.env.example`](.env.example). Missing values fail loudly at startup rather
 than degrading silently, matching the gateway's own configuration convention.
 
+The dashboard adds the issuer it signs in against (`NEXT_PUBLIC_AUTH0_DOMAIN`,
+`NEXT_PUBLIC_AUTH0_CLIENT_ID`, `NEXT_PUBLIC_AUTH0_AUDIENCE`) and, because the
+browser PUTs attachment bytes straight to object storage, the origin of the
+presigned upload URL (`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN`) so the page's
+Content-Security-Policy admits it — the local MinIO in development, the
+attachment bucket's virtual-hosted URL in production.
+
 ## How it holds together
 
 **One render on the server, then polling in the browser.** `app/pay/[id]/page.tsx`
@@ -57,7 +75,9 @@ QR and status already in it — no spinner, no layout shift, and it still reads
 correctly with JavaScript disabled. `usePayment` then keeps it live by reading
 the API directly from the browser; the payer routes are public and CORS-enabled,
 so proxying through this app would add a hop and a second copy of the contract
-without buying anything.
+without buying anything. The dashboard calls the merchant routes the same way,
+which the gateway allows from one origin only — `PAYDAY_PUBLIC_BASE_URL`, so
+this app must be served from exactly that origin.
 
 **Polling is adaptive, and deliberately not long polling.** The person who just
 paid is the case that has to feel instant, and it is the one case we can detect
@@ -73,6 +93,14 @@ waits for the server. And payment instructions disappear the moment the payment
 stops being payable, because funds sent afterwards route to the Payday recovery
 wallet rather than back to the payer; the page tells payers to contact the
 merchant and Payday support for return handling.
+
+**A locked invoice is absent, not hidden.** `unlockedPayment` in
+`lib/checkout-state.ts` narrows the payer response to the shape whose
+mechanics are present; every component that renders an amount, address, QR, or
+attachment takes that narrowed type, so a gated invoice's withheld content
+cannot be rendered by accident and the page shows only the issuer, heading, and
+masked mailbox until the API unlocks it. The attachment's signed URL is fetched
+on click and never server-rendered.
 
 **Amounts are never floats.** The API sends every amount twice, as a display
 string and as integer `_base_units`. Arithmetic uses base units as `BigInt`;

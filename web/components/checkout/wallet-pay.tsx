@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerPayment } from "@payday/sdk";
+import type { UnlockedPayerPayment } from "@/lib/checkout-state";
 import { Loader2, Wallet } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { erc20Abi, type Hex } from "viem";
@@ -39,7 +39,7 @@ export function WalletPay({
   payment,
   onSent,
 }: {
-  payment: PayerPayment;
+  payment: UnlockedPayerPayment;
   onSent: (hash: string) => void;
 }) {
   const { address, isConnected, chainId } = useAccount();

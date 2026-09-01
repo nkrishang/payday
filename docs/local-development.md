@@ -68,12 +68,12 @@ skipped.
 
 ## Prerequisites
 
-- Rust, Foundry (`anvil`, `cast`, `forge`), Docker, `just`, the PostgreSQL
-  client, and `jq`.
+- Rust, Foundry (`anvil`, `cast`, `forge`), Docker (it runs PostgreSQL and
+  the MinIO attachment store), `just`, the PostgreSQL client, and `jq`.
 - Node.js 20 or newer, for the TypeScript SDK and the `payday.sh` web app.
 
 Copy `.env.example` to `.env` if you want to override the checked-in local
-defaults. Start PostgreSQL, Anvil, the development identity provider,
+defaults. Start PostgreSQL, MinIO, Anvil, the development identity provider,
 `gatewayd`, and the indexer with multiplexed logs:
 
 ```bash
@@ -87,12 +87,13 @@ just seed
 ```
 
 The one-time code is printed in the `[identity]` log and the CLI saves the
-issued key in its local profile. Each run starts from a clean database and
-Anvil chain so their indexed histories cannot drift. After the bootstrap
-deploys the contracts, the runner reads their runtime bytecode from the chain
-and exports `PAYDAY_FACTORY_CODE_HASH` and `PAYDAY_BATCH_SWEEPER_CODE_HASH`
-from it (overriding any `.env` value), because both services verify the
-deployed contract generation at startup and refuse to start on a mismatch.
+issued key in its local profile. Each run starts from a clean database,
+attachment store, and Anvil chain so their indexed histories cannot drift.
+After the bootstrap deploys the contracts, the runner reads their runtime
+bytecode from the chain and exports `PAYDAY_FACTORY_CODE_HASH` and
+`PAYDAY_BATCH_SWEEPER_CODE_HASH` from it (overriding any `.env` value),
+because both services verify the deployed contract generation at startup and
+refuse to start on a mismatch.
 
 To open a created payment, run the hosted checkout in a third shell:
 
@@ -103,9 +104,17 @@ just web
 ```
 
 It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
-points at, so the `payment_url` the CLI prints opens the real checkout. Port
-3002 rather than 3001, which belongs to the development identity provider. See
-[web/README.md](../web/README.md).
+points at, so the `payment_url` the CLI prints opens the real checkout and the
+gateway accepts the dashboard's cross-origin requests (the merchant routes
+answer only that origin). Port 3002 rather than 3001, which belongs to the
+development identity provider. See [web/README.md](../web/README.md).
+
+For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_AUTH0_DOMAIN`,
+`NEXT_PUBLIC_AUTH0_CLIENT_ID`, and `NEXT_PUBLIC_AUTH0_AUDIENCE` (sign-in
+against the development identity provider, code printed in its log) and
+`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
+`http://127.0.0.1:9000`, so the page may PUT PDFs there). The example file
+carries working local values.
 
 ## Local Anvil end-to-end run
 
@@ -116,7 +125,8 @@ beneficiary and its operator release; an expired partial payment recovered
 automatically and completed late; the `recovered_funds` ledger and its
 webhook events) against a fresh Anvil started with
 `--slots-in-an-epoch 1 --block-time 1`, which makes the node's
-`finalized` tag advance like a real chain. Use it whenever the contracts or
+`finalized` tag advance like a real chain, and a fresh MinIO container
+standing in for the attachment bucket. Use it whenever the contracts or
 the worker change:
 
 ```bash
@@ -164,12 +174,32 @@ export PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$(cast code 0x5FbDB2315678afecb3
 export PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$(cast code 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 --rpc-url http://127.0.0.1:8545)")"
 ```
 
-### 3. Build and start the services manually
+### 3. Start the local attachment store
+
+MinIO stands in for the S3 attachment bucket (the runner does this for you).
+Nothing scans local uploads, so it also stands in for GuardDuty: the tag its
+scanner would write is set by hand, as described under
+[Attachments and the scan tag](#attachments-and-the-scan-tag).
+
+```bash
+docker run -d --rm --name payday-minio \
+  -e MINIO_ROOT_USER=payday-local -e MINIO_ROOT_PASSWORD=payday-local -e MINIO_BROWSER=off \
+  -p 127.0.0.1:9000:9000 minio/minio server /data
+curl -fsS http://127.0.0.1:9000/minio/health/live
+docker run --rm --network host \
+  -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
+  minio/mc mb --ignore-existing local/payday-attachments-local
+```
+
+`.env.example` carries the matching `PAYDAY_ATTACHMENT_*` and `AWS_*` values.
+
+### 4. Build and start the services manually
 
 Ensure `.env` contains the local addresses, recovery address, database URL,
-RPC URL, finality settings, start block, signer key, and identity settings, and
-that the two code hashes above are exported (the `.env.example` placeholders
-are zero and will be refused). Start the identity provider:
+RPC URL, finality settings, start block, signer and attestation keys,
+attachment store, and identity settings, and that the two code hashes above
+are exported (the `.env.example` placeholders are zero and will be refused).
+Start the identity provider:
 
 ```bash
 cargo build --workspace
@@ -196,7 +226,7 @@ set -a; source .env; set +a
 PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
 ```
 
-### 4. Create a payment
+### 5. Create a payment
 
 Expirations must be at least ten minutes and at most a year ahead.
 
@@ -235,6 +265,27 @@ cast call 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   'balanceOf(address)(uint256)' <payment_address> --rpc-url http://127.0.0.1:8545
 cast call <payment_address> 'settled()(bool)' --rpc-url http://127.0.0.1:8545
 ```
+
+## Attachments and the scan tag
+
+`POST /v1/attachments` returns a presigned PUT aimed at MinIO; upload the PDF
+with the returned headers, then call `POST /v1/attachments/{id}/finalize`.
+Finalize answers `409 attachment_scan_pending` until the object carries the
+tag GuardDuty Malware Protection writes in production, and
+`422 attachment_rejected` for any other verdict. Stamp a clean verdict on an
+upload by its object key, `uploads/<account_id>/<attachment_id>.pdf`:
+
+```bash
+docker run --rm --network host \
+  -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
+  minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
+  'GuardDutyMalwareScanStatus=NO_THREATS_FOUND'
+```
+
+`mc tag list` on the same path shows the tags; set any other value to walk
+the rejection path. `scripts/e2e-anvil.sh` does the same through its
+`tag_object_scanned` helper. No lifecycle rule runs locally, so abandoned
+uploads stay until the container is removed.
 
 ## Automated tests
 
@@ -309,6 +360,24 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
 - `PAYDAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
   uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
+- `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding invoice PDFs;
+  `payday-attachments-local` on the runner's MinIO
+- `PAYDAY_ATTACHMENT_S3_ENDPOINT`, `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE` —
+  optional endpoint override and path-style addressing, set locally to reach
+  MinIO at `http://127.0.0.1:9000`; unset in production
+- `PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS` — lifetime of signed download URLs,
+  default 300
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` — MinIO's root
+  credentials locally (`payday-local`, region `us-east-1`); the ambient ECS
+  task role in production
+- `PAYDAY_ATTESTATION_SIGNER_KEY` — local key signing Proof of Payment
+  verification attestations (Anvil account #6, whose address
+  `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
+  mutually exclusive with `PAYDAY_ATTESTATION_KMS_KEY_ID`, the production KMS
+  secp256k1 key ARN. Exactly one is required unless `PAYDAY_STATUS_ONLY=true`
+- `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` — optional client ID of the dashboard's
+  Auth0 Single Page Application, whose access tokens `gatewayd` accepts next
+  to the CLI's; `payday-dashboard-local` with the development identity provider
 
 The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
 Terraform source is under `infra/`.

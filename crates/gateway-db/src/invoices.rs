@@ -10,11 +10,13 @@ use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::AccountId;
+use crate::attachments::{AttachInvoiceError, DbAttachment, attach_in_transaction};
 use crate::cursor::IndexerCursor;
+use crate::{AccountId, attachments};
 use gateway_core::{
-    Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, InvoiceId,
-    InvoiceStatusParseError, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
+    Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, ExpectedIdentity,
+    FactoryAddress, Invoice, InvoiceId, InvoiceStatusParseError, Party, PayerPolicy,
+    PaymentAddress, RecoveryAddress, Salt, TokenAddress,
 };
 
 /// Database row representing one invoice.
@@ -23,7 +25,6 @@ pub struct DbInvoice {
     pub id: Uuid,
     pub account_id: Uuid,
     pub idempotency_key: String,
-    pub memo: Option<String>,
     pub chain_id: i64,
     pub factory_address: Vec<u8>,
     pub token_address: Vec<u8>,
@@ -75,6 +76,23 @@ pub struct DbInvoice {
     pub settlement_tx_hash: Option<Vec<u8>>,
     pub fee_amount: String,
     pub net_amount: String,
+    /// Optional link to the merchant's customer record; the parties below are
+    /// the snapshot taken at issuance.
+    pub customer_id: Option<Uuid>,
+    pub issuer: Option<sqlx::types::Json<Party>>,
+    pub bill_to: Option<sqlx::types::Json<Party>>,
+    pub notes: Option<String>,
+    pub heading: Option<String>,
+    pub payer_policy_mode: String,
+    pub expected_email: Option<String>,
+    pub expected_identity: Option<sqlx::types::Json<ExpectedIdentity>>,
+    pub verification_completed_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    /// Proof material; nullable in the schema only until pre-release reset.
+    pub issuance_snapshot: Option<sqlx::types::Json<CanonicalIssuanceSnapshot>>,
+    pub attribution_version: Option<i16>,
+    pub attribution_nonce: Option<Vec<u8>>,
+    pub attribution_hash: Option<Vec<u8>>,
+    pub likely_unsolicited_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
 }
 
 /// A stored invoice row could not be decoded into the domain model. This
@@ -83,6 +101,8 @@ pub struct DbInvoice {
 pub enum DbInvoiceError {
     #[error("invalid amount in DB row {id}: {value:?}")]
     InvalidAmount { id: Uuid, value: String },
+    #[error("DB row {id} has no {field}")]
+    MissingAttribution { id: Uuid, field: &'static str },
     #[error("invalid {field} bytes in DB row {id}: expected {expected} bytes, got {got}")]
     WrongByteLength {
         id: Uuid,
@@ -140,6 +160,30 @@ impl TryFrom<&DbInvoice> for Invoice {
             .status
             .parse()
             .map_err(|source| DbInvoiceError::InvalidStatus { id: row.id, source })?;
+        let missing = |field| DbInvoiceError::MissingAttribution { id: row.id, field };
+        let attribution_version = row
+            .attribution_version
+            .ok_or(missing("attribution_version"))? as u16;
+        let attribution_nonce = word_from_col(
+            row.id,
+            "attribution_nonce",
+            row.attribution_nonce
+                .as_deref()
+                .ok_or(missing("attribution_nonce"))?,
+        )?;
+        let attribution_hash = word_from_col(
+            row.id,
+            "attribution_hash",
+            row.attribution_hash
+                .as_deref()
+                .ok_or(missing("attribution_hash"))?,
+        )?;
+        let issuance_snapshot = row
+            .issuance_snapshot
+            .as_ref()
+            .ok_or(missing("issuance_snapshot"))?
+            .0
+            .clone();
 
         Ok(Invoice {
             id: InvoiceId(row.id),
@@ -183,6 +227,10 @@ impl TryFrom<&DbInvoice> for Invoice {
             settled_at_timestamp: row.settled_at.map(|time| time.timestamp() as u64),
             blocked_reason: row.blocked_reason.clone(),
             cancellation_requested_at: row.cancellation_requested_at.map(|time| time.to_rfc3339()),
+            attribution_version,
+            attribution_nonce,
+            attribution_hash,
+            issuance_snapshot,
         })
     }
 }
@@ -202,14 +250,53 @@ pub enum ReleasePaymentError {
     Database(#[from] sqlx::Error),
 }
 
+/// The issued invoice and, when one was bound, its attachment. `replayed`
+/// means an identical request had already been issued under the key.
+#[derive(Debug, Clone)]
+pub struct InsertIssuedInvoice {
+    pub row: DbInvoice,
+    pub attachment: Option<DbAttachment>,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum InsertIssuedInvoiceError {
+    #[error("idempotency key already used with different request parameters")]
+    IdempotencyConflict,
+    #[error("attachment is not ready to be issued")]
+    AttachmentNotReady,
+    #[error("attachment not found")]
+    AttachmentNotFound,
+    #[error("attachment is already attached to an invoice")]
+    AttachmentAlreadyAttached,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+impl From<AttachInvoiceError> for InsertIssuedInvoiceError {
+    fn from(error: AttachInvoiceError) -> Self {
+        match error {
+            AttachInvoiceError::NotFound => Self::AttachmentNotFound,
+            AttachInvoiceError::NotReady => Self::AttachmentNotReady,
+            AttachInvoiceError::AlreadyAttached => Self::AttachmentAlreadyAttached,
+            AttachInvoiceError::Database(error) => Self::Database(error),
+        }
+    }
+}
+
 /// Input for creating an invoice in the DB.
 pub struct CreateInvoiceInput {
     pub id: Uuid,
     pub account_id: AccountId,
     pub idempotency_key: String,
-    pub memo: Option<String>,
+    pub customer_id: Option<Uuid>,
+    pub issuer: Party,
+    pub bill_to: Party,
+    pub notes: Option<String>,
+    pub heading: Option<String>,
     pub reference: Option<String>,
     pub metadata: serde_json::Value,
+    pub payer_policy: PayerPolicy,
     pub chain_id: u64,
     pub factory_address: [u8; 20],
     pub token_address: [u8; 20],
@@ -222,6 +309,10 @@ pub struct CreateInvoiceInput {
     pub amount: String,
     pub salt: [u8; 32],
     pub payment_address: [u8; 20],
+    pub issuance_snapshot: CanonicalIssuanceSnapshot,
+    pub attribution_version: u16,
+    pub attribution_nonce: [u8; 32],
+    pub attribution_hash: [u8; 32],
 }
 
 /// One validated, finalized USDC `Transfer` log from the configured token.
@@ -268,27 +359,33 @@ pub struct RangeOutcome {
 }
 
 impl CreateInvoiceInput {
-    /// Build the write-path input from a freshly created domain [`Invoice`],
-    /// projecting its strongly-typed fields to DB column types. The
-    /// idempotency key and token decimals are not part of the domain model, so
-    /// they are supplied by the caller. Status is not included — the INSERT
-    /// hardcodes `'created'`.
+    /// Build the write-path input from a freshly issued domain [`Invoice`],
+    /// projecting its strongly-typed fields to DB column types. The document
+    /// columns come from the issuance snapshot; the idempotency key, token
+    /// decimals, and expiry intent are not part of the domain model, so they
+    /// are supplied by the caller, and the customer link and metadata are set
+    /// afterwards. Status is not included — the INSERT hardcodes `'created'`.
     pub fn from_invoice(
         invoice: &Invoice,
         account_id: AccountId,
         idempotency_key: String,
         token_decimals: u8,
-        memo: Option<String>,
         expires_in_secs: u64,
         expiration_intent: String,
     ) -> Self {
+        let snapshot = &invoice.issuance_snapshot;
         Self {
             id: invoice.id.0,
             account_id,
             idempotency_key,
-            memo,
-            reference: None,
+            customer_id: None,
+            issuer: snapshot.issuer.clone(),
+            bill_to: snapshot.bill_to.clone(),
+            notes: snapshot.notes.clone(),
+            heading: snapshot.heading.clone(),
+            reference: snapshot.reference.clone(),
             metadata: serde_json::json!({}),
+            payer_policy: snapshot.payer_policy.clone(),
             chain_id: invoice.chain_id.0,
             factory_address: invoice.factory.0.into(),
             token_address: invoice.token.0.into(),
@@ -301,7 +398,45 @@ impl CreateInvoiceInput {
             amount: invoice.amount.0.to_string(),
             salt: invoice.salt.0.into(),
             payment_address: invoice.payment_address.0.into(),
+            issuance_snapshot: snapshot.clone(),
+            attribution_version: invoice.attribution_version,
+            attribution_nonce: invoice.attribution_nonce.into(),
+            attribution_hash: invoice.attribution_hash.into(),
         }
+    }
+
+    /// Whether `existing` was issued from this same request. Everything the
+    /// merchant asserted is compared; what the server generated (id, salt,
+    /// address, nonce, the resolved deadline of a relative expiry) is not.
+    fn same_issuance(
+        &self,
+        existing: &DbInvoice,
+        existing_attachment: Option<&DbAttachment>,
+        attachment_id: Option<Uuid>,
+    ) -> bool {
+        existing.chain_id as u64 == self.chain_id
+            && existing.factory_address == self.factory_address
+            && existing.token_address == self.token_address
+            && existing.token_decimals == self.token_decimals as i16
+            && existing.beneficiary_address == self.beneficiary_address
+            && existing.expiration_intent == self.expiration_intent
+            && existing.recovery_address == self.recovery_address
+            && existing.amount == self.amount
+            && existing.reference == self.reference
+            && existing.metadata.0 == self.metadata
+            && existing.customer_id == self.customer_id
+            && existing.issuer.as_ref().map(|party| &party.0) == Some(&self.issuer)
+            && existing.bill_to.as_ref().map(|party| &party.0) == Some(&self.bill_to)
+            && existing.notes == self.notes
+            && existing.heading == self.heading
+            && existing.payer_policy_mode == self.payer_policy.mode().as_str()
+            && existing.expected_email.as_deref() == self.payer_policy.expected_email()
+            && existing
+                .expected_identity
+                .as_ref()
+                .map(|identity| &identity.0)
+                == self.payer_policy.expected_identity()
+            && existing_attachment.map(|attachment| attachment.id) == attachment_id
     }
 }
 
@@ -351,19 +486,32 @@ impl InvoiceRepository {
             .map(drop)
     }
 
-    /// Insert a new invoice. Returns the row if inserted, or None if a row with
-    /// the same idempotency_key already exists (caller must handle the conflict).
-    pub async fn insert(
+    /// Issue an invoice under an idempotency key, binding its attachment in
+    /// the same transaction. The key's existing row is locked and compared
+    /// field by field before anything is written: an identical request
+    /// replays the original, a different one conflicts. A losing racer whose
+    /// insert hits the unique key takes the same path against the winner.
+    pub async fn insert_issued(
         &self,
         input: &CreateInvoiceInput,
-    ) -> Result<Option<DbInvoice>, sqlx::Error> {
-        let row = sqlx::query_as::<_, DbInvoice>(
+        attachment_id: Option<Uuid>,
+    ) -> Result<InsertIssuedInvoice, InsertIssuedInvoiceError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(existing) = lock_by_idempotency_key(&mut tx, input).await? {
+            return replay(&mut tx, input, attachment_id, existing).await;
+        }
+
+        let inserted = sqlx::query_as::<_, DbInvoice>(
             r#"
             INSERT INTO invoices
-                (id, account_id, idempotency_key, memo, reference, metadata, chain_id, factory_address, token_address,
-                 token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
-                 expiration_intent, recovery_address, amount, net_amount, salt, payment_address, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, 'created')
+                (id, account_id, idempotency_key, customer_id, issuer, bill_to, notes, heading,
+                 reference, metadata, payer_policy_mode, expected_email, expected_identity,
+                 chain_id, factory_address, token_address, token_decimals, beneficiary_address,
+                 expiration_timestamp, expires_in_secs, expiration_intent, recovery_address,
+                 amount, net_amount, salt, payment_address, issuance_snapshot,
+                 attribution_version, attribution_nonce, attribution_hash, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                    $18, $19, $20, $21, $22, $23, $23, $24, $25, $26, $27, $28, $29, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -371,9 +519,21 @@ impl InvoiceRepository {
         .bind(input.id)
         .bind(input.account_id.0)
         .bind(&input.idempotency_key)
-        .bind(&input.memo)
+        .bind(input.customer_id)
+        .bind(sqlx::types::Json(&input.issuer))
+        .bind(sqlx::types::Json(&input.bill_to))
+        .bind(&input.notes)
+        .bind(&input.heading)
         .bind(&input.reference)
         .bind(&input.metadata)
+        .bind(input.payer_policy.mode().as_str())
+        .bind(input.payer_policy.expected_email())
+        .bind(
+            input
+                .payer_policy
+                .expected_identity()
+                .map(sqlx::types::Json),
+        )
         .bind(input.chain_id as i64)
         .bind(input.factory_address)
         .bind(input.token_address)
@@ -386,10 +546,33 @@ impl InvoiceRepository {
         .bind(&input.amount)
         .bind(input.salt)
         .bind(input.payment_address)
-        .fetch_optional(&self.pool)
+        .bind(sqlx::types::Json(&input.issuance_snapshot))
+        .bind(input.attribution_version as i16)
+        .bind(input.attribution_nonce)
+        .bind(input.attribution_hash)
+        .fetch_optional(&mut *tx)
         .await?;
 
-        Ok(row)
+        let Some(row) = inserted else {
+            let existing = lock_by_idempotency_key(&mut tx, input)
+                .await?
+                .ok_or_else(|| {
+                    sqlx::Error::Protocol("idempotency key vanished after conflict".into())
+                })?;
+            return replay(&mut tx, input, attachment_id, existing).await;
+        };
+        let attachment = match attachment_id {
+            Some(attachment_id) => {
+                Some(attach_in_transaction(&mut tx, input.account_id, attachment_id, row.id).await?)
+            }
+            None => None,
+        };
+        tx.commit().await?;
+        Ok(InsertIssuedInvoice {
+            row,
+            attachment,
+            replayed: false,
+        })
     }
 
     /// Fetch an existing invoice by its idempotency key.
@@ -850,13 +1033,123 @@ impl InvoiceRepository {
     }
 }
 
+async fn lock_by_idempotency_key(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &CreateInvoiceInput,
+) -> Result<Option<DbInvoice>, sqlx::Error> {
+    sqlx::query_as::<_, DbInvoice>(
+        "SELECT * FROM invoices WHERE account_id = $1 AND idempotency_key = $2 FOR UPDATE",
+    )
+    .bind(input.account_id.0)
+    .bind(&input.idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// Resolve a request against the row already issued under its key.
+async fn replay(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &CreateInvoiceInput,
+    attachment_id: Option<Uuid>,
+    existing: DbInvoice,
+) -> Result<InsertIssuedInvoice, InsertIssuedInvoiceError> {
+    let attachment = attachments::find_by_invoice_with(&mut **tx, existing.id).await?;
+    if !input.same_issuance(&existing, attachment.as_ref(), attachment_id) {
+        return Err(InsertIssuedInvoiceError::IdempotencyConflict);
+    }
+    Ok(InsertIssuedInvoice {
+        row: existing,
+        attachment,
+        replayed: true,
+    })
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use alloy_primitives::address;
+    use gateway_core::{AttachmentCommitment, ExpectedIdentity, PayerPolicyMode};
     use sqlx::types::chrono::{DateTime, Utc};
 
     fn epoch() -> DateTime<Utc> {
         DateTime::from_timestamp(0, 0).unwrap()
+    }
+
+    pub(crate) fn party(name: &str) -> Party {
+        Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        }
+    }
+
+    /// A minimal permissionless snapshot for the given terms.
+    fn snapshot() -> CanonicalIssuanceSnapshot {
+        CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            PayerPolicy::Permissionless,
+            FactoryAddress(Address::repeat_byte(1)),
+            ChainId(1),
+            TokenAddress(Address::repeat_byte(2)),
+            BeneficiaryAddress(Address::repeat_byte(3)),
+            Amount(U256::from(100)),
+            1_900_000_000,
+            RecoveryAddress(Address::repeat_byte(6)),
+        )
+    }
+
+    pub(crate) async fn account(pool: &PgPool, id: u128) -> AccountId {
+        let id = Uuid::from_u128(id);
+        sqlx::query(
+            "INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, 'hint') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(id.as_bytes().repeat(2))
+        .execute(pool)
+        .await
+        .unwrap();
+        AccountId(id)
+    }
+
+    /// Issue a fresh domain invoice (new id, nonce, salt, and address every
+    /// call, as a retried request would produce) and project it for the DB.
+    pub(crate) fn issuance_input(
+        owner: AccountId,
+        key: &str,
+        attachment: Option<&DbAttachment>,
+    ) -> CreateInvoiceInput {
+        let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
+        let token = TokenAddress(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"));
+        let beneficiary =
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
+        let recovery = RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
+        let amount = Amount(U256::from(1_000_000));
+        let mut snapshot = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            PayerPolicy::Permissionless,
+            factory,
+            ChainId(1),
+            token,
+            beneficiary,
+            amount,
+            4_000_000_000,
+            recovery,
+        );
+        snapshot.attachment = attachment.and_then(DbAttachment::commitment);
+        let invoice = Invoice::issue(
+            factory,
+            ChainId(1),
+            token,
+            beneficiary,
+            amount,
+            4_000_000_000,
+            recovery,
+            snapshot,
+        )
+        .unwrap();
+        CreateInvoiceInput::from_invoice(&invoice, owner, key.into(), 6, 3_600, "in:3600".into())
     }
 
     /// A DB row that decodes cleanly; individual tests corrupt one field.
@@ -865,7 +1158,6 @@ mod tests {
             id: Uuid::now_v7(),
             account_id: Uuid::from_u128(1),
             idempotency_key: "key".to_string(),
-            memo: None,
             chain_id: 1,
             factory_address: vec![1u8; 20],
             token_address: vec![2u8; 20],
@@ -903,6 +1195,20 @@ mod tests {
             settlement_tx_hash: None,
             fee_amount: "0".into(),
             net_amount: "100".into(),
+            customer_id: None,
+            issuer: Some(sqlx::types::Json(party("Acme"))),
+            bill_to: Some(sqlx::types::Json(party("Globex"))),
+            notes: None,
+            heading: None,
+            payer_policy_mode: "permissionless".into(),
+            expected_email: None,
+            expected_identity: None,
+            verification_completed_at: None,
+            issuance_snapshot: Some(sqlx::types::Json(snapshot())),
+            attribution_version: Some(1),
+            attribution_nonce: Some(vec![7u8; 32]),
+            attribution_hash: Some(vec![8u8; 32]),
+            likely_unsolicited_at: None,
         }
     }
 
@@ -915,6 +1221,10 @@ mod tests {
         assert_eq!(invoice.recovery.0, Address::repeat_byte(6));
         assert_eq!(invoice.received.0, U256::ZERO);
         assert_eq!(invoice.execute_tx_hash, None);
+        assert_eq!(invoice.attribution_version, 1);
+        assert_eq!(invoice.attribution_nonce, B256::repeat_byte(7));
+        assert_eq!(invoice.attribution_hash, B256::repeat_byte(8));
+        assert_eq!(invoice.issuance_snapshot.issuer.name, "Acme");
     }
 
     #[test]
@@ -983,116 +1293,120 @@ mod tests {
                 ..
             })
         ));
+
+        let mut row = valid_row();
+        row.attribution_nonce = Some(vec![7u8; 16]);
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::WrongByteLength {
+                field: "attribution_nonce",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rows_without_attribution_material_are_typed_errors_not_panics() {
+        let mut row = valid_row();
+        row.issuance_snapshot = None;
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::MissingAttribution {
+                field: "issuance_snapshot",
+                ..
+            })
+        ));
+        let mut row = valid_row();
+        row.attribution_hash = None;
+        assert!(matches!(
+            Invoice::try_from(&row),
+            Err(DbInvoiceError::MissingAttribution {
+                field: "attribution_hash",
+                ..
+            })
+        ));
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn customer_queries_are_scoped_and_cancellation_is_advisory(pool: PgPool) {
-        let account = AccountId(Uuid::from_u128(1));
-        let other = AccountId(Uuid::from_u128(2));
-        for id in [account.0, other.0] {
-            sqlx::query(
-                "INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, 'hint')",
-            )
-            .bind(id)
-            .bind(id.as_bytes().repeat(2))
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+        let owner = account(&pool, 1).await;
+        let other = account(&pool, 2).await;
         let repo = InvoiceRepository::new(pool);
-        let input = |id, owner, key: &str, payment: u8| CreateInvoiceInput {
-            id,
-            account_id: owner,
-            idempotency_key: key.into(),
-            memo: None,
-            reference: None,
-            metadata: serde_json::json!({}),
-            chain_id: 1,
-            factory_address: [1; 20],
-            token_address: [2; 20],
-            token_decimals: 6,
-            beneficiary_address: [3; 20],
-            expiration_timestamp: 1_900_000_000,
-            expires_in_secs: 3_600,
-            expiration_intent: "at:1900000000".into(),
-            recovery_address: [4; 20],
-            amount: "1".into(),
-            salt: [payment; 32],
-            payment_address: [payment; 20],
-        };
-        let first = Uuid::parse_str("aaaaaaaa-0000-7000-8000-000000000001").unwrap();
-        let second = Uuid::parse_str("aaaaaaaa-0000-7000-8000-000000000002").unwrap();
-        repo.insert(&input(first, account, "one", 5)).await.unwrap();
-        let mut second_input = input(second, account, "two", 6);
-        second_input.memo = Some("customer reference".into());
+        let first = repo
+            .insert_issued(&issuance_input(owner, "one", None), None)
+            .await
+            .unwrap()
+            .row;
+        let mut second_input = issuance_input(owner, "two", None);
+        second_input.notes = Some("customer reference".into());
         second_input.reference = Some("order-2".into());
-        repo.insert(&second_input).await.unwrap();
-        repo.insert(&input(Uuid::now_v7(), other, "other", 7))
+        let second = repo.insert_issued(&second_input, None).await.unwrap().row;
+        repo.insert_issued(&issuance_input(other, "other", None), None)
             .await
             .unwrap();
 
         assert_eq!(
-            repo.list_for_account(account, None, None, None, 20)
+            repo.list_for_account(owner, None, None, None, 20)
                 .await
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            repo.list_for_account(account, Some("awaiting_payment"), None, None, 1)
+            repo.list_for_account(owner, Some("awaiting_payment"), None, None, 1)
                 .await
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            repo.list_for_account(account, None, Some("order-2"), None, 20)
+            repo.list_for_account(owner, None, Some("order-2"), None, 20)
                 .await
                 .unwrap()
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
-            [second]
+            [second.id]
         );
         assert_eq!(
-            repo.find_by_id_for_account(account, second)
+            repo.find_by_id_for_account(owner, second.id)
                 .await
                 .unwrap()
                 .unwrap()
-                .memo
+                .notes
                 .as_deref(),
             Some("customer reference")
         );
         assert_eq!(
-            repo.find_by_payment_address_for_account(account, &[5; 20])
+            repo.find_by_payment_address_for_account(owner, &first.payment_address)
                 .await
                 .unwrap()
                 .unwrap()
                 .id,
-            first
+            first.id
         );
         assert!(
-            repo.find_by_payment_address_for_account(other, &[5; 20])
+            repo.find_by_payment_address_for_account(other, &first.payment_address)
                 .await
                 .unwrap()
                 .is_none()
         );
 
         let cancelled = repo
-            .request_cancellation(account, first)
+            .request_cancellation(owner, first.id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(cancelled.status, "created");
         let requested_at = cancelled.cancellation_requested_at.unwrap();
         let repeated = repo
-            .request_cancellation(account, first)
+            .request_cancellation(owner, first.id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(repeated.cancellation_requested_at.unwrap(), requested_at);
         assert!(
-            repo.request_cancellation(other, first)
+            repo.request_cancellation(other, first.id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1100,57 +1414,209 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn insert_issued_replays_identical_requests_and_rejects_different_ones(pool: PgPool) {
+        let owner = account(&pool, 1).await;
+        let repo = InvoiceRepository::new(pool.clone());
+        let customer = Uuid::now_v7();
+        sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, 'Globex')")
+            .bind(customer)
+            .bind(owner.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let attachments = crate::AttachmentRepository::new(pool.clone());
+        let document = crate::attachments::tests::ready(&attachments, owner, "contract.pdf").await;
+
+        let mut original = issuance_input(owner, "replay", Some(&document));
+        original.customer_id = Some(customer);
+        original.notes = Some("Net 30".into());
+        original.heading = Some("March retainer".into());
+        original.reference = Some("INV-1".into());
+        original.metadata = serde_json::json!({"po": "42"});
+        original.payer_policy = PayerPolicy::VerifiedIdentity {
+            expected_email: "alice@example.com".into(),
+            expected_identity: ExpectedIdentity {
+                first_name: "Alice".into(),
+                last_name: "Smith".into(),
+            },
+        };
+        let issued = repo
+            .insert_issued(&original, Some(document.id))
+            .await
+            .unwrap();
+        assert!(!issued.replayed);
+        assert_eq!(issued.row.customer_id, Some(customer));
+        assert_eq!(issued.row.payer_policy_mode, "verified_identity");
+        assert_eq!(
+            issued.row.expected_email.as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            issued.row.expected_identity.as_ref().unwrap().0.last_name,
+            "Smith"
+        );
+        assert_eq!(issued.row.attribution_version, Some(1));
+        assert_eq!(
+            issued.row.attribution_hash.as_deref(),
+            Some(original.attribution_hash.as_slice())
+        );
+
+        // A retry re-derives id, nonce, salt, and address; only the merchant's
+        // request is compared, so the original row comes back.
+        let mut retry = issuance_input(owner, "replay", Some(&document));
+        retry.customer_id = original.customer_id;
+        retry.notes = original.notes.clone();
+        retry.heading = original.heading.clone();
+        retry.reference = original.reference.clone();
+        retry.metadata = original.metadata.clone();
+        retry.payer_policy = original.payer_policy.clone();
+        assert_ne!(retry.salt, original.salt);
+        let replayed = repo.insert_issued(&retry, Some(document.id)).await.unwrap();
+        assert!(replayed.replayed);
+        assert_eq!(replayed.row.id, issued.row.id);
+        assert_eq!(replayed.row.salt, issued.row.salt);
+        assert_eq!(replayed.attachment.unwrap().id, document.id);
+
+        type Conflict = (
+            &'static str,
+            Box<dyn Fn(&mut CreateInvoiceInput)>,
+            Option<Uuid>,
+        );
+        let conflicts: Vec<Conflict> = vec![
+            (
+                "notes",
+                Box::new(|i| i.notes = Some("Net 60".into())),
+                Some(document.id),
+            ),
+            ("heading", Box::new(|i| i.heading = None), Some(document.id)),
+            (
+                "reference",
+                Box::new(|i| i.reference = Some("INV-2".into())),
+                Some(document.id),
+            ),
+            (
+                "metadata",
+                Box::new(|i| i.metadata = serde_json::json!({"po": "43"})),
+                Some(document.id),
+            ),
+            (
+                "customer",
+                Box::new(|i| i.customer_id = None),
+                Some(document.id),
+            ),
+            (
+                "issuer",
+                Box::new(|i| i.issuer.email = Some("ap@acme.example".into())),
+                Some(document.id),
+            ),
+            (
+                "bill_to",
+                Box::new(|i| i.bill_to = party("Initech")),
+                Some(document.id),
+            ),
+            (
+                "policy mode",
+                Box::new(|i| {
+                    i.payer_policy = PayerPolicy::VerifiedEmail {
+                        expected_email: "alice@example.com".into(),
+                    }
+                }),
+                Some(document.id),
+            ),
+            (
+                "expected identity",
+                Box::new(|i| {
+                    i.payer_policy = PayerPolicy::VerifiedIdentity {
+                        expected_email: "alice@example.com".into(),
+                        expected_identity: ExpectedIdentity {
+                            first_name: "Alicia".into(),
+                            last_name: "Smith".into(),
+                        },
+                    }
+                }),
+                Some(document.id),
+            ),
+            (
+                "amount",
+                Box::new(|i| i.amount = "1000001".into()),
+                Some(document.id),
+            ),
+            (
+                "expiration intent",
+                Box::new(|i| i.expiration_intent = "in:7200".into()),
+                Some(document.id),
+            ),
+            ("attachment", Box::new(|_| {}), None),
+        ];
+        for (name, mutate, attachment) in conflicts {
+            let mut conflicting = issuance_input(owner, "replay", Some(&document));
+            conflicting.customer_id = original.customer_id;
+            conflicting.notes = original.notes.clone();
+            conflicting.heading = original.heading.clone();
+            conflicting.reference = original.reference.clone();
+            conflicting.metadata = original.metadata.clone();
+            conflicting.payer_policy = original.payer_policy.clone();
+            mutate(&mut conflicting);
+            let error = repo
+                .insert_issued(&conflicting, attachment)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, InsertIssuedInvoiceError::IdempotencyConflict),
+                "{name}: {error}"
+            );
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM invoices")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "conflicts issue nothing");
+        assert_eq!(
+            issued
+                .row
+                .payer_policy_mode
+                .parse::<PayerPolicyMode>()
+                .unwrap(),
+            PayerPolicyMode::VerifiedIdentity
+        );
+        assert_eq!(
+            issued
+                .row
+                .issuance_snapshot
+                .unwrap()
+                .0
+                .attachment
+                .map(|commitment: AttachmentCommitment| commitment.id),
+            Some(document.id)
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn issuance_fields_are_immutable_while_lifecycle_columns_stay_writable(pool: PgPool) {
-        let account = AccountId(Uuid::from_u128(1));
-        sqlx::query(
-            "INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, 'hint')",
-        )
-        .bind(account.0)
-        .bind(account.0.as_bytes().repeat(2))
-        .execute(&pool)
-        .await
-        .unwrap();
+        let owner = account(&pool, 1).await;
         // A customer in the same account, so the only thing refusing the link
         // change is the immutability trigger, not the foreign key.
         let customer = Uuid::now_v7();
         sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, 'Acme')")
             .bind(customer)
-            .bind(account.0)
+            .bind(owner.0)
             .execute(&pool)
             .await
             .unwrap();
-        let id = Uuid::now_v7();
         let repo = InvoiceRepository::new(pool.clone());
-        repo.insert(&CreateInvoiceInput {
-            id,
-            account_id: account,
-            idempotency_key: "immutable".into(),
-            memo: Some("as issued".into()),
-            reference: None,
-            metadata: serde_json::json!({}),
-            chain_id: 1,
-            factory_address: [1; 20],
-            token_address: [2; 20],
-            token_decimals: 6,
-            beneficiary_address: [3; 20],
-            expiration_timestamp: 4_000_000_000,
-            expires_in_secs: 3_600,
-            expiration_intent: "at:4000000000".into(),
-            recovery_address: [4; 20],
-            amount: "1000000".into(),
-            salt: [5; 32],
-            payment_address: [6; 20],
-        })
-        .await
-        .unwrap();
+        let mut input = issuance_input(owner, "immutable", None);
+        input.notes = Some("as issued".into());
+        let id = repo.insert_issued(&input, None).await.unwrap().row.id;
 
-        // The memo mirrors the reference the payer was shown, the customer is
-        // the party link, and the rest commit the payment address.
+        // The notes are part of the hashed document, the customer is the
+        // party link, and the rest commit the payment address.
         let immutable = [
-            "memo = 'edited'".to_string(),
+            "notes = 'edited'".to_string(),
             format!("customer_id = '{customer}'"),
             "amount = '2000000'".to_string(),
             r"beneficiary_address = '\x0909090909090909090909090909090909090909'".to_string(),
+            "payer_policy_mode = 'verified_email', expected_email = 'a@b.co'".to_string(),
+            r"attribution_nonce = '\x0909090909090909090909090909090909090909090909090909090909090909'".to_string(),
         ];
         // Test-owned literals only, so the assembled statements are safe.
         let update = |assignment: &str| {
@@ -1171,6 +1637,7 @@ mod tests {
             "status = 'funded'",
             "confirmed_received = '1000000'",
             "blocked_reason = 'retries_exhausted'",
+            "verification_completed_at = now()",
         ] {
             sqlx::query(update(assignment))
                 .bind(id)
@@ -1179,12 +1646,13 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{assignment}: {error}"));
         }
         let row = repo.find_by_id(id).await.unwrap().unwrap();
-        assert_eq!(row.memo.as_deref(), Some("as issued"));
+        assert_eq!(row.notes.as_deref(), Some("as issued"));
         assert_eq!(row.amount, "1000000");
-        assert_eq!(row.beneficiary_address, vec![3; 20]);
+        assert_eq!(row.beneficiary_address, input.beneficiary_address);
         assert_eq!(row.status, "funded");
         assert_eq!(row.confirmed_received, "1000000");
         assert_eq!(row.blocked_reason.as_deref(), Some("retries_exhausted"));
+        assert!(row.verification_completed_at.is_some());
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
@@ -1310,30 +1778,11 @@ mod tests {
         let account = AccountId(Uuid::now_v7());
         sqlx::query("INSERT INTO accounts(id,api_key_hash,api_key_hint,email) VALUES($1,$2,'hint','merchant@example.com')")
             .bind(account.0).bind(account.0.as_bytes().repeat(2)).execute(&pool).await.unwrap();
-        let id = Uuid::now_v7();
         let repo = InvoiceRepository::new(pool.clone());
-        repo.insert(&CreateInvoiceInput {
-            id,
-            account_id: account,
-            idempotency_key: "attention".into(),
-            memo: None,
-            reference: Some("order-42".into()),
-            metadata: serde_json::json!({"source":"checkout"}),
-            chain_id: 1,
-            factory_address: [1; 20],
-            token_address: [2; 20],
-            token_decimals: 6,
-            beneficiary_address: [3; 20],
-            expiration_timestamp: 4_000_000_000,
-            expires_in_secs: 3_600,
-            expiration_intent: "at:4000000000".into(),
-            recovery_address: [4; 20],
-            amount: "1000000".into(),
-            salt: [5; 32],
-            payment_address: [6; 20],
-        })
-        .await
-        .unwrap();
+        let mut input = issuance_input(account, "attention", None);
+        input.reference = Some("order-42".into());
+        input.metadata = serde_json::json!({"source":"checkout"});
+        let id = repo.insert_issued(&input, None).await.unwrap().row.id;
         sqlx::query("UPDATE invoices SET status='deploying' WHERE id=$1")
             .bind(id)
             .execute(&pool)

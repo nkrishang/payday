@@ -11,9 +11,7 @@
 
 function required(value: string | undefined, name: string): string {
   if (!value) {
-    throw new Error(
-      `${name} is not set. Copy web/.env.example to web/.env.local and fill it in.`,
-    );
+    throw new Error(`${name} is not set. Copy web/.env.example to web/.env.local and fill it in.`);
   }
   return value;
 }
@@ -38,6 +36,7 @@ if (!Number.isSafeInteger(chainId) || chainId <= 0) {
 
 const explorerUrl = process.env.NEXT_PUBLIC_EXPLORER_BASE_URL;
 const walletConnectProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
+const attachmentUploadOrigin = process.env.NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN;
 
 export const config = {
   /** Origin of the Payday API, e.g. https://api.payday.sh. */
@@ -54,6 +53,12 @@ export const config = {
   ).toLowerCase(),
   explorerUrl: explorerUrl ? trimTrailingSlash(explorerUrl) : null,
   walletConnectProjectId: walletConnectProjectId || null,
+  /**
+   * Origin the dashboard PUTs attachment bytes to (the presigned upload URL's
+   * host), so the page's CSP can admit it. Null when uploads share the API
+   * origin, as they do against the e2e stub.
+   */
+  attachmentUploadOrigin: attachmentUploadOrigin ? trimTrailingSlash(attachmentUploadOrigin) : null,
   nativeSymbol: process.env.NEXT_PUBLIC_NATIVE_SYMBOL || defaultNativeSymbol(chainId),
 } as const;
 

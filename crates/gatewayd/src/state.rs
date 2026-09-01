@@ -1,19 +1,28 @@
 use alloy_primitives::Address;
 use gateway_core::ChainId;
-use gateway_db::{AccountRepository, InvoiceRepository, WebhookRepository};
+use gateway_db::{
+    AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
+    ProofRepository, WebhookRepository,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::api::error::ApiError;
 use crate::api::{Auth0Verifier, payer::PayerAccess};
+use crate::attachments::AttachmentStore;
+use crate::attestation::VerificationAttestor;
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
 #[derive(Clone)]
 pub struct AppState {
     pub repo: InvoiceRepository,
     pub accounts: AccountRepository,
+    pub attachments: AttachmentRepository,
+    pub customers: CustomerRepository,
+    pub proofs: ProofRepository,
     pub identity_verifier: Option<Auth0Verifier>,
     pub chain_id: ChainId,
     pub factory_address: Address,
@@ -28,6 +37,10 @@ pub struct AppState {
     pub api_key_prefix: String,
     pub status_stale_seconds: u64,
     pub rate_limits: Arc<Mutex<HashMap<Uuid, (f64, Instant)>>>,
+    /// The attachment bucket and the attestation key are `None` only in
+    /// status-only mode, whose router never reaches the routes that need them.
+    attachment_store: Option<AttachmentStore>,
+    attestor: Option<VerificationAttestor>,
 }
 
 impl AppState {
@@ -44,9 +57,15 @@ impl AppState {
         api_key_prefix: String,
         webhook_encryption_key: Option<[u8; 32]>,
         status_stale_seconds: u64,
+        attachment_store: Option<AttachmentStore>,
+        attestor: Option<VerificationAttestor>,
     ) -> Self {
-        let webhooks = WebhookRepository::new(repo.pool().clone());
+        let pool = repo.pool().clone();
         Self {
+            webhooks: WebhookRepository::new(pool.clone()),
+            attachments: AttachmentRepository::new(pool.clone()),
+            customers: CustomerRepository::new(pool.clone()),
+            proofs: ProofRepository::new(pool),
             repo,
             accounts,
             identity_verifier,
@@ -55,11 +74,24 @@ impl AppState {
             usdc_address,
             recovery_address,
             payer,
-            webhooks,
             webhook_encryption_key,
             api_key_prefix,
             status_stale_seconds,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            attachment_store,
+            attestor,
         }
+    }
+
+    pub fn attachment_store(&self) -> Result<&AttachmentStore, ApiError> {
+        self.attachment_store
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("attachment storage is not configured"))
+    }
+
+    pub fn attestor(&self) -> Result<&VerificationAttestor, ApiError> {
+        self.attestor
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("attestation signing is not configured"))
     }
 }

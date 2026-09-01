@@ -1,11 +1,11 @@
-import type { PayerPayment, PaymentStatus } from "@payday/sdk";
+import type { Chain, PayerPayment, PaymentStatus, Token } from "@payday/sdk";
 import { formatDisplayAmount } from "./format";
 
 /**
  * The checkout renders one of these phases. They are derived from the server's
  * status plus two local facts, and nothing else.
  *
- * Two rules this module exists to enforce:
+ * Three rules this module exists to enforce:
  *
  * 1. The payer's device clock never decides that a payment expired — chain time
  *    does. When the countdown reaches zero we move to `closing`, which says the
@@ -14,8 +14,13 @@ import { formatDisplayAmount } from "./format";
  * 2. Payment instructions disappear the moment the payment stops being payable.
  *    Funds sent after the deadline route to the Payday recovery wallet, not
  *    back to the payer, so continuing to show an address would cause real loss.
+ * 3. A gated invoice discloses nothing but the issuer and heading until the
+ *    gateway says the content is unlocked. The API withholds the fields; this
+ *    module turns their absence into a phase so no component ever reaches for
+ *    a null amount or address.
  */
 export type CheckoutPhase =
+  | "verification_required"
   | "awaiting"
   | "partial"
   | "confirming"
@@ -49,6 +54,69 @@ export interface CheckoutView {
   isTerminal: boolean;
 }
 
+/**
+ * A payer payment whose mechanics are present. The API nulls every one of
+ * these together while a gated invoice is locked, so components that render
+ * an amount or an address take this type and never see a null.
+ */
+export type UnlockedPayerPayment = PayerPayment & {
+  chain: Chain;
+  token: Token;
+  amount: string;
+  amount_base_units: string;
+  received: string;
+  received_base_units: string;
+  remaining: string;
+  remaining_base_units: string;
+  address: string;
+};
+
+/**
+ * Narrows to the unlocked shape, or null while the content is withheld. One
+ * flag drives every gated field on the API side; checking the fields too means
+ * a response that disagrees with its own flag is treated as locked rather than
+ * rendered with holes.
+ */
+export function unlockedPayment(payment: PayerPayment): UnlockedPayerPayment | null {
+  if (!payment.content_unlocked) return null;
+  const {
+    chain,
+    token,
+    amount,
+    amount_base_units,
+    received,
+    received_base_units,
+    remaining,
+    remaining_base_units,
+    address,
+  } = payment;
+  if (
+    chain === null ||
+    token === null ||
+    amount === null ||
+    amount_base_units === null ||
+    received === null ||
+    received_base_units === null ||
+    remaining === null ||
+    remaining_base_units === null ||
+    address === null
+  ) {
+    return null;
+  }
+  return {
+    ...payment,
+    chain,
+    token,
+    amount,
+    amount_base_units,
+    received,
+    received_base_units,
+    remaining,
+    remaining_base_units,
+    address,
+  };
+}
+
 const TERMINAL: ReadonlySet<PaymentStatus> = new Set<PaymentStatus>([
   "settled",
   "returned",
@@ -63,6 +131,27 @@ const RECOVERY_NOTE =
   "The full balance goes to the Payday recovery wallet, which is not automatically the payer. Contact the merchant and Payday support for return handling.";
 
 export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
+  const unlocked = unlockedPayment(payment);
+
+  if (unlocked === null) {
+    // Locked content comes before every lifecycle state: a payer who has not
+    // verified is told nothing about the amount, not even that it was paid.
+    return {
+      phase: "verification_required",
+      tone: "neutral",
+      label: "Verification required",
+      title: "Verify to view this invoice",
+      detail:
+        "The amount, payment details, and attachment are shown once the expected payer has verified.",
+      showInstructions: false,
+      isTerminal: false,
+    };
+  }
+
+  return unlockedView(unlocked, local);
+}
+
+function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState): CheckoutView {
   const received = BigInt(payment.received_base_units);
 
   if (payment.status === "needs_attention") {

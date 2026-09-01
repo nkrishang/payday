@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerPayment } from "@payday/sdk";
+import type { UnlockedPayerPayment } from "@/lib/checkout-state";
 import { useState } from "react";
 import { cn } from "@/lib/cn";
 
@@ -14,7 +14,7 @@ import { cn } from "@/lib/cn";
  * A partial payment lowers the remaining amount and therefore changes the code,
  * so the URL carries the remaining base units and re-fetches when they move.
  */
-export function QrPanel({ payment, qrUrl }: { payment: PayerPayment; qrUrl: string }) {
+export function QrPanel({ payment, qrUrl }: { payment: UnlockedPayerPayment; qrUrl: string }) {
   const src = `${qrUrl}?v=${payment.remaining_base_units}`;
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [shown, setShown] = useState(src);

@@ -1,7 +1,13 @@
 use std::str::FromStr;
+use std::time::Duration;
 
 use alloy_primitives::{Address, B256};
 use gateway_core::ChainId;
+
+/// Signed download links live this long unless configured otherwise.
+const DEFAULT_DOWNLOAD_TTL_SECS: u64 = 300;
+/// SigV4 presigned URLs cannot outlive a week.
+const MAX_PRESIGN_SECS: u64 = 7 * 24 * 3600;
 
 pub struct Config {
     bind_addr: String,
@@ -15,6 +21,10 @@ pub struct Config {
     /// `None` only in status-only mode, which never issues invoices or reads
     /// the chain, so it needs neither an RPC endpoint nor a recovery wallet.
     settlement: Option<SettlementConfig>,
+    /// The attachment bucket and the attestation key; both `None` only in
+    /// status-only mode, which serves neither attachments nor proofs.
+    attachments: Option<AttachmentConfig>,
+    attestation: Option<AttestationSignerConfig>,
     public_base_url: String,
     explorer_base_url: Option<String>,
     api_key_prefix: String,
@@ -30,11 +40,17 @@ impl Config {
         let auth0_issuer = std::env::var("PAYDAY_AUTH0_ISSUER").ok();
         let auth0_audience = std::env::var("PAYDAY_AUTH0_AUDIENCE").ok();
         let auth0_client_id = std::env::var("PAYDAY_AUTH0_CLIENT_ID").ok();
+        // Absent (or empty, as the ECS task sets it while unconfigured) means
+        // dashboard tokens are not accepted at all.
+        let dashboard_client_id = std::env::var("PAYDAY_DASHBOARD_AUTH0_CLIENT_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         let auth0 = match (auth0_issuer, auth0_audience, auth0_client_id) {
             (Some(issuer), Some(audience), Some(client_id)) => Some(Auth0Config {
                 issuer,
                 audience,
                 client_id,
+                dashboard_client_id,
             }),
             (None, None, None) => None,
             _ => panic!(
@@ -57,26 +73,46 @@ impl Config {
         let usdc_address = Address::from_str(&usdc_address)
             .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_ADDRESS '{usdc_address}': {e}"));
 
-        let settlement = (!status_only).then(|| {
-            let required =
-                |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
-            SettlementConfig {
-                rpc_url: required("PAYDAY_RPC_URL"),
-                recovery_address: parse_recovery_address(&required("PAYDAY_RECOVERY_ADDRESS"))
-                    .unwrap_or_else(|message| panic!("{message}")),
-                batch_sweeper_address: Address::from_str(&required("PAYDAY_BATCH_SWEEPER_ADDRESS"))
-                    .unwrap_or_else(|e| panic!("invalid PAYDAY_BATCH_SWEEPER_ADDRESS: {e}")),
-                factory_code_hash: parse_code_hash(
-                    "PAYDAY_FACTORY_CODE_HASH",
-                    &required("PAYDAY_FACTORY_CODE_HASH"),
-                )
+        let required =
+            |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+        let settlement = (!status_only).then(|| SettlementConfig {
+            rpc_url: required("PAYDAY_RPC_URL"),
+            recovery_address: parse_recovery_address(&required("PAYDAY_RECOVERY_ADDRESS"))
                 .unwrap_or_else(|message| panic!("{message}")),
-                batch_sweeper_code_hash: parse_code_hash(
-                    "PAYDAY_BATCH_SWEEPER_CODE_HASH",
-                    &required("PAYDAY_BATCH_SWEEPER_CODE_HASH"),
-                )
-                .unwrap_or_else(|message| panic!("{message}")),
-            }
+            batch_sweeper_address: Address::from_str(&required("PAYDAY_BATCH_SWEEPER_ADDRESS"))
+                .unwrap_or_else(|e| panic!("invalid PAYDAY_BATCH_SWEEPER_ADDRESS: {e}")),
+            factory_code_hash: parse_code_hash(
+                "PAYDAY_FACTORY_CODE_HASH",
+                &required("PAYDAY_FACTORY_CODE_HASH"),
+            )
+            .unwrap_or_else(|message| panic!("{message}")),
+            batch_sweeper_code_hash: parse_code_hash(
+                "PAYDAY_BATCH_SWEEPER_CODE_HASH",
+                &required("PAYDAY_BATCH_SWEEPER_CODE_HASH"),
+            )
+            .unwrap_or_else(|message| panic!("{message}")),
+        });
+
+        let attachments = (!status_only).then(|| AttachmentConfig {
+            bucket: required("PAYDAY_ATTACHMENT_BUCKET"),
+            s3_endpoint: std::env::var("PAYDAY_ATTACHMENT_S3_ENDPOINT")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            force_path_style: std::env::var("PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE").as_deref()
+                == Ok("1"),
+            download_ttl: parse_download_ttl(
+                std::env::var("PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or_else(|message| panic!("{message}")),
+        });
+        let attestation = (!status_only).then(|| {
+            attestation_signer(
+                std::env::var("PAYDAY_ATTESTATION_SIGNER_KEY").ok(),
+                std::env::var("PAYDAY_ATTESTATION_KMS_KEY_ID").ok(),
+            )
+            .unwrap_or_else(|message| panic!("{message}"))
         });
 
         let api_key_prefix =
@@ -101,6 +137,8 @@ impl Config {
             factory_address,
             usdc_address,
             settlement,
+            attachments,
+            attestation,
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
             explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
@@ -154,6 +192,16 @@ impl Config {
         self.settlement.as_ref()
     }
 
+    /// The attachment bucket; absent in status-only mode.
+    pub fn attachments(&self) -> Option<&AttachmentConfig> {
+        self.attachments.as_ref()
+    }
+
+    /// The Proof of Payment attestation key; absent in status-only mode.
+    pub fn attestation(&self) -> Option<&AttestationSignerConfig> {
+        self.attestation.as_ref()
+    }
+
     pub fn public_base_url(&self) -> &str {
         &self.public_base_url
     }
@@ -193,6 +241,41 @@ fn parse_code_hash(name: &str, value: &str) -> Result<B256, String> {
         .map_err(|e| format!("invalid {name} '{value}': expected 0x-prefixed 32-byte hex: {e}"))
 }
 
+/// Exactly one attestation key source: a raw key locally, KMS in production.
+/// Both or neither is a deployment mistake, not a fallback.
+fn attestation_signer(
+    signer_key: Option<String>,
+    kms_key_id: Option<String>,
+) -> Result<AttestationSignerConfig, &'static str> {
+    let signer_key = signer_key.filter(|value| !value.trim().is_empty());
+    let kms_key_id = kms_key_id.filter(|value| !value.trim().is_empty());
+    match (signer_key, kms_key_id) {
+        (Some(key), None) => Ok(AttestationSignerConfig::Local(key)),
+        (None, Some(key_id)) => Ok(AttestationSignerConfig::AwsKms(key_id)),
+        (Some(_), Some(_)) => Err(
+            "PAYDAY_ATTESTATION_SIGNER_KEY and PAYDAY_ATTESTATION_KMS_KEY_ID are mutually exclusive",
+        ),
+        (None, None) => Err(
+            "exactly one of PAYDAY_ATTESTATION_SIGNER_KEY or PAYDAY_ATTESTATION_KMS_KEY_ID must be set",
+        ),
+    }
+}
+
+fn parse_download_ttl(value: Option<&str>) -> Result<Duration, String> {
+    let seconds = match value {
+        None => DEFAULT_DOWNLOAD_TTL_SECS,
+        Some(value) => value.parse::<u64>().map_err(|_| {
+            "PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS must be a positive integer".to_string()
+        })?,
+    };
+    if !(1..=MAX_PRESIGN_SECS).contains(&seconds) {
+        return Err(format!(
+            "PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS must be between 1 and {MAX_PRESIGN_SECS}"
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 fn validate_api_key_prefix(value: &str) -> Result<(), &'static str> {
     match value {
         "payday_live_" | "payday_test_" => Ok(()),
@@ -213,7 +296,25 @@ fn decode_webhook_encryption_key(value: &str) -> Result<[u8; 32], &'static str> 
 pub struct Auth0Config {
     pub issuer: String,
     pub audience: String,
+    /// The CLI application: its tokens may issue API keys.
     pub client_id: String,
+    /// The dashboard application: its tokens authenticate API calls as a
+    /// session, never issue keys. `None` disables dashboard sessions.
+    pub dashboard_client_id: Option<String>,
+}
+
+/// The S3 bucket (or MinIO, through the endpoint override) holding PDFs.
+pub struct AttachmentConfig {
+    pub bucket: String,
+    pub s3_endpoint: Option<String>,
+    pub force_path_style: bool,
+    pub download_ttl: Duration,
+}
+
+/// Which key signs Proof of Payment attestations.
+pub enum AttestationSignerConfig {
+    Local(String),
+    AwsKms(String),
 }
 
 /// The contracts this build must find on the chain and the platform recovery
@@ -264,6 +365,33 @@ mod tests {
         assert!(validate_api_key_prefix("payday_test_").is_ok());
         assert!(validate_api_key_prefix("payday_dev_").is_err());
         assert!(validate_api_key_prefix("payday_live").is_err());
+    }
+
+    #[test]
+    fn attestation_signer_comes_from_exactly_one_source() {
+        assert!(matches!(
+            attestation_signer(Some("0xabc".into()), None),
+            Ok(AttestationSignerConfig::Local(key)) if key == "0xabc"
+        ));
+        assert!(matches!(
+            attestation_signer(None, Some("arn:aws:kms:key".into())),
+            Ok(AttestationSignerConfig::AwsKms(id)) if id == "arn:aws:kms:key"
+        ));
+        assert!(attestation_signer(None, None).is_err());
+        assert!(attestation_signer(Some(" ".into()), Some("".into())).is_err());
+        assert!(attestation_signer(Some("0xabc".into()), Some("arn".into())).is_err());
+    }
+
+    #[test]
+    fn download_ttl_defaults_to_five_minutes_within_presign_limits() {
+        assert_eq!(parse_download_ttl(None).unwrap(), Duration::from_secs(300));
+        assert_eq!(
+            parse_download_ttl(Some("60")).unwrap(),
+            Duration::from_secs(60)
+        );
+        assert!(parse_download_ttl(Some("0")).is_err());
+        assert!(parse_download_ttl(Some("604801")).is_err());
+        assert!(parse_download_ttl(Some("soon")).is_err());
     }
 
     #[test]

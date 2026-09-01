@@ -1,20 +1,30 @@
 mod accounts;
+mod attachments;
 mod cursor;
+mod customers;
 mod invoices;
 mod notifications;
+mod proofs;
 mod sweeps;
 mod webhooks;
 
 pub use accounts::{
     API_KEY_GRACE_HOURS, AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError,
-    IssuedApiKey,
+    IssuedApiKey, ProvisionAccountError,
+};
+pub use attachments::{
+    AttachInvoiceError, AttachmentRepository, AttachmentStatus, AttachmentStatusParseError,
+    CreateAttachmentUpload, DbAttachment,
 };
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
+pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
 pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
-    InvoiceRepository, PaymentObservation, RangeOutcome, ReleasePaymentError,
+    InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, PaymentObservation,
+    RangeOutcome, ReleasePaymentError,
 };
 pub use notifications::{NotificationEvent, NotificationRepository};
+pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;

@@ -879,8 +879,8 @@ pub(crate) mod tests {
     use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
     use async_trait::async_trait;
     use gateway_core::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, RecoveryAddress,
-        TokenAddress, USDC_DECIMALS,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
+        Party, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
     };
     use sqlx::PgPool;
 
@@ -1290,15 +1290,45 @@ pub(crate) mod tests {
     }
 
     fn make_invoice_expiring(amount: u64, expiration: u64) -> Invoice {
-        Invoice::new(
+        issue(ChainId(CHAIN_ID), amount, expiration)
+    }
+
+    /// Issue with a minimal permissionless snapshot; the document is not what
+    /// the indexer is exercising.
+    fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
+        let token = TokenAddress(usdc());
+        let beneficiary =
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
+        let amount = Amount(U256::from(amount));
+        let recovery = RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"));
+        let party = |name: &str| Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        };
+        let snapshot = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            PayerPolicy::Permissionless,
             factory(),
-            ChainId(CHAIN_ID),
-            TokenAddress(usdc()),
-            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
-            Amount(U256::from(amount)),
+            chain_id,
+            token,
+            beneficiary,
+            amount,
             expiration,
-            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
+            recovery,
+        );
+        Invoice::issue(
+            factory(),
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration,
+            recovery,
+            snapshot,
         )
+        .unwrap()
     }
 
     fn transfer(recipient: Address, amount: u64, block: u64, log_index: u64) -> UsdcTransfer {
@@ -1343,14 +1373,12 @@ pub(crate) mod tests {
             gateway_db::AccountId(account_id),
             key.to_string(),
             USDC_DECIMALS,
-            None,
             invoice.expiration_timestamp,
             format!("at:{}", invoice.expiration_timestamp),
         );
-        repo.insert(&input)
+        repo.insert_issued(&input, None)
             .await
-            .expect("insert should succeed")
-            .expect("row should be inserted");
+            .expect("insert should succeed");
     }
 
     /// Insert an invoice and credit it through the block indexer at `block`,
@@ -1687,15 +1715,7 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn ignores_invoices_on_other_chains(pool: PgPool) {
-        let invoice = Invoice::new(
-            factory(),
-            ChainId(1), // not CHAIN_ID
-            TokenAddress(usdc()),
-            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
-            Amount(U256::from(100)),
-            FAR_EXPIRY,
-            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
-        );
+        let invoice = issue(ChainId(1), 100, FAR_EXPIRY); // not CHAIN_ID
         insert(&pool, &invoice, "key-1").await;
 
         let chain =
@@ -2939,15 +2959,7 @@ pub(crate) mod tests {
     async fn sweep_ignores_invoices_that_are_not_ready(pool: PgPool) {
         let created = make_invoice(100);
         let partial = make_invoice(100);
-        let other_chain = Invoice::new(
-            factory(),
-            ChainId(1),
-            TokenAddress(usdc()),
-            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
-            Amount(U256::from(100)),
-            FAR_EXPIRY,
-            RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
-        );
+        let other_chain = issue(ChainId(1), 100, FAR_EXPIRY);
         insert(&pool, &created, "a").await;
         insert(&pool, &partial, "b").await;
         insert(&pool, &other_chain, "c").await;

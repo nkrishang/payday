@@ -5,8 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -22,7 +24,12 @@ use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
 
-const CLIENT_ID: &str = "payday-cli-local";
+/// The CLI and the dashboard, mirroring the two Auth0 applications the
+/// production Post-Login Action admits. Both exchange an email OTP for a token
+/// bound to the same API audience.
+const CLI_CLIENT_ID: &str = "payday-cli-local";
+const DASHBOARD_CLIENT_ID: &str = "payday-dashboard-local";
+const CLIENT_IDS: [&str; 2] = [CLI_CLIENT_ID, DASHBOARD_CLIENT_ID];
 const AUDIENCE: &str = "payday-api-local";
 
 #[derive(Clone)]
@@ -106,14 +113,41 @@ fn router_with_state(state: AppState) -> Router {
         .route("/passwordless/start", post(start))
         .route("/oauth/token", post(token))
         .route("/.well-known/jwks.json", get(jwks))
+        .layer(middleware::from_fn(cors))
         .with_state(state)
+}
+
+/// The dashboard calls the passwordless endpoints from the browser, exactly as
+/// it calls Auth0 in production. Auth0 allows the SPA's origins; this provider
+/// only ever listens on loopback, so allowing any origin exposes nothing that
+/// was not already reachable from the developer's machine.
+async fn cors(request: Request, next: Next) -> Response {
+    let mut response = if request.method() == Method::OPTIONS {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(request).await
+    };
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type"),
+    );
+    response
 }
 
 async fn start(
     State(state): State<AppState>,
     Json(request): Json<StartRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if request.client_id != CLIENT_ID
+    if !CLIENT_IDS.contains(&request.client_id.as_str())
         || request.connection != "email"
         || request.send != "code"
         || !request.email.contains('@')
@@ -136,7 +170,7 @@ async fn token(
     Json(request): Json<TokenRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if request.grant_type != "http://auth0.com/oauth/grant-type/passwordless/otp"
-        || request.client_id != CLIENT_ID
+        || !CLIENT_IDS.contains(&request.client_id.as_str())
         || request.realm != "email"
         || request.audience != AUDIENCE
     {
@@ -161,9 +195,9 @@ async fn token(
         iss: state.issuer.clone(),
         aud: AUDIENCE.into(),
         exp: now + 300,
-        azp: CLIENT_ID.into(),
+        azp: request.client_id.clone(),
         method: "email_otp",
-        client_id: CLIENT_ID.into(),
+        client_id: request.client_id,
         authenticated_at: now,
         event_id: Uuid::now_v7().to_string(),
         email,
@@ -208,35 +242,52 @@ mod tests {
     use super::*;
     use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 
-    #[tokio::test]
-    async fn otp_is_single_use_and_token_matches_jwks() {
-        let state = new_state("http://127.0.0.1:3001".into());
+    /// Requests a code for `email` and returns the OTP the provider logged.
+    async fn issue_otp(state: &AppState, client_id: &str, email: &str) -> String {
         let _ = start(
             State(state.clone()),
             Json(StartRequest {
-                client_id: CLIENT_ID.into(),
+                client_id: client_id.into(),
                 connection: "email".into(),
-                email: "dev@example.com".into(),
+                email: email.into(),
                 send: "code".into(),
             }),
         )
         .await
         .unwrap();
-        let otp = state
-            .otps
-            .lock()
-            .await
-            .get("dev@example.com")
-            .unwrap()
-            .clone();
-        let request = || TokenRequest {
+        state.otps.lock().await.get(email).unwrap().clone()
+    }
+
+    fn token_request(client_id: &str, email: &str, otp: &str) -> TokenRequest {
+        TokenRequest {
             grant_type: "http://auth0.com/oauth/grant-type/passwordless/otp".into(),
-            client_id: CLIENT_ID.into(),
-            username: "dev@example.com".into(),
-            otp: otp.clone(),
+            client_id: client_id.into(),
+            username: email.into(),
+            otp: otp.into(),
             realm: "email".into(),
             audience: AUDIENCE.into(),
-        };
+        }
+    }
+
+    /// Decodes a token against the provider's own JWKS with the CLI's validation rules.
+    fn verified_claims(state: &AppState, jwt: &str) -> serde_json::Value {
+        let set: JwkSet = serde_json::from_value(state.jwks.clone()).unwrap();
+        let key =
+            DecodingKey::from_jwk(set.find(&decode_header(jwt).unwrap().kid.unwrap()).unwrap())
+                .unwrap();
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[AUDIENCE]);
+        validation.set_issuer(&["http://127.0.0.1:3001/"]);
+        decode::<serde_json::Value>(jwt, &key, &validation)
+            .unwrap()
+            .claims
+    }
+
+    #[tokio::test]
+    async fn otp_is_single_use_and_token_matches_jwks() {
+        let state = new_state("http://127.0.0.1:3001".into());
+        let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
+        let request = || token_request(CLI_CLIENT_ID, "dev@example.com", &otp);
         let response = token(State(state.clone()), Json(request()))
             .await
             .unwrap()
@@ -247,15 +298,114 @@ mod tests {
                 .unwrap_err(),
             StatusCode::UNAUTHORIZED
         );
-        let jwt = response["access_token"].as_str().unwrap();
-        let set: JwkSet = serde_json::from_value(state.jwks.clone()).unwrap();
-        let key =
-            DecodingKey::from_jwk(set.find(&decode_header(jwt).unwrap().kid.unwrap()).unwrap())
-                .unwrap();
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[AUDIENCE]);
-        validation.set_issuer(&["http://127.0.0.1:3001/"]);
-        assert!(decode::<serde_json::Value>(jwt, &key, &validation).is_ok());
+        let claims = verified_claims(&state, response["access_token"].as_str().unwrap());
+        assert_eq!(claims["azp"], CLI_CLIENT_ID);
+        assert_eq!(
+            claims["https://api.payday.sh/auth/client_id"],
+            CLI_CLIENT_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_client_tokens_verify_against_the_jwks_with_dashboard_azp() {
+        let state = new_state("http://127.0.0.1:3001".into());
+        let otp = issue_otp(&state, DASHBOARD_CLIENT_ID, "merchant@example.com").await;
+        let response = token(
+            State(state.clone()),
+            Json(token_request(
+                DASHBOARD_CLIENT_ID,
+                "merchant@example.com",
+                &otp,
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let claims = verified_claims(&state, response["access_token"].as_str().unwrap());
+        assert_eq!(claims["aud"], AUDIENCE);
+        assert_eq!(claims["azp"], DASHBOARD_CLIENT_ID);
+        assert_eq!(
+            claims["https://api.payday.sh/auth/client_id"],
+            DASHBOARD_CLIENT_ID
+        );
+        assert_eq!(claims["https://api.payday.sh/auth/method"], "email_otp");
+        assert_eq!(
+            claims["https://api.payday.sh/auth/email"],
+            "merchant@example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_client_cannot_start_or_exchange_a_code() {
+        let state = new_state("http://127.0.0.1:3001".into());
+        let denied = start(
+            State(state.clone()),
+            Json(StartRequest {
+                client_id: "payday-other-local".into(),
+                connection: "email".into(),
+                email: "dev@example.com".into(),
+                send: "code".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, StatusCode::BAD_REQUEST);
+
+        // A code issued to one client is not exchangeable by a client the
+        // provider does not know, even with the right OTP.
+        let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
+        let denied = token(
+            State(state.clone()),
+            Json(token_request("payday-other-local", "dev@example.com", &otp)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn browser_preflight_and_responses_allow_any_origin() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = router(base.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        let preflight = http
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("{base}/passwordless/start"),
+            )
+            .header("origin", "http://127.0.0.1:3002")
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "content-type")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), reqwest::StatusCode::NO_CONTENT);
+        assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
+        assert_eq!(
+            preflight.headers()["access-control-allow-methods"],
+            "GET, POST"
+        );
+        assert_eq!(
+            preflight.headers()["access-control-allow-headers"],
+            "content-type"
+        );
+
+        let started = http
+            .post(format!("{base}/passwordless/start"))
+            .header("origin", "http://127.0.0.1:3002")
+            .json(&serde_json::json!({
+                "client_id": DASHBOARD_CLIENT_ID, "connection": "email",
+                "email": "merchant@example.com", "send": "code"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(started.status(), reqwest::StatusCode::OK);
+        assert_eq!(started.headers()["access-control-allow-origin"], "*");
     }
 
     #[test]

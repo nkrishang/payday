@@ -1,16 +1,17 @@
 # Auth0 configuration
 
 Terraform owns Payday's passwordless email connection, branded OTP template,
-and tenant attack protection. It deliberately does not own the Resend
-credential: keep that key only in Auth0's email-provider settings as described
-in [`docs/authentication.md`](../docs/authentication.md).
+the dashboard's browser application, and tenant attack protection. It
+deliberately does not own the Resend credential: keep that key only in Auth0's
+email-provider settings as described in
+[`docs/authentication.md`](../docs/authentication.md).
 
 ## Bootstrap or update
 
 Create a dedicated Auth0 Machine-to-Machine deployment client authorized only
 for the Auth0 Management API scopes `read:connections`, `update:connections`,
-`read:attack_protection`, and `update:attack_protection`. Do not authorize it
-for the Payday API. Expose its credentials through the provider's
+`read:clients`, `create:clients`, `update:clients`, `read:attack_protection`,
+and `update:attack_protection`. Do not authorize it for the Payday API. Expose its credentials through the provider's
 `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET` environment
 variables; never put them in a checked-in file or Terraform command line.
 
@@ -46,6 +47,34 @@ Review every connection and attack-protection option in the first plan. Auth0
 replaces connection options as a unit, so an omitted setting can reset a
 dashboard-only value. The connection has destroy protection; removing it
 requires an explicit reviewed code change.
+
+## Dashboard application
+
+`dashboard.tf` declares the `Payday Dashboard` single-page application and
+enables the passwordless email connection for it. The dashboard signs in with
+the same email OTP as the CLI, but exchanges it directly against Auth0's
+passwordless endpoints from the browser with its own public client ID, so the
+application carries no secret and needs only the passwordless OTP grant. Its
+allowed origins, callbacks, and logout URLs cover `https://payday.sh` and the
+local Next.js dev server at `http://127.0.0.1:3002`.
+
+Let Terraform create the application on the first apply. If one was created in
+the dashboard beforehand, import it instead so the plan does not create a
+duplicate:
+
+```bash
+terraform -chdir=auth0 import auth0_client.dashboard 'CLIENT_ID_REPLACE_ME'
+terraform -chdir=auth0 import auth0_connection_client.dashboard_passwordless_email \
+  'con_REPLACE_ME::CLIENT_ID_REPLACE_ME'
+```
+
+The application is not, on its own, allowed to obtain Payday API tokens. The
+Post-Login Action admits only the client IDs configured as its secrets, so
+after the apply copy the new application's Client ID into the Action secret
+`PAYDAY_DASHBOARD_CLIENT_ID` (see `docs/authentication.md`) and into
+`gatewayd`'s `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`. Until both are set, dashboard
+logins are denied at the token step. The API accepts dashboard tokens only as a
+session credential; it never issues an API key to the browser.
 
 ## Attack-protection policy
 
@@ -104,7 +133,9 @@ with a custom email-provider Action.
 ## Verification
 
 Auth0 pastes the Action source into a CommonJS runtime, so `payday-email-otp.js`
-uses `require` and `exports`. The repository root is an ES module workspace, so
+uses `require` and `exports`. The Action admits exactly the client IDs in its
+`PAYDAY_CLIENT_ID` and `PAYDAY_DASHBOARD_CLIENT_ID` secrets; an unset secret
+admits nothing. The repository root is an ES module workspace, so
 `auth0/package.json` pins this directory back to CommonJS; without it Node reads
 these files as ES modules and the tests fail to load.
 
@@ -118,6 +149,8 @@ terraform -chdir=auth0 validate
 Authoritative references, checked 2026-08-28:
 
 * [Provider 1.56 `auth0_attack_protection` schema](https://registry.terraform.io/providers/auth0/auth0/1.56.0/docs/resources/attack_protection)
+* [Provider 1.56 `auth0_client` schema](https://registry.terraform.io/providers/auth0/auth0/1.56.0/docs/resources/client)
+* [Provider 1.56 `auth0_connection_client` schema](https://registry.terraform.io/providers/auth0/auth0/1.56.0/docs/resources/connection_client)
 * [Auth0 brute-force protection](https://auth0.com/docs/secure/attack-protection/brute-force-protection)
 * [Auth0 suspicious-IP throttling](https://auth0.com/docs/secure/attack-protection/suspicious-ip-throttling)
 * [Auth0 suspicious-IP throttling API defaults](https://auth0.com/docs/api/management/v2/attack-protection/get-suspicious-ip-throttling)

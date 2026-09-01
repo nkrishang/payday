@@ -17,7 +17,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "unauthorized",
-            message: "A valid bearer API key is required".into(),
+            message: "A valid bearer API key or dashboard access token is required".into(),
         }
     }
 
@@ -182,6 +182,93 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: msg.into(),
+        }
+    }
+
+    pub fn customer_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "customer_not_found",
+            message: "Customer not found".into(),
+        }
+    }
+
+    pub fn attachment_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "attachment_not_found",
+            message: "Attachment not found".into(),
+        }
+    }
+
+    pub fn attachment_scan_pending() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_scan_pending",
+            message: "The malware scan has not reported yet; retry finalize with backoff".into(),
+        }
+    }
+
+    /// `reason` is a short token or the scanner's verdict, never derived
+    /// from the uploaded bytes.
+    pub fn attachment_rejected(reason: &str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "attachment_rejected",
+            message: format!("The upload was rejected ({reason}); upload a new file"),
+        }
+    }
+
+    pub fn attachment_not_ready() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "Finalize the upload before attaching it to an invoice".into(),
+        }
+    }
+
+    /// The bucket expired a finalized upload before an invoice was issued
+    /// with it; the merchant starts over with a new upload.
+    pub fn attachment_expired() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "The upload expired before it was attached; upload the PDF again".into(),
+        }
+    }
+
+    /// Finalize was called before anything reached the presigned URL.
+    pub fn attachment_not_uploaded() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "Upload the PDF to upload_url before finalizing".into(),
+        }
+    }
+
+    pub fn attachment_already_attached() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_already_attached",
+            message: "This attachment already belongs to an issued invoice".into(),
+        }
+    }
+
+    pub fn payment_not_settled() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "payment_not_settled",
+            message: "Proof of Payment is available once the payment has settled".into(),
+        }
+    }
+
+    /// A gated invoice's content and payment mechanics stay hidden until the
+    /// payer has satisfied the policy (product plan §4.3).
+    pub fn verification_required() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "verification_required",
+            message: "Complete verification to view this invoice's payment details".into(),
         }
     }
 

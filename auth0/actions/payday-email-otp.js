@@ -3,6 +3,19 @@ const crypto = require("crypto");
 const CLAIM_NAMESPACE = "https://api.payday.sh/auth";
 const MAX_AUTHENTICATION_AGE_SECONDS = 5 * 60;
 
+/**
+ * The two first-party applications allowed to hold a Payday API token: the CLI
+ * (native) and the dashboard (SPA). Both are configured as Action secrets so a
+ * tenant edit cannot admit a third client without a reviewed change. An unset
+ * secret is dropped rather than compared, because `undefined === undefined`
+ * would otherwise admit a request that carries no client at all.
+ */
+function allowedClientIds(secrets) {
+  return [secrets.PAYDAY_CLIENT_ID, secrets.PAYDAY_DASHBOARD_CLIENT_ID].filter(
+    (id) => typeof id === "string" && id.length > 0,
+  );
+}
+
 exports.onExecutePostLogin = async (event, api) => {
   if (event.resource_server?.identifier !== event.secrets.PAYDAY_API_AUDIENCE) {
     return;
@@ -15,8 +28,10 @@ exports.onExecutePostLogin = async (event, api) => {
     new Date(emailMethod?.timestamp ?? "invalid").getTime() / 1000,
   );
   const now = Math.floor(Date.now() / 1000);
+  const clientId = event.client?.client_id;
   const isPaydayEmailOtp =
-    event.client?.client_id === event.secrets.PAYDAY_CLIENT_ID &&
+    typeof clientId === "string" &&
+    allowedClientIds(event.secrets).includes(clientId) &&
     event.connection?.strategy === "email" &&
     event.user?.email_verified === true &&
     typeof event.user?.email === "string" &&
@@ -31,10 +46,7 @@ exports.onExecutePostLogin = async (event, api) => {
 
   api.accessToken.setCustomClaim(`${CLAIM_NAMESPACE}/method`, "email_otp");
   api.accessToken.setCustomClaim(`${CLAIM_NAMESPACE}/email`, event.user.email);
-  api.accessToken.setCustomClaim(
-    `${CLAIM_NAMESPACE}/client_id`,
-    event.client.client_id,
-  );
+  api.accessToken.setCustomClaim(`${CLAIM_NAMESPACE}/client_id`, clientId);
   api.accessToken.setCustomClaim(
     `${CLAIM_NAMESPACE}/authenticated_at`,
     authenticatedAt,

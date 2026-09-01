@@ -51,7 +51,9 @@ export function usePayment(initial: PayerPayment): LivePayment {
   const markSent = useCallback((hash: string) => {
     const send: PendingSend = {
       hash,
-      receivedAtSend: BigInt(latest.current.payment.received_base_units),
+      // Locked content has no credited total; nothing can be sent from a locked
+      // page, so this only runs with the mechanics present.
+      receivedAtSend: BigInt(latest.current.payment.received_base_units ?? "0"),
       at: Date.now(),
     };
     latest.current = { ...latest.current, pendingSend: send };
@@ -83,7 +85,7 @@ export function usePayment(initial: PayerPayment): LivePayment {
           ? backoffMs(failures)
           : pollDelayMs({
               status: current.status,
-              receivedBaseUnits: current.received_base_units,
+              receivedBaseUnits: current.received_base_units ?? "0",
               documentHidden: typeof document !== "undefined" && document.hidden,
               msSinceSend: send ? Date.now() - send.at : null,
             });
@@ -109,7 +111,7 @@ export function usePayment(initial: PayerPayment): LivePayment {
         // Our transfer has been credited once the gateway's total moves past
         // what it was when we sent, so the "confirming" state can end.
         const send = latest.current.pendingSend;
-        if (send && BigInt(next.received_base_units) > send.receivedAtSend) {
+        if (send && BigInt(next.received_base_units ?? "0") > send.receivedAtSend) {
           latest.current = { ...latest.current, pendingSend: null };
           setPendingSend(null);
         }

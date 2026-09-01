@@ -2,8 +2,9 @@
 
 This is the first-production deployment path for one operator. Terraform owns
 the AWS resources; Docker images contain the two Rust services; AWS KMS owns
-the non-exportable sweep key and the non-exportable recovery key. Do not accept
-a real payment until the final end-to-end test in this runbook succeeds.
+the non-exportable sweep key, recovery key, and Proof of Payment attestation
+key. Do not accept a real payment until the final end-to-end test in this
+runbook succeeds.
 
 Two things Payday holds and one it never does: the sweep signer holds only MON
 for gas; the Payday recovery wallet holds recovered USDC (overpayment
@@ -39,7 +40,10 @@ Required:
    sending domain before real users authenticate. Apply the reviewable Auth0
    attack-protection root and complete its launch checks in
    [`auth0/README.md`](../auth0/README.md); enabled tenant
-   defaults alone are not deployment evidence.
+   defaults alone are not deployment evidence. The merchant dashboard signs
+   in through a separate Single Page Application in the same tenant; its
+   setup is described in the dashboard section of
+   [authentication.md](authentication.md).
 
 No Docker Hub, Terraform Cloud, separate PostgreSQL vendor, Circle account, or
 third-party key-management account is required.
@@ -205,6 +209,8 @@ Replace every placeholder in `terraform.tfvars`, including:
   in step 7 refuses until it is set
 - current `usdc_start_block`
 - Auth0 issuer, API audience, and Native application client ID
+- `dashboard_auth0_client_id`, once the dashboard's Auth0 Single Page
+  Application exists; leave it out until then
 
 Supply the RPC URL without writing it to the tfvars file:
 
@@ -276,12 +282,15 @@ terraform -chdir=infra apply deploy.tfplan
 ```
 
 Review the plan before applying it. In particular, reject unexplained database
-replacement/destruction, IAM permissions broader than the named secrets and KMS
-keys (nothing may gain `kms:Sign` on the recovery key), a worker count other
-than one, or plaintext/non-HTTPS endpoints.
+replacement/destruction, IAM permissions broader than the named secrets, the
+attachment bucket's `uploads/` prefix, and the named KMS keys (nothing may
+gain `kms:Sign` on the recovery key, and only the API task role may sign with
+the attestation key), a worker count other than one, or plaintext/non-HTTPS
+endpoints.
 
 AWS creates the TLS certificate, DNS record, ALB/WAF, ECS services, RDS database,
-Secrets Manager values, alarms, and KMS keys. Both services verify the contract
+Secrets Manager values, alarms, KMS keys, the invoice attachment bucket, and
+its GuardDuty Malware Protection plan. Both services verify the contract
 generation against the chain as they start: if a task loops on a code-hash or
 bound-factory refusal, the tfvars and the deployment disagree — fix the values,
 never the check. WAF request sampling is disabled so
@@ -310,7 +319,51 @@ The two addresses must match. Fund it with only enough MON for expected sweeps
 and maintain a low-balance alert operationally. The signer does not custody
 USDC; it pays gas to invoke the permissionless factory.
 
-## 9. Configure and test the CLI
+## 9. Verify attachment scanning
+
+Terraform created the `<name>-invoice-attachments` bucket and a GuardDuty
+Malware Protection plan for it; Malware Protection for S3 does not require
+the GuardDuty detector to be enabled. Confirm the plan is active with tagging
+on, and that GuardDuty turned on the bucket's EventBridge notifications:
+
+```bash
+aws guardduty list-malware-protection-plans
+aws guardduty get-malware-protection-plan --malware-protection-plan-id <id> \
+  --query '{status: Status, tagging: Actions.Tagging.Status}'
+aws s3api get-bucket-notification-configuration \
+  --bucket "$(terraform -chdir=infra output -raw attachment_bucket_name)"
+```
+
+`status` must be `ACTIVE`, `tagging` `ENABLED`, and the notification
+configuration must contain `EventBridgeConfiguration`. Then upload a small PDF
+through the CLI (`payday create --attachment`) or the dashboard and watch
+finalization move from `409 attachment_scan_pending` to an attachment
+descriptor within a few minutes; `aws s3api get-object-tagging` on
+`uploads/<account_id>/<attachment_id>.pdf` then shows
+`GuardDutyMalwareScanStatus=NO_THREATS_FOUND`. Uploading the EICAR test file
+must end in `422 attachment_rejected`. Malware findings appear in the
+GuardDuty console; nothing in Payday alarms on them.
+
+## 10. Derive and publish the attestation signer
+
+Every Proof of Payment carries a verification attestation signed with the
+attestation KMS key. Only the API task role can sign with it and it holds no
+funds. Derive its address exactly as for the other keys and verify the
+derivation independently:
+
+```bash
+export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw attestation_kms_key_arn)"
+cast wallet address --aws
+```
+
+Publish that address as Payday's trusted attestor, in the API documentation
+and wherever proofs are downloaded, so merchants and auditors can pass it to
+`payday proof verify proof.json --trusted-attestor <address>`; an attestation
+signed by anything else must fail verification. The address changes only if
+the key is replaced, which changes the trust anchor of every earlier proof,
+so treat replacement as an announced cut-over, never as routine rotation.
+
+## 11. Configure and test the CLI
 
 Authenticate through Auth0. Production API and Auth0 defaults are compiled into
 the CLI, and the key is saved securely in its XDG-aware credentials file:
@@ -343,6 +396,9 @@ that:
    Return it by hand from the recovery key afterwards.
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
+8. `payday proof download <id> --output proof.json` followed by
+   `payday proof verify proof.json --trusted-attestor <address from step 10>`
+   succeeds.
 
 Do not advertise or depend on the service until this succeeds.
 
@@ -408,6 +464,10 @@ and creates the GitHub Release.
 - Review the `recovered_funds` ledger and return held amounts by hand from the
   recovery key; see "Reconciling recovered funds" in
   `docs/runbooks/stuck-invoice.md`. Nothing automates a return.
+- Attached PDFs stay in the versioned, KMS-encrypted attachment bucket for as
+  long as their invoice; the lifecycle rule removes only uploads that were
+  never attached (still tagged `payday-upload=pending`) after seven days.
+  Include the bucket in the backup discipline applied to the database.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
   bypasses ECS and starts another task. Keep the ECS service at one task as an
   additional control.

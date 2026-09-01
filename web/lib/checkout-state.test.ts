@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { payment } from "@/test/fixtures";
-import { checkoutView, isTerminalStatus } from "./checkout-state";
+import { lockedPayment, payment } from "@/test/fixtures";
+import { checkoutView, isTerminalStatus, unlockedPayment } from "./checkout-state";
 
 const open = { secondsRemaining: 3_600, pendingTxHash: null };
 
@@ -161,6 +161,64 @@ describe("checkoutView", () => {
       const view = checkoutView(payment({ status, payable: false }), open);
       expect(view.showInstructions, status).toBe(false);
     }
+  });
+});
+
+describe("checkoutView for a gated invoice", () => {
+  it("requires verification while the gateway withholds the content", () => {
+    const view = checkoutView(lockedPayment(), open);
+    expect(view.phase).toBe("verification_required");
+    expect(view.showInstructions).toBe(false);
+    expect(view.isTerminal).toBe(false);
+  });
+
+  it("puts the lock ahead of every lifecycle state, so a locked page never reports an outcome", () => {
+    const statuses = [
+      "partially_paid",
+      "paid",
+      "settled",
+      "expired",
+      "returned",
+      "needs_attention",
+    ] as const;
+    for (const status of statuses) {
+      const view = checkoutView(lockedPayment({ status, payable: false }), open);
+      expect(view.phase, status).toBe("verification_required");
+      expect(view.showInstructions, status).toBe(false);
+    }
+  });
+
+  it("keeps the lock when the countdown ends or a transfer is pending", () => {
+    expect(checkoutView(lockedPayment(), { secondsRemaining: 0, pendingTxHash: null }).phase).toBe(
+      "verification_required",
+    );
+    expect(checkoutView(lockedPayment(), { ...open, pendingTxHash: "0xabc" }).phase).toBe(
+      "verification_required",
+    );
+  });
+
+  it("never mentions an amount, address, or attachment in the locked copy", () => {
+    const view = checkoutView(lockedPayment(), open);
+    expect(`${view.label} ${view.title} ${view.detail}`).not.toMatch(/25|0x9a3f|USDC|Globex/);
+  });
+});
+
+describe("unlockedPayment", () => {
+  it("returns the mechanics when the gateway unlocked them", () => {
+    const unlocked = unlockedPayment(payment());
+    expect(unlocked?.address).toBe("0x9a3f0000000000000000000000000000000000c2");
+    expect(unlocked?.token.symbol).toBe("USDC");
+  });
+
+  it("treats a locked response as locked regardless of status", () => {
+    expect(unlockedPayment(lockedPayment())).toBeNull();
+  });
+
+  it("treats a response that claims to be unlocked but lacks a mechanic as locked", () => {
+    // The API nulls every gated field together; a response that disagrees with
+    // its own flag must not be rendered with holes.
+    expect(unlockedPayment(payment({ address: null } as never))).toBeNull();
+    expect(unlockedPayment(payment({ token: null } as never))).toBeNull();
   });
 });
 

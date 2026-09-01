@@ -1,11 +1,16 @@
 use std::io::IsTerminal;
+use std::path::Path;
 
 use anstyle::{AnsiColor, Color, RgbColor, Style};
 use chrono::{DateTime, Utc};
-use gateway_core::{PaymentResponse, PaymentStatus, PaymentSummaryResponse};
+use gateway_core::{
+    PayerPolicyMode, PaymentResponse, PaymentStatus, PaymentSummaryResponse, ProofOfPayment,
+};
 use supports_hyperlinks::Stream;
 
 use crate::cli::ColorChoice;
+use crate::client::Customer;
+use crate::proof::{CheckStatus, Report};
 
 // ── Design tokens ──────────────────────────────────────────────────
 
@@ -136,6 +141,7 @@ impl Presentation {
                     self.dim("Payday recovery wallet for late or leftover funds"),
                 ),
             ));
+            out.extend(self.document(payment));
             out.push(String::new());
 
             out.push(self.wrap_dim(&format!(
@@ -172,9 +178,7 @@ impl Presentation {
                 ),
             ));
 
-            if let Some(reference) = payment.reference.as_ref().or(payment.memo.as_ref()) {
-                out.push(self.kv("Reference", reference));
-            }
+            out.extend(self.document(payment));
             if payment.cancellation_requested_at.is_some() {
                 out.push(self.kv_warn(
                     "Cancelled",
@@ -276,26 +280,42 @@ impl Presentation {
 
     pub fn list(&self, payments: &[PaymentSummaryResponse]) -> String {
         if payments.is_empty() {
-            return self.dim("  No payments found.").to_string();
+            return self.dim("  No invoices found.").to_string();
         }
 
         let mut out = Vec::new();
 
-        // Column widths — full payment IDs are 39 chars (pay_ + UUID)
+        // Column widths — full payment IDs are 39 chars (pay_ + UUID). The
+        // bill-to and policy columns size to their content so the rare long
+        // mode (`verified_identity_unattributed`) never breaks alignment.
         let id_w = 39;
         let status_w = 20;
         let amount_w = 12;
+        let bill_to_w = payments
+            .iter()
+            .map(|payment| truncate(&payment.bill_to_name, BILL_TO_MAX).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("BILL TO".len());
+        let policy_w = payments
+            .iter()
+            .map(|payment| payment.payer_policy_mode.as_str().len())
+            .max()
+            .unwrap_or(0)
+            .max("POLICY".len());
 
         // Header
         out.push(format!(
-            "  {}  {}  {}  {}",
+            "  {}  {}  {}  {}  {}  {}",
             self.dim(&pad("PAYMENT", id_w)),
             self.dim(&pad("STATUS", status_w)),
             self.dim(&pad_right("AMOUNT", amount_w)),
-            self.dim("REFERENCE"),
+            self.dim(&pad("BILL TO", bill_to_w)),
+            self.dim(&pad("POLICY", policy_w)),
+            self.dim("HEADING"),
         ));
         // Separator matches the visual width of the columns above
-        let sep_width = id_w + 2 + status_w + 2 + amount_w + 2 + 9; // "REFERENCE" = 9
+        let sep_width = id_w + 2 + status_w + 2 + amount_w + 2 + bill_to_w + 2 + policy_w + 2 + 7; // "HEADING" = 7
         out.push(format!("  {}", self.dim(&DIVIDER.repeat(sep_width))));
 
         for payment in payments {
@@ -308,11 +328,7 @@ impl Presentation {
             };
             let icon = status_icon(payment.status);
             let amount_str = format!("{} USDC", amount(&payment.amount));
-            let reference = payment
-                .reference
-                .as_deref()
-                .or(payment.memo.as_deref())
-                .unwrap_or("—");
+            let heading = payment.heading.as_deref().unwrap_or("—");
 
             // Build the status cell: icon + space + status text, padded to status_w
             let status_text = pad(status, status_w - 2);
@@ -323,15 +339,203 @@ impl Presentation {
             );
 
             out.push(format!(
-                "  {}  {}  {}  {}",
+                "  {}  {}  {}  {}  {}  {}",
                 self.dim(&pad(&payment.id, id_w)),
                 status_cell,
                 self.dim(&pad_right(&amount_str, amount_w)),
-                reference,
+                pad(&truncate(&payment.bill_to_name, BILL_TO_MAX), bill_to_w),
+                self.dim(&pad(payment.payer_policy_mode.as_str(), policy_w)),
+                heading,
             ));
         }
 
         out.join("\n")
+    }
+
+    pub fn customer(&self, customer: &Customer, created: bool) -> String {
+        let mut out = Vec::new();
+        if created {
+            out.push(self.heading(&format!(
+                "Customer created · {}",
+                self.cyan(&customer.id.to_string())
+            )));
+            out.push(String::new());
+        }
+        out.push(self.kv("Customer", &self.cyan(&customer.id.to_string())));
+        out.push(self.kv("Name", &customer.name));
+        out.push(self.kv("Email", customer.email.as_deref().unwrap_or("—")));
+        out.push(self.kv("Details", customer.details.as_deref().unwrap_or("—")));
+        out.push(self.kv("Created", &short_time(&customer.created_at)));
+        if created {
+            out.push(String::new());
+            out.push(self.hint(&format!(
+                "Reference it from a `--from-file` body with \"customer_id\": \"{}\"",
+                customer.id
+            )));
+        }
+        out.join("\n")
+    }
+
+    pub fn customers(&self, customers: &[Customer]) -> String {
+        if customers.is_empty() {
+            return self.dim("  No customers found.").to_string();
+        }
+        let id_w = 36;
+        let name_w = customers
+            .iter()
+            .map(|customer| truncate(&customer.name, BILL_TO_MAX).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("NAME".len());
+        let mut out = vec![format!(
+            "  {}  {}  {}",
+            self.dim(&pad("CUSTOMER", id_w)),
+            self.dim(&pad("NAME", name_w)),
+            self.dim("EMAIL"),
+        )];
+        out.push(format!(
+            "  {}",
+            self.dim(&DIVIDER.repeat(id_w + 2 + name_w + 2 + 5))
+        ));
+        for customer in customers {
+            out.push(format!(
+                "  {}  {}  {}",
+                self.dim(&pad(&customer.id.to_string(), id_w)),
+                pad(&truncate(&customer.name, BILL_TO_MAX), name_w),
+                customer.email.as_deref().unwrap_or("—"),
+            ));
+        }
+        out.join("\n")
+    }
+
+    /// After `payday proof download`: where the proof went and what it covers.
+    pub fn proof_saved(&self, proof: &ProofOfPayment, path: &Path) -> String {
+        [
+            format!("  ✓ Proof of Payment saved to {}", path.display()),
+            String::new(),
+            self.kv("Payment", &self.cyan(&proof.payment_id)),
+            self.kv("Address", &self.cyan(&proof.payment_address)),
+            self.kv("Settlement", &proof.settlement_transaction_hash),
+            self.kv(
+                "Attestation",
+                &format!(
+                    "{} {}  {}",
+                    proof.verification.payload.payer_policy_mode,
+                    proof.verification.payload.result,
+                    self.dim(&format!("signed by {}", proof.verification.signer)),
+                ),
+            ),
+            String::new(),
+            self.hint(&format!(
+                "Verify offline: payday proof verify {} [--attachment FILE.pdf] [--trusted-attestor {}]",
+                path.display(),
+                proof.verification.signer
+            )),
+        ]
+        .join("\n")
+    }
+
+    /// `payday proof verify`: one line per check, then the verdict.
+    pub fn proof_report(&self, proof: &ProofOfPayment, report: &Report) -> String {
+        let mut out = vec![
+            self.heading(&format!(
+                "Proof of Payment · {}",
+                self.cyan(&proof.payment_id)
+            )),
+            String::new(),
+        ];
+        for check in &report.checks {
+            let (icon, color) = match check.status {
+                CheckStatus::Passed => ("✓", AnsiColor::Green),
+                CheckStatus::Failed => ("✗", AnsiColor::Red),
+                CheckStatus::Skipped => ("·", AnsiColor::Yellow),
+            };
+            let mut line = format!("  {}  {}", self.colored(icon, color), check.name);
+            if let Some(detail) = &check.detail {
+                line.push_str(&format!("  {}", self.dim(detail)));
+            }
+            out.push(line);
+        }
+        out.push(String::new());
+        let failed = report
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Failed)
+            .count();
+        out.push(if report.ok {
+            format!(
+                "  {}",
+                self.green("Proof verified: the invoice, its payment address, and the transfers that paid it agree.")
+            )
+        } else {
+            format!(
+                "  {}",
+                self.colored(
+                    &format!("Proof failed {failed} check(s); do not rely on it."),
+                    AnsiColor::Red
+                )
+            )
+        });
+        out.join("\n")
+    }
+
+    /// The invoice document: who issued it, who owes it, what the payer must
+    /// prove before seeing it, and the commitment that binds it to the address.
+    fn document(&self, payment: &PaymentResponse) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(heading) = &payment.heading {
+            out.push(self.kv("Heading", heading));
+        }
+        out.push(self.kv("Issuer", &payment.issuer.name));
+        out.push(self.kv("Bill to", &payment.bill_to.name));
+        if let Some(reference) = &payment.reference {
+            out.push(self.kv("Reference", reference));
+        }
+        let mode = payment.payer_policy.mode();
+        out.push(self.kv(
+            "Payer",
+            &if mode == PayerPolicyMode::Permissionless {
+                "anyone with the link".to_string()
+            } else {
+                let verification = match &payment.verification_completed_at {
+                    Some(at) => format!("verified {}", short_time(at)),
+                    None => "payer verifies before paying".to_string(),
+                };
+                format!("{}  {}", mode, self.dim(&verification))
+            },
+        ));
+        if let Some(attachment) = &payment.attachment {
+            out.push(self.kv(
+                "Attachment",
+                &format!(
+                    "{}  {}",
+                    attachment.filename,
+                    self.dim(&format!(
+                        "{} bytes · sha256 {}…",
+                        attachment.byte_length,
+                        attachment.sha256.chars().take(12).collect::<String>()
+                    ))
+                ),
+            ));
+        }
+        out.push(self.kv(
+            "Attribution",
+            &format!(
+                "{}  {}",
+                payment.attribution.hash,
+                self.dim(&format!("v{}", payment.attribution.version))
+            ),
+        ));
+        if let Some(at) = &payment.likely_unsolicited_at {
+            out.push(self.kv_warn(
+                "Unsolicited",
+                &format!(
+                    "funds arrived {} before the payer verified; treat as likely unsolicited",
+                    short_time(at)
+                ),
+            ));
+        }
+        out
     }
 
     // ── Layout helpers ──────────────────────────────────────
@@ -609,6 +813,18 @@ fn cursor_age(value: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Widest a name column grows before its content is elided.
+const BILL_TO_MAX: usize = 24;
+
+fn truncate(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let mut short: String = value.chars().take(width.saturating_sub(1)).collect();
+    short.push('…');
+    short
+}
+
 fn pad(value: &str, width: usize) -> String {
     let len = value.chars().count();
     if len >= width {
@@ -675,7 +891,10 @@ pub fn terminal(status: PaymentStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gateway_core::{ChainDto, IndexerFreshnessDto, SelfSettlementDto, TokenDto, TransferDto};
+    use gateway_core::{
+        AttachmentDescriptor, AttributionDto, ChainDto, IndexerFreshnessDto, Party, PayerPolicy,
+        SelfSettlementDto, TokenDto, TransferDto,
+    };
 
     #[test]
     fn errors_lead_with_the_summary_and_indent_their_hints() {
@@ -731,8 +950,37 @@ mod tests {
                 salt: "0xsalt".into(),
             },
             attention: None,
-            memo: Some("Order 1234".into()),
+            issuer: Party {
+                name: "Acme Corp".into(),
+                email: None,
+                details: None,
+            },
+            bill_to: Party {
+                name: "Globex".into(),
+                email: None,
+                details: None,
+            },
+            notes: None,
+            heading: Some("March retainer".into()),
             reference: Some("Order 1234".into()),
+            customer_id: None,
+            payer_policy: PayerPolicy::VerifiedEmail {
+                expected_email: "alice@example.com".into(),
+            },
+            attachment: Some(AttachmentDescriptor {
+                id: uuid::Uuid::from_u128(9),
+                filename: "contract.pdf".into(),
+                mime_type: "application/pdf".into(),
+                byte_length: "1234".into(),
+                sha256: format!("0x{}", "ab".repeat(32)),
+                download_url: None,
+            }),
+            verification_completed_at: None,
+            likely_unsolicited_at: None,
+            attribution: AttributionDto {
+                version: 1,
+                hash: format!("0x{}", "cd".repeat(32)),
+            },
             metadata: serde_json::json!({}),
             created_at: "2026-08-27T14:00:00Z".into(),
             updated_at: "2026-08-27T15:00:00Z".into(),
@@ -761,7 +1009,35 @@ mod tests {
         assert!(output.contains("0.4 of 1 USDC received · 0.6 USDC remaining"));
         assert!(output.contains("Reference"));
         assert!(output.contains("Order 1234"));
+        assert!(output.contains("Issuer"));
+        assert!(output.contains("Acme Corp"));
+        assert!(output.contains("Bill to"));
+        assert!(output.contains("Globex"));
+        assert!(output.contains("March retainer"));
+        assert!(output.contains("verified_email"));
+        assert!(output.contains("payer verifies before paying"));
+        assert!(output.contains("contract.pdf"));
+        assert!(output.contains("sha256 0xababababab…"));
+        assert!(output.contains("Attribution"));
+        assert!(output.contains(&format!("0x{}", "cd".repeat(32))));
+        assert!(!output.contains("alice@example.com"));
         assert!(!output.contains("Factory"));
+        assert!(!output.contains("Unsolicited"));
+    }
+
+    #[test]
+    fn verification_and_unsolicited_funds_are_called_out() {
+        let mut payment = payment(PaymentStatus::PartiallyPaid, "0.400000");
+        payment.verification_completed_at = Some("2026-08-27T15:30:00Z".into());
+        payment.likely_unsolicited_at = Some("2026-08-27T15:02:00Z".into());
+        let output = Presentation {
+            color: false,
+            verbose: false,
+        }
+        .payment(&payment, false);
+        assert!(output.contains("verified Aug 27 15:30 UTC"));
+        assert!(output.contains("Unsolicited"));
+        assert!(output.contains("likely unsolicited"));
     }
 
     #[test]
@@ -791,30 +1067,71 @@ mod tests {
         assert!(!output.contains("refund"));
     }
 
-    #[test]
-    fn list_formats_with_header_and_alignment() {
-        let payments = vec![PaymentSummaryResponse {
+    fn summary(
+        bill_to: &str,
+        mode: PayerPolicyMode,
+        heading: Option<&str>,
+    ) -> PaymentSummaryResponse {
+        PaymentSummaryResponse {
             id: "pay_0191c8e0-5b3a-7c4d-9e2f-1a2b3c4d5e6f".into(),
-            memo: Some("Order 1234".into()),
+            heading: heading.map(Into::into),
+            bill_to_name: bill_to.into(),
             reference: Some("Order 1234".into()),
             metadata: serde_json::json!({}),
             created_at: "2026-08-27T14:00:00Z".into(),
             status: PaymentStatus::Settled,
             amount: "25.000000".into(),
             received: "25.000000".into(),
+            payer_policy_mode: mode,
+            customer_id: None,
+            has_attachment: false,
+            verification_completed_at: None,
+            likely_unsolicited_at: None,
             cancellation_requested_at: None,
-        }];
+        }
+    }
+
+    #[test]
+    fn list_rows_show_bill_to_policy_and_heading_aligned() {
+        let payments = vec![
+            summary(
+                "Globex",
+                PayerPolicyMode::Permissionless,
+                Some("March retainer"),
+            ),
+            summary(
+                "Initech International Holdings Ltd",
+                PayerPolicyMode::VerifiedIdentityUnattributed,
+                None,
+            ),
+        ];
         let output = Presentation {
             color: false,
             verbose: false,
         }
         .list(&payments);
-        assert!(output.contains("PAYMENT"));
-        assert!(output.contains("STATUS"));
-        assert!(output.contains("AMOUNT"));
-        assert!(output.contains("REFERENCE"));
-        assert!(output.contains("Order 1234"));
-        assert!(output.contains("25 USDC"));
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines[0].contains("PAYMENT"));
+        assert!(lines[0].contains("STATUS"));
+        assert!(lines[0].contains("AMOUNT"));
+        assert!(lines[0].contains("BILL TO"));
+        assert!(lines[0].contains("POLICY"));
+        assert!(lines[0].contains("HEADING"));
+        assert!(lines[2].contains("25 USDC"));
+        assert!(lines[2].contains("Globex"));
+        assert!(lines[2].contains("permissionless"));
+        assert!(lines[2].ends_with("March retainer"));
+        assert!(lines[3].contains("Initech International H…"));
+        assert!(lines[3].contains("verified_identity_unattributed"));
+        assert!(lines[3].ends_with("—"));
+        // Both rows place each column at the same character offset even
+        // though the elided name carries a multi-byte ellipsis.
+        let column = |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
+        assert_eq!(column(lines[2], "March retainer"), column(lines[3], "—"));
+        assert_eq!(
+            column(lines[2], "permissionless"),
+            column(lines[3], "verified_identity_unattributed")
+        );
     }
 
     #[test]
@@ -824,7 +1141,63 @@ mod tests {
             verbose: false,
         }
         .list(&[]);
-        assert!(output.contains("No payments found"));
+        assert!(output.contains("No invoices found"));
+    }
+
+    #[test]
+    fn customers_render_as_a_record_and_a_table() {
+        let customer = Customer {
+            id: uuid::Uuid::from_u128(7),
+            name: "Globex".into(),
+            email: Some("billing@globex.example".into()),
+            details: None,
+            created_at: "2026-08-27T14:00:00Z".into(),
+            updated_at: "2026-08-27T14:00:00Z".into(),
+        };
+        let plain = Presentation {
+            color: false,
+            verbose: false,
+        };
+        let record = plain.customer(&customer, true);
+        assert!(record.contains("Customer created"));
+        assert!(record.contains("Globex"));
+        assert!(record.contains("billing@globex.example"));
+        assert!(record.contains("Details       —"));
+        assert!(record.contains("customer_id"));
+        let table = plain.customers(std::slice::from_ref(&customer));
+        assert!(table.contains("CUSTOMER"));
+        assert!(table.contains(&customer.id.to_string()));
+        assert!(plain.customers(&[]).contains("No customers found"));
+    }
+
+    #[test]
+    fn proof_report_marks_each_check_and_fails_loudly() {
+        let proof = crate::proof::fixture::proof();
+        let plain = Presentation {
+            color: false,
+            verbose: false,
+        };
+        let (checks, verified) = crate::proof::offline(&proof, None, &[]);
+        assert!(verified.is_some());
+        let report = Report { checks, ok: true };
+        let output = plain.proof_report(&proof, &report);
+        assert!(output.contains(&proof.payment_id));
+        assert!(output.contains("✓  Canonical invoice hashes to the attribution hash"));
+        assert!(output.contains("·  Attachment matches"));
+        assert!(output.contains("Proof verified"));
+
+        let (checks, verified) =
+            crate::proof::offline(&proof, None, &[alloy_primitives::Address::repeat_byte(1)]);
+        assert!(verified.is_none());
+        let report = Report { checks, ok: false };
+        let output = plain.proof_report(&proof, &report);
+        assert!(output.contains("✗  Verification attestation"));
+        assert!(output.contains("Proof failed 1 check(s)"));
+
+        let saved = plain.proof_saved(&proof, Path::new("proof.json"));
+        assert!(saved.contains("saved to proof.json"));
+        assert!(saved.contains("payday proof verify proof.json"));
+        assert!(saved.contains(&proof.verification.signer));
     }
 
     #[test]
@@ -841,6 +1214,8 @@ mod tests {
         assert!(output.contains("Recovery"));
         assert!(output.contains("Payday recovery wallet"));
         assert!(output.contains("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
+        assert!(output.contains("Issuer"));
+        assert!(output.contains("Bill to"));
         assert!(!output.contains("Refund"));
     }
 }

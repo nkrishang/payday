@@ -12,8 +12,10 @@ const SNIPPETS = [
     code: `payday create \\
   --amount 25.00 \\
   --to 0x1111111111111111111111111111111111111111 \\
-  --expires-in 1h \\
-  --memo 'Order 1042'
+  --issuer 'Acme LLC' \\
+  --bill-to 'Customer Inc' \\
+  --reference 'INV-1042' \\
+  --expires-in 1h
 
 payday get <PAYMENT-ID> --watch`,
   },
@@ -28,6 +30,10 @@ const payment = await payday.payments.create(
   {
     amount: "25.00",
     payout_address: "0x1111111111111111111111111111111111111111",
+    issuer: { name: "Acme LLC" },
+    bill_to: { name: "Customer Inc" },
+    reference: "INV-1042",
+    payer_policy: { mode: "permissionless" },
     expires_in: 3600,
   },
   crypto.randomUUID(), // idempotency key is mandatory
@@ -46,6 +52,10 @@ console.log(payment.payment_url);`,
   -d '{
     "amount": "25.00",
     "payout_address": "0x1111111111111111111111111111111111111111",
+    "issuer": {"name": "Acme LLC"},
+    "bill_to": {"name": "Customer Inc"},
+    "reference": "INV-1042",
+    "payer_policy": {"mode": "permissionless"},
     "expires_in": 3600
   }'`,
   },

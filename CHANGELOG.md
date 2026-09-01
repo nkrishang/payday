@@ -10,6 +10,67 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
+- Invoice documents. `POST /v1/payments` now takes the document the payment
+  fulfils: required `issuer` and `bill_to` parties (name, optional email and
+  free-text details), a required `payer_policy` (`permissionless`,
+  `verified_email`, `verified_identity`, or `verified_identity_unattributed`
+  with the merchant's expected email and, for `verified_identity`, expected
+  name), and optional `heading`, `notes`, `customer_id`, and `attachment_id`.
+  The merchant `Payment` object returns them, the list summary carries
+  `heading`, `bill_to_name`, `payer_policy_mode`, `customer_id`,
+  `has_attachment`, `verification_completed_at`, and `likely_unsolicited_at`,
+  and control characters in any text field are rejected as `invalid_request`.
+- Attribution: at issuance the invoice is canonicalized (RFC 8785), hashed
+  with a random nonce, and the CREATE3 salt is derived from that hash, so the
+  payment address commits to the exact document. The response reports it as
+  `attribution {version, hash}`, and the idempotency check covers every
+  committed field, including the chain, token, factory, and recovery wallet.
+- Customers: `POST`/`GET`/`PATCH /v1/customers`, a reusable counterparty an
+  invoice can reference while keeping its own `bill_to` snapshot.
+- PDF attachments: `POST /v1/attachments` returns a presigned upload (one PDF
+  per invoice, at most 5 MiB, enforced at finalize), the client `PUT`s the
+  bytes with the returned headers, and `POST /v1/attachments/{id}/finalize`
+  answers `attachment_scan_pending` until the malware scan reports and
+  `attachment_rejected` for anything that is not a clean PDF. Keys are
+  write-once (`If-None-Match: *`, so a replayed upload fails with 412) and the
+  finalized object version is pinned for every later read; rejected uploads
+  are deleted, unattached ones expire after seven days, and an upload that
+  expired unused is refused at issuance with `attachment_not_ready`.
+- `GET /v1/payments/{id}/attachment` (a short-lived signed download),
+  `GET /v1/payments/{id}/invoice.pdf` (a deterministic Payday-rendered
+  summary), and `GET /v1/payments/{id}/proof`.
+- Proof of Payment: for a settled invoice, the canonical issuance snapshot,
+  nonce, attribution hash, salt, chain, factory, token and payment addresses,
+  every credited transfer, the fulfilment transaction as
+  `settlement_transaction_hash`, and a Payday-signed verification attestation
+  whose payload names the invoice's `attribution_hash`, `chain_id`, and
+  `payment_address`, so it cannot be transplanted onto another proof.
+  Verifiers recompute hash → salt → address, check the attachment and the
+  attestation, and require the transfers to sum to at least the invoice
+  amount; `payday proof verify --rpc-url` also checks each transfer's receipt
+  and the settlement receipt on chain.
+- CLI: `payday create` takes `--issuer`, `--bill-to`, `--heading`, and
+  `--reference`, or the whole API body with `--from-file`, and uploads a PDF
+  with `--attachment` (waiting for the scan before issuing); `payday get
+  --pdf` saves the invoice PDF; `payday customers create|get|list`; and
+  `payday proof download|verify`.
+- The merchant dashboard at `payday.sh/dashboard`: invoices, customers, and
+  attachment upload with scan progress. It signs in with the same emailed
+  code as the CLI, and the API accepts the resulting short-lived identity
+  token as a session credential on the payment, customer, and attachment
+  routes, so no API key ever reaches a browser. `gatewayd` reads
+  `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` to admit it.
+- Gated payer responses: for the verified policies the payer route returns
+  only the issuer name, heading, requirements, and a masked expected mailbox
+  until verification completes; the amount, address, invoice content, and the
+  settlement transaction hash and explorer link stay `null` while locked.
+- Environment: `PAYDAY_ATTACHMENT_BUCKET`, `PAYDAY_ATTACHMENT_S3_ENDPOINT`,
+  `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE`, and
+  `PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS` for the attachment store; exactly one
+  of `PAYDAY_ATTESTATION_SIGNER_KEY` or `PAYDAY_ATTESTATION_KMS_KEY_ID` for
+  the attestation signer; `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`; and, for the
+  web app, `NEXT_PUBLIC_AUTH0_DOMAIN`, `NEXT_PUBLIC_AUTH0_CLIENT_ID`,
+  `NEXT_PUBLIC_AUTH0_AUDIENCE`, and `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN`.
 - `recovery_address` on the merchant payment response: the Payday recovery
   wallet each payment is committed to. The payer response does not carry it.
 - The `recovered_funds` ledger also records recoveries performed by executions
@@ -52,6 +113,13 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- `issuer`, `bill_to`, and `payer_policy` are required on `POST /v1/payments`;
+  a body without them is rejected. An issued invoice is immutable.
+- Cross-origin access to the merchant routes (payments, customers,
+  attachments) is allowed from the configured web origin only
+  (`PAYDAY_PUBLIC_BASE_URL`) for `GET`, `POST`, and `PATCH` with the
+  `Authorization`, `Content-Type`, `Idempotency-Key`, and `Accept` headers;
+  the payer `GET` routes remain open to any origin.
 - Settlement is exact: a live `Payment` deployment transfers exactly the
   invoice amount to the payout address and any remainder to the Payday
   recovery wallet (`Settled` then `Recovered`), reverts when underfunded, and
@@ -81,6 +149,9 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Removed
 
+- `memo` from `POST /v1/payments`, the payment responses, the TypeScript SDK,
+  and the CLI (`--memo` survives only as a hidden alias of `--reference`).
+  Use `reference` for the invoice number and `notes` for free text.
 - `refund_address` from `POST /v1/payments` (a body carrying it is rejected as
   an unknown field), from `CreatePayment` in the TypeScript SDK, and
   `--refund-to` from `payday create`. The merchant response field

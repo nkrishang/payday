@@ -104,6 +104,17 @@ variable "auth0_client_id" {
   }
 }
 
+variable "dashboard_auth0_client_id" {
+  description = <<-EOT
+    Public client ID of the Auth0 Single Page Application the merchant
+    dashboard signs in with; see docs/authentication.md. Leave empty until it
+    exists: gatewayd then accepts only API keys and the CLI's Native
+    application, and the variable is not passed to the task at all.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "route53_zone_id" {
   description = "ID of the public Route53 hosted zone containing the API domain_name."
   type        = string

@@ -22,6 +22,7 @@ function event(overrides = {}) {
     secrets: {
       PAYDAY_API_AUDIENCE: "https://api.payday.sh",
       PAYDAY_CLIENT_ID: "payday-cli",
+      PAYDAY_DASHBOARD_CLIENT_ID: "payday-dashboard",
     },
     client: { client_id: "payday-cli" },
     connection: { strategy: "email" },
@@ -33,7 +34,7 @@ function event(overrides = {}) {
   };
 }
 
-test("adds fresh email OTP claims for the Payday client", async () => {
+test("adds fresh email OTP claims for the Payday CLI client", async () => {
   const result = actionApi();
   await onExecutePostLogin(event(), result.api);
 
@@ -53,11 +54,43 @@ test("adds fresh email OTP claims for the Payday client", async () => {
   );
 });
 
-test("denies another client or authentication method", async () => {
+test("adds the same claims for the dashboard client, naming that client", async () => {
+  const result = actionApi();
+  await onExecutePostLogin(
+    event({ client: { client_id: "payday-dashboard" } }),
+    result.api,
+  );
+
+  assert.equal(result.denial(), undefined);
+  assert.deepEqual(
+    [...result.claims.keys()].sort(),
+    [
+      "https://api.payday.sh/auth/authenticated_at",
+      "https://api.payday.sh/auth/client_id",
+      "https://api.payday.sh/auth/email",
+      "https://api.payday.sh/auth/event_id",
+      "https://api.payday.sh/auth/method",
+    ],
+  );
+  assert.equal(
+    result.claims.get("https://api.payday.sh/auth/client_id"),
+    "payday-dashboard",
+  );
+});
+
+test("denies an unknown client, another authentication method, or a missing client", async () => {
+  const secretsWithoutDashboard = {
+    PAYDAY_API_AUDIENCE: "https://api.payday.sh",
+    PAYDAY_CLIENT_ID: "payday-cli",
+  };
   for (const invalid of [
     event({ client: { client_id: "other-client" } }),
     event({ connection: { strategy: "google-oauth2" } }),
     event({ authentication: { methods: [{ name: "federated" }] } }),
+    // The dashboard secret is not configured yet: its client must stay out.
+    event({ secrets: secretsWithoutDashboard, client: { client_id: "payday-dashboard" } }),
+    // No client at all must not match an unset secret.
+    event({ secrets: secretsWithoutDashboard, client: {} }),
   ]) {
     const result = actionApi();
     await onExecutePostLogin(invalid, result.api);

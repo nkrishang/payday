@@ -21,6 +21,9 @@ export default defineConfig({
       NEXT_PUBLIC_RPC_URL: "https://rpc.example.test",
       NEXT_PUBLIC_USDC_ADDRESS: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
       NEXT_PUBLIC_EXPLORER_BASE_URL: "https://explorer.example.test",
+      NEXT_PUBLIC_AUTH0_DOMAIN: "http://127.0.0.1:3001",
+      NEXT_PUBLIC_AUTH0_CLIENT_ID: "payday-dashboard-local",
+      NEXT_PUBLIC_AUTH0_AUDIENCE: "payday-api-local",
     },
   },
 });

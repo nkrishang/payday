@@ -1,9 +1,14 @@
 mod api;
+mod attachments;
+mod attestation;
 mod config;
 mod deployment;
 mod dispatcher;
+mod invoice_pdf;
 mod state;
 mod webhook_worker;
+
+use std::sync::Arc;
 
 use alloy_primitives::Address;
 use axum::serve;
@@ -37,6 +42,7 @@ async fn main() {
                 auth0.issuer.clone(),
                 auth0.audience.clone(),
                 auth0.client_id.clone(),
+                auth0.dashboard_client_id.clone(),
                 config.dev_identity(),
             )
             .await
@@ -44,6 +50,33 @@ async fn main() {
         ),
         None => None,
     };
+    // One AWS configuration serves S3, KMS, and SES; status-only mode uses none.
+    let aws = if config.status_only() {
+        None
+    } else {
+        Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
+    };
+    let attachment_store = config.attachments().map(|attachments| {
+        let storage = attachments::S3ObjectStorage::new(
+            aws.as_ref()
+                .expect("AWS configuration is loaded outside status-only mode"),
+            attachments.bucket.clone(),
+            attachments.s3_endpoint.as_deref(),
+            attachments.force_path_style,
+        );
+        attachments::AttachmentStore::new(Arc::new(storage), attachments.download_ttl)
+    });
+    let attestor = match config.attestation() {
+        Some(signer) => Some(
+            attestation::VerificationAttestor::from_config(signer)
+                .await
+                .unwrap_or_else(|error| panic!("{error}")),
+        ),
+        None => None,
+    };
+    if let Some(attestor) = &attestor {
+        tracing::info!(address = %attestor.address(), "configured attestation signer");
+    }
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
         config.explorer_base_url().map(str::to_owned),
@@ -81,6 +114,8 @@ async fn main() {
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),
         config.status_stale_seconds(),
+        attachment_store,
+        attestor,
     );
     if !config.status_only()
         && let Some(key) = state.webhook_encryption_key
@@ -118,10 +153,12 @@ async fn main() {
     };
     let dispatcher = if !config.status_only() {
         if let Some(from) = config.notification_from_address() {
-            let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let aws = aws
+                .as_ref()
+                .expect("AWS configuration is loaded outside status-only mode");
             Some(tokio::spawn(dispatcher::run(
                 notifications,
-                aws_sdk_sesv2::Client::new(&aws),
+                aws_sdk_sesv2::Client::new(aws),
                 from.to_owned(),
                 shutdown_rx,
             )))

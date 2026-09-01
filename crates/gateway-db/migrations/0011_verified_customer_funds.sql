@@ -11,6 +11,15 @@
 -- attribution columns NOT NULL.
 
 -- ---------------------------------------------------------------------------
+-- Accounts: the dashboard provisions an account on first sign-in without
+-- issuing an API key, so a missing key no longer implies revocation. A
+-- revoked account still has no key.
+-- ---------------------------------------------------------------------------
+ALTER TABLE accounts DROP CONSTRAINT accounts_revoked_key_state;
+ALTER TABLE accounts ADD CONSTRAINT accounts_revoked_key_state
+    CHECK (key_revoked_at IS NULL OR api_key_hash IS NULL);
+
+-- ---------------------------------------------------------------------------
 -- Customers: merchant-owned counterparty records. Issued invoices snapshot
 -- the party they were billed to instead of depending on these mutable rows.
 -- ---------------------------------------------------------------------------
@@ -214,6 +223,10 @@ CREATE TABLE invoice_attachments (
         byte_length IS NULL OR byte_length BETWEEN 1 AND 5242880
     ),
     sha256 BYTEA CHECK (sha256 IS NULL OR octet_length(sha256) = 32),
+    -- The bucket version that was hashed at finalization. Every later read
+    -- (retagging, download) pins it, so a second PUT to the key can never
+    -- replace what the invoice committed to. NULL on unversioned buckets.
+    version_id TEXT,
     status TEXT NOT NULL CHECK (
         status IN ('pending_upload', 'scanning', 'ready', 'rejected', 'attached')
     ),
@@ -248,6 +261,7 @@ BEGIN
   IF OLD.sha256 IS NOT NULL AND (
        NEW.sha256 IS DISTINCT FROM OLD.sha256
        OR NEW.byte_length IS DISTINCT FROM OLD.byte_length
+       OR NEW.version_id IS DISTINCT FROM OLD.version_id
        OR NEW.object_key IS DISTINCT FROM OLD.object_key)
   THEN
     RAISE EXCEPTION 'attachment % is finalized and its content commitment is immutable', OLD.id
@@ -257,7 +271,7 @@ BEGIN
 END $$;
 
 CREATE TRIGGER invoice_attachment_commitment_immutable
-BEFORE UPDATE OF invoice_id, object_key, sha256, byte_length ON invoice_attachments
+BEFORE UPDATE OF invoice_id, object_key, sha256, byte_length, version_id ON invoice_attachments
 FOR EACH ROW EXECUTE FUNCTION reject_attachment_commitment_mutation();
 
 -- ---------------------------------------------------------------------------

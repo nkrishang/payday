@@ -11,8 +11,16 @@ container="payday-postgres-${mode}-${PPID}-$$"
 pg_port="${PAYDAY_POSTGRES_PORT:-55432}"
 postgres_image="${PAYDAY_POSTGRES_IMAGE:-postgres:16-alpine}"
 postgres_password="${PAYDAY_POSTGRES_PASSWORD:-payday-local}"
+minio_container="payday-minio-${mode}-${PPID}-$$"
+minio_port="${PAYDAY_MINIO_PORT:-9000}"
+minio_image="${PAYDAY_MINIO_IMAGE:-minio/minio}"
+mc_image="${PAYDAY_MC_IMAGE:-minio/mc}"
+# MinIO's root credentials double as the AWS credentials gatewayd signs with.
+minio_credential="payday-local"
+attachment_bucket="payday-attachments-local"
 pids=()
 postgres_started=false
+minio_started=false
 
 cleanup() {
   status=$?
@@ -23,6 +31,9 @@ cleanup() {
   fi
   if [[ "$postgres_started" == true ]]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
+  fi
+  if [[ "$minio_started" == true ]]; then
+    docker rm -f "$minio_container" >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
@@ -50,6 +61,37 @@ start_postgres() {
     exit 1
   }
   export DATABASE_URL="postgresql://payday:${postgres_password}@127.0.0.1:${pg_port}/gateway"
+}
+
+# MinIO stands in for the S3 attachment bucket, and for GuardDuty: nothing
+# scans local uploads, so the verdict tag finalize insists on is set by hand
+# (docs/local-development.md). Called after .env is loaded so its exports win,
+# like DATABASE_URL, because the runner owns this container.
+start_minio() {
+  need curl
+  echo "[runner] starting MinIO ($minio_image) on port $minio_port"
+  docker run -d --rm --name "$minio_container" \
+    -e MINIO_ROOT_USER="$minio_credential" -e MINIO_ROOT_PASSWORD="$minio_credential" -e MINIO_BROWSER=off \
+    -p "127.0.0.1:${minio_port}:9000" "$minio_image" server /data >/dev/null
+  minio_started=true
+  for _ in {1..100}; do
+    curl -fsS "http://127.0.0.1:${minio_port}/minio/health/live" >/dev/null 2>&1 && break
+    sleep .1
+  done
+  curl -fsS "http://127.0.0.1:${minio_port}/minio/health/live" >/dev/null 2>&1 || {
+    docker logs "$minio_container" >&2
+    echo "MinIO did not become ready" >&2
+    exit 1
+  }
+  docker run --rm --network host \
+    -e "MC_HOST_local=http://${minio_credential}:${minio_credential}@127.0.0.1:${minio_port}" \
+    "$mc_image" mb --ignore-existing "local/${attachment_bucket}" >/dev/null
+  export PAYDAY_ATTACHMENT_BUCKET="$attachment_bucket"
+  export PAYDAY_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${minio_port}"
+  export PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE=1
+  export AWS_ACCESS_KEY_ID="$minio_credential"
+  export AWS_SECRET_ACCESS_KEY="$minio_credential"
+  export AWS_REGION=us-east-1
 }
 
 prefix() {
@@ -92,6 +134,11 @@ load_local_env() {
   export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$PAYDAY_API_URL}"
   export PAYDAY_API_KEY_PREFIX="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
   export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+  # Proof of Payment attestations are signed with Anvil account #6
+  # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
+  # local proof verification; production signs with a KMS key instead.
+  export PAYDAY_ATTESTATION_SIGNER_KEY="${PAYDAY_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
+  export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="${PAYDAY_DASHBOARD_AUTH0_CLIENT_ID:-payday-dashboard-local}"
 }
 
 # Both services compare the deployed runtime bytecode with these hashes at
@@ -142,13 +189,16 @@ export DATABASE_URL="postgresql://payday:${postgres_password}@127.0.0.1:${pg_por
 if [[ "$mode" == e2e ]]; then
   need cargo; need anvil; need cast; need forge; need jq; need psql
   cargo build --locked --workspace
+  # The suite starts its own MinIO next to the processes it manages.
   ./scripts/e2e-anvil.sh
   exit
 fi
 
 need cargo; need anvil; need cast; need forge; need curl
 cargo build --locked --workspace
+start_minio
 prefix postgres docker logs -f "$container"
+prefix minio docker logs -f "$minio_container"
 prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --slots-in-an-epoch 1 --mixed-mining --block-time 1
 for _ in {1..100}; do
   cast chain-id --rpc-url "$PAYDAY_RPC_URL" >/dev/null 2>&1 && break
@@ -176,7 +226,7 @@ done
 curl -fsS "$PAYDAY_API_URL/health" >/dev/null || { echo "gatewayd did not become ready" >&2; exit 1; }
 prefix indexer ./target/debug/gateway-indexer
 echo "[runner] ready: API $PAYDAY_API_URL; run 'just seed' in another shell"
-echo "[runner] Ctrl-C stops services and removes the local database"
+echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do
   for pid in "${pids[@]}"; do
     kill -0 "$pid" 2>/dev/null || {

@@ -4,13 +4,16 @@
 //! database. The request/response wire types come from `gateway-core`, the same
 //! definitions the server uses, so the two cannot drift apart.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use gateway_core::{
-    CancelPaymentResponse, CreatePaymentRequest, PaymentListResponse, PaymentResponse,
+    AttachmentDescriptor, CancelPaymentResponse, CreatePaymentRequest, PDF_MIME_TYPE,
+    PaymentListResponse, PaymentResponse, ProofOfPayment,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use uuid::Uuid;
 
 use crate::account::ApiKeyMetadata;
 use crate::error::{ApiErrorBody, CliError};
@@ -24,10 +27,55 @@ pub struct WebhookEndpoint {
     pub secret: Option<String>,
 }
 
+/// A reusable counterparty record (`/v1/customers`).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Customer {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub details: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CreateCustomerRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CustomerListResponse {
+    pub customers: Vec<Customer>,
+    pub next_cursor: Option<String>,
+}
+
+/// A reserved upload slot: where to PUT the PDF and the headers the presigned
+/// URL was signed with, which must be sent verbatim. The slot's `expires_at`
+/// is not needed here: the PUT follows immediately.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AttachmentUploadSlot {
+    pub id: Uuid,
+    pub upload_url: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// How long a single 5 MiB PUT to object storage may take on a slow link.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Thin wrapper around a `reqwest::Client` bound to one gateway base URL.
 pub struct GatewayClient {
     base_url: String,
     http: reqwest::Client,
+    /// Carries no credentials: presigned uploads go straight to object
+    /// storage, which must never see the API key.
+    anonymous: reqwest::Client,
 }
 
 impl GatewayClient {
@@ -64,8 +112,20 @@ impl GatewayClient {
                 url: base_url.clone(),
                 source,
             })?;
+        let anonymous = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(UPLOAD_TIMEOUT)
+            .build()
+            .map_err(|source| CliError::Transport {
+                url: base_url.clone(),
+                source,
+            })?;
 
-        Ok(Self { base_url, http })
+        Ok(Self {
+            base_url,
+            http,
+            anonymous,
+        })
     }
 
     /// Create a payment. `idempotency_key` is sent as the `Idempotency-Key`
@@ -182,6 +242,140 @@ impl GatewayClient {
                 source,
             })?;
         parse_response(response).await
+    }
+
+    /// The Payday-rendered invoice summary PDF.
+    pub async fn invoice_pdf(&self, id: &str) -> Result<Vec<u8>, CliError> {
+        let url = format!("{}/v1/payments/{id}/invoice.pdf", self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .header(ACCEPT, PDF_MIME_TYPE)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|source| CliError::Transport { url, source });
+        }
+        Err(parse_error_body(status, response).await)
+    }
+
+    /// The settled invoice's Proof of Payment; `409 payment_not_settled`
+    /// before settlement.
+    pub async fn proof(&self, id: &str) -> Result<ProofOfPayment, CliError> {
+        self.request_json(
+            self.http
+                .get(format!("{}/v1/payments/{id}/proof", self.base_url)),
+        )
+        .await
+    }
+
+    /// Reserve a presigned upload slot for one PDF.
+    pub async fn create_attachment(
+        &self,
+        filename: &str,
+    ) -> Result<AttachmentUploadSlot, CliError> {
+        self.request_json(
+            self.http
+                .post(format!("{}/v1/attachments", self.base_url))
+                .json(&serde_json::json!({ "filename": filename })),
+        )
+        .await
+    }
+
+    /// PUT the bytes to object storage with exactly the headers the URL was
+    /// signed for. Object storage speaks its own error dialect, so a failure
+    /// here is reported by status alone.
+    pub async fn upload_attachment(
+        &self,
+        slot: &AttachmentUploadSlot,
+        bytes: Vec<u8>,
+    ) -> Result<(), CliError> {
+        let mut headers = HeaderMap::new();
+        for (name, value) in &slot.headers {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                CliError::UnexpectedResponse {
+                    status: 0,
+                    body: format!("upload slot carried an invalid header name {name:?}"),
+                }
+            })?;
+            let value = HeaderValue::from_str(value).map_err(|_| CliError::UnexpectedResponse {
+                status: 0,
+                body: format!("upload slot carried an invalid value for header {name}"),
+            })?;
+            headers.insert(name, value);
+        }
+        let response = self
+            .anonymous
+            .put(&slot.upload_url)
+            .headers(headers)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: slot.upload_url.clone(),
+                source,
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(CliError::UnexpectedResponse {
+            status: status.as_u16(),
+            body: "object storage refused the attachment upload".into(),
+        })
+    }
+
+    /// Ask the API to admit the uploaded bytes; `409 attachment_scan_pending`
+    /// while the malware scan has not reported.
+    pub async fn finalize_attachment(&self, id: Uuid) -> Result<AttachmentDescriptor, CliError> {
+        self.request_json(
+            self.http
+                .post(format!("{}/v1/attachments/{id}/finalize", self.base_url)),
+        )
+        .await
+    }
+
+    pub async fn create_customer(&self, req: &CreateCustomerRequest) -> Result<Customer, CliError> {
+        self.request_json(
+            self.http
+                .post(format!("{}/v1/customers", self.base_url))
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn get_customer(&self, id: Uuid) -> Result<Customer, CliError> {
+        self.request_json(
+            self.http
+                .get(format!("{}/v1/customers/{id}", self.base_url)),
+        )
+        .await
+    }
+
+    pub async fn list_customers(
+        &self,
+        limit: u32,
+        starting_after: Option<Uuid>,
+    ) -> Result<CustomerListResponse, CliError> {
+        let mut query = vec![("limit", limit.to_string())];
+        if let Some(cursor) = starting_after {
+            query.push(("starting_after", cursor.to_string()));
+        }
+        self.request_json(
+            self.http
+                .get(format!("{}/v1/customers", self.base_url))
+                .query(&query),
+        )
+        .await
     }
 
     pub async fn account(&self) -> Result<ApiKeyMetadata, CliError> {
@@ -309,29 +503,40 @@ async fn parse_response_with_noun<T: serde::de::DeserializeOwned>(
         });
     }
 
-    match serde_json::from_str::<ApiErrorBody>(&body) {
-        Ok(parsed) => Err(CliError::Api {
-            status: status.as_u16(),
-            code: parsed.error.code,
-            message: parsed.error.message,
-        }),
-        Err(_) => Err(CliError::UnexpectedResponse {
-            status: status.as_u16(),
-            body,
-        }),
+    Err(api_error(status, body))
+}
+
+/// Read a failed response's body and turn it into the typed error.
+async fn parse_error_body(status: reqwest::StatusCode, response: reqwest::Response) -> CliError {
+    let url = response.url().to_string();
+    match response.text().await {
+        Ok(body) => api_error(status, body),
+        Err(source) => CliError::Transport { url, source },
     }
 }
 
+fn api_error(status: reqwest::StatusCode, body: String) -> CliError {
+    match serde_json::from_str::<ApiErrorBody>(&body) {
+        Ok(parsed) => CliError::Api {
+            status: status.as_u16(),
+            code: parsed.error.code,
+            message: parsed.error.message,
+        },
+        Err(_) => CliError::UnexpectedResponse {
+            status: status.as_u16(),
+            body,
+        },
+    }
+}
+
+/// A one-connection-per-response HTTP stub shared by the client and proof
+/// tests: it records each raw request and answers with the next canned reply.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::*;
-
-    const KEY: &str = "0123456789abcdef0123456789abcdef";
-
-    async fn capture_server(
+    pub(crate) async fn capture_server(
         responses: Vec<String>,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -341,15 +546,32 @@ mod tests {
             for response in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
-                let mut buffer = [0_u8; 1024];
-                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut buffer = [0_u8; 4096];
+                loop {
                     let read = stream.read(&mut buffer).await.unwrap();
                     if read == 0 {
                         break;
                     }
                     request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        // Keep reading until the declared body has arrived so
+                        // the stub never answers a request it has not fully seen.
+                        let head = String::from_utf8_lossy(&request[..end]).to_string();
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
                 }
-                requests.push(String::from_utf8(request).unwrap());
+                requests.push(String::from_utf8_lossy(&request).to_string());
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
             requests
@@ -357,21 +579,33 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
-    fn response(status: &str, headers: &str, body: &str) -> String {
+    pub(crate) fn response(status: &str, headers: &str, body: &str) -> String {
         format!(
             "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
     }
 
+    pub(crate) fn header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (candidate, value) = line.split_once(':')?;
+            candidate.eq_ignore_ascii_case(name).then_some(value.trim())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gateway_core::{Party, PayerPolicy};
+
+    use super::test_support::{capture_server, header, response};
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
     fn assert_bearer_header(request: &str) {
-        let authorization = request.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("authorization")
-                .then_some(value.trim())
-        });
         let expected = format!("Bearer {KEY}");
-        assert_eq!(authorization, Some(expected.as_str()));
+        assert_eq!(header(request, "authorization"), Some(expected.as_str()));
     }
 
     #[test]
@@ -416,16 +650,27 @@ mod tests {
         ])
         .await;
         let client = GatewayClient::new(base_url, KEY).unwrap();
+        let party = |name: &str| Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        };
         let create = CreatePaymentRequest {
             chain_id: Some("31337".into()),
             token_address: Some("0x0000000000000000000000000000000000000001".into()),
             payout_address: "0x0000000000000000000000000000000000000002".into(),
             amount: "1".into(),
-            expires_in: Some(3_600),
-            expires_at: None,
-            memo: None,
+            issuer: party("Acme"),
+            bill_to: party("Globex"),
+            customer_id: None,
+            notes: None,
+            heading: None,
             reference: None,
             metadata: serde_json::json!({}),
+            payer_policy: PayerPolicy::Permissionless,
+            attachment_id: None,
+            expires_in: Some(3_600),
+            expires_at: None,
         };
 
         assert!(
@@ -498,6 +743,171 @@ mod tests {
             CliError::UnexpectedResponse { status: 302, .. }
         ));
         assert_eq!(requests.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn customer_client_uses_documented_routes_and_shapes() {
+        let customer = serde_json::json!({
+            "id": "0198ec14-39df-7dd0-9994-92b510a89e85",
+            "name": "Globex",
+            "email": null,
+            "details": null,
+            "created_at": "2026-08-27T12:00:00Z",
+            "updated_at": "2026-08-27T12:00:00Z"
+        });
+        let created = response(
+            "201 Created",
+            "Content-Type: application/json\r\n",
+            &customer.to_string(),
+        );
+        let page = response(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            &serde_json::json!({ "customers": [customer], "next_cursor": null }).to_string(),
+        );
+        let (base_url, requests) = capture_server(vec![created.clone(), page, created]).await;
+        let client = GatewayClient::new(base_url, KEY).unwrap();
+        let id: Uuid = "0198ec14-39df-7dd0-9994-92b510a89e85".parse().unwrap();
+
+        let customer = client
+            .create_customer(&CreateCustomerRequest {
+                name: "Globex".into(),
+                email: None,
+                details: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(customer.id, id);
+        assert_eq!(customer.email, None);
+        let listed = client.list_customers(7, Some(id)).await.unwrap();
+        assert_eq!(listed.customers.len(), 1);
+        assert!(listed.next_cursor.is_none());
+        client.get_customer(id).await.unwrap();
+
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("POST /v1/customers HTTP/1.1"));
+        // Absent optional fields are omitted rather than sent as null.
+        assert!(
+            requests[0].ends_with(r#"{"name":"Globex"}"#),
+            "{}",
+            requests[0]
+        );
+        assert!(requests[1].starts_with(&format!(
+            "GET /v1/customers?limit=7&starting_after={id} HTTP/1.1"
+        )));
+        assert!(requests[2].starts_with(&format!("GET /v1/customers/{id} HTTP/1.1")));
+        requests
+            .iter()
+            .for_each(|request| assert_bearer_header(request));
+    }
+
+    #[tokio::test]
+    async fn attachment_upload_sends_signed_headers_to_storage_without_the_api_key() {
+        let id: Uuid = "0198ec14-39df-7dd0-9994-92b510a89e86".parse().unwrap();
+        let descriptor = serde_json::json!({
+            "id": id,
+            "filename": "invoice.pdf",
+            "mime_type": "application/pdf",
+            "byte_length": "9",
+            "sha256": format!("0x{}", "ab".repeat(32)),
+        });
+        // Object storage is a separate stub so the PUT's destination and
+        // headers can be inspected apart from the API's.
+        let (storage_url, storage) = capture_server(vec![response("200 OK", "", "")]).await;
+        let slot = serde_json::json!({
+            "id": id,
+            "upload_url": format!("{storage_url}/payday-attachments-local/uploads/acct/{id}.pdf?X-Amz-Signature=abc"),
+            "headers": {
+                "content-type": "application/pdf",
+                "x-amz-tagging": "payday-upload=pending"
+            },
+            "expires_at": "2026-08-27T12:15:00Z"
+        });
+        let (api_url, api) = capture_server(vec![
+            response(
+                "201 Created",
+                "Content-Type: application/json\r\n",
+                &slot.to_string(),
+            ),
+            response(
+                "409 Conflict",
+                "Content-Type: application/json\r\n",
+                r#"{"error":{"code":"attachment_scan_pending","message":"scan pending"}}"#,
+            ),
+            response(
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                &descriptor.to_string(),
+            ),
+        ])
+        .await;
+        let client = GatewayClient::new(api_url, KEY).unwrap();
+
+        let slot = client.create_attachment("invoice.pdf").await.unwrap();
+        assert_eq!(slot.id, id);
+        client
+            .upload_attachment(&slot, b"%PDF-1.7\n".to_vec())
+            .await
+            .unwrap();
+        let pending = client.finalize_attachment(id).await.unwrap_err();
+        assert!(
+            matches!(pending, CliError::Api { ref code, status: 409, .. } if code == "attachment_scan_pending")
+        );
+        let finalized = client.finalize_attachment(id).await.unwrap();
+        assert_eq!(finalized.byte_length, "9");
+
+        let api = api.await.unwrap();
+        assert!(api[0].starts_with("POST /v1/attachments HTTP/1.1"));
+        assert!(api[0].ends_with(r#"{"filename":"invoice.pdf"}"#));
+        assert!(api[1].starts_with(&format!("POST /v1/attachments/{id}/finalize HTTP/1.1")));
+        assert!(api[2].starts_with(&format!("POST /v1/attachments/{id}/finalize HTTP/1.1")));
+        api.iter().for_each(|request| assert_bearer_header(request));
+
+        let storage = storage.await.unwrap();
+        assert!(storage[0].starts_with(&format!(
+            "PUT /payday-attachments-local/uploads/acct/{id}.pdf?X-Amz-Signature=abc HTTP/1.1"
+        )));
+        assert_eq!(header(&storage[0], "content-type"), Some("application/pdf"));
+        assert_eq!(
+            header(&storage[0], "x-amz-tagging"),
+            Some("payday-upload=pending")
+        );
+        assert_eq!(header(&storage[0], "content-length"), Some("9"));
+        assert!(
+            header(&storage[0], "authorization").is_none(),
+            "the API key must never reach object storage"
+        );
+        assert!(storage[0].ends_with("%PDF-1.7\n"));
+    }
+
+    #[tokio::test]
+    async fn proof_and_pdf_use_documented_routes() {
+        let pdf = response("200 OK", "Content-Type: application/pdf\r\n", "%PDF-1.7 x");
+        let not_settled = response(
+            "409 Conflict",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"code":"payment_not_settled","message":"not yet"}}"#,
+        );
+        let (base_url, requests) =
+            capture_server(vec![pdf, not_settled.clone(), not_settled]).await;
+        let client = GatewayClient::new(base_url, KEY).unwrap();
+
+        assert_eq!(client.invoice_pdf("pay_test").await.unwrap(), b"%PDF-1.7 x");
+        let error = client.proof("pay_test").await.unwrap_err();
+        assert!(
+            matches!(error, CliError::Api { ref code, status: 409, .. } if code == "payment_not_settled")
+        );
+        // A failed PDF read still surfaces the API's stable error code.
+        let error = client.invoice_pdf("pay_test").await.unwrap_err();
+        assert!(matches!(error, CliError::Api { ref code, .. } if code == "payment_not_settled"));
+
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /v1/payments/pay_test/invoice.pdf HTTP/1.1"));
+        assert_eq!(header(&requests[0], "accept"), Some("application/pdf"));
+        assert!(requests[1].starts_with("GET /v1/payments/pay_test/proof HTTP/1.1"));
+        requests
+            .iter()
+            .for_each(|request| assert_bearer_header(request));
     }
 
     #[tokio::test]
