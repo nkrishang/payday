@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use gateway_core::{
-    Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentResponse, PaymentStatus,
-    RecoveryAddress, TokenAddress, USDC_DECIMALS, resolve_expiration,
+    Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentAddress, PaymentResponse,
+    PaymentStatus, RecoveryAddress, TokenAddress, USDC_DECIMALS, payment_id, resolve_expiration,
 };
 use uuid::Uuid;
 
@@ -79,7 +79,11 @@ async fn main() {
             if cli.json {
                 eprintln!("{}", err.json());
             } else {
-                eprintln!("error: {err}");
+                eprintln!(
+                    "{}",
+                    Presentation::for_stderr(cli.color, cli.plain, cli.verbose)
+                        .error(&err.to_string())
+                );
             }
             if cli.verbose
                 && let Some(detail) = err.diagnostic()
@@ -136,7 +140,7 @@ async fn run_webhooks(cli: &Cli, command: WebhooksCommand) -> Result<Output, Cli
 fn webhook_text(value: &serde_json::Value) -> String {
     if let Some(items) = value.as_array() {
         if items.is_empty() {
-            return "No webhooks or deliveries found.".into();
+            return "  No webhooks or deliveries found.".into();
         }
         return items
             .iter()
@@ -146,17 +150,20 @@ fn webhook_text(value: &serde_json::Value) -> String {
     }
     if let Some(secret) = value.get("secret").and_then(|v| v.as_str()) {
         return format!(
-            "✓ Webhook {} added\nURL     {}\nSecret  {}\n\nSave this secret now; it will not be shown again.",
-            value["id"].as_str().unwrap_or(""),
+            "  ✓ Webhook added\n\n  URL     {}\n  ID      {}\n  Secret  {}\n\n  → Save this secret now; it will not be shown again.",
             value["url"].as_str().unwrap_or(""),
-            secret
+            value["id"].as_str().unwrap_or(""),
+            secret,
         );
     }
     if let Some(id) = value.get("delivery_id").and_then(|v| v.as_str()) {
-        return format!("✓ Test delivery {id} queued.");
+        return format!("  ✓ Test delivery {id} queued.");
     }
     if value.get("disabled").and_then(|v| v.as_bool()) == Some(true) {
-        return format!("✓ Webhook {} removed.", value["id"].as_str().unwrap_or(""));
+        return format!(
+            "  ✓ Webhook {} removed.",
+            value["id"].as_str().unwrap_or("")
+        );
     }
     webhook_line(value)
 }
@@ -166,12 +173,16 @@ fn webhook_line(value: &serde_json::Value) -> String {
         value.get("url").and_then(|v| v.as_str()),
         value.get("state").and_then(|v| v.as_str()),
     ) {
-        (Some(url), _) => format!("{}  {}", value["id"].as_str().unwrap_or("—"), url),
+        (Some(url), _) => format!(
+            "  {:<38}  {}",
+            value["id"].as_str().unwrap_or("—"),
+            url,
+        ),
         (_, Some(state)) => format!(
-            "{}  {:<12} {} attempts",
+            "  {:<38}  {:<12}  {} attempts",
             value["id"].as_str().unwrap_or("—"),
             state,
-            value["attempt_count"].as_u64().unwrap_or(0)
+            value["attempt_count"].as_u64().unwrap_or(0),
         ),
         _ => value.to_string(),
     }
@@ -179,7 +190,23 @@ fn webhook_line(value: &serde_json::Value) -> String {
 
 fn print_output(output: Output, json: bool, interactive: bool) {
     if !json && interactive {
-        println!("Payday — stablecoin payments\n");
+        let brand = if std::env::var_os("NO_COLOR").is_none() {
+            let cyan = anstyle::Style::new()
+                .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+                .bold();
+            let dim = anstyle::Style::new()
+                .fg_color(Some(anstyle::Color::Rgb(anstyle::RgbColor(0x44, 0x44, 0x44))));
+            format!(
+                "{}payday{}{} · stablecoin payments{}",
+                cyan.render(),
+                cyan.render_reset(),
+                dim.render(),
+                dim.render_reset(),
+            )
+        } else {
+            "payday · stablecoin payments".to_string()
+        };
+        println!("{brand}\n");
         if let Some(email) = output.signed_in {
             println!("Signed in as {email}.\n");
         }
@@ -191,7 +218,7 @@ fn print_output(output: Output, json: bool, interactive: bool) {
         && interactive
         && let Some(next) = output.next
     {
-        println!("\nNext: {next}");
+        println!("\n  → {next}");
     }
 }
 
@@ -213,16 +240,16 @@ fn completions(shell: clap_complete::Shell) -> Result<String, CliError> {
 fn docs(topic: Option<DocsTopic>) -> &'static str {
     match topic {
         None => {
-            "Payday guides\n\n  getting-started  Create and inspect your first payment\n  authentication   Sign in and manage API keys\n  environment      Configure Payday\n\nRun `payday docs <topic>` to read a guide."
+            "  Payday guides\n\n    getting-started  Create and inspect your first payment\n    authentication   Sign in and manage API keys\n    environment      Configure Payday\n\n  → Run `payday docs <topic>` to read a guide."
         }
         Some(DocsTopic::GettingStarted) => {
-            "Getting started\n\n1. Run `payday login`.\n2. Create a payment with `payday create --amount 25 --to 0x…`.\n3. Follow it with `payday get <PAYMENT_ID> --watch`.\n\nAdd `--json` for machine-readable output."
+            "  Getting started\n\n    1. Run `payday login`\n    2. Create a payment: `payday create --amount 25 --to 0x…`\n    3. Follow it:    `payday get <PAYMENT_ID> --watch`\n\n  → Add --json for machine-readable output."
         }
         Some(DocsTopic::Authentication) => {
-            "Authentication\n\nRun `payday login` to authenticate by email and save a profile for the current API. Use `payday whoami`, `payday keys rotate`, `payday keys revoke`, and `payday logout` to manage it. PAYDAY_API_KEY overrides saved credentials for scripts."
+            "  Authentication\n\n    payday login        Sign in by email and save a profile\n    payday whoami       Show the current account\n    payday keys rotate  Replace your API key\n    payday keys revoke  Immediately invalidate keys\n    payday logout       Remove saved credentials\n\n  → PAYDAY_API_KEY overrides saved credentials for scripts."
         }
         Some(DocsTopic::Environment) => {
-            "Environment\n\nPAYDAY_API_URL      Payday API endpoint\nPAYDAY_API_KEY      Bearer API key override\nNO_COLOR            Disable colored output\n\nCommand-line flags override environment values."
+            "  Environment\n\n    PAYDAY_API_URL   Payday API endpoint\n    PAYDAY_API_KEY   Bearer API key override\n    NO_COLOR         Disable colored output\n\n  → Command-line flags override environment values."
         }
     }
 }
@@ -437,14 +464,15 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
             })
         }
         Command::Cancel(args) => {
-            require_nonblank("reference", &args.reference)?;
-            let cancelled = client.cancel_payment(&args.reference).await?;
+            let cancelled = client
+                .cancel_payment(payment_reference(&args.reference)?)
+                .await?;
             Ok(Output {
                 body: if cli.json {
                     json(&cancelled)?
                 } else {
                     format!(
-                        "✓ Payment {} cancelled (advisory)\n\n{}\nThe address keeps its on-chain settlement terms.",
+                        "  ✓ Payment {} cancelled (advisory)\n\n  {}\n  → The address keeps its on-chain settlement terms.",
                         cancelled.payment.id, cancelled.advisory
                     )
                 },
@@ -518,8 +546,38 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentRespo
 }
 
 async fn get(client: &GatewayClient, reference: &str) -> Result<PaymentResponse, CliError> {
-    require_nonblank("reference", reference)?;
-    client.get_payment(reference).await
+    client.get_payment(payment_reference(reference)?).await
+}
+
+/// A payment resolves only by its complete ID or its payment address, so reject
+/// anything else here rather than spending a round trip to learn the same.
+fn payment_reference(reference: &str) -> Result<&str, CliError> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(CliError::InvalidInput(
+            "A payment ID or payment address is required\n→ Run `payday list` to see your payments."
+                .into(),
+        ));
+    }
+    if payment_id(reference).is_some() || PaymentAddress::from_str(reference).is_ok() {
+        return Ok(reference);
+    }
+    Err(CliError::InvalidInput(format!(
+        "'{}' is not a complete payment ID or payment address\n\
+         → Payment ID:      pay_0198f80c-8d2f-7dc1-a369-90556a64f700\n\
+         → Payment address: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8\n\
+         → Run `payday list` to see your payments.",
+        elide(reference)
+    )))
+}
+
+/// Keep a pasted-in reference from overrunning the error it appears in.
+fn elide(value: &str) -> String {
+    let mut short: String = value.chars().take(46).collect();
+    if short.chars().count() < value.chars().count() {
+        short.push('…');
+    }
+    short
 }
 
 async fn watch(
@@ -533,16 +591,17 @@ async fn watch(
             "Watch interval must be at least one second".into(),
         ));
     }
+    let reference = payment_reference(&args.reference)?.to_owned();
     let interactive = allow_redraw && io::stdout().is_terminal();
     let mut previous = String::new();
     let mut first = true;
     loop {
         let payment = if first {
             first = false;
-            get(client, &args.reference).await?
+            get(client, &reference).await?
         } else {
             client
-                .wait_for_payment_change(&args.reference, args.interval)
+                .wait_for_payment_change(&reference, args.interval)
                 .await?
         };
         let frame = output.payment(&payment, false);
@@ -646,8 +705,7 @@ async fn run_login(cli: &Cli, args: LoginArgs) -> Result<String, CliError> {
         key_hint(&issued.api_key)
     };
     Ok(format!(
-        "  ✓ Signed in as {email}\n  ✓ API key saved to {} ({display_key})\n\n  Create your first payment:\n    payday create --help",
-        path.display()
+        "  ✓ Signed in as {email}\n  ✓ API key saved ({display_key})\n\n  → payday create --help"
     ))
 }
 
@@ -780,9 +838,8 @@ async fn run_keys(cli: &Cli, command: KeysCommand) -> Result<String, CliError> {
                 key_hint(&issued.api_key)
             };
             Ok(format!(
-                "  ✓ API key rotated (generation {})\n  ✓ Saved to {} ({key})\n  ! Previous key remains valid for 24 hours.",
+                "  ✓ API key rotated (generation {})\n  ✓ Saved ({key})\n  ! Previous key remains valid for 24 hours.",
                 issued.generation,
-                path.display()
             ))
         }
         KeysCommand::Revoke(RevokeArgs { yes }) => {
@@ -803,7 +860,7 @@ fn format_metadata(metadata: &ApiKeyMetadata, json: bool) -> Result<String, CliE
         });
     }
     Ok(format!(
-        "Account {}\n  key          {}\n  generation   {}\n  created      {}\n  rotated      {}\n  previous key {}",
+        "  Account    {}\n  Key        {}\n  Generation {}\n  Created    {}\n  Rotated    {}\n  Previous   {}",
         metadata.account_id,
         metadata.key_hint.as_deref().unwrap_or("revoked"),
         metadata.generation,
@@ -813,7 +870,7 @@ fn format_metadata(metadata: &ApiKeyMetadata, json: bool) -> Result<String, CliE
             .previous_key_expires_at
             .as_deref()
             .map(|expiry| format!("valid until {expiry}"))
-            .unwrap_or_else(|| "none".into())
+            .unwrap_or_else(|| "none".into()),
     ))
 }
 
@@ -895,8 +952,32 @@ fn confirm(prompt: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_client, mask_email, valid_code, validate_email};
+    use super::{account_client, mask_email, payment_reference, valid_code, validate_email};
     use crate::cli::{Cli, ColorChoice, Command, Profile};
+
+    #[test]
+    fn references_resolve_only_as_complete_ids_or_addresses() {
+        let id = "pay_0198f80c-8d2f-7dc1-a369-90556a64f700";
+        assert_eq!(payment_reference(id).unwrap(), id);
+        assert_eq!(payment_reference(&format!(" {id}\n")).unwrap(), id);
+        let address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+        assert_eq!(payment_reference(address).unwrap(), address);
+
+        for rejected in [
+            "",
+            "   ",
+            "pay_0198f80c",
+            "pay_",
+            "0198f80c-8d2f-7dc1-a369-90556a64f700",
+        ] {
+            let error = payment_reference(rejected).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{rejected}");
+            assert!(
+                error.to_string().contains("payday list"),
+                "expected a next step for {rejected}"
+            );
+        }
+    }
 
     #[test]
     fn login_input_helpers_are_strict() {

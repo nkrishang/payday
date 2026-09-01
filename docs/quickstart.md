@@ -43,7 +43,7 @@ payday create \
   Hidden chain/token overrides are intended for controlled deployments only.
 
 The result includes a `pay_…` ID, one-time address, amount, deadline, current
-status, and a signed `payment_url`. Add `--json` for the full API object.
+status, and a `payment_url`. Add `--json` for the full API object.
 
 For scripted retries, supply a stable key and reuse it only with the same
 parameters:
@@ -60,9 +60,11 @@ create a new payment.
 ## 3. Share and track
 
 Send the returned `payment_url` to the payer. The hosted checkout displays the
-remaining amount, network, exact token, one-time address, QR code, wallet
-request, deadline, and live finalized status. Treat the full URL as sensitive:
-its signed token grants read access to that payment until 30 days after expiry.
+remaining amount, network, exact token, one-time address, QR code, deadline, and
+live finalized status, and lets the payer pay from a connected wallet in the
+page. The link is deliberately open: anyone holding it can read the payment and
+fulfil it, which is what makes it shareable. It carries no merchant data — no
+payout address, refund address, memo, reference, or metadata.
 
 Track settlement in another terminal:
 

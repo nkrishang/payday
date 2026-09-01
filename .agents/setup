@@ -71,6 +71,21 @@ install_foundry() {
   fi
 }
 
+install_node() {
+  # The web package (payday.sh: landing page and hosted checkout) is the only
+  # part of the repo that needs Node.
+  local required=22
+
+  if command -v node >/dev/null 2>&1 &&
+    [[ "$(node --version | sed 's/^v\([0-9]*\).*/\1/')" -ge "$required" ]]; then
+    echo "Node $(node --version) already installed"
+    return
+  fi
+
+  curl -fsSL "https://deb.nodesource.com/setup_${required}.x" | sudo -E bash -
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+}
+
 configure_login_shell() {
   local marker="# payday orb development environment"
   if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
@@ -134,12 +149,14 @@ step "Install Docker" install_docker
 step "Install Rust" install_rust
 export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 step "Install Foundry" install_foundry
+step "Install Node" install_node
 step "Configure login shell" configure_login_shell
 step "Initialize git submodules" git submodule update --init --recursive --depth 1 --recommend-shallow
 step "Start PostgreSQL" start_postgres
 step "Create development database" configure_database
 step "Create local development environment" create_dev_env
 step "Fetch Rust dependencies" cargo fetch --locked
+step "Install Node dependencies" npm ci
 step "Build Foundry FFI helper" cargo build --locked -p gateway-core --bin derive-address
 
 echo "Orb setup complete"

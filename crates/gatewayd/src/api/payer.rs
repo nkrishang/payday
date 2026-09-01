@@ -3,52 +3,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, U256};
 use axum::Json;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, header};
-use axum::response::{Html, IntoResponse, Response};
-use gateway_core::{Invoice, InvoiceStatus, PayerPaymentResponse, PaymentResponse};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use gateway_core::{Invoice, InvoiceId, InvoiceStatus, PayerPaymentResponse, PaymentResponse};
 use qrcode::{QrCode, render::svg};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::state::AppState;
 
-const ISSUER: &str = "payday-gateway";
-const AUDIENCE: &str = "payer-payment-read";
-const READ_GRACE_SECS: u64 = 30 * 24 * 60 * 60;
-
 #[derive(Clone)]
 pub struct PayerAccess {
     public_base_url: String,
     explorer_base_url: Option<String>,
-    encoding_key: EncodingKey,
-    decoding_key: DecodingKey,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    iss: String,
-    aud: String,
-    exp: u64,
-}
-
-#[derive(Deserialize)]
-pub struct AccessQuery {
-    token: String,
 }
 
 impl PayerAccess {
     pub fn new(
         public_base_url: impl Into<String>,
         explorer_base_url: Option<String>,
-        secret: &[u8],
     ) -> Result<Self, String> {
-        if secret.len() < 32 {
-            return Err("PAYDAY_PAYER_TOKEN_SECRET must be at least 32 bytes".into());
-        }
         let public_base_url = validate_base_url(public_base_url.into(), "public base URL", true)?;
         let explorer_base_url = explorer_base_url
             .map(|url| validate_base_url(url, "explorer base URL", false))
@@ -56,41 +31,17 @@ impl PayerAccess {
         Ok(Self {
             public_base_url,
             explorer_base_url,
-            encoding_key: EncodingKey::from_secret(secret),
-            decoding_key: DecodingKey::from_secret(secret),
         })
     }
 
-    pub fn payment_url(&self, invoice: &Invoice) -> Result<String, ApiError> {
-        let token = encode(
-            &Header::new(Algorithm::HS256),
-            &Claims {
-                sub: invoice.id.to_string(),
-                iss: ISSUER.into(),
-                aud: AUDIENCE.into(),
-                exp: invoice.expiration_timestamp.saturating_add(READ_GRACE_SECS),
-            },
-            &self.encoding_key,
-        )
-        .map_err(|error| ApiError::internal(format!("failed to sign payment URL: {error}")))?;
-        Ok(format!(
-            "{}/pay/{}?token={token}",
-            self.public_base_url, invoice.id
-        ))
+    /// Link to the hosted checkout for one payment. Its origin is a different
+    /// service, so this is the one place that knows where the checkout lives.
+    pub fn checkout_url(&self, id: &InvoiceId) -> String {
+        format!("{}/pay/{id}", self.public_base_url)
     }
 
-    fn verify(&self, token: &str, id: &str) -> Result<(), ApiError> {
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_issuer(&[ISSUER]);
-        validation.set_audience(&[AUDIENCE]);
-        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-        let claims = decode::<Claims>(token, &self.decoding_key, &validation)
-            .map_err(|_| ApiError::payer_unauthorized())?
-            .claims;
-        if claims.sub != id {
-            return Err(ApiError::payer_unauthorized());
-        }
-        Ok(())
+    pub fn payment_url(&self, invoice: &Invoice) -> Result<String, ApiError> {
+        Ok(self.checkout_url(&invoice.id))
     }
 
     pub fn address_url(&self, address: &str) -> Option<String> {
@@ -192,16 +143,17 @@ fn payer_response(
     }
 }
 
+fn parse_invoice_id(id: &str) -> Result<Uuid, ApiError> {
+    id.strip_prefix("pay_")
+        .and_then(|value| Uuid::from_str(value).ok())
+        .ok_or_else(ApiError::payer_unauthorized)
+}
+
 async fn authorized_invoice(
     state: &AppState,
     id: &str,
-    token: &str,
 ) -> Result<(Invoice, Option<String>), ApiError> {
-    let uuid = id
-        .strip_prefix("pay_")
-        .and_then(|value| Uuid::from_str(value).ok())
-        .ok_or_else(ApiError::payer_unauthorized)?;
-    state.payer.verify(token, id)?;
+    let uuid = parse_invoice_id(id)?;
     let row = state
         .repo
         .find_by_id(uuid)
@@ -220,9 +172,8 @@ async fn authorized_invoice(
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(query): Query<AccessQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (invoice, settlement_tx_hash) = authorized_invoice(&state, &id, &query.token).await?;
+    let (invoice, settlement_tx_hash) = authorized_invoice(&state, &id).await?;
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
@@ -238,9 +189,8 @@ pub async fn get(
 pub async fn qr(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(query): Query<AccessQuery>,
 ) -> Result<Response, ApiError> {
-    let (invoice, _) = authorized_invoice(&state, &id, &query.token).await?;
+    let (invoice, _) = authorized_invoice(&state, &id).await?;
     let (remaining, payable) = payment_state(&invoice, unix_now());
     if !payable {
         return Err(ApiError::payment_not_payable());
@@ -263,42 +213,34 @@ pub async fn qr(
         .into_response())
 }
 
-pub async fn page() -> impl IntoResponse {
-    (
+/// Permanently redirect a payer link to the hosted checkout.
+///
+/// The checkout is served from `PAYDAY_PUBLIC_BASE_URL`, which is a different
+/// origin from this service, so every link ever shared keeps working after the
+/// page moved. The id is parsed strictly before it is interpolated: without
+/// that check an arbitrary path segment would end up in a `Location` header.
+pub async fn page(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let location = state.payer.checkout_url(&InvoiceId(parse_invoice_id(&id)?));
+    let location =
+        HeaderValue::from_str(&location).map_err(|_| ApiError::internal("invalid payer link"))?;
+    Ok((
+        StatusCode::MOVED_PERMANENTLY,
         [
+            (header::LOCATION, location),
             (
                 header::CACHE_CONTROL,
-                "public, max-age=300, stale-while-revalidate=86400",
+                HeaderValue::from_static("public, max-age=3600"),
             ),
-            (header::REFERRER_POLICY, "no-referrer"),
-            (header::X_FRAME_OPTIONS, "DENY"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+                header::REFERRER_POLICY,
+                HeaderValue::from_static("no-referrer"),
             ),
         ],
-        Html(include_str!("payer.html")),
     )
-}
-
-pub async fn css() -> impl IntoResponse {
-    asset("text/css; charset=utf-8", include_str!("payer.css"))
-}
-
-pub async fn js() -> impl IntoResponse {
-    asset("text/javascript; charset=utf-8", include_str!("payer.js"))
-}
-
-fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        body,
-    )
+        .into_response())
 }
 
 #[cfg(test)]
@@ -317,29 +259,22 @@ mod tests {
             TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000002")),
             Amount(U256::from(1_500_000)),
-            u64::MAX - READ_GRACE_SECS,
+            u64::MAX / 2,
             RecoveryAddress(address!("0x0000000000000000000000000000000000000003")),
         )
     }
 
     #[test]
-    fn token_is_scoped_to_one_invoice_and_payment_uri_is_eip_681() {
+    fn payment_url_is_tokenless_and_payment_uri_is_eip_681() {
         let access = PayerAccess::new(
             "https://pay.payday.sh/",
             Some("https://monadvision.com/".into()),
-            b"0123456789abcdef0123456789abcdef",
         )
         .unwrap();
         let invoice = invoice();
         let url = access.payment_url(&invoice).unwrap();
-        let token = url.split("?token=").nth(1).unwrap();
-        assert!(url.starts_with(&format!("https://pay.payday.sh/pay/{}", invoice.id)));
-        assert!(access.verify(token, &invoice.id.to_string()).is_ok());
-        assert!(
-            access
-                .verify(token, &format!("pay_{}", Uuid::now_v7()))
-                .is_err()
-        );
+        assert_eq!(url, format!("https://pay.payday.sh/pay/{}", invoice.id));
+        assert!(!url.contains("token"));
         assert_eq!(
             payment_uri(&invoice, invoice.amount.0),
             format!(
@@ -364,17 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn configuration_rejects_weak_secrets_and_insecure_remote_urls() {
-        assert!(PayerAccess::new("https://pay.payday.sh", None, b"short").is_err());
-        assert!(PayerAccess::new("http://pay.payday.sh", None, &[b'x'; 32]).is_err());
-        assert!(PayerAccess::new("https://pay.payday.sh/base", None, &[b'x'; 32]).is_err());
-        assert!(PayerAccess::new("https://user@pay.payday.sh", None, &[b'x'; 32]).is_err());
-        assert!(PayerAccess::new("http://127.0.0.1:3000", None, &[b'x'; 32]).is_ok());
+    fn configuration_rejects_insecure_remote_urls() {
+        assert!(PayerAccess::new("http://pay.payday.sh", None).is_err());
+        assert!(PayerAccess::new("https://pay.payday.sh/base", None).is_err());
+        assert!(PayerAccess::new("https://user@pay.payday.sh", None).is_err());
+        assert!(PayerAccess::new("http://127.0.0.1:3000", None).is_ok());
         assert!(
             PayerAccess::new(
                 "https://pay.payday.sh",
                 Some("http://monadvision.com".into()),
-                &[b'x'; 32]
             )
             .is_err()
         );

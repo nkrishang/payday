@@ -45,7 +45,6 @@ async fn main() {
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
         config.explorer_base_url().map(str::to_owned),
-        config.payer_token_secret(),
     )
     .expect("invalid payer link configuration");
     let state = state::AppState::new(

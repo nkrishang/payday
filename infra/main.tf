@@ -1,6 +1,11 @@
 data "aws_availability_zones" "available" { state = "available" }
 
 locals {
+  # Payer links point at the hosted checkout. gatewayd validates this as a bare
+  # HTTPS origin and redirects its own /pay/{id} to it, so links shared before
+  # the checkout moved keep working.
+  checkout_base_url = var.checkout_base_url != "" ? var.checkout_base_url : "https://${var.payment_domain_name}"
+
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
   certificate_validation_zone_ids = {
     (var.domain_name)         = var.route53_zone_id
@@ -124,10 +129,6 @@ resource "random_password" "db" {
   special = false
 }
 
-resource "random_password" "payer_token" {
-  length  = 48
-  special = false
-}
 
 resource "aws_db_subnet_group" "this" {
   name       = var.name
@@ -168,11 +169,6 @@ resource "aws_secretsmanager_secret" "rpc_url" { name = "${var.name}/rpc-url" }
 resource "aws_secretsmanager_secret_version" "rpc_url" {
   secret_id     = aws_secretsmanager_secret.rpc_url.id
   secret_string = var.rpc_url
-}
-resource "aws_secretsmanager_secret" "payer_token" { name = "${var.name}/payer-token" }
-resource "aws_secretsmanager_secret_version" "payer_token" {
-  secret_id     = aws_secretsmanager_secret.payer_token.id
-  secret_string = random_password.payer_token.result
 }
 
 # Webhook signing secrets need to be recoverable across worker restarts while
@@ -270,7 +266,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.payer_token.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
 }
 resource "aws_iam_role_policy" "status_secrets" {
   role   = aws_iam_role.status_execution.id
@@ -331,14 +327,13 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_AUTH0_AUDIENCE", value = var.auth0_audience },
       { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id },
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
-      { name = "PAYDAY_PUBLIC_BASE_URL", value = "https://${var.payment_domain_name}" },
+      { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address }
     ]),
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
-      { name = "PAYDAY_PAYER_TOKEN_SECRET", valueFrom = aws_secretsmanager_secret.payer_token.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
     ],

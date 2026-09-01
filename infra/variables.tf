@@ -36,6 +36,21 @@ variable "payment_route53_zone_id" {
   type        = string
 }
 
+variable "checkout_base_url" {
+  description = <<-EOT
+    Origin serving the hosted checkout at /pay/{id}, which is where every
+    payment_url points. In production this is the Vercel-hosted site at
+    https://payday.sh. Leave empty to keep links on payment_domain_name, which
+    this service answers with a 301 to this origin.
+  EOT
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.checkout_base_url == "" || can(regex("^https://[^/?#]+$", var.checkout_base_url))
+    error_message = "checkout_base_url must be an HTTPS origin without a trailing slash, path, query, or fragment."
+  }
+}
+
 variable "explorer_base_url" {
   description = "Explorer origin for the configured chain; Monad production uses MonadVision."
   type        = string

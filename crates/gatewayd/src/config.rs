@@ -14,7 +14,6 @@ pub struct Config {
     usdc_address: Address,
     public_base_url: String,
     explorer_base_url: Option<String>,
-    payer_token_secret: String,
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
     notification_from_address: Option<String>,
@@ -79,13 +78,6 @@ impl Config {
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
             explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
-            payer_token_secret: std::env::var("PAYDAY_PAYER_TOKEN_SECRET").unwrap_or_else(|_| {
-                if status_only {
-                    "status-service-does-not-issue-links".into()
-                } else {
-                    panic!("PAYDAY_PAYER_TOKEN_SECRET must be set")
-                }
-            }),
             api_key_prefix,
             webhook_encryption_key,
             notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
@@ -137,10 +129,6 @@ impl Config {
 
     pub fn explorer_base_url(&self) -> Option<&str> {
         self.explorer_base_url.as_deref()
-    }
-
-    pub fn payer_token_secret(&self) -> &[u8] {
-        self.payer_token_secret.as_bytes()
     }
 
     pub fn api_key_prefix(&self) -> &str {

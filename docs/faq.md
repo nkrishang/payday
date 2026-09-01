@@ -16,10 +16,9 @@ Never reuse it for another order.
 
 ## What should I give the payer?
 
-Prefer the returned signed `payment_url`. It shows network, token, remaining
-amount, address, QR/wallet request, deadline, and finalized live status. The URL
-grants scoped read access until 30 days after expiry, so send it to the payer
-rather than publishing it. If integrating your own UI, reproduce all safety
+Prefer the returned `payment_url`. It shows network, token, remaining
+amount, address, QR/wallet request, deadline, and finalized live status. Send
+it to the payer. If integrating your own UI, reproduce all safety
 guidance in [Payment safety](payment-safety.md).
 
 ## Why has a wallet transaction not appeared?
@@ -58,8 +57,8 @@ your own wallet/process after confirming where the funds settled.
 
 ## How do I find and reconcile payments?
 
-Save the `pay_…` ID and your own `reference`. Look up a payment by full ID,
-unambiguous ID prefix, or payment address. List newest-first with optional
+Save the `pay_…` ID and your own `reference`. Look up a payment by complete
+ID or payment address. List newest-first with optional
 status/reference filters and cursor pagination. The transfers endpoint provides
 finalized sender, transaction, amount, block, disposition, and collection state.
 

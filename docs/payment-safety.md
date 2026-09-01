@@ -4,6 +4,11 @@ Payday payment addresses are single-use. Give the payer the amount, payment
 address, network, and deadline shown by the checkout, and ask them not to reuse
 the address.
 
+The hosted checkout offers three ways to pay the same one-time address: a
+connected wallet, a scanned QR, or a copied address. All three request the
+amount still due and stop being offered the moment the payment is no longer
+payable.
+
 ## What the payer must send
 
 - Send **exactly the displayed amount** of **Circle-issued native USDC** on the

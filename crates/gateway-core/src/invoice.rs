@@ -20,25 +20,15 @@ impl fmt::Display for InvoiceId {
     }
 }
 
-/// Validate a customer-facing `pay_…` ID or unambiguous prefix and return the
-/// UUID portion used by the account-scoped database lookup.
-pub fn payment_id_prefix(value: &str) -> Option<&str> {
+/// Validate a complete customer-facing `pay_…` ID and return the UUID used by
+/// the account-scoped database lookup. Only the canonical form the API emits is
+/// accepted: partial IDs and other UUID spellings are rejected so a lookup can
+/// never resolve to more than one payment.
+pub fn payment_id(value: &str) -> Option<Uuid> {
     let suffix = value.strip_prefix("pay_")?;
-    if suffix.is_empty() || suffix.len() > 36 {
-        return None;
-    }
-    let canonical = "00000000-0000-0000-0000-000000000000".as_bytes();
-    suffix
-        .bytes()
-        .zip(canonical)
-        .all(|(byte, template)| {
-            if *template == b'-' {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            }
-        })
-        .then_some(suffix)
+    let uuid = Uuid::try_parse(suffix).ok()?;
+    let mut canonical = [0u8; uuid::fmt::Hyphenated::LENGTH];
+    (uuid.hyphenated().encode_lower(&mut canonical) == suffix).then_some(uuid)
 }
 
 pub fn generate_invoice_id() -> InvoiceId {
@@ -221,15 +211,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_payment_ids_are_prefixed_and_validate_canonical_prefixes() {
-        let id = InvoiceId(Uuid::parse_str("0198f80c-8d2f-7dc1-a369-90556a64f700").unwrap());
+    fn public_payment_ids_round_trip_only_in_canonical_complete_form() {
+        let uuid = Uuid::parse_str("0198f80c-8d2f-7dc1-a369-90556a64f700").unwrap();
+        let id = InvoiceId(uuid);
         assert_eq!(id.to_string(), "pay_0198f80c-8d2f-7dc1-a369-90556a64f700");
-        assert_eq!(
-            payment_id_prefix("pay_0198f80c-8d2f"),
-            Some("0198f80c-8d2f")
-        );
-        for invalid in ["", "pay_", "0198f80c", "pay_0198F", "pay_0198-", "pay_%"] {
-            assert_eq!(payment_id_prefix(invalid), None, "{invalid}");
+        assert_eq!(payment_id(&id.to_string()), Some(uuid));
+        for invalid in [
+            "",
+            "pay_",
+            "0198f80c-8d2f-7dc1-a369-90556a64f700",
+            "pay_0198f80c",
+            "pay_0198f80c-8d2f",
+            "pay_0198F80C-8D2F-7DC1-A369-90556A64F700",
+            "pay_0198f80c8d2f7dc1a36990556a64f700",
+            "pay_{0198f80c-8d2f-7dc1-a369-90556a64f700}",
+            "pay_%",
+        ] {
+            assert_eq!(payment_id(invalid), None, "{invalid}");
         }
     }
     use uuid::Version;

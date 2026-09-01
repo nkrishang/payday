@@ -60,7 +60,10 @@ impl CliError {
             CliError::Config(_) => "configuration_error",
             CliError::Auth { .. } => "authentication_error",
         };
-        serde_json::json!({ "error": { "code": code, "message": self.to_string() } }).to_string()
+        // Hints after the first line are written for a reader, not a script.
+        let message = self.to_string();
+        let summary = message.lines().next().unwrap_or_default();
+        serde_json::json!({ "error": { "code": code, "message": summary } }).to_string()
     }
 
     /// Stable process exit code. Distinguishes local misuse from remote failures
@@ -91,5 +94,14 @@ mod tests {
             serde_json::from_str(&CliError::InvalidInput("bad expiry".into()).json()).unwrap();
         assert_eq!(value["error"]["code"], "invalid_input");
         assert_eq!(value["error"]["message"], "bad expiry");
+    }
+
+    #[test]
+    fn json_errors_carry_one_line_and_leave_hints_to_the_terminal() {
+        let value: serde_json::Value = serde_json::from_str(
+            &CliError::InvalidInput("bad reference\n→ Run `payday list`.".into()).json(),
+        )
+        .unwrap();
+        assert_eq!(value["error"]["message"], "bad reference");
     }
 }

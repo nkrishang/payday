@@ -2,6 +2,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type PaymentStatus = "awaiting_payment" | "partially_paid" | "paid" | "settled" | "expired" | "returned" | "needs_attention";
 
 export interface Chain { id: string; name: string }
+export interface Token { symbol: string; address: string; decimals: number }
 export interface AsOf { block: string; at: string }
 export interface CreatePayment {
   amount: string;
@@ -21,7 +22,7 @@ export interface Payment {
   status: PaymentStatus;
   chain: Chain;
   currency: string;
-  token: { symbol: string; address: string; decimals: number };
+  token: Token;
   address: string;
   address_explorer_url: string | null;
   payout_address: string;
@@ -57,6 +58,40 @@ export interface Payment {
   transfers: Transfer[];
   indexer_freshness: { last_indexed_block: string | null; last_finalized_block: string | null; cursor_updated_at: string | null };
 }
+
+/**
+ * The narrowed projection served to anyone holding a payment link.
+ *
+ * Deliberately carries no merchant data: no payout or refund address, no memo,
+ * reference, or metadata. The payment page is world-readable, so this is the
+ * only payment shape safe to render on it.
+ */
+export interface PayerPayment {
+  id: string;
+  chain: Chain;
+  token: Token;
+  amount: string;
+  amount_base_units: string;
+  received: string;
+  received_base_units: string;
+  remaining: string;
+  remaining_base_units: string;
+  address: string;
+  expires_at: string;
+  /** Gateway wall-clock unix seconds, so a countdown never trusts the payer's device. */
+  server_timestamp: string;
+  status: PaymentStatus;
+  /** Whether the gateway still considers this address payable. */
+  payable: boolean;
+  /** EIP-681 request for the amount still due; null once the payment is not payable. */
+  payment_uri: string | null;
+  address_explorer_url: string | null;
+  settlement_tx_hash: string | null;
+  settlement_explorer_url: string | null;
+  /** Safety guidance shown only when payout needs operator attention. */
+  payer_message: string | null;
+}
+
 export interface PaymentSummary { id: string; memo: string | null; reference: string | null; metadata: Record<string, JsonValue>; created_at: string; status: PaymentStatus; amount: string; received: string; cancellation_requested_at: string | null }
 export interface ListPaymentsParams { starting_after?: string; status?: PaymentStatus; reference?: string; limit?: number }
 export interface PaymentPage { payments: PaymentSummary[]; next_cursor: string | null }
@@ -87,6 +122,11 @@ export interface PaydayClientOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+export interface PaydayPayerClientOptions {
+  baseUrl?: string;
+  fetch?: typeof globalThis.fetch;
+}
+
 export class PaydayError extends Error {
   readonly code: string;
   readonly requestId: string | undefined;
@@ -101,6 +141,53 @@ export class PaydayError extends Error {
   }
 }
 
+const DEFAULT_BASE_URL = "https://api.payday.sh";
+
+interface RequestOptions {
+  method?: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
+/**
+ * Every Payday response is `Cache-Control: no-store`, so requests opt out of
+ * caching explicitly. This also stops frameworks that patch `fetch` with a
+ * caching default (Next.js) from serving a stale payment.
+ */
+async function request<T>(
+  fetcher: typeof globalThis.fetch,
+  baseUrl: string,
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json", ...options.headers };
+  if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetcher(`${baseUrl}${path}`, {
+    method: options.method ?? "GET",
+    headers,
+    cache: "no-store",
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
+  const text = await response.text();
+  let data: unknown;
+  try { data = text ? JSON.parse(text) : undefined; } catch { data = undefined; }
+  if (!response.ok) {
+    const wire = data as { error?: { code?: string; message?: string }; request_id?: string } | undefined;
+    throw new PaydayError(
+      wire?.error?.message ?? response.statusText ?? "Payday API request failed",
+      wire?.error?.code ?? "http_error", response.status,
+      wire?.request_id ?? response.headers.get("x-request-id") ?? undefined,
+    );
+  }
+  return data as T;
+}
+
+function normalizeBaseUrl(baseUrl: string | undefined): string {
+  return (baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+}
+
 export class PaydayClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -109,7 +196,7 @@ export class PaydayClient {
   constructor(options: PaydayClientOptions) {
     if (!options.apiKey) throw new TypeError("apiKey is required");
     this.apiKey = options.apiKey;
-    this.baseUrl = (options.baseUrl ?? "https://api.payday.sh").replace(/\/+$/, "");
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.fetcher = options.fetch ?? globalThis.fetch;
     if (!this.fetcher) throw new TypeError("fetch is required");
   }
@@ -143,27 +230,45 @@ export class PaydayClient {
 
   status(): Promise<ServiceStatus> { return this.request("/v1/status"); }
 
-  private async request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string } = {}): Promise<T> {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json" };
-    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  private request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string } = {}): Promise<T> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}` };
     if (options.idempotencyKey !== undefined) headers["Idempotency-Key"] = options.idempotencyKey;
-    const response = await this.fetcher(`${this.baseUrl}${path}`, {
-      method: options.method ?? "GET", headers,
-      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    return request<T>(this.fetcher, this.baseUrl, path, {
+      headers,
+      ...(options.method === undefined ? {} : { method: options.method }),
+      ...(options.body === undefined ? {} : { body: options.body }),
     });
-    const text = await response.text();
-    let data: unknown;
-    try { data = text ? JSON.parse(text) : undefined; } catch { data = undefined; }
-    if (!response.ok) {
-      const wire = data as { error?: { code?: string; message?: string }; request_id?: string } | undefined;
-      throw new PaydayError(
-        wire?.error?.message ?? response.statusText ?? "Payday API request failed",
-        wire?.error?.code ?? "http_error", response.status,
-        wire?.request_id ?? response.headers.get("x-request-id") ?? undefined,
-      );
-    }
-    return data as T;
   }
+}
+
+/**
+ * Keyless client for the public payer routes behind a `payment_url`.
+ *
+ * A payment link is intentionally open: anyone holding it may view the payment
+ * and fulfil it. These routes accept no API key, so never pass a secret here.
+ */
+export class PaydayPayerClient {
+  private readonly baseUrl: string;
+  private readonly fetcher: typeof globalThis.fetch;
+
+  constructor(options: PaydayPayerClientOptions = {}) {
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
+    this.fetcher = options.fetch ?? globalThis.fetch;
+    if (!this.fetcher) throw new TypeError("fetch is required");
+  }
+
+  readonly payments = {
+    get: (id: string, options: { signal?: AbortSignal } = {}): Promise<PayerPayment> =>
+      request<PayerPayment>(this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}`, options),
+
+    /**
+     * Absolute URL of the payment's QR, an SVG of the same EIP-681 request the
+     * page shows. Serve it through an `<img>`: it needs no CORS, and it answers
+     * `410 payment_not_payable` the moment the address must stop being shown.
+     */
+    qrUrl: (id: string): string =>
+      `${this.baseUrl}/v1/payer/payments/${encodeURIComponent(id)}/qr`,
+  };
 }
 
 function query(params: object): string {

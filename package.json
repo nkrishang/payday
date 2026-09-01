@@ -1,0 +1,20 @@
+{
+  "name": "payday-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "sdk/typescript",
+    "web"
+  ],
+  "scripts": {
+    "build:sdk": "npm run build --workspace @payday/sdk",
+    "test:sdk": "npm test --workspace @payday/sdk",
+    "dev": "npm run dev --workspace @payday/web",
+    "build": "npm run build --workspace @payday/web",
+    "lint": "npm run lint --workspace @payday/web",
+    "test": "npm test --workspace @payday/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

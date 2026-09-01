@@ -2,6 +2,8 @@ aws_region       = "us-east-1"
 api_key_prefix   = "payday_live_"
 domain_name      = "api.payday.sh"
 payment_domain_name = "pay.payday.sh"
+# Origin serving /pay/{id}. Links on payment_domain_name 301 here.
+checkout_base_url   = "https://payday.sh"
 payment_route53_zone_id = "Z0987654321EXAMPLE"
 auth0_issuer     = "https://your-tenant.us.auth0.com/"
 auth0_audience   = "https://api.payday.sh"
