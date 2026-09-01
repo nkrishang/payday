@@ -173,11 +173,7 @@ fn webhook_line(value: &serde_json::Value) -> String {
         value.get("url").and_then(|v| v.as_str()),
         value.get("state").and_then(|v| v.as_str()),
     ) {
-        (Some(url), _) => format!(
-            "  {:<38}  {}",
-            value["id"].as_str().unwrap_or("—"),
-            url,
-        ),
+        (Some(url), _) => format!("  {:<38}  {}", value["id"].as_str().unwrap_or("—"), url),
         (_, Some(state)) => format!(
             "  {:<38}  {:<12}  {} attempts",
             value["id"].as_str().unwrap_or("—"),
@@ -194,8 +190,9 @@ fn print_output(output: Output, json: bool, interactive: bool) {
             let cyan = anstyle::Style::new()
                 .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
                 .bold();
-            let dim = anstyle::Style::new()
-                .fg_color(Some(anstyle::Color::Rgb(anstyle::RgbColor(0x44, 0x44, 0x44))));
+            let dim = anstyle::Style::new().fg_color(Some(anstyle::Color::Rgb(anstyle::RgbColor(
+                0x44, 0x44, 0x44,
+            ))));
             format!(
                 "{}payday{}{} · stablecoin payments{}",
                 cyan.render(),

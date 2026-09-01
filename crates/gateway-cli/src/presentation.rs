@@ -62,7 +62,10 @@ impl Presentation {
             out.push(String::new());
 
             // Share link callout
-            out.push(self.kv("Share", &self.cyan(&hyperlink(&payment.payment_url, &payment.payment_url))));
+            out.push(self.kv(
+                "Share",
+                &self.cyan(&hyperlink(&payment.payment_url, &payment.payment_url)),
+            ));
             out.push(String::new());
         }
 
@@ -74,7 +77,10 @@ impl Presentation {
         let s = status_color(payment.status);
 
         if created {
-            out.push(format!("  {icon_str}  {status_str}  {}", self.dim(sentence)));
+            out.push(format!(
+                "  {icon_str}  {status_str}  {}",
+                self.dim(sentence)
+            ));
         } else {
             out.push(format!(
                 "  {icon_str}  {status_str}  {}  {}",
@@ -86,11 +92,9 @@ impl Presentation {
 
         // ── Amount progress ──────────────────────────────────
         let progress = match payment.status {
-            PaymentStatus::AwaitingPayment => format!(
-                "Awaiting {} {}",
-                amount(&payment.amount),
-                payment.currency
-            ),
+            PaymentStatus::AwaitingPayment => {
+                format!("Awaiting {} {}", amount(&payment.amount), payment.currency)
+            }
             PaymentStatus::PartiallyPaid => format!(
                 "{} of {} {} received · {} {} remaining",
                 amount(&payment.received),
@@ -112,13 +116,16 @@ impl Presentation {
         // ── Details section ──────────────────────────────────
         if created {
             out.push(self.section("Payment details"));
-            out.push(self.kv("Pay to", &format!(
-                "{}  {} · native {}{}",
-                self.cyan(&payment.address),
-                self.dim(&payment.chain.name),
-                self.dim(&payment.currency),
-                explorer_suffix(payment.address_explorer_url.as_deref(), self.color),
-            )));
+            out.push(self.kv(
+                "Pay to",
+                &format!(
+                    "{}  {} · native {}{}",
+                    self.cyan(&payment.address),
+                    self.dim(&payment.chain.name),
+                    self.dim(&payment.currency),
+                    explorer_suffix(payment.address_explorer_url.as_deref(), self.color),
+                ),
+            ));
             out.push(self.kv("Expires", &expiry_colored(&payment.expires_at, self.color)));
             out.push(self.kv("Payout", &self.cyan(&payment.payout_address)));
             out.push(self.kv("Refund", &self.cyan(&payment.refund_address)));
@@ -133,21 +140,30 @@ impl Presentation {
             out.push(self.hint(&format!("Follow it:  payday get {} --watch", payment.id)));
         } else {
             out.push(self.section("Payment details"));
-            out.push(self.kv("Pay to", &format!(
-                "{}  {} · native {}{}",
-                self.cyan(&payment.address),
-                self.dim(&payment.chain.name),
-                self.dim(&payment.currency),
-                explorer_suffix(payment.address_explorer_url.as_deref(), self.color),
-            )));
-            out.push(self.kv("Link", &self.cyan(&hyperlink(&payment.payment_url, &payment.payment_url))));
+            out.push(self.kv(
+                "Pay to",
+                &format!(
+                    "{}  {} · native {}{}",
+                    self.cyan(&payment.address),
+                    self.dim(&payment.chain.name),
+                    self.dim(&payment.currency),
+                    explorer_suffix(payment.address_explorer_url.as_deref(), self.color),
+                ),
+            ));
+            out.push(self.kv(
+                "Link",
+                &self.cyan(&hyperlink(&payment.payment_url, &payment.payment_url)),
+            ));
             out.push(self.kv("Expires", &expiry_colored(&payment.expires_at, self.color)));
-            out.push(self.kv("Payout", &format!(
-                "{}  {} → {}",
-                self.cyan(&payment.payout_address),
-                self.dim("late or leftover funds"),
-                self.cyan(&payment.refund_address),
-            )));
+            out.push(self.kv(
+                "Payout",
+                &format!(
+                    "{}  {} → {}",
+                    self.cyan(&payment.payout_address),
+                    self.dim("late or leftover funds"),
+                    self.cyan(&payment.refund_address),
+                ),
+            ));
 
             if let Some(reference) = payment.reference.as_ref().or(payment.memo.as_ref()) {
                 out.push(self.kv("Reference", reference));
@@ -159,7 +175,10 @@ impl Presentation {
                 ));
             }
             if let Some(attention) = &payment.attention {
-                out.push(self.kv_alert("Action", &format!("{} {}", attention.message, attention.action)));
+                out.push(self.kv_alert(
+                    "Action",
+                    &format!("{} {}", attention.message, attention.action),
+                ));
             }
             if let Some(hash) = &payment.settlement_tx_hash {
                 out.push(self.kv(
@@ -182,7 +201,10 @@ impl Presentation {
                             self.green("↑"),
                         ),
                         "late" => (
-                            self.yellow(&format!("{} USDC late → refund wallet", amount(&transfer.amount))),
+                            self.yellow(&format!(
+                                "{} USDC late → refund wallet",
+                                amount(&transfer.amount)
+                            )),
                             self.yellow("↗"),
                         ),
                         "zero" => (
@@ -267,10 +289,7 @@ impl Presentation {
         ));
         // Separator matches the visual width of the columns above
         let sep_width = id_w + 2 + status_w + 2 + amount_w + 2 + 9; // "REFERENCE" = 9
-        out.push(format!(
-            "  {}",
-            self.dim(&DIVIDER.repeat(sep_width))
-        ));
+        out.push(format!("  {}", self.dim(&DIVIDER.repeat(sep_width))));
 
         for payment in payments {
             let status = if payment.cancellation_requested_at.is_some()
@@ -312,7 +331,9 @@ impl Presentation {
 
     fn heading(&self, text: &str) -> String {
         if self.color {
-            let style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan))).bold();
+            let style = Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Cyan)))
+                .bold();
             format!("{}{text}{}", style.render(), style.render_reset())
         } else {
             text.to_string()
@@ -349,7 +370,11 @@ impl Presentation {
         let base = self.kv(key, "");
         if self.color {
             let val_style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
-            format!("{base}{}{value}{}", val_style.render(), val_style.render_reset())
+            format!(
+                "{base}{}{value}{}",
+                val_style.render(),
+                val_style.render_reset()
+            )
         } else {
             format!("{base}{value}")
         }
@@ -358,8 +383,14 @@ impl Presentation {
     fn kv_alert(&self, key: &str, value: &str) -> String {
         let base = self.kv(key, "");
         if self.color {
-            let val_style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red))).bold();
-            format!("{base}{}{value}{}", val_style.render(), val_style.render_reset())
+            let val_style = Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Red)))
+                .bold();
+            format!(
+                "{base}{}{value}{}",
+                val_style.render(),
+                val_style.render_reset()
+            )
         } else {
             format!("{base}{value}")
         }
@@ -593,7 +624,12 @@ fn explorer_link(value: &str, url: Option<&str>, color: bool) -> String {
     if let Some(url) = url {
         if color {
             let style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan)));
-            format!("{}{}{}", style.render(), hyperlink(url, value), style.render_reset())
+            format!(
+                "{}{}{}",
+                style.render(),
+                hyperlink(url, value),
+                style.render_reset()
+            )
         } else {
             hyperlink(url, value)
         }
@@ -632,9 +668,7 @@ pub fn terminal(status: PaymentStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gateway_core::{
-        ChainDto, IndexerFreshnessDto, SelfSettlementDto, TokenDto, TransferDto,
-    };
+    use gateway_core::{ChainDto, IndexerFreshnessDto, SelfSettlementDto, TokenDto, TransferDto};
 
     #[test]
     fn errors_lead_with_the_summary_and_indent_their_hints() {

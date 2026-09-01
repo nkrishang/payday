@@ -103,6 +103,11 @@ with a custom email-provider Action.
 
 ## Verification
 
+Auth0 pastes the Action source into a CommonJS runtime, so `payday-email-otp.js`
+uses `require` and `exports`. The repository root is an ES module workspace, so
+`auth0/package.json` pins this directory back to CommonJS; without it Node reads
+these files as ES modules and the tests fail to load.
+
 ```bash
 node --test auth0/actions/*.test.js auth0/email/*.test.js
 terraform -chdir=auth0 init -backend=false
