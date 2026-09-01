@@ -11,8 +11,8 @@ chain's gas currency do not count and may be unrecoverable.
 
 It is a unique counterfactual smart-contract address for one payment. USDC can
 arrive before the contract exists; deployment later routes its balance under
-the amount, payout, expiry, and refund terms committed into that address.
-Never reuse it for another order.
+the amount, payout, expiry, and Payday recovery terms committed into that
+address. Never reuse it for another order.
 
 ## What should I give the payer?
 
@@ -34,26 +34,32 @@ payment.
 - Exact and cumulative partial transfers become `paid` once finalized credits
   reach the requested amount.
 - `partially_paid` remains open while the finalized total is short.
-- On-time execution sends the complete balance to payout, including any excess.
-  Payday does not automatically refund overpayment.
-- If execution happens after expiry, the complete balance goes to the
-  merchant-controlled refund address—even if enough USDC arrived earlier.
+- On-time execution sends exactly the invoice amount to payout. Any excess goes
+  to the Payday recovery wallet and is returned after manual review; it is
+  never forwarded to the merchant.
+- If execution happens after expiry, the complete balance goes to the Payday
+  recovery wallet—even if enough USDC arrived earlier.
 
 Leave time for inclusion, finality, and settlement before the deadline.
 
 ## Where do expired or late funds go?
 
 An underpaid address is recovered after expiry. Native USDC sent after expiry
-or after the payment contract executes is routed to `refund_address`. That
-address is chosen by the merchant and is not automatically the payer. Merchants
-must reconcile it and decide whether/how to refund the payer.
+or after the payment contract executes is routed to the Payday recovery wallet
+(`recovery_address` on the payment). Payday holds those funds, records each
+amount against the payment, reviews it manually, and returns it; the wallet is
+not the payer's and not the merchant's. Payers should contact the merchant and
+Payday support for return handling.
 
 ## Can I cancel or refund through Payday?
 
 `payday cancel` and `POST /v1/payments/{id}/cancel` are advisory: they stop
 Payday clients from presenting the payment but cannot disable an EVM address or
-alter its contract. Payday has no payer-refund endpoint. Issue refunds through
-your own wallet/process after confirming where the funds settled.
+alter its contract. There is no refund endpoint. Funds that settled to your
+payout address are yours to refund through your own wallet/process; recovered
+funds (overpayments, late or expired transfers) are returned by Payday after
+manual review, and `payment.recovered_funds` webhooks tell you when Payday
+holds something for one of your payments.
 
 ## How do I find and reconcile payments?
 
@@ -66,9 +72,9 @@ finalized sender, transaction, amount, block, disposition, and collection state.
 
 Use signed webhooks for lifecycle automation and API long polling
 (`wait_for=change`) for an active screen. Webhooks report paid, settled,
-expired, refunded, and attention transitions. Verify the HMAC over the exact raw
-body, reject stale timestamps, and deduplicate by event ID. See
-[Webhooks](webhooks.md).
+expired, refunded, and attention transitions, plus every amount recovered by
+Payday. Verify the HMAC over the exact raw body, reject stale timestamps, and
+deduplicate by event ID. See [Webhooks](webhooks.md).
 
 ## What does `needs_attention` mean?
 

@@ -128,7 +128,14 @@ impl Presentation {
             ));
             out.push(self.kv("Expires", &expiry_colored(&payment.expires_at, self.color)));
             out.push(self.kv("Payout", &self.cyan(&payment.payout_address)));
-            out.push(self.kv("Refund", &self.cyan(&payment.refund_address)));
+            out.push(self.kv(
+                "Recovery",
+                &format!(
+                    "{}  {}",
+                    self.cyan(&payment.recovery_address),
+                    self.dim("Payday recovery wallet for late or leftover funds"),
+                ),
+            ));
             out.push(String::new());
 
             out.push(self.wrap_dim(&format!(
@@ -158,10 +165,10 @@ impl Presentation {
             out.push(self.kv(
                 "Payout",
                 &format!(
-                    "{}  {} → {}",
+                    "{}  {} {}",
                     self.cyan(&payment.payout_address),
-                    self.dim("late or leftover funds"),
-                    self.cyan(&payment.refund_address),
+                    self.dim("late or leftover funds → Payday recovery"),
+                    self.cyan(&payment.recovery_address),
                 ),
             ));
 
@@ -202,7 +209,7 @@ impl Presentation {
                         ),
                         "late" => (
                             self.yellow(&format!(
-                                "{} USDC late → refund wallet",
+                                "{} USDC late → Payday recovery",
                                 amount(&transfer.amount)
                             )),
                             self.yellow("↗"),
@@ -488,7 +495,7 @@ fn status_text(payment: &PaymentResponse) -> (&'static str, &'static str) {
         PaymentStatus::Paid => "payment confirmed; settlement queued",
         PaymentStatus::Settled => "paid to payout wallet",
         PaymentStatus::Expired => "expired; recovery pending",
-        PaymentStatus::Returned => "funds sent to refund wallet",
+        PaymentStatus::Returned => "funds sent to Payday recovery",
         PaymentStatus::NeedsAttention => "automatic settlement needs attention",
     };
     (label, sentence)
@@ -691,7 +698,7 @@ mod tests {
             address: "0x8F2aB1c4D5e6F7a8B9c0D1e2F3a4B5c6D7e8F9A0".into(),
             address_explorer_url: Some("https://monadvision.com/address/0x8F2a".into()),
             payout_address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into(),
-            refund_address: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC".into(),
+            recovery_address: "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc".into(),
             expires_at: "2030-03-17T17:46:40Z".into(),
             expires_in: Some(86_400),
             amount: "1.000000".into(),
@@ -779,8 +786,9 @@ mod tests {
         }
         .payment(&payment, false);
         assert!(output.contains("+0.4 USDC received"));
-        assert!(output.contains("0.4 USDC late → refund wallet"));
+        assert!(output.contains("0.4 USDC late → Payday recovery"));
         assert!(output.contains("0.4 USDC ignored"));
+        assert!(!output.contains("refund"));
     }
 
     #[test]
@@ -830,5 +838,9 @@ mod tests {
         assert!(output.contains("Share"));
         assert!(output.contains("Pay to"));
         assert!(output.contains("0x8F2aB1c4D5e6F7a8B9c0D1e2F3a4B5c6D7e8F9A0"));
+        assert!(output.contains("Recovery"));
+        assert!(output.contains("Payday recovery wallet"));
+        assert!(output.contains("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
+        assert!(!output.contains("Refund"));
     }
 }

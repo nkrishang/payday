@@ -21,8 +21,6 @@ pub struct CreatePaymentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refund_address: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
@@ -68,7 +66,10 @@ pub struct PaymentResponse {
     pub address: String,
     pub address_explorer_url: Option<String>,
     pub payout_address: String,
-    pub refund_address: String,
+    /// Payday's custodial recovery wallet, committed into the payment address.
+    /// Overpayments, expired balances, and late transfers land here and are
+    /// returned by the operator. Merchant-visible; never in the payer response.
+    pub recovery_address: String,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
@@ -239,7 +240,7 @@ impl PaymentResponse {
             address: inv.payment_address.0.to_checksum(None),
             address_explorer_url: None,
             payout_address: inv.beneficiary.0.to_checksum(None),
-            refund_address: inv.recovery.0.to_checksum(None),
+            recovery_address: inv.recovery.0.to_checksum(None),
             expires_at: DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
                 .expect("validated timestamp")
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -327,8 +328,8 @@ fn attention(code: &str) -> AttentionDto {
             "Contact support to provide a compliant payout address.",
         ),
         "recovery_blacklisted" => (
-            "Circle has blacklisted the refund address.",
-            "Resolve the blacklist with Circle, then contact support to retry.",
+            "The Payday recovery wallet is restricted by the USDC issuer.",
+            "Payday is resolving it; no merchant action is needed. Contact Payday support only if the payment stays paused.",
         ),
         "payment_address_blacklisted" => (
             "Circle has blacklisted the payment address.",
@@ -411,6 +412,11 @@ mod tests {
         assert_eq!(json["status"], "awaiting_payment");
         assert_eq!(json["currency"], "USDC");
         assert!(json.get("beneficiary_address").is_none());
+        assert_eq!(
+            json["recovery_address"],
+            "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+        );
+        assert!(json.get("refund_address").is_none());
 
         let summary = PaymentSummaryResponse {
             id: payment.id,
@@ -426,5 +432,22 @@ mod tests {
         let summary = serde_json::to_value(summary).unwrap();
         assert!(summary.get("transfers").is_none());
         assert!(summary.get("self_settlement").is_none());
+    }
+
+    #[test]
+    fn create_request_no_longer_accepts_a_merchant_refund_address() {
+        let accepted = serde_json::json!({
+            "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "amount": "1"
+        });
+        assert!(serde_json::from_value::<CreatePaymentRequest>(accepted).is_ok());
+
+        let rejected = serde_json::json!({
+            "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "amount": "1",
+            "refund_address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+        });
+        let error = serde_json::from_value::<CreatePaymentRequest>(rejected).unwrap_err();
+        assert!(error.to_string().contains("refund_address"));
     }
 }

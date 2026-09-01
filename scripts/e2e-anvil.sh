@@ -37,6 +37,8 @@ export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
 export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
 export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
 export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
+# Recovery is platform-controlled: gatewayd stamps this wallet on every invoice.
+export PAYDAY_RECOVERY_ADDRESS="$RECOVERY"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
 export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
@@ -107,6 +109,26 @@ wait_for_api() {
   return 1
 }
 
+# gatewayd and the indexer refuse to start unless the deployed runtime bytecode
+# hashes to these values, so they are computed from the freshly bootstrapped
+# chain rather than trusted from the environment.
+pin_deployment_code_hashes() {
+  local factory_code sweeper_code
+  factory_code="$(cast code "$FACTORY" --rpc-url "$RPC_URL")"
+  sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$RPC_URL")"
+  [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
+    echo "no code at PaymentFactory $FACTORY after the bootstrap" >&2
+    return 1
+  }
+  [[ -n "$sweeper_code" && "$sweeper_code" != 0x ]] || {
+    echo "no code at BatchSweeper $BATCH_SWEEPER after the bootstrap" >&2
+    return 1
+  }
+  PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$factory_code")"
+  PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$sweeper_code")"
+  export PAYDAY_FACTORY_CODE_HASH PAYDAY_BATCH_SWEEPER_CODE_HASH
+}
+
 create_invoice() {
   local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4
   curl --fail --silent \
@@ -173,13 +195,25 @@ set_blacklisted() {
 }
 
 # Raw request body for POST /v1/payments; built with jq so no shell quoting
-# is involved (bash 3.2 brace-expands nested quotes inside "$(...)").
+# is involved (bash 3.2 brace-expands nested quotes inside "$(...)"). Recovery
+# is not a request field: the platform stamps its own wallet on every invoice.
 invoice_body() {
   local amount=$1 beneficiary=$2 expires_in=$3
   jq -cn --arg chain "$PAYDAY_CHAIN_ID" --arg token "$USDC" --arg beneficiary "$beneficiary" \
-    --arg amount "$amount" --argjson expires_in "$expires_in" --arg recovery "$RECOVERY" \
+    --arg amount "$amount" --argjson expires_in "$expires_in" \
     '{chain_id: $chain, token_address: $token, payout_address: $beneficiary,
-      amount: $amount, expires_in: $expires_in, refund_address: $recovery}'
+      amount: $amount, expires_in: $expires_in}'
+}
+
+lowercase() {
+  tr '[:upper:]' '[:lower:]' <<<"$1"
+}
+
+# Query text for wait_for_sql: the recovery ledger rows an invoice should carry.
+recovery_ledger_query() {
+  local invoice_id=$1 reason=$2 amount=$3
+  echo "SELECT count(*) FROM recovered_funds
+    WHERE invoice_id = '${invoice_id#pay_}'::uuid AND reason = '$reason' AND amount = '$amount'"
 }
 
 api_status_code() {
@@ -224,6 +258,7 @@ pids+=("$anvil_pid")
 wait_for_rpc
 forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
   --rpc-url "$RPC_URL" --private-key "$SIGNER_KEY" --broadcast >/dev/null
+pin_deployment_code_hashes
 
 echo "Starting gateway services"
 ./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
@@ -263,12 +298,27 @@ zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 36
 assert_eq 400 "$(api_status_code "$zero_beneficiary")" "a zero beneficiary was accepted"
 valid="$(invoice_body 1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 201 "$(api_status_code "$valid")" "a valid request was rejected"
+# Merchants no longer choose where recovered funds go; the field is unknown to
+# the API and must fail like any other unknown field. The exact code is the
+# API's decision, so only the class is asserted.
+with_refund_address="$(jq -c --arg recovery "$RECOVERY" '. + {refund_address: $recovery}' <<<"$valid")"
+refund_status="$(api_status_code "$with_refund_address")"
+[[ "$refund_status" != 201 && "$refund_status" -ge 400 && "$refund_status" -le 499 ]] || {
+  echo "a request carrying refund_address was not rejected: status $refund_status" >&2
+  exit 1
+}
 
 echo "Testing exact payment and API idempotency"
 exact="$(create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 exact_replay="$(create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 exact_id="$(jq -r .id <<<"$exact")"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
+assert_eq "$(lowercase "$RECOVERY")" "$(jq -r '.recovery_address | ascii_downcase' <<<"$exact")" \
+  "invoice does not carry the platform recovery wallet"
+[[ "$(jq -c 'has("refund_address")' <<<"$exact")" == false ]] || {
+  echo "the merchant response still exposes refund_address" >&2
+  exit 1
+}
 second_account_invoice="$(PAYDAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 [[ "$(jq -r .id <<<"$second_account_invoice")" != "$exact_id" ]] || {
   echo "account-scoped idempotency returned another account's invoice" >&2
@@ -311,16 +361,21 @@ assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL
   "partial payment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$partial_address"
 
-echo "Testing overpayment full-balance sweep"
+echo "Testing exact settlement with recovery of the remainder"
 overpayment="$(create_invoice 1 "$BENEFICIARY_OVERPAYMENT" 3600 "overpayment-$run_id")"
 overpayment_id="$(jq -r .id <<<"$overpayment")"
 overpayment_address="$(jq -r .address <<<"$overpayment")"
 overpayment_before="$(token_balance "$BENEFICIARY_OVERPAYMENT")"
+recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$overpayment_address" 1250000
 wait_for_status "$overpayment_id" settled
-assert_eq "$((overpayment_before + 1250000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
-  "overpayment beneficiary balance mismatch"
+assert_eq "$((overpayment_before + 1000000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
+  "beneficiary must receive exactly the invoice amount"
+assert_eq "$((recovery_before + 250000))" "$(token_balance "$RECOVERY")" \
+  "overpayment remainder did not reach the Payday recovery wallet"
 assert_payment_deployed_and_empty "$overpayment_address"
+wait_for_sql 1 "$(recovery_ledger_query "$overpayment_id" overpayment 250000)" \
+  "overpayment remainder was not recorded in the recovery ledger"
 
 echo "Testing one-transaction batch sweeping"
 batch_one="$(create_invoice 0.1 "$BENEFICIARY_EXACT" 3600 "batch-one-$run_id")"
@@ -362,14 +417,16 @@ assert_payment_deployed_and_empty "$batch_one_address"
 assert_payment_deployed_and_empty "$batch_two_address"
 assert_payment_deployed_and_empty "$batch_three_address"
 
-echo "Testing that a transfer after settlement is forwarded to the recovery address"
+echo "Testing that a transfer after settlement is forwarded to the Payday recovery wallet"
 recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$batch_one_address" 7
 send_usdc "$batch_one_address" 0
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late transfer was not collected"
-assert_eq "$((recovery_before + 7))" "$(token_balance "$RECOVERY")" "late transfer did not reach the recovery address"
+assert_eq "$((recovery_before + 7))" "$(token_balance "$RECOVERY")" "late transfer did not reach the Payday recovery wallet"
+wait_for_sql 1 "$(recovery_ledger_query "$batch_one_id" late_transfer 7)" \
+  "late transfer was not recorded in the recovery ledger"
 assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'error' AND disposition_reason = 'zero_amount'
@@ -434,18 +491,22 @@ wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == 
 cast rpc --rpc-url "$RPC_URL" evm_increaseTime 700 >/dev/null
 wait_for_status "$expired_id" returned
 assert_eq "$((recovery_before + 400000))" "$(token_balance "$RECOVERY")" \
-  "expired partial payment was not sent to recovery"
+  "expired partial payment was not sent to the Payday recovery wallet"
 assert_payment_deployed_and_empty "$expired_address"
 assert_eq false "$(cast call "$expired_address" 'settled()(bool)' --rpc-url "$RPC_URL")" \
   "deployed Payment must record recovery"
+wait_for_sql 1 "$(recovery_ledger_query "$expired_id" expired 400000)" \
+  "expired balance was not recorded in the recovery ledger"
 send_usdc "$expired_address" 600000
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${expired_id#pay_}'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late completion was not collected"
 assert_eq "$((recovery_before + 1000000))" "$(token_balance "$RECOVERY")" \
-  "late completion was not forwarded to recovery"
+  "late completion was not forwarded to the Payday recovery wallet"
 assert_eq returned "$(get_invoice "$expired_id" | jq -r .status)" "late completion changed the payment status"
 assert_eq 0 "$(token_balance "$expired_address")" "late completion stranded at the payment address"
+wait_for_sql 1 "$(recovery_ledger_query "$expired_id" late_transfer 600000)" \
+  "late completion was not recorded in the recovery ledger"
 
 echo "Checking that every helper transaction batch resolved"
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
@@ -454,6 +515,18 @@ assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND blocked_reason IS NULL
 ")" "collectable funds remain queued"
+
+echo "Checking that every recovery ledger row raised a payment.recovered_funds event"
+ledger_rows="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM recovered_funds
+")"
+[[ "$ledger_rows" -ge 4 ]] || {
+  echo "expected at least four recovery ledger rows (overpayment, late transfer, expired, late completion), found $ledger_rows" >&2
+  exit 1
+}
+assert_eq "$ledger_rows" "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM webhook_events WHERE event_type = 'payment.recovered_funds'
+")" "recovery ledger rows and payment.recovered_funds events differ"
 
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive gatewayd "$gatewayd_pid"

@@ -61,10 +61,47 @@ describe("checkoutView", () => {
     expect(view.showInstructions).toBe(false);
   });
 
+  it("tells an exactly paid payer only that the invoice amount reached the merchant", () => {
+    const view = checkoutView(
+      payment({
+        status: "settled",
+        payable: false,
+        received: "25.00",
+        received_base_units: "25000000",
+        remaining: "0",
+        remaining_base_units: "0",
+      }),
+      open,
+    );
+    expect(view.phase).toBe("settled");
+    expect(view.detail).toMatch(/Exactly the invoice amount reached the merchant/);
+    expect(view.detail).not.toMatch(/recovery wallet/);
+  });
+
+  it("tells an overpaid payer where the remainder went once settled", () => {
+    const view = checkoutView(
+      payment({
+        status: "settled",
+        payable: false,
+        received: "30.00",
+        received_base_units: "30000000",
+        remaining: "0",
+        remaining_base_units: "0",
+      }),
+      open,
+    );
+    expect(view.phase).toBe("settled");
+    expect(view.detail).toMatch(/Exactly the invoice amount reached the merchant/);
+    expect(view.detail).toMatch(/above the invoice amount went to the Payday recovery wallet/);
+    expect(view.detail).toMatch(/Payday support/);
+    expect(view.detail).not.toMatch(/refund/i);
+  });
+
   it("treats paid as in-progress, because settlement has not happened yet", () => {
     const view = checkoutView(payment({ status: "paid" }), open);
     expect(view.phase).toBe("paid");
     expect(view.isTerminal).toBe(false);
+    expect(view.detail).toMatch(/settling the invoice amount to the merchant/);
   });
 
   it("separates an expired payment that received nothing from one holding funds", () => {
@@ -82,14 +119,26 @@ describe("checkoutView", () => {
       open,
     );
     expect(funded.phase).toBe("expired_funded");
-    expect(funded.detail).toMatch(/refund address/i);
+    expect(funded.detail).toMatch(/Payday recovery wallet/);
     expect(funded.detail).toMatch(/not automatically the payer/i);
+    expect(funded.detail).toMatch(/Payday support/);
   });
 
   it("says plainly where returned funds went", () => {
     const view = checkoutView(payment({ status: "returned", payable: false }), open);
     expect(view.phase).toBe("returned");
-    expect(view.detail).toMatch(/refund address/i);
+    expect(view.detail).toMatch(/Payday recovery wallet/);
+  });
+
+  it("never calls the recovery wallet a refund address", () => {
+    const statuses = ["partially_paid", "expired", "returned"] as const;
+    for (const status of statuses) {
+      const view = checkoutView(
+        payment({ status, payable: status === "partially_paid", received_base_units: "1" }),
+        open,
+      );
+      expect(view.detail, status).not.toMatch(/refund/i);
+    }
   });
 
   it("shows the gateway's own words when settlement needs attention", () => {

@@ -16,7 +16,7 @@ const STEPS = [
   {
     n: "01",
     title: "Create",
-    body: "One authenticated call returns a payment with its own address — computed before any contract exists, and committed to the amount, payout wallet, deadline, and refund wallet. Those terms cannot be changed afterwards, by anyone.",
+    body: "One authenticated call returns a payment with its own address — computed before any contract exists, and committed to the amount, payout wallet, deadline, and Payday's recovery wallet. Those terms cannot be changed afterwards, by anyone.",
   },
   {
     n: "02",
@@ -26,7 +26,7 @@ const STEPS = [
   {
     n: "03",
     title: "Settle",
-    body: "Payday indexes finalized USDC transfers, accumulates partial payments, then sweeps the balance to your payout wallet before the deadline, or to your refund wallet after it.",
+    body: "Payday indexes finalized USDC transfers, accumulates partial payments, then sweeps exactly the invoice amount to your payout wallet before the deadline. Anything else — overpayments, late or expired funds — goes to Payday's recovery wallet and is returned after review.",
   },
 ];
 
@@ -41,11 +41,11 @@ const FEATURES = [
   },
   {
     title: "Partial payments accumulate",
-    body: "Transfers add up across transactions and blocks. Overpayment is forwarded with the rest; nothing is silently dropped.",
+    body: "Transfers add up across transactions and blocks. Any excess over the amount is recovered by Payday and returned after review; nothing is silently dropped.",
   },
   {
     title: "Automatic recovery",
-    body: "Funds that arrive late, fall short, or land after settlement route to your refund wallet instead of getting stuck at an address nobody controls.",
+    body: "Funds that arrive late, fall short, or land after settlement go to Payday's recovery wallet and are returned after review, instead of getting stuck at an address nobody controls.",
   },
   {
     title: "Signed webhooks",
@@ -58,12 +58,12 @@ const FEATURES = [
 ];
 
 const ROUTING = [
-  ["Exact amount, on time", "Full balance to your payout wallet"],
-  ["Several partial transfers reaching the amount", "They fund one payment; full balance to payout"],
-  ["Still short at the deadline", "Full balance to your refund wallet"],
-  ["More than requested, on time", "Payout receives the amount and the excess"],
-  ["Execution after the deadline", "Full balance to your refund wallet"],
-  ["USDC arriving after settlement", "Collected to your refund wallet"],
+  ["Exact amount, on time", "Exactly the invoice amount to your payout wallet"],
+  ["Several partial transfers reaching the amount", "They fund one payment; the amount goes to payout"],
+  ["Still short at the deadline", "Full balance to the Payday recovery wallet"],
+  ["More than requested, on time", "Payout receives the amount; the excess goes to Payday recovery"],
+  ["Execution after the deadline", "Full balance to the Payday recovery wallet"],
+  ["USDC arriving after settlement", "Collected to the Payday recovery wallet"],
 ];
 
 export default function Home() {
@@ -89,8 +89,8 @@ export default function Home() {
             </h1>
             <p className="mt-5 max-w-[52ch] text-[16px] leading-relaxed text-muted">
               Create an invoice and get a unique, shareable payment link. Each payment is routed
-              through a unique, non-custodial, one-time smart-address with a memo, programmed to
-              deliver funds to the destination of your choice.
+              through a unique, one-time smart address, programmed to deliver exactly the
+              invoice amount directly to the wallet of your choice.
             </p>
             <div className="mt-8 max-w-[420px]">
               <InstallLine />
@@ -118,8 +118,9 @@ export default function Home() {
         <Section title="Where the money goes" eyebrow="Routing">
           <p className="mb-6 max-w-[62ch] text-[15px] leading-relaxed text-muted">
             Chain time decides every one of these outcomes — not a payer&rsquo;s device clock, and
-            not the moment a wallet says the transaction was sent. The refund address is
-            merchant-controlled exception handling, not an automatic return to the payer.
+            not the moment a wallet says the transaction was sent. The Payday recovery wallet
+            holds overpayments and late or expired funds; they are reviewed manually and
+            returned by Payday, not sent back to the payer automatically.
           </p>
           <dl className="overflow-hidden rounded-[16px] border border-line">
             {ROUTING.map(([situation, outcome], index) => (

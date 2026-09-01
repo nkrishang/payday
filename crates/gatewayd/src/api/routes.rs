@@ -123,10 +123,10 @@ pub fn status_router(state: AppState) -> Router {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, address};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
-    use gateway_core::ChainId;
+    use gateway_core::{ChainId, Invoice};
     use gateway_db::{AccountRepository, InvoiceRepository};
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
@@ -139,6 +139,8 @@ mod tests {
     use super::*;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
+    /// The platform recovery wallet this test deployment is configured with.
+    const RECOVERY: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
 
     #[derive(Serialize)]
     struct IdentityClaims<'a> {
@@ -160,6 +162,10 @@ mod tests {
     }
 
     async fn app(pool: PgPool) -> Router {
+        app_with_recovery(pool, RECOVERY).await
+    }
+
+    async fn app_with_recovery(pool: PgPool, recovery: Address) -> Router {
         let accounts = AccountRepository::new(pool.clone());
         if accounts
             .find_by_identity("https://test.issuer/", "email|test-user")
@@ -186,6 +192,7 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            recovery,
             payer_access(),
             "payday_live_".into(),
             None,
@@ -212,8 +219,7 @@ mod tests {
             "token_address": "0x0000000000000000000000000000000000000000",
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
-            "expires_in": 3600,
-            "refund_address": "0x0000000000000000000000000000000000000003"
+            "expires_in": 3600
         })
     }
 
@@ -603,6 +609,7 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            RECOVERY,
             payer_access(),
             "payday_live_".into(),
             None,
@@ -659,7 +666,7 @@ mod tests {
         let address = created["address"].as_str().unwrap();
         assert_eq!(created["chain"]["id"], "1");
         assert_eq!(created["token"]["address"], Address::ZERO.to_checksum(None));
-        assert_eq!(created["refund_address"], body["payout_address"]);
+        assert_eq!(created["recovery_address"], RECOVERY.to_checksum(None));
         assert_eq!(created["memo"], "Order 1234");
         assert_eq!(created["expires_in"], 86_400);
 
@@ -790,6 +797,7 @@ mod tests {
         ));
         for private in [
             "payout_address",
+            "recovery_address",
             "refund_address",
             "self_settlement",
             "metadata",
@@ -871,6 +879,88 @@ mod tests {
         assert_eq!(
             json_body(closed_qr).await["error"]["code"],
             "payment_not_payable"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn create_rejects_unknown_refund_address(pool: PgPool) {
+        let app = app(pool).await;
+        let mut body = valid_body();
+        body["refund_address"] = json!("0x0000000000000000000000000000000000000003");
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "refund", &body))
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "invalid_request"
+        );
+
+        let listed = app
+            .oneshot(
+                Request::get("/v1/payments")
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            json_body(listed).await["payments"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "no invoice may be created from a rejected request"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn create_uses_configured_recovery_address(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "platform-recovery", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        assert_eq!(created["recovery_address"], RECOVERY.to_checksum(None));
+        assert!(created.get("refund_address").is_none());
+
+        let id = created["id"].as_str().unwrap();
+        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let row = InvoiceRepository::new(pool.clone())
+            .find_by_id(uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.recovery_address, RECOVERY.to_vec());
+        let invoice = Invoice::try_from(&row).unwrap();
+        assert_eq!(invoice.recovery.0, RECOVERY);
+        assert!(
+            invoice.address_matches_parameters(),
+            "the payment address must commit to the platform recovery wallet"
+        );
+        assert_eq!(
+            created["address"],
+            invoice.payment_address.0.to_checksum(None)
+        );
+
+        // The wallet is committed into the address, so a replay against a
+        // deployment with a different recovery wallet cannot be the same
+        // request.
+        let other = address!("0x000000000000000000000000000000000000dEaD");
+        let replay = app_with_recovery(pool, other)
+            .await
+            .oneshot(create_request(KEY, "platform-recovery", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(replay).await["error"]["code"],
+            "idempotency_conflict"
         );
     }
 
@@ -1024,6 +1114,7 @@ mod tests {
             ChainId(1),
             Address::ZERO,
             Address::ZERO,
+            RECOVERY,
             payer_access(),
             "payday_live_".into(),
             None,

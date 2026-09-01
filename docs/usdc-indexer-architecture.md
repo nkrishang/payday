@@ -288,23 +288,31 @@ payments across transactions or blocks accumulate. Multiple transfers in one
 transaction remain distinct by log index. Fund at the first observation where
 the cumulative amount reaches the requested amount.
 
-Before expiration, all USDC at the payment address when execution occurs belongs
-to the beneficiary. The Payment constructor requires a balance of at least the
-invoice amount and transfers the full balance, so an overpayment present before
-execution is not stranded. After expiration, execution instead transfers the
-complete balance to the invoice's recovery address without requiring the invoice
-amount. Both the expiration timestamp and recovery address are committed into
-the deterministic address.
+Before expiration, the Payment constructor requires a balance of at least the
+invoice amount, transfers exactly that amount to the beneficiary, and sends any
+remainder to the Payday recovery wallet, so an overpayment present before
+execution is neither stranded nor forwarded to the merchant. After expiration,
+execution instead transfers the complete balance to the recovery wallet without
+requiring the invoice amount. Both the expiration timestamp and the recovery
+wallet are committed into the deterministic address; the wallet is platform
+configuration (`PAYDAY_RECOVERY_ADDRESS`), not a merchant choice.
 
 Factory execution is permissionless, so anyone can recover an expired partial
 payment; the indexer also does it automatically once the invoice is `expired`,
 reporting the outcome as `recovered`.
 
 Transfers sent after the Payment contract has executed are forwarded to the
-recovery address by `Payment.recover`, which anyone may call and which the
+recovery wallet by `Payment.recover`, which anyone may call and which the
 sweep worker calls automatically; they are never credited to the invoice. The
 API still describes the address as single-use so merchants do not present it
 after settlement.
+
+Every nonzero amount the recovery wallet receives — an overpayment remainder,
+an expired balance, or a late transfer — is a `recovered_funds` row keyed by
+invoice, transaction, and reason, inserted in the transaction that finalizes
+the batch, so a replayed receipt cannot double-count and the ledger is never
+ahead of or behind the invoice state. A trigger raises one
+`payment.recovered_funds` webhook per row.
 
 ## Sweep architecture under USDC
 
@@ -330,12 +338,15 @@ classification reads. `BatchSweeper` deploys `Payment` through the factory for
 an address without code and calls
 `Payment.recover` for one that already has code; it never attempts the CREATE2
 collision that a second `execute` would hit, which burns every unit of gas
-forwarded to it. Per item the receipt carries exactly one of:
+forwarded to it. Per item the receipt carries one of:
 
 - `Settled` from the payment address: the deployment paid the beneficiary
-  (`fulfilled`);
-- `Recovered` from the payment address: the deployment paid the recovery
-  address after expiry (`recovered`);
+  exactly the invoice amount (`fulfilled`). An overpaid deployment also emits
+  `Recovered` for the remainder in the same receipt; the parser combines the
+  two regardless of event order and rejects a duplicate or conflicting pair as
+  a malformed receipt;
+- `Recovered` alone from the payment address: the deployment paid the whole
+  balance to the recovery wallet after expiry (`recovered`);
 - `SweepRecovered` from the helper: the contract pre-existed and `recover`
   forwarded the reported amount; an open invoice in this position was executed
   by someone else and `Payment.settled()` at the receipt block says how;

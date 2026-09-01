@@ -12,7 +12,7 @@ import { formatDisplayAmount } from "./format";
  *    deadline was reached and waits for the server to confirm, rather than
  *    claiming the payment is over.
  * 2. Payment instructions disappear the moment the payment stops being payable.
- *    Funds sent after the deadline route to the merchant's refund address, not
+ *    Funds sent after the deadline route to the Payday recovery wallet, not
  *    back to the payer, so continuing to show an address would cause real loss.
  */
 export type CheckoutPhase =
@@ -59,8 +59,8 @@ export function isTerminalStatus(status: PaymentStatus): boolean {
   return TERMINAL.has(status);
 }
 
-const REFUND_NOTE =
-  "The full balance goes to the merchant's refund address, which is not automatically the payer. Contact the merchant to arrange a return.";
+const RECOVERY_NOTE =
+  "The full balance goes to the Payday recovery wallet, which is not automatically the payer. Contact the merchant and Payday support for return handling.";
 
 export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
   const received = BigInt(payment.received_base_units);
@@ -80,12 +80,20 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
   }
 
   if (payment.status === "settled") {
+    // Settlement is exact: the merchant receives the invoice amount and any
+    // remainder goes to the recovery wallet, so an overpaid payer is told where
+    // the rest went rather than left to assume the merchant is holding it.
+    const overpaid = received > BigInt(payment.amount_base_units);
     return {
       phase: "settled",
       tone: "success",
       label: "Paid",
       title: "Payment complete",
-      detail: "The full balance reached the merchant. You can close this page.",
+      detail:
+        "Exactly the invoice amount reached the merchant. You can close this page." +
+        (overpaid
+          ? " Anything above the invoice amount went to the Payday recovery wallet; contact the merchant and Payday support for return handling."
+          : ""),
       showInstructions: false,
       isTerminal: true,
     };
@@ -97,7 +105,7 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
       tone: "warning",
       label: "Returned",
       title: "This payment was not completed in time",
-      detail: REFUND_NOTE,
+      detail: RECOVERY_NOTE,
       showInstructions: false,
       isTerminal: true,
     };
@@ -120,7 +128,7 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
           tone: "warning",
           label: "Expired",
           title: "The deadline passed before this payment completed",
-          detail: REFUND_NOTE,
+          detail: RECOVERY_NOTE,
           showInstructions: false,
           isTerminal: true,
         };
@@ -132,7 +140,8 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
       tone: "progress",
       label: "Received",
       title: "Payment received",
-      detail: "Payday is settling the balance to the merchant. Nothing more is needed from you.",
+      detail:
+        "Payday is settling the invoice amount to the merchant. Nothing more is needed from you.",
       showInstructions: false,
       isTerminal: false,
     };
@@ -174,7 +183,7 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
       label: "Partially paid",
       title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${payment.token.symbol}`,
       detail:
-        "Transfers accumulate. If the total is still short at the deadline, the balance goes to the merchant's refund address.",
+        "Transfers accumulate. If the total is still short at the deadline, the balance goes to the Payday recovery wallet.",
       showInstructions: true,
       isTerminal: false,
     };

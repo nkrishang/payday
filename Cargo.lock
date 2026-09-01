@@ -2600,6 +2600,9 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "aws-config",
  "aws-sdk-sesv2",
  "axum",
@@ -2619,6 +2622,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "thiserror",
  "tokio",
  "tower",
  "tower-http",

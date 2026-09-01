@@ -7,7 +7,6 @@ export interface AsOf { block: string; at: string }
 export interface CreatePayment {
   amount: string;
   payout_address: string;
-  refund_address?: string;
   chain_id?: string;
   token_address?: string;
   expires_in?: number;
@@ -26,7 +25,13 @@ export interface Payment {
   address: string;
   address_explorer_url: string | null;
   payout_address: string;
-  refund_address: string;
+  /**
+   * Payday's custodial recovery wallet, committed into the payment address.
+   * Overpayment remainders, expired balances, and late transfers land there
+   * and are returned by the operator after manual review; merchants cannot
+   * choose it.
+   */
+  recovery_address: string;
   amount: string;
   amount_base_units: string;
   received: string;
@@ -62,7 +67,7 @@ export interface Payment {
 /**
  * The narrowed projection served to anyone holding a payment link.
  *
- * Deliberately carries no merchant data: no payout or refund address, no memo,
+ * Deliberately carries no merchant data: no payout or recovery address, no memo,
  * reference, or metadata. The payment page is world-readable, so this is the
  * only payment shape safe to render on it.
  */

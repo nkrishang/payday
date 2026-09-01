@@ -70,8 +70,9 @@ would improve a case that is already handled. See `lib/poll.ts`.
 device clock never decides that a payment expired — chain time does, so a
 countdown reaching zero moves the page to "the deadline has been reached" and
 waits for the server. And payment instructions disappear the moment the payment
-stops being payable, because funds sent afterwards route to the merchant's
-refund address rather than back to the payer.
+stops being payable, because funds sent afterwards route to the Payday recovery
+wallet rather than back to the payer; the page tells payers to contact the
+merchant and Payday support for return handling.
 
 **Amounts are never floats.** The API sends every amount twice, as a display
 string and as integer `_base_units`. Arithmetic uses base units as `BigInt`;

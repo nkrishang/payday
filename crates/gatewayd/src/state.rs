@@ -18,6 +18,9 @@ pub struct AppState {
     pub chain_id: ChainId,
     pub factory_address: Address,
     pub usdc_address: Address,
+    /// Payday's custodial recovery wallet, stamped on every new invoice.
+    /// Merchants cannot choose it.
+    pub recovery_address: Address,
     pub payer: PayerAccess,
     pub webhooks: WebhookRepository,
     /// 256-bit AEAD key. Webhook APIs remain unavailable when not configured.
@@ -36,6 +39,7 @@ impl AppState {
         chain_id: ChainId,
         factory_address: Address,
         usdc_address: Address,
+        recovery_address: Address,
         payer: PayerAccess,
         api_key_prefix: String,
         webhook_encryption_key: Option<[u8; 32]>,
@@ -49,6 +53,7 @@ impl AppState {
             chain_id,
             factory_address,
             usdc_address,
+            recovery_address,
             payer,
             webhooks,
             webhook_encryption_key,

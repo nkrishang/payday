@@ -7,8 +7,9 @@ Payday calculates it before deploying the payment contract, so a payer can send
 USDC to it immediately.
 
 The address commits to the configured token, amount, payout address, deadline,
-refund address, and a unique salt. Deployment cannot change those terms.
-Anyone may execute the contract, but the caller cannot redirect its funds.
+Payday's recovery wallet, and a unique salt. Deployment cannot change those
+terms. Anyone may execute the contract, but the caller cannot redirect its
+funds.
 
 Treat the address as single-use. Share the `payment_url` or all returned
 payment instructions, and stop presenting the address after it is no longer
@@ -21,9 +22,9 @@ payable. Never recycle it for another order.
 | `awaiting_payment` | No finalized, on-time USDC has been credited. |
 | `partially_paid` | Some finalized USDC is credited, but less than the requested amount. |
 | `paid` | Finalized credits reached the amount; settlement is queued or pending finality. |
-| `settled` | The complete balance present at on-time execution reached the payout address. |
+| `settled` | Exactly the invoice amount reached the payout address at on-time execution; any remainder went to the Payday recovery wallet. |
 | `expired` | The deadline passed before successful settlement; recovery is pending. |
-| `returned` | The complete balance at post-expiry execution reached the refund address. |
+| `returned` | The complete balance at post-expiry execution reached the Payday recovery wallet. |
 | `needs_attention` | Automatic movement stopped; follow `attention.action` or contact support. |
 
 `paid` is not yet payout finality. Fulfil an order according to your own risk
@@ -61,20 +62,24 @@ whether a transfer and eventual execution are on time.
 
 | Situation | Routing |
 |---|---|
-| Exact amount reaches the address and execution occurs by the deadline | The complete balance goes to the payout address. |
-| Several partial transfers cumulatively reach the amount | They fund one payment; the complete balance goes to payout if execution remains on time. |
-| Partial total remains short at expiry | The complete balance goes to the refund address after expiry. |
-| More than requested is present at on-time execution | Payout receives the requested amount and all excess; Payday does not automatically refund it. |
-| Execution occurs after the deadline | The complete balance goes to the refund address, even if the requested amount arrived earlier. |
-| USDC arrives after execution | It is collected to the refund address and does not repeat the payout. |
+| Exact amount reaches the address and execution occurs by the deadline | Exactly the invoice amount goes to the payout address. |
+| Several partial transfers cumulatively reach the amount | They fund one payment; the invoice amount goes to payout if execution remains on time. |
+| Partial total remains short at expiry | The complete balance goes to the Payday recovery wallet after expiry. |
+| More than requested is present at on-time execution | Payout receives exactly the invoice amount; the remainder goes to the Payday recovery wallet. |
+| Execution occurs after the deadline | The complete balance goes to the Payday recovery wallet, even if the requested amount arrived earlier. |
+| USDC arrives after execution | It is collected to the Payday recovery wallet and does not repeat the payout. |
 
 Execution at the exact expiration timestamp is on time; a later block timestamp
 is expired. Leave room for inclusion, finality, and sweeping rather than paying
 at the boundary.
 
-The refund address is merchant-controlled exception handling, not necessarily
-the payer. Reconcile it and implement your own payer-refund process for partial,
-duplicate, excess, or late payments.
+The Payday recovery wallet is Payday's custodial exception handling, not the
+payer and not a merchant wallet. Every recovered amount is recorded against its
+payment, reviewed manually, and returned by the operator; a
+`payment.recovered_funds` webhook reports each one. Payday does not hold the
+intended invoice amount, which moves directly to the payout address. Payers who
+sent excess, late, or expired funds should contact the merchant and Payday
+support for return handling.
 
 ## Safety boundaries
 

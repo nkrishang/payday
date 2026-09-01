@@ -46,16 +46,18 @@ subcommand.
 
 ```text
 payday create --amount AMOUNT --to ADDRESS
-  [--refund-to ADDRESS]
   [--expires-in DURATION | --expires-at RFC3339]
   [--memo TEXT]
   [--idempotency-key KEY]
 ```
 
-Amounts are positive USDC decimals with at most six fractional digits.
-`--refund-to` defaults to `--to`; expiry defaults to 24 hours and must resolve
-between 10 minutes and 366 days ahead. `--memo` is the merchant-facing order
-reference. The deployment supplies chain and native-USDC defaults.
+Amounts are positive USDC decimals with at most six fractional digits. Exactly
+the amount settles to `--to`. There is no recovery flag: overpayments, late
+transfers, and expired balances go to the Payday recovery wallet (reported as
+`recovery_address` with `--json`) and are returned by Payday after manual
+review. Expiry defaults to 24 hours and must resolve between 10 minutes and 366
+days ahead. `--memo` is the merchant-facing order reference. The deployment
+supplies chain and native-USDC defaults.
 
 The CLI validates input locally, generates a UUIDv7 idempotency key when none is
 supplied, and prints human payment instructions or the complete API response
@@ -83,7 +85,7 @@ or `needs_attention`. Continue with the API's complete `next_cursor`.
 ### `payday cancel REFERENCE`
 
 Records an advisory cancellation and tells clients to stop presenting the
-payment. It cannot disable the address or change on-chain payout, refund, or
+payment. It cannot disable the address or change on-chain payout, recovery, or
 expiry terms.
 
 ## Sign-in and keys

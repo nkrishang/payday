@@ -23,7 +23,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use gateway_core::{ChainId, Invoice, InvoiceStatus};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
-    MinedBatch, PaymentObservation, SweepBatch,
+    MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
 };
 use sqlx::types::chrono::Utc;
 use thiserror::Error;
@@ -520,6 +520,7 @@ impl Indexer {
                 tx_hash,
                 receipt.block,
                 receipt.transaction_index,
+                header.timestamp,
                 &outcomes,
             )
             .await?;
@@ -549,22 +550,32 @@ impl Indexer {
         header: &BlockHeader,
     ) -> Result<InvoiceOutcome, IndexerError> {
         let payment = invoice.payment_address.0;
+        // Only a nonzero amount is a recovery worth a ledger row.
+        let recovered = |amount: U256, reason: RecoveryReason| {
+            (!amount.is_zero()).then_some(RecoveredFundsInput { amount, reason })
+        };
         match outcome {
-            Some(SweepOutcome::Settled { .. }) => Ok(InvoiceOutcome::Drained {
+            Some(SweepOutcome::Settled {
+                recovered_amount, ..
+            }) => Ok(InvoiceOutcome::Drained {
                 status: Some(InvoiceStatus::Fulfilled),
                 execute_tx: true,
                 settlement_tx_hash: tx_hash,
                 settlement_block: header.number,
                 settlement_timestamp: header.timestamp,
+                settlement_recovered: None,
+                recovered: recovered(*recovered_amount, RecoveryReason::Overpayment),
             }),
-            Some(SweepOutcome::Recovered { .. }) => Ok(InvoiceOutcome::Drained {
+            Some(SweepOutcome::Recovered { amount }) => Ok(InvoiceOutcome::Drained {
                 status: Some(InvoiceStatus::Recovered),
                 execute_tx: true,
                 settlement_tx_hash: tx_hash,
                 settlement_block: header.number,
                 settlement_timestamp: header.timestamp,
+                settlement_recovered: None,
+                recovered: recovered(*amount, RecoveryReason::Expired),
             }),
-            Some(SweepOutcome::Collected { .. }) => {
+            Some(SweepOutcome::Collected { amount }) => {
                 // The contract already existed. For an open invoice that means
                 // someone else deployed it; the contract recorded how it routed
                 // the balance it found.
@@ -592,12 +603,26 @@ impl Indexer {
                     ))
                     .into());
                 }
+                // A terminal invoice's settlement was ledgered when it resolved
+                // (or predates the ledger). An open one was deployed by someone
+                // else, and whatever that deployment sent to the recovery
+                // wallet is known only from its own logs: the remainder of a
+                // live settlement, or the whole balance once expired.
+                let settlement_recovered = if invoice.status.is_terminal() {
+                    None
+                } else if settlement.settled.is_some() {
+                    recovered(settlement.recovered, RecoveryReason::Overpayment)
+                } else {
+                    recovered(settlement.recovered, RecoveryReason::Expired)
+                };
                 Ok(InvoiceOutcome::Drained {
                     status,
                     execute_tx: false,
                     settlement_tx_hash: settlement.transaction_hash,
                     settlement_block: settlement.block_number,
                     settlement_timestamp: settlement_header.timestamp,
+                    settlement_recovered,
+                    recovered: recovered(*amount, RecoveryReason::LateTransfer),
                 })
             }
             Some(SweepOutcome::Failed { .. }) => {
@@ -613,6 +638,13 @@ impl Indexer {
                     )
                     .await?;
                 let to_recovery = probe.code_present || expired;
+                // A live deployment also forwards any balance above the
+                // invoice amount to the recovery wallet in the same
+                // transaction, so that leg alone can fail an overpaid item.
+                let touches_recovery = to_recovery
+                    || probe
+                        .balance
+                        .is_some_and(|balance| balance > invoice.amount.0);
                 let blocked = |reason: &str| InvoiceOutcome::Blocked {
                     reason: reason.to_string(),
                 };
@@ -620,7 +652,7 @@ impl Indexer {
                     InvoiceOutcome::Retry
                 } else if probe.payment_blacklisted == Some(true) {
                     blocked("payment_address_blacklisted")
-                } else if to_recovery && probe.recovery_blacklisted == Some(true) {
+                } else if touches_recovery && probe.recovery_blacklisted == Some(true) {
                     blocked("recovery_blacklisted")
                 } else if !to_recovery && probe.receiver_blacklisted == Some(true) {
                     blocked("beneficiary_blacklisted")
@@ -838,13 +870,13 @@ fn sweep_request(invoice: &Invoice) -> SweepRequest {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use alloy_primitives::{Address, B256, Bytes, U256, address};
+    use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
     use async_trait::async_trait;
     use gateway_core::{
         Amount, BeneficiaryAddress, ChainId, FactoryAddress, Invoice, RecoveryAddress,
@@ -881,6 +913,20 @@ mod tests {
         GENESIS_TIMESTAMP + block * 10
     }
 
+    /// The address a sweep item deploys to, derived the way the API does.
+    fn payment_address_of(sweep: &SweepRequest) -> Address {
+        gateway_core::predict_payment_address(
+            factory(),
+            TokenAddress(sweep.token),
+            Amount(sweep.amount),
+            BeneficiaryAddress(sweep.receiver),
+            sweep.expiration_timestamp,
+            RecoveryAddress(sweep.recovery),
+            gateway_core::Salt(sweep.salt),
+        )
+        .0
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Submission {
         nonce: u64,
@@ -891,7 +937,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MockState {
+    pub(crate) struct MockState {
         latest: u64,
         finalized: u64,
         transfers: Vec<UsdcTransfer>,
@@ -917,14 +963,24 @@ mod tests {
         probes: HashMap<Address, FailureProbe>,
         header_requests: usize,
         reorg_on_header_request: Option<usize>,
+        /// Runtime code hashes by address; see [`mock_code_hash`] for the default.
+        pub(crate) code_hashes: HashMap<Address, B256>,
+        /// Factory each BatchSweeper reports; defaults to the test factory.
+        pub(crate) sweeper_factories: HashMap<Address, Address>,
     }
 
-    struct MockChain {
+    /// The code hash the mock reports for an address it has no override for:
+    /// a stand-in for "some deployed runtime bytecode" that differs per address.
+    pub(crate) fn mock_code_hash(address: Address) -> B256 {
+        keccak256(address.as_slice())
+    }
+
+    pub(crate) struct MockChain {
         state: Mutex<MockState>,
     }
 
     impl MockChain {
-        fn new(latest: u64) -> Self {
+        pub(crate) fn new(latest: u64) -> Self {
             Self {
                 state: Mutex::new(MockState {
                     latest,
@@ -941,7 +997,7 @@ mod tests {
             }
         }
 
-        fn with(self, apply: impl FnOnce(&mut MockState)) -> Self {
+        pub(crate) fn with(self, apply: impl FnOnce(&mut MockState)) -> Self {
             apply(&mut self.state.lock().unwrap());
             self
         }
@@ -1086,19 +1142,11 @@ mod tests {
                     sweeps
                         .iter()
                         .map(|sweep| {
-                            let payment = gateway_core::predict_payment_address(
-                                factory(),
-                                TokenAddress(sweep.token),
-                                Amount(sweep.amount),
-                                BeneficiaryAddress(sweep.receiver),
-                                sweep.expiration_timestamp,
-                                RecoveryAddress(sweep.recovery),
-                                gateway_core::Salt(sweep.salt),
-                            )
-                            .0;
+                            let payment = payment_address_of(sweep);
                             let outcome = state.next_outcomes.remove(&payment).unwrap_or(
                                 SweepOutcome::Settled {
                                     amount: sweep.amount,
+                                    recovered_amount: U256::ZERO,
                                 },
                             );
                             (payment, outcome)
@@ -1137,22 +1185,25 @@ mod tests {
             from_block: u64,
             _to_block: u64,
         ) -> Result<SettlementEvent, ChainError> {
-            self.state
-                .lock()
-                .unwrap()
-                .settlement_events
-                .get(&payment)
-                .copied()
-                .map_or_else(
-                    || {
-                        Ok(SettlementEvent {
-                            transaction_hash: B256::repeat_byte(0xCC),
-                            block_number: from_block,
-                            block_hash: block_hash(from_block),
-                        })
-                    },
-                    Ok,
-                )
+            let state = self.state.lock().unwrap();
+            if let Some(event) = state.settlement_events.get(&payment) {
+                return Ok(*event);
+            }
+            // Without an override the deployment was this worker's own exact
+            // settlement, whose amount the mock finds among its submissions.
+            let settled = state
+                .submissions
+                .iter()
+                .flat_map(|submission| &submission.sweeps)
+                .find(|sweep| payment_address_of(sweep) == payment)
+                .map_or(U256::ZERO, |sweep| sweep.amount);
+            Ok(SettlementEvent {
+                transaction_hash: B256::repeat_byte(0xCC),
+                block_number: from_block,
+                block_hash: block_hash(from_block),
+                settled: Some(settled),
+                recovered: U256::ZERO,
+            })
         }
 
         async fn probe_failure(
@@ -1171,6 +1222,31 @@ mod tests {
                 .get(&payment)
                 .copied()
                 .unwrap_or_default())
+        }
+
+        async fn code_hash(&self, address: Address) -> Result<B256, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .code_hashes
+                .get(&address)
+                .copied()
+                .unwrap_or_else(|| mock_code_hash(address)))
+        }
+
+        async fn batch_sweeper_factory(
+            &self,
+            batch_sweeper: Address,
+        ) -> Result<Address, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .sweeper_factories
+                .get(&batch_sweeper)
+                .copied()
+                .unwrap_or(factory().0))
         }
     }
 
@@ -1328,6 +1404,20 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+
+    /// Recovery ledger rows for an invoice: (amount, reason, tx hash, block,
+    /// recovered_at as a unix timestamp), oldest first.
+    async fn ledger(pool: &PgPool, invoice: &Invoice) -> Vec<(String, String, Vec<u8>, i64, i64)> {
+        sqlx::query_as(
+            "SELECT amount, reason, transaction_hash, block_number,
+                    EXTRACT(EPOCH FROM recovered_at)::bigint
+             FROM recovered_funds WHERE invoice_id = $1 ORDER BY created_at",
+        )
+        .bind(invoice.id.0)
+        .fetch_all(pool)
+        .await
+        .unwrap()
     }
 
     // --- Block indexer ------------------------------------------------------
@@ -1886,6 +1976,135 @@ mod tests {
         assert_eq!(row.uncollected_count, 0);
     }
 
+    // --- Recovery ledger ------------------------------------------------------
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn overpayment_records_only_remainder_as_recovered(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
+        let chain =
+            Arc::new(MockChain::new(7).with(|state| {
+                state.transfers = vec![transfer(invoice.payment_address.0, 150, 1, 0)]
+            }));
+        let worker = indexer(&pool, chain.clone());
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "funded");
+
+        // The contract pays the receiver exactly the invoice amount and sends
+        // the remainder to the platform recovery wallet.
+        chain.set(|state| {
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Settled {
+                    amount: U256::from(100),
+                    recovered_amount: U256::from(50),
+                },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
+        let tx_hash = chain.submissions()[0].tx_hash;
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "50".to_string(),
+                "overpayment".to_string(),
+                tx_hash.to_vec(),
+                7,
+                block_timestamp(7) as i64
+            )]
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn expired_sweep_records_full_recovered_balance(pool: PgPool) {
+        let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
+        insert(&pool, &invoice, "key-1").await;
+        let chain = Arc::new(MockChain::new(2).with(|state| {
+            state.transfers = vec![transfer(invoice.payment_address.0, 40, 1, 0)];
+        }));
+        let worker = indexer(&pool, chain.clone());
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "expired");
+
+        chain.set(|state| {
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Recovered {
+                    amount: U256::from(40),
+                },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        assert_eq!(fetch(&pool, &invoice).await.status, "recovered");
+        let tx_hash = chain.submissions()[0].tx_hash;
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "40".to_string(),
+                "expired".to_string(),
+                tx_hash.to_vec(),
+                2,
+                block_timestamp(2) as i64
+            )]
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn late_collection_appends_recovery_ledger_entry(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
+        assert!(
+            ledger(&pool, &invoice).await.is_empty(),
+            "an exact settlement recovers nothing"
+        );
+
+        // A repeat payment lands after settlement; `recover()` forwards it.
+        chain.set(|state| {
+            state.latest = 9;
+            state.finalized = 9;
+            state.mine_at = Some(9);
+            state
+                .transfers
+                .push(transfer(invoice.payment_address.0, 30, 8, 0));
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Collected {
+                    amount: U256::from(30),
+                },
+            );
+        });
+        worker.tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
+        assert_eq!(row.uncollected_count, 0);
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "30".to_string(),
+                "late_transfer".to_string(),
+                submissions[1].tx_hash.to_vec(),
+                9,
+                block_timestamp(9) as i64
+            )]
+        );
+    }
+
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn funded_invoice_swept_after_its_deadline_reports_recovered_not_fulfilled(pool: PgPool) {
         let invoice = make_invoice(100);
@@ -1917,6 +2136,8 @@ mod tests {
                     transaction_hash: B256::repeat_byte(0xA1),
                     block_number: 3,
                     block_hash: block_hash(3),
+                    settled: Some(U256::from(100)),
+                    recovered: U256::ZERO,
                 },
             );
             state.settlement_events.insert(
@@ -1925,6 +2146,8 @@ mod tests {
                     transaction_hash: B256::repeat_byte(0xA2),
                     block_number: 4,
                     block_hash: block_hash(4),
+                    settled: None,
+                    recovered: U256::from(200),
                 },
             );
             for invoice in [&settled, &recovered] {
@@ -1952,11 +2175,117 @@ mod tests {
             settled_row.settled_at.unwrap().timestamp(),
             (GENESIS_TIMESTAMP + 30) as i64
         );
+        assert!(
+            ledger(&pool, &settled).await.is_empty(),
+            "an exact third-party settlement recovers nothing"
+        );
         let recovered_row = fetch(&pool, &recovered).await;
         assert_eq!(recovered_row.status, "recovered");
         assert_eq!(recovered_row.execute_tx_hash, None);
         assert_eq!(recovered_row.settlement_tx_hash, Some(vec![0xA2; 32]));
         assert_eq!(recovered_row.resolved_at_block, Some(4));
+        assert_eq!(
+            ledger(&pool, &recovered).await,
+            vec![(
+                "200".to_string(),
+                "expired".to_string(),
+                vec![0xA2; 32],
+                4,
+                block_timestamp(4) as i64
+            )],
+            "the balance the third party's deployment recovered is ledgered under their transaction"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn third_party_overpaid_execution_ledgers_the_remainder(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        // Someone else deployed the contract while the address held 125: the
+        // receiver got the invoice amount and the remainder went to the
+        // recovery wallet in that same transaction, before our item ran.
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.settlement_events.insert(
+                invoice.payment_address.0,
+                SettlementEvent {
+                    transaction_hash: B256::repeat_byte(0xA3),
+                    block_number: 3,
+                    block_hash: block_hash(3),
+                    settled: Some(U256::from(100)),
+                    recovered: U256::from(25),
+                },
+            );
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Collected { amount: U256::ZERO },
+            );
+        }));
+        let worker = indexer(&pool, chain);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
+        assert_eq!(row.settlement_tx_hash, Some(vec![0xA3; 32]));
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "25".to_string(),
+                "overpayment".to_string(),
+                vec![0xA3; 32],
+                3,
+                block_timestamp(3) as i64
+            )],
+            "the remainder is keyed by the third party's transaction and an empty recover() adds nothing"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn third_party_expired_execution_ledgers_the_full_balance(pool: PgPool) {
+        let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
+        insert(&pool, &invoice, "key-1").await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.transfers = vec![transfer(invoice.payment_address.0, 40, 1, 0)];
+        }));
+        let worker = indexer(&pool, chain.clone());
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "expired");
+
+        // Someone else deployed the expired contract, which sent the whole
+        // balance to the recovery wallet.
+        chain.set(|state| {
+            state.settlement_events.insert(
+                invoice.payment_address.0,
+                SettlementEvent {
+                    transaction_hash: B256::repeat_byte(0xA4),
+                    block_number: 4,
+                    block_hash: block_hash(4),
+                    settled: None,
+                    recovered: U256::from(40),
+                },
+            );
+            state.settled.insert(invoice.payment_address.0, false);
+            state.next_outcomes.insert(
+                invoice.payment_address.0,
+                SweepOutcome::Collected { amount: U256::ZERO },
+            );
+        });
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "recovered");
+        assert_eq!(row.settlement_tx_hash, Some(vec![0xA4; 32]));
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "40".to_string(),
+                "expired".to_string(),
+                vec![0xA4; 32],
+                4,
+                block_timestamp(4) as i64
+            )]
+        );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -2161,6 +2490,52 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn overpaid_live_invoice_with_blacklisted_recovery_is_blocked(pool: PgPool) {
+        let overpaid = make_invoice(100);
+        let exact = make_invoice(200);
+        insert_funded(&pool, &overpaid, "key-1", 1).await;
+        insert_funded(&pool, &exact, "key-2", 1).await;
+        let failed = SweepOutcome::Failed {
+            revert_data: Bytes::from_static(&[0x30, 0x11, 0x64, 0x25]),
+        };
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            for (invoice, balance) in [(&overpaid, 110), (&exact, 200)] {
+                state
+                    .next_outcomes
+                    .insert(invoice.payment_address.0, failed.clone());
+                state.probes.insert(
+                    invoice.payment_address.0,
+                    FailureProbe {
+                        code_present: false,
+                        recovery_blacklisted: Some(true),
+                        balance: Some(U256::from(balance)),
+                        ..FailureProbe::default()
+                    },
+                );
+            }
+        }));
+        let worker = indexer(&pool, chain);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        // A live deployment forwards the remainder to the recovery wallet in
+        // the same transaction, so the restriction alone explains the failure.
+        let overpaid_row = fetch(&pool, &overpaid).await;
+        assert_eq!(overpaid_row.status, "blocked");
+        assert_eq!(
+            overpaid_row.blocked_reason.as_deref(),
+            Some("recovery_blacklisted")
+        );
+
+        // An exact balance never touches the recovery wallet, so its failure
+        // has some other, possibly transient, cause.
+        let exact_row = fetch(&pool, &exact).await;
+        assert_eq!(exact_row.status, "deploying");
+        assert_eq!(exact_row.blocked_reason, None);
+        assert_eq!(exact_row.sweep_attempts, 1);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn unknown_failures_block_once_retries_are_exhausted(pool: PgPool) {
         let invoice = make_invoice(100);
         insert_funded(&pool, &invoice, "key-1", 1).await;
@@ -2286,6 +2661,7 @@ mod tests {
                         invoice.payment_address.0,
                         SweepOutcome::Settled {
                             amount: U256::from(100),
+                            recovered_amount: U256::ZERO,
                         },
                     )]),
                 },
@@ -2324,6 +2700,7 @@ mod tests {
                         invoice.payment_address.0,
                         SweepOutcome::Settled {
                             amount: U256::from(100),
+                            recovered_amount: U256::ZERO,
                         },
                     )]),
                 },
@@ -2408,6 +2785,7 @@ mod tests {
                         invoice.payment_address.0,
                         SweepOutcome::Settled {
                             amount: U256::from(100),
+                            recovered_amount: U256::ZERO,
                         },
                     )]),
                 },
@@ -2534,6 +2912,13 @@ mod tests {
     async fn tampered_parameters_are_blocked_before_any_transaction(pool: PgPool) {
         let invoice = make_invoice(100);
         insert_funded(&pool, &invoice, "key-1", 1).await;
+        // The database refuses to change issuance fields; this test deliberately
+        // bypasses that guard to prove the indexer still refuses to sweep a row
+        // whose parameters no longer derive its payment address.
+        sqlx::query("ALTER TABLE invoices DISABLE TRIGGER invoice_issuance_immutable")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE invoices SET beneficiary_address = $2 WHERE id = $1")
             .bind(invoice.id.0)
             .bind([9u8; 20].as_slice())

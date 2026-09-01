@@ -61,6 +61,10 @@ prefix() {
 
 load_local_env() {
   if [[ -f .env ]]; then
+    # A .env that does not parse would abort the sourcing shell, and the EXIT
+    # trap cannot see that failure, so the runner would report success having
+    # started nothing. Refuse it explicitly instead.
+    bash -n .env || { echo ".env does not parse as shell; fix it before running the local stack" >&2; exit 1; }
     set -a
     # shellcheck disable=SC1091
     source .env
@@ -77,6 +81,9 @@ load_local_env() {
   export PAYDAY_FACTORY_ADDRESS="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
   export PAYDAY_USDC_ADDRESS="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
   export PAYDAY_BATCH_SWEEPER_ADDRESS="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
+  # Payday's local recovery wallet fixture: Anvil account #5, the same address
+  # scripts/e2e-anvil.sh asserts recovered balances against.
+  export PAYDAY_RECOVERY_ADDRESS="${PAYDAY_RECOVERY_ADDRESS:-0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc}"
   export PAYDAY_USDC_START_BLOCK="${PAYDAY_USDC_START_BLOCK:-0}"
   export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
   export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
@@ -85,6 +92,29 @@ load_local_env() {
   export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$PAYDAY_API_URL}"
   export PAYDAY_API_KEY_PREFIX="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
   export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+}
+
+# Both services compare the deployed runtime bytecode with these hashes at
+# startup and refuse to start on a mismatch. The running chain is the truth for
+# the contract generation, so they are always computed from it here, overriding
+# anything .env carries, once the bootstrap has deployed the fixtures.
+pin_deployment_code_hashes() {
+  local factory_code sweeper_code
+  factory_code="$(cast code "$PAYDAY_FACTORY_ADDRESS" --rpc-url "$PAYDAY_RPC_URL")"
+  sweeper_code="$(cast code "$PAYDAY_BATCH_SWEEPER_ADDRESS" --rpc-url "$PAYDAY_RPC_URL")"
+  [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
+    echo "no code at PAYDAY_FACTORY_ADDRESS $PAYDAY_FACTORY_ADDRESS; the bootstrap did not deploy PaymentFactory" >&2
+    exit 1
+  }
+  [[ -n "$sweeper_code" && "$sweeper_code" != 0x ]] || {
+    echo "no code at PAYDAY_BATCH_SWEEPER_ADDRESS $PAYDAY_BATCH_SWEEPER_ADDRESS; the bootstrap did not deploy BatchSweeper" >&2
+    exit 1
+  }
+  PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$factory_code")"
+  PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$sweeper_code")"
+  export PAYDAY_FACTORY_CODE_HASH PAYDAY_BATCH_SWEEPER_CODE_HASH
+  echo "[bootstrap] factory code hash $PAYDAY_FACTORY_CODE_HASH"
+  echo "[bootstrap] batch sweeper code hash $PAYDAY_BATCH_SWEEPER_CODE_HASH"
 }
 
 seed() {
@@ -128,6 +158,7 @@ cast chain-id --rpc-url "$PAYDAY_RPC_URL" >/dev/null 2>&1 || { echo "Anvil did n
 echo "[bootstrap] deploying deterministic local fixtures"
 forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
   --rpc-url "$PAYDAY_RPC_URL" --private-key "$PAYDAY_SIGNER_KEY" --broadcast
+pin_deployment_code_hashes
 prefix identity ./target/debug/payday-dev-identity
 for _ in {1..100}; do
   curl -fsS "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break

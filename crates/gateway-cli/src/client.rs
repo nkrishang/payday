@@ -423,7 +423,6 @@ mod tests {
             amount: "1".into(),
             expires_in: Some(3_600),
             expires_at: None,
-            refund_address: Some("0x0000000000000000000000000000000000000003".into()),
             memo: None,
             reference: None,
             metadata: serde_json::json!({}),

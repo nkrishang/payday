@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use gateway_core::ChainId;
 
 /// Default indexer poll interval when `PAYDAY_INDEXER_POLL_INTERVAL_MS` is unset.
@@ -36,7 +36,9 @@ pub struct Config {
     max_ranges_per_tick: u64,
     usdc_start_block: u64,
     factory_address: Address,
+    factory_code_hash: B256,
     batch_sweeper_address: Address,
+    batch_sweeper_code_hash: B256,
     usdc_address: Address,
     sweep_pending_timeout: Duration,
     sweep_max_submissions: u32,
@@ -62,6 +64,10 @@ impl Config {
         let usdc_address = parse_address_env("PAYDAY_USDC_ADDRESS");
         let factory_address = parse_address_env("PAYDAY_FACTORY_ADDRESS");
         let batch_sweeper_address = parse_address_env("PAYDAY_BATCH_SWEEPER_ADDRESS");
+        // keccak256 of the runtime bytecode `eth_getCode` returns for each
+        // contract: the deployed generation this build was reviewed against.
+        let factory_code_hash = parse_b256_env("PAYDAY_FACTORY_CODE_HASH");
+        let batch_sweeper_code_hash = parse_b256_env("PAYDAY_BATCH_SWEEPER_CODE_HASH");
 
         let finality_source = match std::env::var("PAYDAY_FINALITY_SOURCE").as_deref() {
             Ok("finalized") | Err(_) => FinalitySource::FinalizedTag,
@@ -119,7 +125,9 @@ impl Config {
             max_ranges_per_tick,
             usdc_start_block,
             factory_address,
+            factory_code_hash,
             batch_sweeper_address,
+            batch_sweeper_code_hash,
             usdc_address,
             sweep_pending_timeout: Duration::from_secs(parse_u64_env(
                 "PAYDAY_SWEEP_PENDING_TIMEOUT_SECS",
@@ -195,8 +203,16 @@ impl Config {
         self.factory_address
     }
 
+    pub fn factory_code_hash(&self) -> B256 {
+        self.factory_code_hash
+    }
+
     pub fn batch_sweeper_address(&self) -> Address {
         self.batch_sweeper_address
+    }
+
+    pub fn batch_sweeper_code_hash(&self) -> B256 {
+        self.batch_sweeper_code_hash
     }
 
     pub fn sweep_pending_timeout(&self) -> Duration {
@@ -225,6 +241,13 @@ fn parse_address_env(name: &str) -> Address {
         .unwrap_or_else(|_| panic!("{name} must be set"))
         .parse()
         .unwrap_or_else(|error| panic!("invalid {name}: {error}"))
+}
+
+fn parse_b256_env(name: &str) -> B256 {
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} must be set"))
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid {name}: expected 0x-prefixed 32-byte hex: {error}"))
 }
 
 fn parse_u64_env(name: &str, default: u64) -> u64 {

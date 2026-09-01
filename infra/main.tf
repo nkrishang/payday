@@ -16,6 +16,8 @@ locals {
     { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
     { name = "PAYDAY_FACTORY_ADDRESS", value = var.factory_address },
     { name = "PAYDAY_BATCH_SWEEPER_ADDRESS", value = var.batch_sweeper_address },
+    { name = "PAYDAY_FACTORY_CODE_HASH", value = var.factory_code_hash },
+    { name = "PAYDAY_BATCH_SWEEPER_CODE_HASH", value = var.batch_sweeper_code_hash },
     { name = "PAYDAY_USDC_ADDRESS", value = var.usdc_address },
     { name = "RUST_LOG", value = "info" }
   ]
@@ -207,6 +209,24 @@ resource "aws_kms_alias" "signer" {
   target_key_id = aws_kms_key.signer.key_id
 }
 
+# The recovery wallet takes custody of overpayment remainders, expired
+# balances, and late transfers. Nothing in the stack signs with it: recovered
+# funds are reviewed and returned by hand, so no task role is granted kms:Sign.
+resource "aws_kms_key" "recovery" {
+  description              = "Payday recovery wallet; manual operator use only"
+  key_usage                = "SIGN_VERIFY"
+  customer_master_key_spec = "ECC_SECG_P256K1"
+  deletion_window_in_days  = 30
+  enable_key_rotation      = false
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+resource "aws_kms_alias" "recovery" {
+  name          = "alias/${var.name}-recovery"
+  target_key_id = aws_kms_key.recovery.key_id
+}
+
 resource "aws_ecr_repository" "api" {
   name                 = "${var.name}-api"
   image_tag_mutability = "IMMUTABLE"
@@ -266,7 +286,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
 }
 resource "aws_iam_role_policy" "status_secrets" {
   role   = aws_iam_role.status_execution.id
@@ -330,15 +350,28 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
-      { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address }
+      { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
+      { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address }
     ]),
+    # The API verifies the deployed contract generation at startup, so it reads
+    # the chain through the same RPC secret as the indexer.
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
     ],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
+
+  # The recovery wallet is committed into every payment address, so the API
+  # must never start with a placeholder; fail the plan rather than the task.
+  lifecycle {
+    precondition {
+      condition     = var.recovery_address != null
+      error_message = "recovery_address must be set to the recovery KMS key's address (derive it with cast wallet address --aws from recovery_kms_key_arn) before the API task can be deployed"
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "status" {

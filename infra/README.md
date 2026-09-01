@@ -1,6 +1,18 @@
 # AWS deployment
 
-Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, and a secp256k1 KMS signing key. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
+Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, and two secp256k1 KMS keys: the sweep signer and the Payday recovery wallet. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
+
+The contract generation is pinned: `factory_code_hash` and
+`batch_sweeper_code_hash` are the keccak256 of the runtime bytecode at
+`factory_address` and `batch_sweeper_address`
+(`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`), deployed together
+as one generation. Both services compare them with the chain at startup and
+refuse to start on a mismatch, which is why the API task now also reads the RPC
+secret. `recovery_address` is the address of the recovery key, derived with
+`cast wallet address --aws` from `recovery_kms_key_arn` after a targeted apply
+of that key; see `docs/production-runbook.md`. It has no safe placeholder:
+leave it unset until the key exists, and the API task definition's
+precondition fails the plan until it is set.
 
 The API task also requires an externally configured Auth0 tenant issuer, API
 audience, and Native application client ID. Terraform passes these non-secret
@@ -41,13 +53,16 @@ export TF_VAR_rpc_url='https://your-paid-provider.example/...'
 terraform init -backend-config=backend.hcl
 terraform fmt -check -recursive
 terraform validate
-terraform apply -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer
+terraform apply -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer \
+  -target=aws_kms_key.recovery -target=aws_kms_alias.recovery
 # Build and push Dockerfile's API/indexer targets using image_tag now.
+# Derive the recovery wallet and set recovery_address in terraform.tfvars:
+AWS_KMS_KEY_ID="$(terraform output -raw recovery_kms_key_arn)" cast wallet address --aws
 terraform plan -out=deploy.tfplan
 terraform apply deploy.tfplan
 ```
 
-Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address or USDC start block is defaulted. Retrieve generated values from Secrets Manager rather than Terraform output.
+Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address, code hash, or USDC start block is defaulted, and `recovery_address` defaults to null so the plan fails closed until the real key's address is set. Retrieve generated values from Secrets Manager rather than Terraform output.
 After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do not deliver until it is confirmed.
 The stack verifies `notification_domain_name` with SES Easy DKIM. Before launch,
 also move the SES account out of the sandbox in this region and verify a test
@@ -67,11 +82,13 @@ database password/URL in plaintext within encrypted state despite `sensitive`
 markings. Secure state,
 plans, CI logs, and access accordingly; never commit `terraform.tfvars`,
 `backend.hcl`, or plans. ECS injects infrastructure secrets at task startup.
-The API execution role can read only the database, payer-link, webhook
-encryption, and generated operator credential secrets; its task role can send
-mail only from the verified SES identity. The status execution role can read
-only the database secret. Indexer execution can read only database/RPC secrets.
-The indexer task role can only `kms:GetPublicKey` and `kms:Sign` on its key. RDS
+The API execution role can read only the database, RPC, webhook encryption,
+and generated operator credential secrets; its task role can send mail only
+from the verified SES identity. The status execution role can read only the
+database secret. Indexer execution can read only database/RPC secrets. The
+indexer task role can only `kms:GetPublicKey` and `kms:Sign` on the signer
+key. No role at all can sign with the recovery key: recovered funds are
+returned by an operator by hand, never by the stack. RDS
 connections use hostname and certificate verification against the
 checksum-pinned AWS global RDS CA bundle in the image. Secrets Manager version
 rotation is not observed by running ECS tasks. Force a new API deployment after
@@ -84,4 +101,4 @@ WAF request sampling is disabled because samples can contain the bearer `Authori
 
 ## Destroy protection
 
-RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. The non-exportable KMS signing key also has Terraform `prevent_destroy`. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guard before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.
+RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. The non-exportable KMS signing key and recovery key both have Terraform `prevent_destroy`; the recovery key holds custody of recovered USDC, so confirm the wallet is empty and every `recovered_funds` row has been returned before removing that guard. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.

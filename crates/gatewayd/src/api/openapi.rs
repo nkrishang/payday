@@ -51,11 +51,10 @@ struct IndexerFreshness {
     cursor_updated_at: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
-#[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","refund_address":"0x2222222222222222222222222222222222222222","expires_in":3600,"reference":"order-42","metadata":{"customer":"cus_123"}}))]
+#[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","expires_in":3600,"reference":"order-42","metadata":{"customer":"cus_123"}}))]
 struct CreatePayment {
     amount: String,
     payout_address: String,
-    refund_address: Option<String>,
     chain_id: Option<String>,
     token_address: Option<String>,
     expires_in: Option<u64>,
@@ -76,7 +75,9 @@ struct Payment {
     address: String,
     address_explorer_url: Option<String>,
     payout_address: String,
-    refund_address: String,
+    /// Payday's custodial recovery wallet for overpayments, expired balances,
+    /// and late transfers; configured by the platform, not the merchant.
+    recovery_address: String,
     expires_in: Option<u64>,
     amount: String,
     amount_base_units: String,
@@ -342,6 +343,13 @@ mod tests {
             ROUTES.len()
         );
         assert!(d["components"]["schemas"]["Payment"]["properties"]["as_of"].is_object());
+        assert!(
+            d["components"]["schemas"]["Payment"]["properties"]["recovery_address"].is_object()
+        );
+        assert!(d["components"]["schemas"]["Payment"]["properties"]["refund_address"].is_null());
+        assert!(
+            d["components"]["schemas"]["CreatePayment"]["properties"]["refund_address"].is_null()
+        );
         let status = &d["components"]["schemas"]["ServiceStatus"]["properties"];
         assert_eq!(
             status.as_object().unwrap().keys().collect::<Vec<_>>(),

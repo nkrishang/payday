@@ -61,6 +61,13 @@ const FULL = {
 
 const CLOSED = { payable: false, payment_uri: null };
 
+const SETTLED = {
+  status: "settled",
+  settlement_tx_hash: "0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190",
+  settlement_explorer_url:
+    "https://monadvision.com/tx/0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190",
+};
+
 /** Reads counted per id, so one scenario can change between polls. */
 const reads = new Map();
 
@@ -68,15 +75,11 @@ const scenarios = {
   awaiting: () => base(),
   partial: () => base(PARTIAL),
   paid: () => base({ ...FULL, ...CLOSED, status: "paid" }),
-  settled: () =>
-    base({
-      ...FULL,
-      ...CLOSED,
-      status: "settled",
-      settlement_tx_hash: "0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190",
-      settlement_explorer_url:
-        "https://monadvision.com/tx/0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190",
-    }),
+  settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
+  // More arrived than was asked for. Settlement is exact, so the merchant got
+  // 25 and the remainder went to the recovery wallet; the receipt says so.
+  "settled-overpaid": () =>
+    base({ ...FULL, ...CLOSED, ...SETTLED, received: "30.000000", received_base_units: "30000000" }),
   expired: () => base({ ...CLOSED, status: "expired" }),
   "expired-funded": () => base({ ...PARTIAL, ...CLOSED, status: "expired" }),
   returned: () => base({ ...PARTIAL, ...CLOSED, status: "returned" }),

@@ -20,9 +20,18 @@ alarm_email      = "operator@example.com"
 chain_id         = 10143
 usdc_address     = "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea"
 # Fill these from the sandbox contract deployment output; zero/guessed addresses
-# must not be deployed.
-factory_address       = "0x0000000000000000000000000000000000000001"
-batch_sweeper_address = "0x0000000000000000000000000000000000000002"
+# and hashes must not be deployed. The factory and sweeper are one generation:
+# cast keccak "$(cast code <ADDRESS> --rpc-url "$TESTNET_RPC_URL")".
+factory_address         = "0x0000000000000000000000000000000000000001"
+batch_sweeper_address   = "0x0000000000000000000000000000000000000002"
+factory_code_hash       = "0x0000000000000000000000000000000000000000000000000000000000000000"
+batch_sweeper_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# The sandbox has its own recovery KMS key; derive its address the same way as
+# production, after the targeted apply that creates the key. Sandbox and
+# production recovery wallets must never be shared. There is no safe
+# placeholder, so leave it unset until then; the full apply refuses until it
+# is set.
+# recovery_address = "0x<address of the sandbox recovery key>"
 # Set to the Monad testnet block immediately before deploying the services.
 usdc_start_block      = 0
 finality_confirmations = 2

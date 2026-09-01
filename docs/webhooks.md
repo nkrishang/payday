@@ -29,11 +29,59 @@ not followed. A delivery becomes `failed` after its twelfth failed attempt.
 The deliveries API returns that terminal state and immutable per-attempt HTTP
 status/error, timestamp, and duration history.
 
-Events map internal transitions as follows: funded → `payment.paid`, fulfilled
-→ `payment.settled`, expired → `payment.expired`, recovered →
-`payment.refunded`, blocked → `payment.needs_attention`. The event is inserted
-by the same database transaction that updates the lifecycle row. Payloads use
-the public, versioned `2026-08-01` envelope and include the stable event ID,
-`occurred_at`, public payment status, reference, and metadata. Test events are
-sent only to the requested endpoint, require no invoice, and cannot consume a
-real lifecycle event's uniqueness key.
+## Event types
+
+Lifecycle events map internal transitions as follows and happen at most once
+per payment: funded → `payment.paid`, fulfilled → `payment.settled`, expired →
+`payment.expired`, recovered → `payment.refunded`, blocked →
+`payment.needs_attention`. Each is inserted by the same database transaction
+that updates the lifecycle row.
+
+| Event | When |
+|---|---|
+| `payment.paid`, `payment.settled`, `payment.expired`, `payment.refunded`, `payment.needs_attention` | The lifecycle transitions above |
+| `payment.recovered_funds` | Payday's recovery wallet received funds on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per recovered amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
+| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied |
+| `verification.declined` | Reserved; emitted by the payer identity verification flow when a required payer verification is declined |
+| `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: funds were first observed before the payer policy was satisfied, so the payment is flagged as likely unsolicited |
+
+`verification.approved` and `payment.likely_unsolicited` are inserted by the
+same `invoices` trigger as the lifecycle events, in the transaction that first
+sets `verification_completed_at` or `likely_unsolicited_at`; nothing sets
+those columns until the payer-policy features are enabled for an account.
+`verification.declined` is reserved: it is in the vocabulary now so handlers
+can be registered ahead of it, and the payer identity verification flow emits
+it.
+
+## Payload
+
+Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
+`occurred_at`, and `data`. Every payment event carries `data.payment` with the
+public status, `amount`, `received`, `reference`, `metadata`, and three policy
+fields: `payer_policy_mode`, `verification_completed_at`, and
+`likely_unsolicited_at`. The payload never includes the expected email,
+expected identity, or any payer assertion. `payment.needs_attention` adds
+`data.payment.attention`. Lifecycle payloads carry no recovery flag by design:
+a `payment.settled` for an overpaid payment is indistinguishable from one for
+an exact payment, and `payment.recovered_funds` is the recovery signal.
+
+`payment.recovered_funds` adds `data.recovery`:
+
+```json
+{
+  "id": "…",
+  "amount": "250000",
+  "reason": "overpayment",
+  "transaction_hash": "0x…",
+  "block_number": 12345,
+  "recovered_at": "2026-09-01T12:00:00Z"
+}
+```
+
+`amount` is in base units and `reason` is one of `overpayment`, `expired`, or
+`late_transfer`. Recovered funds are held by Payday, reviewed manually, and
+returned by the operator; use these events to reconcile what Payday holds for
+your payments.
+
+Test events are sent only to the requested endpoint, require no invoice, and
+cannot consume a real lifecycle event's uniqueness key.

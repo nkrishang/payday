@@ -19,8 +19,8 @@ use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 pub use sweeps::{
-    BatchResolution, InvoiceOutcome, MinedBatch, SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats,
-    SweeperStatus,
+    BatchResolution, InvoiceOutcome, MinedBatch, RecoveredFundsInput, RecoveryReason,
+    SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats, SweeperStatus,
 };
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,

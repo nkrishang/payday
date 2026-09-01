@@ -51,7 +51,7 @@ const created: readonly Line[] = [
   [["  Pay to    ", "dim"], ["0xfF70…A0dF", "id"], ["  native USDC", "dim"]],
   [["  Expires   ", "dim"], ["in 1 hour", "text"]],
   [["  Payout    ", "dim"], ["0x7099…79C8", "id"]],
-  [["  Refund    ", "dim"], ["0x3C44…93BC", "id"]],
+  [["  Recovery  ", "dim"], ["0x9965…A4dc", "id"], ["  Payday", "dim"]],
 ];
 
 const listed: readonly Line[] = [

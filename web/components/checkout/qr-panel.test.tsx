@@ -25,7 +25,8 @@ describe("QrPanel", () => {
   it("removes itself when the gateway stops serving the code", () => {
     // The QR route answers 410 once the payment is no longer payable, which
     // reaches the browser as a load error. Showing a stale address after that
-    // would invite a transfer that routes to the merchant's refund wallet.
+    // would invite a transfer that routes to the Payday recovery wallet rather
+    // than back to the payer.
     render(<QrPanel payment={payment()} qrUrl={QR_URL} />);
     fireEvent.error(screen.getByRole("img"));
     expect(screen.queryByRole("img")).not.toBeInTheDocument();

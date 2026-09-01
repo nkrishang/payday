@@ -98,8 +98,24 @@ test("a settled payment is a receipt, not an invitation to pay again", async ({ 
   await page.goto("/pay/pay_settled");
 
   await expect(page.getByText("Payment complete")).toBeVisible();
-  await expect(page.getByText("The full balance reached the merchant.")).toBeVisible();
+  await expect(page.getByText("Exactly the invoice amount reached the merchant.")).toBeVisible();
+  // An exact payment has nothing in recovery, so the receipt must not mention it.
+  await expect(page.getByText(/recovery wallet/)).toHaveCount(0);
   await expect(page.getByRole("link", { name: /0x00210b33/ })).toBeVisible();
+  await expectNoInstructions(page);
+});
+
+test("an overpaid settled payment says where the remainder went", async ({ page }) => {
+  await page.goto("/pay/pay_settled-overpaid");
+
+  await expect(page.getByText("Payment complete")).toBeVisible();
+  await expect(page.getByText(/Exactly the invoice amount reached the merchant/)).toBeVisible();
+  await expect(
+    page.getByText(/above the invoice amount went to the Payday recovery wallet/),
+  ).toBeVisible();
+  // The receipt shows both what was asked for and what actually arrived.
+  await expect(page.getByText("25.00 USDC")).toBeVisible();
+  await expect(page.getByText("30.00 USDC")).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -107,7 +123,7 @@ test("a received payment says settlement is still in progress", async ({ page })
   await page.goto("/pay/pay_paid");
 
   await expect(page.getByText("Payment received")).toBeVisible();
-  await expect(page.getByText(/settling the balance to the merchant/)).toBeVisible();
+  await expect(page.getByText(/settling the invoice amount to the merchant/)).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -123,7 +139,7 @@ test("an expired payment holding funds says where they went", async ({ page }) =
   await page.goto("/pay/pay_expired-funded");
 
   await expect(page.getByText("The deadline passed before this payment completed")).toBeVisible();
-  await expect(page.getByText(/refund address, which is not automatically the payer/)).toBeVisible();
+  await expect(page.getByText(/recovery wallet, which is not automatically the payer/)).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -131,7 +147,7 @@ test("a returned payment does the same", async ({ page }) => {
   await page.goto("/pay/pay_returned");
 
   await expect(page.getByText("This payment was not completed in time")).toBeVisible();
-  await expect(page.getByText(/refund address/)).toBeVisible();
+  await expect(page.getByText(/recovery wallet/)).toBeVisible();
   await expectNoInstructions(page);
 });
 

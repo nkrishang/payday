@@ -142,6 +142,54 @@ variable "batch_sweeper_address" {
   }
 }
 
+variable "factory_code_hash" {
+  description = <<-EOT
+    keccak256 of the runtime bytecode deployed at factory_address, computed
+    with: cast keccak "$(cast code <factory_address> --rpc-url <rpc_url>)".
+    PaymentFactory and BatchSweeper are deployed together as one contract
+    generation; both services compare the live code with this hash at startup
+    and refuse to start on a mismatch.
+  EOT
+  type        = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{64}$", var.factory_code_hash))
+    error_message = "factory_code_hash must be a 32-byte 0x-prefixed keccak256 hash."
+  }
+}
+
+variable "batch_sweeper_code_hash" {
+  description = <<-EOT
+    keccak256 of the runtime bytecode deployed at batch_sweeper_address,
+    computed with: cast keccak "$(cast code <batch_sweeper_address> --rpc-url <rpc_url>)".
+    Deploy the sweeper with the factory it is bound to, as one generation;
+    never point a new factory at an old sweeper.
+  EOT
+  type        = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{64}$", var.batch_sweeper_code_hash))
+    error_message = "batch_sweeper_code_hash must be a 32-byte 0x-prefixed keccak256 hash."
+  }
+}
+
+variable "recovery_address" {
+  description = <<-EOT
+    Payday's custodial recovery wallet: the Ethereum address of the recovery
+    KMS key (cast wallet address --aws with recovery_kms_key_arn). gatewayd
+    stamps it on every invoice; overpayment remainders, expired balances, and
+    late transfers land here and are returned manually by the operator.
+    Null until the key exists: there is no safe placeholder, because every
+    invoice commits this address into its payment address, so the API task
+    definition refuses to plan while it is unset.
+  EOT
+  type        = string
+  default     = null
+  nullable    = true
+  validation {
+    condition     = var.recovery_address == null || can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address))
+    error_message = "recovery_address must be a 20-byte 0x-prefixed EVM address."
+  }
+}
+
 variable "usdc_address" {
   type = string
   validation {

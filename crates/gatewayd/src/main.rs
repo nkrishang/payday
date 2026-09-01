@@ -1,9 +1,11 @@
 mod api;
 mod config;
+mod deployment;
 mod dispatcher;
 mod state;
 mod webhook_worker;
 
+use alloy_primitives::Address;
 use axum::serve;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -47,6 +49,26 @@ async fn main() {
         config.explorer_base_url().map(str::to_owned),
     )
     .expect("invalid payer link configuration");
+    // Every payment address this service hands out assumes the reviewed
+    // contract generation, so refuse to serve against any other deployment.
+    if let Some(settlement) = config.settlement() {
+        deployment::verify_deployment(
+            &settlement.rpc_url,
+            &deployment::ExpectedDeployment {
+                chain_id: config.chain_id().0,
+                factory: config.factory_address(),
+                factory_code_hash: settlement.factory_code_hash,
+                batch_sweeper: settlement.batch_sweeper_address,
+                batch_sweeper_code_hash: settlement.batch_sweeper_code_hash,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
+    }
+    // Status-only mode never issues invoices, so it has no wallet to stamp.
+    let recovery_address = config
+        .settlement()
+        .map_or(Address::ZERO, |settlement| settlement.recovery_address);
     let state = state::AppState::new(
         repo,
         accounts,
@@ -54,6 +76,7 @@ async fn main() {
         config.chain_id(),
         config.factory_address(),
         config.usdc_address(),
+        recovery_address,
         payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),

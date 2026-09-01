@@ -46,7 +46,6 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 {
   "amount": "10.50",
   "payout_address": "0x1111111111111111111111111111111111111111",
-  "refund_address": "0x2222222222222222222222222222222222222222",
   "expires_in": 3600,
   "reference": "order-42",
   "metadata": {"customer":"cus_123"}
@@ -56,8 +55,7 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | Field | Rules |
 |---|---|
 | `amount` | Required positive USDC decimal; at most six fractional digits |
-| `payout_address` | Required nonzero EVM address |
-| `refund_address` | Optional nonzero EVM address; defaults to payout |
+| `payout_address` | Required nonzero EVM address; receives exactly `amount` |
 | `expires_in` | Optional lifetime in seconds |
 | `expires_at` | Optional RFC 3339 deadline; mutually exclusive with `expires_in` |
 | `chain_id`, `token_address` | Optional deployment overrides; otherwise configured chain/native USDC |
@@ -65,10 +63,16 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `memo` | Compatibility alias for reference, at most 128 characters and 2,000 encoded bytes; if both are present they must match |
 | `metadata` | JSON object, at most 16 keys and 512 encoded bytes per value |
 
-Unknown fields are rejected. Expiry defaults to 24 hours and must be 10 minutes
-to 366 days ahead. A first request returns `201`; an identical retry returns the
+Unknown fields are rejected. Recovery is not a request field: Payday stamps its
+own recovery wallet on every payment, so a body carrying `refund_address` is
+rejected like any other unknown field. Expiry defaults to 24 hours and must be
+10 minutes to 366 days ahead. A first request returns `201`; an identical retry returns the
 original payment with `200` and `Idempotency-Replayed: true`. Reuse with changed
-parameters returns `409 idempotency_conflict`. Relative-expiry retries retain
+parameters returns `409 idempotency_conflict`. The Payday recovery wallet is
+one of the committed parameters even though it is not a request field, because
+it is part of the payment address: a replay after Payday rotates the recovery
+wallet also returns `409`, and the original payment must be fetched with
+`GET /v1/payments/{reference}` rather than replayed. Relative-expiry retries retain
 the original resolved deadline. Payment creation also requires the account to
 have a verified support email from a recent login.
 
@@ -113,7 +117,10 @@ The full payment response contains:
 
 - identity and instructions: `id`, `payment_url`, `address`, optional
   `address_explorer_url`, `chain`, `token`, `currency`, `payout_address`,
-  `refund_address`, and `expires_at`;
+  `recovery_address`, and `expires_at`. `recovery_address` is the Payday
+  recovery wallet the payment is committed to; overpayment remainders, expired
+  balances, and late transfers land there and are returned by the operator
+  after manual review;
 - accounting: `amount`, `received`, `remaining`, `fee_amount`, and `net_amount`,
   each with a corresponding `_base_units` field; current fees are zero;
 - state: `status`, `paid_at`, `paid_at_block`, `settled_at`, `settled_block`,
@@ -191,7 +198,7 @@ a checkout against them; no other route allows cross-origin reads.
 | `authentication_event_already_used` | 409 | Identity event already mutated key state |
 | `api_key_generation_conflict` | 409 | Key generation changed or was omitted incorrectly |
 | `missing_idempotency_key` | 400 | Create header absent |
-| `idempotency_conflict` | 409 | Key reused with different payment parameters |
+| `idempotency_conflict` | 409 | Key reused with different payment parameters; the Payday recovery wallet counts, so a replay after it was rotated conflicts and the original must be fetched with `GET` |
 | `invalid_request` | 400 | Invalid field, query, JSON, or request shape |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
 | `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |

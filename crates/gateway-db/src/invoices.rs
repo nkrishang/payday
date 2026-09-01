@@ -1100,6 +1100,212 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn issuance_fields_are_immutable_while_lifecycle_columns_stay_writable(pool: PgPool) {
+        let account = AccountId(Uuid::from_u128(1));
+        sqlx::query(
+            "INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, 'hint')",
+        )
+        .bind(account.0)
+        .bind(account.0.as_bytes().repeat(2))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A customer in the same account, so the only thing refusing the link
+        // change is the immutability trigger, not the foreign key.
+        let customer = Uuid::now_v7();
+        sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, 'Acme')")
+            .bind(customer)
+            .bind(account.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = Uuid::now_v7();
+        let repo = InvoiceRepository::new(pool.clone());
+        repo.insert(&CreateInvoiceInput {
+            id,
+            account_id: account,
+            idempotency_key: "immutable".into(),
+            memo: Some("as issued".into()),
+            reference: None,
+            metadata: serde_json::json!({}),
+            chain_id: 1,
+            factory_address: [1; 20],
+            token_address: [2; 20],
+            token_decimals: 6,
+            beneficiary_address: [3; 20],
+            expiration_timestamp: 4_000_000_000,
+            expires_in_secs: 3_600,
+            expiration_intent: "at:4000000000".into(),
+            recovery_address: [4; 20],
+            amount: "1000000".into(),
+            salt: [5; 32],
+            payment_address: [6; 20],
+        })
+        .await
+        .unwrap();
+
+        // The memo mirrors the reference the payer was shown, the customer is
+        // the party link, and the rest commit the payment address.
+        let immutable = [
+            "memo = 'edited'".to_string(),
+            format!("customer_id = '{customer}'"),
+            "amount = '2000000'".to_string(),
+            r"beneficiary_address = '\x0909090909090909090909090909090909090909'".to_string(),
+        ];
+        // Test-owned literals only, so the assembled statements are safe.
+        let update = |assignment: &str| {
+            sqlx::AssertSqlSafe(format!("UPDATE invoices SET {assignment} WHERE id = $1"))
+        };
+        for assignment in &immutable {
+            let error = sqlx::query(update(assignment))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("issuance fields are immutable"),
+                "{assignment}: {error}"
+            );
+        }
+        for assignment in [
+            "status = 'funded'",
+            "confirmed_received = '1000000'",
+            "blocked_reason = 'retries_exhausted'",
+        ] {
+            sqlx::query(update(assignment))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("{assignment}: {error}"));
+        }
+        let row = repo.find_by_id(id).await.unwrap().unwrap();
+        assert_eq!(row.memo.as_deref(), Some("as issued"));
+        assert_eq!(row.amount, "1000000");
+        assert_eq!(row.beneficiary_address, vec![3; 20]);
+        assert_eq!(row.status, "funded");
+        assert_eq!(row.confirmed_received, "1000000");
+        assert_eq!(row.blocked_reason.as_deref(), Some("retries_exhausted"));
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn webhook_payloads_expose_only_the_allowlisted_payment_fields(pool: PgPool) {
+        use std::collections::BTreeSet;
+
+        let account = Uuid::from_u128(1);
+        sqlx::query(
+            "INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, 'hint')",
+        )
+        .bind(account)
+        .bind(account.as_bytes().repeat(2))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Inserted directly: the policy columns are issuance fields, so no
+        // repository write path can set them once the row exists.
+        let id = Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO invoices
+                 (id, account_id, idempotency_key, chain_id, factory_address, token_address,
+                  token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
+                  expiration_intent, recovery_address, amount, net_amount, salt, payment_address,
+                  status, reference, metadata, payer_policy_mode, expected_email, expected_identity)
+               VALUES ($1, $2, 'allowlist', 1, $3, $3, 6, $3, 4000000000, 3600, 'at:4000000000',
+                  $3, '1000000', '1000000', $4, $3, 'created', 'order-7', '{"source":"checkout"}',
+                  'verified_identity', 'alice@example.com',
+                  '{"first_name":"Alice","last_name":"Smith"}')"#,
+        )
+        .bind(id)
+        .bind(account)
+        .bind([1u8; 20].as_slice())
+        .bind([2u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Every transition that enqueues an invoice event, in lifecycle order.
+        for statement in [
+            "UPDATE invoices SET status = 'funded', paid_at = now() WHERE id = $1",
+            "UPDATE invoices SET verification_completed_at = now() WHERE id = $1",
+            "UPDATE invoices SET likely_unsolicited_at = now() WHERE id = $1",
+            "UPDATE invoices SET status = 'fulfilled', settled_at = now() WHERE id = $1",
+            "UPDATE invoices SET blocked_reason = 'recovery_blacklisted' WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            r#"INSERT INTO recovered_funds
+                 (id, invoice_id, chain_id, token_address, transaction_hash, block_number,
+                  amount, reason, recovered_at)
+               VALUES ($1, $2, 1, $3, $4, 7, '25', 'overpayment', now())"#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(id)
+        .bind([1u8; 20].as_slice())
+        .bind([0xA1u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let events: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT event_type, payload FROM webhook_events WHERE invoice_id = $1 ORDER BY event_type",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "payment.likely_unsolicited",
+                "payment.needs_attention",
+                "payment.paid",
+                "payment.recovered_funds",
+                "payment.settled",
+                "verification.approved",
+            ]
+        );
+        let allowlist: BTreeSet<&str> = [
+            "id",
+            "status",
+            "amount",
+            "received",
+            "reference",
+            "metadata",
+            "payer_policy_mode",
+            "verification_completed_at",
+            "likely_unsolicited_at",
+        ]
+        .into_iter()
+        .collect();
+        for (kind, payload) in &events {
+            let serialized = payload.to_string();
+            for secret in ["alice@example.com", "Alice", "Smith"] {
+                assert!(
+                    !serialized.contains(secret),
+                    "{kind} carries {secret}: {serialized}"
+                );
+            }
+            let payment = payload["data"]["payment"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{kind} has no payment object: {serialized}"));
+            let mut keys: BTreeSet<&str> = payment.keys().map(String::as_str).collect();
+            assert_eq!(
+                keys.remove("attention"),
+                kind == "payment.needs_attention",
+                "{kind}: only the attention event carries the attention object"
+            );
+            assert_eq!(keys, allowlist, "{kind}");
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn attention_transition_notifies_once_and_release_is_guarded(pool: PgPool) {
         let account = AccountId(Uuid::now_v7());
         sqlx::query("INSERT INTO accounts(id,api_key_hash,api_key_hint,email) VALUES($1,$2,'hint','merchant@example.com')")

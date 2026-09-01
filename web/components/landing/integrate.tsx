@@ -12,7 +12,6 @@ const SNIPPETS = [
     code: `payday create \\
   --amount 25.00 \\
   --to 0x1111111111111111111111111111111111111111 \\
-  --refund-to 0x2222222222222222222222222222222222222222 \\
   --expires-in 1h \\
   --memo 'Order 1042'
 
@@ -29,7 +28,6 @@ const payment = await payday.payments.create(
   {
     amount: "25.00",
     payout_address: "0x1111111111111111111111111111111111111111",
-    refund_address: "0x2222222222222222222222222222222222222222",
     expires_in: 3600,
   },
   crypto.randomUUID(), // idempotency key is mandatory
@@ -48,7 +46,6 @@ console.log(payment.payment_url);`,
   -d '{
     "amount": "25.00",
     "payout_address": "0x1111111111111111111111111111111111111111",
-    "refund_address": "0x2222222222222222222222222222222222222222",
     "expires_in": 3600
   }'`,
   },

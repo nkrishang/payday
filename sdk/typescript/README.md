@@ -13,13 +13,18 @@ const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
 const payment = await payday.payments.create({
   amount: "10.00",
   payout_address: "0x1111111111111111111111111111111111111111",
-  refund_address: "0x2222222222222222222222222222222222222222",
   expires_in: 3600,
 }, crypto.randomUUID()); // caller-supplied idempotency key is mandatory
 
 console.log(await payday.payments.get(payment.id));
 console.log(await payday.payments.list({ status: "awaiting_payment", limit: 20 }));
 ```
+
+Exactly `amount` settles to `payout_address`. The response's `recovery_address`
+is the Payday recovery wallet the payment is committed to: overpayment
+remainders, expired balances, and late transfers land there and are returned by
+the operator after manual review. It is platform-configured, so a create request
+carrying `refund_address` is rejected.
 
 The client also provides long polling through `payments.get(id, { waitForChange: true })`, `payments.cancel`, `payments.transfers`, `status`, and `webhooks.add/list/remove/test/deliveries`. API failures throw `PaydayError`, exposing `code`, `status`, and `requestId`.
 
@@ -43,4 +48,4 @@ payment.server_timestamp;     // render the deadline without trusting the payer'
 payer.payments.qrUrl(payment.id); // <img src> for the QR; answers 410 once not payable
 ```
 
-The response deliberately carries no merchant data — no payout or refund address, no memo, reference, or metadata. Pass an `AbortSignal` to cancel a poll. If you build your own checkout, reproduce the guidance in [Payment safety](../../docs/payment-safety.md): payers must send the exact amount of the exact token on the exact chain, and must not pay at the deadline boundary.
+The response deliberately carries no merchant data — no payout or recovery address, no memo, reference, or metadata. Pass an `AbortSignal` to cancel a poll. If you build your own checkout, reproduce the guidance in [Payment safety](../../docs/payment-safety.md): payers must send the exact amount of the exact token on the exact chain, and must not pay at the deadline boundary.

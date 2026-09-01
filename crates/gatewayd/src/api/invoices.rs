@@ -198,18 +198,6 @@ pub async fn create_payment(
     )
     .map_err(|error| ApiError::invalid_request(error.to_string()))?;
     let expiration_timestamp = expiration.timestamp;
-    let recovery_addr = req
-        .refund_address
-        .as_deref()
-        .map_or(Ok(beneficiary_addr), |value| {
-            Address::from_str(value)
-                .map_err(|e| ApiError::invalid_request(format!("invalid refund_address: {e}")))
-        })?;
-    if recovery_addr.is_zero() {
-        return Err(ApiError::invalid_request(
-            "refund_address must not be the zero address",
-        ));
-    }
 
     // 3. Enforce the configured chain and Circle-issued USDC contract.
     if chain_id != state.chain_id.0 {
@@ -229,13 +217,17 @@ pub async fn create_payment(
     if amount.0 == U256::ZERO {
         return Err(ApiError::invalid_amount("amount must be positive"));
     }
+    // Recovery is the platform wallet, never a request field. It is part of
+    // the replay comparison because it is committed into the payment address:
+    // a replay after the platform wallet changed cannot return the old address
+    // as if it were equivalent.
     let requested = RequestedInvoice {
         chain_id,
         token: token_addr,
         beneficiary: beneficiary_addr,
         amount: amount.0,
         expiration_intent: &expiration.intent,
-        recovery: recovery_addr,
+        recovery: state.recovery_address,
         memo: memo.as_deref(),
         reference: reference.as_deref(),
         metadata: &req.metadata,
@@ -274,7 +266,7 @@ pub async fn create_payment(
         BeneficiaryAddress(beneficiary_addr),
         amount,
         expiration_timestamp,
-        RecoveryAddress(recovery_addr),
+        RecoveryAddress(state.recovery_address),
     );
 
     // 7. Persist. ON CONFLICT handles the race between our check and insert.
@@ -571,7 +563,6 @@ mod tests {
             "chain_id": "1", "token_address": "0x0000000000000000000000000000000000000001",
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1", "expires_in": 3600,
-            "refund_address": "0x0000000000000000000000000000000000000003",
             "memo": "order-42"
         });
         let request: CreatePaymentRequest = serde_json::from_value(json).unwrap();

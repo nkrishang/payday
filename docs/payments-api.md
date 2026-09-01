@@ -7,9 +7,13 @@ TypeScript applications can use the zero-runtime-dependency client in
 creates additionally require `Idempotency-Key`. A replay returns
 `Idempotency-Replayed: true`.
 
-Create requests contain `amount` and `payout_address`; `refund_address` defaults
-to the payout address. Choose either `expires_in` (seconds) or RFC3339
-`expires_at`, or omit both for a 24-hour lifetime. `chain_id` and
+Create requests contain `amount` and `payout_address`. Exactly `amount` settles
+to `payout_address`; the response's `recovery_address` is the Payday recovery
+wallet the payment is committed to, where overpayment remainders, expired
+balances, and late transfers land before the operator returns them after manual
+review. It is platform-configured, so a request carrying `refund_address` is
+rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
+both for a 24-hour lifetime. `chain_id` and
 `token_address` default to the configured chain and USDC contract. `reference`
 and a small JSON-object `metadata` are optional.
 
@@ -77,7 +81,7 @@ export PAYDAY_API_KEY=payday_test_...
 PAYMENT=$(curl -fsS "$API/v1/payments" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: quickstart-$(date +%s)" \
-  -d '{"amount":"1.00","payout_address":"0x1111111111111111111111111111111111111111","refund_address":"0x2222222222222222222222222222222222222222","expires_in":3600}')
+  -d '{"amount":"1.00","payout_address":"0x1111111111111111111111111111111111111111","expires_in":3600}')
 PAYMENT_ID=$(printf '%s' "$PAYMENT" | jq -r .id)
 PAYMENT_ADDRESS=$(printf '%s' "$PAYMENT" | jq -r .address)
 # Send test USDC to $PAYMENT_ADDRESS using the sandbox faucet/wallet; there is

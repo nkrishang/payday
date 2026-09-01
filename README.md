@@ -1,6 +1,6 @@
 # Payday
 
-Payday is a stablecoin payment gateway for merchants: create a payment through a small API or CLI, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle the full balance automatically. Partial payments accumulate, overpayments are forwarded, expired funds go to the refund address, and every observed transfer remains in an auditable PostgreSQL ledger.
+Payday is a stablecoin payment gateway for merchants: create an invoice through a small API or CLI, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically. Partial payments accumulate; overpayment remainders, expired balances, and late transfers go to the Payday recovery wallet, where they are recorded per invoice and returned after manual review; and every observed transfer remains in an auditable PostgreSQL ledger.
 
 ## 60-second local quickstart
 

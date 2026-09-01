@@ -149,9 +149,6 @@ pub struct CreateArgs {
     /// Exact expiry in RFC 3339 format.
     #[arg(long, conflicts_with = "expires_in")]
     pub expires_at: Option<String>,
-    /// Wallet for late or leftover funds; defaults to --to.
-    #[arg(long, alias = "refund")]
-    pub refund_to: Option<String>,
     /// Merchant-facing order reference.
     #[arg(long)]
     pub memo: Option<String>,
@@ -289,7 +286,26 @@ mod tests {
             panic!()
         };
         assert!(args.expires_in.is_none());
-        assert!(args.refund_to.is_none());
+    }
+
+    #[test]
+    fn merchants_can_no_longer_choose_the_recovery_wallet() {
+        for flag in ["--refund-to", "--refund"] {
+            assert!(
+                Cli::try_parse_from([
+                    "payday",
+                    "create",
+                    "--amount",
+                    "1",
+                    "--to",
+                    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                    flag,
+                    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+                ])
+                .is_err(),
+                "{flag} must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -12,8 +12,20 @@ route53_zone_id  = "Z0123456789EXAMPLE"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
 alarm_email      = "operator@example.com"
 chain_id         = 143
+# PaymentFactory and BatchSweeper are deployed together as one generation.
+# Record both addresses from the deployment script, then pin their runtime
+# bytecode: cast keccak "$(cast code <ADDRESS> --rpc-url "$MONAD_RPC_URL")".
+# Zero hashes must not be deployed; both services refuse to start on a mismatch.
 factory_address  = "0x0000000000000000000000000000000000000001"
 batch_sweeper_address = "0x0000000000000000000000000000000000000002"
+factory_code_hash       = "0x0000000000000000000000000000000000000000000000000000000000000000"
+batch_sweeper_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# Payday recovery wallet: the address of the recovery KMS key, derived with
+# `cast wallet address --aws` after the targeted apply that creates the key
+# (see the production runbook). There is no safe placeholder, because every
+# invoice commits this address into its payment address, so leave it unset
+# until then; the full apply refuses until it is set.
+# recovery_address = "0x<address of the recovery key>"
 usdc_address     = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
 explorer_base_url = "https://monadvision.com"
 # Set this to the current Monad block immediately before the first deployment;

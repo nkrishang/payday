@@ -29,14 +29,15 @@ For CI, set `PAYDAY_API_KEY` instead of running an interactive login.
 payday create \
   --amount 25.00 \
   --to 0x1111111111111111111111111111111111111111 \
-  --refund-to 0x2222222222222222222222222222222222222222 \
   --expires-in 1h \
   --memo 'Order 1042'
 ```
 
-- `--to` is the wallet that receives an on-time successful payment.
-- `--refund-to` receives expired, late, or post-settlement USDC. It defaults to
-  `--to` and is not an automatic refund to the payer.
+- `--to` is the wallet that receives exactly the invoice amount from an on-time
+  successful payment.
+- Overpayments, late transfers, and expired balances go to the Payday recovery
+  wallet. They are reviewed manually and returned by Payday; they are not sent
+  back to the payer automatically, and you cannot choose that wallet.
 - Expiry defaults to 24 hours. Use a duration such as `30m`, `24h`, or `7d`, or
   an RFC 3339 `--expires-at` value. The allowed window is 10 minutes to 366 days.
 - The deployment chooses the chain and exact Circle-issued native USDC contract.
@@ -64,7 +65,7 @@ remaining amount, network, exact token, one-time address, QR code, deadline, and
 live finalized status, and lets the payer pay from a connected wallet in the
 page. The link is deliberately open: anyone holding it can read the payment and
 fulfil it, which is what makes it shareable. It carries no merchant data — no
-payout address, refund address, memo, reference, or metadata.
+payout address, recovery address, memo, reference, or metadata.
 
 Track settlement in another terminal:
 

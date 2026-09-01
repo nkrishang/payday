@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use gateway_core::ChainId;
 
 pub struct Config {
@@ -12,6 +12,9 @@ pub struct Config {
     chain_id: ChainId,
     factory_address: Address,
     usdc_address: Address,
+    /// `None` only in status-only mode, which never issues invoices or reads
+    /// the chain, so it needs neither an RPC endpoint nor a recovery wallet.
+    settlement: Option<SettlementConfig>,
     public_base_url: String,
     explorer_base_url: Option<String>,
     api_key_prefix: String,
@@ -54,6 +57,28 @@ impl Config {
         let usdc_address = Address::from_str(&usdc_address)
             .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_ADDRESS '{usdc_address}': {e}"));
 
+        let settlement = (!status_only).then(|| {
+            let required =
+                |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+            SettlementConfig {
+                rpc_url: required("PAYDAY_RPC_URL"),
+                recovery_address: parse_recovery_address(&required("PAYDAY_RECOVERY_ADDRESS"))
+                    .unwrap_or_else(|message| panic!("{message}")),
+                batch_sweeper_address: Address::from_str(&required("PAYDAY_BATCH_SWEEPER_ADDRESS"))
+                    .unwrap_or_else(|e| panic!("invalid PAYDAY_BATCH_SWEEPER_ADDRESS: {e}")),
+                factory_code_hash: parse_code_hash(
+                    "PAYDAY_FACTORY_CODE_HASH",
+                    &required("PAYDAY_FACTORY_CODE_HASH"),
+                )
+                .unwrap_or_else(|message| panic!("{message}")),
+                batch_sweeper_code_hash: parse_code_hash(
+                    "PAYDAY_BATCH_SWEEPER_CODE_HASH",
+                    &required("PAYDAY_BATCH_SWEEPER_CODE_HASH"),
+                )
+                .unwrap_or_else(|message| panic!("{message}")),
+            }
+        });
+
         let api_key_prefix =
             std::env::var("PAYDAY_API_KEY_PREFIX").unwrap_or_else(|_| "payday_live_".into());
         validate_api_key_prefix(&api_key_prefix).unwrap_or_else(|message| panic!("{message}"));
@@ -75,6 +100,7 @@ impl Config {
             chain_id: ChainId(chain_id),
             factory_address,
             usdc_address,
+            settlement,
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
             explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
@@ -123,6 +149,11 @@ impl Config {
         self.usdc_address
     }
 
+    /// The chain deployment and recovery wallet; absent in status-only mode.
+    pub fn settlement(&self) -> Option<&SettlementConfig> {
+        self.settlement.as_ref()
+    }
+
     pub fn public_base_url(&self) -> &str {
         &self.public_base_url
     }
@@ -142,6 +173,24 @@ impl Config {
     pub fn notification_from_address(&self) -> Option<&str> {
         self.notification_from_address.as_deref()
     }
+}
+
+/// Payday's custodial recovery wallet. It is committed into every payment
+/// address, so a zero address would burn every overpayment and expired balance.
+fn parse_recovery_address(value: &str) -> Result<Address, String> {
+    let address = Address::from_str(value)
+        .map_err(|e| format!("invalid PAYDAY_RECOVERY_ADDRESS '{value}': {e}"))?;
+    if address.is_zero() {
+        return Err("PAYDAY_RECOVERY_ADDRESS must not be the zero address".into());
+    }
+    Ok(address)
+}
+
+/// keccak256 of the runtime bytecode `eth_getCode` returns for a contract,
+/// as `cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"` prints it.
+fn parse_code_hash(name: &str, value: &str) -> Result<B256, String> {
+    B256::from_str(value)
+        .map_err(|e| format!("invalid {name} '{value}': expected 0x-prefixed 32-byte hex: {e}"))
 }
 
 fn validate_api_key_prefix(value: &str) -> Result<(), &'static str> {
@@ -167,9 +216,47 @@ pub struct Auth0Config {
     pub client_id: String,
 }
 
+/// The contracts this build must find on the chain and the platform recovery
+/// wallet it stamps on every invoice.
+pub struct SettlementConfig {
+    pub rpc_url: String,
+    pub recovery_address: Address,
+    pub batch_sweeper_address: Address,
+    pub factory_code_hash: B256,
+    pub batch_sweeper_code_hash: B256,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_address_must_be_a_nonzero_evm_address() {
+        assert_eq!(
+            parse_recovery_address("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc").unwrap(),
+            Address::from_str("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc").unwrap()
+        );
+        assert!(
+            parse_recovery_address("0x0000000000000000000000000000000000000000")
+                .unwrap_err()
+                .contains("zero address")
+        );
+        assert!(parse_recovery_address("not-an-address").is_err());
+        assert!(parse_recovery_address("").is_err());
+    }
+
+    #[test]
+    fn code_hashes_are_0x_prefixed_32_byte_hex() {
+        let hash = "0x".to_string() + &"ab".repeat(32);
+        assert_eq!(
+            parse_code_hash("PAYDAY_FACTORY_CODE_HASH", &hash).unwrap(),
+            B256::repeat_byte(0xab)
+        );
+        let error = parse_code_hash("PAYDAY_FACTORY_CODE_HASH", "0xabcd").unwrap_err();
+        assert!(error.contains("PAYDAY_FACTORY_CODE_HASH"));
+        assert!(parse_code_hash("PAYDAY_BATCH_SWEEPER_CODE_HASH", "").is_err());
+        assert!(parse_code_hash("PAYDAY_BATCH_SWEEPER_CODE_HASH", &"zz".repeat(32)).is_err());
+    }
 
     #[test]
     fn accepts_only_supported_api_key_prefixes() {

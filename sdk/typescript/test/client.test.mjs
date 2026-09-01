@@ -17,7 +17,7 @@ test("create sends bearer auth, JSON, and the caller's idempotency key", async (
   }));
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test/", fetch: mock.fetch });
   const input = {
-    amount: "10.00", payout_address: "0x1", refund_address: "0x2", expires_in: 3600,
+    amount: "10.00", payout_address: "0x1", expires_in: 3600,
   };
 
   const payment = await client.payments.create(input, "order-123");
@@ -30,11 +30,26 @@ test("create sends bearer auth, JSON, and the caller's idempotency key", async (
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), input);
 });
 
+test("create never sends a refund address, because recovery is Payday's", async () => {
+  const mock = mockFetch(() => new Response(JSON.stringify({ id: "pay_1", status: "awaiting_payment" }), {
+    status: 201, headers: { "content-type": "application/json" },
+  }));
+  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+
+  await client.payments.create({ amount: "10.00", payout_address: "0x1", expires_in: 3600 }, "order-123");
+
+  // The API rejects the field outright, so the exact payload on the wire is
+  // what matters — not the type the caller was offered.
+  const sent = JSON.parse(mock.calls[0].init.body);
+  assert.equal("refund_address" in sent, false);
+  assert.deepEqual(Object.keys(sent).sort(), ["amount", "expires_in", "payout_address"]);
+});
+
 test("create rejects a missing idempotency key before fetch", () => {
   const mock = mockFetch(() => { throw new Error("must not fetch"); });
   const client = new PaydayClient({ apiKey: "secret", fetch: mock.fetch });
   assert.throws(() => client.payments.create({
-    amount: "1", payout_address: "0x1", refund_address: "0x2", expires_in: 60,
+    amount: "1", payout_address: "0x1", expires_in: 60,
   }, ""), /idempotencyKey is required/);
   assert.equal(mock.calls.length, 0);
 });

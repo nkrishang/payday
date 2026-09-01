@@ -179,8 +179,7 @@ load the saved profile automatically:
   --token <USDC_ADDRESS> \
   --payout <PAYOUT_ADDRESS> \
   --amount 1.00 \
-  --expires-in 3600 \
-  --refund <REFUND_ADDRESS>
+  --expires-in 3600
 ./target/debug/payday get <PAYMENT_ID>
 ```
 

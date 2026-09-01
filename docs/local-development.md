@@ -11,13 +11,22 @@ amount, or to `expired` when the finalized block timestamp passes the deadline.
 
 The sweep worker submits batches to `BatchSweeper`. For an address without
 code it calls `PaymentFactory.execute`, which deploys `Payment` at the
-counterfactual address; the constructor pays the beneficiary before expiry or
-the recovery address after it. For an address that already has code it calls
-`Payment.recover`, which forwards anything that arrived later to the recovery
-address. The finalized receipt decides the outcome: `Settled` → `fulfilled`,
-`Recovered` → `recovered`, `SweepRecovered` → late funds collected, and
-`SweepFailed` → retried or `blocked` after reading `paused()`,
-`isBlacklisted()`, and `balanceOf()` on the token.
+counterfactual address; before expiry the constructor pays the beneficiary
+exactly the invoice amount and sends any remainder to the Payday recovery
+wallet, and after expiry it sends the whole balance to that wallet. For an
+address that already has code it calls `Payment.recover`, which forwards
+anything that arrived later to the recovery wallet. The finalized receipt
+decides the outcome: `Settled` → `fulfilled` (with a `Recovered` remainder
+when overpaid), standalone `Recovered` → `recovered`, `SweepRecovered` → late
+funds collected, and `SweepFailed` → retried or `blocked` after reading
+`paused()`, `isBlacklisted()`, and `balanceOf()` on the token. Every nonzero
+recovery is written to the `recovered_funds` ledger in the transaction that
+resolves the batch, and each ledger row raises a `payment.recovered_funds`
+webhook.
+
+The recovery wallet is platform-controlled: `gatewayd` stamps
+`PAYDAY_RECOVERY_ADDRESS` on every invoice and rejects a create request that
+carries `refund_address`.
 
 ```
 created → funded → deploying → fulfilled
@@ -79,7 +88,11 @@ just seed
 
 The one-time code is printed in the `[identity]` log and the CLI saves the
 issued key in its local profile. Each run starts from a clean database and
-Anvil chain so their indexed histories cannot drift.
+Anvil chain so their indexed histories cannot drift. After the bootstrap
+deploys the contracts, the runner reads their runtime bytecode from the chain
+and exports `PAYDAY_FACTORY_CODE_HASH` and `PAYDAY_BATCH_SWEEPER_CODE_HASH`
+from it (overriding any `.env` value), because both services verify the
+deployed contract generation at startup and refuse to start on a mismatch.
 
 To open a created payment, run the hosted checkout in a third shell:
 
@@ -96,10 +109,12 @@ points at, so the `payment_url` the CLI prints opens the real checkout. Port
 
 ## Local Anvil end-to-end run
 
-`scripts/e2e-anvil.sh` runs the complete flow (exact, partial, overpaid, and
-batched payments; late transfers; third-party execution; a paused token; a
-blacklisted beneficiary and its operator release; an expired partial payment
-recovered automatically and completed late) against a fresh Anvil started with
+`scripts/e2e-anvil.sh` runs the complete flow (exact, partial, and batched
+payments; an overpayment split between the beneficiary and the Payday recovery
+wallet; late transfers; third-party execution; a paused token; a blacklisted
+beneficiary and its operator release; an expired partial payment recovered
+automatically and completed late; the `recovered_funds` ledger and its
+webhook events) against a fresh Anvil started with
 `--slots-in-an-epoch 1 --block-time 1`, which makes the node's
 `finalized` tag advance like a real chain. Use it whenever the contracts or
 the worker change:
@@ -121,7 +136,9 @@ anvil --chain-id 31337 --slots-in-an-epoch 1 --mixed-mining --block-time 1
 
 Run against a fresh Anvil. The script is safe to repeat on the same node, but
 it will not redeploy changed contract code over existing addresses: restart
-Anvil after editing a contract.
+Anvil after editing a contract, and recompute the code hashes below, because
+the services refuse to start against a generation that differs from the one
+they were configured for.
 
 ```bash
 forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
@@ -136,13 +153,23 @@ It deploys:
 - `MockUSDC`: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
 - `BatchSweeper`: `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`
 
-Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
+Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC. Account #5,
+`0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc`, is the local Payday recovery
+wallet (`PAYDAY_RECOVERY_ADDRESS`).
+
+Pin the deployed generation for both services (the runner does this for you):
+
+```bash
+export PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$(cast code 0x5FbDB2315678afecb367f032d93F642f64180aa3 --rpc-url http://127.0.0.1:8545)")"
+export PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$(cast code 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 --rpc-url http://127.0.0.1:8545)")"
+```
 
 ### 3. Build and start the services manually
 
-Ensure `.env` contains the local addresses, database URL, RPC URL, finality
-settings, start block, signer key, and identity settings. Start the identity
-provider:
+Ensure `.env` contains the local addresses, recovery address, database URL,
+RPC URL, finality settings, start block, signer key, and identity settings, and
+that the two code hashes above are exported (the `.env.example` placeholders
+are zero and will be refused). Start the identity provider:
 
 ```bash
 cargo build --workspace
@@ -179,9 +206,11 @@ Expirations must be at least ten minutes and at most a year ahead.
   --token 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --payout 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --expires-in 3600 \
-  --refund 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
   --amount 1.5
 ```
+
+The response's `recovery_address` is the configured Payday recovery wallet;
+there is no flag to choose it.
 
 Copy `id` and `address` from the response, then transfer 1.5 USDC
 (`1500000` atomic units):
@@ -216,8 +245,10 @@ forge test
 just web-check   # SDK and web app: build, types, lint, unit tests
 ```
 
-Coverage includes exact, partial, and overpayment funding; finality-tag and
-confirmation gating; multi-range draining; range replay idempotency; chain
+Coverage includes exact, partial, and overpayment funding; the overpayment
+split between beneficiary and recovery and the `recovered_funds` ledger;
+deployment code-hash and bound-factory verification at startup; finality-tag
+and confirmation gating; multi-range draining; range replay idempotency; chain
 isolation; expiry by block timestamp; settlement, recovery, third-party
 execution, and late-fund collection through finalized receipts; failure
 classification (paused, blacklisted, underfunded, unknown); same-nonce fee
@@ -238,6 +269,15 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`
+- `PAYDAY_FACTORY_CODE_HASH`, `PAYDAY_BATCH_SWEEPER_CODE_HASH` — keccak256 of
+  the runtime bytecode at the two addresses
+  (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both services
+  compare them with the live chain at startup, also checking that
+  `BatchSweeper.factory()` is `PAYDAY_FACTORY_ADDRESS`, and refuse to start on
+  a mismatch. `just dev` and `just e2e` compute them from the running chain
+- `PAYDAY_RECOVERY_ADDRESS` — the Payday recovery wallet `gatewayd` stamps on
+  every invoice; a nonzero address, Anvil account #5 locally, the recovery KMS
+  key's address in production
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
   payment links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
@@ -247,7 +287,10 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   Monad uses `https://monadvision.com`, while Anvil leaves it unset
 - `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
   fresh database (the current block at first deployment)
-- `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
+- `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally; read by
+  both services (`gatewayd` uses it for deployment verification and skips it,
+  along with the recovery address and code hashes, when
+  `PAYDAY_STATUS_ONLY=true`)
 - `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
   or `latest`
 - `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality

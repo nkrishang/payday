@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use gateway_core::{
     Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentAddress, PaymentResponse,
-    PaymentStatus, RecoveryAddress, TokenAddress, USDC_DECIMALS, payment_id, resolve_expiration,
+    PaymentStatus, TokenAddress, USDC_DECIMALS, payment_id, resolve_expiration,
 };
 use uuid::Uuid;
 
@@ -500,10 +500,6 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentRespo
     }
     BeneficiaryAddress::from_str(&args.to)
         .map_err(|error| CliError::InvalidInput(format!("Payout address {error}")))?;
-    if let Some(refund) = &args.refund_to {
-        RecoveryAddress::from_str(refund)
-            .map_err(|error| CliError::InvalidInput(format!("Refund address {error}")))?;
-    }
     if let Some(token) = &args.token {
         TokenAddress::from_str(token)
             .map_err(|error| CliError::InvalidInput(format!("Token address {error}")))?;
@@ -527,14 +523,15 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentRespo
     let idempotency_key = args
         .idempotency_key
         .unwrap_or_else(|| Uuid::now_v7().to_string());
+    // Recovery is Payday's wallet, configured by the platform; there is
+    // nothing for the merchant to send.
     let req = CreatePaymentRequest {
         chain_id: args.chain_id.map(|value| value.to_string()),
         token_address: args.token,
-        payout_address: args.to.clone(),
+        payout_address: args.to,
         amount: args.amount,
         expires_in,
         expires_at: args.expires_at,
-        refund_address: Some(args.refund_to.unwrap_or(args.to)),
         memo: args.memo,
         reference: None,
         metadata: serde_json::json!({}),

@@ -23,30 +23,117 @@ contract PaymentTest is Test {
         factory = new PaymentFactory();
     }
 
-    function test_payment_usdc(address sender, address receiver, uint96 invoiceAmount, uint96 overpayment, bytes32 salt)
-        public
-    {
-        vm.assume(invoiceAmount > 0);
-        vm.assume(uint160(sender) > uint160(0x11) && uint160(receiver) > uint160(0x11));
-        assumeNotForgeAddress(sender);
-        assumeNotForgeAddress(receiver);
-
-        uint256 paid = uint256(invoiceAmount) + overpayment;
-        uint64 expirationTimestamp = uint64(block.timestamp + 1 days);
-        address paymentAddress =
-            factory.paymentAddress(address(token), invoiceAmount, receiver, expirationTimestamp, RECOVERY, salt);
-        token.mint(sender, paid);
-        vm.prank(sender);
-        assertTrue(token.transfer(paymentAddress, paid));
+    function test_exact_funding_settles_invoice_amount() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 1);
+        token.mint(paymentAddress, 10e6);
 
         vm.expectEmit(true, true, true, true, paymentAddress);
-        emit Settled(receiver, paid);
-        factory.execute(address(token), invoiceAmount, receiver, expirationTimestamp, RECOVERY, salt);
+        emit Settled(RECEIVER, 10e6);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
 
-        assertEq(token.balanceOf(receiver), paid, "beneficiary receives full balance");
-        assertEq(token.balanceOf(paymentAddress), 0, "overpayment must not be stranded");
+        assertEq(token.balanceOf(RECEIVER), 10e6);
+        assertEq(token.balanceOf(RECOVERY), 0);
+        assertEq(token.balanceOf(paymentAddress), 0);
         assertGt(paymentAddress.code.length, 0);
         assertTrue(Payment(paymentAddress).settled(), "deployment must record that the receiver was paid");
+    }
+
+    /// @notice The receiver takes exactly the invoice amount; the overpayment is
+    /// Payday custody and leaves for the recovery wallet in the same deployment.
+    function test_overpayment_splits_receiver_and_recovery() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 2);
+        token.mint(paymentAddress, 12e6);
+
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit Settled(RECEIVER, 10e6);
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit Recovered(RECOVERY, 2e6);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+
+        assertEq(token.balanceOf(RECEIVER), 10e6);
+        assertEq(token.balanceOf(RECOVERY), 2e6);
+        assertEq(token.balanceOf(paymentAddress), 0);
+        assertTrue(Payment(paymentAddress).settled(), "an overpaid deployment still records that the receiver was paid");
+    }
+
+    function testFuzz_overpayment_remainder_always_goes_to_recovery(uint96 invoiceAmount, uint96 overpayment) public {
+        uint256 amount = bound(invoiceAmount, 1, type(uint96).max);
+        uint256 remainder = bound(overpayment, 1, type(uint96).max);
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(amount, 3);
+        token.mint(paymentAddress, amount + remainder);
+
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit Settled(RECEIVER, amount);
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit Recovered(RECOVERY, remainder);
+        factory.execute(address(token), amount, RECEIVER, expirationTimestamp, RECOVERY, salt);
+
+        assertEq(token.balanceOf(RECEIVER), amount, "the receiver never takes more than the invoice amount");
+        assertEq(token.balanceOf(RECOVERY), remainder, "every unit above the invoice amount is recovered");
+        assertEq(token.balanceOf(paymentAddress), 0);
+    }
+
+    function test_underfunded_live_deployment_reverts() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 4);
+        token.mint(paymentAddress, 10e6 - 1);
+
+        vm.expectRevert(CREATE3.DeploymentFailed.selector);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+
+        assertEq(paymentAddress.code.length, 0, "a failed deployment must leave the address usable for the invoice");
+        assertEq(token.balanceOf(paymentAddress), 10e6 - 1, "a partial payment stays put until completed or expired");
+        assertEq(token.balanceOf(RECEIVER), 0);
+        assertEq(token.balanceOf(RECOVERY), 0);
+    }
+
+    /// @notice CREATE3 discards constructor revert data, so deploy directly to
+    /// pin the custom error and the balances it reports.
+    function test_underfunded_deployment_reverts_with_insufficient_token_balance() public {
+        uint64 expirationTimestamp = uint64(block.timestamp + 1 hours);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        token.mint(predicted, 10e6 - 1);
+
+        vm.expectRevert(abi.encodeWithSelector(Payment.InsufficientTokenBalance.selector, 10e6 - 1, 10e6));
+        new Payment(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY);
+
+        assertEq(predicted.code.length, 0);
+        assertEq(token.balanceOf(predicted), 10e6 - 1, "a partial payment stays put until completed or expired");
+    }
+
+    function test_zero_remainder_emits_no_recovered_event() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 5);
+        token.mint(paymentAddress, 10e6);
+
+        vm.recordLogs();
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        // The token logs its own transfers, so only count what the Payment emitted.
+        uint256 paymentLogs;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != paymentAddress) continue;
+            paymentLogs++;
+            assertEq(logs[i].topics[0], Settled.selector, "an exact payment must only report settlement");
+        }
+        assertEq(paymentLogs, 1, "an exact payment must emit exactly one event");
+        assertEq(token.balanceOf(RECOVERY), 0);
+    }
+
+    /// @notice Both legs of an overpaid settlement clear together: when the
+    /// recovery wallet cannot take the remainder, the receiver is not paid
+    /// either and the address stays usable for a later attempt.
+    function test_overpayment_reverts_atomically_when_recovery_transfer_fails() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 6);
+        token.mint(paymentAddress, 12e6);
+        token.setBlacklisted(RECOVERY, true);
+
+        vm.expectRevert(CREATE3.DeploymentFailed.selector);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+
+        assertEq(token.balanceOf(RECEIVER), 0, "the receiver leg must roll back with the recovery leg");
+        assertEq(token.balanceOf(RECOVERY), 0);
+        assertEq(token.balanceOf(paymentAddress), 12e6, "the full balance stays at the address");
+        assertEq(paymentAddress.code.length, 0);
     }
 
     /// @notice End-to-end recovery: derive, pre-fund, expire, deploy through the
@@ -64,7 +151,35 @@ contract PaymentTest is Test {
         assertEq(token.balanceOf(RECOVERY), 4e6);
         assertEq(token.balanceOf(paymentAddress), 0);
         assertGt(paymentAddress.code.length, 0);
-        assertFalse(Payment(paymentAddress).settled(), "deployment must record that the recovery address was paid");
+        assertFalse(Payment(paymentAddress).settled(), "deployment must record that the recovery wallet was paid");
+    }
+
+    /// @notice Expiry is decided before funding: a fully funded, even overpaid,
+    /// expired deployment pays the receiver nothing and recovers everything.
+    function test_expired_fully_funded_deployment_recovers_everything() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 7);
+        token.mint(paymentAddress, 12e6);
+
+        vm.warp(expirationTimestamp + 1);
+        vm.recordLogs();
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        // The token logs its own transfers, so only count what the Payment emitted.
+        uint256 paymentLogs;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != paymentAddress) continue;
+            paymentLogs++;
+            assertEq(logs[i].topics[0], Recovered.selector, "an expired deployment must never report settlement");
+            assertEq(logs[i].topics[1], bytes32(uint256(uint160(RECOVERY))));
+            assertEq(abi.decode(logs[i].data, (uint256)), 12e6, "the whole balance is recovered, not a remainder");
+        }
+        assertEq(paymentLogs, 1, "an expired deployment must emit exactly one event");
+
+        assertEq(token.balanceOf(RECEIVER), 0, "the receiver is never paid after expiry");
+        assertEq(token.balanceOf(RECOVERY), 12e6);
+        assertEq(token.balanceOf(paymentAddress), 0);
+        assertFalse(Payment(paymentAddress).settled(), "deployment must record that the recovery wallet was paid");
     }
 
     function test_expiration_boundary_still_pays_beneficiary() public {
@@ -86,7 +201,7 @@ contract PaymentTest is Test {
         assertEq(token.balanceOf(RECEIVER), 10e6);
 
         // A repeat payment after settlement can no longer reach the receiver;
-        // anyone may forward it to the invoice's recovery address.
+        // anyone may forward it to the Payday recovery wallet.
         token.mint(paymentAddress, 3e6);
         vm.expectEmit(true, true, true, true, paymentAddress);
         emit Recovered(RECOVERY, 3e6);
