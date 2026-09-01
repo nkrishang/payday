@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers. The project is currently
 pre-release software; the `0.1.0` version does not imply a stable public API.
 
+## [Unreleased]
+
+### Added
+
+- A `payday.sh` web project (`web/`): a landing page and the hosted checkout at
+  `/pay/{id}`, built with Next.js, Tailwind, and wagmi. The checkout is
+  server-rendered, so it arrives complete, and a payer can pay from a connected
+  wallet, a scanned QR, or a copied address.
+- `PaydayPayerClient` in the TypeScript SDK — a keyless client for the public
+  payer routes, so a merchant can build a checkout of their own.
+- `Access-Control-Allow-Origin: *` on `GET /v1/payer/payments/{id}` and its
+  `/qr`. No other route allows cross-origin reads.
+- A `checkout_base_url` Terraform variable naming the origin that serves the
+  checkout, which is where every `payment_url` points.
+
+### Changed
+
+- The payer link is tokenless and unauthenticated. Anyone holding it may read
+  the payment and fulfil it, which is what makes it shareable; it exposes no
+  payout address, refund address, memo, reference, or metadata. Documentation
+  that still described a signed token has been corrected.
+- `GET /pay/{id}` on the gateway now answers `301` to the hosted checkout, so
+  links shared before it moved keep working.
+- Payments are looked up by their complete ID or payment address; ID prefixes
+  are no longer accepted.
+
+### Removed
+
+- The placeholder checkout that was compiled into the gateway binary, along with
+  its `/assets/payer.*` routes.
+
 ### Documentation
 
 - Added a customer [quickstart](docs/quickstart.md),
@@ -20,7 +51,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - Authenticated creation, listing, filtering, pagination, cancellation, and
   account-scoped lookup of single-use USDC payments by ID, prefix, or address.
 - Merchant references and metadata, finalized transfer provenance, indexer
-  freshness, explorer links, long polling, and signed hosted payer checkouts.
+  freshness, explorer links, long polling, and hosted payer checkouts.
 - Signed lifecycle webhooks with test events, delivery/attempt visibility,
   SSRF-resistant endpoints, and durable retries.
 - Support for one configured EVM chain and its exact Circle native-USDC proxy

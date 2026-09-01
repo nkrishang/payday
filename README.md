@@ -22,6 +22,20 @@ cargo install --path crates/gateway-cli --locked
 
 The CLI provides polished login, payment creation and tracking, payer links, account-key management, and webhook operations. Local credentials are saved under a separate profile; production login uses Auth0. See [Install](docs/install.md) and [Authentication and API keys](docs/authentication.md).
 
+## Web
+
+`payday.sh` — the landing page and the hosted checkout at `/pay/{id}` — lives in
+[`web/`](web/). It is a Next.js app that consumes Payday's own public payer API
+through `@payday/sdk`, and it is where every `payment_url` points. Run it beside
+the local stack:
+
+```bash
+npm ci
+just web
+```
+
+See [web/README.md](web/README.md).
+
 ## Documentation
 
 - [Customer quickstart](docs/quickstart.md)

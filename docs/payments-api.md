@@ -24,9 +24,15 @@ on-chain transfers.
 Every payment includes a `payment_url` that can be shared directly with
 the payer. Its checkout page shows the remaining amount, a copyable one-time
 address, an EIP-681 wallet request and QR code, a server-clock countdown, and
-live finalized status. Treat the full URL as sensitive: its token grants read
-access to that payment until 30 days after expiry. Address, settlement, and
-transfer explorer URLs are included when the configured chain has an explorer.
+live finalized status, and can send the transfer from a connected wallet.
+Address, settlement, and transfer explorer URLs are included when the configured
+chain has an explorer.
+
+The link is unauthenticated by design — anyone holding it may read the payment
+and pay it. `GET /v1/payer/payments/{id}` and its `/qr` accept no API key,
+return no merchant data, and send `Access-Control-Allow-Origin: *`, so a
+merchant can build a checkout of their own against them. Reproduce the guidance
+in [Payment safety](payment-safety.md) if you do.
 
 `GET /v1/payments` accepts `status`, `reference`, `starting_after`, and `limit`.
 `GET /v1/payments/{id}/transfers` returns finalized transfer provenance.

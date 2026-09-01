@@ -1,5 +1,9 @@
+use std::time::Duration;
+
+use axum::http::Method;
 use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing::field;
@@ -53,13 +57,25 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/payments/{id}/release", post(admin::release))
         .route_layer(middleware::from_fn(auth::require_admin));
 
+    // A payment link is public by design: anyone holding it may read the payment
+    // and fulfil it. These routes accept no API key and return no merchant data,
+    // so allowing any browser origin grants exactly what curl already has — and
+    // it is what lets a merchant render their own checkout, as the docs invite.
+    // This must never be extended to the API-key routes.
+    let payer = Router::new()
+        .route("/v1/payer/payments/{id}", get(payer::get))
+        .route("/v1/payer/payments/{id}/qr", get(payer::qr))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::HEAD])
+                .max_age(Duration::from_secs(86_400)),
+        );
+
     Router::new()
         .route("/health", get(health::health))
         .route("/pay/{id}", get(payer::page))
-        .route("/assets/payer.css", get(payer::css))
-        .route("/assets/payer.js", get(payer::js))
-        .route("/v1/payer/payments/{id}", get(payer::get))
-        .route("/v1/payer/payments/{id}/qr", get(payer::qr))
+        .merge(payer)
         .route("/openapi.json", get(openapi::spec))
         .route("/docs", get(openapi::reference))
         .route("/api", get(openapi::reference))
@@ -179,11 +195,7 @@ mod tests {
     }
 
     fn payer_access() -> payer::PayerAccess {
-        payer::PayerAccess::new(
-            "http://127.0.0.1:3000",
-            None,
-        )
-        .unwrap()
+        payer::PayerAccess::new("http://127.0.0.1:3000", None).unwrap()
     }
 
     fn unix_now() -> u64 {
@@ -714,6 +726,8 @@ mod tests {
         assert!(!payment_url.contains("token"));
         assert!(payment_url.ends_with(&format!("/pay/{id}")));
 
+        // The checkout is hosted at PAYDAY_PUBLIC_BASE_URL, so this service only
+        // forwards the link that merchants have already shared.
         let page = app
             .clone()
             .oneshot(
@@ -723,14 +737,38 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(page.status(), StatusCode::OK);
-        assert_eq!(page.headers()[header::REFERRER_POLICY], "no-referrer");
-        assert!(
-            page.headers()[header::CACHE_CONTROL]
-                .to_str()
-                .unwrap()
-                .starts_with("public")
+        assert_eq!(page.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            page.headers()[header::LOCATION],
+            format!("http://127.0.0.1:3000/pay/{id}").as_str()
         );
+        assert_eq!(page.headers()[header::REFERRER_POLICY], "no-referrer");
+
+        // An id that is not a payment must not reach the Location header.
+        let bogus = app
+            .clone()
+            .oneshot(
+                Request::get("/pay/https:%2F%2Fevil.test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bogus.status(), StatusCode::UNAUTHORIZED);
+        assert!(!bogus.headers().contains_key(header::LOCATION));
+
+        // Browsers on the checkout origin read these routes directly.
+        let cors = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/payer/payments/{id}"))
+                    .header(header::ORIGIN, "https://payday.sh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cors.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
 
         let status = app
             .clone()

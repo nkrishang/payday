@@ -166,12 +166,17 @@ loopback, link-local, or reserved targets are rejected. See
 
 ## Payer links and documentation
 
-The `payment_url` opens `GET /pay/{id}`. Its page reads payment data from
-`GET /v1/payer/payments/{id}` and QR SVG from
-`GET /v1/payer/payments/{id}/qr`. These routes do not accept account API
-keys. JSON responses use
+The `payment_url` points at the hosted checkout, whose origin is
+`PAYDAY_PUBLIC_BASE_URL`. This service answers its own `GET /pay/{id}` with a
+`301` to that origin so links shared earlier keep working.
+
+The checkout reads payment data from `GET /v1/payer/payments/{id}` and QR SVG
+from `GET /v1/payer/payments/{id}/qr`. These routes are unauthenticated, accept
+no account API key, and expose no merchant data. JSON responses use
 `Cache-Control: no-store`, and QR requests return `410 payment_not_payable` once
-the address should no longer be presented.
+the address should no longer be presented. Both send
+`Access-Control-Allow-Origin: *` for `GET`, so a browser on any origin can build
+a checkout against them; no other route allows cross-origin reads.
 
 ## Stable error codes
 
@@ -191,7 +196,7 @@ the address should no longer be presented.
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
 | `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
 | `payment_not_found` | 404 | Missing or cross-account payment |
-| `invalid_payment_link` | 401 | Payer token invalid, mismatched, or expired |
+| `invalid_payment_link` | 401 | Payment link does not resolve to a payment |
 | `payment_not_payable` | 410 | QR/payment request is no longer available |
 | `rate_limited` | 429 | Per-account allowance exhausted |
 | `database_unavailable` | 503 | Persistent storage unavailable |

@@ -1,6 +1,11 @@
 data "aws_availability_zones" "available" { state = "available" }
 
 locals {
+  # Payer links point at the hosted checkout. gatewayd validates this as a bare
+  # HTTPS origin and redirects its own /pay/{id} to it, so links shared before
+  # the checkout moved keep working.
+  checkout_base_url = var.checkout_base_url != "" ? var.checkout_base_url : "https://${var.payment_domain_name}"
+
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
   certificate_validation_zone_ids = {
     (var.domain_name)         = var.route53_zone_id
@@ -322,7 +327,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_AUTH0_AUDIENCE", value = var.auth0_audience },
       { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id },
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
-      { name = "PAYDAY_PUBLIC_BASE_URL", value = "https://${var.payment_domain_name}" },
+      { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address }

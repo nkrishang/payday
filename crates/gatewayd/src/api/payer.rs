@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use alloy_primitives::{B256, U256};
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, header};
-use axum::response::{Html, IntoResponse, Response};
-use gateway_core::{Invoice, InvoiceStatus, PayerPaymentResponse, PaymentResponse};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use gateway_core::{Invoice, InvoiceId, InvoiceStatus, PayerPaymentResponse, PaymentResponse};
 use qrcode::{QrCode, render::svg};
 use uuid::Uuid;
 
@@ -34,11 +34,14 @@ impl PayerAccess {
         })
     }
 
+    /// Link to the hosted checkout for one payment. Its origin is a different
+    /// service, so this is the one place that knows where the checkout lives.
+    pub fn checkout_url(&self, id: &InvoiceId) -> String {
+        format!("{}/pay/{id}", self.public_base_url)
+    }
+
     pub fn payment_url(&self, invoice: &Invoice) -> Result<String, ApiError> {
-        Ok(format!(
-            "{}/pay/{}",
-            self.public_base_url, invoice.id
-        ))
+        Ok(self.checkout_url(&invoice.id))
     }
 
     pub fn address_url(&self, address: &str) -> Option<String> {
@@ -140,14 +143,17 @@ fn payer_response(
     }
 }
 
+fn parse_invoice_id(id: &str) -> Result<Uuid, ApiError> {
+    id.strip_prefix("pay_")
+        .and_then(|value| Uuid::from_str(value).ok())
+        .ok_or_else(ApiError::payer_unauthorized)
+}
+
 async fn authorized_invoice(
     state: &AppState,
     id: &str,
 ) -> Result<(Invoice, Option<String>), ApiError> {
-    let uuid = id
-        .strip_prefix("pay_")
-        .and_then(|value| Uuid::from_str(value).ok())
-        .ok_or_else(ApiError::payer_unauthorized)?;
+    let uuid = parse_invoice_id(id)?;
     let row = state
         .repo
         .find_by_id(uuid)
@@ -207,42 +213,34 @@ pub async fn qr(
         .into_response())
 }
 
-pub async fn page() -> impl IntoResponse {
-    (
+/// Permanently redirect a payer link to the hosted checkout.
+///
+/// The checkout is served from `PAYDAY_PUBLIC_BASE_URL`, which is a different
+/// origin from this service, so every link ever shared keeps working after the
+/// page moved. The id is parsed strictly before it is interpolated: without
+/// that check an arbitrary path segment would end up in a `Location` header.
+pub async fn page(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let location = state.payer.checkout_url(&InvoiceId(parse_invoice_id(&id)?));
+    let location =
+        HeaderValue::from_str(&location).map_err(|_| ApiError::internal("invalid payer link"))?;
+    Ok((
+        StatusCode::MOVED_PERMANENTLY,
         [
+            (header::LOCATION, location),
             (
                 header::CACHE_CONTROL,
-                "public, max-age=300, stale-while-revalidate=86400",
+                HeaderValue::from_static("public, max-age=3600"),
             ),
-            (header::REFERRER_POLICY, "no-referrer"),
-            (header::X_FRAME_OPTIONS, "DENY"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+                header::REFERRER_POLICY,
+                HeaderValue::from_static("no-referrer"),
             ),
         ],
-        Html(include_str!("payer.html")),
     )
-}
-
-pub async fn css() -> impl IntoResponse {
-    asset("text/css; charset=utf-8", include_str!("payer.css"))
-}
-
-pub async fn js() -> impl IntoResponse {
-    asset("text/javascript; charset=utf-8", include_str!("payer.js"))
-}
-
-fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        body,
-    )
+        .into_response())
 }
 
 #[cfg(test)]

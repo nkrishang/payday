@@ -61,6 +61,7 @@ skipped.
 
 - Rust, Foundry (`anvil`, `cast`, `forge`), Docker, `just`, the PostgreSQL
   client, and `jq`.
+- Node.js 20 or newer, for the TypeScript SDK and the `payday.sh` web app.
 
 Copy `.env.example` to `.env` if you want to override the checked-in local
 defaults. Start PostgreSQL, Anvil, the development identity provider,
@@ -79,6 +80,19 @@ just seed
 The one-time code is printed in the `[identity]` log and the CLI saves the
 issued key in its local profile. Each run starts from a clean database and
 Anvil chain so their indexed histories cannot drift.
+
+To open a created payment, run the hosted checkout in a third shell:
+
+```bash
+npm ci
+cp web/.env.example web/.env.local
+just web
+```
+
+It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
+points at, so the `payment_url` the CLI prints opens the real checkout. Port
+3002 rather than 3001, which belongs to the development identity provider. See
+[web/README.md](../web/README.md).
 
 ## Local Anvil end-to-end run
 
@@ -199,6 +213,7 @@ cast call <payment_address> 'settled()(bool)' --rpc-url http://127.0.0.1:8545
 DATABASE_URL=postgresql:///gateway?user="$USER" cargo test --workspace
 cargo build -p gateway-core --bin derive-address
 forge test
+just web-check   # SDK and web app: build, types, lint, unit tests
 ```
 
 Coverage includes exact, partial, and overpayment funding; finality-tag and
@@ -224,8 +239,10 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
-- `PAYDAY_PUBLIC_BASE_URL` — origin used in payment links; defaults to
-  `http://127.0.0.1:3000` locally
+- `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
+  payment links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
+  locally, `https://payday.sh` in production. Must be a bare origin, and HTTPS
+  unless it is loopback
 - `PAYDAY_EXPLORER_BASE_URL` — optional HTTPS explorer origin; production
   Monad uses `https://monadvision.com`, while Anvil leaves it unset
 - `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
