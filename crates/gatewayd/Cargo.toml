@@ -19,8 +19,16 @@ sqlx = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
+chrono = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+utoipa = { workspace = true }
+qrcode = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-sesv2 = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

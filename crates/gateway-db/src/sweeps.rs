@@ -81,6 +81,9 @@ pub enum InvoiceOutcome {
     Drained {
         status: Option<InvoiceStatus>,
         execute_tx: bool,
+        settlement_tx_hash: B256,
+        settlement_block: u64,
+        settlement_timestamp: u64,
     },
     /// The item failed for a reason that may clear; it returns to the queue
     /// behind exponential backoff.
@@ -97,6 +100,12 @@ pub struct SweepQueueStats {
     pub in_flight: i64,
     /// Age of the oldest uncollected transfer that automation is responsible for.
     pub oldest_uncollected_secs: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweeperStatus {
+    pub state: String,
+    pub heartbeat_at: DateTime<Utc>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -248,20 +257,28 @@ impl InvoiceRepository {
 
     /// Remove an invoice from automation with a reason, outside any batch.
     pub async fn block_invoice(&self, id: Uuid, reason: &str) -> Result<bool, sqlx::Error> {
-        sqlx::query(
+        let mut tx = self.pool().begin().await?;
+        let account: Option<Uuid> = sqlx::query_scalar(
             r#"
             UPDATE invoices
             SET status = CASE WHEN status IN ('deploying', 'expired') THEN 'blocked' ELSE status END,
                 blocked_reason = $2,
                 updated_at = now()
-            WHERE id = $1 AND sweep_batch_id IS NULL
+            WHERE id = $1 AND sweep_batch_id IS NULL AND blocked_reason IS NULL
+            RETURNING account_id
             "#,
         )
         .bind(id)
         .bind(reason)
-        .execute(self.pool())
-        .await
-        .map(|result| result.rows_affected() > 0)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(account) = account {
+            sqlx::query("INSERT INTO notification_outbox(id,account_id,invoice_id,reason,email) SELECT $1,$2,$3,$4,email FROM accounts WHERE id=$2")
+                .bind(Uuid::now_v7()).bind(account).bind(id).bind(reason)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(account.is_some())
     }
 
     /// Open a batch for a signed helper transaction and attach every
@@ -494,7 +511,13 @@ impl InvoiceRepository {
         let mut tx = self.pool().begin().await?;
         for (invoice_id, outcome) in outcomes {
             let updated = match outcome {
-                InvoiceOutcome::Drained { status, execute_tx } => {
+                InvoiceOutcome::Drained {
+                    status,
+                    execute_tx,
+                    settlement_tx_hash,
+                    settlement_block,
+                    settlement_timestamp,
+                } => {
                     sqlx::query(
                         r#"
                         UPDATE payment_observations
@@ -516,8 +539,11 @@ impl InvoiceRepository {
                         UPDATE invoices
                         SET status = COALESCE($4, status),
                             execute_tx_hash = CASE WHEN $5 THEN $6 ELSE execute_tx_hash END,
+                            settlement_tx_hash = COALESCE(settlement_tx_hash, $8),
                             resolved_at_block = CASE WHEN $4 IS NULL THEN resolved_at_block
-                                                     ELSE COALESCE(resolved_at_block, $2) END,
+                                                     ELSE COALESCE(resolved_at_block, $9) END,
+                            settled_at = CASE WHEN $4 IS NULL THEN settled_at
+                                              ELSE COALESCE(settled_at, to_timestamp($10)) END,
                             drained_at_block = $2,
                             drained_at_transaction_index = $3,
                             uncollected_count = (
@@ -539,6 +565,9 @@ impl InvoiceRepository {
                     .bind(execute_tx)
                     .bind(tx_hash.as_slice())
                     .bind(batch_id)
+                    .bind(settlement_tx_hash.as_slice())
+                    .bind(*settlement_block as i64)
+                    .bind(*settlement_timestamp as f64)
                     .execute(&mut *tx)
                     .await?
                 }
@@ -637,5 +666,23 @@ impl InvoiceRepository {
             in_flight,
             oldest_uncollected_secs,
         })
+    }
+
+    pub async fn record_sweeper_status(
+        &self,
+        chain_id: u64,
+        state: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO sweeper_status (chain_id, state) VALUES ($1, $2) ON CONFLICT (chain_id) DO UPDATE SET state=EXCLUDED.state, heartbeat_at=now()")
+            .bind(chain_id as i64).bind(state).execute(self.pool()).await.map(drop)
+    }
+
+    pub async fn sweeper_status(
+        &self,
+        chain_id: u64,
+    ) -> Result<Option<SweeperStatus>, sqlx::Error> {
+        sqlx::query_as::<_, (String, DateTime<Utc>)>("SELECT CASE WHEN heartbeat_at < now() - interval '30 seconds' THEN 'degraded' ELSE state END, heartbeat_at FROM sweeper_status WHERE chain_id=$1")
+            .bind(chain_id as i64).fetch_optional(self.pool()).await
+            .map(|row| row.map(|(state, heartbeat_at)| SweeperStatus { state, heartbeat_at }))
     }
 }

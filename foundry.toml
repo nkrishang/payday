@@ -5,8 +5,7 @@ libs = ["foundry/lib"]
 test = "foundry/test"
 cache_path = "foundry/cache"
 ffi = true
-# `Payment` is deployed once per invoice and called at most a handful of
-# times, so optimise for deployment size: runs = 1 trims its runtime code
-# by a third and a fresh `execute` by ~65k gas.
+# `Payment` is deployed once per invoice and called at most a handful of times, so optimise for
+# deployment size: runs = 1 trims its runtime code by a third and a fresh `execute` by ~65k gas.
 optimizer = true
 optimizer_runs = 1

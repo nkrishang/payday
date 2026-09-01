@@ -2,6 +2,10 @@
 target/
 .env
 
+# Node.js
+node_modules/
+sdk/typescript/dist/
+
 # Foundry broadcast logs (from forge script)
 /broadcast/
 
@@ -14,3 +18,7 @@ infra/*.tfstate*
 infra/*.tfplan
 infra/backend.hcl
 infra/terraform.tfvars
+auth0/.terraform/
+auth0/*.tfstate*
+auth0/*.tfplan
+auth0/backend.hcl

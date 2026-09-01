@@ -5,17 +5,16 @@
 # `finalized` tag advances on its own (finalized = latest - 2, one block per
 # second), which is the finality source the indexer uses in production.
 # Transactions wait for the next interval block, exactly like a real chain.
-# Every flow below is observed through the public API; PostgreSQL is only
-# consulted for the observation ledger and for the operator procedures the
-# runbooks describe.
+# Every flow below is exercised through the public or operator API; PostgreSQL
+# is consulted only for test-only ledger and queue invariants.
 set -euo pipefail
 
-RPC_URL="${GATEWAY_RPC_URL:-http://127.0.0.1:8545}"
-API_URL="${GATEWAY_API_URL:-http://127.0.0.1:3000}"
-FACTORY="${GATEWAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
-BATCH_SWEEPER="${GATEWAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
-USDC="${GATEWAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
-SIGNER_KEY="${GATEWAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
+API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
+FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
+BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
+USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
+SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 PAYER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 PAYER="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 BENEFICIARY_EXACT="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
@@ -27,19 +26,28 @@ BENEFICIARY_PAUSED="0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
 BENEFICIARY_BLACKLISTED="0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
 RECOVERY="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 
-export GATEWAY_RPC_URL="$RPC_URL"
-export GATEWAY_API_URL="$API_URL"
-export GATEWAY_FACTORY_ADDRESS="$FACTORY"
-export GATEWAY_BATCH_SWEEPER_ADDRESS="$BATCH_SWEEPER"
-export GATEWAY_USDC_ADDRESS="$USDC"
-export GATEWAY_CHAIN_ID="${GATEWAY_CHAIN_ID:-31337}"
-export GATEWAY_USDC_START_BLOCK="${GATEWAY_USDC_START_BLOCK:-0}"
-export GATEWAY_FINALITY_SOURCE="${GATEWAY_FINALITY_SOURCE:-finalized}"
-export GATEWAY_FINALITY_CONFIRMATIONS="${GATEWAY_FINALITY_CONFIRMATIONS:-0}"
-export GATEWAY_INDEXER_POLL_INTERVAL_MS="${GATEWAY_INDEXER_POLL_INTERVAL_MS:-250}"
-export GATEWAY_SIGNER_KEY="$SIGNER_KEY"
-export GATEWAY_API_KEY="${GATEWAY_API_KEY:-0123456789abcdef0123456789abcdef}"
-SECOND_API_KEY="second-account-0123456789abcdef0123456789abcdef"
+export PAYDAY_RPC_URL="$RPC_URL"
+export PAYDAY_API_URL="$API_URL"
+export PAYDAY_FACTORY_ADDRESS="$FACTORY"
+export PAYDAY_BATCH_SWEEPER_ADDRESS="$BATCH_SWEEPER"
+export PAYDAY_USDC_ADDRESS="$USDC"
+export PAYDAY_CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
+export PAYDAY_USDC_START_BLOCK="${PAYDAY_USDC_START_BLOCK:-0}"
+export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
+export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
+export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
+export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
+export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
+export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
+export PAYDAY_API_KEY_PREFIX="payday_test_"
+export PAYDAY_DEV_IDENTITY=1
+export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
+export PAYDAY_DEV_IDENTITY_BIND="127.0.0.1:3001"
+export PAYDAY_DEV_IDENTITY_ISSUER="http://127.0.0.1:3001"
+export PAYDAY_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
+export PAYDAY_AUTH0_CLIENT_ID="payday-cli-local"
+export PAYDAY_AUTH0_AUDIENCE="payday-api-local"
 
 logs="$(mktemp -d)"
 pids=()
@@ -72,14 +80,6 @@ for command in anvil cast curl forge jq psql; do
   }
 done
 
-# GNU coreutils on Linux/CI, Perl's shasum on stock macOS.
-sha256_hex() {
-  if command -v sha256sum >/dev/null; then
-    sha256sum | awk '{print $1}'
-  else
-    shasum -a 256 | awk '{print $1}'
-  fi
-}
 [[ -n "${DATABASE_URL:-}" ]] || {
   echo "DATABASE_URL must be set" >&2
   exit 1
@@ -108,30 +108,30 @@ wait_for_api() {
 }
 
 create_invoice() {
-  local amount=$1 beneficiary=$2 expiration=$3 idempotency_key=$4
-  ./target/debug/gateway-cli --json invoice create \
-    --chain-id "$GATEWAY_CHAIN_ID" \
-    --token "$USDC" \
-    --beneficiary "$beneficiary" \
-    --expiration-timestamp "$expiration" \
-    --recovery "$RECOVERY" \
-    --amount "$amount" \
-    --idempotency-key "$idempotency_key"
+  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4
+  curl --fail --silent \
+    --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    --header "Content-Type: application/json" \
+    --header "Idempotency-Key: $idempotency_key" \
+    --data "$(invoice_body "$amount" "$beneficiary" "$expires_in")" \
+    "$API_URL/v1/payments"
 }
 
 get_invoice() {
-  ./target/debug/gateway-cli --json invoice get "$1"
+  ./target/debug/payday --json get "$1"
 }
 
-# Poll the API until a jq expression over the invoice is true.
+# Poll at the documented per-account rate until a jq expression is true. A
+# 100ms loop used to be harmless, but now tests the rate limiter instead of the
+# payment transition and can starve the rest of this end-to-end suite.
 wait_for_invoice() {
   local id=$1 expression=$2 description=$3 invoice
-  for _ in {1..600}; do
+  for _ in {1..60}; do
     invoice="$(get_invoice "$id")"
     if jq -e "$expression" <<<"$invoice" >/dev/null; then
       return
     fi
-    sleep 0.1
+    sleep 1
   done
   echo "invoice $id never satisfied '$description'; last state: $(jq -c . <<<"$invoice")" >&2
   return 1
@@ -172,23 +172,23 @@ set_blacklisted() {
     --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
 }
 
-# Raw request body for POST /v1/invoices; built with jq so no shell quoting
+# Raw request body for POST /v1/payments; built with jq so no shell quoting
 # is involved (bash 3.2 brace-expands nested quotes inside "$(...)").
 invoice_body() {
-  local amount=$1 beneficiary=$2 expiration=$3
-  jq -cn --arg chain "$GATEWAY_CHAIN_ID" --arg token "$USDC" --arg beneficiary "$beneficiary" \
-    --arg amount "$amount" --arg expiration "$expiration" --arg recovery "$RECOVERY" \
-    '{chain_id: $chain, token_address: $token, beneficiary_address: $beneficiary,
-      amount: $amount, expiration_timestamp: $expiration, recovery_address: $recovery}'
+  local amount=$1 beneficiary=$2 expires_in=$3
+  jq -cn --arg chain "$PAYDAY_CHAIN_ID" --arg token "$USDC" --arg beneficiary "$beneficiary" \
+    --arg amount "$amount" --argjson expires_in "$expires_in" --arg recovery "$RECOVERY" \
+    '{chain_id: $chain, token_address: $token, payout_address: $beneficiary,
+      amount: $amount, expires_in: $expires_in, refund_address: $recovery}'
 }
 
 api_status_code() {
   local body=$1
   curl --silent --output /dev/null --write-out '%{http_code}' \
-    --header "Authorization: Bearer $GATEWAY_API_KEY" \
+    --header "Authorization: Bearer $PAYDAY_API_KEY" \
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: validation-$RANDOM-$RANDOM" \
-    --data "$body" "$API_URL/v1/invoices"
+    --data "$body" "$API_URL/v1/payments"
 }
 
 assert_eq() {
@@ -217,7 +217,7 @@ assert_process_alive() {
 }
 
 echo "Starting Anvil (finalized = latest - 2, one block per second) and deploying local fixtures"
-anvil --chain-id "$GATEWAY_CHAIN_ID" --slots-in-an-epoch 1 --block-time 1 --silent \
+anvil --chain-id "$PAYDAY_CHAIN_ID" --slots-in-an-epoch 1 --block-time 1 --silent \
   >"$logs/anvil.log" 2>&1 &
 anvil_pid=$!
 pids+=("$anvil_pid")
@@ -226,63 +226,71 @@ forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
   --rpc-url "$RPC_URL" --private-key "$SIGNER_KEY" --broadcast >/dev/null
 
 echo "Starting gateway services"
+./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
+identity_pid=$!
+pids+=("$identity_pid")
+for _ in {1..100}; do
+  curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" && break
+  sleep 0.1
+done
+curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" || {
+  echo "development identity provider did not become ready" >&2
+  exit 1
+}
 ./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
-primary_key_hash="$(printf %s "$GATEWAY_API_KEY" | sha256_hex)"
-second_key_hash="$(printf %s "$SECOND_API_KEY" | sha256_hex)"
-psql "$DATABASE_URL" --quiet --command "
-  INSERT INTO accounts (id, api_key_hash, api_key_hint)
-  VALUES
-    ('00000000-0000-0000-0000-000000000001', decode('$primary_key_hash', 'hex'), '…abcdef'),
-    ('00000000-0000-0000-0000-000000000002', decode('$second_key_hash', 'hex'), '…abcdef')
-  ON CONFLICT (id) DO NOTHING
-" >/dev/null
+echo "Creating accounts through the real local email-OTP CLI flow"
+export PAYDAY_CONFIG_DIR="$logs/payday-config"
+primary_login="$(printf 'primary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
+PAYDAY_API_KEY="$(jq -er .api_key <<<"$primary_login")"
+export PAYDAY_API_KEY
+second_login="$(printf 'secondary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
+SECOND_API_KEY="$(jq -er .api_key <<<"$second_login")"
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")
 
-expiration="$(( $(date +%s) + 3600 ))"
 run_id="${GITHUB_RUN_ID:-local}-$(date +%s)-$$"
 
 echo "Testing API validation"
-too_soon="$(invoice_body 1 "$BENEFICIARY_EXACT" "$(( $(date +%s) + 60 ))")"
+too_soon="$(invoice_body 1 "$BENEFICIARY_EXACT" 60)"
 assert_eq 400 "$(api_status_code "$too_soon")" "an expiration inside the minimum lead time was accepted"
-negative="$(invoice_body -1 "$BENEFICIARY_EXACT" "$expiration")"
+negative="$(invoice_body -1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 400 "$(api_status_code "$negative")" "a negative amount was accepted"
-zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 "$expiration")"
+zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 3600)"
 assert_eq 400 "$(api_status_code "$zero_beneficiary")" "a zero beneficiary was accepted"
-valid="$(invoice_body 1 "$BENEFICIARY_EXACT" "$expiration")"
+valid="$(invoice_body 1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 201 "$(api_status_code "$valid")" "a valid request was rejected"
 
 echo "Testing exact payment and API idempotency"
-exact="$(create_invoice 1.5 "$BENEFICIARY_EXACT" "$expiration" "exact-payment-$run_id")"
-exact_replay="$(create_invoice 1.5 "$BENEFICIARY_EXACT" "$expiration" "exact-payment-$run_id")"
+exact="$(create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
+exact_replay="$(create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 exact_id="$(jq -r .id <<<"$exact")"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
-second_account_invoice="$(GATEWAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" "$expiration" "exact-payment-$run_id")"
+second_account_invoice="$(PAYDAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 [[ "$(jq -r .id <<<"$second_account_invoice")" != "$exact_id" ]] || {
   echo "account-scoped idempotency returned another account's invoice" >&2
   exit 1
 }
 cross_account_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "Authorization: Bearer $SECOND_API_KEY" "$API_URL/v1/invoices/$exact_id")"
+  --header "Authorization: Bearer $SECOND_API_KEY" "$API_URL/v1/payments/$exact_id")"
 assert_eq 404 "$cross_account_status" "cross-account invoice lookup leaked an invoice"
-exact_address="$(jq -r .payment_address <<<"$exact")"
+exact_address="$(jq -r .address <<<"$exact")"
 exact_before="$(token_balance "$BENEFICIARY_EXACT")"
 send_usdc "$exact_address" 1500000
-wait_for_status "$exact_id" fulfilled
+wait_for_status "$exact_id" settled
 assert_eq "$((exact_before + 1500000))" "$(token_balance "$BENEFICIARY_EXACT")" \
   "exact payment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$exact_address"
 exact_final="$(get_invoice "$exact_id")"
 assert_eq 1500000 "$(jq -r .received_base_units <<<"$exact_final")" "received amount not reported"
-[[ "$(jq -r .execute_tx_hash <<<"$exact_final")" == 0x* ]] || {
+[[ "$(jq -r .settlement_tx_hash <<<"$exact_final")" == 0x* ]] || {
   echo "settlement transaction hash not reported" >&2
   exit 1
 }
-[[ "$(jq -r .resolved_at_block <<<"$exact_final")" != "null" ]] || {
+[[ "$(jq -r .settled_block <<<"$exact_final")" != "null" ]] || {
   echo "resolution block not reported" >&2
   exit 1
 }
@@ -290,40 +298,40 @@ assert_eq true "$(cast call "$exact_address" 'settled()(bool)' --rpc-url "$RPC_U
   "deployed Payment must record settlement"
 
 echo "Testing cumulative partial payments"
-partial="$(create_invoice 1 "$BENEFICIARY_PARTIAL" "$expiration" "partial-payment-$run_id")"
+partial="$(create_invoice 1 "$BENEFICIARY_PARTIAL" 3600 "partial-payment-$run_id")"
 partial_id="$(jq -r .id <<<"$partial")"
-partial_address="$(jq -r .payment_address <<<"$partial")"
+partial_address="$(jq -r .address <<<"$partial")"
 partial_before="$(token_balance "$BENEFICIARY_PARTIAL")"
 send_usdc "$partial_address" 400000
 assert_eq 400000 "$(token_balance "$partial_address")" "first partial payment was not retained"
-wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "created"' "partial credit visible while still created"
+wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "partially_paid"' "partial credit visible while still open"
 send_usdc "$partial_address" 600000
-wait_for_status "$partial_id" fulfilled
+wait_for_status "$partial_id" settled
 assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL")" \
   "partial payment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$partial_address"
 
 echo "Testing overpayment full-balance sweep"
-overpayment="$(create_invoice 1 "$BENEFICIARY_OVERPAYMENT" "$expiration" "overpayment-$run_id")"
+overpayment="$(create_invoice 1 "$BENEFICIARY_OVERPAYMENT" 3600 "overpayment-$run_id")"
 overpayment_id="$(jq -r .id <<<"$overpayment")"
-overpayment_address="$(jq -r .payment_address <<<"$overpayment")"
+overpayment_address="$(jq -r .address <<<"$overpayment")"
 overpayment_before="$(token_balance "$BENEFICIARY_OVERPAYMENT")"
 send_usdc "$overpayment_address" 1250000
-wait_for_status "$overpayment_id" fulfilled
+wait_for_status "$overpayment_id" settled
 assert_eq "$((overpayment_before + 1250000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
   "overpayment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$overpayment_address"
 
 echo "Testing one-transaction batch sweeping"
-batch_one="$(create_invoice 0.1 "$BENEFICIARY_EXACT" "$expiration" "batch-one-$run_id")"
-batch_two="$(create_invoice 0.2 "$BENEFICIARY_PARTIAL" "$expiration" "batch-two-$run_id")"
-batch_three="$(create_invoice 0.3 "$BENEFICIARY_OVERPAYMENT" "$expiration" "batch-three-$run_id")"
+batch_one="$(create_invoice 0.1 "$BENEFICIARY_EXACT" 3600 "batch-one-$run_id")"
+batch_two="$(create_invoice 0.2 "$BENEFICIARY_PARTIAL" 3600 "batch-two-$run_id")"
+batch_three="$(create_invoice 0.3 "$BENEFICIARY_OVERPAYMENT" 3600 "batch-three-$run_id")"
 batch_one_id="$(jq -r .id <<<"$batch_one")"
 batch_two_id="$(jq -r .id <<<"$batch_two")"
 batch_three_id="$(jq -r .id <<<"$batch_three")"
-batch_one_address="$(jq -r .payment_address <<<"$batch_one")"
-batch_two_address="$(jq -r .payment_address <<<"$batch_two")"
-batch_three_address="$(jq -r .payment_address <<<"$batch_three")"
+batch_one_address="$(jq -r .address <<<"$batch_one")"
+batch_two_address="$(jq -r .address <<<"$batch_two")"
+batch_three_address="$(jq -r .address <<<"$batch_three")"
 
 # Mine all three transfers in one block so one acquisition pass makes the
 # invoices eligible together: pause interval mining, queue the transfers with
@@ -343,11 +351,11 @@ done
 cast rpc --rpc-url "$RPC_URL" anvil_mine 1 >/dev/null
 cast rpc --rpc-url "$RPC_URL" evm_setIntervalMining 1 >/dev/null
 
-wait_for_status "$batch_one_id" fulfilled
-wait_for_status "$batch_two_id" fulfilled
-wait_for_status "$batch_three_id" fulfilled
+wait_for_status "$batch_one_id" settled
+wait_for_status "$batch_two_id" settled
+wait_for_status "$batch_three_id" settled
 batch_hashes="$(for id in "$batch_one_id" "$batch_two_id" "$batch_three_id"; do
-  get_invoice "$id" | jq -r .execute_tx_hash
+  get_invoice "$id" | jq -r .settlement_tx_hash
 done | sort -u | wc -l | tr -d ' ')"
 assert_eq 1 "$batch_hashes" "eligible invoices did not share one batch transaction"
 assert_payment_deployed_and_empty "$batch_one_address"
@@ -359,74 +367,72 @@ recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$batch_one_address" 7
 send_usdc "$batch_one_address" 0
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
-  WHERE invoice_id = '$batch_one_id'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
+  WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late transfer was not collected"
 assert_eq "$((recovery_before + 7))" "$(token_balance "$RECOVERY")" "late transfer did not reach the recovery address"
 assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM payment_observations
-  WHERE invoice_id = '$batch_one_id'::uuid AND disposition = 'error' AND disposition_reason = 'zero_amount'
+  WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'error' AND disposition_reason = 'zero_amount'
 ")" "zero-value transfer was not marked erroneous"
 batch_one_final="$(get_invoice "$batch_one_id")"
-assert_eq fulfilled "$(jq -r .status <<<"$batch_one_final")" "late collection changed the invoice status"
+assert_eq settled "$(jq -r .status <<<"$batch_one_final")" "late collection changed the payment status"
 assert_eq 100000 "$(jq -r .received_base_units <<<"$batch_one_final")" "late transfer was credited to the invoice"
 assert_eq 0 "$(token_balance "$batch_one_address")" "late transfer stranded at the payment address"
 
 echo "Testing an invoice executed by a third party before the worker"
-third="$(create_invoice 2 "$BENEFICIARY_THIRD_PARTY" "$expiration" "third-party-$run_id")"
+third="$(create_invoice 2 "$BENEFICIARY_THIRD_PARTY" 3600 "third-party-$run_id")"
 third_id="$(jq -r .id <<<"$third")"
-third_address="$(jq -r .payment_address <<<"$third")"
-third_salt="$(jq -r .salt <<<"$third")"
+third_address="$(jq -r .address <<<"$third")"
+third_salt="$(jq -r .self_settlement.salt <<<"$third")"
+third_expiration="$(jq -r '.expires_at | fromdateiso8601' <<<"$third")"
 send_usdc "$third_address" 2000000
-cast send "$FACTORY" \
+third_party_tx="$(cast send "$FACTORY" \
   'execute(address,uint256,address,uint64,address,bytes32)' \
-  "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$expiration" "$RECOVERY" "$third_salt" \
-  --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
-wait_for_status "$third_id" fulfilled
-assert_eq null "$(get_invoice "$third_id" | jq -r .execute_tx_hash)" "a third-party execution must not be attributed to the worker"
+  "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$third_expiration" "$RECOVERY" "$third_salt" \
+  --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" --json | jq -r .transactionHash)"
+wait_for_status "$third_id" settled
+assert_eq "$third_party_tx" "$(get_invoice "$third_id" | jq -r .settlement_tx_hash)" \
+  "third-party settlement transaction hash was not reported"
 assert_eq 2000000 "$(token_balance "$BENEFICIARY_THIRD_PARTY")" "third-party settlement balance mismatch"
 
 echo "Testing that a paused token is retried rather than blocked"
-paused="$(create_invoice 0.5 "$BENEFICIARY_PAUSED" "$expiration" "paused-$run_id")"
+paused="$(create_invoice 0.5 "$BENEFICIARY_PAUSED" 3600 "paused-$run_id")"
 paused_id="$(jq -r .id <<<"$paused")"
-paused_address="$(jq -r .payment_address <<<"$paused")"
+paused_address="$(jq -r .address <<<"$paused")"
 send_usdc "$paused_address" 500000
 set_paused true
-wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '$paused_id'::uuid AND sweep_attempts >= 1 AND status = 'deploying'" \
+wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#pay_}'::uuid AND sweep_attempts >= 1 AND status = 'deploying'" \
   "paused token did not produce a retryable failure"
-assert_eq null "$(get_invoice "$paused_id" | jq -r .blocked_reason)" "a paused token must not block the invoice"
+assert_eq null "$(get_invoice "$paused_id" | jq -r .attention)" "a paused token must not block the payment"
 set_paused false
-wait_for_status "$paused_id" fulfilled
+wait_for_status "$paused_id" settled
 assert_eq 500000 "$(token_balance "$BENEFICIARY_PAUSED")" "post-pause settlement balance mismatch"
 
 echo "Testing that a blacklisted beneficiary is blocked, then released by the operator"
 set_blacklisted "$BENEFICIARY_BLACKLISTED" true
-blacklisted="$(create_invoice 0.25 "$BENEFICIARY_BLACKLISTED" "$expiration" "blacklisted-$run_id")"
+blacklisted="$(create_invoice 0.25 "$BENEFICIARY_BLACKLISTED" 3600 "blacklisted-$run_id")"
 blacklisted_id="$(jq -r .id <<<"$blacklisted")"
-blacklisted_address="$(jq -r .payment_address <<<"$blacklisted")"
+blacklisted_address="$(jq -r .address <<<"$blacklisted")"
 send_usdc "$blacklisted_address" 250000
-wait_for_status "$blacklisted_id" blocked
-assert_eq beneficiary_blacklisted "$(get_invoice "$blacklisted_id" | jq -r .blocked_reason)" "wrong block reason"
+wait_for_status "$blacklisted_id" needs_attention
+assert_eq beneficiary_blacklisted "$(get_invoice "$blacklisted_id" | jq -r .attention.code)" "wrong attention code"
 assert_eq 250000 "$(token_balance "$blacklisted_address")" "funds must stay at the address while blocked"
 set_blacklisted "$BENEFICIARY_BLACKLISTED" false
-# Operator procedure from docs/runbooks/stuck-invoice.md.
-psql "$DATABASE_URL" --quiet --command "
-  UPDATE invoices SET blocked_reason = NULL, status = 'deploying', updated_at = now()
-  WHERE id = '$blacklisted_id'::uuid AND status = 'blocked'
-" >/dev/null
-wait_for_status "$blacklisted_id" fulfilled
+# Audited operator procedure from docs/runbooks/stuck-invoice.md.
+./target/debug/payday --json ops release "$blacklisted_id" >/dev/null
+wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
 
 echo "Testing automatic recovery of an expired partial payment and its late completion"
-expired_at="$(( $(date +%s) + 660 ))"
-expired="$(create_invoice 1 "$BENEFICIARY_EXPIRED" "$expired_at" "expired-recovery-$run_id")"
+expired="$(create_invoice 1 "$BENEFICIARY_EXPIRED" 660 "expired-recovery-$run_id")"
 expired_id="$(jq -r .id <<<"$expired")"
-expired_address="$(jq -r .payment_address <<<"$expired")"
+expired_address="$(jq -r .address <<<"$expired")"
 recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$expired_address" 400000
-wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == "created"' "partial payment credited"
+wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == "partially_paid"' "partial payment credited"
 # Chain time passes the deadline; wall-clock stays where it is.
 cast rpc --rpc-url "$RPC_URL" evm_increaseTime 700 >/dev/null
-wait_for_status "$expired_id" recovered
+wait_for_status "$expired_id" returned
 assert_eq "$((recovery_before + 400000))" "$(token_balance "$RECOVERY")" \
   "expired partial payment was not sent to recovery"
 assert_payment_deployed_and_empty "$expired_address"
@@ -434,11 +440,11 @@ assert_eq false "$(cast call "$expired_address" 'settled()(bool)' --rpc-url "$RP
   "deployed Payment must record recovery"
 send_usdc "$expired_address" 600000
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
-  WHERE invoice_id = '$expired_id'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
+  WHERE invoice_id = '${expired_id#pay_}'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late completion was not collected"
 assert_eq "$((recovery_before + 1000000))" "$(token_balance "$RECOVERY")" \
   "late completion was not forwarded to recovery"
-assert_eq recovered "$(get_invoice "$expired_id" | jq -r .status)" "late completion changed the invoice status"
+assert_eq returned "$(get_invoice "$expired_id" | jq -r .status)" "late completion changed the payment status"
 assert_eq 0 "$(token_balance "$expired_address")" "late completion stranded at the payment address"
 
 echo "Checking that every helper transaction batch resolved"

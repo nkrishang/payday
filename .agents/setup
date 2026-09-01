@@ -71,6 +71,21 @@ install_foundry() {
   fi
 }
 
+install_node() {
+  # The web package (payday.sh: landing page and hosted checkout) is the only
+  # part of the repo that needs Node.
+  local required=22
+
+  if command -v node >/dev/null 2>&1 &&
+    [[ "$(node --version | sed 's/^v\([0-9]*\).*/\1/')" -ge "$required" ]]; then
+    echo "Node $(node --version) already installed"
+    return
+  fi
+
+  curl -fsSL "https://deb.nodesource.com/setup_${required}.x" | sudo -E bash -
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+}
+
 configure_login_shell() {
   local marker="# payday orb development environment"
   if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
@@ -115,16 +130,16 @@ create_dev_env() {
     db_user="$(id -un)"
     cat >.env <<EOF
 DATABASE_URL=postgresql:///gateway?user=$db_user
-GATEWAY_CHAIN_ID=31337
-GATEWAY_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
-GATEWAY_USDC_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
-GATEWAY_RPC_URL=http://127.0.0.1:8545
-GATEWAY_USDC_START_BLOCK=0
+PAYDAY_CHAIN_ID=31337
+PAYDAY_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+PAYDAY_USDC_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+PAYDAY_RPC_URL=http://127.0.0.1:8545
+PAYDAY_USDC_START_BLOCK=0
 # Local Anvil mines deterministically; production chains should set a reviewed
 # chain-specific confirmation depth when using a QuickNode HTTPS RPC URL.
-GATEWAY_FINALITY_CONFIRMATIONS=0
+PAYDAY_FINALITY_CONFIRMATIONS=0
 # Anvil's public development account #0; never use this key on a real network.
-GATEWAY_SIGNER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+PAYDAY_SIGNER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 EOF
   fi
 }
@@ -134,12 +149,14 @@ step "Install Docker" install_docker
 step "Install Rust" install_rust
 export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 step "Install Foundry" install_foundry
+step "Install Node" install_node
 step "Configure login shell" configure_login_shell
 step "Initialize git submodules" git submodule update --init --recursive --depth 1 --recommend-shallow
 step "Start PostgreSQL" start_postgres
 step "Create development database" configure_database
 step "Create local development environment" create_dev_env
 step "Fetch Rust dependencies" cargo fetch --locked
+step "Install Node dependencies" npm ci
 step "Build Foundry FFI helper" cargo build --locked -p gateway-core --bin derive-address
 
 echo "Orb setup complete"

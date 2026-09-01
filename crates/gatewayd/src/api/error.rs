@@ -28,6 +28,28 @@ impl ApiError {
             message: "A valid Auth0 access token is required".into(),
         }
     }
+    pub fn admin_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "admin_unauthorized",
+            message: "A valid operator bearer credential is required".into(),
+        }
+    }
+    pub fn invoice_not_blocked() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "invoice_not_blocked",
+            message: "Invoice is not blocked".into(),
+        }
+    }
+
+    pub fn payer_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_payment_link",
+            message: "This payment link is invalid or expired".into(),
+        }
+    }
 
     pub fn identity_unavailable() -> Self {
         Self {
@@ -53,11 +75,27 @@ impl ApiError {
         }
     }
 
+    pub fn account_contact_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "account_contact_required",
+            message: "A verified merchant email is required before creating a payment; run `payday login` to authenticate again".into(),
+        }
+    }
+
     pub fn api_key_generation_conflict() -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code: "api_key_generation_conflict",
             message: "The API key changed after confirmation; authenticate and try again".into(),
+        }
+    }
+
+    pub fn account_disabled() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "account_disabled",
+            message: "This account is disabled".into(),
         }
     }
 
@@ -109,11 +147,25 @@ impl ApiError {
         }
     }
 
-    pub fn invoice_not_found() -> Self {
+    pub fn payment_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "invoice_not_found",
-            message: "Invoice not found".into(),
+            code: "payment_not_found",
+            message: "Payment not found".into(),
+        }
+    }
+
+    pub fn invalid_payment_reference() -> Self {
+        Self::invalid_request(
+            "reference must be a complete payment ID (pay_…) or payment address (0x…)",
+        )
+    }
+
+    pub fn payment_not_payable() -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code: "payment_not_payable",
+            message: "This payment is no longer accepting funds".into(),
         }
     }
 
@@ -130,6 +182,14 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: msg.into(),
+        }
+    }
+
+    pub fn rate_limited() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: "Per-account request limit exceeded".into(),
         }
     }
 }

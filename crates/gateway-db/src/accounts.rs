@@ -2,15 +2,23 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Previous keys remain usable for 24 hours after rotation. This conservative,
+/// fixed window gives deployments time to switch credentials without leaving a
+/// long-lived second credential.
+pub const API_KEY_GRACE_HOURS: i64 = 24;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccountId(pub Uuid);
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct ApiKeyMetadata {
-    pub hint: String,
+    pub account_id: Uuid,
+    pub hint: Option<String>,
     pub generation: i64,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
     pub rotated_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    pub previous_key_expires_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    pub revoked_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -26,6 +34,8 @@ pub enum IssueApiKeyError {
     AuthenticationEventAlreadyUsed,
     #[error("API key generation changed")]
     GenerationConflict,
+    #[error("account is disabled")]
+    AccountDisabled,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -43,7 +53,11 @@ impl AccountRepository {
     pub async fn authenticate(&self, key: &str) -> Result<Option<AccountId>, sqlx::Error> {
         let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
         sqlx::query_scalar(
-            "SELECT id FROM accounts WHERE api_key_hash = $1 AND disabled_at IS NULL",
+            r#"SELECT id FROM accounts
+               WHERE disabled_at IS NULL AND (
+                   api_key_hash = $1 OR
+                   (previous_api_key_hash = $1 AND previous_api_key_expires_at > now())
+               )"#,
         )
         .bind(hash.as_slice())
         .fetch_optional(&self.pool)
@@ -59,14 +73,54 @@ impl AccountRepository {
         authentication_event_id: &str,
         key: &str,
     ) -> Result<IssuedApiKey, IssueApiKeyError> {
+        self.issue_api_key_inner(
+            issuer,
+            subject,
+            expected_generation,
+            authentication_event_id,
+            key,
+            None,
+        )
+        .await
+    }
+
+    pub async fn issue_api_key_with_email(
+        &self,
+        issuer: &str,
+        subject: &str,
+        expected_generation: Option<i64>,
+        authentication_event_id: &str,
+        key: &str,
+        verified_email: &str,
+    ) -> Result<IssuedApiKey, IssueApiKeyError> {
+        self.issue_api_key_inner(
+            issuer,
+            subject,
+            expected_generation,
+            authentication_event_id,
+            key,
+            Some(verified_email),
+        )
+        .await
+    }
+
+    async fn issue_api_key_inner(
+        &self,
+        issuer: &str,
+        subject: &str,
+        expected_generation: Option<i64>,
+        authentication_event_id: &str,
+        key: &str,
+        verified_email: Option<&str>,
+    ) -> Result<IssuedApiKey, IssueApiKeyError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
             .bind(issuer)
             .bind(subject)
             .execute(&mut *tx)
             .await?;
-        if let Some((account_id, generation)) = sqlx::query_as::<_, (Uuid, i64)>(
-            r#"SELECT account_id, api_key_generation
+        if let Some((account_id, generation, disabled)) = sqlx::query_as::<_, (Uuid, i64, bool)>(
+            r#"SELECT account_id, api_key_generation, disabled_at IS NOT NULL
                FROM account_identities
                JOIN accounts ON accounts.id = account_identities.account_id
                WHERE issuer = $1 AND subject = $2"#,
@@ -76,6 +130,9 @@ impl AccountRepository {
         .fetch_optional(&mut *tx)
         .await?
         {
+            if disabled {
+                return Err(IssueApiKeyError::AccountDisabled);
+            }
             if expected_generation != Some(generation) {
                 return Err(IssueApiKeyError::GenerationConflict);
             }
@@ -93,14 +150,20 @@ impl AccountRepository {
             let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
             let generation = sqlx::query_scalar(
                 r#"UPDATE accounts
-                   SET api_key_hash = $1, api_key_hint = $2,
-                       api_key_generation = api_key_generation + 1, key_rotated_at = now()
-                   WHERE id = $3 AND disabled_at IS NULL
+                   SET previous_api_key_hash = api_key_hash,
+                       previous_api_key_expires_at = CASE WHEN api_key_hash IS NULL THEN NULL
+                           ELSE now() + make_interval(hours => $4) END,
+                       api_key_hash = $1, api_key_hint = $2, key_created_at = now(),
+                       api_key_generation = api_key_generation + 1, key_rotated_at = now(),
+                       key_revoked_at = NULL, email = COALESCE($5, email)
+                   WHERE id = $3
                    RETURNING api_key_generation"#,
             )
             .bind(hash.as_slice())
             .bind(key_hint(key))
             .bind(account_id)
+            .bind(API_KEY_GRACE_HOURS as i32)
+            .bind(verified_email)
             .fetch_one(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -116,12 +179,15 @@ impl AccountRepository {
         }
         let id = Uuid::now_v7();
         let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
-        sqlx::query("INSERT INTO accounts (id, api_key_hash, api_key_hint) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(hash.as_slice())
-            .bind(key_hint(key))
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO accounts (id, api_key_hash, api_key_hint, email) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(hash.as_slice())
+        .bind(key_hint(key))
+        .bind(verified_email)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO account_identities (issuer, subject, account_id) VALUES ($1, $2, $3)",
         )
@@ -162,11 +228,60 @@ impl AccountRepository {
 
     pub async fn metadata(&self, account: AccountId) -> Result<ApiKeyMetadata, sqlx::Error> {
         sqlx::query_as(
-            "SELECT api_key_hint AS hint, api_key_generation AS generation, key_created_at AS created_at, key_rotated_at AS rotated_at FROM accounts WHERE id = $1",
+            "SELECT id AS account_id, api_key_hint AS hint, api_key_generation AS generation, key_created_at AS created_at, key_rotated_at AS rotated_at, previous_api_key_expires_at AS previous_key_expires_at, key_revoked_at AS revoked_at FROM accounts WHERE id = $1",
         )
         .bind(account.0)
         .fetch_one(&self.pool)
         .await
+    }
+
+    pub async fn has_verified_email(&self, account: AccountId) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT email IS NOT NULL FROM accounts WHERE id = $1")
+            .bind(account.0)
+            .fetch_one(&self.pool)
+            .await
+    }
+
+    pub async fn revoke_api_key(
+        &self,
+        issuer: &str,
+        subject: &str,
+        expected_generation: i64,
+        authentication_event_id: &str,
+    ) -> Result<AccountId, IssueApiKeyError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+            .bind(issuer)
+            .bind(subject)
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query_as::<_, (Uuid, i64, bool)>(
+            r#"SELECT account_id, api_key_generation, disabled_at IS NOT NULL
+               FROM account_identities JOIN accounts ON accounts.id = account_id
+               WHERE issuer = $1 AND subject = $2"#,
+        )
+        .bind(issuer)
+        .bind(subject)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((account_id, generation, disabled)) = row else {
+            return Err(IssueApiKeyError::GenerationConflict);
+        };
+        if disabled {
+            return Err(IssueApiKeyError::AccountDisabled);
+        }
+        if generation != expected_generation {
+            return Err(IssueApiKeyError::GenerationConflict);
+        }
+        let inserted = sqlx::query("INSERT INTO account_key_authentication_events (account_id, event_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(account_id).bind(authentication_event_id).execute(&mut *tx).await?;
+        if inserted.rows_affected() == 0 {
+            return Err(IssueApiKeyError::AuthenticationEventAlreadyUsed);
+        }
+        sqlx::query("UPDATE accounts SET api_key_hash = NULL, api_key_hint = NULL, previous_api_key_hash = NULL, previous_api_key_expires_at = NULL, key_revoked_at = now() WHERE id = $1")
+            .bind(account_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(AccountId(account_id))
     }
 }
 
@@ -192,7 +307,7 @@ mod tests {
     const FOURTH_KEY: &str = "fourth-key-0123456789abcdef0123456789abcdef";
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
-    async fn reissue_replaces_the_only_key_for_an_identity(pool: PgPool) {
+    async fn rotation_keeps_the_previous_key_until_grace_expires(pool: PgPool) {
         let repo = AccountRepository::new(pool);
         let first = repo
             .issue_api_key(
@@ -223,6 +338,21 @@ mod tests {
         assert!(second.replaced_previous_key);
         assert_eq!(second.account_id, first.account_id);
         assert_eq!(second.generation, 2);
+        assert_eq!(
+            repo.authenticate(FIRST_KEY).await.unwrap(),
+            Some(first.account_id)
+        );
+        assert_eq!(
+            repo.authenticate(SECOND_KEY).await.unwrap(),
+            Some(first.account_id)
+        );
+        sqlx::query(
+            "UPDATE accounts SET previous_api_key_expires_at = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(first.account_id.0)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
         assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), None);
         assert_eq!(
             repo.authenticate(SECOND_KEY).await.unwrap(),
@@ -265,7 +395,10 @@ mod tests {
             replay,
             Err(IssueApiKeyError::AuthenticationEventAlreadyUsed)
         ));
-        assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), None);
+        assert_eq!(
+            repo.authenticate(FIRST_KEY).await.unwrap(),
+            Some(first.account_id)
+        );
         assert_eq!(
             repo.authenticate(SECOND_KEY).await.unwrap(),
             Some(first.account_id)
@@ -369,5 +502,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retry.generation, 3);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn revocation_immediately_invalidates_current_and_grace_keys(pool: PgPool) {
+        let repo = AccountRepository::new(pool);
+        let first = repo
+            .issue_api_key("issuer", "email|one", None, "event-1", FIRST_KEY)
+            .await
+            .unwrap();
+        repo.issue_api_key("issuer", "email|one", Some(1), "event-2", SECOND_KEY)
+            .await
+            .unwrap();
+        repo.revoke_api_key("issuer", "email|one", 2, "event-3")
+            .await
+            .unwrap();
+        assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), None);
+        assert_eq!(repo.authenticate(SECOND_KEY).await.unwrap(), None);
+        let metadata = repo.metadata(first.account_id).await.unwrap();
+        assert!(metadata.revoked_at.is_some());
+        assert!(metadata.previous_key_expires_at.is_none());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn disabled_accounts_cannot_authenticate_rotate_or_revoke(pool: PgPool) {
+        let repo = AccountRepository::new(pool.clone());
+        let account = repo
+            .issue_api_key("issuer", "email|one", None, "event-1", FIRST_KEY)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE accounts SET disabled_at = now() WHERE id = $1")
+            .bind(account.account_id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), None);
+        assert!(matches!(
+            repo.issue_api_key("issuer", "email|one", Some(1), "event-2", SECOND_KEY)
+                .await,
+            Err(IssueApiKeyError::AccountDisabled)
+        ));
+        assert!(matches!(
+            repo.revoke_api_key("issuer", "email|one", 1, "event-3")
+                .await,
+            Err(IssueApiKeyError::AccountDisabled)
+        ));
     }
 }

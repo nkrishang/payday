@@ -1,0 +1,19 @@
+[package]
+name = "payday-dev-identity"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
+rand = { workspace = true }
+rsa = { version = "0.9", features = ["pem"] }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }

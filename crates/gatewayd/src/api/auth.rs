@@ -1,3 +1,5 @@
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -5,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
+use axum::response::IntoResponse;
 use axum::response::Response;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
@@ -26,6 +30,7 @@ pub struct Identity {
     pub issuer: String,
     pub subject: String,
     pub authentication_event_id: String,
+    pub email: String,
 }
 
 #[derive(Clone)]
@@ -62,17 +67,26 @@ struct Claims {
     authenticated_at: u64,
     #[serde(rename = "https://api.payday.sh/auth/event_id")]
     authentication_event_id: String,
+    #[serde(rename = "https://api.payday.sh/auth/email")]
+    email: String,
 }
 
 impl Auth0Verifier {
-    pub async fn new(issuer: String, audience: String, client_id: String) -> Result<Self, String> {
+    pub async fn new(
+        issuer: String,
+        audience: String,
+        client_id: String,
+        allow_dev_identity: bool,
+    ) -> Result<Self, String> {
         let parsed_issuer = reqwest::Url::parse(&issuer)
             .map_err(|error| format!("invalid Auth0 issuer URL: {error}"))?;
-        if parsed_issuer.scheme() != "https"
+        if !issuer_transport_allowed(&parsed_issuer, allow_dev_identity)
             || parsed_issuer.query().is_some()
             || parsed_issuer.fragment().is_some()
         {
-            return Err("Auth0 issuer must be an HTTPS URL without query or fragment".into());
+            return Err(
+                "Auth0 issuer must be HTTPS; loopback HTTP requires PAYDAY_DEV_IDENTITY=1".into(),
+            );
         }
         for (name, value) in [("audience", &audience), ("client ID", &client_id)] {
             if value.trim().is_empty() {
@@ -141,6 +155,7 @@ impl Auth0Verifier {
             || !claims.sub.starts_with("email|")
             || claims.authentication_event_id.is_empty()
             || claims.authentication_event_id.len() > 255
+            || !valid_email(&claims.email)
             || claims.authenticated_at > now + CLOCK_SKEW.as_secs()
             || now.saturating_sub(claims.authenticated_at) > AUTHENTICATION_MAX_AGE.as_secs()
         {
@@ -150,6 +165,7 @@ impl Auth0Verifier {
             issuer: claims.iss,
             subject: claims.sub,
             authentication_event_id: claims.authentication_event_id,
+            email: claims.email,
         })
     }
 
@@ -214,6 +230,33 @@ impl Auth0Verifier {
     }
 }
 
+fn valid_email(value: &str) -> bool {
+    value.len() <= 254
+        && !value.chars().any(char::is_whitespace)
+        && value.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        })
+}
+
+fn issuer_transport_allowed(issuer: &reqwest::Url, allow_dev_identity: bool) -> bool {
+    issuer.scheme() == "https"
+        || (allow_dev_identity
+            && issuer.scheme() == "http"
+            && issuer.host_str().is_some_and(|host| {
+                let host = host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host);
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            }))
+}
+
 fn refresh_is_due(cached: &CachedKeys, kid: &str) -> bool {
     (cached.refreshed_at.elapsed() >= JWKS_CACHE_TTL || !cached.values.contains_key(kid))
         && cached.last_attempt.elapsed() >= JWKS_RETRY_BACKOFF
@@ -259,8 +302,57 @@ pub async fn require_api_key(
         .authenticate(supplied)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
+    // One independently refilled bucket per authenticated account. Authentication
+    // failures cannot consume another customer's allowance.
+    const LIMIT: f64 = 60.0;
+    let now = Instant::now();
+    let (allowed, remaining, seconds_until_full) = {
+        let mut buckets = state.rate_limits.lock().await;
+        let bucket = buckets.entry(account.0).or_insert((LIMIT, now));
+        bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64()).min(LIMIT);
+        bucket.1 = now;
+        let allowed = bucket.0 >= 1.0;
+        if allowed {
+            bucket.0 -= 1.0;
+        }
+        (
+            allowed,
+            bucket.0.floor() as u64,
+            (LIMIT - bucket.0).ceil() as u64,
+        )
+    };
     request.extensions_mut().insert(account);
-    Ok(next.run(request).await)
+    tracing::Span::current().record("account_id", tracing::field::display(account.0));
+    let mut response = if allowed {
+        next.run(request).await
+    } else {
+        ApiError::rate_limited().into_response()
+    };
+    response
+        .headers_mut()
+        .insert("x-ratelimit-limit", HeaderValue::from_static("60"));
+    response.headers_mut().insert(
+        "x-ratelimit-remaining",
+        HeaderValue::from_str(&remaining.to_string()).unwrap(),
+    );
+    response.headers_mut().insert(
+        "x-ratelimit-reset",
+        HeaderValue::from_str(
+            &(SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                + seconds_until_full)
+                .to_string(),
+        )
+        .unwrap(),
+    );
+    if !allowed {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    Ok(response)
 }
 
 pub async fn require_identity(
@@ -275,6 +367,24 @@ pub async fn require_identity(
         .ok_or_else(ApiError::identity_unavailable)?;
     let identity = verifier.verify(token).await?;
     request.extensions_mut().insert(identity);
+    Ok(next.run(request).await)
+}
+
+pub async fn require_admin(mut request: Request, next: Next) -> Result<Response, ApiError> {
+    let supplied = bearer_from_request(&request).ok_or_else(ApiError::admin_unauthorized)?;
+    let expected =
+        std::env::var("PAYDAY_ADMIN_BEARER_SECRET").map_err(|_| ApiError::admin_unauthorized())?;
+    let mut expected_mac =
+        Hmac::<Sha256>::new_from_slice(b"Payday admin credential comparison").unwrap();
+    expected_mac.update(expected.as_bytes());
+    let expected_tag = expected_mac.finalize().into_bytes();
+    let mut supplied_mac =
+        Hmac::<Sha256>::new_from_slice(b"Payday admin credential comparison").unwrap();
+    supplied_mac.update(supplied.as_bytes());
+    if expected.len() < 32 || supplied_mac.verify_slice(&expected_tag).is_err() {
+        return Err(ApiError::admin_unauthorized());
+    }
+    request.extensions_mut().insert(());
     Ok(next.run(request).await)
 }
 
@@ -321,6 +431,8 @@ mod tests {
         authenticated_at: u64,
         #[serde(rename = "https://api.payday.sh/auth/event_id")]
         authentication_event_id: &'a str,
+        #[serde(rename = "https://api.payday.sh/auth/email")]
+        email: &'a str,
     }
 
     #[test]
@@ -339,24 +451,43 @@ mod tests {
                 "http://issuer.example".into(),
                 "audience".into(),
                 "client".into(),
+                false,
             )
             .await
             .is_err()
         );
         assert!(
-            Auth0Verifier::new("https://issuer.example".into(), " ".into(), "client".into(),)
-                .await
-                .is_err()
+            Auth0Verifier::new(
+                "https://issuer.example".into(),
+                " ".into(),
+                "client".into(),
+                false,
+            )
+            .await
+            .is_err()
         );
         assert!(
             Auth0Verifier::new(
                 "https://issuer.example".into(),
                 "audience".into(),
                 " ".into(),
+                false,
             )
             .await
             .is_err()
         );
+        assert!(issuer_transport_allowed(
+            &reqwest::Url::parse("http://127.0.0.1:3001").unwrap(),
+            true
+        ));
+        assert!(issuer_transport_allowed(
+            &reqwest::Url::parse("http://[::1]:3001").unwrap(),
+            true
+        ));
+        assert!(!issuer_transport_allowed(
+            &reqwest::Url::parse("http://identity.example").unwrap(),
+            true
+        ));
     }
 
     fn verifier_and_key() -> (Auth0Verifier, EncodingKey) {
@@ -417,6 +548,7 @@ mod tests {
                     .unwrap()
                     .as_secs(),
                 authentication_event_id: "authentication-event",
+                email: "merchant@example.com",
             },
             key,
         )
@@ -529,6 +661,7 @@ mod tests {
                     authentication_client_id: client_id,
                     authenticated_at,
                     authentication_event_id: event_id,
+                    email: "merchant@example.com",
                 },
                 &key,
             )
@@ -637,6 +770,25 @@ mod tests {
             verifier.verify(&new_token).await.unwrap().subject,
             "email|user"
         );
+        assert_eq!(requests.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_key_id_refreshes_a_fresh_jwks_cache() {
+        let (_, _, old_decoding) = rsa_key("old-key");
+        let (new_jwk, new_encoding, _) = rsa_key("new-key");
+        let (url, requests) = jwks_server(new_jwk).await;
+        let verifier = stale_verifier(url, "old-key", old_decoding);
+        verifier.inner.keys.write().await.refreshed_at = Instant::now();
+        let new_token = token_with_kid(
+            &new_encoding,
+            "new-key",
+            "https://issuer.example/",
+            "https://api.payday.sh",
+            u64::MAX,
+        );
+
+        assert!(verifier.verify(&new_token).await.is_ok());
         assert_eq!(requests.await.unwrap(), 1);
     }
 

@@ -14,6 +14,23 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InvoiceId(pub Uuid);
 
+impl fmt::Display for InvoiceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "pay_{}", self.0)
+    }
+}
+
+/// Validate a complete customer-facing `pay_…` ID and return the UUID used by
+/// the account-scoped database lookup. Only the canonical form the API emits is
+/// accepted: partial IDs and other UUID spellings are rejected so a lookup can
+/// never resolve to more than one payment.
+pub fn payment_id(value: &str) -> Option<Uuid> {
+    let suffix = value.strip_prefix("pay_")?;
+    let uuid = Uuid::try_parse(suffix).ok()?;
+    let mut canonical = [0u8; uuid::fmt::Hyphenated::LENGTH];
+    (uuid.hyphenated().encode_lower(&mut canonical) == suffix).then_some(uuid)
+}
+
 pub fn generate_invoice_id() -> InvoiceId {
     InvoiceId(Uuid::now_v7())
 }
@@ -121,8 +138,13 @@ pub struct Invoice {
     pub execute_tx_hash: Option<B256>,
     /// Block at which the invoice reached `fulfilled` or `recovered`.
     pub resolved_at_block: Option<u64>,
+    /// Timestamp of that finalized block.
+    pub settled_at_timestamp: Option<u64>,
     /// Why automatic sweeping stopped for this invoice, if it did.
     pub blocked_reason: Option<String>,
+    /// When the customer asked clients to stop using this invoice. This is
+    /// advisory metadata and does not alter the immutable payment contract.
+    pub cancellation_requested_at: Option<String>,
 }
 
 impl Invoice {
@@ -159,7 +181,9 @@ impl Invoice {
             received: Amount(U256::ZERO),
             execute_tx_hash: None,
             resolved_at_block: None,
+            settled_at_timestamp: None,
             blocked_reason: None,
+            cancellation_requested_at: None,
         }
     }
 
@@ -185,6 +209,27 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn public_payment_ids_round_trip_only_in_canonical_complete_form() {
+        let uuid = Uuid::parse_str("0198f80c-8d2f-7dc1-a369-90556a64f700").unwrap();
+        let id = InvoiceId(uuid);
+        assert_eq!(id.to_string(), "pay_0198f80c-8d2f-7dc1-a369-90556a64f700");
+        assert_eq!(payment_id(&id.to_string()), Some(uuid));
+        for invalid in [
+            "",
+            "pay_",
+            "0198f80c-8d2f-7dc1-a369-90556a64f700",
+            "pay_0198f80c",
+            "pay_0198f80c-8d2f",
+            "pay_0198F80C-8D2F-7DC1-A369-90556A64F700",
+            "pay_0198f80c8d2f7dc1a36990556a64f700",
+            "pay_{0198f80c-8d2f-7dc1-a369-90556a64f700}",
+            "pay_%",
+        ] {
+            assert_eq!(payment_id(invalid), None, "{invalid}");
+        }
+    }
     use uuid::Version;
 
     #[test]
