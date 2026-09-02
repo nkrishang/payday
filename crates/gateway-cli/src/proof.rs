@@ -3,7 +3,7 @@
 //! receipt checks over plain JSON-RPC: one for the payer's transfers into the
 //! address, one for the settlement transaction that forwarded the funds out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -273,6 +273,8 @@ struct Log {
     address: String,
     topics: Vec<String>,
     data: String,
+    #[serde(rename = "logIndex")]
+    log_index: Option<String>,
 }
 
 impl Receipt {
@@ -287,6 +289,29 @@ impl Receipt {
                 && parse_word(&log.topics[2]) == Some(to.into_word())
                 && parse_u256(&log.data) == Some(amount)
         })
+    }
+
+    fn has_transfer_at(
+        &self,
+        index: u64,
+        token: Address,
+        from: Address,
+        to: Address,
+        amount: U256,
+    ) -> bool {
+        self.logs
+            .iter()
+            .filter(|log| {
+                log.log_index.as_deref().and_then(parse_quantity) == Some(index)
+                    && Address::from_str(&log.address).is_ok_and(|a| a == token)
+                    && log.topics.len() == 3
+                    && parse_word(&log.topics[0]) == Some(TRANSFER_TOPIC)
+                    && parse_word(&log.topics[1]) == Some(from.into_word())
+                    && parse_word(&log.topics[2]) == Some(to.into_word())
+                    && parse_u256(&log.data) == Some(amount)
+            })
+            .count()
+            == 1
     }
 }
 
@@ -367,29 +392,22 @@ async fn confirm_receipts(
 ) -> Result<String, String> {
     let token = Address::from_str(&proof.token_address)
         .map_err(|_| "token_address is malformed".to_string())?;
-    let mut hashes: Vec<&str> = Vec::new();
     let mut unique = HashSet::new();
-    let transfers = proof.transfers.iter().filter(|transfer| {
-        unique.insert((
-            transfer.transaction_hash.as_str(),
-            transfer.sender.as_str(),
-            transfer.recipient.as_str(),
-            transfer.amount_base_units.as_str(),
-            transfer.block_number.as_str(),
-        ))
-    });
-    let transfers: Vec<_> = transfers.collect();
-    for transfer in &transfers {
-        if !hashes.contains(&transfer.transaction_hash.as_str()) {
-            hashes.push(&transfer.transaction_hash);
+    let mut by_hash = HashMap::<B256, Vec<_>>::new();
+    for transfer in &proof.transfers {
+        let hash =
+            B256::from_str(&transfer.transaction_hash).map_err(|_| "transfer hash is malformed")?;
+        let index = transfer
+            .log_index
+            .parse::<u64>()
+            .map_err(|_| "transfer log index is malformed")?;
+        if unique.insert((hash, index)) {
+            by_hash.entry(hash).or_default().push((transfer, index));
         }
     }
-    for hash in &hashes {
-        let receipt = rpc.successful_receipt(hash).await?;
-        for transfer in transfers
-            .iter()
-            .filter(|transfer| transfer.transaction_hash == *hash)
-        {
+    for (hash, transfers) in &by_hash {
+        let receipt = rpc.successful_receipt(&hash.to_string()).await?;
+        for (transfer, index) in transfers {
             let sender = Address::from_str(&transfer.sender)
                 .map_err(|_| format!("transfer sender {} is malformed", transfer.sender))?;
             let amount = U256::from_str_radix(&transfer.amount_base_units, 10).map_err(|_| {
@@ -398,7 +416,7 @@ async fn confirm_receipts(
                     transfer.amount_base_units
                 )
             })?;
-            if !receipt.has_transfer(token, sender, verified.payment_address, amount) {
+            if !receipt.has_transfer_at(*index, token, sender, verified.payment_address, amount) {
                 return Err(format!(
                     "no USDC Transfer of {} base units from {} to {} in {hash}",
                     transfer.amount_base_units,
@@ -410,7 +428,7 @@ async fn confirm_receipts(
     }
     Ok(format!(
         "{} receipt(s) confirmed via {}",
-        hashes.len(),
+        by_hash.len(),
         rpc.host
     ))
 }
@@ -454,6 +472,9 @@ fn parse_word(value: &str) -> Option<B256> {
 
 fn parse_u256(value: &str) -> Option<U256> {
     U256::from_str_radix(value.trim_start_matches("0x"), 16).ok()
+}
+fn parse_quantity(value: &str) -> Option<u64> {
+    u64::from_str_radix(value.strip_prefix("0x")?, 16).ok()
 }
 
 #[cfg(test)]
@@ -565,6 +586,7 @@ pub(crate) mod fixture {
             settlement_transaction_hash: SETTLEMENT_HASH.to_string(),
             transfers: vec![ProofTransfer {
                 transaction_hash: TRANSFER_HASH.to_string(),
+                log_index: "0".into(),
                 sender: SENDER.to_checksum(None),
                 recipient: invoice.payment_address.0.to_checksum(None),
                 amount_base_units: "2500000".into(),
@@ -734,6 +756,7 @@ mod tests {
     ) -> serde_json::Value {
         serde_json::json!({
             "address": proof.token_address.to_lowercase(),
+            "logIndex": "0x0",
             "topics": [
                 TRANSFER_TOPIC.to_string(),
                 from.into_word().to_string(),

@@ -244,6 +244,14 @@ pub async fn start(
         .as_ref()
         .ok_or_else(ApiError::identity_verification_unavailable)?;
     let (row, invoice) = gated_invoice(&state, &id).await?;
+    if !matches!(
+        invoice.status,
+        gateway_core::InvoiceStatus::Created
+            | gateway_core::InvoiceStatus::Funded
+            | gateway_core::InvoiceStatus::Deploying
+    ) {
+        return Err(ApiError::payment_not_payable());
+    }
     let policy = &invoice.issuance_snapshot.payer_policy;
     let mode = policy.mode();
     if !matches!(

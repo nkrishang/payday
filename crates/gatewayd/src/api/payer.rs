@@ -257,14 +257,7 @@ pub async fn authorized_invoice(
         .map(|hash| hash.to_string());
     let invoice = Invoice::try_from(&row)?;
     let mode = invoice.issuance_snapshot.payer_policy.mode();
-    let terminal = !matches!(
-        invoice.status,
-        InvoiceStatus::Created | InvoiceStatus::Funded | InvoiceStatus::Deploying
-    );
     let session = match session_token {
-        Some(token) if mode.is_gated() && terminal => {
-            state.payer_sessions.find(token, row.id).await?
-        }
         Some(token) if mode.is_gated() => state.payer_sessions.find_active(token, row.id).await?,
         _ => None,
     };

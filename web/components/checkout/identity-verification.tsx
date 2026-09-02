@@ -89,12 +89,21 @@ export function IdentityVerification({
         }
       }
     };
+    const visibilityChanged = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (!document.hidden) void read();
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
     void read();
 
     return () => {
       disposed = true;
       controller.abort();
       if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visibilityChanged);
     };
   }, [paymentId, payerSession, onSession]);
 

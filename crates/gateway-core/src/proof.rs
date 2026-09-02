@@ -32,6 +32,7 @@ pub const ATTESTATION_DOMAIN: &[u8] = b"PAYDAY_VERIFICATION_ATTESTATION_V1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofTransfer {
     pub transaction_hash: String,
+    pub log_index: String,
     pub sender: String,
     pub recipient: String,
     pub amount_base_units: String,
@@ -298,23 +299,24 @@ pub fn verify_proof(
         &proof.settlement_transaction_hash,
     )?;
     let mut total = U256::ZERO;
-    // Proof entries have no log index, so byte-for-byte duplicate entries
-    // cannot identify distinct on-chain events and must not add coverage.
+    // Canonical event identity prevents textual/metadata aliases inflating it.
     let mut unique_transfers = HashSet::new();
     for transfer in &proof.transfers {
-        word("transfer transaction_hash", &transfer.transaction_hash)?;
+        let hash = word("transfer transaction_hash", &transfer.transaction_hash)?;
+        let log_index = transfer
+            .log_index
+            .parse::<u64>()
+            .map_err(|_| ProofError::Malformed("transfer log_index"))?;
         if address("transfer recipient", &transfer.recipient)? != payment_address {
             return Err(ProofError::TransferRecipientMismatch);
         }
         let credited = U256::from_str_radix(&transfer.amount_base_units, 10)
             .map_err(|_| ProofError::Malformed("transfer amount_base_units"))?;
-        if unique_transfers.insert((
-            transfer.transaction_hash.as_str(),
-            transfer.sender.as_str(),
-            transfer.recipient.as_str(),
-            transfer.amount_base_units.as_str(),
-            transfer.block_number.as_str(),
-        )) {
+        transfer
+            .block_number
+            .parse::<u64>()
+            .map_err(|_| ProofError::Malformed("transfer block_number"))?;
+        if unique_transfers.insert((hash, log_index)) {
             total = total
                 .checked_add(credited)
                 .ok_or(ProofError::Malformed("transfer amount_base_units"))?;
@@ -447,6 +449,7 @@ mod tests {
             transfers: vec![
                 ProofTransfer {
                     transaction_hash: B256::repeat_byte(0xA1).to_string(),
+                    log_index: "0".into(),
                     sender: address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
                         .to_checksum(None),
                     recipient: invoice.payment_address.0.to_checksum(None),
@@ -455,6 +458,7 @@ mod tests {
                 },
                 ProofTransfer {
                     transaction_hash: B256::repeat_byte(0xA2).to_string(),
+                    log_index: "1".into(),
                     sender: address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
                         .to_checksum(None),
                     recipient: invoice.payment_address.0.to_checksum(None),

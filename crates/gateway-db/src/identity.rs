@@ -24,6 +24,9 @@ use crate::verifications::DbPayerSession;
 pub const DEFAULT_CREDENTIAL_LIFETIME: Duration = Duration::from_secs(180 * 24 * 3600);
 /// How often an actively pending hosted session is polled.
 pub const IDENTITY_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// A provider-session creation normally finishes within its HTTP timeout.
+/// This lease blocks concurrent starts without making a crashed start permanent.
+pub const IDENTITY_CREATION_LEASE: Duration = Duration::from_secs(60);
 /// The longest an in-review session or a failing provider waits between polls.
 pub const MAX_POLL_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Automated resubmissions allowed after a decline: one (product plan §13).
@@ -144,6 +147,7 @@ pub struct DbVerificationAttempt {
     pub verified_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub next_poll_at: Option<DateTime<Utc>>,
+    pub leased_until: Option<DateTime<Utc>>,
     pub poll_count: i32,
     pub provider_failures: i32,
     pub created_at: DateTime<Utc>,
@@ -155,7 +159,7 @@ macro_rules! attempt_columns {
         "id, invoice_id, account_id, payer_session_id, kind, status, provider, \
          provider_reference, payer_ref, expected_identity_hash, document_status, liveness_status, \
          identity_match_status, risk_codes, country_code, attempt_number, verified_at, expires_at, \
-         next_poll_at, poll_count, provider_failures, created_at"
+         next_poll_at, leased_until, poll_count, provider_failures, created_at"
     };
 }
 
@@ -391,16 +395,36 @@ impl VerificationRepository {
         if in_review {
             return Err(StartIdentityError::InReview);
         }
+        let creating: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM payer_verifications
+                WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2
+                  AND status = 'pending' AND provider_reference IS NULL
+                  AND COALESCE(leased_until, created_at + make_interval(secs => $3)) > now()
+            )
+            "#,
+        )
+        .bind(invoice_id)
+        .bind(payer_ref.as_slice())
+        .bind(IDENTITY_CREATION_LEASE.as_secs_f64())
+        .fetch_one(&mut *tx)
+        .await?;
+        if creating {
+            return Err(StartIdentityError::InReview);
+        }
         sqlx::query(
             r#"
             UPDATE payer_verifications
             SET status = 'abandoned', next_poll_at = NULL, leased_until = NULL
             WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2
               AND status = 'pending' AND provider_reference IS NULL
+              AND COALESCE(leased_until, created_at + make_interval(secs => $3)) <= now()
             "#,
         )
         .bind(invoice_id)
         .bind(payer_ref.as_slice())
+        .bind(IDENTITY_CREATION_LEASE.as_secs_f64())
         .execute(&mut *tx)
         .await?;
         let id = Uuid::now_v7();
@@ -408,8 +432,9 @@ impl VerificationRepository {
             r#"
             INSERT INTO payer_verifications
                 (id, invoice_id, account_id, payer_session_id, kind, status, provider,
-                 payer_ref, expected_identity_hash, attempt_number)
-            VALUES ($1, $2, $3, $4, 'identity', 'pending', $5, $6, $7, $8)
+                 payer_ref, expected_identity_hash, attempt_number, leased_until)
+            VALUES ($1, $2, $3, $4, 'identity', 'pending', $5, $6, $7, $8,
+                    now() + make_interval(secs => $9))
             RETURNING "#,
             attempt_columns!(),
             r#"
@@ -423,6 +448,7 @@ impl VerificationRepository {
         .bind(payer_ref.as_slice())
         .bind(expected_identity_hash.map(|hash| hash.to_vec()))
         .bind(declines + 1)
+        .bind(IDENTITY_CREATION_LEASE.as_secs_f64())
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -443,8 +469,9 @@ impl VerificationRepository {
             UPDATE payer_verifications
             SET provider_reference = $2,
                 status = CASE WHEN $4 THEN $3 ELSE 'pending' END,
-                next_poll_at = CASE WHEN $4 THEN now() + make_interval(secs => $5) ELSE now() END
-            WHERE id = $1 AND status = 'pending'
+                next_poll_at = CASE WHEN $4 THEN now() + make_interval(secs => $5) ELSE now() END,
+                leased_until = NULL
+            WHERE id = $1 AND status = 'pending' AND provider_reference IS NULL
             "#,
         )
         .bind(attempt_id)
@@ -454,7 +481,13 @@ impl VerificationRepository {
         .bind(IDENTITY_POLL_INTERVAL.as_secs_f64())
         .execute(&self.pool)
         .await
-        .map(drop)
+        .and_then(|result| {
+            if result.rows_affected() == 1 {
+                Ok(())
+            } else {
+                Err(sqlx::Error::RowNotFound)
+            }
+        })
     }
 
     /// The provider refused to open a session: the attempt never happened.
@@ -979,9 +1012,11 @@ fn state_from(attempts: Vec<DbVerificationAttempt>, reviewed: bool) -> IdentityS
         || attempts
             .iter()
             .any(|attempt| attempt.status() == IdentityStatus::ReviewRequired);
-    let in_review = attempts
-        .iter()
-        .any(|attempt| attempt.status().is_open() && attempt.provider_reference.is_some());
+    let in_review = attempts.iter().any(|attempt| {
+        attempt.status().is_open()
+            && (attempt.provider_reference.is_some()
+                || attempt.leased_until.is_some_and(|lease| lease > Utc::now()))
+    });
     IdentityState {
         latest: attempts.into_iter().next(),
         review_required,
@@ -1763,5 +1798,46 @@ mod tests {
         assert_eq!(stored.status(), IdentityStatus::Pending);
         assert!(stored.next_poll_at.is_some_and(|due| due <= Utc::now()));
         assert!(completed_at(&pool, row.id).await.is_none());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn provider_creation_lease_serializes_starts_and_rejects_stale_cas(pool: PgPool) {
+        let repo = VerificationRepository::new(pool.clone());
+        let row = invoice(&pool, 1, "concurrent-create", unattributed()).await;
+        let (session, reference) = verified_session(&pool, &row).await;
+        let first = repo
+            .begin_identity_verification(session.id, reference, None, "didit")
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            repo.begin_identity_verification(session.id, reference, None, "didit")
+                .await,
+            Err(StartIdentityError::InReview)
+        ));
+
+        sqlx::query("UPDATE payer_verifications SET leased_until = now() - interval '1 second' WHERE id = $1")
+            .bind(first.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let replacement = repo
+            .begin_identity_verification(session.id, reference, None, "didit")
+            .await
+            .unwrap();
+        assert_ne!(replacement.id, first.id);
+        assert_eq!(
+            repo.find_attempt(first.id).await.unwrap().unwrap().status(),
+            IdentityStatus::Abandoned
+        );
+        assert!(matches!(
+            repo.record_provider_session(
+                first.id,
+                "late-provider-session",
+                IdentityStatus::Pending
+            )
+            .await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 }

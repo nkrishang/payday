@@ -1,7 +1,7 @@
 "use client";
 
 import type { PayerPayment } from "@payday/sdk";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { checkoutView, unlockedPayment } from "@/lib/checkout-state";
 import { usePayerSession } from "@/lib/payer-session";
 import { StatusDot } from "@/components/ui/status-dot";
@@ -36,10 +36,13 @@ function CheckoutBody({ initial }: { initial: PayerPayment }) {
     payerSession,
   );
   const [emailCodeSent, setEmailCodeSent] = useState(false);
-  const updateSession = (token: string | null) => {
-    if (token === null) setEmailCodeSent(false);
-    setPayerSession(token);
-  };
+  const updateSession = useCallback(
+    (token: string | null) => {
+      if (token === null) setEmailCodeSent(false);
+      setPayerSession(token);
+    },
+    [setPayerSession],
+  );
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
   const view = checkoutView(payment, { secondsRemaining, pendingTxHash, emailCodeSent });
   // Null exactly when the phase is one of the locked ones: the same narrowing

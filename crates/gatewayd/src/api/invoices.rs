@@ -380,9 +380,7 @@ pub async fn create_payment(
             // from expiry and bound to nothing. Hand it back to the lifecycle
             // rule. A typed race can mean the winner attached this same object,
             // though, in which case restoring it would expire live content.
-            let restore_attachment = if matches!(error, InsertIssuedInvoiceError::Database(_)) {
-                true
-            } else if let Some(attachment) = &attachment {
+            let restore_attachment = if let Some(attachment) = &attachment {
                 match state
                     .attachments
                     .get_for_account(account, attachment.id)

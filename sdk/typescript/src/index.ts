@@ -339,6 +339,8 @@ export interface CanonicalIssuanceSnapshot {
 
 export interface ProofTransfer {
   transaction_hash: string;
+  /** Decimal receipt log index; canonical event identity with transaction_hash. */
+  log_index: string;
   sender: string;
   recipient: string;
   amount_base_units: string;
@@ -442,13 +444,16 @@ export class PaydayError extends Error {
   readonly code: string;
   readonly requestId: string | undefined;
   readonly status: number;
+  /** Short-lived proof returned when an accepted OTP could not be persisted. */
+  readonly continuation: string | undefined;
 
-  constructor(message: string, code: string, status: number, requestId?: string) {
+  constructor(message: string, code: string, status: number, requestId?: string, continuation?: string) {
     super(message);
     this.name = "PaydayError";
     this.code = code;
     this.status = status;
     this.requestId = requestId;
+    this.continuation = continuation;
   }
 }
 
@@ -492,12 +497,13 @@ async function send(
 
 async function errorFrom(response: Response): Promise<PaydayError> {
   const text = await response.text();
-  let wire: { error?: { code?: string; message?: string }; request_id?: string } | undefined;
+  let wire: { error?: { code?: string; message?: string }; request_id?: string; continuation?: string } | undefined;
   try { wire = text ? JSON.parse(text) : undefined; } catch { wire = undefined; }
   return new PaydayError(
     wire?.error?.message ?? response.statusText ?? "Payday API request failed",
     wire?.error?.code ?? "http_error", response.status,
     wire?.request_id ?? response.headers.get("x-request-id") ?? undefined,
+    wire?.continuation,
   );
 }
 
@@ -738,6 +744,12 @@ export class PaydayPayerClient {
       request<VerificationStatus>(
         this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/confirm`,
         { method: "POST", body: { otp }, ...payerOptions({ ...options, payerSession }) },
+      ),
+    /** Resume persistence after `verification_persistence_unavailable`, without reusing the spent OTP. */
+    continueEmail: (id: string, continuation: string, payerSession: string, options: { signal?: AbortSignal } = {}): Promise<VerificationStatus> =>
+      request<VerificationStatus>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/confirm`,
+        { method: "POST", body: { continuation }, ...payerOptions({ ...options, payerSession }) },
       ),
     /** The session's facts, or the invoice's without a session. */
     status: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<VerificationStatus> =>

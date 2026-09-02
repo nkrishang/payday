@@ -243,7 +243,10 @@ fn feature_status(features: &[DiditFeature]) -> VerificationFactStatus {
 }
 
 fn is_expected_details_mismatch(risk: &str) -> bool {
-    risk == "EXPECTED_DETAILS_MISMATCH"
+    matches!(
+        risk,
+        "FULL_NAME_MISMATCH_WITH_PROVIDED" | "EXPECTED_DETAILS_MISMATCH"
+    )
 }
 
 fn is_risk_code(value: &str) -> bool {
@@ -457,7 +460,7 @@ impl PayerIdentityProvider for DiditProvider {
                 .await
                 .map_err(|_| IdentityProviderError::Unavailable("decision did not parse".into()))?;
             Ok(Self::reduce(decision))
-        } else if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
+        } else if status == StatusCode::NOT_FOUND {
             Err(IdentityProviderError::Rejected(format!(
                 "fetch decision answered {status}"
             )))
@@ -570,6 +573,21 @@ mod tests {
             VerificationFactStatus::Approved
         );
         assert_eq!(decision.risk_codes, ["FACE_MISMATCH"]);
+    }
+
+    #[test]
+    fn documented_full_name_mismatch_never_approves_the_expected_identity() {
+        let raw = APPROVED_MATCHED.replace(
+            "\"warnings\": []",
+            "\"warnings\": [{\"risk\": \"FULL_NAME_MISMATCH_WITH_PROVIDED\"}]",
+        );
+        let decision = reduce(&raw);
+        assert_eq!(decision.status, IdentityProviderStatus::Approved);
+        assert_eq!(
+            decision.expected_identity_match,
+            VerificationFactStatus::Declined
+        );
+        assert_eq!(decision.risk_codes, ["FULL_NAME_MISMATCH_WITH_PROVIDED"]);
     }
 
     #[test]

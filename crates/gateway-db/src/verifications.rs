@@ -175,27 +175,6 @@ impl PayerSessionRepository {
         .await
     }
 
-    /// Resolve a session regardless of expiry. This is only used for closed
-    /// invoices, where it restores the receipt but can no longer enable a payment.
-    pub async fn find(
-        &self,
-        token: &str,
-        invoice_id: Uuid,
-    ) -> Result<Option<DbPayerSession>, sqlx::Error> {
-        sqlx::query_as::<_, DbPayerSession>(
-            r#"
-            SELECT id, invoice_id, payer_ref, email_verified_at, document_verified_at,
-                   liveness_verified_at, identity_matched_at, created_at, expires_at
-            FROM payer_sessions
-            WHERE token_hash = $1 AND invoice_id = $2
-            "#,
-        )
-        .bind(token_hash(token).as_slice())
-        .bind(invoice_id)
-        .fetch_optional(&self.pool)
-        .await
-    }
-
     pub async fn delete(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM payer_sessions WHERE id = $1")
             .bind(session_id)
@@ -373,6 +352,22 @@ impl PayerSessionRepository {
         .bind(verified_at)
         .fetch_one(&mut *tx)
         .await?;
+        // A completed terminal invoice may issue a fresh receipt capability
+        // after the expected mailbox is proven again. This never revives an
+        // invoice or extends the old bearer: it marks only this new 24h session.
+        let session = sqlx::query_as::<_, DbPayerSession>(
+            r#"
+            UPDATE payer_sessions s SET
+              document_verified_at = CASE WHEN i.payer_policy_mode IN ('verified_identity','verified_identity_unattributed') THEN COALESCE(s.document_verified_at, $2) ELSE s.document_verified_at END,
+              liveness_verified_at = CASE WHEN i.payer_policy_mode IN ('verified_identity','verified_identity_unattributed') THEN COALESCE(s.liveness_verified_at, $2) ELSE s.liveness_verified_at END,
+              identity_matched_at = CASE WHEN i.payer_policy_mode = 'verified_identity' THEN COALESCE(s.identity_matched_at, $2) ELSE s.identity_matched_at END
+            FROM invoices i WHERE s.id=$1 AND i.id=s.invoice_id
+              AND i.verification_completed_at IS NOT NULL
+              AND i.status NOT IN ('created','funded','deploying')
+            RETURNING s.id,s.invoice_id,s.payer_ref,s.email_verified_at,s.document_verified_at,
+                      s.liveness_verified_at,s.identity_matched_at,s.created_at,s.expires_at
+            "#,
+        ).bind(session_id).bind(verified_at).fetch_optional(&mut *tx).await?.unwrap_or(session);
         let invoice_completed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             r#"
             UPDATE invoices

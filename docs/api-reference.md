@@ -407,14 +407,22 @@ it back in `Payday-Payer-Session` on a second `start` resends the code on the
 same session. At most one code per invoice per minute is sent, whoever asks;
 sooner answers `429 otp_resend_cooldown` with `Retry-After`. `confirm` takes
 the session and the code, exchanges it with Auth0 against the payer audience,
-and answers `{requirements, identity_start_available}`. For `verified_email`
+and answers `{requirements, identity_start_available}`. If Auth0 accepts and
+consumes the OTP but database persistence remains unavailable, it answers
+`503 verification_persistence_unavailable` with a five-minute, signed
+`continuation`. Retry the same confirm route with `{"continuation":"…"}` and
+the same payer session; this proof is audience-, invoice-, and session-bound,
+contains no Auth0 bearer token, and responses are `no-store`. For `verified_email`
 the invoice's verification completes and the session unlocks the content; the
 identity modes record the mailbox and stay locked until their identity facts.
 `GET …/verify` reports the same shape for a session, or for the invoice as a
 whole without one. Permissionless invoices answer
 `409 verification_not_required`; invoices past their deadline or already
 settled answer `410 payment_not_payable`, because verification after expiry
-cannot revive settlement.
+cannot revive settlement. The exception is a terminal invoice that previously
+completed verification: `start` and `confirm` explicitly re-prove its expected
+mailbox and mint a new 24-hour receipt session. Expired sessions never unlock
+terminal content, and receipt re-authentication never makes the invoice payable.
 
 The write routes answer cross-origin requests only from the hosted
 checkout origin (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
@@ -487,6 +495,7 @@ binds the same expected-identity hash an automated approval would.
 | `verification_required` | 401 | Content or QR requested for a gated invoice without an unlocked session |
 | `verification_not_required` | 409 | Verification started on a permissionless invoice |
 | `verification_not_started` | 409 | Confirm called before a code was sent, or after it was spent |
+| `verification_persistence_unavailable` | 503 | Auth0 accepted the OTP but persistence failed; retry confirm with the returned short-lived continuation |
 | `email_verification_required` | 409 | Identity start before this session proved the expected mailbox |
 | `identity_in_review` | 409 | Identity start while the provider is still reviewing an earlier attempt |
 | `review_required` | 409 | Identity start after automation stopped: a second decline, a review request, or a reviewer's decision |

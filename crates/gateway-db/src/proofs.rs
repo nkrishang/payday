@@ -12,6 +12,7 @@ pub struct DbSettlementTransfer {
     pub recipient_address: Vec<u8>,
     pub amount: String,
     pub transaction_hash: Vec<u8>,
+    pub log_index: i64,
     pub block_number: i64,
 }
 
@@ -44,7 +45,7 @@ impl ProofRepository {
         invoice_id: Uuid,
     ) -> Result<Vec<DbSettlementTransfer>, sqlx::Error> {
         sqlx::query_as::<_, DbSettlementTransfer>(
-            r#"SELECT sender_address, recipient_address, amount, transaction_hash, block_number
+            r#"SELECT sender_address, recipient_address, amount, transaction_hash, log_index, block_number
                FROM payment_observations
                WHERE invoice_id = $1 AND disposition = 'credited'
                ORDER BY block_number, transaction_index, log_index"#,

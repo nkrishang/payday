@@ -3419,12 +3419,38 @@ mod tests {
         .await;
         assert!(merchant["verification_completed_at"].is_string());
 
+        // A terminal invoice never accepts an expired bearer. Re-proving the
+        // asserted mailbox explicitly mints a fresh, invoice-scoped receipt session.
+        let email_uuid = Uuid::parse_str(email_id.strip_prefix("pay_").unwrap()).unwrap();
+        sqlx::query("UPDATE invoices SET status = 'fulfilled', settlement_tx_hash = $2, settled_at = now() WHERE id = $1")
+            .bind(email_uuid)
+            .bind([0x44u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE payer_sessions SET created_at = now() - interval '25 hours', expires_at = now() - interval '1 hour' WHERE invoice_id = $1")
+            .bind(email_uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let expired = payer_read(&app, &email_id, Some(&session)).await;
+        assert_eq!(expired["content_unlocked"], false);
+        sqlx::query("UPDATE payer_verifications SET created_at = now() - interval '2 minutes' WHERE invoice_id = $1")
+            .bind(email_uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let receipt_session = start_session(&app, &email_id).await;
+        confirm_email(&app, &email_id, &receipt_session).await;
+        let receipt = payer_read(&app, &email_id, Some(&receipt_session)).await;
+        assert_eq!(receipt["content_unlocked"], true);
+
         // An identity mode proves the mailbox the same way but stays
         // incomplete, locked, and unsettleable until its identity facts.
         let identity_session = start_session(&app, &identity_id).await;
         assert_eq!(
             *tenant.started.lock().unwrap(),
-            ["alice@example.com", "bob@example.com"]
+            ["alice@example.com", "alice@example.com", "bob@example.com"]
         );
         let identity_confirmed = app
             .clone()
@@ -4163,13 +4189,7 @@ mod tests {
         reconcile_due(&pool, &provider).await;
         let declined = verify_status(&app, &id, &session).await;
         assert_eq!(declined["identity"]["status"], "declined");
-        assert!(
-            declined["identity"]
-                .as_object()
-                .unwrap()
-                .get("retry_available")
-                .is_none()
-        );
+        assert_eq!(declined["identity"]["retry_available"], true);
         assert_eq!(declined["identity_start_available"], true);
         assert_eq!(declined["requirements"]["document"], "declined");
         assert_eq!(declined["requirements"]["complete"], false);
@@ -4205,13 +4225,7 @@ mod tests {
         reconcile_due(&pool, &provider).await;
         let stopped = verify_status(&app, &id, &session).await;
         assert_eq!(stopped["identity"]["status"], "review_required");
-        assert!(
-            stopped["identity"]
-                .as_object()
-                .unwrap()
-                .get("retry_available")
-                .is_none()
-        );
+        assert_eq!(stopped["identity"]["retry_available"], false);
         assert_eq!(stopped["identity_start_available"], false);
         let (status, body) = identity_start(&app, &id, Some(&session)).await;
         assert_eq!(status, StatusCode::CONFLICT);

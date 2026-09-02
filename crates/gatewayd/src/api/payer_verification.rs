@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
 use gateway_core::{Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse};
@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::api::attachments::no_store;
 use crate::api::error::ApiError;
 use crate::api::payer::parse_invoice_id;
+use crate::payer_identity::EmailContinuation;
 use crate::state::AppState;
 
 /// The bearer header carrying an opaque payer session.
@@ -40,7 +41,10 @@ const MAX_OTP_LEN: usize = 16;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmEmailRequest {
-    pub otp: String,
+    #[serde(default)]
+    pub otp: Option<String>,
+    #[serde(default)]
+    pub continuation: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -67,6 +71,7 @@ pub struct PayerIdentityStatus {
     /// `abandoned`, or `review_required`.
     pub status: String,
     pub attempt_number: u16,
+    pub retry_available: bool,
 }
 
 /// The session token a request carries, if any. Tokens are opaque; only
@@ -97,6 +102,7 @@ async fn status_response(
         identity: identity.latest.as_ref().map(|latest| PayerIdentityStatus {
             status: latest.status.clone(),
             attempt_number: latest.attempt_number.max(0) as u16,
+            retry_available: identity_start_available,
         }),
     })
 }
@@ -123,7 +129,11 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
         invoice.status,
         InvoiceStatus::Created | InvoiceStatus::Funded | InvoiceStatus::Deploying
     );
-    if !open || unix_now() > invoice.expiration_timestamp {
+    // A terminal, previously verified invoice may explicitly re-authenticate
+    // the expected mailbox to mint a fresh receipt session. Unpaid/expired
+    // invoices still cannot start verification.
+    let receipt_reauth = !open && row.verification_completed_at.is_some();
+    if (!open && !receipt_reauth) || (open && unix_now() > invoice.expiration_timestamp) {
         return Err(ApiError::payment_not_payable());
     }
     Ok((row, invoice))
@@ -225,13 +235,20 @@ pub async fn confirm_email(
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<ConfirmEmailRequest>,
-) -> Result<(HeaderMap, Json<VerificationStatusResponse>), ApiError> {
+) -> Result<Response, ApiError> {
     let verification = state
         .payer_verification
         .as_ref()
         .ok_or_else(ApiError::verification_unavailable)?;
-    let otp = request.otp.trim();
-    if otp.is_empty() || otp.len() > MAX_OTP_LEN || !otp.chars().all(char::is_alphanumeric) {
+    if request.otp.is_some() == request.continuation.is_some() {
+        return Err(ApiError::invalid_request(
+            "provide exactly one of otp or continuation",
+        ));
+    }
+    let otp = request.otp.as_deref().map(str::trim);
+    if otp.is_some_and(|otp| {
+        otp.is_empty() || otp.len() > MAX_OTP_LEN || !otp.chars().all(char::is_alphanumeric)
+    }) {
         return Err(ApiError::invalid_request(
             "otp must be the code from the verification email",
         ));
@@ -243,25 +260,33 @@ pub async fn confirm_email(
         .find_active(token, row.id)
         .await?
         .ok_or_else(ApiError::payer_session_invalid)?;
-    if !state
-        .payer_sessions
-        .has_pending_email_verification(session.id)
-        .await?
-    {
-        return Err(ApiError::verification_not_started());
-    }
     let expected = expected_email(&invoice);
-    let identity = verification.confirm_code(&expected, otp).await?;
-    let reference = verification.payer_ref(row.account_id, &expected);
-    let verified_at = Utc::now();
+    let (reference, verified_at, event_id) = if let Some(otp) = otp {
+        if !state
+            .payer_sessions
+            .has_pending_email_verification(session.id)
+            .await?
+        {
+            return Err(ApiError::verification_not_started());
+        }
+        let identity = verification.confirm_code(&expected, otp).await?;
+        (
+            verification.payer_ref(row.account_id, &expected),
+            Utc::now(),
+            identity.authentication_event_id,
+        )
+    } else {
+        let claims = verification
+            .verify_continuation(request.continuation.as_deref().unwrap())
+            .filter(|claims| claims.session_id == session.id && claims.invoice_id == row.id)
+            .ok_or_else(ApiError::otp_invalid)?;
+        let verified_at = chrono::DateTime::from_timestamp(claims.verified_at, 0)
+            .ok_or_else(ApiError::otp_invalid)?;
+        (claims.payer_ref, verified_at, claims.event_id)
+    };
     let mut approval = state
         .payer_sessions
-        .approve_email(
-            session.id,
-            reference,
-            verified_at,
-            &identity.authentication_event_id,
-        )
+        .approve_email(session.id, reference, verified_at, &event_id)
         .await;
     // The OTP has been consumed, so transient/ambiguous database failures
     // must be retried here rather than requiring the payer to exchange it again.
@@ -272,15 +297,27 @@ pub async fn confirm_email(
         tokio::time::sleep(Duration::from_millis(25)).await;
         approval = state
             .payer_sessions
-            .approve_email(
-                session.id,
-                reference,
-                verified_at,
-                &identity.authentication_event_id,
-            )
+            .approve_email(session.id, reference, verified_at, &event_id)
             .await;
     }
-    let completion = approval?;
+    let completion = match approval {
+        Ok(completion) => completion,
+        Err(error) => {
+            tracing::warn!(invoice_id = %row.id, %error, "email proof persistence failed; returning continuation");
+            let continuation = verification.continuation(EmailContinuation {
+                session_id: session.id,
+                invoice_id: row.id,
+                payer_ref: reference,
+                verified_at: verified_at.timestamp(),
+                event_id,
+                exp: 0,
+            });
+            return Ok((StatusCode::SERVICE_UNAVAILABLE, no_store(), Json(serde_json::json!({
+                "error": {"code": "verification_persistence_unavailable", "message": "Verification was accepted but could not be saved; retry with continuation"},
+                "continuation": continuation
+            }))).into_response());
+        }
+    };
     if completion.invoice_completed_at.is_some() {
         tracing::info!(invoice_id = %row.id, "payer verification completed");
     }
@@ -288,7 +325,8 @@ pub async fn confirm_email(
     Ok((
         no_store(),
         Json(status_response(&state, mode, &completion.session).await?),
-    ))
+    )
+        .into_response())
 }
 
 /// What the caller's session has established, or, without a session, what

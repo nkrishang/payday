@@ -432,6 +432,7 @@ struct CanonicalIssuanceSnapshot {
 #[derive(Serialize, ToSchema)]
 struct ProofTransfer {
     transaction_hash: String,
+    log_index: String,
     sender: String,
     recipient: String,
     amount_base_units: String,

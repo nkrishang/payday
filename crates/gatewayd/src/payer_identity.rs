@@ -15,14 +15,29 @@ use std::time::Duration;
 use alloy_primitives::B256;
 use async_trait::async_trait;
 use axum::http::StatusCode;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use gateway_db::payer_ref;
-use serde::Deserialize;
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::api::{Auth0Verifier, Identity};
 
 const PASSWORDLESS_OTP_GRANT: &str = "http://auth0.com/oauth/grant-type/passwordless/otp";
+const CONTINUATION_DOMAIN: &[u8] = b"PAYDAY_PAYER_EMAIL_CONTINUATION_V1";
+const CONTINUATION_TTL_SECS: u64 = 5 * 60;
+
+#[derive(Serialize, Deserialize)]
+pub struct EmailContinuation {
+    pub session_id: Uuid,
+    pub invoice_id: Uuid,
+    pub payer_ref: B256,
+    pub verified_at: i64,
+    pub event_id: String,
+    pub exp: u64,
+}
 
 #[derive(Debug)]
 pub enum OtpError {
@@ -195,6 +210,83 @@ impl PayerVerification {
 
     pub fn payer_ref(&self, account_id: Uuid, normalized_email: &str) -> B256 {
         payer_ref(&self.payer_ref_master_key, account_id, normalized_email)
+    }
+
+    /// Mint a short-lived, invoice/session-bound proof after Auth0 consumed the
+    /// OTP. It contains no Auth0 bearer token and is safe to return only to the
+    /// no-store confirmation response.
+    pub fn continuation(&self, mut claims: EmailContinuation) -> String {
+        claims.exp = unix_now().saturating_add(CONTINUATION_TTL_SECS);
+        encode_continuation(&self.payer_ref_master_key, &claims)
+    }
+
+    pub fn verify_continuation(&self, token: &str) -> Option<EmailContinuation> {
+        decode_continuation(&self.payer_ref_master_key, token)
+    }
+}
+
+fn encode_continuation(key: &[u8; 32], claims: &EmailContinuation) -> String {
+    let payload = serde_json::to_vec(claims).expect("continuation claims serialize");
+    let encoded = URL_SAFE_NO_PAD.encode(payload);
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(CONTINUATION_DOMAIN);
+    mac.update(encoded.as_bytes());
+    format!(
+        "{encoded}.{}",
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    )
+}
+
+fn decode_continuation(key: &[u8; 32], token: &str) -> Option<EmailContinuation> {
+    let (payload, signature) = token.split_once('.')?;
+    let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).ok()?;
+    mac.update(CONTINUATION_DOMAIN);
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&signature).ok()?;
+    let claims: EmailContinuation =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    (claims.exp > unix_now()).then_some(claims)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+
+    fn claims(exp: u64) -> EmailContinuation {
+        EmailContinuation {
+            session_id: Uuid::now_v7(),
+            invoice_id: Uuid::now_v7(),
+            payer_ref: B256::repeat_byte(0x11),
+            verified_at: unix_now() as i64,
+            event_id: "event-1".into(),
+            exp,
+        }
+    }
+
+    #[test]
+    fn continuation_is_bound_authenticated_and_expires() {
+        let key = [0x22; 32];
+        let live = claims(unix_now() + 60);
+        let token = encode_continuation(&key, &live);
+        let decoded = decode_continuation(&key, &token).unwrap();
+        assert_eq!(decoded.session_id, live.session_id);
+        assert_eq!(decoded.invoice_id, live.invoice_id);
+        assert!(decode_continuation(&[0x33; 32], &token).is_none());
+
+        let mut tampered = token.into_bytes();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        assert!(decode_continuation(&key, std::str::from_utf8(&tampered).unwrap()).is_none());
+
+        let expired = encode_continuation(&key, &claims(unix_now().saturating_sub(1)));
+        assert!(decode_continuation(&key, &expired).is_none());
     }
 }
 

@@ -53,6 +53,7 @@ pub async fn get_proof(
                 transaction_hash: B256::try_from(transfer.transaction_hash.as_slice())
                     .map_err(|_| ApiError::internal("invalid transfer hash"))?
                     .to_string(),
+                log_index: transfer.log_index.to_string(),
                 sender: Address::try_from(transfer.sender_address.as_slice())
                     .map_err(|_| ApiError::internal("invalid transfer sender"))?
                     .to_checksum(None),

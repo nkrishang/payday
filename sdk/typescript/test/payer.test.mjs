@@ -192,6 +192,28 @@ test("email verification starts without naming a mailbox and confirms with the s
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
 });
 
+test("email persistence continuation is exposed and can be retried without an OTP", async () => {
+  const calls = [];
+  const client = new PaydayPayerClient({
+    baseUrl: "https://example.test",
+    fetch: async (_url, init) => {
+      calls.push(JSON.parse(init.body));
+      if (calls.length === 1) return new Response(JSON.stringify({
+        error: { code: "verification_persistence_unavailable", message: "retry" },
+        continuation: "signed-proof",
+      }), { status: 503 });
+      return new Response(JSON.stringify({ requirements: {}, identity_start_available: false, identity: null }));
+    },
+  });
+  let proof;
+  await assert.rejects(client.verification.confirmEmail("pay_1", "123456", "pps"), (error) => {
+    proof = error.continuation;
+    return error.code === "verification_persistence_unavailable" && proof === "signed-proof";
+  });
+  await client.verification.continueEmail("pay_1", proof, "pps");
+  assert.deepEqual(calls, [{ otp: "123456" }, { continuation: "signed-proof" }]);
+});
+
 test("a wrong code and a cooled-down resend surface their codes", async () => {
   const mock = mockFetch((url) => new Response(JSON.stringify({
     error: url.endsWith("/confirm")
