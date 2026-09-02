@@ -2,13 +2,15 @@ import type { PayerPayment, PayerPolicyMode, VerificationFactStatus } from "@pay
 import type { CheckoutView } from "@/lib/checkout-state";
 import { Lock, ShieldCheck } from "lucide-react";
 import { EmailVerification } from "./email-verification";
+import { IdentityVerification } from "./identity-verification";
 
 /**
  * What a gated invoice shows before the payer has verified: the issuer, the
  * heading, a masked hint of the mailbox it was issued to, what is required,
- * and the controls for the step that is due. Nothing else is in the tree —
- * the API does not send the amount, parties, attachment, or address, and this
- * component never asks for them.
+ * and the controls for the step that is due — the email code first, then,
+ * for the identity modes, the hosted identity check. Nothing else is in the
+ * tree — the API does not send the amount, parties, attachment, or address,
+ * and this component never asks for them.
  */
 export function VerificationGate({
   payment,
@@ -65,10 +67,21 @@ export function VerificationGate({
         <Requirements payment={payment} />
 
         {identityDue ? (
-          <p className="mt-4 border-t border-line pt-3 text-[12px] leading-relaxed text-faint">
-            Identity verification is being enabled for this invoice. Nothing can be paid from this
-            page until it completes.
-          </p>
+          <div className="mt-4 border-t border-line pt-4">
+            {payerSession ? (
+              <IdentityVerification
+                paymentId={payment.id}
+                mode={mode}
+                payerSession={payerSession}
+                onSession={onSession}
+                onVerified={onVerified}
+              />
+            ) : (
+              <p className="text-[13px] leading-relaxed text-muted">
+                Verify the expected email in this tab to continue to the identity check.
+              </p>
+            )}
+          </div>
         ) : (
           <div className="mt-4 border-t border-line pt-4">
             <EmailVerification

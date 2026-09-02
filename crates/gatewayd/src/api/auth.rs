@@ -472,6 +472,23 @@ pub async fn require_identity(
     Ok(next.run(request).await)
 }
 
+/// Who an operator route acts as: the configured reviewer identity, recorded
+/// on every manual verification decision (product plan §6.3).
+#[derive(Clone, Debug)]
+pub struct Reviewer(pub String);
+
+/// `PAYDAY_ADMIN_REVIEWER_ID`, or `operator` while a deployment has not named
+/// its reviewer.
+pub fn reviewer_from_env() -> Reviewer {
+    Reviewer(
+        std::env::var("PAYDAY_ADMIN_REVIEWER_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "operator".into()),
+    )
+}
+
 pub async fn require_admin(mut request: Request, next: Next) -> Result<Response, ApiError> {
     let supplied = bearer_from_request(&request).ok_or_else(ApiError::admin_unauthorized)?;
     let expected =
@@ -486,7 +503,7 @@ pub async fn require_admin(mut request: Request, next: Next) -> Result<Response,
     if expected.len() < 32 || supplied_mac.verify_slice(&expected_tag).is_err() {
         return Err(ApiError::admin_unauthorized());
     }
-    request.extensions_mut().insert(());
+    request.extensions_mut().insert(reviewer_from_env());
     Ok(next.run(request).await)
 }
 

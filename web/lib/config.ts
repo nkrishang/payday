@@ -37,6 +37,7 @@ if (!Number.isSafeInteger(chainId) || chainId <= 0) {
 const explorerUrl = process.env.NEXT_PUBLIC_EXPLORER_BASE_URL;
 const walletConnectProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
 const attachmentUploadOrigin = process.env.NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN;
+const payerAppealEmail = process.env.NEXT_PUBLIC_PAYER_APPEAL_EMAIL;
 
 export const config = {
   /** Origin of the Payday API, e.g. https://api.payday.sh. */
@@ -60,6 +61,8 @@ export const config = {
    */
   attachmentUploadOrigin: attachmentUploadOrigin ? trimTrailingSlash(attachmentUploadOrigin) : null,
   nativeSymbol: process.env.NEXT_PUBLIC_NATIVE_SYMBOL || defaultNativeSymbol(chainId),
+  /** Where a payer whose identity check was declined writes to appeal. */
+  payerAppealEmail: payerAppealEmail || "support@payday.sh",
 } as const;
 
 export type PublicConfig = typeof config;

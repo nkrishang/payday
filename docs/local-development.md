@@ -319,6 +319,13 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `payday-payer-local` client and audience
 - `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
   verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
+- `PAYDAY_DIDIT_API_KEY`, `PAYDAY_DIDIT_WORKFLOW_ID`,
+  `PAYDAY_DIDIT_WEBHOOK_SECRET` (optional `PAYDAY_DIDIT_BASE_URL`) — the
+  identity provider, set together or not at all; `just dev` leaves them unset,
+  so identity start answers `verification_unavailable` locally unless you
+  export a Didit sandbox key, and the hosted callback then needs a public URL
+- `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the reviewer on
+  `POST /v1/admin/verifications/{id}/decision`; defaults to `operator`
 - `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
   issuer; non-loopback HTTP issuers remain rejected
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider

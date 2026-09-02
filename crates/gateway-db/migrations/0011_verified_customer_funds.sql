@@ -324,9 +324,16 @@ CREATE TABLE payer_verifications (
     attempt_number SMALLINT NOT NULL DEFAULT 1 CHECK (attempt_number BETWEEN 1 AND 2),
     verified_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,
+    -- Reconciliation of hosted identity sessions: when to ask the provider
+    -- next, the lease a worker holds while asking, how many times a decision
+    -- has been fetched (drives the in-review backoff), and how many fetches
+    -- failed in a row (drives the operational backoff; never a decline).
     next_poll_at TIMESTAMPTZ,
     leased_until TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    poll_count INTEGER NOT NULL DEFAULT 0 CHECK (poll_count >= 0),
+    provider_failures INTEGER NOT NULL DEFAULT 0 CHECK (provider_failures >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (kind <> 'identity' OR payer_ref IS NOT NULL)
 );
 
 CREATE UNIQUE INDEX payer_verifications_provider_reference

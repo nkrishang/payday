@@ -15,6 +15,11 @@ dashboard_auth0_client_id = "your-dashboard-spa-application-client-id"
 # docs/authentication.md and auth0/payer.tf). Leave both out until they exist.
 payer_auth0_audience  = "https://api.payday.sh/payer"
 payer_auth0_client_id = "your-payer-native-application-client-id"
+# Didit workflow for payer identity verification (see docs/authentication.md).
+# Leave it out until the workflow and its webhook destination exist; supply
+# the key and secret as TF_VAR_didit_api_key and TF_VAR_didit_webhook_secret.
+didit_workflow_id = "your-didit-workflow-id"
+admin_reviewer_id = "reviewer@example.com"
 route53_zone_id  = "Z0123456789EXAMPLE"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
 alarm_email      = "operator@example.com"

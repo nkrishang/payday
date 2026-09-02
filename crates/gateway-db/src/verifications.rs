@@ -104,7 +104,8 @@ pub enum StartEmailVerificationError {
 pub struct VerificationCompletion {
     pub session: DbPayerSession,
     /// Set when this approval completed the invoice's verification, which
-    /// only `verified_email` allows; identity modes complete in Slice 4.
+    /// only `verified_email` allows; the identity modes complete through
+    /// `VerificationRepository` once their identity facts arrive.
     pub invoice_completed_at: Option<DateTime<Utc>>,
 }
 

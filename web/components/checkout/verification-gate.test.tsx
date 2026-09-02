@@ -1,18 +1,19 @@
 import type { PayerPayment } from "@payday/sdk";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { payerClient } from "@/lib/payday";
 import { checkoutView } from "@/lib/checkout-state";
 import { lockedPayment } from "@/test/fixtures";
 import { VerificationGate } from "./verification-gate";
 
 const open = { secondsRemaining: 3_600, pendingTxHash: null };
 
-function gate(payment: PayerPayment, local = open) {
+function gate(payment: PayerPayment, local = open, payerSession: string | null = null) {
   return (
     <VerificationGate
       payment={payment}
       view={checkoutView(payment, local)}
-      payerSession={null}
+      payerSession={payerSession}
       onSession={vi.fn()}
       onCodeSent={vi.fn()}
       onVerified={vi.fn()}
@@ -35,7 +36,9 @@ describe("VerificationGate", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Acme Corp");
     expect(screen.getByText("Consulting — August")).toBeInTheDocument();
     expect(screen.getByText("a****@e***.com")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /verify to view this invoice/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /verify to view this invoice/i }),
+    ).toBeInTheDocument();
     // The masked hint is the only mailbox-shaped string on the page.
     expect(container.textContent).not.toMatch(/alice|example\.com/);
     expect(container.textContent).not.toMatch(/25|USDC|0x9a3f|Globex/);
@@ -44,7 +47,9 @@ describe("VerificationGate", () => {
   it("offers to send the code, and no field to type an email into", () => {
     render(gate(lockedPayment()));
 
-    expect(screen.getByRole("button", { name: /send a code to a\*\*\*\*@e\*\*\*\.com/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /send a code to a\*\*\*\*@e\*\*\*\.com/i }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.getByText(/does not prove ownership of the wallet/i)).toBeInTheDocument();
   });
@@ -94,7 +99,35 @@ describe("VerificationGate", () => {
     expect(screen.queryByText(/matching the person it names/)).not.toBeInTheDocument();
   });
 
-  it("moves on to the identity step once the email is approved, without offering the code again", () => {
+  it("moves on to the identity step once the email is approved, without offering the code again", async () => {
+    vi.spyOn(payerClient.verification, "status").mockResolvedValue({
+      requirements: IDENTITY_APPROVED_EMAIL,
+      identity_start_available: true,
+      identity: null,
+    });
+    render(
+      gate(
+        lockedPayment({
+          payer_policy: { mode: "verified_identity", expected_email_hint: "a****@e***.com" },
+          requirements: IDENTITY_APPROVED_EMAIL,
+        }),
+        open,
+        "pps_1",
+      ),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: /verify your identity to view this invoice/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /continue to identity verification/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /send a code/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("asks for the email in this tab before the identity step when no session is held", () => {
     render(
       gate(
         lockedPayment({
@@ -103,13 +136,7 @@ describe("VerificationGate", () => {
         }),
       ),
     );
-
-    expect(
-      screen.getByRole("heading", { name: /verify your identity to view this invoice/i }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
-    expect(screen.getByText(/identity verification is being enabled/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /send a code/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByText(/verify the expected email in this tab/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

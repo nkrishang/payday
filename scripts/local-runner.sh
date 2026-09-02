@@ -136,6 +136,7 @@ load_local_env() {
   export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$PAYDAY_API_URL}"
   export PAYDAY_API_KEY_PREFIX="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
   export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+  export PAYDAY_ADMIN_REVIEWER_ID="${PAYDAY_ADMIN_REVIEWER_ID:-local-operator}"
   # Proof of Payment attestations are signed with Anvil account #6
   # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
   # local proof verification; production signs with a KMS key instead.

@@ -141,11 +141,78 @@ export interface PayerPolicySummary { mode: PayerPolicyMode; expected_email_hint
 
 /** A payer session minted by `verification.startEmail`; the token is opaque and stored hashed by the API. */
 export interface StartEmailVerification { payer_session: string; expires_at: string }
+
+export type IdentityAttemptStatus =
+  | "pending" | "approved" | "declined" | "in_review" | "expired" | "abandoned" | "review_required";
+
+/** Where this session's hosted identity check stands; no provider reference, no risk categories. */
+export interface PayerIdentityStatus {
+  status: IdentityAttemptStatus;
+  attempt_number: number;
+  /** Whether the payer may start the hosted check again (one automated resubmission after a decline). */
+  retry_available: boolean;
+}
+
 /** What a session (or, without one, the invoice) has established. */
 export interface VerificationStatus {
   requirements: VerificationRequirements;
-  /** Whether the identity step may be started now; identity verification lands with a later release. */
+  /** Whether this session may start (or restart) the hosted identity step now. */
   identity_start_available: boolean;
+  /** The session's latest identity attempt; null before one is started or without a session. */
+  identity: PayerIdentityStatus | null;
+}
+
+/**
+ * The outcome of `verification.startIdentity`: an earlier credential of the
+ * same merchant satisfied the policy (`reused`, the session is unlocked), or
+ * the payer must be sent to the provider's hosted session (`redirect`).
+ */
+export type IdentityStartOutcome = { type: "reused" } | { type: "redirect"; url: string };
+export interface StartIdentityVerification { outcome: IdentityStartOutcome }
+
+/** A human review of one attempt: who decided what, and when. */
+export interface VerificationReview {
+  requested_at: string;
+  decision: "approved" | "declined" | null;
+  reviewer: string | null;
+  note: string | null;
+  decided_at: string | null;
+}
+
+/**
+ * One verification attempt as the merchant sees it: statuses, the provider's
+ * reference, and allowlisted risk categories. Never anything the provider
+ * extracted.
+ */
+export interface VerificationAttempt {
+  id: string;
+  kind: "email" | "identity";
+  status: IdentityAttemptStatus;
+  provider: "auth0" | "didit" | "manual";
+  provider_reference: string | null;
+  attempt_number: number;
+  document: VerificationFactStatus;
+  liveness: VerificationFactStatus;
+  identity_match: VerificationFactStatus;
+  risk_codes: string[];
+  country_code: string | null;
+  verified_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+  review: VerificationReview | null;
+}
+
+/** The merchant's verification view of one invoice: each fact on its own, every attempt, and what may happen next. */
+export interface VerificationDetail {
+  payer_policy_mode: PayerPolicyMode;
+  verification_completed_at: string | null;
+  likely_unsolicited_at: string | null;
+  facts: VerificationRequirements;
+  attempts: VerificationAttempt[];
+  /** The latest identity attempt was declined and a human may be asked. */
+  review_available: boolean;
+  /** The payer may resubmit from the checkout on their own. */
+  retry_available: boolean;
 }
 
 /** Invoice content that a gated invoice withholds until verification completes. */
@@ -502,6 +569,16 @@ export class PaydayClient {
     /** Available once the payment is settled; `409 payment_not_settled` before. */
     proof: (id: string): Promise<ProofOfPayment> =>
       this.request(`/v1/payments/${encodeURIComponent(id)}/proof`),
+    /** Every verification attempt on the invoice, each fact reported separately. */
+    verification: (id: string): Promise<VerificationDetail> =>
+      this.request(`/v1/payments/${encodeURIComponent(id)}/verification`),
+    /**
+     * Ask a human to review the latest declined identity attempt; automated
+     * resubmission stops for that payer. `409 review_not_available` when
+     * nothing is declined.
+     */
+    requestVerificationReview: (id: string): Promise<VerificationDetail> =>
+      this.request(`/v1/payments/${encodeURIComponent(id)}/verification/review`, { method: "POST" }),
   };
 
   readonly customers = {
@@ -667,6 +744,19 @@ export class PaydayPayerClient {
       request<VerificationStatus>(
         this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify`,
         payerOptions(options),
+      ),
+    /**
+     * Start the hosted identity check for an identity-mode invoice whose
+     * mailbox this session has proven. Answers `reused` when an earlier
+     * credential of the same merchant satisfies the policy, `redirect` with
+     * the hosted URL otherwise; `409 email_verification_required`,
+     * `409 review_required`, `409 identity_in_review`, and
+     * `503 verification_unavailable` are the refusals.
+     */
+    startIdentity: (id: string, payerSession: string, options: { signal?: AbortSignal } = {}): Promise<StartIdentityVerification> =>
+      request<StartIdentityVerification>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/identity/start`,
+        { method: "POST", ...payerOptions({ ...options, payerSession }) },
       ),
   };
 }

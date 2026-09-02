@@ -1,0 +1,19 @@
+{
+  "session_id": "9f1c0f6e-1111-4c1a-9c1e-000000000005",
+  "session_kind": "user",
+  "status": "Approved",
+  "id_verifications": [
+    {
+      "node_id": "id-1",
+      "status": "Approved",
+      "warnings": [],
+      "document_number": "SENTINEL_DOC_NUMBER",
+      "issuing_state": "FRA",
+      "first_name": "SENTINEL_FIRST_NAME",
+      "last_name": "SENTINEL_LAST_NAME",
+      "date_of_birth": "1900-01-01"
+    }
+  ],
+  "liveness_checks": [],
+  "face_matches": []
+}

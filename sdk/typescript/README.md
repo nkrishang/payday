@@ -77,6 +77,8 @@ also exposed separately as `attachments.create({ filename })` and
 
 - `payments.attachment(id)` — the attached PDF's descriptor with a short-lived `download_url`.
 - `payments.invoicePdf(id)` — Payday's deterministic invoice summary as a `Blob`; the same invoice always renders byte-identical.
+- `payments.verification(id)` — every verification attempt on the invoice with each fact (`email`, `document`, `liveness`, `identity_match`) reported separately, the provider's reference and allowlisted risk categories, any human review, and whether `review_available` / `retry_available`. Never the provider's extracted identity.
+- `payments.requestVerificationReview(id)` — asks a person to review the latest declined identity attempt; automated resubmission stops for that payer (`409 review_not_available` when nothing is declined).
 - `payments.proof(id)` — the `ProofOfPayment` for a settled invoice (`409 payment_not_settled` before). It ties the canonical issuance snapshot, nonce, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the payment's `settlement_tx_hash`), carries a Payday attestation bound to that invoice, and can be verified offline with `payday proof verify` without contacting Payday.
 
 ## Customers
@@ -124,6 +126,13 @@ payer.payments.attachment(payment.id, payerSession); // PDF descriptor; 401 veri
 // cross-origin for the hosted checkout only.
 const { payer_session } = await payer.verification.startEmail(payment.id);
 await payer.verification.confirmEmail(payment.id, "123456", payer_session);
+
+// Identity modes then need the hosted document and liveness check. The
+// outcome is `reused` (an earlier credential of the same merchant applied)
+// or `redirect` (send the payer to `url`; poll `verification.status` after
+// they return, ignoring anything the provider appended to the URL).
+const { outcome } = await payer.verification.startIdentity(payment.id, payer_session);
+const { identity, identity_start_available } = await payer.verification.status(payment.id, { payerSession: payer_session });
 ```
 
 For `permissionless` invoices everything is unlocked immediately. For the

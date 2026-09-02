@@ -33,6 +33,8 @@ pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V1";
 pub const SNAPSHOT_SCHEMA: &str = "payday.invoice";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
+/// Domain of [`expected_identity_hash`].
+pub const EXPECTED_IDENTITY_DOMAIN: &[u8] = b"PAYDAY_EXPECTED_IDENTITY_V1";
 
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -370,6 +372,15 @@ pub fn canonical_bytes(snapshot: &CanonicalIssuanceSnapshot) -> Result<Vec<u8>, 
 /// `keccak256(ATTRIBUTION_DOMAIN || canonical_bytes)`.
 pub fn attribution_hash(canonical_bytes: &[u8]) -> B256 {
     keccak256([ATTRIBUTION_DOMAIN, canonical_bytes].concat())
+}
+
+/// `keccak256(EXPECTED_IDENTITY_DOMAIN || JCS(identity))`: what a matched
+/// identity credential is bound to (product plan §4.6). A credential earned
+/// against one asserted name never satisfies another, because the hash of
+/// the assertion, not the assertion itself, is what the ledger stores.
+pub fn expected_identity_hash(identity: &ExpectedIdentity) -> B256 {
+    let canonical = serde_jcs::to_vec(identity).expect("two strings always canonicalize");
+    keccak256([EXPECTED_IDENTITY_DOMAIN, canonical.as_slice()].concat())
 }
 
 /// `keccak256(SALT_DOMAIN || nonce || attribution_hash)`: what a verifier
@@ -715,6 +726,36 @@ mod tests {
         assert_eq!(
             serde_json::to_value(party("Acme")).unwrap(),
             serde_json::json!({"name": "Acme"})
+        );
+    }
+
+    #[test]
+    fn expected_identity_hash_is_pinned_and_binds_the_exact_assertion() {
+        let alice = ExpectedIdentity {
+            first_name: "Alice".into(),
+            last_name: "Smith".into(),
+        };
+        let pinned = keccak256(
+            [
+                EXPECTED_IDENTITY_DOMAIN,
+                br#"{"first_name":"Alice","last_name":"Smith"}"#,
+            ]
+            .concat(),
+        );
+        assert_eq!(expected_identity_hash(&alice), pinned);
+        assert_ne!(
+            expected_identity_hash(&alice),
+            expected_identity_hash(&ExpectedIdentity {
+                first_name: "alice".into(),
+                last_name: "Smith".into(),
+            })
+        );
+        assert_ne!(
+            expected_identity_hash(&alice),
+            expected_identity_hash(&ExpectedIdentity {
+                first_name: "Smith".into(),
+                last_name: "Alice".into(),
+            })
         );
     }
 }

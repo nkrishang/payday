@@ -257,6 +257,58 @@ impl VerificationRequirementsResponse {
     }
 }
 
+/// One verification attempt as the merchant sees it: statuses, the
+/// provider's reference, and allowlisted risk categories. Never anything the
+/// provider extracted (product plan §3.6).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationAttemptResponse {
+    pub id: String,
+    /// `email` or `identity`.
+    pub kind: String,
+    /// `pending`, `approved`, `declined`, `in_review`, `expired`,
+    /// `abandoned`, or `review_required`.
+    pub status: String,
+    /// `auth0`, `didit`, or `manual`.
+    pub provider: String,
+    pub provider_reference: Option<String>,
+    pub attempt_number: u16,
+    pub document: VerificationFactStatus,
+    pub liveness: VerificationFactStatus,
+    pub identity_match: VerificationFactStatus,
+    pub risk_codes: Vec<String>,
+    pub country_code: Option<String>,
+    pub verified_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+    pub review: Option<VerificationReviewResponse>,
+}
+
+/// A human review of one attempt: who decided what, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationReviewResponse {
+    pub requested_at: String,
+    /// `approved` or `declined` once decided.
+    pub decision: Option<String>,
+    pub reviewer: Option<String>,
+    pub note: Option<String>,
+    pub decided_at: Option<String>,
+}
+
+/// The merchant's verification view of one invoice: each fact on its own,
+/// every attempt, and what may happen next (product plan §7.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationDetailResponse {
+    pub payer_policy_mode: PayerPolicyMode,
+    pub verification_completed_at: Option<String>,
+    pub likely_unsolicited_at: Option<String>,
+    pub facts: VerificationRequirementsResponse,
+    pub attempts: Vec<VerificationAttemptResponse>,
+    /// The latest identity attempt was declined and a human may be asked.
+    pub review_available: bool,
+    /// The payer may resubmit from the checkout on their own.
+    pub retry_available: bool,
+}
+
 /// Invoice content revealed only once the payer may see it (product plan §4.3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayerInvoiceDetails {

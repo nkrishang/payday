@@ -18,7 +18,9 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
 use gateway_core::{Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse};
-use gateway_db::{DbInvoice, DbPayerSession, PAYER_SESSION_TTL, StartEmailVerificationError};
+use gateway_db::{
+    DbInvoice, DbPayerSession, IdentityState, PAYER_SESSION_TTL, StartEmailVerificationError,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -50,9 +52,22 @@ pub struct StartEmailResponse {
 #[derive(Serialize)]
 pub struct VerificationStatusResponse {
     pub requirements: VerificationRequirementsResponse,
-    /// Whether the payer may start the identity step now. The identity
-    /// routes arrive in Slice 4; until then nothing is startable.
+    /// Whether this session may start (or restart) the hosted identity step.
     pub identity_start_available: bool,
+    /// The session's latest identity attempt, for the checkout to show where
+    /// the hosted flow stands; absent before one is started.
+    pub identity: Option<PayerIdentityStatus>,
+}
+
+/// What the payer learns about their identity attempt: its status and
+/// whether they may try again. No provider reference, no risk categories.
+#[derive(Serialize)]
+pub struct PayerIdentityStatus {
+    /// `pending`, `in_review`, `approved`, `declined`, `expired`,
+    /// `abandoned`, or `review_required`.
+    pub status: String,
+    pub attempt_number: u16,
+    pub retry_available: bool,
 }
 
 /// The session token a request carries, if any. Tokens are opaque; only
@@ -65,11 +80,27 @@ pub fn session_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty() && token.len() <= MAX_SESSION_TOKEN_LEN)
 }
 
-fn status_response(mode: PayerPolicyMode, session: &DbPayerSession) -> VerificationStatusResponse {
-    VerificationStatusResponse {
-        requirements: VerificationRequirementsResponse::from_facts(mode, session.facts()),
-        identity_start_available: false,
+async fn status_response(
+    state: &AppState,
+    mode: PayerPolicyMode,
+    session: &DbPayerSession,
+) -> Result<VerificationStatusResponse, ApiError> {
+    let identity: IdentityState = state.verifications.identity_state(session).await?;
+    let mut requirements = VerificationRequirementsResponse::from_facts(mode, session.facts());
+    if let Some(latest) = &identity.latest {
+        crate::api::identity::refine_declined(&mut requirements, latest);
     }
+    let identity_start_available =
+        crate::api::identity::identity_start_available(state, mode, session, &identity);
+    Ok(VerificationStatusResponse {
+        requirements,
+        identity_start_available,
+        identity: identity.latest.as_ref().map(|latest| PayerIdentityStatus {
+            status: latest.status.clone(),
+            attempt_number: latest.attempt_number.max(0) as u16,
+            retry_available: identity_start_available,
+        }),
+    })
 }
 
 fn unix_now() -> u64 {
@@ -79,7 +110,7 @@ fn unix_now() -> u64 {
 /// The gated invoice behind `id`, still open to verification: permissionless
 /// invoices have nothing to verify, and verification after the deadline or
 /// after settlement cannot change anything, so both are refused up front.
-async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Invoice), ApiError> {
+pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Invoice), ApiError> {
     let uuid = parse_invoice_id(id)?;
     let row = state
         .repo
@@ -215,7 +246,10 @@ pub async fn confirm_email(
         tracing::info!(invoice_id = %row.id, "payer verification completed");
     }
     let mode = invoice.issuance_snapshot.payer_policy.mode();
-    Ok((no_store(), Json(status_response(mode, &completion.session))))
+    Ok((
+        no_store(),
+        Json(status_response(&state, mode, &completion.session).await?),
+    ))
 }
 
 /// What the caller's session has established, or, without a session, what
@@ -242,7 +276,7 @@ pub async fn status(
                 .find_active(token, row.id)
                 .await?
                 .ok_or_else(ApiError::payer_session_invalid)?;
-            status_response(mode, &session)
+            status_response(&state, mode, &session).await?
         }
         None => VerificationStatusResponse {
             requirements: VerificationRequirementsResponse::for_mode(
@@ -250,6 +284,7 @@ pub async fn status(
                 row.verification_completed_at.is_some(),
             ),
             identity_start_available: false,
+            identity: None,
         },
     };
     Ok((no_store(), Json(response)))

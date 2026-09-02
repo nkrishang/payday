@@ -2,6 +2,7 @@ mod accounts;
 mod attachments;
 mod cursor;
 mod customers;
+mod identity;
 mod invoices;
 mod notifications;
 mod proofs;
@@ -19,6 +20,13 @@ pub use attachments::{
 };
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
+pub use identity::{
+    ClaimedVerification, CredentialKind, DEFAULT_CREDENTIAL_LIFETIME, DbPayerCredential,
+    DbVerificationAttempt, DbVerificationReview, DecisionRecord, IDENTITY_POLL_INTERVAL,
+    IdentityCompletion, IdentityState, IdentityStatus, IdentityStatusParseError,
+    MAX_AUTOMATED_ATTEMPTS, MAX_POLL_BACKOFF, ReviewDecision, ReviewError, StartIdentityError,
+    VerificationRepository, poll_backoff,
+};
 pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
     InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, PaymentObservation,

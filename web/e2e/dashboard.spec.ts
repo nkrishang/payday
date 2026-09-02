@@ -151,7 +151,8 @@ test("a merchant can create a customer, upload a PDF, issue an invoice, and open
   await expect(page.getByText("Verified identity")).toBeVisible();
   await expect(page.getByText("peter@initrode.example")).toBeVisible();
   await expect(page.getByText("Peter Gibbons")).toBeVisible();
-  await expect(page.getByText("Pending")).toBeVisible();
+  await expect(page.getByText("Pending").first()).toBeVisible();
+  await expect(page.getByText(/has not started verifying yet/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Proof of Payment" })).toBeDisabled();
   await expect(page.getByText(/generated once the invoice settles/)).toBeVisible();
   await expect(page.getByText("Recovered funds")).toHaveCount(0);
@@ -211,6 +212,34 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const pdf = await pdfDownload;
   expect(pdf.suggestedFilename()).toBe("INV-1042.pdf");
   expect((await streamToString(pdf))?.startsWith("%PDF-")).toBe(true);
+});
+
+test("a declined identity check shows its facts, reference, and risk categories, and can be sent to review", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.getByRole("link", { name: "Retainer — September" }).click();
+  await expect(page).toHaveURL(/\/dashboard\/invoices\/pay_seed-unsolicited$/);
+
+  const activity = page.getByLabel("Verification activity");
+  await expect(activity).toBeVisible();
+  const facts = page.getByLabel("Verification facts");
+  await expect(facts).toContainText("Email ownership");
+  await expect(facts).toContainText("Identity document");
+  await expect(facts).toContainText("Name matches the invoice");
+  await expect(facts).toContainText("Declined");
+  await expect(activity).toContainText("9f1c0f6e-1111-4c1a-9c1e-000000000003");
+  await expect(activity).toContainText("EXPECTED_DETAILS_MISMATCH");
+  await expect(activity).toContainText("ESP");
+  await expect(activity).toContainText(/may try the identity check once more/);
+  await expect(page.getByText("Likely unsolicited").first()).toBeVisible();
+  const text = await page.locator("body").innerText();
+  expect(text).not.toMatch(/SENTINEL|1900-01-01/);
+
+  await page.getByRole("button", { name: "Request review" }).click();
+  await expect(activity).toContainText(/awaiting a reviewer/);
+  await expect(activity).toContainText("Review required");
+  await expect(activity).not.toContainText(/may try the identity check once more/);
 });
 
 test("signing out ends the session", async ({ page }) => {

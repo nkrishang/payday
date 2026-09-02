@@ -73,9 +73,15 @@ attachment means a new invoice.
   received versus requested, funded and settled times, the settlement
   transaction, and any operator attention message;
 - *Verification*: the policy mode with the merchant's own assertions (expected
-  email and, for `verified_identity`, the expected name), and the verification
+  email and, for `verified_identity`, the expected name), the verification
   verdict — separate from the payment status, because a gated invoice can be
-  funded before its payer has verified;
+  funded before its payer has verified — and, for gated invoices, the
+  activity behind it: each fact (email, document, liveness and face match,
+  name match) on its own, every attempt with the provider's reference and
+  allowlisted risk categories, the reviewer's outcome and time, whether the
+  payer may retry, and a *Request review* action for a declined identity
+  check. The provider's extracted identity is never shown, because the API
+  never has it;
 - *Attachment* and *Downloads*: the attached PDF through a short-lived signed
   URL fetched on demand, the deterministic invoice PDF
   (`GET /v1/payments/{id}/invoice.pdf`), and the Proof of Payment as JSON

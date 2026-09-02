@@ -136,6 +136,42 @@ variable "payer_auth0_client_id" {
   }
 }
 
+variable "didit_workflow_id" {
+  description = <<-EOT
+    The pinned Didit workflow for payer identity verification (document,
+    liveness, face match; declines expected-name mismatches); see
+    docs/authentication.md. Leave empty with the two Didit secrets until they
+    exist: the identity settings are then not passed to the task at all and
+    identity start answers unavailable.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "didit_api_key" {
+  description = "Didit API key. Prefer TF_VAR_didit_api_key from a secure environment."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "didit_webhook_secret" {
+  description = "Shared secret of the Didit webhook destination that points at /v1/webhooks/identity. Prefer TF_VAR_didit_webhook_secret."
+  type        = string
+  default     = ""
+  sensitive   = true
+  validation {
+    condition     = (var.didit_workflow_id == "") == (var.didit_api_key == "") && (var.didit_workflow_id == "") == (var.didit_webhook_secret == "")
+    error_message = "didit_workflow_id, didit_api_key, and didit_webhook_secret must be set together."
+  }
+}
+
+variable "admin_reviewer_id" {
+  description = "Recorded as the reviewer on manual verification decisions taken through the operator API."
+  type        = string
+  default     = "operator"
+}
+
 variable "route53_zone_id" {
   description = "ID of the public Route53 hosted zone containing the API domain_name."
   type        = string

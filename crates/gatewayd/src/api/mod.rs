@@ -5,6 +5,7 @@ mod auth;
 mod customers;
 pub(crate) mod error;
 mod health;
+pub mod identity;
 mod invoices;
 mod middleware;
 mod openapi;

@@ -13,6 +13,7 @@ const APPROVED = {
     complete: true,
   },
   identity_start_available: false,
+  identity: null,
 } as const;
 
 function renderForm(overrides: Partial<Parameters<typeof EmailVerification>[0]> = {}) {

@@ -54,7 +54,7 @@ export default defineConfig({
       command: "node e2e/stub-api.mjs",
       url: `http://127.0.0.1:${STUB_PORT}/health`,
       reuseExistingServer: !process.env.CI,
-      env: { STUB_PORT: String(STUB_PORT) },
+      env: { STUB_PORT: String(STUB_PORT), CHECKOUT_ORIGIN: `http://127.0.0.1:${APP_PORT}` },
     },
     {
       // NEXT_PUBLIC_* values are inlined at build time, so the build has to

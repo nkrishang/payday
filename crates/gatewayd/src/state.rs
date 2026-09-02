@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use gateway_core::ChainId;
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
-    PayerSessionRepository, ProofRepository, WebhookRepository,
+    PayerSessionRepository, ProofRepository, VerificationRepository, WebhookRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use crate::api::error::ApiError;
 use crate::api::{Auth0Verifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
+use crate::identity::PayerIdentityProvider;
 use crate::payer_identity::PayerVerification;
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
@@ -25,7 +26,11 @@ pub struct AppState {
     pub customers: CustomerRepository,
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
+    pub verifications: VerificationRepository,
     pub identity_verifier: Option<Auth0Verifier>,
+    /// The document-and-liveness provider; `None` leaves identity start
+    /// answering `verification_unavailable`.
+    pub identity: Option<Arc<dyn PayerIdentityProvider>>,
     /// The payer audience; `None` leaves gated invoices unverifiable and the
     /// email routes answering `verification_unavailable`.
     pub payer_verification: Option<PayerVerification>,
@@ -65,6 +70,7 @@ impl AppState {
         attachment_store: Option<AttachmentStore>,
         attestor: Option<VerificationAttestor>,
         payer_verification: Option<PayerVerification>,
+        identity: Option<Arc<dyn PayerIdentityProvider>>,
     ) -> Self {
         let pool = repo.pool().clone();
         Self {
@@ -72,7 +78,9 @@ impl AppState {
             attachments: AttachmentRepository::new(pool.clone()),
             customers: CustomerRepository::new(pool.clone()),
             proofs: ProofRepository::new(pool.clone()),
-            payer_sessions: PayerSessionRepository::new(pool),
+            payer_sessions: PayerSessionRepository::new(pool.clone()),
+            verifications: VerificationRepository::new(pool),
+            identity,
             repo,
             accounts,
             identity_verifier,

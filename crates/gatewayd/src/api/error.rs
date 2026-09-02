@@ -281,6 +281,64 @@ impl ApiError {
         }
     }
 
+    /// The deployment has no identity provider configured.
+    pub fn identity_verification_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "verification_unavailable",
+            message: "Identity verification is not available on this deployment".into(),
+        }
+    }
+
+    pub fn email_verification_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "email_verification_required",
+            message: "Verify the expected email in this session before starting the identity check"
+                .into(),
+        }
+    }
+
+    pub fn identity_in_review() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "identity_in_review",
+            message: "An earlier identity check is still being reviewed by the provider".into(),
+        }
+    }
+
+    pub fn review_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "review_required",
+            message: "Automated identity verification has stopped for this invoice; a human review is required".into(),
+        }
+    }
+
+    pub fn review_not_available() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "review_not_available",
+            message: "No declined identity attempt is waiting for review".into(),
+        }
+    }
+
+    pub fn verification_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "verification_not_found",
+            message: "Verification attempt not found".into(),
+        }
+    }
+
+    pub fn webhook_signature_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "webhook_signature_invalid",
+            message: "The callback signature or timestamp was not accepted".into(),
+        }
+    }
+
     pub fn identity_provider_unavailable() -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,

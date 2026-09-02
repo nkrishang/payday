@@ -14,6 +14,7 @@ import { formatDate } from "./labels";
 import { RecoveredFunds } from "./recovered-funds";
 import { useMerchant, useResource } from "./session";
 import { StatusBadge } from "./status-badge";
+import { VerificationActivity } from "./verification-activity";
 import { VerificationStatus } from "./verification-status";
 
 export function InvoiceDetail({ id }: { id: string }) {
@@ -176,6 +177,11 @@ function Loaded({ payment }: { payment: Payment }) {
               completedAt={payment.verification_completed_at}
               unsolicitedAt={payment.likely_unsolicited_at}
             />
+            {payment.payer_policy.mode !== "permissionless" ? (
+              <div className="mt-4 border-t border-line pt-4">
+                <VerificationActivity paymentId={payment.id} />
+              </div>
+            ) : null}
           </Card>
 
           <Card title="Attachment">

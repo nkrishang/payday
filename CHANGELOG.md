@@ -10,6 +10,62 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
+- Payer identity verification for `verified_identity` and
+  `verified_identity_unattributed`, through Didit's hosted document, liveness,
+  and face-match session behind a thin `PayerIdentityProvider` boundary.
+  `POST /v1/payer/payments/{id}/verify/identity/start` (session with a proven
+  mailbox required) answers `{outcome: reused | redirect {url}}`: a hosted
+  session is created lazily, with the merchant-scoped payer reference as
+  vendor data, Payday's attempt id as metadata, and, for `verified_identity`
+  only, the expected first and last name as the details to match; a mismatch
+  declines. Only statuses, the provider's session reference, the document's
+  issuing country, and allowlisted risk categories are kept; the decision
+  types cannot carry names, document numbers, dates of birth, or images, and
+  nothing logs a callback body. Approval sets the document, liveness, and
+  (matched) identity-match facts on the verifying session only, mints a
+  merchant-scoped `document_liveness` credential and, for matched mode, a
+  `matched_identity` credential bound to the expected-identity hash
+  (`keccak256("PAYDAY_EXPECTED_IDENTITY_V1" || JCS(expected_identity))`),
+  and completes the invoice's verification only while it is still live.
+  Credentials (180-day default lifetime) are reused within the merchant on
+  later invoices whose mailbox is proven again — generic ones for
+  unattributed mode, hash-bound ones for the same asserted name — and never
+  across merchants or across different names.
+- Callback and reconciliation: `POST /v1/webhooks/identity` verifies Didit's
+  `X-Signature-V2` (HMAC-SHA256 over Didit's canonical JSON: sorted keys,
+  compact separators, unescaped Unicode, whole floats as integers) and
+  `X-Timestamp` (±300 s), records the event id once, answers `202`, and only
+  brings the attempt's poll forward; a reconciler worker in gatewayd claims
+  open attempts with `FOR UPDATE SKIP LOCKED` and a lease, polls pending
+  sessions every 15 seconds and in-review ones with increasing backoff, stops
+  on a settled status, and defers provider failures with backoff rather than
+  declining the payer. `verification.declined` is now emitted, once per
+  payment, when a decline is recorded.
+- Retry and human review: one automated resubmission after a decline; a
+  second decline sets `review_required` and further starts answer
+  `409 review_required`. `GET /v1/payments/{id}/verification` gives the
+  merchant every attempt with each fact reported separately, provider
+  reference, risk categories, and reviews; `POST …/verification/review`
+  asks a person to look at a declined attempt (automation stops for that
+  payer); `POST /v1/admin/verifications/{id}/decision` records the
+  reviewer (`PAYDAY_ADMIN_REVIEWER_ID`, default `operator`), decision, note,
+  and time, and a manual approval binds the same expected-identity hash.
+  Configured by `PAYDAY_DIDIT_API_KEY`, `PAYDAY_DIDIT_WORKFLOW_ID`,
+  `PAYDAY_DIDIT_WEBHOOK_SECRET` (optional `PAYDAY_DIDIT_BASE_URL`), all
+  together or none; without them identity start answers
+  `503 verification_unavailable`.
+- Checkout: explicit consent before the redirect (matched and unattributed
+  copy, both privacy notices, the wallet-ownership caveat), the session
+  restored from this tab's storage after the provider returns, the return
+  URL's query ignored in favour of polling `GET …/verify`, and, after a
+  decline, one retry and the appeal contact
+  (`NEXT_PUBLIC_PAYER_APPEAL_EMAIL`). Dashboard: verification activity on the
+  invoice page with each fact on its own, every attempt's provider reference
+  and risk categories, the reviewer's outcome, retry availability, and a
+  request-review action. SDK: `payer.verification.startIdentity`,
+  `identity` on the verification status, `payments.verification`, and
+  `payments.requestVerificationReview`.
+
 - Payer email verification. A gated invoice's payer proves ownership of the
   mailbox the merchant asserted through
   `POST /v1/payer/payments/{id}/verify/email/start` (the gateway sends the

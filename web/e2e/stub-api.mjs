@@ -17,6 +17,8 @@ import { createServer } from "node:http";
 
 const PORT = Number(process.env.STUB_PORT ?? 4010);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
+/** Where the stand-in identity provider sends the payer back to. */
+const CHECKOUT_ORIGIN = process.env.CHECKOUT_ORIGIN ?? "http://127.0.0.1:3003";
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";
 const FACTORY = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
@@ -105,10 +107,32 @@ function base(overrides = {}) {
 }
 
 /**
- * Payer sessions minted by the verification routes: token -> { id, emailVerified }.
+ * Payer sessions minted by the verification routes:
+ * token -> { id, emailVerified, identity: null | { status, attempt_number, retry_available } }.
  * A session is good for exactly the payment it was started on.
  */
 const sessions = new Map();
+
+/**
+ * Hosted identity sessions of the stand-in provider: hostedId -> session
+ * token. The hosted page decides per scenario and sends the payer back to
+ * the checkout with whatever a real provider would append, which the page
+ * must ignore.
+ */
+const hosted = new Map();
+
+const IDENTITY_MODES = new Set(["verified_identity", "verified_identity_unattributed"]);
+
+/** What a scenario's hosted check decides when the payer returns. */
+function decideHosted(scenarioId, session) {
+  const attempt = session.identity?.attempt_number ?? 1;
+  if (scenarioId === "gated-identity-declined") {
+    return attempt >= 2
+      ? { status: "review_required", attempt_number: attempt, retry_available: false }
+      : { status: "declined", attempt_number: attempt, retry_available: true };
+  }
+  return { status: "approved", attempt_number: attempt, retry_available: false };
+}
 
 /** The session a request presents, if it is valid for `id`. */
 function sessionFor(req, id) {
@@ -120,7 +144,7 @@ function sessionFor(req, id) {
 /** A gated invoice as its verifying session sees it. */
 function gatedFor(mode, session) {
   if (!session?.emailVerified) return locked(mode);
-  if (mode === "verified_email") {
+  if (mode === "verified_email" || session.identity?.status === "approved") {
     return base({
       heading: "Consulting — August",
       payer_policy: { mode, expected_email_hint: "a****@e***.com" },
@@ -135,7 +159,30 @@ function gatedFor(mode, session) {
     });
   }
   // Identity modes: the mailbox is proven, the identity facts are not.
-  return locked(mode, { ...requirements(mode), email: "approved" });
+  const declined =
+    session.identity?.status === "declined" || session.identity?.status === "review_required";
+  return locked(mode, {
+    ...requirements(mode),
+    email: "approved",
+    ...(declined ? { document: "declined" } : {}),
+  });
+}
+
+/** The `/verify` shape for one session. */
+function verifyStatus(payment, session) {
+  const mode = payment.payer_policy.mode;
+  const identity = session?.identity ?? null;
+  const startable =
+    IDENTITY_MODES.has(mode) &&
+    Boolean(session?.emailVerified) &&
+    !payment.requirements.complete &&
+    identity?.status !== "review_required" &&
+    identity?.status !== "in_review";
+  return {
+    requirements: payment.requirements,
+    identity_start_available: startable,
+    identity,
+  };
 }
 
 /** A gated invoice before verification: only the issuer, heading, and policy leave the API. */
@@ -204,6 +251,8 @@ const scenarios = {
   "gated-email": (id, session) => gatedFor("verified_email", session),
   "gated-identity": (id, session) => gatedFor("verified_identity", session),
   "gated-unattributed": (id, session) => gatedFor("verified_identity_unattributed", session),
+  // The hosted check declines the first attempt and stops on the second.
+  "gated-identity-declined": (id, session) => gatedFor("verified_identity", session),
   partial: () => base(PARTIAL),
   paid: () => base({ ...FULL, ...CLOSED, status: "paid" }),
   settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
@@ -336,6 +385,7 @@ function merchantPayment(input, extra = {}) {
     attachment: extra.attachment ?? null,
     verification_completed_at: null,
     likely_unsolicited_at: null,
+    verification_attempts: [],
     attribution: { version: 1, hash: hex32(`attribution:${id}`) },
     metadata: input.metadata ?? {},
     created_at: created,
@@ -352,6 +402,40 @@ function merchantPayment(input, extra = {}) {
     },
     as_of: { block: "1000", at: created },
     ...extra,
+  };
+}
+
+/** The merchant's verification view; seeded invoices carry their attempts. */
+function verificationDetail(payment) {
+  const mode = payment.payer_policy.mode;
+  const completed = payment.verification_completed_at !== null;
+  const attempts = payment.verification_attempts ?? [];
+  const latest = [...attempts].reverse().find((attempt) => attempt.kind === "identity") ?? null;
+  const reviewed = attempts.some((attempt) => attempt.review !== null);
+  return {
+    payer_policy_mode: mode,
+    verification_completed_at: payment.verification_completed_at,
+    likely_unsolicited_at: payment.likely_unsolicited_at,
+    facts: completed
+      ? requirements(mode, true)
+      : {
+          ...requirements(mode),
+          email: attempts.some(
+            (attempt) => attempt.kind === "email" && attempt.status === "approved",
+          )
+            ? "approved"
+            : requirements(mode).email,
+          ...(latest && ["declined", "review_required"].includes(latest.status)
+            ? { document: latest.document }
+            : {}),
+        },
+    attempts,
+    review_available: latest !== null && ["declined", "review_required"].includes(latest.status),
+    retry_available:
+      !completed &&
+      !reviewed &&
+      latest !== null &&
+      ["declined", "expired", "abandoned"].includes(latest.status),
   };
 }
 
@@ -526,6 +610,42 @@ function seed() {
       likely_unsolicited_at: "2026-08-26T11:00:00.000Z",
       paid_at: "2026-08-26T11:00:00.000Z",
       paid_at_block: "1400",
+      verification_attempts: [
+        {
+          id: "0198f80c-8d2f-7dc1-a369-90556a64f7e1",
+          kind: "email",
+          status: "approved",
+          provider: "auth0",
+          provider_reference: null,
+          attempt_number: 1,
+          document: "not_required",
+          liveness: "not_required",
+          identity_match: "not_required",
+          risk_codes: [],
+          country_code: null,
+          verified_at: "2026-08-26T10:30:00.000Z",
+          expires_at: null,
+          created_at: "2026-08-26T10:29:00.000Z",
+          review: null,
+        },
+        {
+          id: "0198f80c-8d2f-7dc1-a369-90556a64f7e2",
+          kind: "identity",
+          status: "declined",
+          provider: "didit",
+          provider_reference: "9f1c0f6e-1111-4c1a-9c1e-000000000003",
+          attempt_number: 1,
+          document: "declined",
+          liveness: "approved",
+          identity_match: "pending",
+          risk_codes: ["EXPECTED_DETAILS_MISMATCH", "DOCUMENT_EXPIRED"],
+          country_code: "ESP",
+          verified_at: null,
+          expires_at: null,
+          created_at: "2026-08-26T10:40:00.000Z",
+          review: null,
+        },
+      ],
       transfers: [
         {
           transaction_hash: hex32("tx:unsolicited"),
@@ -639,10 +759,13 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm)?$/,
+    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/verify\/identity\/start)?$/,
   );
   if (!match) return false;
-  const write = match[2] === "/verify/email/start" || match[2] === "/verify/email/confirm";
+  const write =
+    match[2] === "/verify/email/start" ||
+    match[2] === "/verify/email/confirm" ||
+    match[2] === "/verify/identity/start";
   if (req.method !== (write ? "POST" : "GET")) {
     return fail(res, 405, "method_not_allowed", "method not allowed");
   }
@@ -660,7 +783,7 @@ async function payer(req, res, url) {
     // The code goes to the merchant's asserted mailbox; the request names none.
     const reused = session ?? null;
     const token = reused ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
-    if (!reused) sessions.set(token, { id, emailVerified: false });
+    if (!reused) sessions.set(token, { id, emailVerified: false, identity: null });
     return send(res, 200, {
       payer_session: token,
       expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
@@ -673,15 +796,40 @@ async function payer(req, res, url) {
     const body = await readJson(req);
     if (body.otp !== OTP) return fail(res, 401, "otp_invalid", "The code was not accepted");
     session.emailVerified = true;
-    const facts = { ...requirements(mode), email: "approved", complete: mode === "verified_email" };
-    return send(res, 200, { requirements: facts, identity_start_available: false });
+    const current = { ...scenario(id, session), id };
+    return send(res, 200, verifyStatus(current, session));
+  }
+
+  if (match[2] === "/verify/identity/start") {
+    if (!IDENTITY_MODES.has(mode)) {
+      return fail(res, 409, "verification_not_required", "Nothing to verify");
+    }
+    if (!session) return fail(res, 401, "payer_session_invalid", "Start verification again");
+    if (!session.emailVerified) {
+      return fail(res, 409, "email_verification_required", "Verify the email first");
+    }
+    if (session.identity?.status === "approved")
+      return send(res, 200, { outcome: { type: "reused" } });
+    if (session.identity?.status === "review_required") {
+      return fail(res, 409, "review_required", "A human review is required");
+    }
+    // The unattributed scenario holds an earlier credential of this merchant.
+    if (id.replace(/^pay_/, "") === "gated-unattributed") {
+      session.identity = { status: "approved", attempt_number: 1, retry_available: false };
+      return send(res, 200, { outcome: { type: "reused" } });
+    }
+    const attempt = (session.identity?.attempt_number ?? 0) + 1;
+    session.identity = { status: "pending", attempt_number: attempt, retry_available: false };
+    const hostedId = randomUUID();
+    hosted.set(hostedId, req.headers["payday-payer-session"]);
+    return send(res, 200, { outcome: { type: "redirect", url: `${ORIGIN}/__didit/${hostedId}` } });
   }
 
   if (match[2] === "/verify") {
     if (req.headers["payday-payer-session"] && !session) {
       return fail(res, 401, "payer_session_invalid", "Start verification again");
     }
-    return send(res, 200, { requirements: payment.requirements, identity_start_available: false });
+    return send(res, 200, verifyStatus(payment, session));
   }
 
   if (match[2] === "/qr") {
@@ -736,6 +884,26 @@ async function issuer(req, res, url) {
     });
   }
   return false;
+}
+
+/**
+ * The stand-in identity provider's hosted session: decides at once and sends
+ * the payer back to the checkout with the sort of query string a real
+ * provider appends. Nothing in it is trusted by the page.
+ */
+function identityProvider(req, res, url) {
+  const match = url.pathname.match(/^\/__didit\/([^/]+)$/);
+  if (!match) return false;
+  const token = hosted.get(match[1]);
+  const session = token ? sessions.get(token) : undefined;
+  if (!session) return fail(res, 404, "not_found", "unknown hosted session");
+  hosted.delete(match[1]);
+  session.identity = decideHosted(session.id.replace(/^pay_/, ""), session);
+  res.writeHead(302, {
+    location: `${CHECKOUT_ORIGIN}/pay/${encodeURIComponent(session.id)}?status=Approved&session_id=${match[1]}`,
+  });
+  res.end();
+  return true;
 }
 
 /** The presigned PUT target and the signed download URL, standing in for S3. */
@@ -926,14 +1094,33 @@ async function payments(req, res, url) {
   }
 
   const match = url.pathname.match(
-    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers)?$/,
+    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers|\/verification|\/verification\/review)?$/,
   );
   if (!match) return false;
-  if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
   const payment = store.payments.get(decodeURIComponent(match[1]));
   if (!payment) return fail(res, 404, "payment_not_found", "No such payment");
+  if (match[2] === "/verification/review") {
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const attempts = payment.verification_attempts ?? [];
+    const latest = [...attempts].reverse().find((attempt) => attempt.kind === "identity");
+    if (!latest || !["declined", "review_required"].includes(latest.status)) {
+      return fail(res, 409, "review_not_available", "Nothing is declined");
+    }
+    latest.status = "review_required";
+    latest.review ??= {
+      requested_at: new Date().toISOString(),
+      decision: null,
+      reviewer: null,
+      note: null,
+      decided_at: null,
+    };
+    return send(res, 200, verificationDetail(payment));
+  }
+  if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
 
   switch (match[2]) {
+    case "/verification":
+      return send(res, 200, verificationDetail(payment));
     case "/attachment":
       if (!payment.attachment) return fail(res, 404, "attachment_not_found", "No attachment");
       return send(res, 200, {
@@ -969,6 +1156,7 @@ createServer(async (req, res) => {
     }
 
     if ((await payer(req, res, url)) !== false) return;
+    if (identityProvider(req, res, url) !== false) return;
     if ((await issuer(req, res, url)) !== false) return;
     if ((await objectStore(req, res, url)) !== false) return;
 
