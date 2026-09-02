@@ -243,7 +243,7 @@ fn feature_status(features: &[DiditFeature]) -> VerificationFactStatus {
 }
 
 fn is_expected_details_mismatch(risk: &str) -> bool {
-    risk.contains("EXPECTED_DETAILS") || risk.contains("MISMATCH")
+    risk == "EXPECTED_DETAILS_MISMATCH"
 }
 
 fn is_risk_code(value: &str) -> bool {
@@ -555,6 +555,21 @@ mod tests {
             decision.risk_codes,
             ["EXPECTED_DETAILS_MISMATCH", "DOCUMENT_EXPIRED"]
         );
+    }
+
+    #[test]
+    fn unrelated_mismatch_warning_does_not_decline_the_expected_identity() {
+        let raw = APPROVED_MATCHED.replace(
+            "\"warnings\": []",
+            "\"warnings\": [{\"risk\": \"FACE_MISMATCH\"}]",
+        );
+        let decision = reduce(&raw);
+        assert_eq!(decision.status, IdentityProviderStatus::Approved);
+        assert_eq!(
+            decision.expected_identity_match,
+            VerificationFactStatus::Approved
+        );
+        assert_eq!(decision.risk_codes, ["FACE_MISMATCH"]);
     }
 
     #[test]

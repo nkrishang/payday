@@ -16,7 +16,7 @@ use crate::{AccountId, attachments};
 use gateway_core::{
     Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, ExpectedIdentity,
     FactoryAddress, Invoice, InvoiceId, InvoiceStatusParseError, Party, PayerPolicy,
-    PaymentAddress, RecoveryAddress, Salt, TokenAddress,
+    PayerPolicyMode, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
 };
 
 /// Database row representing one invoice.
@@ -160,30 +160,34 @@ impl TryFrom<&DbInvoice> for Invoice {
             .status
             .parse()
             .map_err(|source| DbInvoiceError::InvalidStatus { id: row.id, source })?;
-        let missing = |field| DbInvoiceError::MissingAttribution { id: row.id, field };
-        let attribution_version = row
-            .attribution_version
-            .ok_or(missing("attribution_version"))? as u16;
-        let attribution_nonce = word_from_col(
-            row.id,
-            "attribution_nonce",
-            row.attribution_nonce
-                .as_deref()
-                .ok_or(missing("attribution_nonce"))?,
-        )?;
-        let attribution_hash = word_from_col(
-            row.id,
-            "attribution_hash",
-            row.attribution_hash
-                .as_deref()
-                .ok_or(missing("attribution_hash"))?,
-        )?;
-        let issuance_snapshot = row
-            .issuance_snapshot
-            .as_ref()
-            .ok_or(missing("issuance_snapshot"))?
-            .0
-            .clone();
+        let attribution = match (
+            row.attribution_version,
+            row.attribution_nonce.as_deref(),
+            row.attribution_hash.as_deref(),
+            row.issuance_snapshot.as_ref(),
+        ) {
+            (Some(version), Some(nonce), Some(hash), Some(snapshot)) => (
+                version as u16,
+                word_from_col(row.id, "attribution_nonce", nonce)?,
+                word_from_col(row.id, "attribution_hash", hash)?,
+                snapshot.0.clone(),
+            ),
+            (None, None, None, None) => legacy_attribution(row)?,
+            _ => {
+                let field = if row.attribution_version.is_none() {
+                    "attribution_version"
+                } else if row.attribution_nonce.is_none() {
+                    "attribution_nonce"
+                } else if row.attribution_hash.is_none() {
+                    "attribution_hash"
+                } else {
+                    "issuance_snapshot"
+                };
+                return Err(DbInvoiceError::MissingAttribution { id: row.id, field });
+            }
+        };
+        let (attribution_version, attribution_nonce, attribution_hash, issuance_snapshot) =
+            attribution;
 
         Ok(Invoice {
             id: InvoiceId(row.id),
@@ -233,6 +237,57 @@ impl TryFrom<&DbInvoice> for Invoice {
             issuance_snapshot,
         })
     }
+}
+
+/// Migration 0011 deliberately permits pre-attribution rows. Keep those
+/// invoices readable, but mark the unavailable commitment as version zero so
+/// it can never be mistaken for a verifiable v1 issuance.
+fn legacy_attribution(
+    row: &DbInvoice,
+) -> Result<(u16, B256, B256, CanonicalIssuanceSnapshot), DbInvoiceError> {
+    let party = |name: &str| Party {
+        name: name.into(),
+        email: None,
+        details: None,
+    };
+    let mut snapshot = CanonicalIssuanceSnapshot::new(
+        row.issuer
+            .as_ref()
+            .map(|value| value.0.clone())
+            .unwrap_or_else(|| party("Legacy issuer")),
+        row.bill_to
+            .as_ref()
+            .map(|value| value.0.clone())
+            .unwrap_or_else(|| party("Legacy payer")),
+        PayerPolicy::Permissionless,
+        FactoryAddress(address_from_col(
+            row.id,
+            "factory_address",
+            &row.factory_address,
+        )?),
+        ChainId(row.chain_id as u64),
+        TokenAddress(address_from_col(
+            row.id,
+            "token_address",
+            &row.token_address,
+        )?),
+        BeneficiaryAddress(address_from_col(
+            row.id,
+            "beneficiary_address",
+            &row.beneficiary_address,
+        )?),
+        Amount(units_from_col(row.id, &row.amount)?),
+        row.expiration_timestamp as u64,
+        RecoveryAddress(address_from_col(
+            row.id,
+            "recovery_address",
+            &row.recovery_address,
+        )?),
+    );
+    snapshot.notes = row.notes.clone();
+    snapshot.heading = row.heading.clone();
+    snapshot.reference = row.reference.clone();
+    Ok((0, B256::ZERO, B256::ZERO, snapshot))
 }
 
 #[derive(Clone)]
@@ -313,6 +368,60 @@ pub struct CreateInvoiceInput {
     pub attribution_version: u16,
     pub attribution_nonce: [u8; 32],
     pub attribution_hash: [u8; 32],
+}
+
+/// Merchant-controlled issuance fields used by both the optimistic API replay
+/// check and the transaction's authoritative race check.
+pub struct IssuanceRequest<'a> {
+    pub chain_id: u64,
+    pub factory: &'a [u8],
+    pub token: &'a [u8],
+    pub token_decimals: u8,
+    pub beneficiary: &'a [u8],
+    pub amount: U256,
+    pub expiration_intent: &'a str,
+    pub recovery: &'a [u8],
+    pub issuer: &'a Party,
+    pub bill_to: &'a Party,
+    pub notes: Option<&'a str>,
+    pub heading: Option<&'a str>,
+    pub reference: Option<&'a str>,
+    pub metadata: &'a serde_json::Value,
+    pub customer_id: Option<Uuid>,
+    pub payer_policy: &'a PayerPolicy,
+    pub attachment_id: Option<Uuid>,
+    pub attachment: Option<&'a gateway_core::AttachmentCommitment>,
+}
+
+pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> bool {
+    let committed = existing
+        .issuance_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.0.attachment.as_ref());
+    existing.chain_id as u64 == request.chain_id
+        && existing.factory_address == request.factory
+        && existing.token_address == request.token
+        && existing.token_decimals == request.token_decimals as i16
+        && existing.beneficiary_address == request.beneficiary
+        && existing.expiration_intent == request.expiration_intent
+        && existing.recovery_address == request.recovery
+        && U256::from_str_radix(&existing.amount, 10).is_ok_and(|amount| amount == request.amount)
+        && existing.reference.as_deref() == request.reference
+        && existing.metadata.0 == *request.metadata
+        && existing.customer_id == request.customer_id
+        && existing.issuer.as_ref().map(|party| &party.0) == Some(request.issuer)
+        && existing.bill_to.as_ref().map(|party| &party.0) == Some(request.bill_to)
+        && existing.notes.as_deref() == request.notes
+        && existing.heading.as_deref() == request.heading
+        && existing.payer_policy_mode == request.payer_policy.mode().as_str()
+        && existing.expected_email.as_deref() == request.payer_policy.expected_email()
+        && existing
+            .expected_identity
+            .as_ref()
+            .map(|identity| &identity.0)
+            == request.payer_policy.expected_identity()
+        && committed.map(|attachment| attachment.id) == request.attachment_id
+        && committed == request.attachment
 }
 
 /// One validated, finalized USDC `Transfer` log from the configured token.
@@ -414,29 +523,31 @@ impl CreateInvoiceInput {
         existing_attachment: Option<&DbAttachment>,
         attachment_id: Option<Uuid>,
     ) -> bool {
-        existing.chain_id as u64 == self.chain_id
-            && existing.factory_address == self.factory_address
-            && existing.token_address == self.token_address
-            && existing.token_decimals == self.token_decimals as i16
-            && existing.beneficiary_address == self.beneficiary_address
-            && existing.expiration_intent == self.expiration_intent
-            && existing.recovery_address == self.recovery_address
-            && existing.amount == self.amount
-            && existing.reference == self.reference
-            && existing.metadata.0 == self.metadata
-            && existing.customer_id == self.customer_id
-            && existing.issuer.as_ref().map(|party| &party.0) == Some(&self.issuer)
-            && existing.bill_to.as_ref().map(|party| &party.0) == Some(&self.bill_to)
-            && existing.notes == self.notes
-            && existing.heading == self.heading
-            && existing.payer_policy_mode == self.payer_policy.mode().as_str()
-            && existing.expected_email.as_deref() == self.payer_policy.expected_email()
-            && existing
-                .expected_identity
-                .as_ref()
-                .map(|identity| &identity.0)
-                == self.payer_policy.expected_identity()
-            && existing_attachment.map(|attachment| attachment.id) == attachment_id
+        same_issuance(
+            existing,
+            &IssuanceRequest {
+                chain_id: self.chain_id,
+                factory: &self.factory_address,
+                token: &self.token_address,
+                token_decimals: self.token_decimals,
+                beneficiary: &self.beneficiary_address,
+                amount: U256::from_str_radix(&self.amount, 10).unwrap_or_default(),
+                expiration_intent: &self.expiration_intent,
+                recovery: &self.recovery_address,
+                issuer: &self.issuer,
+                bill_to: &self.bill_to,
+                notes: self.notes.as_deref(),
+                heading: self.heading.as_deref(),
+                reference: self.reference.as_deref(),
+                metadata: &self.metadata,
+                customer_id: self.customer_id,
+                payer_policy: &self.payer_policy,
+                attachment_id,
+                attachment: existing_attachment
+                    .and_then(DbAttachment::commitment)
+                    .as_ref(),
+            },
+        )
     }
 }
 
@@ -976,7 +1087,7 @@ impl InvoiceRepository {
                         funded_at_block_hash = $6,
                         paid_at = to_timestamp($7),
                         likely_unsolicited_at = CASE
-                            WHEN payer_policy_mode <> 'permissionless'
+                            WHEN payer_policy_mode <> $9
                              AND verification_completed_at IS NULL
                              AND likely_unsolicited_at IS NULL
                             THEN to_timestamp($8)
@@ -994,6 +1105,7 @@ impl InvoiceRepository {
                 .bind(block_hash.as_slice())
                 .bind(block_timestamp as f64)
                 .bind(first_funding)
+                .bind(PayerPolicyMode::Permissionless.as_str())
                 .execute(&mut *tx)
                 .await?;
                 if result.rows_affected() > 0 {
@@ -1006,7 +1118,7 @@ impl InvoiceRepository {
                     SET confirmed_received = $2,
                         uncollected_count = $3,
                         likely_unsolicited_at = CASE
-                            WHEN payer_policy_mode <> 'permissionless'
+                            WHEN payer_policy_mode <> $5
                              AND verification_completed_at IS NULL
                              AND likely_unsolicited_at IS NULL
                             THEN to_timestamp($4)
@@ -1020,6 +1132,7 @@ impl InvoiceRepository {
                 .bind(credit.received.to_string())
                 .bind(credit.uncollected)
                 .bind(first_funding)
+                .bind(PayerPolicyMode::Permissionless.as_str())
                 .execute(&mut *tx)
                 .await?;
             }
@@ -1343,16 +1456,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rows_without_attribution_material_are_typed_errors_not_panics() {
+    fn legacy_rows_without_attribution_material_remain_readable() {
         let mut row = valid_row();
         row.issuance_snapshot = None;
-        assert!(matches!(
-            Invoice::try_from(&row),
-            Err(DbInvoiceError::MissingAttribution {
-                field: "issuance_snapshot",
-                ..
-            })
-        ));
+        row.attribution_version = None;
+        row.attribution_nonce = None;
+        row.attribution_hash = None;
+        row.issuer = None;
+        row.bill_to = None;
+        let invoice = Invoice::try_from(&row).expect("legacy rows must not halt readers");
+        assert_eq!(invoice.attribution_version, 0);
+        assert_eq!(invoice.attribution_nonce, B256::ZERO);
+        assert_eq!(invoice.attribution_hash, B256::ZERO);
+        assert_eq!(invoice.issuance_snapshot.issuer.name, "Legacy issuer");
+    }
+
+    #[test]
+    fn partially_missing_attribution_is_still_rejected() {
         let mut row = valid_row();
         row.attribution_hash = None;
         assert!(matches!(

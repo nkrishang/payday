@@ -38,26 +38,44 @@ async fn main() {
     let cursor = gateway_db::CursorRepository::new(pool.clone());
     let health_cursor = cursor.clone();
     let notifications = gateway_db::NotificationRepository::new(pool.clone());
-    let identity_verifier = match config.auth0() {
-        Some(auth0) => Some(
-            api::Auth0Verifier::new(
-                auth0.issuer.clone(),
-                auth0.audience.clone(),
-                auth0.client_id.clone(),
-                auth0.dashboard_client_id.clone(),
-                config.dev_identity(),
-            )
-            .await
-            .expect("failed to initialize Auth0 JWT verification"),
-        ),
-        None => None,
-    };
-    // One AWS configuration serves S3, KMS, and SES; status-only mode uses none.
-    let aws = if config.status_only() {
-        None
-    } else {
-        Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
-    };
+    // Auth0 discovery and AWS provider-chain loading are independent network
+    // work. Start them together, and retain one AWS configuration for S3, KMS,
+    // and SES; status-only mode uses neither AWS nor payer authentication.
+    let auth0 = config.auth0().map(|auth0| {
+        (
+            auth0.issuer.clone(),
+            auth0.audience.clone(),
+            auth0.client_id.clone(),
+            auth0.dashboard_client_id.clone(),
+        )
+    });
+    let dev_identity = config.dev_identity();
+    let status_only = config.status_only();
+    let (identity_verifier, aws) = tokio::join!(
+        async move {
+            match auth0 {
+                Some((issuer, audience, client_id, dashboard_client_id)) => Some(
+                    api::Auth0Verifier::new(
+                        issuer,
+                        audience,
+                        client_id,
+                        dashboard_client_id,
+                        dev_identity,
+                    )
+                    .await
+                    .expect("failed to initialize Auth0 JWT verification"),
+                ),
+                None => None,
+            }
+        },
+        async move {
+            if status_only {
+                None
+            } else {
+                Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
+            }
+        }
+    );
     let attachment_store = config.attachments().map(|attachments| {
         let storage = attachments::S3ObjectStorage::new(
             aws.as_ref()
@@ -70,9 +88,13 @@ async fn main() {
     });
     let attestor = match config.attestation() {
         Some(signer) => Some(
-            attestation::VerificationAttestor::from_config(signer)
-                .await
-                .unwrap_or_else(|error| panic!("{error}")),
+            attestation::VerificationAttestor::from_config(
+                signer,
+                aws.as_ref()
+                    .expect("AWS configuration is loaded outside status-only mode"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}")),
         ),
         None => None,
     };

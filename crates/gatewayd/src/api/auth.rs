@@ -11,6 +11,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use gateway_core::valid_email;
 use gateway_db::{AccountId, ProvisionAccountError};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
@@ -289,17 +290,6 @@ fn email_otp_subject(claims: &Claims) -> bool {
     claims.authentication_method == EMAIL_OTP_METHOD
         && claims.sub.starts_with("email|")
         && valid_email(&claims.email)
-}
-
-fn valid_email(value: &str) -> bool {
-    value.len() <= 254
-        && !value.chars().any(char::is_whitespace)
-        && value.split_once('@').is_some_and(|(local, domain)| {
-            !local.is_empty()
-                && domain.contains('.')
-                && !domain.starts_with('.')
-                && !domain.ends_with('.')
-        })
 }
 
 fn issuer_transport_allowed(issuer: &reqwest::Url, allow_dev_identity: bool) -> bool {

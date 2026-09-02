@@ -3,6 +3,7 @@
 //! receipt checks over plain JSON-RPC: one for the payer's transfers into the
 //! address, one for the settlement transaction that forwarded the funds out.
 
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -230,6 +231,7 @@ fn failing_check(error: &ProofError) -> usize {
         | ProofError::UntrustedAttestor
         | ProofError::AttestationPaymentIdMismatch
         | ProofError::AttestationModeMismatch
+        | ProofError::AttestationNotPassed
         | ProofError::AttestationCommitmentMismatch => ATTESTATION,
         ProofError::TransferRecipientMismatch | ProofError::TransfersBelowInvoiceAmount => {
             TRANSFERS
@@ -366,15 +368,25 @@ async fn confirm_receipts(
     let token = Address::from_str(&proof.token_address)
         .map_err(|_| "token_address is malformed".to_string())?;
     let mut hashes: Vec<&str> = Vec::new();
-    for transfer in &proof.transfers {
+    let mut unique = HashSet::new();
+    let transfers = proof.transfers.iter().filter(|transfer| {
+        unique.insert((
+            transfer.transaction_hash.as_str(),
+            transfer.sender.as_str(),
+            transfer.recipient.as_str(),
+            transfer.amount_base_units.as_str(),
+            transfer.block_number.as_str(),
+        ))
+    });
+    let transfers: Vec<_> = transfers.collect();
+    for transfer in &transfers {
         if !hashes.contains(&transfer.transaction_hash.as_str()) {
             hashes.push(&transfer.transaction_hash);
         }
     }
     for hash in &hashes {
         let receipt = rpc.successful_receipt(hash).await?;
-        for transfer in proof
-            .transfers
+        for transfer in transfers
             .iter()
             .filter(|transfer| transfer.transaction_hash == *hash)
         {

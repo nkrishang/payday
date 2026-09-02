@@ -46,9 +46,13 @@ export function EmailVerification({
       onCodeSent();
     } catch (cause) {
       if (cause instanceof PaydayError && cause.code === "otp_resend_cooldown") {
-        // A code is already on its way; let it be entered.
-        setStep("code");
-        setError("A code was sent a moment ago. Check your inbox before requesting another.");
+        // Only a session that initiated that send can exchange its code.
+        if (payerSession !== null) setStep("code");
+        setError(
+          payerSession === null
+            ? "A code was sent a moment ago in another tab. Wait briefly, then request a new one here."
+            : "A code was sent a moment ago. Check your inbox before requesting another.",
+        );
       } else if (cause instanceof PaydayError && cause.code === "payer_session_invalid") {
         onSession(null);
         setError("This tab's verification session expired. Request a new code.");

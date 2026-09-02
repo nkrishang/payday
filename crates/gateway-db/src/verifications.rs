@@ -175,6 +175,45 @@ impl PayerSessionRepository {
         .await
     }
 
+    /// Resolve a session regardless of expiry. This is only used for closed
+    /// invoices, where it restores the receipt but can no longer enable a payment.
+    pub async fn find(
+        &self,
+        token: &str,
+        invoice_id: Uuid,
+    ) -> Result<Option<DbPayerSession>, sqlx::Error> {
+        sqlx::query_as::<_, DbPayerSession>(
+            r#"
+            SELECT id, invoice_id, payer_ref, email_verified_at, document_verified_at,
+                   liveness_verified_at, identity_matched_at, created_at, expires_at
+            FROM payer_sessions
+            WHERE token_hash = $1 AND invoice_id = $2
+            "#,
+        )
+        .bind(token_hash(token).as_slice())
+        .bind(invoice_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn delete(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM payer_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn abandon_email_verification(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE payer_verifications SET status = 'abandoned' WHERE payer_session_id = $1 AND kind = 'email' AND status = 'pending'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Record that a code is being sent for `session_id`'s invoice. Earlier
     /// pending attempts on the session are abandoned; the cooldown is per
     /// invoice, whatever session asks, so the expected mailbox cannot be
@@ -198,7 +237,11 @@ impl PayerSessionRepository {
         .fetch_one(&mut *tx)
         .await?;
         let latest: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT max(created_at) FROM payer_verifications WHERE invoice_id = $1 AND kind = 'email'",
+            r#"
+            SELECT max(created_at)
+            FROM payer_verifications
+            WHERE invoice_id = $1 AND kind = 'email' AND status IN ('pending', 'approved')
+            "#,
         )
         .bind(invoice_id)
         .fetch_one(&mut *tx)
@@ -269,21 +312,38 @@ impl PayerSessionRepository {
         provider_event_id: &str,
     ) -> Result<VerificationCompletion, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let session = sqlx::query_as::<_, DbPayerSession>(
-            r#"
-            UPDATE payer_sessions
-            SET payer_ref = $2, email_verified_at = COALESCE(email_verified_at, $3)
-            WHERE id = $1
-            RETURNING id, invoice_id, payer_ref, email_verified_at, document_verified_at,
-                      liveness_verified_at, identity_matched_at, created_at, expires_at
-            "#,
+        // A commit acknowledgement can be lost after PostgreSQL committed.
+        // Make the provider event an idempotency key so the handler can retry
+        // without requiring the already-consumed OTP again.
+        if let Some(existing_session_id) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT payer_session_id FROM payer_verifications WHERE provider_event_id = $1 AND status = 'approved'",
         )
-        .bind(session_id)
-        .bind(payer_ref.as_slice())
-        .bind(verified_at)
-        .fetch_one(&mut *tx)
-        .await?;
-        sqlx::query(
+        .bind(provider_event_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let session = sqlx::query_as::<_, DbPayerSession>(
+                r#"
+                SELECT id, invoice_id, payer_ref, email_verified_at, document_verified_at,
+                       liveness_verified_at, identity_matched_at, created_at, expires_at
+                FROM payer_sessions WHERE id = $1
+                "#,
+            )
+            .bind(existing_session_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let completed = sqlx::query_scalar(
+                "SELECT verification_completed_at FROM invoices WHERE id = $1",
+            )
+            .bind(session.invoice_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            return Ok(VerificationCompletion {
+                session,
+                invoice_completed_at: completed,
+            });
+        }
+        let attempt = sqlx::query(
             r#"
             UPDATE payer_verifications
             SET status = 'approved', verified_at = $2, payer_ref = $3, provider_event_id = $4
@@ -296,6 +356,23 @@ impl PayerSessionRepository {
         .bind(provider_event_id)
         .execute(&mut *tx)
         .await?;
+        if attempt.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        let session = sqlx::query_as::<_, DbPayerSession>(
+            r#"
+            UPDATE payer_sessions
+            SET payer_ref = $2, email_verified_at = COALESCE(email_verified_at, $3)
+            WHERE id = $1 AND expires_at > $3
+            RETURNING id, invoice_id, payer_ref, email_verified_at, document_verified_at,
+                      liveness_verified_at, identity_matched_at, created_at, expires_at
+            "#,
+        )
+        .bind(session_id)
+        .bind(payer_ref.as_slice())
+        .bind(verified_at)
+        .fetch_one(&mut *tx)
+        .await?;
         let invoice_completed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             r#"
             UPDATE invoices
@@ -303,6 +380,8 @@ impl PayerSessionRepository {
             WHERE id = $1
               AND payer_policy_mode = 'verified_email'
               AND verification_completed_at IS NULL
+              AND status IN ('created', 'funded', 'deploying')
+              AND expiration_timestamp >= EXTRACT(EPOCH FROM $2)::bigint
             RETURNING verification_completed_at
             "#,
         )
@@ -484,6 +563,12 @@ mod tests {
                 .await
                 .unwrap()
         );
+        // A provider send failure abandons its attempt and must not preserve
+        // the cooldown for a code that was never delivered.
+        repo.abandon_email_verification(first.id).await.unwrap();
+        repo.begin_email_verification(second.id, cooldown)
+            .await
+            .unwrap();
         // Once it lapses a resend replaces the earlier pending attempt.
         sqlx::query("UPDATE payer_verifications SET created_at = now() - interval '2 minutes'")
             .execute(&pool)

@@ -634,7 +634,7 @@ resource "aws_iam_role_policy" "api_attachments" {
       {
         Sid      = "ManageUploads"
         Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:PutObjectTagging", "s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:GetObjectVersionTagging", "s3:DeleteObject"]
+        Action   = ["s3:PutObject", "s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:GetObjectVersionTagging", "s3:DeleteObject"]
         Resource = "${aws_s3_bucket.attachments.arn}/uploads/*"
       },
       {
@@ -677,7 +677,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
-    ], local.dashboard_environment, local.payer_environment),
+    ], local.dashboard_environment, local.payer_environment, local.identity_environment),
     # The API verifies the deployed contract generation at startup, so it reads
     # the chain through the same RPC secret as the indexer.
     secrets = concat([
@@ -685,7 +685,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
-    ], local.payer_secrets),
+    ], local.payer_secrets, local.identity_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 

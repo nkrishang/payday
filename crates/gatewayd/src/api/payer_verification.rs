@@ -67,7 +67,6 @@ pub struct PayerIdentityStatus {
     /// `abandoned`, or `review_required`.
     pub status: String,
     pub attempt_number: u16,
-    pub retry_available: bool,
 }
 
 /// The session token a request carries, if any. Tokens are opaque; only
@@ -98,7 +97,6 @@ async fn status_response(
         identity: identity.latest.as_ref().map(|latest| PayerIdentityStatus {
             status: latest.status.clone(),
             attempt_number: latest.attempt_number.max(0) as u16,
-            retry_available: identity_start_available,
         }),
     })
 }
@@ -134,13 +132,17 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
 /// The address the code goes to: the merchant's assertion, normalized the
 /// way the Auth0 Action normalizes the proven mailbox.
 fn expected_email(invoice: &Invoice) -> String {
-    invoice
-        .issuance_snapshot
-        .payer_policy
-        .expected_email()
-        .expect("a gated policy carries an expected email")
-        .trim()
-        .to_lowercase()
+    normalize_email(
+        invoice
+            .issuance_snapshot
+            .payer_policy
+            .expected_email()
+            .expect("a gated policy carries an expected email"),
+    )
+}
+
+fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
 }
 
 pub async fn start_email(
@@ -163,14 +165,14 @@ pub async fn start_email(
             .map(|session| (session, token.to_owned())),
         None => None,
     };
-    let (session_id, token, expires_at) = match existing {
-        Some((session, token)) => (session.id, token, session.expires_at),
+    let (session_id, token, expires_at, created) = match existing {
+        Some((session, token)) => (session.id, token, session.expires_at, false),
         None => {
             let created = state
                 .payer_sessions
                 .create(row.id, PAYER_SESSION_TTL)
                 .await?;
-            (created.id, created.token, created.expires_at)
+            (created.id, created.token, created.expires_at, true)
         }
     };
     match state
@@ -180,6 +182,9 @@ pub async fn start_email(
     {
         Ok(_) => {}
         Err(StartEmailVerificationError::Cooldown { retry_after }) => {
+            if created {
+                state.payer_sessions.delete(session_id).await?;
+            }
             let seconds = retry_after.as_secs().max(1);
             let mut response = ApiError::otp_resend_cooldown(seconds).into_response();
             response
@@ -187,9 +192,24 @@ pub async fn start_email(
                 .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
             return Ok(response);
         }
-        Err(StartEmailVerificationError::Database(error)) => return Err(error.into()),
+        Err(StartEmailVerificationError::Database(error)) => {
+            if created {
+                state.payer_sessions.delete(session_id).await?;
+            }
+            return Err(error.into());
+        }
     }
-    verification.send_code(&expected_email(&invoice)).await?;
+    if let Err(error) = verification.send_code(&expected_email(&invoice)).await {
+        if created {
+            state.payer_sessions.delete(session_id).await?;
+        } else {
+            state
+                .payer_sessions
+                .abandon_email_verification(session_id)
+                .await?;
+        }
+        return Err(error);
+    }
     Ok((
         no_store(),
         Json(StartEmailResponse {
@@ -233,15 +253,34 @@ pub async fn confirm_email(
     let expected = expected_email(&invoice);
     let identity = verification.confirm_code(&expected, otp).await?;
     let reference = verification.payer_ref(row.account_id, &expected);
-    let completion = state
+    let verified_at = Utc::now();
+    let mut approval = state
         .payer_sessions
         .approve_email(
             session.id,
             reference,
-            Utc::now(),
+            verified_at,
             &identity.authentication_event_id,
         )
-        .await?;
+        .await;
+    // The OTP has been consumed, so transient/ambiguous database failures
+    // must be retried here rather than requiring the payer to exchange it again.
+    for _ in 0..2 {
+        if approval.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        approval = state
+            .payer_sessions
+            .approve_email(
+                session.id,
+                reference,
+                verified_at,
+                &identity.authentication_event_id,
+            )
+            .await;
+    }
+    let completion = approval?;
     if completion.invoice_completed_at.is_some() {
         tracing::info!(invoice_id = %row.id, "payer verification completed");
     }

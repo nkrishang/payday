@@ -344,13 +344,14 @@ CREATE INDEX payer_verifications_poll
     WHERE status IN ('pending', 'in_review');
 CREATE INDEX payer_verifications_invoice
     ON payer_verifications(invoice_id, created_at DESC);
+CREATE INDEX payer_verifications_session
+    ON payer_verifications(payer_session_id);
 
 CREATE TABLE payer_credentials (
     id UUID PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     payer_ref BYTEA NOT NULL CHECK (octet_length(payer_ref) = 32),
     kind TEXT NOT NULL CHECK (kind IN ('document_liveness', 'matched_identity')),
-    status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'expired')),
     expected_identity_hash BYTEA CHECK (
         expected_identity_hash IS NULL OR octet_length(expected_identity_hash) = 32
     ),
@@ -366,10 +367,10 @@ CREATE TABLE payer_credentials (
 
 CREATE UNIQUE INDEX payer_generic_credential
     ON payer_credentials(account_id, payer_ref, kind)
-    WHERE kind = 'document_liveness' AND status = 'active';
+    WHERE kind = 'document_liveness';
 CREATE UNIQUE INDEX payer_matched_credential
     ON payer_credentials(account_id, payer_ref, expected_identity_hash)
-    WHERE kind = 'matched_identity' AND status = 'active';
+    WHERE kind = 'matched_identity';
 
 -- ---------------------------------------------------------------------------
 -- Manual review and identity webhook deduplication.

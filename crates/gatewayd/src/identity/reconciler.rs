@@ -43,10 +43,20 @@ pub async fn run(
     loop {
         let pause = match repo.claim_due(BATCH, LEASE).await {
             Ok(claims) if !claims.is_empty() => {
+                let mut tasks = tokio::task::JoinSet::new();
                 for claim in claims {
-                    let id = claim.id;
-                    if let Err(error) = reconcile_one(&repo, provider.as_ref(), claim).await {
-                        tracing::error!(verification_id = %id, %error, "identity reconciliation failed");
+                    let repo = repo.clone();
+                    let provider = provider.clone();
+                    tasks.spawn(async move {
+                        let id = claim.id;
+                        if let Err(error) = reconcile_one(&repo, provider.as_ref(), claim).await {
+                            tracing::error!(verification_id = %id, %error, "identity reconciliation failed");
+                        }
+                    });
+                }
+                while let Some(result) = tasks.join_next().await {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "identity reconciliation task failed");
                     }
                 }
                 Duration::ZERO
@@ -97,10 +107,23 @@ pub async fn reconcile_one(
         Err(IdentityProviderError::InvalidCallback(_)) => {
             unreachable!("fetching a decision never verifies a callback")
         }
-        Err(error) => {
-            // Unavailable or rejected alike: the payer is not declined for
-            // the provider's trouble. Keep polling, and shout once it has
-            // gone on long enough that an operator should look.
+        Err(IdentityProviderError::Rejected(error)) => {
+            tracing::warn!(verification_id = %verification.id, %error, "identity provider rejected the session lookup");
+            repo.apply_decision(
+                verification.id,
+                &DecisionRecord {
+                    status: IdentityStatus::Abandoned,
+                    document: VerificationFactStatus::Pending,
+                    liveness: VerificationFactStatus::Pending,
+                    identity_match: VerificationFactStatus::Pending,
+                    risk_codes: vec![],
+                    country_code: None,
+                    expires_at: None,
+                },
+            )
+            .await?;
+        }
+        Err(error @ IdentityProviderError::Unavailable(_)) => {
             let failures = verification.provider_failures + 1;
             if failures >= FAILURE_ALERT_THRESHOLD {
                 tracing::error!(verification_id = %verification.id, failures, %error, "identity provider keeps failing");
@@ -111,18 +134,6 @@ pub async fn reconcile_one(
         }
     }
     Ok(())
-}
-
-/// A freshly opened session's status, before any decision exists.
-pub fn provider_status(status: IdentityProviderStatus) -> IdentityStatus {
-    match status {
-        IdentityProviderStatus::Pending => IdentityStatus::Pending,
-        IdentityProviderStatus::Approved => IdentityStatus::Approved,
-        IdentityProviderStatus::Declined => IdentityStatus::Declined,
-        IdentityProviderStatus::InReview => IdentityStatus::InReview,
-        IdentityProviderStatus::Expired => IdentityStatus::Expired,
-        IdentityProviderStatus::Abandoned => IdentityStatus::Abandoned,
-    }
 }
 
 /// Translate a provider decision into what the ledger records. Approval
@@ -156,7 +167,8 @@ pub fn record_from(decision: &IdentityDecision, matched: bool) -> DecisionRecord
                 || liveness == VerificationFactStatus::Declined
                 || identity_match == VerificationFactStatus::Declined
             {
-                IdentityStatus::Declined
+                risk_codes.push(INCOMPLETE_CHECKS_RISK.into());
+                IdentityStatus::ReviewRequired
             } else {
                 risk_codes.push(INCOMPLETE_CHECKS_RISK.into());
                 IdentityStatus::ReviewRequired
@@ -167,6 +179,7 @@ pub fn record_from(decision: &IdentityDecision, matched: bool) -> DecisionRecord
         IdentityProviderStatus::Pending => IdentityStatus::Pending,
         IdentityProviderStatus::Expired => IdentityStatus::Expired,
         IdentityProviderStatus::Abandoned => IdentityStatus::Abandoned,
+        IdentityProviderStatus::ReviewRequired => IdentityStatus::ReviewRequired,
     };
     DecisionRecord {
         status,
@@ -201,7 +214,7 @@ mod tests {
         mismatch.expected_identity_match = VerificationFactStatus::Declined;
         assert_eq!(
             record_from(&mismatch, true).status,
-            IdentityStatus::Declined
+            IdentityStatus::ReviewRequired
         );
         assert_eq!(
             record_from(&mismatch, false).status,

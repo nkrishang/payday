@@ -154,6 +154,20 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
 function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
   const { requirements, payer_policy } = payment;
 
+  // Invoice-level completion from another payer is not evidence for this tab.
+  // Treat the internally inconsistent locked/complete response as a fresh gate.
+  if (requirements.complete) {
+    return {
+      phase: "verification_required",
+      tone: "neutral",
+      label: "Verification required",
+      title: "Verify to view this invoice",
+      detail: "The amount, payment details, and attachment are shown once you verify.",
+      showInstructions: false,
+      isTerminal: false,
+    };
+  }
+
   if (requirements.email === "approved" && !requirements.complete) {
     const matched = payer_policy.mode === "verified_identity";
     return {

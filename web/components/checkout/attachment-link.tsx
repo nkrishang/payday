@@ -32,6 +32,10 @@ export function AttachmentLink({
   const [state, setState] = useState<LinkState>({ status: "idle" });
 
   const open = async () => {
+    // Open synchronously so popup blockers see the user's click. With
+    // `noopener`, browsers deliberately return null even when navigation works.
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
     setState({ status: "fetching" });
     try {
       const descriptor =
@@ -41,9 +45,14 @@ export function AttachmentLink({
       if (!descriptor.download_url) {
         throw new Error("The gateway returned no download link");
       }
-      const opened = window.open(descriptor.download_url, "_blank", "noopener,noreferrer");
-      setState(opened ? { status: "idle" } : { status: "blocked", url: descriptor.download_url });
+      if (tab) {
+        tab.location.replace(descriptor.download_url);
+        setState({ status: "idle" });
+      } else {
+        setState({ status: "blocked", url: descriptor.download_url });
+      }
     } catch (error) {
+      tab?.close();
       setState({
         status: "failed",
         message:

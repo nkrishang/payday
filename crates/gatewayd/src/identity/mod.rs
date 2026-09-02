@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use gateway_core::{ExpectedIdentity, VerificationFactStatus};
+use gateway_db::IdentityStatus;
 use uuid::Uuid;
 
 /// What a hosted session is opened for.
@@ -41,15 +42,9 @@ pub struct IdentitySession {
     pub status: IdentityProviderStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityProviderStatus {
-    Pending,
-    Approved,
-    Declined,
-    InReview,
-    Expired,
-    Abandoned,
-}
+/// Provider statuses use the ledger's canonical representation. Adapters
+/// never produce `ReviewRequired`; that remains Payday's own verdict.
+pub type IdentityProviderStatus = IdentityStatus;
 
 /// The decision, reduced to statuses and allowlisted risk categories.
 #[derive(Debug, Clone)]

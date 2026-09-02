@@ -27,3 +27,6 @@ pub use expiration::*;
 
 mod proof;
 pub use proof::*;
+
+mod deployment;
+pub use deployment::*;

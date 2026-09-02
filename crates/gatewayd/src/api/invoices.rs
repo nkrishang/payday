@@ -13,11 +13,10 @@ use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, AsOfDto, AttachmentCommitment, BeneficiaryAddress, CancelPaymentResponse,
-    CanonicalIssuanceSnapshot, ChainId, CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto,
-    Invoice, PDF_MIME_TYPE, Party, PayerPolicy, PaymentListResponse, PaymentResponse,
-    PaymentStatus, PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto,
-    USDC_DECIMALS, parse_expiration, validate_expiration_window,
+    Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, CanonicalIssuanceSnapshot, ChainId,
+    CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto, Invoice, PDF_MIME_TYPE, Party,
+    PaymentListResponse, PaymentResponse, PaymentStatus, PaymentSummaryResponse, RecoveryAddress,
+    TokenAddress, TransferDto, USDC_DECIMALS, parse_expiration, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -27,7 +26,7 @@ use crate::invoice_pdf::render_invoice_pdf;
 use crate::state::AppState;
 use gateway_db::{
     AccountId, AttachmentStatus, CreateInvoiceInput, DbAttachment, DbInvoice,
-    InsertIssuedInvoiceError,
+    InsertIssuedInvoiceError, IssuanceRequest, same_issuance,
 };
 
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
@@ -255,14 +254,16 @@ pub async fn create_payment(
     // the replay comparison because it is committed into the payment address:
     // a replay after the platform wallet changed cannot return the old address
     // as if it were equivalent.
-    let requested = RequestedInvoice {
+    let attachment_commitment = attachment.as_ref().and_then(DbAttachment::commitment);
+    let requested = IssuanceRequest {
         chain_id,
-        factory: state.factory_address,
-        token: token_addr,
-        beneficiary: beneficiary_addr,
+        factory: state.factory_address.as_slice(),
+        token: token_addr.as_slice(),
+        token_decimals: decimals,
+        beneficiary: beneficiary_addr.as_slice(),
         amount: amount.0,
         expiration_intent: &expiration.intent,
-        recovery: state.recovery_address,
+        recovery: state.recovery_address.as_slice(),
         issuer: &req.issuer,
         bill_to: &req.bill_to,
         notes: req.notes.as_deref(),
@@ -272,7 +273,7 @@ pub async fn create_payment(
         customer_id: req.customer_id,
         payer_policy: &payer_policy,
         attachment_id: req.attachment_id,
-        attachment: attachment.as_ref().and_then(DbAttachment::commitment),
+        attachment: attachment_commitment.as_ref(),
     };
 
     // 6. Check for existing idempotency key before generating anything.
@@ -281,7 +282,7 @@ pub async fn create_payment(
         .find_by_idempotency_key(account, &idempotency_key)
         .await?
     {
-        if same_request(&existing, &requested) {
+        if same_issuance(&existing, &requested) {
             return Ok(replayed(to_response(&state, account, existing).await?));
         } else {
             return Err(ApiError::idempotency_conflict());
@@ -341,7 +342,7 @@ pub async fn create_payment(
     snapshot.notes = req.notes.clone();
     snapshot.heading = req.heading.clone();
     snapshot.reference = req.reference.clone();
-    snapshot.attachment = requested.attachment.clone();
+    snapshot.attachment = requested.attachment.cloned();
     let invoice = Invoice::issue(
         factory,
         ChainId(chain_id),
@@ -377,8 +378,28 @@ pub async fn create_payment(
             // The retag above preceded a transaction that did not commit, so
             // the object would otherwise sit in the bucket forever, exempt
             // from expiry and bound to nothing. Hand it back to the lifecycle
-            // rule; the request's outcome is the insert's error either way.
-            if let Some(attachment) = &attachment
+            // rule. A typed race can mean the winner attached this same object,
+            // though, in which case restoring it would expire live content.
+            let restore_attachment = if matches!(error, InsertIssuedInvoiceError::Database(_)) {
+                true
+            } else if let Some(attachment) = &attachment {
+                match state
+                    .attachments
+                    .get_for_account(account, attachment.id)
+                    .await
+                {
+                    Ok(Some(current)) => current.invoice_id.is_none(),
+                    Ok(None) => false,
+                    Err(lookup) => {
+                        tracing::warn!(error = %lookup, attachment_id = %attachment.id, "failed to determine whether attachment tag needs restoring");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if restore_attachment
+                && let Some(attachment) = &attachment
                 && let Err(restore) = state
                     .attachment_store()?
                     .restore_pending(&attachment.object_key, attachment.version_id.as_deref())
@@ -644,63 +665,6 @@ fn unix_now() -> u64 {
 /// issued under an idempotency key. What the server generated (id, salt,
 /// address, nonce, the resolved deadline of a relative expiry) is not part of
 /// the request and is not compared.
-struct RequestedInvoice<'a> {
-    chain_id: u64,
-    /// Configured, not requested, but committed into the payment address
-    /// like recovery: the repository compares it too, and both paths must
-    /// agree on what counts as the same issuance.
-    factory: Address,
-    token: Address,
-    beneficiary: Address,
-    amount: U256,
-    expiration_intent: &'a str,
-    recovery: Address,
-    issuer: &'a Party,
-    bill_to: &'a Party,
-    notes: Option<&'a str>,
-    heading: Option<&'a str>,
-    reference: Option<&'a str>,
-    metadata: &'a serde_json::Value,
-    customer_id: Option<Uuid>,
-    payer_policy: &'a PayerPolicy,
-    attachment_id: Option<Uuid>,
-    /// The attachment's id, byte length, and SHA-256, as the snapshot commits
-    /// to them. `None` for an upload that is not finalized, which is why the
-    /// id is compared separately: a pending upload is not "no attachment".
-    attachment: Option<AttachmentCommitment>,
-}
-
-fn same_request(row: &DbInvoice, request: &RequestedInvoice<'_>) -> bool {
-    row.chain_id as u64 == request.chain_id
-        && row.factory_address.as_slice() == request.factory.as_slice()
-        && row.token_address.as_slice() == request.token.as_slice()
-        && row.beneficiary_address.as_slice() == request.beneficiary.as_slice()
-        && row.expiration_intent == request.expiration_intent
-        && row.recovery_address.as_slice() == request.recovery.as_slice()
-        && row.issuer.as_ref().map(|party| &party.0) == Some(request.issuer)
-        && row.bill_to.as_ref().map(|party| &party.0) == Some(request.bill_to)
-        && row.notes.as_deref() == request.notes
-        && row.heading.as_deref() == request.heading
-        && row.reference.as_deref() == request.reference
-        && row.metadata.0 == *request.metadata
-        && row.customer_id == request.customer_id
-        && row.payer_policy_mode == request.payer_policy.mode().as_str()
-        && row.expected_email.as_deref() == request.payer_policy.expected_email()
-        && row.expected_identity.as_ref().map(|identity| &identity.0)
-            == request.payer_policy.expected_identity()
-        && committed_attachment(row).map(|commitment| commitment.id) == request.attachment_id
-        && committed_attachment(row) == request.attachment.as_ref()
-        && U256::from_str_radix(&row.amount, 10)
-            .map(|amount| amount == request.amount)
-            .unwrap_or(false)
-}
-
-fn committed_attachment(row: &DbInvoice) -> Option<&AttachmentCommitment> {
-    row.issuance_snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.0.attachment.as_ref())
-}
-
 fn validate_party(field: &str, party: &Party) -> Result<(), ApiError> {
     validate_party_fields(
         &format!("{field}."),

@@ -132,6 +132,7 @@ export function InvoiceForm() {
   const modeHelpId = useId();
   const [values, setValues] = useState<InvoiceFormValues>(EMPTY_VALUES);
   const [attachment, setAttachment] = useState<AttachmentDescriptor | null>(null);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // One key per distinct submission: a retry of the same values replays, and
@@ -175,6 +176,7 @@ export function InvoiceForm() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (attachmentBusy) return;
     setBusy(true);
     setError(null);
     idempotencyKey.current ??= crypto.randomUUID();
@@ -334,7 +336,7 @@ export function InvoiceForm() {
             onChange={(event) => update("notes", event.target.value)}
           />
         </Field>
-        <AttachmentUpload onChange={setAttachment} />
+        <AttachmentUpload onChange={setAttachment} onBusyChange={setAttachmentBusy} />
       </Fieldset>
 
       <Fieldset
@@ -407,7 +409,7 @@ export function InvoiceForm() {
       <Problem>{error}</Problem>
 
       <div className="flex items-center justify-end gap-3">
-        <Button type="submit" disabled={busy}>
+        <Button type="submit" disabled={busy || attachmentBusy}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : null}
           Issue invoice
         </Button>

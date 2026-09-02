@@ -55,7 +55,10 @@ struct AppState {
     kid: String,
     encoding_key: Arc<EncodingKey>,
     jwks: serde_json::Value,
-    otps: Arc<Mutex<HashMap<String, String>>>,
+    // Auth0 passwordless transactions belong to the application that started
+    // them. Keep the audience in the key as well so this remains safe if a
+    // local client is ever allowed to address more than one API.
+    otps: Arc<Mutex<HashMap<(String, String, String), String>>>,
 }
 
 #[derive(Deserialize)]
@@ -164,20 +167,22 @@ async fn start(
     State(state): State<AppState>,
     Json(request): Json<StartRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if audience_for(&request.client_id).is_none()
-        || request.connection != "email"
-        || request.send != "code"
-        || !request.email.contains('@')
-    {
+    let Some(audience) = audience_for(&request.client_id) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    if request.connection != "email" || request.send != "code" || !request.email.contains('@') {
         return Err(StatusCode::BAD_REQUEST);
     }
     let otp = std::env::var("PAYDAY_DEV_IDENTITY_OTP")
         .unwrap_or_else(|_| format!("{:06}", rand::rng().random_range(0..1_000_000)));
-    state
-        .otps
-        .lock()
-        .await
-        .insert(request.email.to_ascii_lowercase(), otp.clone());
+    state.otps.lock().await.insert(
+        (
+            request.client_id,
+            audience.to_owned(),
+            request.email.to_ascii_lowercase(),
+        ),
+        otp.clone(),
+    );
     eprintln!("DEV IDENTITY OTP {} {}", request.email, otp);
     Ok(Json(serde_json::json!({})))
 }
@@ -195,11 +200,16 @@ async fn token(
     // Like Auth0, a wrong code is refused without spending the right one;
     // the right one is spent on use.
     let username = request.username.to_ascii_lowercase();
+    let otp_key = (
+        request.client_id.clone(),
+        request.audience.clone(),
+        username.clone(),
+    );
     let mut otps = state.otps.lock().await;
-    if otps.get(&username) != Some(&request.otp) {
+    if otps.get(&otp_key) != Some(&request.otp) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    otps.remove(&username);
+    otps.remove(&otp_key);
     drop(otps);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -272,7 +282,17 @@ mod tests {
         )
         .await
         .unwrap();
-        state.otps.lock().await.get(email).unwrap().clone()
+        state
+            .otps
+            .lock()
+            .await
+            .get(&(
+                client_id.to_owned(),
+                audience_for(client_id).unwrap().to_owned(),
+                email.to_ascii_lowercase(),
+            ))
+            .unwrap()
+            .clone()
     }
 
     fn token_request(client_id: &str, email: &str, otp: &str) -> TokenRequest {
@@ -397,6 +417,24 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(denied, StatusCode::BAD_REQUEST);
+
+        // Known applications sharing the merchant audience still own distinct
+        // passwordless transactions.
+        let denied = token(
+            State(state.clone()),
+            Json(token_request(DASHBOARD_CLIENT_ID, "dev@example.com", &otp)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, StatusCode::UNAUTHORIZED);
+
+        // The failed cross-client exchange did not spend the CLI's code.
+        let _ = token(
+            State(state),
+            Json(token_request(CLI_CLIENT_ID, "dev@example.com", &otp)),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

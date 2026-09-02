@@ -15,6 +15,7 @@ pub struct DbSettlementTransfer {
     pub block_number: i64,
 }
 
+/// Legacy aggregate retained as part of the crate's public read-model API.
 #[derive(Debug, Clone)]
 pub struct DbInvoiceSettlement {
     pub status: String,
@@ -23,7 +24,6 @@ pub struct DbInvoiceSettlement {
     pub settled_at: Option<DateTime<Utc>>,
     pub payer_policy_mode: String,
     pub verification_completed_at: Option<DateTime<Utc>>,
-    /// Chain order: block, transaction, log.
     pub transfers: Vec<DbSettlementTransfer>,
 }
 
@@ -37,39 +37,13 @@ impl ProofRepository {
         Self { pool }
     }
 
-    /// Settlement details and credited observations; `None` when the invoice
-    /// does not exist. Callers resolve the invoice within its account first.
+    /// Credited observations in chain order. Callers must first resolve the
+    /// invoice within its account; this deliberately does not re-read it.
     pub async fn settlement_transfers(
         &self,
         invoice_id: Uuid,
-    ) -> Result<Option<DbInvoiceSettlement>, sqlx::Error> {
-        type Settlement = (
-            String,
-            Option<Vec<u8>>,
-            Option<i64>,
-            Option<DateTime<Utc>>,
-            String,
-            Option<DateTime<Utc>>,
-        );
-        let Some((
-            status,
-            settlement_tx_hash,
-            resolved_at_block,
-            settled_at,
-            payer_policy_mode,
-            verification_completed_at,
-        )) = sqlx::query_as::<_, Settlement>(
-            r#"SELECT status, settlement_tx_hash, resolved_at_block, settled_at,
-                      payer_policy_mode, verification_completed_at
-               FROM invoices WHERE id = $1"#,
-        )
-        .bind(invoice_id)
-        .fetch_optional(&self.pool)
-        .await?
-        else {
-            return Ok(None);
-        };
-        let transfers = sqlx::query_as::<_, DbSettlementTransfer>(
+    ) -> Result<Vec<DbSettlementTransfer>, sqlx::Error> {
+        sqlx::query_as::<_, DbSettlementTransfer>(
             r#"SELECT sender_address, recipient_address, amount, transaction_hash, block_number
                FROM payment_observations
                WHERE invoice_id = $1 AND disposition = 'credited'
@@ -77,16 +51,7 @@ impl ProofRepository {
         )
         .bind(invoice_id)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(Some(DbInvoiceSettlement {
-            status,
-            settlement_tx_hash,
-            resolved_at_block,
-            settled_at,
-            payer_policy_mode,
-            verification_completed_at,
-            transfers,
-        }))
+        .await
     }
 }
 
@@ -145,23 +110,16 @@ mod tests {
         .unwrap();
 
         let repo = ProofRepository::new(pool.clone());
-        let settlement = repo.settlement_transfers(issued.id).await.unwrap().unwrap();
-        assert_eq!(settlement.status, "fulfilled");
-        assert_eq!(settlement.settlement_tx_hash, Some(vec![9u8; 32]));
-        assert_eq!(settlement.resolved_at_block, Some(9));
-        assert!(settlement.settled_at.is_some());
-        assert_eq!(settlement.payer_policy_mode, "permissionless");
+        let transfers = repo.settlement_transfers(issued.id).await.unwrap();
         assert_eq!(
-            settlement
-                .transfers
+            transfers
                 .iter()
                 .map(|transfer| (transfer.block_number, transfer.amount.as_str()))
                 .collect::<Vec<_>>(),
             [(3, "1000000"), (9, "1500000")]
         );
         assert!(
-            settlement
-                .transfers
+            transfers
                 .iter()
                 .all(|transfer| transfer.recipient_address == issued.payment_address)
         );
@@ -169,7 +127,7 @@ mod tests {
             repo.settlement_transfers(Uuid::now_v7())
                 .await
                 .unwrap()
-                .is_none()
+                .is_empty()
         );
     }
 

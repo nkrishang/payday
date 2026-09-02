@@ -20,6 +20,7 @@ use std::time::Duration;
 use alloy_primitives::B256;
 use async_trait::async_trait;
 use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+#[cfg(test)]
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::presigning::PresigningConfig;
@@ -87,12 +88,20 @@ pub trait ObjectStorage: Send + Sync {
     ) -> Result<BTreeMap<String, String>, StorageError>;
     /// The object's bytes, streamed and abandoned with [`StorageError::TooLarge`]
     /// as soon as more than `limit` bytes have arrived.
+    #[cfg(test)]
     async fn get(
         &self,
         key: &str,
         version: Option<&str>,
         limit: u64,
     ) -> Result<Vec<u8>, StorageError>;
+    /// Stream the object while checking its PDF prefix and computing SHA-256.
+    async fn inspect_bytes(
+        &self,
+        key: &str,
+        version: Option<&str>,
+        limit: u64,
+    ) -> Result<(u64, bool, [u8; 32]), StorageError>;
     async fn put_tags(
         &self,
         key: &str,
@@ -224,6 +233,7 @@ impl ObjectStorage for S3ObjectStorage {
             .collect())
     }
 
+    #[cfg(test)]
     async fn get(
         &self,
         key: &str,
@@ -262,6 +272,42 @@ impl ObjectStorage for S3ObjectStorage {
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
+    }
+
+    async fn inspect_bytes(
+        &self,
+        key: &str,
+        version: Option<&str>,
+        limit: u64,
+    ) -> Result<(u64, bool, [u8; 32]), StorageError> {
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .set_version_id(version.map(str::to_owned))
+            .send()
+            .await
+            .map_err(missing_or_backend)?;
+        let mut body = output.body;
+        let mut length = 0u64;
+        let mut prefix = Vec::with_capacity(PDF_MAGIC.len());
+        let mut digest = Sha256::new();
+        while let Some(chunk) = body
+            .try_next()
+            .await
+            .map_err(|error| StorageError::Backend(error.to_string()))?
+        {
+            length = length.saturating_add(chunk.len() as u64);
+            if length > limit {
+                return Err(StorageError::TooLarge(limit));
+            }
+            if prefix.len() < PDF_MAGIC.len() {
+                prefix.extend_from_slice(&chunk[..chunk.len().min(PDF_MAGIC.len() - prefix.len())]);
+            }
+            digest.update(&chunk);
+        }
+        Ok((length, prefix == PDF_MAGIC, digest.finalize().into()))
     }
 
     async fn put_tags(
@@ -486,27 +532,26 @@ impl AttachmentStore {
             Some(verdict) if verdict == CLEAN_SCAN => {}
             Some(verdict) => return Err(AttachmentError::Rejected(verdict.clone())),
         }
-        let bytes = match self
+        let (byte_length, is_pdf, digest) = match self
             .storage
-            .get(object_key, version, MAX_ATTACHMENT_BYTES)
+            .inspect_bytes(object_key, version, MAX_ATTACHMENT_BYTES)
             .await
         {
-            Ok(bytes) => bytes,
+            Ok(inspected) => inspected,
             Err(StorageError::TooLarge(_)) => {
                 return Err(AttachmentError::Rejected("size_out_of_range".into()));
             }
             Err(StorageError::NotFound) => return Err(AttachmentError::NotUploaded),
             Err(error) => return Err(error.into()),
         };
-        if bytes.is_empty() {
+        if byte_length == 0 {
             return Err(AttachmentError::Rejected("size_out_of_range".into()));
         }
-        if !bytes.starts_with(PDF_MAGIC) {
+        if !is_pdf {
             return Err(AttachmentError::Rejected("not_a_pdf".into()));
         }
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
         Ok(InspectedPdf {
-            byte_length: bytes.len() as u64,
+            byte_length,
             sha256: B256::from(digest),
             version_id: head.version_id,
         })
@@ -778,6 +823,7 @@ pub mod memory {
             }
         }
 
+        #[cfg(test)]
         async fn get(
             &self,
             key: &str,
@@ -795,6 +841,17 @@ pub mod memory {
                 return Err(StorageError::TooLarge(limit));
             }
             Ok(object.bytes.clone())
+        }
+
+        async fn inspect_bytes(
+            &self,
+            key: &str,
+            version: Option<&str>,
+            limit: u64,
+        ) -> Result<(u64, bool, [u8; 32]), StorageError> {
+            let bytes = self.get(key, version, limit).await?;
+            let digest = Sha256::digest(&bytes).into();
+            Ok((bytes.len() as u64, bytes.starts_with(PDF_MAGIC), digest))
         }
 
         async fn put_tags(

@@ -1664,8 +1664,8 @@ mod tests {
                 .is_some_and(|url| url.starts_with("memory://"))
         );
 
-        // Once verification completes the requirements read approved; the
-        // content itself unlocks per payer session in Slice 3. The settlement
+        // Invoice-level completion is not evidence that this browser verified;
+        // the content and approved facts unlock per payer session. The settlement
         // transaction is content too: on chain it names the payment address,
         // the amount, and the payout address.
         let settlement = alloy_primitives::B256::repeat_byte(0x5e);
@@ -1687,8 +1687,8 @@ mod tests {
             .await
             .unwrap();
         let completed = json_body(completed).await;
-        assert_eq!(completed["requirements"]["email"], "approved");
-        assert_eq!(completed["requirements"]["complete"], true);
+        assert_eq!(completed["requirements"]["email"], "pending");
+        assert_eq!(completed["requirements"]["complete"], false);
         assert_eq!(completed["content_unlocked"], false);
         assert!(completed["settlement_tx_hash"].is_null());
         assert!(completed["settlement_explorer_url"].is_null());
@@ -3134,6 +3134,15 @@ mod tests {
             ProofError::UntrustedAttestor
         ));
 
+        // Fulfilled proof inputs are immutable, so repeated owned GETs return
+        // the cached signed package rather than querying/signing it again.
+        let repeated = app.clone().oneshot(proof_request(KEY)).await.unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(repeated).await,
+            serde_json::to_value(&proof).unwrap()
+        );
+
         const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
         other_account(&pool, OTHER).await;
         let foreign = app.oneshot(proof_request(OTHER)).await.unwrap();
@@ -3311,7 +3320,7 @@ mod tests {
             .unwrap();
         let bare = json_body(bare).await;
         assert_eq!(bare["content_unlocked"], false);
-        assert_eq!(bare["requirements"]["email"], "approved");
+        assert_eq!(bare["requirements"]["email"], "pending");
         assert!(bare["address"].is_null());
         let stale = app
             .clone()
@@ -4154,7 +4163,13 @@ mod tests {
         reconcile_due(&pool, &provider).await;
         let declined = verify_status(&app, &id, &session).await;
         assert_eq!(declined["identity"]["status"], "declined");
-        assert_eq!(declined["identity"]["retry_available"], true);
+        assert!(
+            declined["identity"]
+                .as_object()
+                .unwrap()
+                .get("retry_available")
+                .is_none()
+        );
         assert_eq!(declined["identity_start_available"], true);
         assert_eq!(declined["requirements"]["document"], "declined");
         assert_eq!(declined["requirements"]["complete"], false);
@@ -4190,7 +4205,13 @@ mod tests {
         reconcile_due(&pool, &provider).await;
         let stopped = verify_status(&app, &id, &session).await;
         assert_eq!(stopped["identity"]["status"], "review_required");
-        assert_eq!(stopped["identity"]["retry_available"], false);
+        assert!(
+            stopped["identity"]
+                .as_object()
+                .unwrap()
+                .get("retry_available")
+                .is_none()
+        );
         assert_eq!(stopped["identity_start_available"], false);
         let (status, body) = identity_start(&app, &id, Some(&session)).await;
         assert_eq!(status, StatusCode::CONFLICT);

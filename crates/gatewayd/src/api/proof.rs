@@ -26,26 +26,27 @@ pub async fn get_proof(
 ) -> Result<Json<ProofOfPayment>, ApiError> {
     let row = resolve_payment(&state, account, &reference).await?;
     let invoice = Invoice::try_from(&row)?;
-    let settlement = state
-        .proofs
-        .settlement_transfers(row.id)
-        .await?
-        .ok_or_else(ApiError::payment_not_found)?;
     // Only a fulfilled invoice, whose funds have reached the beneficiary,
     // has anything to prove. The row's settlement_tx_hash is the fulfilment
     // call that forwarded them (our batch sweep or a third party's execute);
     // it is what the proof names as the settlement transaction.
-    let settlement_transaction_hash = match (
-        settlement.status.parse::<InvoiceStatus>(),
-        &settlement.settlement_tx_hash,
-    ) {
-        (Ok(InvoiceStatus::Fulfilled), Some(hash)) => B256::try_from(hash.as_slice())
-            .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
-            .to_string(),
-        _ => return Err(ApiError::payment_not_settled()),
-    };
-    let transfers = settlement
-        .transfers
+    let settlement_transaction_hash =
+        match (row.status.parse::<InvoiceStatus>(), &row.settlement_tx_hash) {
+            (Ok(InvoiceStatus::Fulfilled), Some(hash)) => B256::try_from(hash.as_slice())
+                .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
+                .to_string(),
+            _ => return Err(ApiError::payment_not_settled()),
+        };
+    let attestor = state.attestor()?;
+    // A fulfilled invoice and its proof inputs are immutable. Account and
+    // signer are in the key so cached material can never cross ownership or
+    // attestation-key boundaries; authorization is still checked above.
+    let cache_key = (account.0, row.id, attestor.address());
+    if let Some(proof) = state.cached_proof(cache_key.0, cache_key.1, cache_key.2) {
+        return Ok(Json(proof));
+    }
+    let settlement_transfers = state.proofs.settlement_transfers(row.id).await?;
+    let transfers = settlement_transfers
         .iter()
         .map(|transfer| {
             Ok(ProofTransfer {
@@ -75,8 +76,7 @@ pub async fn get_proof(
     } else {
         "pending"
     };
-    let verification = state
-        .attestor()?
+    let verification = attestor
         .attest(VerificationAttestationPayload {
             version: ATTESTATION_VERSION.into(),
             payment_id: invoice.id.to_string(),
@@ -98,7 +98,7 @@ pub async fn get_proof(
             ApiError::internal("failed to sign the verification attestation")
         })?;
 
-    Ok(Json(ProofOfPayment {
+    let proof = ProofOfPayment {
         version: PROOF_VERSION.into(),
         payment_id: invoice.id.to_string(),
         canonical_issuance_snapshot: invoice.issuance_snapshot,
@@ -113,5 +113,7 @@ pub async fn get_proof(
         settlement_transaction_hash,
         transfers,
         verification,
-    }))
+    };
+    state.cache_proof(cache_key.0, cache_key.1, cache_key.2, proof.clone());
+    Ok(Json(proof))
 }

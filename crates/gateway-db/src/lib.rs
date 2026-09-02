@@ -29,8 +29,8 @@ pub use identity::{
 };
 pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
-    InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, PaymentObservation,
-    RangeOutcome, ReleasePaymentError,
+    InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, IssuanceRequest,
+    PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
 };
 pub use notifications::{NotificationEvent, NotificationRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};

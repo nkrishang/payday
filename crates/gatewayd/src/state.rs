@@ -1,11 +1,11 @@
 use alloy_primitives::Address;
-use gateway_core::ChainId;
+use gateway_core::{ChainId, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
     PayerSessionRepository, ProofRepository, VerificationRepository, WebhookRepository,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -47,6 +47,7 @@ pub struct AppState {
     pub api_key_prefix: String,
     pub status_stale_seconds: u64,
     pub rate_limits: Arc<Mutex<HashMap<Uuid, (f64, Instant)>>>,
+    proof_cache: Arc<StdMutex<HashMap<(Uuid, Uuid, Address), ProofOfPayment>>>,
     /// The attachment bucket and the attestation key are `None` only in
     /// status-only mode, whose router never reaches the routes that need them.
     attachment_store: Option<AttachmentStore>,
@@ -94,6 +95,7 @@ impl AppState {
             api_key_prefix,
             status_stale_seconds,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            proof_cache: Arc::new(StdMutex::new(HashMap::new())),
             attachment_store,
             attestor,
         }
@@ -109,5 +111,32 @@ impl AppState {
         self.attestor
             .as_ref()
             .ok_or_else(|| ApiError::internal("attestation signing is not configured"))
+    }
+
+    pub fn cached_proof(
+        &self,
+        account_id: Uuid,
+        invoice_id: Uuid,
+        attestor: Address,
+    ) -> Option<ProofOfPayment> {
+        self.proof_cache
+            .lock()
+            .expect("proof cache lock poisoned")
+            .get(&(account_id, invoice_id, attestor))
+            .cloned()
+    }
+
+    pub fn cache_proof(
+        &self,
+        account_id: Uuid,
+        invoice_id: Uuid,
+        attestor: Address,
+        proof: ProofOfPayment,
+    ) {
+        let mut cache = self.proof_cache.lock().expect("proof cache lock poisoned");
+        if cache.len() >= 1_024 {
+            cache.clear();
+        }
+        cache.insert((account_id, invoice_id, attestor), proof);
     }
 }

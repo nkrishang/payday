@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, U256};
@@ -9,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use gateway_core::{
     AttachmentDescriptor, Invoice, InvoiceId, InvoiceStatus, PayerInvoiceDetails,
     PayerPaymentResponse, PayerPolicyResponse, PaymentResponse, VerificationRequirementsResponse,
-    masked_email,
+    masked_email, payment_id,
 };
 use gateway_db::DbAttachment;
 use qrcode::{QrCode, render::svg};
@@ -231,9 +230,7 @@ fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerPaymentR
 }
 
 pub(crate) fn parse_invoice_id(id: &str) -> Result<Uuid, ApiError> {
-    id.strip_prefix("pay_")
-        .and_then(|value| Uuid::from_str(value).ok())
-        .ok_or_else(ApiError::payer_unauthorized)
+    payment_id(id).ok_or_else(ApiError::payer_unauthorized)
 }
 
 /// One decision for every gated field: the content is unlocked when the
@@ -260,16 +257,20 @@ pub async fn authorized_invoice(
         .map(|hash| hash.to_string());
     let invoice = Invoice::try_from(&row)?;
     let mode = invoice.issuance_snapshot.payer_policy.mode();
+    let terminal = !matches!(
+        invoice.status,
+        InvoiceStatus::Created | InvoiceStatus::Funded | InvoiceStatus::Deploying
+    );
     let session = match session_token {
+        Some(token) if mode.is_gated() && terminal => {
+            state.payer_sessions.find(token, row.id).await?
+        }
         Some(token) if mode.is_gated() => state.payer_sessions.find_active(token, row.id).await?,
         _ => None,
     };
     let requirements = match &session {
         Some(session) => VerificationRequirementsResponse::from_facts(mode, session.facts()),
-        None => VerificationRequirementsResponse::for_mode(
-            mode,
-            row.verification_completed_at.is_some(),
-        ),
+        None => VerificationRequirementsResponse::for_mode(mode, false),
     };
     let content_unlocked = !mode.is_gated()
         || session

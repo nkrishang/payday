@@ -30,7 +30,8 @@ describe("AttachmentLink", () => {
     const fetchDescriptor = vi
       .spyOn(payerClient.payments, "attachment")
       .mockResolvedValue({ ...ATTACHMENT, download_url: DOWNLOAD_URL });
-    open.mockReturnValue(window);
+    const tab = { opener: window, location: { replace: vi.fn() }, close: vi.fn() };
+    open.mockReturnValue(tab as unknown as Window);
 
     const { container } = render(<AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} />);
 
@@ -41,9 +42,8 @@ describe("AttachmentLink", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /INV-1042\.pdf/ }));
 
-    await waitFor(() =>
-      expect(open).toHaveBeenCalledWith(DOWNLOAD_URL, "_blank", "noopener,noreferrer"),
-    );
+    await waitFor(() => expect(open).toHaveBeenCalledWith("", "_blank"));
+    expect(tab.location.replace).toHaveBeenCalledWith(DOWNLOAD_URL);
     expect(fetchDescriptor).toHaveBeenCalledWith("pay_1");
     expect(container.innerHTML).not.toContain("X-Amz-Signature");
   });
@@ -52,7 +52,7 @@ describe("AttachmentLink", () => {
     const fetchDescriptor = vi
       .spyOn(payerClient.payments, "attachment")
       .mockResolvedValue({ ...ATTACHMENT, download_url: DOWNLOAD_URL });
-    open.mockReturnValue(window);
+    open.mockReturnValue({ opener: null, location: { replace: vi.fn() } } as unknown as Window);
 
     const { container } = render(
       <AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} payerSession="pps_token" />,
@@ -88,6 +88,6 @@ describe("AttachmentLink", () => {
     fireEvent.click(screen.getByRole("button", { name: /INV-1042\.pdf/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/verify first/i);
-    expect(open).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledWith("", "_blank");
   });
 });

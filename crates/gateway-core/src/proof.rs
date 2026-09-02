@@ -11,6 +11,7 @@
 //! settlement transaction really forwarded the funds is provable only
 //! against the chain (`payday proof verify --rpc-url`).
 
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, Signature, U256, hex, keccak256};
@@ -138,6 +139,8 @@ pub enum ProofError {
     AttestationPaymentIdMismatch,
     #[error("verification attestation is for a different payer policy mode")]
     AttestationModeMismatch,
+    #[error("verification attestation does not record a passed outcome")]
+    AttestationNotPassed,
     #[error(
         "verification attestation commits to a different invoice (attribution hash, chain, or payment address)"
     )]
@@ -263,6 +266,14 @@ pub fn verify_proof(
     if attestation.payload.payer_policy_mode != snapshot.payer_policy.mode().as_str() {
         return Err(ProofError::AttestationModeMismatch);
     }
+    let passed_result = if snapshot.payer_policy.mode().is_gated() {
+        "approved"
+    } else {
+        "not_required"
+    };
+    if attestation.payload.result != passed_result {
+        return Err(ProofError::AttestationNotPassed);
+    }
     // The signed commitment must be the one recomputed from the snapshot in
     // steps 1–3, or the attestation was issued for some other invoice.
     if word(
@@ -287,6 +298,9 @@ pub fn verify_proof(
         &proof.settlement_transaction_hash,
     )?;
     let mut total = U256::ZERO;
+    // Proof entries have no log index, so byte-for-byte duplicate entries
+    // cannot identify distinct on-chain events and must not add coverage.
+    let mut unique_transfers = HashSet::new();
     for transfer in &proof.transfers {
         word("transfer transaction_hash", &transfer.transaction_hash)?;
         if address("transfer recipient", &transfer.recipient)? != payment_address {
@@ -294,9 +308,17 @@ pub fn verify_proof(
         }
         let credited = U256::from_str_radix(&transfer.amount_base_units, 10)
             .map_err(|_| ProofError::Malformed("transfer amount_base_units"))?;
-        total = total
-            .checked_add(credited)
-            .ok_or(ProofError::Malformed("transfer amount_base_units"))?;
+        if unique_transfers.insert((
+            transfer.transaction_hash.as_str(),
+            transfer.sender.as_str(),
+            transfer.recipient.as_str(),
+            transfer.amount_base_units.as_str(),
+            transfer.block_number.as_str(),
+        )) {
+            total = total
+                .checked_add(credited)
+                .ok_or(ProofError::Malformed("transfer amount_base_units"))?;
+        }
     }
     if total < amount {
         return Err(ProofError::TransfersBelowInvoiceAmount);
@@ -558,6 +580,13 @@ mod tests {
             check(|p| p.verification.payload.result = "declined".into(), None),
             ProofError::AttestationSignerMismatch
         ));
+        let mut pending = good.clone();
+        pending.verification.payload.result = "pending".into();
+        pending.verification = sign(pending.verification.payload);
+        assert!(matches!(
+            verify_proof(&pending, None, &[attestor()]).unwrap_err(),
+            ProofError::AttestationNotPassed
+        ));
         assert!(matches!(
             check(
                 |p| p.verification.signer = Address::repeat_byte(0x04).to_checksum(None),
@@ -607,6 +636,13 @@ mod tests {
         ));
         assert!(matches!(
             check(|p| p.transfers.clear(), None),
+            ProofError::TransfersBelowInvoiceAmount
+        ));
+        let mut duplicated = good.clone();
+        duplicated.transfers.truncate(1);
+        duplicated.transfers.push(duplicated.transfers[0].clone());
+        assert!(matches!(
+            verify_proof(&duplicated, None, &[]).unwrap_err(),
             ProofError::TransfersBelowInvoiceAmount
         ));
         assert!(matches!(

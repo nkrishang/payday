@@ -76,15 +76,6 @@ fn rfc3339(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn fact(value: Option<&str>) -> VerificationFactStatus {
-    match value {
-        Some("approved") => VerificationFactStatus::Approved,
-        Some("declined") => VerificationFactStatus::Declined,
-        Some("not_required") => VerificationFactStatus::NotRequired,
-        _ => VerificationFactStatus::Pending,
-    }
-}
-
 fn attempt_response(
     attempt: &DbVerificationAttempt,
     reviews: &[DbVerificationReview],
@@ -96,9 +87,11 @@ fn attempt_response(
         provider: attempt.provider.clone(),
         provider_reference: attempt.provider_reference.clone(),
         attempt_number: attempt.attempt_number.max(0) as u16,
-        document: fact(attempt.document_status.as_deref()),
-        liveness: fact(attempt.liveness_status.as_deref()),
-        identity_match: fact(attempt.identity_match_status.as_deref()),
+        document: DbVerificationAttempt::fact_status(attempt.document_status.as_deref()),
+        liveness: DbVerificationAttempt::fact_status(attempt.liveness_status.as_deref()),
+        identity_match: DbVerificationAttempt::fact_status(
+            attempt.identity_match_status.as_deref(),
+        ),
         risk_codes: attempt.risk_codes.clone(),
         country_code: attempt.country_code.clone(),
         verified_at: attempt.verified_at.map(rfc3339),
@@ -140,7 +133,9 @@ async fn detail(
         let email = attempts
             .iter()
             .any(|(attempt, _)| attempt.kind == "email" && attempt.status == "approved");
-        let established = |value: Option<&str>| value == Some("approved");
+        let established = |value: Option<&str>| {
+            DbVerificationAttempt::fact_status(value) == VerificationFactStatus::Approved
+        };
         let mut requirements = VerificationRequirementsResponse::from_facts(
             mode,
             VerificationFacts {
@@ -200,7 +195,9 @@ pub fn refine_declined(
         return;
     }
     let refine = |current: &mut VerificationFactStatus, stored: Option<&str>| {
-        if *current == VerificationFactStatus::Pending && stored == Some("declined") {
+        if *current == VerificationFactStatus::Pending
+            && DbVerificationAttempt::fact_status(stored) == VerificationFactStatus::Declined
+        {
             *current = VerificationFactStatus::Declined;
         }
     };
@@ -295,7 +292,7 @@ pub async fn start(
     {
         let completion = state
             .verifications
-            .reuse_credential(session.id, &credential)
+            .reuse_credential(session.id, &credential, PROVIDER)
             .await?;
         if completion.invoice_completed_at.is_some() {
             tracing::info!(invoice_id = %row.id, "payer verification completed by credential reuse");
@@ -310,7 +307,7 @@ pub async fn start(
 
     let attempt = match state
         .verifications
-        .begin_identity_verification(session.id, payer_ref, hash)
+        .begin_identity_verification(session.id, payer_ref, hash, PROVIDER)
         .await
     {
         Ok(attempt) => attempt,
@@ -341,11 +338,7 @@ pub async fn start(
     };
     state
         .verifications
-        .record_provider_session(
-            attempt.id,
-            &created.provider_reference,
-            crate::identity::reconciler::provider_status(created.status),
-        )
+        .record_provider_session(attempt.id, &created.provider_reference, created.status)
         .await?;
     tracing::info!(invoice_id = %row.id, verification_id = %attempt.id, "identity session started");
     Ok((

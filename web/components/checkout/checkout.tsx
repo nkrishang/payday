@@ -36,6 +36,10 @@ function CheckoutBody({ initial }: { initial: PayerPayment }) {
     payerSession,
   );
   const [emailCodeSent, setEmailCodeSent] = useState(false);
+  const updateSession = (token: string | null) => {
+    if (token === null) setEmailCodeSent(false);
+    setPayerSession(token);
+  };
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
   const view = checkoutView(payment, { secondsRemaining, pendingTxHash, emailCodeSent });
   // Null exactly when the phase is one of the locked ones: the same narrowing
@@ -65,7 +69,7 @@ function CheckoutBody({ initial }: { initial: PayerPayment }) {
           payment={payment}
           view={view}
           payerSession={payerSession}
-          onSession={setPayerSession}
+          onSession={updateSession}
           onCodeSent={() => setEmailCodeSent(true)}
           onVerified={refresh}
         />

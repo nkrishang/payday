@@ -938,6 +938,7 @@ pub(crate) mod tests {
 
     #[derive(Default)]
     pub(crate) struct MockState {
+        pub(crate) chain_id: u64,
         latest: u64,
         finalized: u64,
         transfers: Vec<UsdcTransfer>,
@@ -983,6 +984,7 @@ pub(crate) mod tests {
         pub(crate) fn new(latest: u64) -> Self {
             Self {
                 state: Mutex::new(MockState {
+                    chain_id: 31337,
                     latest,
                     finalized: latest,
                     mine_at: Some(latest),
@@ -1013,6 +1015,10 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl ChainClient for MockChain {
+        async fn get_chain_id(&self) -> Result<u64, ChainError> {
+            Ok(self.state.lock().unwrap().chain_id)
+        }
+
         async fn latest_block_number(&self) -> Result<u64, ChainError> {
             Ok(self.state.lock().unwrap().latest)
         }

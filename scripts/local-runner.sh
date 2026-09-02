@@ -133,7 +133,9 @@ load_local_env() {
   export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
   export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-1000}"
   export PAYDAY_SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
-  export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$PAYDAY_API_URL}"
+  # The web dev server hosts both dashboard and checkout; gatewayd remains on
+  # PAYDAY_API_URL and is called cross-origin by the browser.
+  export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
   export PAYDAY_API_KEY_PREFIX="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
   export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
   export PAYDAY_ADMIN_REVIEWER_ID="${PAYDAY_ADMIN_REVIEWER_ID:-local-operator}"
@@ -150,7 +152,7 @@ load_local_env() {
   # A fixed local key: payer references derived here never leave the developer's database.
   export PAYDAY_PAYER_REF_MASTER_KEY="${PAYDAY_PAYER_REF_MASTER_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
   # The Next.js dev server (`just web`) is the hosted checkout locally.
-  export PAYDAY_HOSTED_CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-http://127.0.0.1:3002}"
+  export PAYDAY_HOSTED_CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-$PAYDAY_PUBLIC_BASE_URL}"
 }
 
 # Both services compare the deployed runtime bytecode with these hashes at

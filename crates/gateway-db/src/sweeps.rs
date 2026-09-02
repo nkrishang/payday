@@ -768,15 +768,25 @@ impl InvoiceRepository {
         let (queued, in_flight, oldest_uncollected_secs): (i64, i64, Option<f64>) = sqlx::query_as(
             r#"
             SELECT
-                (SELECT count(*) FROM invoices
+                (SELECT count(*) FROM invoices invoice
                   WHERE chain_id = $1 AND uncollected_count > 0 AND sweep_batch_id IS NULL
-                    AND blocked_reason IS NULL AND status = ANY($2)),
+                    AND blocked_reason IS NULL AND status = ANY($2)
+                    AND (status IN ('expired', 'fulfilled', 'recovered') OR
+                         (status IN ('funded', 'deploying')
+                          AND (payer_policy_mode = 'permissionless' OR verification_completed_at IS NOT NULL)
+                          AND (status = 'deploying' OR expiration_timestamp >= COALESCE(
+                              (SELECT last_block_timestamp FROM indexer_cursor WHERE chain_id = invoice.chain_id), 0))))),
                 (SELECT count(*) FROM invoices WHERE chain_id = $1 AND sweep_batch_id IS NOT NULL),
                 (SELECT EXTRACT(EPOCH FROM now() - min(o.observed_at))::float8
                    FROM payment_observations o
                    JOIN invoices i ON i.id = o.invoice_id
                   WHERE i.chain_id = $1 AND o.collected_at_block IS NULL AND o.disposition <> 'error'
-                    AND i.blocked_reason IS NULL AND i.status = ANY($2))
+                    AND i.blocked_reason IS NULL AND i.status = ANY($2)
+                    AND (i.status IN ('expired', 'fulfilled', 'recovered') OR
+                         (i.status IN ('funded', 'deploying')
+                          AND (i.payer_policy_mode = 'permissionless' OR i.verification_completed_at IS NOT NULL)
+                          AND (i.status = 'deploying' OR i.expiration_timestamp >= COALESCE(
+                              (SELECT last_block_timestamp FROM indexer_cursor WHERE chain_id = i.chain_id), 0)))))
             "#,
         )
         .bind(chain_id as i64)
@@ -1263,6 +1273,43 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(claimed(&repo).await, [invoice.id.0]);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn queue_stats_apply_the_live_verification_gate(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        sqlx::query(
+            r#"
+            INSERT INTO payment_observations
+                (chain_id, token_address, block_number, block_hash, block_timestamp,
+                 transaction_hash, transaction_index, log_index, sender_address,
+                 recipient_address, invoice_id, amount, disposition)
+            VALUES ($1, $2, 1, $3, $4, $5, 0, 0, $6, $7, $8, '100', 'credited')
+            "#,
+        )
+        .bind(CHAIN_ID as i64)
+        .bind(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").as_slice())
+        .bind([0x11u8; 32].as_slice())
+        .bind((EXPIRATION - 120) as i64)
+        .bind([0x22u8; 32].as_slice())
+        .bind([0x33u8; 20].as_slice())
+        .bind(invoice.payment_address.0.as_slice())
+        .bind(invoice.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+
+        let stats = repo.sweep_queue_stats(CHAIN_ID).await.unwrap();
+        assert_eq!(stats.queued, 0);
+        assert_eq!(stats.oldest_uncollected_secs, None);
+
+        complete_verification(&pool, &invoice).await;
+        let stats = repo.sweep_queue_stats(CHAIN_ID).await.unwrap();
+        assert_eq!(stats.queued, 1);
+        assert!(stats.oldest_uncollected_secs.is_some());
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]

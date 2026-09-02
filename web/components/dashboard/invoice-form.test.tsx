@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildCreatePayment, EMPTY_VALUES, InvoiceForm } from "./invoice-form";
 import { MerchantProvider } from "./session";
+import * as attachmentUpload from "@/lib/attachment-upload";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -40,6 +41,30 @@ beforeEach(() => {
 });
 
 describe("InvoiceForm policy modes", () => {
+  it("cannot issue while an attachment is uploading or scanning", async () => {
+    const user = userEvent.setup();
+    let finish!: (value: null) => void;
+    vi.spyOn(attachmentUpload, "uploadAttachment").mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { create } = renderForm();
+    const file = new File(["%PDF-1.4"], "invoice.pdf", { type: "application/pdf" });
+
+    const uploading = user.upload(screen.getByLabelText("Attachment (PDF, up to 5 MiB)"), file);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Issue invoice" })).toBeDisabled(),
+    );
+    expect(create).not.toHaveBeenCalled();
+
+    finish(null);
+    await uploading;
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Issue invoice" })).toBeEnabled(),
+    );
+  });
+
   it("offers the four modes and asks for assertions only where the mode needs them", async () => {
     const user = userEvent.setup();
     renderForm();

@@ -12,7 +12,7 @@ use std::time::Duration;
 use alloy_primitives::B256;
 use gateway_core::VerificationFactStatus;
 use sqlx::types::chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -108,6 +108,19 @@ fn fact_str(status: VerificationFactStatus) -> &'static str {
     status.as_str()
 }
 
+/// Parse the database representation of an independently recorded fact.
+fn parse_fact_status(value: Option<&str>) -> VerificationFactStatus {
+    [
+        VerificationFactStatus::NotRequired,
+        VerificationFactStatus::Pending,
+        VerificationFactStatus::Approved,
+        VerificationFactStatus::Declined,
+    ]
+    .into_iter()
+    .find(|status| Some(status.as_str()) == value)
+    .unwrap_or(VerificationFactStatus::Pending)
+}
+
 /// One verification attempt as stored: an email code or a hosted identity
 /// session, whichever kind.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -147,6 +160,10 @@ macro_rules! attempt_columns {
 }
 
 impl DbVerificationAttempt {
+    pub fn fact_status(value: Option<&str>) -> VerificationFactStatus {
+        parse_fact_status(value)
+    }
+
     pub fn status(&self) -> IdentityStatus {
         self.status
             .parse()
@@ -165,7 +182,6 @@ pub struct DbPayerCredential {
     pub account_id: Uuid,
     pub payer_ref: Vec<u8>,
     pub kind: String,
-    pub status: String,
     pub expected_identity_hash: Option<Vec<u8>>,
     pub verified_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -298,13 +314,12 @@ impl VerificationRepository {
     ) -> Result<Option<DbPayerCredential>, sqlx::Error> {
         sqlx::query_as::<_, DbPayerCredential>(
             r#"
-            SELECT id, account_id, payer_ref, kind, status, expected_identity_hash,
+            SELECT id, account_id, payer_ref, kind, expected_identity_hash,
                    verified_at, expires_at
             FROM payer_credentials
             WHERE account_id = $1
               AND payer_ref = $2
               AND kind = $3
-              AND status = 'active'
               AND expires_at > now()
               AND expected_identity_hash IS NOT DISTINCT FROM $4
             ORDER BY verified_at DESC
@@ -327,46 +342,19 @@ impl VerificationRepository {
         let Some(payer_ref) = session.payer_ref.as_deref() else {
             return Ok(IdentityState::default());
         };
-        let attempts = sqlx::query_as::<_, DbVerificationAttempt>(concat!(
-            r#"
-            SELECT "#,
-            attempt_columns!(),
-            r#"
-            FROM payer_verifications
-            WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2
-            ORDER BY created_at DESC, id DESC
-            "#
-        ))
-        .bind(session.invoice_id)
-        .bind(payer_ref)
-        .fetch_all(&self.pool)
-        .await?;
-        let reviewed: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM verification_reviews AS review
-                JOIN payer_verifications AS attempt ON attempt.id = review.verification_id
-                WHERE attempt.invoice_id = $1 AND attempt.kind = 'identity' AND attempt.payer_ref = $2
-            )
-            "#,
-        )
-        .bind(session.invoice_id)
-        .bind(payer_ref)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(state_from(attempts, reviewed))
+        let mut connection = self.pool.acquire().await?;
+        load_identity_state(&mut connection, session.invoice_id, payer_ref).await
     }
 
     /// Open an identity attempt for `session`'s invoice. Earlier pending
-    /// attempts by the same payer are abandoned so the reconciler stops
-    /// polling sessions the payer walked away from; a decline earns exactly
-    /// one resubmission, and anything past that is a matter for review.
+    /// attempts that have not reached the provider are abandoned; a hosted
+    /// session remains authoritative until reconciliation settles it.
     pub async fn begin_identity_verification(
         &self,
         session_id: Uuid,
         payer_ref: B256,
         expected_identity_hash: Option<B256>,
+        provider: &str,
     ) -> Result<DbVerificationAttempt, StartIdentityError> {
         let mut tx = self.pool.begin().await?;
         let (invoice_id, account_id): (Uuid, Uuid) = sqlx::query_as(
@@ -381,50 +369,34 @@ impl VerificationRepository {
         .bind(session_id)
         .fetch_one(&mut *tx)
         .await?;
-        let attempts = sqlx::query_as::<_, DbVerificationAttempt>(concat!(
-            r#"
-            SELECT "#,
-            attempt_columns!(),
-            r#"
-            FROM payer_verifications
-            WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2
-            ORDER BY created_at DESC, id DESC
-            "#
-        ))
+        let IdentityState {
+            latest: _,
+            review_required,
+            in_review,
+        } = load_identity_state(&mut tx, invoice_id, payer_ref.as_slice()).await?;
+        let attempts: Vec<(String,)> = sqlx::query_as(
+            "SELECT status FROM payer_verifications WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2",
+        )
         .bind(invoice_id)
         .bind(payer_ref.as_slice())
         .fetch_all(&mut *tx)
         .await?;
-        let reviewed: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM verification_reviews AS review
-                JOIN payer_verifications AS attempt ON attempt.id = review.verification_id
-                WHERE attempt.invoice_id = $1 AND attempt.kind = 'identity' AND attempt.payer_ref = $2
-            )
-            "#,
-        )
-        .bind(invoice_id)
-        .bind(payer_ref.as_slice())
-        .fetch_one(&mut *tx)
-        .await?;
         let declines = attempts
             .iter()
-            .filter(|attempt| attempt.status() == IdentityStatus::Declined)
+            .filter(|(status,)| status == IdentityStatus::Declined.as_str())
             .count() as i16;
-        let state = state_from(attempts, reviewed);
-        if state.review_required || declines >= MAX_AUTOMATED_ATTEMPTS {
+        if review_required || declines >= MAX_AUTOMATED_ATTEMPTS {
             return Err(StartIdentityError::ReviewRequired);
         }
-        if state.in_review {
+        if in_review {
             return Err(StartIdentityError::InReview);
         }
         sqlx::query(
             r#"
             UPDATE payer_verifications
             SET status = 'abandoned', next_poll_at = NULL, leased_until = NULL
-            WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2 AND status = 'pending'
+            WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2
+              AND status = 'pending' AND provider_reference IS NULL
             "#,
         )
         .bind(invoice_id)
@@ -437,7 +409,7 @@ impl VerificationRepository {
             INSERT INTO payer_verifications
                 (id, invoice_id, account_id, payer_session_id, kind, status, provider,
                  payer_ref, expected_identity_hash, attempt_number)
-            VALUES ($1, $2, $3, $4, 'identity', 'pending', 'didit', $5, $6, $7)
+            VALUES ($1, $2, $3, $4, 'identity', 'pending', $5, $6, $7, $8)
             RETURNING "#,
             attempt_columns!(),
             r#"
@@ -447,6 +419,7 @@ impl VerificationRepository {
         .bind(invoice_id)
         .bind(account_id)
         .bind(session_id)
+        .bind(provider)
         .bind(payer_ref.as_slice())
         .bind(expected_identity_hash.map(|hash| hash.to_vec()))
         .bind(declines + 1)
@@ -464,19 +437,20 @@ impl VerificationRepository {
         provider_reference: &str,
         status: IdentityStatus,
     ) -> Result<(), sqlx::Error> {
+        let open = status.is_open();
         sqlx::query(
             r#"
             UPDATE payer_verifications
             SET provider_reference = $2,
-                status = $3,
-                next_poll_at = CASE WHEN $4 THEN now() + make_interval(secs => $5) END
+                status = CASE WHEN $4 THEN $3 ELSE 'pending' END,
+                next_poll_at = CASE WHEN $4 THEN now() + make_interval(secs => $5) ELSE now() END
             WHERE id = $1 AND status = 'pending'
             "#,
         )
         .bind(attempt_id)
         .bind(provider_reference)
         .bind(status.as_str())
-        .bind(status.is_open())
+        .bind(open)
         .bind(IDENTITY_POLL_INTERVAL.as_secs_f64())
         .execute(&self.pool)
         .await
@@ -502,6 +476,7 @@ impl VerificationRepository {
         &self,
         session_id: Uuid,
         credential: &DbPayerCredential,
+        provider: &str,
     ) -> Result<IdentityCompletion, sqlx::Error> {
         let matched = credential.kind == CredentialKind::MatchedIdentity.as_str();
         let mut tx = self.pool.begin().await?;
@@ -524,7 +499,7 @@ impl VerificationRepository {
                 (id, invoice_id, account_id, payer_session_id, kind, status, provider,
                  payer_ref, expected_identity_hash, document_status, liveness_status,
                  identity_match_status, verified_at, expires_at)
-            VALUES ($1, $2, $3, $4, 'identity', 'approved', 'didit', $5, $6, $7, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, 'identity', 'approved', $5, $6, $7, $8, $8, $9, $10, $11)
             RETURNING "#,
             attempt_columns!(),
             r#"
@@ -534,6 +509,7 @@ impl VerificationRepository {
         .bind(invoice_id)
         .bind(account_id)
         .bind(session_id)
+        .bind(provider)
         .bind(&credential.payer_ref)
         .bind(&credential.expected_identity_hash)
         .bind(approved)
@@ -1005,12 +981,40 @@ fn state_from(attempts: Vec<DbVerificationAttempt>, reviewed: bool) -> IdentityS
             .any(|attempt| attempt.status() == IdentityStatus::ReviewRequired);
     let in_review = attempts
         .iter()
-        .any(|attempt| attempt.status() == IdentityStatus::InReview);
+        .any(|attempt| attempt.status().is_open() && attempt.provider_reference.is_some());
     IdentityState {
         latest: attempts.into_iter().next(),
         review_required,
         in_review,
     }
+}
+
+async fn load_identity_state(
+    connection: &mut PgConnection,
+    invoice_id: Uuid,
+    payer_ref: &[u8],
+) -> Result<IdentityState, sqlx::Error> {
+    let attempts = sqlx::query_as::<_, DbVerificationAttempt>(concat!(
+        "SELECT ",
+        attempt_columns!(),
+        " FROM payer_verifications WHERE invoice_id = $1 AND kind = 'identity' AND payer_ref = $2 ORDER BY created_at DESC, id DESC"
+    ))
+    .bind(invoice_id)
+    .bind(payer_ref)
+    .fetch_all(&mut *connection)
+    .await?;
+    let reviewed = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM verification_reviews AS review
+            JOIN payer_verifications AS attempt ON attempt.id = review.verification_id
+            WHERE attempt.invoice_id = $1 AND attempt.kind = 'identity' AND attempt.payer_ref = $2
+        )"#,
+    )
+    .bind(invoice_id)
+    .bind(payer_ref)
+    .fetch_one(connection)
+    .await?;
+    Ok(state_from(attempts, reviewed))
 }
 
 /// Approval: stamp the attempt, mint or refresh the credentials, unlock the
@@ -1046,9 +1050,9 @@ async fn approve(
         .expect("identity attempts carry the payer reference");
     sqlx::query(
         r#"
-        INSERT INTO payer_credentials (id, account_id, payer_ref, kind, status, verified_at, expires_at)
-        VALUES ($1, $2, $3, 'document_liveness', 'active', $4, $5)
-        ON CONFLICT (account_id, payer_ref, kind) WHERE kind = 'document_liveness' AND status = 'active'
+        INSERT INTO payer_credentials (id, account_id, payer_ref, kind, verified_at, expires_at)
+        VALUES ($1, $2, $3, 'document_liveness', $4, $5)
+        ON CONFLICT (account_id, payer_ref, kind) WHERE kind = 'document_liveness'
         DO UPDATE SET verified_at = EXCLUDED.verified_at, expires_at = EXCLUDED.expires_at
         "#,
     )
@@ -1063,10 +1067,10 @@ async fn approve(
         sqlx::query(
             r#"
             INSERT INTO payer_credentials
-                (id, account_id, payer_ref, kind, status, expected_identity_hash, verified_at, expires_at)
-            VALUES ($1, $2, $3, 'matched_identity', 'active', $4, $5, $6)
+                (id, account_id, payer_ref, kind, expected_identity_hash, verified_at, expires_at)
+            VALUES ($1, $2, $3, 'matched_identity', $4, $5, $6)
             ON CONFLICT (account_id, payer_ref, expected_identity_hash)
-                WHERE kind = 'matched_identity' AND status = 'active'
+                WHERE kind = 'matched_identity'
             DO UPDATE SET verified_at = EXCLUDED.verified_at, expires_at = EXCLUDED.expires_at
             "#,
         )
@@ -1208,6 +1212,10 @@ mod tests {
     async fn verified_session(pool: &PgPool, row: &DbInvoice) -> (DbPayerSession, B256) {
         let sessions = PayerSessionRepository::new(pool.clone());
         let created = sessions.create(row.id, PAYER_SESSION_TTL).await.unwrap();
+        sessions
+            .begin_email_verification(created.id, Duration::ZERO)
+            .await
+            .unwrap();
         let reference = payer_ref(&MASTER_KEY, row.account_id, "alice@example.com");
         let completion = sessions
             .approve_email(
@@ -1253,7 +1261,7 @@ mod tests {
         provider_reference: &str,
     ) -> DbVerificationAttempt {
         let attempt = repo
-            .begin_identity_verification(session.id, reference, hash)
+            .begin_identity_verification(session.id, reference, hash, "didit")
             .await
             .unwrap();
         repo.record_provider_session(attempt.id, provider_reference, IdentityStatus::Pending)
@@ -1394,7 +1402,7 @@ mod tests {
         let later = invoice(&pool, 1, "later", unattributed()).await;
         let (later_session, _) = verified_session(&pool, &later).await;
         let reused = repo
-            .reuse_credential(later_session.id, &credential)
+            .reuse_credential(later_session.id, &credential, "didit")
             .await
             .unwrap();
         assert_eq!(reused.attempt.status(), IdentityStatus::Approved);
@@ -1402,7 +1410,7 @@ mod tests {
         assert!(reused.session.facts().document && reused.session.facts().liveness);
         assert!(reused.invoice_completed_at.is_some());
 
-        // Expired and revoked credentials are not eligible.
+        // Expired credentials are not eligible.
         sqlx::query(
             "UPDATE payer_credentials SET expires_at = now() - interval '1 day' WHERE id = $1",
         )
@@ -1410,22 +1418,6 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert!(
-            repo.find_active_credential(
-                row.account_id,
-                reference,
-                CredentialKind::DocumentLiveness,
-                None,
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
-        sqlx::query("UPDATE payer_credentials SET expires_at = now() + interval '1 day', status = 'revoked' WHERE id = $1")
-            .bind(credential.id)
-            .execute(&pool)
-            .await
-            .unwrap();
         assert!(
             repo.find_active_credential(
                 row.account_id,
@@ -1547,7 +1539,7 @@ mod tests {
                 .start_available()
         );
         assert!(matches!(
-            repo.begin_identity_verification(session.id, reference, Some(hash))
+            repo.begin_identity_verification(session.id, reference, Some(hash), "didit")
                 .await,
             Err(StartIdentityError::ReviewRequired)
         ));
@@ -1612,10 +1604,11 @@ mod tests {
             .iter()
             .map(|(attempt, _)| attempt.kind.as_str())
             .collect();
-        assert_eq!(kinds, ["identity", "identity"]);
+        assert_eq!(kinds, ["email", "identity", "identity"]);
         assert!(listed[0].1.is_empty());
-        assert_eq!(listed[1].1.len(), 1);
-        assert_eq!(listed[1].1[0].reviewer.as_deref(), Some("operator@payday"));
+        assert!(listed[1].1.is_empty());
+        assert_eq!(listed[2].1.len(), 1);
+        assert_eq!(listed[2].1[0].reviewer.as_deref(), Some("operator@payday"));
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
@@ -1686,7 +1679,7 @@ mod tests {
         assert_eq!(reviewing.poll_count, 1);
         assert_eq!(reviewing.provider_failures, 0);
         assert!(matches!(
-            repo.begin_identity_verification(session.id, reference, None)
+            repo.begin_identity_verification(session.id, reference, None, "didit")
                 .await,
             Err(StartIdentityError::InReview)
         ));
@@ -1738,20 +1731,37 @@ mod tests {
             .is_some()
         );
 
-        // Starting again abandons a pending attempt by the same payer.
+        // A hosted pending attempt cannot be replaced before reconciliation.
         let pending = invoice(&pool, 1, "restart", unattributed()).await;
         let (restart_session, _) = verified_session(&pool, &pending).await;
         let stale = started(&repo, &restart_session, reference, None, "didit-stale").await;
-        let fresh = started(&repo, &restart_session, reference, None, "didit-fresh").await;
+        assert!(matches!(
+            repo.begin_identity_verification(restart_session.id, reference, None, "didit")
+                .await,
+            Err(StartIdentityError::InReview)
+        ));
+        repo.abandon(stale.id).await.unwrap();
         assert_eq!(
             repo.find_attempt(stale.id).await.unwrap().unwrap().status(),
             IdentityStatus::Abandoned
         );
-        assert_eq!(fresh.attempt_number, 1);
-        repo.abandon(fresh.id).await.unwrap();
-        assert_eq!(
-            repo.find_attempt(fresh.id).await.unwrap().unwrap().status(),
-            IdentityStatus::Abandoned
-        );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn terminal_create_status_is_polled_before_it_can_complete(pool: PgPool) {
+        let repo = VerificationRepository::new(pool.clone());
+        let row = invoice(&pool, 1, "terminal-create", unattributed()).await;
+        let (session, reference) = verified_session(&pool, &row).await;
+        let attempt = repo
+            .begin_identity_verification(session.id, reference, None, "didit")
+            .await
+            .unwrap();
+        repo.record_provider_session(attempt.id, "didit-terminal", IdentityStatus::Approved)
+            .await
+            .unwrap();
+        let stored = repo.find_attempt(attempt.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(), IdentityStatus::Pending);
+        assert!(stored.next_poll_at.is_some_and(|due| due <= Utc::now()));
+        assert!(completed_at(&pool, row.id).await.is_none());
     }
 }

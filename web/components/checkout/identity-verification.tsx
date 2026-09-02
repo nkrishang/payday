@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
 import { config } from "@/lib/config";
 import { payerClient } from "@/lib/payday";
+import { backoffMs, DEFAULT_POLL_MS, jitter } from "@/lib/poll";
 
 /**
  * The hosted identity step for the two identity modes. The payer consents
@@ -19,7 +20,7 @@ import { payerClient } from "@/lib/payday";
 
 export const PAYDAY_PRIVACY_URL = "https://payday.sh/privacy";
 export const DIDIT_PRIVACY_URL = "https://didit.me/privacy-policy";
-const POLL_MS = 4_000;
+const REVIEW_POLL_MS = 30_000;
 
 export function IdentityVerification({
   paymentId,
@@ -52,6 +53,7 @@ export function IdentityVerification({
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
     const controller = new AbortController();
 
     const read = async () => {
@@ -61,6 +63,7 @@ export function IdentityVerification({
           signal: controller.signal,
         });
         if (disposed) return;
+        failures = 0;
         setIdentity(status.identity);
         setStartAvailable(status.identity_start_available);
         if (status.requirements.complete) {
@@ -69,7 +72,10 @@ export function IdentityVerification({
         }
         const open =
           status.identity?.status === "pending" || status.identity?.status === "in_review";
-        if (open) timer = setTimeout(() => void read(), POLL_MS);
+        if (open && !document.hidden) {
+          const delay = status.identity?.status === "in_review" ? REVIEW_POLL_MS : DEFAULT_POLL_MS;
+          timer = setTimeout(() => void read(), jitter(delay, Math.random()));
+        }
       } catch (cause) {
         if (disposed || controller.signal.aborted) return;
         if (cause instanceof PaydayError && cause.code === "payer_session_invalid") {
@@ -77,7 +83,10 @@ export function IdentityVerification({
           return;
         }
         // Keep whatever was known and try again; a failed read is not a verdict.
-        timer = setTimeout(() => void read(), POLL_MS);
+        failures += 1;
+        if (!document.hidden) {
+          timer = setTimeout(() => void read(), jitter(backoffMs(failures), Math.random()));
+        }
       }
     };
     void read();
@@ -167,8 +176,16 @@ export function IdentityVerification({
     );
   }
 
+  if (status === "approved") {
+    return (
+      <p role="status" className="text-[13px] text-muted">
+        Your identity check was approved. Opening the invoice…
+      </p>
+    );
+  }
+
   if (status === "declined" || status === "review_required") {
-    const retry = status === "declined" && startAvailable && identity?.retry_available;
+    const retry = status === "declined" && startAvailable;
     return (
       <div className="grid gap-3">
         <p className="text-[13px] leading-relaxed text-muted">

@@ -455,6 +455,9 @@ pub struct SettlementEvent {
 /// the implementation compatible with QuickNode and local Anvil.
 #[async_trait]
 pub trait ChainClient: Send + Sync {
+    /// Chain ID reported by the RPC endpoint.
+    async fn get_chain_id(&self) -> Result<u64, ChainError>;
+
     /// Newest block number the node reports.
     async fn latest_block_number(&self) -> Result<u64, ChainError>;
 
@@ -639,6 +642,10 @@ pub fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
 
 #[async_trait]
 impl ChainClient for AlloyChainClient {
+    async fn get_chain_id(&self) -> Result<u64, ChainError> {
+        AlloyChainClient::get_chain_id(self).await
+    }
+
     async fn latest_block_number(&self) -> Result<u64, ChainError> {
         self.provider
             .get_block_number()
@@ -789,9 +796,15 @@ impl ChainClient for AlloyChainClient {
                         "malformed Recovered event in {transaction_hash}: {error}"
                     ))
                 })?;
-                if recovered_amount.replace(event.data.amount).is_some() {
-                    return Err(malformed("Recovered"));
-                }
+                // `recover()` is intentionally callable more than once. A
+                // deployment and a later recovery can therefore emit several
+                // Recovered logs in one transaction; all are ledgered.
+                recovered_amount = Some(
+                    recovered_amount
+                        .unwrap_or(U256::ZERO)
+                        .checked_add(event.data.amount)
+                        .ok_or_else(|| malformed("Recovered amount overflow"))?,
+                );
             }
         }
         Ok(SettlementEvent {

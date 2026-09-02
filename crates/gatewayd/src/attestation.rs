@@ -44,7 +44,10 @@ impl VerificationAttestor {
         }
     }
 
-    pub async fn from_config(config: &AttestationSignerConfig) -> Result<Self, String> {
+    pub async fn from_config(
+        config: &AttestationSignerConfig,
+        sdk_config: &aws_config::SdkConfig,
+    ) -> Result<Self, String> {
         match config {
             AttestationSignerConfig::Local(key) => {
                 let signer: PrivateKeySigner = key
@@ -53,9 +56,7 @@ impl VerificationAttestor {
                 Ok(Self::local(signer))
             }
             AttestationSignerConfig::AwsKms(key_id) => {
-                let sdk_config =
-                    aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-                let kms = aws_sdk_kms::Client::new(&sdk_config);
+                let kms = aws_sdk_kms::Client::new(sdk_config);
                 // No chain id: attestations are prehash signatures, not
                 // transactions, so EIP-155 never applies.
                 let signer = AwsSigner::new(kms, key_id.clone(), None)
@@ -121,9 +122,13 @@ mod tests {
 
     #[tokio::test]
     async fn attestations_recover_to_the_signer_and_change_with_the_payload() {
-        let attestor = VerificationAttestor::from_config(&AttestationSignerConfig::Local(
-            "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e".into(),
-        ))
+        let sdk_config = aws_config::SdkConfig::builder().build();
+        let attestor = VerificationAttestor::from_config(
+            &AttestationSignerConfig::Local(
+                "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e".into(),
+            ),
+            &sdk_config,
+        )
         .await
         .unwrap();
         assert_eq!(
@@ -154,9 +159,12 @@ mod tests {
             "a signature over one payload does not vouch for another"
         );
         assert!(
-            VerificationAttestor::from_config(&AttestationSignerConfig::Local("0x1234".into()))
-                .await
-                .is_err()
+            VerificationAttestor::from_config(
+                &AttestationSignerConfig::Local("0x1234".into()),
+                &sdk_config,
+            )
+            .await
+            .is_err()
         );
     }
 }

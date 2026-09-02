@@ -15,8 +15,10 @@ import { useMerchant } from "./session";
  */
 export function AttachmentUpload({
   onChange,
+  onBusyChange,
 }: {
   onChange: (attachment: AttachmentDescriptor | null) => void;
+  onBusyChange: (busy: boolean) => void;
 }) {
   const { accessToken } = useMerchant();
   const [state, setState] = useState<UploadState>({ status: "idle" });
@@ -24,7 +26,6 @@ export function AttachmentUpload({
   const inFlight = useRef<AbortController | null>(null);
 
   useEffect(() => () => inFlight.current?.abort(), []);
-
   const pick = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     // Clear the input so choosing the same file again re-runs the upload.
@@ -38,16 +39,22 @@ export function AttachmentUpload({
     }
     setProblem(null);
     onChange(null);
+    onBusyChange(true);
 
     inFlight.current?.abort();
     const controller = new AbortController();
     inFlight.current = controller;
-    const attachment = await uploadAttachment(accessToken, file, setState, controller.signal);
-    if (attachment && !controller.signal.aborted) onChange(attachment);
+    try {
+      const attachment = await uploadAttachment(accessToken, file, setState, controller.signal);
+      if (attachment && !controller.signal.aborted) onChange(attachment);
+    } finally {
+      if (inFlight.current === controller) onBusyChange(false);
+    }
   };
 
   const remove = () => {
     inFlight.current?.abort();
+    onBusyChange(false);
     setState({ status: "idle" });
     setProblem(null);
     onChange(null);

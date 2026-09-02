@@ -118,6 +118,16 @@ describe("EmailVerification", () => {
     expect(screen.getByRole("textbox", { name: /one-time code/i })).toBeInTheDocument();
   });
 
+  it("does not offer code entry when another tab owns the cooled-down session", async () => {
+    vi.spyOn(payerClient.verification, "startEmail").mockRejectedValue(
+      new PaydayError("wait", "otp_resend_cooldown", 429),
+    );
+    renderForm();
+    fireEvent.click(screen.getByRole("button", { name: /send a code/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/another tab/i);
+    expect(screen.queryByRole("textbox", { name: /one-time code/i })).not.toBeInTheDocument();
+  });
+
   it("drops an expired session and starts over", async () => {
     vi.spyOn(payerClient.verification, "confirmEmail").mockRejectedValue(
       new PaydayError("gone", "payer_session_invalid", 401),

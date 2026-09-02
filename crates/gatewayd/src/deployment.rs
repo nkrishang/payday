@@ -12,63 +12,11 @@ use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
-use thiserror::Error;
+pub use gateway_core::ExpectedDeployment;
+use gateway_core::{DeploymentError, ObservedDeployment, check_deployment};
 
 sol! {
     function factory() view returns (address);
-}
-
-/// The deployment this build was configured for.
-pub struct ExpectedDeployment {
-    pub chain_id: u64,
-    pub factory: Address,
-    pub factory_code_hash: B256,
-    pub batch_sweeper: Address,
-    pub batch_sweeper_code_hash: B256,
-}
-
-/// What the RPC endpoint reports for the configured addresses.
-pub struct ObservedDeployment {
-    pub chain_id: u64,
-    pub factory_code_hash: B256,
-    pub batch_sweeper_code_hash: B256,
-    /// `BatchSweeper.factory()`.
-    pub bound_factory: Address,
-}
-
-#[derive(Debug, Error)]
-pub enum DeploymentError {
-    #[error("{operation} failed against PAYDAY_RPC_URL: {message}")]
-    Rpc {
-        operation: &'static str,
-        message: String,
-    },
-    #[error("PAYDAY_RPC_URL serves chain {actual}, but PAYDAY_CHAIN_ID is {expected}")]
-    ChainId { expected: u64, actual: u64 },
-    #[error(
-        "PaymentFactory at {address} has runtime code hash {actual}, but PAYDAY_FACTORY_CODE_HASH is {expected}; the configured factory is not the reviewed generation"
-    )]
-    FactoryCodeHash {
-        address: Address,
-        expected: B256,
-        actual: B256,
-    },
-    #[error(
-        "BatchSweeper at {address} has runtime code hash {actual}, but PAYDAY_BATCH_SWEEPER_CODE_HASH is {expected}; the configured sweeper is not the reviewed generation"
-    )]
-    BatchSweeperCodeHash {
-        address: Address,
-        expected: B256,
-        actual: B256,
-    },
-    #[error(
-        "BatchSweeper at {batch_sweeper} is bound to PaymentFactory {actual}, not the configured PAYDAY_FACTORY_ADDRESS {expected}"
-    )]
-    BoundFactory {
-        batch_sweeper: Address,
-        expected: Address,
-        actual: Address,
-    },
 }
 
 /// Transport errors print the full request URL, and `PAYDAY_RPC_URL` carries
@@ -133,7 +81,7 @@ pub async fn verify_deployment(
             format!("could not decode response: {error}"),
         )
     })?;
-    check(
+    check_deployment(
         expected,
         &ObservedDeployment {
             chain_id,
@@ -159,42 +107,6 @@ async fn code_hash(provider: &impl Provider, address: Address) -> Result<B256, D
         .await
         .map(|code| keccak256(&code))
         .map_err(|error| rpc_error("eth_getCode", error))
-}
-
-/// Compare what was configured with what the chain reports. Pure, so every
-/// mismatch is unit-tested without an RPC endpoint.
-pub fn check(
-    expected: &ExpectedDeployment,
-    observed: &ObservedDeployment,
-) -> Result<(), DeploymentError> {
-    if observed.chain_id != expected.chain_id {
-        return Err(DeploymentError::ChainId {
-            expected: expected.chain_id,
-            actual: observed.chain_id,
-        });
-    }
-    if observed.factory_code_hash != expected.factory_code_hash {
-        return Err(DeploymentError::FactoryCodeHash {
-            address: expected.factory,
-            expected: expected.factory_code_hash,
-            actual: observed.factory_code_hash,
-        });
-    }
-    if observed.batch_sweeper_code_hash != expected.batch_sweeper_code_hash {
-        return Err(DeploymentError::BatchSweeperCodeHash {
-            address: expected.batch_sweeper,
-            expected: expected.batch_sweeper_code_hash,
-            actual: observed.batch_sweeper_code_hash,
-        });
-    }
-    if observed.bound_factory != expected.factory {
-        return Err(DeploymentError::BoundFactory {
-            batch_sweeper: expected.batch_sweeper,
-            expected: expected.factory,
-            actual: observed.bound_factory,
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -227,7 +139,7 @@ mod tests {
 
     #[test]
     fn matching_deployment_passes() {
-        check(&expected(), &observed()).unwrap();
+        check_deployment(&expected(), &observed()).unwrap();
     }
 
     #[test]
@@ -266,7 +178,7 @@ mod tests {
     fn wrong_chain_id_fails() {
         let mut observed = observed();
         observed.chain_id = 1;
-        let error = check(&expected(), &observed).unwrap_err();
+        let error = check_deployment(&expected(), &observed).unwrap_err();
         assert!(matches!(
             error,
             DeploymentError::ChainId {
@@ -281,7 +193,7 @@ mod tests {
     fn wrong_factory_code_hash_fails() {
         let mut observed = observed();
         observed.factory_code_hash = B256::repeat_byte(0x01);
-        let error = check(&expected(), &observed).unwrap_err();
+        let error = check_deployment(&expected(), &observed).unwrap_err();
         assert!(matches!(
             error,
             DeploymentError::FactoryCodeHash { address, .. } if address == FACTORY
@@ -296,7 +208,7 @@ mod tests {
     fn wrong_batch_sweeper_code_hash_fails() {
         let mut observed = observed();
         observed.batch_sweeper_code_hash = B256::repeat_byte(0x02);
-        let error = check(&expected(), &observed).unwrap_err();
+        let error = check_deployment(&expected(), &observed).unwrap_err();
         assert!(matches!(
             error,
             DeploymentError::BatchSweeperCodeHash { address, .. } if address == SWEEPER
@@ -309,7 +221,7 @@ mod tests {
         let other = address!("0x000000000000000000000000000000000000dEaD");
         let mut observed = observed();
         observed.bound_factory = other;
-        let error = check(&expected(), &observed).unwrap_err();
+        let error = check_deployment(&expected(), &observed).unwrap_err();
         assert!(matches!(
             error,
             DeploymentError::BoundFactory { actual, .. } if actual == other
