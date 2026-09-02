@@ -6,6 +6,7 @@ mod invoices;
 mod notifications;
 mod proofs;
 mod sweeps;
+mod verifications;
 mod webhooks;
 
 pub use accounts::{
@@ -31,6 +32,10 @@ use sqlx::postgres::PgPoolOptions;
 pub use sweeps::{
     BatchResolution, InvoiceOutcome, MinedBatch, RecoveredFundsInput, RecoveryReason,
     SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats, SweeperStatus,
+};
+pub use verifications::{
+    CreatedPayerSession, DbPayerSession, EmailVerificationAttempt, PAYER_SESSION_TTL,
+    PayerSessionRepository, StartEmailVerificationError, VerificationCompletion, payer_ref,
 };
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,

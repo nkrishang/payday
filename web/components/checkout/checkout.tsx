@@ -1,7 +1,9 @@
 "use client";
 
 import type { PayerPayment } from "@payday/sdk";
+import { useState } from "react";
 import { checkoutView, unlockedPayment } from "@/lib/checkout-state";
+import { usePayerSession } from "@/lib/payer-session";
 import { StatusDot } from "@/components/ui/status-dot";
 import { AddressRow } from "./address-row";
 import { AmountDue, ReceivedProgress } from "./amount";
@@ -16,20 +18,28 @@ import { usePayment, useSecondsRemaining } from "./use-payment";
 import { VerificationGate } from "./verification-gate";
 import { WalletPay } from "./wallet-pay";
 
-export function Checkout({ initial, qrUrl }: { initial: PayerPayment; qrUrl: string }) {
+export function Checkout({ initial }: { initial: PayerPayment }) {
   return (
     <WalletProviders>
-      <CheckoutBody initial={initial} qrUrl={qrUrl} />
+      <CheckoutBody initial={initial} />
     </WalletProviders>
   );
 }
 
-function CheckoutBody({ initial, qrUrl }: { initial: PayerPayment; qrUrl: string }) {
-  const { payment, receivedAt, reconnecting, pendingTxHash, markSent } = usePayment(initial);
+function CheckoutBody({ initial }: { initial: PayerPayment }) {
+  // This tab's payer session, if it has one. It rides along on every read,
+  // so a gated invoice unlocks here after verification and stays unlocked
+  // across a reload; it never reaches the server-rendered page.
+  const [payerSession, setPayerSession] = usePayerSession(initial.id);
+  const { payment, receivedAt, reconnecting, pendingTxHash, markSent, refresh } = usePayment(
+    initial,
+    payerSession,
+  );
+  const [emailCodeSent, setEmailCodeSent] = useState(false);
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
-  const view = checkoutView(payment, { secondsRemaining, pendingTxHash });
-  // Null exactly when `view.phase` is "verification_required": the same
-  // narrowing decides the phase and what may enter the tree.
+  const view = checkoutView(payment, { secondsRemaining, pendingTxHash, emailCodeSent });
+  // Null exactly when the phase is one of the locked ones: the same narrowing
+  // decides the phase and what may enter the tree.
   const unlocked = unlockedPayment(payment);
 
   return (
@@ -51,10 +61,17 @@ function CheckoutBody({ initial, qrUrl }: { initial: PayerPayment; qrUrl: string
       </div>
 
       {unlocked === null ? (
-        <VerificationGate payment={payment} />
+        <VerificationGate
+          payment={payment}
+          view={view}
+          payerSession={payerSession}
+          onSession={setPayerSession}
+          onCodeSent={() => setEmailCodeSent(true)}
+          onVerified={refresh}
+        />
       ) : (
         <>
-          <InvoiceDetails payment={unlocked} />
+          <InvoiceDetails payment={unlocked} payerSession={payerSession} />
 
           {view.showInstructions ? (
             <section aria-label={view.title} className="px-5 py-6 sm:px-6">
@@ -75,7 +92,7 @@ function CheckoutBody({ initial, qrUrl }: { initial: PayerPayment; qrUrl: string
                 <span className="h-px flex-1 bg-line" />
               </div>
 
-              <QrPanel payment={unlocked} qrUrl={qrUrl} />
+              <QrPanel payment={unlocked} payerSession={payerSession} />
 
               <div className="mt-6 space-y-4">
                 <AddressRow payment={unlocked} />

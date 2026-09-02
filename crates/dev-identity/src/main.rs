@@ -25,12 +25,29 @@ use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
 
 /// The CLI and the dashboard, mirroring the two Auth0 applications the
-/// production Post-Login Action admits. Both exchange an email OTP for a token
-/// bound to the same API audience.
+/// production merchant Post-Login Action admits. Both exchange an email OTP
+/// for a token bound to the same API audience.
 const CLI_CLIENT_ID: &str = "payday-cli-local";
 const DASHBOARD_CLIENT_ID: &str = "payday-dashboard-local";
 const CLIENT_IDS: [&str; 2] = [CLI_CLIENT_ID, DASHBOARD_CLIENT_ID];
 const AUDIENCE: &str = "payday-api-local";
+/// The payer application and its own audience, mirroring the production
+/// payer Action: gatewayd exchanges a payer's code here, and the token it
+/// gets back is good for nothing but unlocking an invoice.
+const PAYER_CLIENT_ID: &str = "payday-payer-local";
+const PAYER_AUDIENCE: &str = "payday-payer-local";
+
+/// The audience a client may request, if any. A merchant client cannot mint
+/// a payer token and the payer client cannot reach the merchant API.
+fn audience_for(client_id: &str) -> Option<&'static str> {
+    if CLIENT_IDS.contains(&client_id) {
+        Some(AUDIENCE)
+    } else if client_id == PAYER_CLIENT_ID {
+        Some(PAYER_AUDIENCE)
+    } else {
+        None
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -147,7 +164,7 @@ async fn start(
     State(state): State<AppState>,
     Json(request): Json<StartRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !CLIENT_IDS.contains(&request.client_id.as_str())
+    if audience_for(&request.client_id).is_none()
         || request.connection != "email"
         || request.send != "code"
         || !request.email.contains('@')
@@ -170,20 +187,20 @@ async fn token(
     Json(request): Json<TokenRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if request.grant_type != "http://auth0.com/oauth/grant-type/passwordless/otp"
-        || !CLIENT_IDS.contains(&request.client_id.as_str())
         || request.realm != "email"
-        || request.audience != AUDIENCE
+        || audience_for(&request.client_id) != Some(request.audience.as_str())
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let valid = state
-        .otps
-        .lock()
-        .await
-        .remove(&request.username.to_ascii_lowercase());
-    if valid.as_deref() != Some(&request.otp) {
+    // Like Auth0, a wrong code is refused without spending the right one;
+    // the right one is spent on use.
+    let username = request.username.to_ascii_lowercase();
+    let mut otps = state.otps.lock().await;
+    if otps.get(&username) != Some(&request.otp) {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    otps.remove(&username);
+    drop(otps);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -193,7 +210,7 @@ async fn token(
     let claims = Claims {
         sub: format!("email|{subject}"),
         iss: state.issuer.clone(),
-        aud: AUDIENCE.into(),
+        aud: request.audience,
         exp: now + 300,
         azp: request.client_id.clone(),
         method: "email_otp",
@@ -259,24 +276,32 @@ mod tests {
     }
 
     fn token_request(client_id: &str, email: &str, otp: &str) -> TokenRequest {
+        token_request_for(client_id, email, otp, AUDIENCE)
+    }
+
+    fn token_request_for(client_id: &str, email: &str, otp: &str, audience: &str) -> TokenRequest {
         TokenRequest {
             grant_type: "http://auth0.com/oauth/grant-type/passwordless/otp".into(),
             client_id: client_id.into(),
             username: email.into(),
             otp: otp.into(),
             realm: "email".into(),
-            audience: AUDIENCE.into(),
+            audience: audience.into(),
         }
     }
 
     /// Decodes a token against the provider's own JWKS with the CLI's validation rules.
     fn verified_claims(state: &AppState, jwt: &str) -> serde_json::Value {
+        verified_claims_for(state, jwt, AUDIENCE)
+    }
+
+    fn verified_claims_for(state: &AppState, jwt: &str, audience: &str) -> serde_json::Value {
         let set: JwkSet = serde_json::from_value(state.jwks.clone()).unwrap();
         let key =
             DecodingKey::from_jwk(set.find(&decode_header(jwt).unwrap().kid.unwrap()).unwrap())
                 .unwrap();
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[AUDIENCE]);
+        validation.set_audience(&[audience]);
         validation.set_issuer(&["http://127.0.0.1:3001/"]);
         decode::<serde_json::Value>(jwt, &key, &validation)
             .unwrap()
@@ -288,6 +313,16 @@ mod tests {
         let state = new_state("http://127.0.0.1:3001".into());
         let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
         let request = || token_request(CLI_CLIENT_ID, "dev@example.com", &otp);
+        // A wrong code does not spend the right one.
+        assert_eq!(
+            token(
+                State(state.clone()),
+                Json(token_request(CLI_CLIENT_ID, "dev@example.com", "000000")),
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
         let response = token(State(state.clone()), Json(request()))
             .await
             .unwrap()
@@ -358,6 +393,64 @@ mod tests {
         let denied = token(
             State(state.clone()),
             Json(token_request("payday-other-local", "dev@example.com", &otp)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn payer_client_gets_the_payer_audience_and_nothing_else() {
+        let state = new_state("http://127.0.0.1:3001".into());
+        let otp = issue_otp(&state, PAYER_CLIENT_ID, "payer@example.com").await;
+        // The payer client cannot mint a merchant token, even with its code.
+        let denied = token(
+            State(state.clone()),
+            Json(token_request(PAYER_CLIENT_ID, "payer@example.com", &otp)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, StatusCode::BAD_REQUEST);
+
+        let response = token(
+            State(state.clone()),
+            Json(token_request_for(
+                PAYER_CLIENT_ID,
+                "payer@example.com",
+                &otp,
+                PAYER_AUDIENCE,
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let claims = verified_claims_for(
+            &state,
+            response["access_token"].as_str().unwrap(),
+            PAYER_AUDIENCE,
+        );
+        assert_eq!(claims["aud"], PAYER_AUDIENCE);
+        assert_eq!(claims["azp"], PAYER_CLIENT_ID);
+        assert_eq!(
+            claims["https://api.payday.sh/auth/client_id"],
+            PAYER_CLIENT_ID
+        );
+        assert_eq!(claims["https://api.payday.sh/auth/method"], "email_otp");
+        assert_eq!(
+            claims["https://api.payday.sh/auth/email"],
+            "payer@example.com"
+        );
+
+        // And a merchant client cannot request the payer audience.
+        let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
+        let denied = token(
+            State(state.clone()),
+            Json(token_request_for(
+                CLI_CLIENT_ID,
+                "dev@example.com",
+                &otp,
+                PAYER_AUDIENCE,
+            )),
         )
         .await
         .unwrap_err();

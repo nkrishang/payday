@@ -143,17 +143,73 @@ test("a locked attachment surfaces verification_required", async () => {
   });
 });
 
-test("qrUrl is absolute and encoded", () => {
-  const client = new PaydayPayerClient({ baseUrl: "https://example.test/", fetch: async () => new Response("") });
-  assert.equal(
-    client.payments.qrUrl("pay_a/b"),
-    "https://example.test/v1/payer/payments/pay_a%2Fb/qr",
-  );
+test("the QR is fetched as a blob with the session in a header, never the URL", async () => {
+  const mock = mockFetch(() => new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } }));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test/", fetch: mock.fetch });
+
+  const svg = await client.payments.qr("pay_a/b", "pps_token");
+
+  assert.equal(await svg.text(), "<svg/>");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/qr");
+  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_token");
+  assert.equal(mock.calls[0].init.headers.Accept, "image/svg+xml");
+  assert.ok(!mock.calls[0].url.includes("pps_token"));
 });
 
-test("payer client defaults to the production API origin", () => {
-  const client = new PaydayPayerClient({ fetch: async () => new Response("") });
-  assert.equal(client.payments.qrUrl("pay_1"), "https://api.payday.sh/v1/payer/payments/pay_1/qr");
+test("payer client defaults to the production API origin", async () => {
+  const mock = mockFetch(() => new Response(JSON.stringify(payerPayment)));
+  const client = new PaydayPayerClient({ fetch: mock.fetch });
+  await client.payments.get("pay_1");
+  assert.equal(mock.calls[0].url, "https://api.payday.sh/v1/payer/payments/pay_1");
+});
+
+test("email verification starts without naming a mailbox and confirms with the session", async () => {
+  const status = { requirements: { ...requirementsNone, email: "approved" }, identity_start_available: false };
+  const mock = mockFetch((url) => new Response(JSON.stringify(
+    url.endsWith("/start") ? { payer_session: "pps_new", expires_at: "2026-09-02T00:00:00Z" } : status,
+  )));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const started = await client.verification.startEmail("pay_a/b");
+  const resent = await client.verification.startEmail("pay_a/b", { payerSession: started.payer_session });
+  const confirmed = await client.verification.confirmEmail("pay_a/b", "123456", started.payer_session);
+  const current = await client.verification.status("pay_a/b", { payerSession: started.payer_session });
+
+  assert.equal(started.payer_session, "pps_new");
+  assert.equal(resent.payer_session, "pps_new");
+  assert.equal(confirmed.requirements.email, "approved");
+  assert.equal(current.identity_start_available, false);
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify/email/start");
+  assert.equal(mock.calls[0].init.method, "POST");
+  assert.equal(mock.calls[0].init.body, undefined);
+  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
+  assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_new");
+  assert.equal(mock.calls[2].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify/email/confirm");
+  assert.deepEqual(JSON.parse(mock.calls[2].init.body), { otp: "123456" });
+  assert.equal(mock.calls[2].init.headers["Payday-Payer-Session"], "pps_new");
+  assert.equal(mock.calls[3].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify");
+  assert.equal(mock.calls[3].init.method, "GET");
+  for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
+});
+
+test("a wrong code and a cooled-down resend surface their codes", async () => {
+  const mock = mockFetch((url) => new Response(JSON.stringify({
+    error: url.endsWith("/confirm")
+      ? { code: "otp_invalid", message: "The code was not accepted" }
+      : { code: "otp_resend_cooldown", message: "Request another in 42 seconds" },
+  }), { status: url.endsWith("/confirm") ? 401 : 429, headers: { "retry-after": "42" } }));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+
+  await assert.rejects(client.verification.confirmEmail("pay_1", "000000", "pps"), (error) => {
+    assert.ok(error instanceof PaydayError);
+    assert.equal(error.code, "otp_invalid");
+    return true;
+  });
+  await assert.rejects(client.verification.startEmail("pay_1", { payerSession: "pps" }), (error) => {
+    assert.equal(error.code, "otp_resend_cooldown");
+    assert.equal(error.status, 429);
+    return true;
+  });
 });
 
 test("an unknown or malformed link surfaces invalid_payment_link", async () => {

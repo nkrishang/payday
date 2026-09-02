@@ -48,6 +48,22 @@ describe("AttachmentLink", () => {
     expect(container.innerHTML).not.toContain("X-Amz-Signature");
   });
 
+  it("presents this tab's session so a gated invoice's descriptor is minted for it", async () => {
+    const fetchDescriptor = vi
+      .spyOn(payerClient.payments, "attachment")
+      .mockResolvedValue({ ...ATTACHMENT, download_url: DOWNLOAD_URL });
+    open.mockReturnValue(window);
+
+    const { container } = render(
+      <AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} payerSession="pps_token" />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /INV-1042\.pdf/ }));
+
+    await waitFor(() => expect(fetchDescriptor).toHaveBeenCalledWith("pay_1", "pps_token"));
+    // The session is a header on the request, never part of the page.
+    expect(container.innerHTML).not.toContain("pps_token");
+  });
+
   it("falls back to a plain link when the browser blocks the tab", async () => {
     vi.spyOn(payerClient.payments, "attachment").mockResolvedValue({
       ...ATTACHMENT,

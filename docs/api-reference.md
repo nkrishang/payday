@@ -360,15 +360,56 @@ For the verified modes those fields — and `settlement_tx_hash` and
 amount and payout address the gate withholds — are `null` until the payer's
 session satisfies the policy; the hint masks the expected mailbox as
 `a****@e***.com`.
-The attachment route answers `401 verification_required` while content is
-locked. A payer session token, obtained by completing verification on the
-hosted checkout, travels in the `Payday-Payer-Session` header.
+The attachment and QR routes answer `401 verification_required` while content
+is locked. A payer session token, obtained by completing verification on the
+hosted checkout, travels in the `Payday-Payer-Session` header on every payer
+read; the reads' `Access-Control-Allow-Headers` admits it. A session unlocks
+exactly the invoice it was created for. When a session is presented,
+`requirements` reports that session's facts; without one it reports what the
+invoice as a whole has completed, which never unlocks a read.
+
+### Email verification
+
+```text
+POST /v1/payer/payments/{id}/verify/email/start
+POST /v1/payer/payments/{id}/verify/email/confirm   {"otp": "123456"}
+GET  /v1/payer/payments/{id}/verify
+```
+
+`start` sends a one-time code to the mailbox the merchant asserted at issuance
+(the request names no email) and returns `{payer_session, expires_at}`: an
+opaque token, valid for 24 hours, of which the API stores only a hash. Sending
+it back in `Payday-Payer-Session` on a second `start` resends the code on the
+same session. At most one code per invoice per minute is sent, whoever asks;
+sooner answers `429 otp_resend_cooldown` with `Retry-After`. `confirm` takes
+the session and the code, exchanges it with Auth0 against the payer audience,
+and answers `{requirements, identity_start_available}`. For `verified_email`
+the invoice's verification completes and the session unlocks the content; the
+identity modes record the mailbox and stay locked until their identity facts.
+`GET …/verify` reports the same shape for a session, or for the invoice as a
+whole without one. Permissionless invoices answer
+`409 verification_not_required`; invoices past their deadline or already
+settled answer `410 payment_not_payable`, because verification after expiry
+cannot revive settlement.
+
+The two write routes answer cross-origin requests only from the hosted
+checkout origin (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
+`Content-Type` and `Payday-Payer-Session`; they never allow `*`. Bodies are
+limited to 8 KiB.
 
 ## Stable error codes
 
 | Code | Typical status | Meaning |
 |---|---:|---|
 | `unauthorized` | 401 | Missing or invalid API key or dashboard access token |
+| `payer_session_invalid` | 401 | `Payday-Payer-Session` missing, unknown, expired, or for another invoice |
+| `otp_invalid` | 401 | The verification code was not accepted |
+| `verification_required` | 401 | Content or QR requested for a gated invoice without an unlocked session |
+| `verification_not_required` | 409 | Verification started on a permissionless invoice |
+| `verification_not_started` | 409 | Confirm called before a code was sent, or after it was spent |
+| `otp_resend_cooldown` | 429 | A code was sent for this invoice within the last minute; see `Retry-After` |
+| `identity_provider_unavailable` | 502 | Auth0 did not answer the passwordless exchange |
+| `verification_unavailable` | 503 | The deployment has no payer audience configured |
 | `identity_unauthorized` | 401 | Invalid Auth0 identity token |
 | `identity_unavailable` | 503 | Identity verification unavailable |
 | `account_disabled` | 403 | Account disabled |

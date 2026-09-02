@@ -25,7 +25,12 @@ pub struct Config {
     /// status-only mode, which serves neither attachments nor proofs.
     attachments: Option<AttachmentConfig>,
     attestation: Option<AttestationSignerConfig>,
+    /// The payer audience and the payer-reference key; both `None` leaves
+    /// the email verification routes unavailable.
+    payer_verification: Option<PayerVerificationConfig>,
     public_base_url: String,
+    /// The one browser origin that may call the verification write routes.
+    hosted_checkout_origin: Option<String>,
     explorer_base_url: Option<String>,
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
@@ -55,6 +60,27 @@ impl Config {
             (None, None, None) => None,
             _ => panic!(
                 "PAYDAY_AUTH0_ISSUER, PAYDAY_AUTH0_AUDIENCE, and PAYDAY_AUTH0_CLIENT_ID must be set together"
+            ),
+        };
+
+        let payer_verification = match (
+            std::env::var("PAYDAY_PAYER_AUTH0_ISSUER").ok(),
+            std::env::var("PAYDAY_PAYER_AUTH0_AUDIENCE").ok(),
+            std::env::var("PAYDAY_PAYER_AUTH0_CLIENT_ID").ok(),
+            std::env::var("PAYDAY_PAYER_REF_MASTER_KEY").ok(),
+        ) {
+            (Some(issuer), Some(audience), Some(client_id), Some(master_key)) => {
+                Some(PayerVerificationConfig {
+                    issuer,
+                    audience,
+                    client_id,
+                    payer_ref_master_key: decode_key_32("PAYDAY_PAYER_REF_MASTER_KEY", &master_key)
+                        .unwrap_or_else(|message| panic!("{message}")),
+                })
+            }
+            (None, None, None, None) => None,
+            _ => panic!(
+                "PAYDAY_PAYER_AUTH0_ISSUER, PAYDAY_PAYER_AUTH0_AUDIENCE, PAYDAY_PAYER_AUTH0_CLIENT_ID, and PAYDAY_PAYER_REF_MASTER_KEY must be set together"
             ),
         };
 
@@ -122,7 +148,7 @@ impl Config {
             std::env::var("PAYDAY_WEBHOOK_ENCRYPTION_KEY")
                 .ok()
                 .map(|value| {
-                    decode_webhook_encryption_key(&value)
+                    decode_key_32("PAYDAY_WEBHOOK_ENCRYPTION_KEY", &value)
                         .unwrap_or_else(|message| panic!("{message}"))
                 });
 
@@ -139,8 +165,12 @@ impl Config {
             settlement,
             attachments,
             attestation,
+            payer_verification,
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
+            hosted_checkout_origin: std::env::var("PAYDAY_HOSTED_CHECKOUT_ORIGIN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
             api_key_prefix,
             webhook_encryption_key,
@@ -202,8 +232,20 @@ impl Config {
         self.attestation.as_ref()
     }
 
+    /// The payer Auth0 audience and payer-reference key; absent when email
+    /// verification is not configured.
+    pub fn payer_verification(&self) -> Option<&PayerVerificationConfig> {
+        self.payer_verification.as_ref()
+    }
+
     pub fn public_base_url(&self) -> &str {
         &self.public_base_url
+    }
+
+    /// Where the hosted checkout is served from; defaults to the public base
+    /// URL, which is where `/pay/{id}` links already point.
+    pub fn hosted_checkout_origin(&self) -> Option<&str> {
+        self.hosted_checkout_origin.as_deref()
     }
 
     pub fn explorer_base_url(&self) -> Option<&str> {
@@ -283,14 +325,26 @@ fn validate_api_key_prefix(value: &str) -> Result<(), &'static str> {
     }
 }
 
-fn decode_webhook_encryption_key(value: &str) -> Result<[u8; 32], &'static str> {
+/// A 256-bit key supplied as standard base64.
+fn decode_key_32(name: &str, value: &str) -> Result<[u8; 32], String> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
-        .map_err(|_| "PAYDAY_WEBHOOK_ENCRYPTION_KEY must be valid standard base64")?;
+        .map_err(|_| format!("{name} must be valid standard base64"))?;
     decoded
         .try_into()
-        .map_err(|_| "PAYDAY_WEBHOOK_ENCRYPTION_KEY must decode to exactly 32 bytes")
+        .map_err(|_| format!("{name} must decode to exactly 32 bytes"))
+}
+
+/// The dedicated payer audience (product plan §6.1): its own Auth0 API and
+/// application, so a payer token can never reach the merchant API and a
+/// merchant token never unlocks an invoice. The master key derives the
+/// merchant-scoped payer references.
+pub struct PayerVerificationConfig {
+    pub issuer: String,
+    pub audience: String,
+    pub client_id: String,
+    pub payer_ref_master_key: [u8; 32],
 }
 
 pub struct Auth0Config {
@@ -395,14 +449,21 @@ mod tests {
     }
 
     #[test]
-    fn encryption_key_requires_standard_base64_of_32_bytes() {
+    fn keys_require_standard_base64_of_32_bytes() {
         assert_eq!(
-            decode_webhook_encryption_key("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
-                .unwrap()
-                .len(),
+            decode_key_32(
+                "PAYDAY_WEBHOOK_ENCRYPTION_KEY",
+                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+            )
+            .unwrap()
+            .len(),
             32
         );
-        assert!(decode_webhook_encryption_key("not base64").is_err());
-        assert!(decode_webhook_encryption_key("c2hvcnQ=").is_err());
+        assert!(decode_key_32("PAYDAY_PAYER_REF_MASTER_KEY", "not base64").is_err());
+        assert!(
+            decode_key_32("PAYDAY_PAYER_REF_MASTER_KEY", "c2hvcnQ=")
+                .unwrap_err()
+                .contains("PAYDAY_PAYER_REF_MASTER_KEY")
+        );
     }
 }

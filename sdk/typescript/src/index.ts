@@ -139,6 +139,15 @@ export interface VerificationRequirements {
 /** The policy as the payer may see it: the mode and a masked mailbox hint such as `a****@e***.com`. */
 export interface PayerPolicySummary { mode: PayerPolicyMode; expected_email_hint: string | null }
 
+/** A payer session minted by `verification.startEmail`; the token is opaque and stored hashed by the API. */
+export interface StartEmailVerification { payer_session: string; expires_at: string }
+/** What a session (or, without one, the invoice) has established. */
+export interface VerificationStatus {
+  requirements: VerificationRequirements;
+  /** Whether the identity step may be started now; identity verification lands with a later release. */
+  identity_start_available: boolean;
+}
+
 /** Invoice content that a gated invoice withholds until verification completes. */
 export interface PayerInvoiceDetails {
   amount: string;
@@ -620,18 +629,52 @@ export class PaydayPayerClient {
       ),
 
     /**
-     * Absolute URL of the payment's QR, an SVG of the same EIP-681 request the
-     * page shows. Serve it through an `<img>`: it needs no CORS, and it answers
+     * The payment's QR: an SVG of the same EIP-681 request the page shows, for
+     * the amount still due. Render it from an object URL. It answers
+     * `401 verification_required` while the content is gated and
      * `410 payment_not_payable` the moment the address must stop being shown.
+     * The session travels in a header, never in the URL.
      */
-    qrUrl: (id: string): string =>
-      `${this.baseUrl}/v1/payer/payments/${encodeURIComponent(id)}/qr`,
+    qr: async (id: string, payerSession?: string, options: { signal?: AbortSignal } = {}): Promise<Blob> => {
+      const response = await send(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/qr`,
+        payerOptions({ ...options, ...(payerSession === undefined ? {} : { payerSession }), accept: "image/svg+xml" }),
+      );
+      return response.blob();
+    },
+  };
+
+  /**
+   * Email verification for a gated invoice. The code goes to the mailbox the
+   * merchant asserted at issuance; the payer only ever types the code. These
+   * writes answer cross-origin requests from the hosted checkout only.
+   */
+  readonly verification = {
+    /** Send (or, with a session, resend) the code and get the session it belongs to. */
+    startEmail: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<StartEmailVerification> =>
+      request<StartEmailVerification>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/start`,
+        { method: "POST", ...payerOptions(options) },
+      ),
+    /** Exchange the code; answers `401 otp_invalid` for a wrong one. */
+    confirmEmail: (id: string, otp: string, payerSession: string, options: { signal?: AbortSignal } = {}): Promise<VerificationStatus> =>
+      request<VerificationStatus>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/confirm`,
+        { method: "POST", body: { otp }, ...payerOptions({ ...options, payerSession }) },
+      ),
+    /** The session's facts, or the invoice's without a session. */
+    status: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<VerificationStatus> =>
+      request<VerificationStatus>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify`,
+        payerOptions(options),
+      ),
   };
 }
 
-function payerOptions(options: { signal?: AbortSignal; payerSession?: string }): RequestOptions {
+function payerOptions(options: { signal?: AbortSignal; payerSession?: string; accept?: string }): RequestOptions {
   return {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.accept === undefined ? {} : { accept: options.accept }),
     ...(options.payerSession === undefined ? {} : { headers: { [PAYER_SESSION_HEADER]: options.payerSession } }),
   };
 }

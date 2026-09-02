@@ -1,7 +1,8 @@
 # Auth0 configuration
 
 Terraform owns Payday's passwordless email connection, branded OTP template,
-the dashboard's browser application, and tenant attack protection. It
+the dashboard's browser application, the payer verification application, and
+tenant attack protection. It
 deliberately does not own the Resend credential: keep that key only in Auth0's
 email-provider settings as described in
 [`docs/authentication.md`](../docs/authentication.md).
@@ -75,6 +76,27 @@ after the apply copy the new application's Client ID into the Action secret
 `gatewayd`'s `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`. Until both are set, dashboard
 logins are denied at the token step. The API accepts dashboard tokens only as a
 session credential; it never issues an API key to the browser.
+
+## Payer verification application
+
+`payer.tf` declares the `Payday Payer Verification` application and enables
+the passwordless email connection for it. It is the client `gatewayd` uses to
+prove a payer owns the mailbox an invoice was issued to: the API asks Auth0 to
+email the code and exchanges it server-side, so the application is public
+(native, no secret) and needs only the passwordless OTP grant. Its tokens are
+requested for a separate payer API audience (`https://api.payday.sh/payer`),
+which the merchant Action ignores and the payer Action
+(`actions/payday-payer-email-otp.js`) guards. See
+[`docs/authentication.md`](../docs/authentication.md) for the audience, the
+Action, its secrets, and the matching `PAYDAY_PAYER_*` settings.
+
+If the application was created in the dashboard beforehand, import it:
+
+```bash
+terraform -chdir=auth0 import auth0_client.payer 'CLIENT_ID_REPLACE_ME'
+terraform -chdir=auth0 import auth0_connection_client.payer_passwordless_email \
+  'con_REPLACE_ME::CLIENT_ID_REPLACE_ME'
+```
 
 ## Attack-protection policy
 

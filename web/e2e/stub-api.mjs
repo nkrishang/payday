@@ -104,12 +104,46 @@ function base(overrides = {}) {
   };
 }
 
+/**
+ * Payer sessions minted by the verification routes: token -> { id, emailVerified }.
+ * A session is good for exactly the payment it was started on.
+ */
+const sessions = new Map();
+
+/** The session a request presents, if it is valid for `id`. */
+function sessionFor(req, id) {
+  const token = req.headers["payday-payer-session"];
+  const session = token ? sessions.get(token) : undefined;
+  return session && session.id === id ? session : null;
+}
+
+/** A gated invoice as its verifying session sees it. */
+function gatedFor(mode, session) {
+  if (!session?.emailVerified) return locked(mode);
+  if (mode === "verified_email") {
+    return base({
+      heading: "Consulting — August",
+      payer_policy: { mode, expected_email_hint: "a****@e***.com" },
+      requirements: requirements(mode, true),
+      invoice: {
+        ...base().invoice,
+        bill_to: { name: "Globex Corporation" },
+        reference: "INV-1042",
+        notes: "Net 30",
+        attachment: ATTACHMENT,
+      },
+    });
+  }
+  // Identity modes: the mailbox is proven, the identity facts are not.
+  return locked(mode, { ...requirements(mode), email: "approved" });
+}
+
 /** A gated invoice before verification: only the issuer, heading, and policy leave the API. */
-function locked(mode) {
+function locked(mode, facts = requirements(mode)) {
   return base({
     heading: "Consulting — August",
     payer_policy: { mode, expected_email_hint: "a****@e***.com" },
-    requirements: requirements(mode),
+    requirements: facts,
     content_unlocked: false,
     chain: null,
     token: null,
@@ -167,9 +201,9 @@ const scenarios = {
         attachment: ATTACHMENT,
       },
     }),
-  "gated-email": () => locked("verified_email"),
-  "gated-identity": () => locked("verified_identity"),
-  "gated-unattributed": () => locked("verified_identity_unattributed"),
+  "gated-email": (id, session) => gatedFor("verified_email", session),
+  "gated-identity": (id, session) => gatedFor("verified_identity", session),
+  "gated-unattributed": (id, session) => gatedFor("verified_identity_unattributed", session),
   partial: () => base(PARTIAL),
   paid: () => base({ ...FULL, ...CLOSED, status: "paid" }),
   settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
@@ -604,15 +638,51 @@ function customerFrom(body, existing) {
 /* ------------------------------------------------------------------------ */
 
 async function payer(req, res, url) {
-  const match = url.pathname.match(/^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment)?$/);
+  const match = url.pathname.match(
+    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm)?$/,
+  );
   if (!match) return false;
-  if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
+  const write = match[2] === "/verify/email/start" || match[2] === "/verify/email/confirm";
+  if (req.method !== (write ? "POST" : "GET")) {
+    return fail(res, 405, "method_not_allowed", "method not allowed");
+  }
 
   const id = decodeURIComponent(match[1]);
   const scenario = scenarioFor(id);
   if (!scenario) return fail(res, 401, "invalid_payment_link", "Payment link is not valid");
 
-  const payment = { ...scenario(id), id };
+  const session = sessionFor(req, id);
+  const payment = { ...scenario(id, session), id };
+  const mode = payment.payer_policy.mode;
+
+  if (match[2] === "/verify/email/start") {
+    if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
+    // The code goes to the merchant's asserted mailbox; the request names none.
+    const reused = session ?? null;
+    const token = reused ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
+    if (!reused) sessions.set(token, { id, emailVerified: false });
+    return send(res, 200, {
+      payer_session: token,
+      expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+    });
+  }
+
+  if (match[2] === "/verify/email/confirm") {
+    if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
+    if (!session) return fail(res, 401, "payer_session_invalid", "Start verification again");
+    const body = await readJson(req);
+    if (body.otp !== OTP) return fail(res, 401, "otp_invalid", "The code was not accepted");
+    session.emailVerified = true;
+    const facts = { ...requirements(mode), email: "approved", complete: mode === "verified_email" };
+    return send(res, 200, { requirements: facts, identity_start_available: false });
+  }
+
+  if (match[2] === "/verify") {
+    if (req.headers["payday-payer-session"] && !session) {
+      return fail(res, 401, "payer_session_invalid", "Start verification again");
+    }
+    return send(res, 200, { requirements: payment.requirements, identity_start_available: false });
+  }
 
   if (match[2] === "/qr") {
     if (!payment.content_unlocked) {

@@ -272,6 +272,66 @@ impl ApiError {
         }
     }
 
+    /// The deployment has no payer Auth0 audience configured.
+    pub fn verification_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "verification_unavailable",
+            message: "Email verification is not available on this deployment".into(),
+        }
+    }
+
+    pub fn identity_provider_unavailable() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "identity_provider_unavailable",
+            message: "The verification provider did not respond; try again shortly".into(),
+        }
+    }
+
+    pub fn verification_not_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_not_required",
+            message: "This invoice does not require verification".into(),
+        }
+    }
+
+    pub fn payer_session_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "payer_session_invalid",
+            message: "The payer session is missing, invalid, or expired; start verification again"
+                .into(),
+        }
+    }
+
+    pub fn otp_resend_cooldown(retry_after_secs: u64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "otp_resend_cooldown",
+            message: format!(
+                "A code was sent recently; request another in {retry_after_secs} seconds"
+            ),
+        }
+    }
+
+    pub fn otp_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "otp_invalid",
+            message: "The code was not accepted; check it or request a new one".into(),
+        }
+    }
+
+    pub fn verification_not_started() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_not_started",
+            message: "Request a code before confirming one".into(),
+        }
+    }
+
     pub fn rate_limited() -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,

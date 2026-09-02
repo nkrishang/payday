@@ -116,8 +116,14 @@ payment.invoice;              // amount, bill_to, notes, reference, attachment â
 payment.payable;              // false once the address must stop being shown
 payment.server_timestamp;     // render the deadline without trusting the payer's clock
 
-payer.payments.qrUrl(payment.id); // <img src> for the QR; answers 410 once not payable
+payer.payments.qr(payment.id, payerSession); // SVG blob for an <img>; 401 while locked, 410 once not payable
 payer.payments.attachment(payment.id, payerSession); // PDF descriptor; 401 verification_required while locked
+
+// Email verification for a gated invoice: the code goes to the mailbox the
+// merchant asserted, and the payer only types it. These writes are answered
+// cross-origin for the hosted checkout only.
+const { payer_session } = await payer.verification.startEmail(payment.id);
+await payer.verification.confirmEmail(payment.id, "123456", payer_session);
 ```
 
 For `permissionless` invoices everything is unlocked immediately. For the

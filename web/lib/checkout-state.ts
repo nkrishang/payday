@@ -21,6 +21,8 @@ import { formatDisplayAmount } from "./format";
  */
 export type CheckoutPhase =
   | "verification_required"
+  | "email_pending"
+  | "identity_required"
   | "awaiting"
   | "partial"
   | "confirming"
@@ -39,6 +41,8 @@ export interface CheckoutLocalState {
   secondsRemaining: number;
   /** Hash of a transfer this browser sent that the gateway has not yet credited. */
   pendingTxHash: string | null;
+  /** A verification code was sent for this tab's session and awaits entry. */
+  emailCodeSent?: boolean;
 }
 
 export interface CheckoutView {
@@ -136,19 +140,57 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
   if (unlocked === null) {
     // Locked content comes before every lifecycle state: a payer who has not
     // verified is told nothing about the amount, not even that it was paid.
+    return lockedView(payment, local);
+  }
+
+  return unlockedView(unlocked, local);
+}
+
+/**
+ * The three locked phases, in the order a payer moves through them. The
+ * facts come from the API for this tab's session; only "a code is on its
+ * way" is local, because the API cannot know which tab asked.
+ */
+function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
+  const { requirements, payer_policy } = payment;
+
+  if (requirements.email === "approved" && !requirements.complete) {
+    const matched = payer_policy.mode === "verified_identity";
     return {
-      phase: "verification_required",
-      tone: "neutral",
-      label: "Verification required",
-      title: "Verify to view this invoice",
-      detail:
-        "The amount, payment details, and attachment are shown once the expected payer has verified.",
+      phase: "identity_required",
+      tone: "progress",
+      label: "Identity check required",
+      title: "Verify your identity to view this invoice",
+      detail: matched
+        ? "Your email is verified. The invoice opens once an identity document and liveness check confirm you are the person it names."
+        : "Your email is verified. The invoice opens once an identity document and liveness check are complete.",
       showInstructions: false,
       isTerminal: false,
     };
   }
 
-  return unlockedView(unlocked, local);
+  if (local.emailCodeSent) {
+    return {
+      phase: "email_pending",
+      tone: "progress",
+      label: "Check your email",
+      title: "Enter the code we sent",
+      detail: `A one-time code was sent to ${payer_policy.expected_email_hint ?? "the expected mailbox"}. Enter it here to continue.`,
+      showInstructions: false,
+      isTerminal: false,
+    };
+  }
+
+  return {
+    phase: "verification_required",
+    tone: "neutral",
+    label: "Verification required",
+    title: "Verify to view this invoice",
+    detail:
+      "The amount, payment details, and attachment are shown once the expected payer has verified.",
+    showInstructions: false,
+    isTerminal: false,
+  };
 }
 
 function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState): CheckoutView {

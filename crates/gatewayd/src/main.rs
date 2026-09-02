@@ -5,6 +5,7 @@ mod config;
 mod deployment;
 mod dispatcher;
 mod invoice_pdf;
+mod payer_identity;
 mod state;
 mod webhook_worker;
 
@@ -80,8 +81,44 @@ async fn main() {
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
         config.explorer_base_url().map(str::to_owned),
+        config.hosted_checkout_origin().map(str::to_owned),
     )
     .expect("invalid payer link configuration");
+    // The payer audience is its own Auth0 API and application (product plan
+    // §6.1); status-only mode never verifies anyone.
+    let payer_verification = match config.payer_verification() {
+        Some(payer_auth) if !config.status_only() => {
+            let verifier = api::Auth0Verifier::new(
+                payer_auth.issuer.clone(),
+                payer_auth.audience.clone(),
+                payer_auth.client_id.clone(),
+                None,
+                config.dev_identity(),
+            )
+            .await
+            .expect("failed to initialize payer Auth0 JWT verification");
+            let otp = payer_identity::Auth0Passwordless::new(
+                &payer_auth.issuer,
+                payer_auth.client_id.clone(),
+                payer_auth.audience.clone(),
+            )
+            .expect("failed to initialize payer Auth0 passwordless client");
+            Some(payer_identity::PayerVerification::new(
+                Arc::new(otp),
+                verifier,
+                payer_auth.payer_ref_master_key,
+            ))
+        }
+        Some(_) => None,
+        None => {
+            if !config.status_only() {
+                tracing::warn!(
+                    "PAYDAY_PAYER_AUTH0_* and PAYDAY_PAYER_REF_MASTER_KEY are unset; gated invoices cannot be verified"
+                );
+            }
+            None
+        }
+    };
     // Every payment address this service hands out assumes the reviewed
     // contract generation, so refuse to serve against any other deployment.
     if let Some(settlement) = config.settlement() {
@@ -116,6 +153,7 @@ async fn main() {
         config.status_stale_seconds(),
         attachment_store,
         attestor,
+        payer_verification,
     );
     if !config.status_only()
         && let Some(key) = state.webhook_encryption_key

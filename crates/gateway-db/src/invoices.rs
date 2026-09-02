@@ -827,6 +827,10 @@ impl InvoiceRepository {
             drained_at: Option<(i64, i64)>,
             uncollected: i32,
             touched: bool,
+            /// Chain time of the earliest new nonzero transfer in this range;
+            /// if verification was still outstanding then, the funds are
+            /// likely unsolicited (product plan §4.9).
+            first_funding_timestamp: Option<u64>,
             crossing: Option<(U256, u64, B256, u64)>,
         }
 
@@ -849,6 +853,7 @@ impl InvoiceRepository {
                     drained_at: row.drained_at_block.zip(row.drained_at_transaction_index),
                     uncollected: row.uncollected_count,
                     touched: false,
+                    first_funding_timestamp: None,
                     crossing: None,
                 },
             );
@@ -917,6 +922,13 @@ impl InvoiceRepository {
                 continue;
             }
             credit.touched = true;
+            credit.first_funding_timestamp = Some(
+                credit
+                    .first_funding_timestamp
+                    .map_or(observation.block_timestamp, |first| {
+                        first.min(observation.block_timestamp)
+                    }),
+            );
             if collected_at.is_none() {
                 credit.uncollected += 1;
             }
@@ -943,8 +955,15 @@ impl InvoiceRepository {
             }
         }
 
+        // Funds that arrive while a gated invoice's verification is still
+        // outstanding are recorded like any other and flagged once, at the
+        // chain time they first appeared. Nothing about the invoice changes
+        // otherwise: same status transitions, same address, no quarantine.
         let mut outcome = RangeOutcome::default();
         for credit in credits.values().filter(|credit| credit.touched) {
+            let first_funding = credit
+                .first_funding_timestamp
+                .map(|timestamp| timestamp as f64);
             if let Some((observed, block, block_hash, block_timestamp)) = credit.crossing {
                 let result = sqlx::query(
                     r#"
@@ -956,6 +975,13 @@ impl InvoiceRepository {
                         funded_at_block = $5,
                         funded_at_block_hash = $6,
                         paid_at = to_timestamp($7),
+                        likely_unsolicited_at = CASE
+                            WHEN payer_policy_mode <> 'permissionless'
+                             AND verification_completed_at IS NULL
+                             AND likely_unsolicited_at IS NULL
+                            THEN to_timestamp($8)
+                            ELSE likely_unsolicited_at
+                        END,
                         updated_at = now()
                     WHERE id = $1 AND status = 'created'
                     "#,
@@ -967,6 +993,7 @@ impl InvoiceRepository {
                 .bind(block as i64)
                 .bind(block_hash.as_slice())
                 .bind(block_timestamp as f64)
+                .bind(first_funding)
                 .execute(&mut *tx)
                 .await?;
                 if result.rows_affected() > 0 {
@@ -976,13 +1003,23 @@ impl InvoiceRepository {
                 sqlx::query(
                     r#"
                     UPDATE invoices
-                    SET confirmed_received = $2, uncollected_count = $3, updated_at = now()
+                    SET confirmed_received = $2,
+                        uncollected_count = $3,
+                        likely_unsolicited_at = CASE
+                            WHEN payer_policy_mode <> 'permissionless'
+                             AND verification_completed_at IS NULL
+                             AND likely_unsolicited_at IS NULL
+                            THEN to_timestamp($4)
+                            ELSE likely_unsolicited_at
+                        END,
+                        updated_at = now()
                     WHERE id = $1
                     "#,
                 )
                 .bind(credit.id)
                 .bind(credit.received.to_string())
                 .bind(credit.uncollected)
+                .bind(first_funding)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -1870,5 +1907,116 @@ pub(crate) mod tests {
             repo.release_blocked(Uuid::now_v7()).await,
             Err(ReleasePaymentError::NotFound)
         ));
+    }
+
+    fn transfer(recipient: Address, amount: u64, block: u64, timestamp: u64) -> PaymentObservation {
+        PaymentObservation {
+            block_number: block,
+            block_hash: B256::repeat_byte(block as u8),
+            block_timestamp: timestamp,
+            transaction_hash: B256::repeat_byte(0x80 + block as u8),
+            transaction_index: 0,
+            log_index: 0,
+            sender: Address::repeat_byte(0x99),
+            recipient,
+            amount: U256::from(amount),
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn funding_before_verification_is_flagged_once_and_never_quarantined(pool: PgPool) {
+        let owner = account(&pool, 1).await;
+        let repo = InvoiceRepository::new(pool.clone());
+        let gated = PayerPolicy::VerifiedEmail {
+            expected_email: "alice@example.com".into(),
+        };
+        let mut unverified = issuance_input(owner, "unverified", None);
+        unverified.issuance_snapshot.payer_policy = gated.clone();
+        unverified.payer_policy = gated.clone();
+        let mut verified = issuance_input(owner, "verified", None);
+        verified.issuance_snapshot.payer_policy = gated.clone();
+        verified.payer_policy = gated;
+        let open = issuance_input(owner, "open", None);
+        let unverified = repo.insert_issued(&unverified, None).await.unwrap().row;
+        let verified = repo.insert_issued(&verified, None).await.unwrap().row;
+        let open = repo.insert_issued(&open, None).await.unwrap().row;
+        sqlx::query("UPDATE invoices SET verification_completed_at = now() WHERE id = $1")
+            .bind(verified.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let address = |row: &DbInvoice| Address::from_slice(&row.payment_address);
+        let token = Address::from_slice(&unverified.token_address);
+
+        // A partial transfer to each, all before the deadline.
+        let outcome = repo
+            .apply_finalized_usdc_range(
+                1,
+                token,
+                None,
+                10,
+                B256::repeat_byte(10),
+                1_000,
+                &[
+                    transfer(address(&unverified), 400_000, 10, 1_000),
+                    transfer(address(&verified), 400_000, 10, 1_000),
+                    transfer(address(&open), 400_000, 10, 1_000),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(outcome.funded.is_empty());
+        let flagged = repo.find_by_id(unverified.id).await.unwrap().unwrap();
+        assert_eq!(
+            flagged.likely_unsolicited_at.map(|at| at.timestamp()),
+            Some(1_000)
+        );
+        assert_eq!(flagged.status, "created");
+        assert_eq!(flagged.confirmed_received, "400000");
+        assert_eq!(flagged.payment_address, unverified.payment_address);
+        for row in [&verified, &open] {
+            let row = repo.find_by_id(row.id).await.unwrap().unwrap();
+            assert!(row.likely_unsolicited_at.is_none());
+        }
+
+        // Completing the amount later keeps the first timestamp and funds the
+        // invoice like any other; the address is unchanged and nothing is set
+        // aside.
+        let cursor = Some(IndexerCursor {
+            block: 10,
+            block_hash: B256::repeat_byte(10),
+            block_timestamp: Some(1_000),
+        });
+        let outcome = repo
+            .apply_finalized_usdc_range(
+                1,
+                token,
+                cursor,
+                11,
+                B256::repeat_byte(11),
+                1_100,
+                &[transfer(address(&unverified), 600_000, 11, 1_100)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.funded, [unverified.id]);
+        let funded = repo.find_by_id(unverified.id).await.unwrap().unwrap();
+        assert_eq!(funded.status, "funded");
+        assert_eq!(
+            funded.likely_unsolicited_at.map(|at| at.timestamp()),
+            Some(1_000)
+        );
+        assert_eq!(funded.payment_address, unverified.payment_address);
+        assert_eq!(funded.uncollected_count, 2);
+        let statuses: Vec<String> = sqlx::query_scalar("SELECT DISTINCT status FROM invoices")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for status in statuses {
+            assert!(
+                status.parse::<gateway_core::InvoiceStatus>().is_ok(),
+                "unexpected status {status}"
+            );
+        }
     }
 }

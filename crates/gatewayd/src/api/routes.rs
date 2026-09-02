@@ -16,6 +16,7 @@ use crate::api::customers;
 use crate::api::health;
 use crate::api::invoices;
 use crate::api::payer;
+use crate::api::payer_verification;
 use crate::api::proof;
 use crate::api::status;
 use crate::api::webhooks;
@@ -104,14 +105,41 @@ pub fn router(state: AppState) -> Router {
     // so allowing any browser origin grants exactly what curl already has — and
     // it is what lets a merchant render their own checkout, as the docs invite.
     // This must never be extended to the API-key routes.
+    let payer_session_header = HeaderName::from_static(payer_verification::PAYER_SESSION_HEADER);
     let payer = Router::new()
         .route("/v1/payer/payments/{id}", get(payer::get))
         .route("/v1/payer/payments/{id}/qr", get(payer::qr))
         .route("/v1/payer/payments/{id}/attachment", get(payer::attachment))
+        .route(
+            "/v1/payer/payments/{id}/verify",
+            get(payer_verification::status),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods([Method::GET, Method::HEAD])
+                .allow_headers([payer_session_header.clone()])
+                .max_age(Duration::from_secs(86_400)),
+        );
+
+    // Verification writes send a code to the merchant's customer and mint
+    // sessions, so unlike the reads they answer one browser origin only: the
+    // hosted checkout (product plan §7.1). No `Any` here, ever.
+    let payer_verification = Router::new()
+        .route(
+            "/v1/payer/payments/{id}/verify/email/start",
+            post(payer_verification::start_email),
+        )
+        .route(
+            "/v1/payer/payments/{id}/verify/email/confirm",
+            post(payer_verification::confirm_email),
+        )
+        .layer(RequestBodyLimitLayer::new(8 * 1024))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([state.payer.checkout_origin_header()]))
+                .allow_methods([Method::POST, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, payer_session_header])
                 .max_age(Duration::from_secs(86_400)),
         );
 
@@ -119,6 +147,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .route("/pay/{id}", get(payer::page))
         .merge(payer)
+        .merge(payer_verification)
         .route("/openapi.json", get(openapi::spec))
         .route("/docs", get(openapi::reference))
         .route("/api", get(openapi::reference))
@@ -186,6 +215,8 @@ mod tests {
     use crate::attachments::memory::MemoryObjectStorage;
     use crate::attachments::{AttachmentStore, CLEAN_SCAN, SCAN_STATUS_TAG};
     use crate::attestation::VerificationAttestor;
+    use crate::payer_identity::PayerVerification;
+    use crate::payer_identity::testing::{FakeTenant, OTP};
 
     const KEY: &str = "payday_live_0123456789abcdef0123456789abcdef";
     /// The platform recovery wallet this test deployment is configured with.
@@ -210,6 +241,7 @@ mod tests {
         identity_verifier: Option<auth::Auth0Verifier>,
         factory: Address,
         recovery: Address,
+        payer_verification: Option<PayerVerification>,
     ) -> (AppState, Arc<MemoryObjectStorage>) {
         let storage = Arc::new(MemoryObjectStorage::default());
         let store = AttachmentStore::new(storage.clone(), Duration::from_secs(300));
@@ -227,8 +259,49 @@ mod tests {
             120,
             Some(store),
             Some(attestor()),
+            payer_verification,
         );
         (state, storage)
+    }
+
+    /// A payer audience with its own signing key, and the stand-in tenant
+    /// that mints tokens for it.
+    fn payer_verification() -> (PayerVerification, Arc<FakeTenant>) {
+        let private = rsa::RsaPrivateKey::new(&mut rand_08::thread_rng(), 2048).unwrap();
+        let private_pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
+        let public_pem = private
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        let tenant = Arc::new(FakeTenant {
+            issuer: "https://payer.issuer/".into(),
+            audience: "https://api.payday.sh/payer".into(),
+            client_id: "payday-payer".into(),
+            kid: "payer-key".into(),
+            key: EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap(),
+            started: Default::default(),
+            outage: Default::default(),
+        });
+        let verifier = auth::Auth0Verifier::for_test(
+            "https://payer.issuer/",
+            "https://api.payday.sh/payer",
+            "payday-payer",
+            None,
+            "payer-key",
+            DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
+        );
+        (
+            PayerVerification::new(tenant.clone(), verifier, [0x42; 32]),
+            tenant,
+        )
+    }
+
+    async fn app_with_payer_verification(pool: PgPool) -> (Router, Arc<FakeTenant>) {
+        let (verification, tenant) = payer_verification();
+        let app = build_with(pool, None, Address::ZERO, RECOVERY, Some(verification))
+            .await
+            .router;
+        (app, tenant)
     }
 
     #[derive(Serialize)]
@@ -273,6 +346,16 @@ mod tests {
         factory: Address,
         recovery: Address,
     ) -> TestApp {
+        build_with(pool, identity_verifier, factory, recovery, None).await
+    }
+
+    async fn build_with(
+        pool: PgPool,
+        identity_verifier: Option<auth::Auth0Verifier>,
+        factory: Address,
+        recovery: Address,
+        payer_verification: Option<PayerVerification>,
+    ) -> TestApp {
         let accounts = AccountRepository::new(pool.clone());
         if accounts
             .find_by_identity("https://test.issuer/", "email|test-user")
@@ -292,11 +375,81 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let (state, storage) = test_state(pool, accounts, identity_verifier, factory, recovery);
+        let (state, storage) = test_state(
+            pool,
+            accounts,
+            identity_verifier,
+            factory,
+            recovery,
+            payer_verification,
+        );
         TestApp {
             router: router(state),
             storage,
         }
+    }
+
+    const CHECKOUT_ORIGIN: &str = "http://127.0.0.1:3000";
+    const SESSION_HEADER: &str = "payday-payer-session";
+
+    /// A payer read, with the session header when one is given.
+    fn payer_get(path: &str, session: Option<&str>) -> Request<Body> {
+        let mut request = Request::get(path);
+        if let Some(session) = session {
+            request = request.header(SESSION_HEADER, session);
+        }
+        request.body(Body::empty()).unwrap()
+    }
+
+    /// A verification write from the hosted checkout.
+    fn payer_post(path: &str, session: Option<&str>, body: Option<&Value>) -> Request<Body> {
+        let mut request = Request::post(path)
+            .header(header::ORIGIN, CHECKOUT_ORIGIN)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(session) = session {
+            request = request.header(SESSION_HEADER, session);
+        }
+        request
+            .body(Body::from(body.map(Value::to_string).unwrap_or_default()))
+            .unwrap()
+    }
+
+    async fn create_gated(
+        app: &Router,
+        key: &str,
+        policy: Value,
+        heading: &str,
+    ) -> (String, Value) {
+        let mut body = valid_body();
+        body["heading"] = json!(heading);
+        body["reference"] = json!("INV-9");
+        body["payer_policy"] = policy;
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, key, &body))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        (created["id"].as_str().unwrap().to_owned(), created)
+    }
+
+    /// Start email verification and return the session token.
+    async fn start_session(app: &Router, id: &str) -> String {
+        let started = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{id}/verify/email/start"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::OK);
+        assert_eq!(started.headers()[header::CACHE_CONTROL], "no-store");
+        let started = json_body(started).await;
+        assert!(started["expires_at"].is_string());
+        started["payer_session"].as_str().unwrap().to_owned()
     }
 
     /// A second account with its own key.
@@ -337,7 +490,7 @@ mod tests {
     }
 
     fn payer_access() -> payer::PayerAccess {
-        payer::PayerAccess::new("http://127.0.0.1:3000", None).unwrap()
+        payer::PayerAccess::new("http://127.0.0.1:3000", None, None).unwrap()
     }
 
     fn unix_now() -> u64 {
@@ -803,6 +956,7 @@ mod tests {
             None,
             Address::ZERO,
             RECOVERY,
+            None,
         );
         let app = status_router(state);
 
@@ -1770,7 +1924,14 @@ mod tests {
     async fn authenticated_user_can_rotate_inspect_and_revoke_keys(pool: PgPool) {
         let (verifier, token, replacement_token, revocation_token) = identity_verifier_and_tokens();
         let accounts = AccountRepository::new(pool.clone());
-        let (state, _) = test_state(pool, accounts, Some(verifier), Address::ZERO, RECOVERY);
+        let (state, _) = test_state(
+            pool,
+            accounts,
+            Some(verifier),
+            Address::ZERO,
+            RECOVERY,
+            None,
+        );
         let app = router(state);
         let identity_request = |method: &str, path: &str, body: Body| {
             Request::builder()
@@ -2939,5 +3100,552 @@ mod tests {
         other_account(&pool, OTHER).await;
         let foreign = app.oneshot(proof_request(OTHER)).await.unwrap();
         assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn email_verification_unlocks_only_the_verifying_session(pool: PgPool) {
+        let (app, tenant) = app_with_payer_verification(pool.clone()).await;
+        let (email_id, email_created) = create_gated(
+            &app,
+            "gated-email",
+            json!({"mode": "verified_email", "expected_email": "Alice@Example.com"}),
+            "Email retainer",
+        )
+        .await;
+        let (identity_id, _) = create_gated(
+            &app,
+            "gated-identity",
+            json!({"mode": "verified_identity_unattributed", "expected_email": "bob@example.com"}),
+            "Identity retainer",
+        )
+        .await;
+
+        // The mailbox comes from the merchant's assertion, normalized; the
+        // payer names nothing and learns only the masked hint.
+        let session = start_session(&app, &email_id).await;
+        assert_eq!(*tenant.started.lock().unwrap(), ["alice@example.com"]);
+        let pending = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{email_id}"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        let pending = json_body(pending).await;
+        assert_eq!(pending["content_unlocked"], false);
+        assert_eq!(pending["requirements"]["email"], "pending");
+        assert_eq!(
+            pending["payer_policy"]["expected_email_hint"],
+            "a****@e***.com"
+        );
+        assert!(pending["amount"].is_null());
+        assert!(!pending.to_string().contains("alice@example.com"));
+
+        // One code per invoice per minute, whoever asks.
+        let again = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{email_id}/verify/email/start"),
+                Some(&session),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(again.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(
+            json_body(again).await["error"]["code"],
+            "otp_resend_cooldown"
+        );
+        assert_eq!(tenant.started.lock().unwrap().len(), 1);
+
+        let confirm_path = format!("/v1/payer/payments/{email_id}/verify/email/confirm");
+        let wrong = app
+            .clone()
+            .oneshot(payer_post(
+                &confirm_path,
+                Some(&session),
+                Some(&json!({"otp": "000000"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(wrong).await["error"]["code"], "otp_invalid");
+        let no_session = app
+            .clone()
+            .oneshot(payer_post(&confirm_path, None, Some(&json!({"otp": OTP}))))
+            .await
+            .unwrap();
+        assert_eq!(no_session.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(no_session).await["error"]["code"],
+            "payer_session_invalid"
+        );
+        let bogus = app
+            .clone()
+            .oneshot(payer_post(
+                &confirm_path,
+                Some("not-a-session"),
+                Some(&json!({"otp": OTP})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bogus.status(), StatusCode::UNAUTHORIZED);
+        let malformed = app
+            .clone()
+            .oneshot(payer_post(
+                &confirm_path,
+                Some(&session),
+                Some(&json!({"otp": "12 34"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let unknown_field = app
+            .clone()
+            .oneshot(payer_post(
+                &confirm_path,
+                Some(&session),
+                Some(&json!({"otp": OTP, "email": "mallory@example.com"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let confirmed = app
+            .clone()
+            .oneshot(payer_post(
+                &confirm_path,
+                Some(&session),
+                Some(&json!({"otp": OTP})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        let confirmed = json_body(confirmed).await;
+        assert_eq!(confirmed["requirements"]["email"], "approved");
+        assert_eq!(confirmed["requirements"]["complete"], true);
+        assert_eq!(confirmed["identity_start_available"], false);
+        // The code is spent with the attempt.
+        let spent = app
+            .clone()
+            .oneshot(payer_post(
+                &confirm_path,
+                Some(&session),
+                Some(&json!({"otp": OTP})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(spent.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(spent).await["error"]["code"],
+            "verification_not_started"
+        );
+
+        // The verifying session sees everything; the bare link still does
+        // not, even though the invoice as a whole is now complete.
+        let unlocked = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{email_id}"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unlocked.status(), StatusCode::OK);
+        let unlocked = json_body(unlocked).await;
+        assert_eq!(unlocked["content_unlocked"], true);
+        assert_eq!(unlocked["address"], email_created["address"]);
+        assert_eq!(unlocked["amount"], "1.000000");
+        assert_eq!(unlocked["invoice"]["bill_to"]["name"], "Globex");
+        assert_eq!(unlocked["invoice"]["reference"], "INV-9");
+        assert!(
+            unlocked["payment_uri"]
+                .as_str()
+                .unwrap()
+                .starts_with("ethereum:")
+        );
+        let bare = app
+            .clone()
+            .oneshot(payer_get(&format!("/v1/payer/payments/{email_id}"), None))
+            .await
+            .unwrap();
+        let bare = json_body(bare).await;
+        assert_eq!(bare["content_unlocked"], false);
+        assert_eq!(bare["requirements"]["email"], "approved");
+        assert!(bare["address"].is_null());
+        let stale = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{email_id}"),
+                Some("expired-or-forged"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json_body(stale).await["content_unlocked"], false);
+
+        // The QR needs that session, and only that session.
+        let qr = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{email_id}/qr"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(qr.status(), StatusCode::OK);
+        assert!(
+            qr.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("image/svg+xml")
+        );
+        let qr_bare = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{email_id}/qr"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(qr_bare.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(qr_bare).await["error"]["code"],
+            "verification_required"
+        );
+
+        // Another invoice is a stranger to this session.
+        let other = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{identity_id}"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        let other = json_body(other).await;
+        assert_eq!(other["content_unlocked"], false);
+        assert_eq!(other["requirements"]["email"], "pending");
+        let other_qr = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{identity_id}/qr"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(other_qr.status(), StatusCode::UNAUTHORIZED);
+        let other_status = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{identity_id}/verify"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(other_status.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(other_status).await["error"]["code"],
+            "payer_session_invalid"
+        );
+        let own_status = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{email_id}/verify"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(own_status).await["requirements"]["complete"],
+            true
+        );
+
+        // The merchant sees the invoice complete; settlement may proceed.
+        let merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/payments/{email_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(merchant["verification_completed_at"].is_string());
+
+        // An identity mode proves the mailbox the same way but stays
+        // incomplete, locked, and unsettleable until its identity facts.
+        let identity_session = start_session(&app, &identity_id).await;
+        assert_eq!(
+            *tenant.started.lock().unwrap(),
+            ["alice@example.com", "bob@example.com"]
+        );
+        let identity_confirmed = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{identity_id}/verify/email/confirm"),
+                Some(&identity_session),
+                Some(&json!({"otp": OTP})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(identity_confirmed.status(), StatusCode::OK);
+        let identity_confirmed = json_body(identity_confirmed).await;
+        assert_eq!(identity_confirmed["requirements"]["email"], "approved");
+        assert_eq!(identity_confirmed["requirements"]["document"], "pending");
+        assert_eq!(identity_confirmed["requirements"]["liveness"], "pending");
+        assert_eq!(
+            identity_confirmed["requirements"]["identity_match"],
+            "not_required"
+        );
+        assert_eq!(identity_confirmed["requirements"]["complete"], false);
+        let identity_read = json_body(
+            app.clone()
+                .oneshot(payer_get(
+                    &format!("/v1/payer/payments/{identity_id}"),
+                    Some(&identity_session),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(identity_read["content_unlocked"], false);
+        assert!(identity_read["address"].is_null());
+        let identity_merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/payments/{identity_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(identity_merchant["verification_completed_at"].is_null());
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn email_verification_refuses_open_closed_and_unconfigured_invoices(pool: PgPool) {
+        let (app, tenant) = app_with_payer_verification(pool.clone()).await;
+        let open = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "open", &valid_body()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let open_id = open["id"].as_str().unwrap();
+        let refused = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{open_id}/verify/email/start"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "verification_not_required"
+        );
+        let open_status = json_body(
+            app.clone()
+                .oneshot(payer_get(
+                    &format!("/v1/payer/payments/{open_id}/verify"),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(open_status["requirements"]["complete"], true);
+        assert_eq!(open_status["requirements"]["email"], "not_required");
+
+        // Verification after the deadline cannot revive anything, so it is
+        // not even started.
+        let (expired_id, _) = create_gated(
+            &app,
+            "expired",
+            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            "Too late",
+        )
+        .await;
+        sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = $1")
+            .bind(Uuid::parse_str(expired_id.strip_prefix("pay_").unwrap()).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let too_late = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{expired_id}/verify/email/start"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(too_late.status(), StatusCode::GONE);
+        assert!(tenant.started.lock().unwrap().is_empty());
+
+        let unknown = app
+            .clone()
+            .oneshot(payer_post(
+                "/v1/payer/payments/pay_not-an-id/verify/email/start",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+
+        // A tenant outage is reported as such, not as a wrong code.
+        let (gated_id, _) = create_gated(
+            &app,
+            "outage",
+            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            "Outage",
+        )
+        .await;
+        *tenant.outage.lock().unwrap() = true;
+        let down = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{gated_id}/verify/email/start"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(down.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            json_body(down).await["error"]["code"],
+            "identity_provider_unavailable"
+        );
+
+        // Without a payer audience the routes say so; the reads still work.
+        let plain = build(pool.clone(), None, Address::ZERO, RECOVERY)
+            .await
+            .router;
+        let unavailable = plain
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{gated_id}/verify/email/start"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(unavailable).await["error"]["code"],
+            "verification_unavailable"
+        );
+        let read = plain
+            .oneshot(payer_get(&format!("/v1/payer/payments/{gated_id}"), None))
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::OK);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn payer_writes_answer_cors_for_the_hosted_checkout_only(pool: PgPool) {
+        let (app, _) = app_with_payer_verification(pool).await;
+        let path = "/v1/payer/payments/pay_x/verify/email/start";
+        let preflight = |origin: &str| {
+            Request::options(path)
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "content-type, payday-payer-session",
+                )
+                .body(Body::empty())
+                .unwrap()
+        };
+        let allowed = app
+            .clone()
+            .oneshot(preflight(CHECKOUT_ORIGIN))
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let headers = allowed.headers();
+        assert_eq!(
+            headers[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            CHECKOUT_ORIGIN
+        );
+        let methods = headers[header::ACCESS_CONTROL_ALLOW_METHODS]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(methods.contains("POST"), "{methods}");
+        assert!(!methods.contains("GET"), "{methods}");
+        let allowed_headers = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        for name in ["content-type", "payday-payer-session"] {
+            assert!(allowed_headers.contains(name), "{allowed_headers}");
+        }
+        assert!(
+            !allowed_headers.contains("authorization"),
+            "{allowed_headers}"
+        );
+
+        // Foreign origins get no allow header at all: never `*`, never an
+        // echo.
+        for origin in ["https://evil.example", "http://127.0.0.1:3001", "null"] {
+            let foreign = app.clone().oneshot(preflight(origin)).await.unwrap();
+            assert!(
+                foreign
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{origin} was allowed: {:?} {:?}",
+                foreign.status(),
+                foreign.headers()
+            );
+        }
+        let foreign_post = app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header(header::ORIGIN, "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            foreign_post
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+
+        // The reads stay open to every origin and now admit the session
+        // header, so a self-hosted checkout can present it.
+        let read_preflight = app
+            .oneshot(
+                Request::options("/v1/payer/payments/pay_x")
+                    .header(header::ORIGIN, "https://merchant.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "payday-payer-session",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_preflight.status(), StatusCode::OK);
+        assert_eq!(
+            read_preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "*"
+        );
+        assert!(
+            read_preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("payday-payer-session")
+        );
     }
 }

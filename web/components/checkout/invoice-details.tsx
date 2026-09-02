@@ -11,7 +11,14 @@ import { AttachmentLink } from "./attachment-link";
  * Party `details` are bounded free text the merchant wrote; they are rendered
  * verbatim with line breaks preserved and are never parsed.
  */
-export function InvoiceDetails({ payment }: { payment: UnlockedPayerPayment }) {
+export function InvoiceDetails({
+  payment,
+  payerSession = null,
+}: {
+  payment: UnlockedPayerPayment;
+  /** This tab's session, which the attachment fetch must present for a gated invoice. */
+  payerSession?: string | null;
+}) {
   const invoice = payment.invoice;
 
   return (
@@ -55,7 +62,11 @@ export function InvoiceDetails({ payment }: { payment: UnlockedPayerPayment }) {
 
       {invoice?.attachment ? (
         <div className="mt-4">
-          <AttachmentLink paymentId={payment.id} attachment={invoice.attachment} />
+          <AttachmentLink
+            paymentId={payment.id}
+            attachment={invoice.attachment}
+            payerSession={payerSession}
+          />
         </div>
       ) : null}
     </section>

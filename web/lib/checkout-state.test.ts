@@ -201,6 +201,69 @@ describe("checkoutView for a gated invoice", () => {
     const view = checkoutView(lockedPayment(), open);
     expect(`${view.label} ${view.title} ${view.detail}`).not.toMatch(/25|0x9a3f|USDC|Globex/);
   });
+
+  it("waits for the code once this tab asked for one", () => {
+    const view = checkoutView(lockedPayment(), { ...open, emailCodeSent: true });
+    expect(view.phase).toBe("email_pending");
+    expect(view.detail).toContain("a****@e***.com");
+    expect(view.showInstructions).toBe(false);
+    expect(`${view.label} ${view.title} ${view.detail}`).not.toMatch(/25|0x9a3f|USDC|Globex/);
+  });
+
+  it("asks for the identity check once the session's email is approved but the policy is not met", () => {
+    const matched = checkoutView(
+      lockedPayment({
+        payer_policy: { mode: "verified_identity", expected_email_hint: "a****@e***.com" },
+        requirements: {
+          email: "approved",
+          document: "pending",
+          liveness: "pending",
+          identity_match: "pending",
+          complete: false,
+        },
+      }),
+      { ...open, emailCodeSent: true },
+    );
+    expect(matched.phase).toBe("identity_required");
+    expect(matched.detail).toMatch(/person it names/);
+
+    const unattributed = checkoutView(
+      lockedPayment({
+        payer_policy: {
+          mode: "verified_identity_unattributed",
+          expected_email_hint: "a****@e***.com",
+        },
+        requirements: {
+          email: "approved",
+          document: "pending",
+          liveness: "pending",
+          identity_match: "not_required",
+          complete: false,
+        },
+      }),
+      open,
+    );
+    expect(unattributed.phase).toBe("identity_required");
+    expect(unattributed.detail).not.toMatch(/person it names/);
+  });
+
+  it("still asks the bare link to verify after another session completed the invoice", () => {
+    // The API reports the invoice's own completion without a session; this
+    // tab has no session, so it must verify itself.
+    const view = checkoutView(
+      lockedPayment({
+        requirements: {
+          email: "approved",
+          document: "not_required",
+          liveness: "not_required",
+          identity_match: "not_required",
+          complete: true,
+        },
+      }),
+      open,
+    );
+    expect(view.phase).toBe("verification_required");
+  });
 });
 
 describe("unlockedPayment", () => {

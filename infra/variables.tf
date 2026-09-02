@@ -115,6 +115,27 @@ variable "dashboard_auth0_client_id" {
   default     = ""
 }
 
+variable "payer_auth0_audience" {
+  description = <<-EOT
+    Identifier of the Auth0 API payers verify their mailbox against
+    (https://api.payday.sh/payer); see docs/authentication.md. Leave empty
+    with payer_auth0_client_id until both exist: the payer settings are then
+    not passed to the task at all and verification answers unavailable.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "payer_auth0_client_id" {
+  description = "Public client ID of the Auth0 Native application gatewayd exchanges payer codes with (auth0/payer.tf)."
+  type        = string
+  default     = ""
+  validation {
+    condition     = (var.payer_auth0_client_id == "") == (var.payer_auth0_audience == "")
+    error_message = "payer_auth0_audience and payer_auth0_client_id must be set together."
+  }
+}
+
 variable "route53_zone_id" {
   description = "ID of the public Route53 hosted zone containing the API domain_name."
   type        = string

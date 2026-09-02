@@ -312,6 +312,13 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
 - `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
   Auth0 account-management settings (see `docs/authentication.md`)
+- `PAYDAY_PAYER_AUTH0_ISSUER`, `PAYDAY_PAYER_AUTH0_AUDIENCE`,
+  `PAYDAY_PAYER_AUTH0_CLIENT_ID`, `PAYDAY_PAYER_REF_MASTER_KEY` — the payer
+  email-verification audience and the payer-reference key, set together or not
+  at all; `just dev` and `just e2e` point them at the development provider's
+  `payday-payer-local` client and audience
+- `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
+  verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
 - `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
   issuer; non-loopback HTTP issuers remain rejected
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider

@@ -60,6 +60,11 @@ export PAYDAY_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
 export PAYDAY_AUTH0_CLIENT_ID="payday-cli-local"
 export PAYDAY_AUTH0_AUDIENCE="payday-api-local"
 export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="payday-dashboard-local"
+export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
+export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
+export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
+export PAYDAY_PAYER_REF_MASTER_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+export PAYDAY_HOSTED_CHECKOUT_ORIGIN="$API_URL"
 export PAYDAY_ATTESTATION_SIGNER_KEY="$ATTESTATION_SIGNER_KEY"
 # MinIO stands in for the S3 attachment bucket; see start_minio below.
 export PAYDAY_ATTACHMENT_BUCKET="$ATTACHMENT_BUCKET"
@@ -721,6 +726,93 @@ assert_eq null "$(jq -r .address <<<"$gated_payer")" "gated invoice revealed its
 assert_eq "Gated retainer" "$(jq -r .heading <<<"$gated_payer")" "gated invoice hides its heading"
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   "$API_URL/v1/payer/payments/$gated_id/attachment")" "gated invoice served its attachment"
+
+# Payer email verification against the development identity provider: the
+# gateway sends the code to the merchant-asserted mailbox and exchanges it on
+# the payer's behalf; the payer supplies nothing but the code.
+verify_payer_email() {
+  local id=$1 started session
+  started="$(curl --fail --silent --request POST --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" \
+    "$API_URL/v1/payer/payments/$id/verify/email/start")"
+  session="$(jq -er .payer_session <<<"$started")"
+  assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+    --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
+    --data '{"otp":"000000"}' "$API_URL/v1/payer/payments/$id/verify/email/confirm")" \
+    "a wrong code was accepted"
+  assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+    --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
+    --data "$(jq -cn --arg otp "$PAYDAY_DEV_IDENTITY_OTP" '{otp: $otp}')" \
+    "$API_URL/v1/payer/payments/$id/verify/email/confirm")" \
+    "the right code was not accepted"
+  echo "$session"
+}
+
+echo "Testing that a payment before email verification waits on the same address until verified"
+gated_address="$(jq -r .address <<<"$gated")"
+gated_before="$(token_balance "$BENEFICIARY_EXACT")"
+send_usdc "$gated_address" 2000000
+wait_for_invoice "$gated_id" '.received_base_units == "2000000" and .status == "paid"' \
+  "pre-verification payment credited"
+# Several indexer and sweep cycles pass; the live claim is gated in SQL.
+sleep 3
+gated_waiting="$(get_invoice "$gated_id")"
+assert_eq paid "$(jq -r .status <<<"$gated_waiting")" "unverified invoice was swept"
+assert_eq 2000000 "$(token_balance "$gated_address")" "unverified funds left the payment address"
+[[ "$(jq -r .likely_unsolicited_at <<<"$gated_waiting")" != null ]] || {
+  echo "pre-verification funding was not flagged as likely unsolicited" >&2
+  exit 1
+}
+assert_eq null "$(jq -r .verification_completed_at <<<"$gated_waiting")" "invoice completed without verification"
+gated_session="$(verify_payer_email "$gated_id")"
+gated_unlocked="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
+  "$API_URL/v1/payer/payments/$gated_id")"
+assert_eq true "$(jq -r .content_unlocked <<<"$gated_unlocked")" "verified session did not unlock the invoice"
+assert_eq "$gated_address" "$(jq -r .address <<<"$gated_unlocked")" "verified session saw a different address"
+assert_eq "Payday E2E Customer" "$(jq -r .invoice.bill_to.name <<<"$gated_unlocked")" "verified session did not see the document"
+assert_eq null "$(curl --fail --silent "$API_URL/v1/payer/payments/$gated_id" | jq -r .address)" \
+  "the bare link unlocked after another session verified"
+# The invoice is already fully funded, so even the verified session gets no
+# QR: the address must not be offered for a second payment. The bare link is
+# refused earlier, for want of a session.
+assert_eq 410 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header "Payday-Payer-Session: $gated_session" "$API_URL/v1/payer/payments/$gated_id/qr")" \
+  "a funded invoice offered its QR to the verified session"
+assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "$API_URL/v1/payer/payments/$gated_id/qr")" "the bare link fetched the QR"
+wait_for_status "$gated_id" settled
+assert_eq "$((gated_before + 2000000))" "$(token_balance "$BENEFICIARY_EXACT")" \
+  "verified invoice did not settle to the beneficiary"
+assert_payment_deployed_and_empty "$gated_address"
+[[ "$(get_invoice "$gated_id" | jq -r .verification_completed_at)" != null ]] || {
+  echo "settled invoice does not record its verification completion" >&2
+  exit 1
+}
+
+echo "Testing that an unverified invoice's balance moves to recovery at expiry"
+# Chain time already runs ahead of the wall clock by the earlier expiry test,
+# so the deadline must clear that gap before it is pushed past.
+unverified_body="$(jq -c '. + {payer_policy: {mode: "verified_email", expected_email: "carol@example.test"}}' \
+  <<<"$(invoice_body 1 "$BENEFICIARY_EXPIRED" 1500)")"
+unverified="$(curl --fail --silent \
+  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Idempotency-Key: unverified-expiry-$run_id" --data "$unverified_body" "$API_URL/v1/payments")"
+unverified_id="$(jq -er .id <<<"$unverified")"
+unverified_address="$(jq -r .address <<<"$unverified")"
+recovery_before="$(token_balance "$RECOVERY")"
+send_usdc "$unverified_address" 1000000
+wait_for_invoice "$unverified_id" '.received_base_units == "1000000" and .status == "paid"' \
+  "unverified payment credited"
+cast rpc --rpc-url "$RPC_URL" evm_increaseTime 1600 >/dev/null
+wait_for_status "$unverified_id" returned
+assert_eq "$((recovery_before + 1000000))" "$(token_balance "$RECOVERY")" \
+  "unverified expired balance did not reach the Payday recovery wallet"
+assert_payment_deployed_and_empty "$unverified_address"
+wait_for_sql 1 "$(recovery_ledger_query "$unverified_id" expired 1000000)" \
+  "unverified expired balance was not recorded in the recovery ledger"
+# Verification after expiry cannot revive settlement, so it is not even started.
+assert_eq 410 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  "$API_URL/v1/payer/payments/$unverified_id/verify/email/start")" \
+  "verification started on an expired invoice"
 
 invoice_pdf="$logs/invoice.pdf"
 api_json GET "/v1/payments/$documented_id/invoice.pdf" "" --output "$invoice_pdf"

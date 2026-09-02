@@ -234,6 +234,15 @@ impl InvoiceRepository {
     /// rows transition to `deploying`; every claimed row's `last_attempt_at`
     /// gates its reclaim after a crash or a failed submission. Row locks are
     /// released before any chain RPC begins.
+    ///
+    /// This query is the verification gate (product plan §4.8), not any
+    /// worker: a live funded invoice is claimable only when its policy is
+    /// permissionless or its verification has completed, and only while the
+    /// finalized chain clock has not passed its deadline. Closed invoices
+    /// (`expired`, `fulfilled`, `recovered`) are always claimable so that
+    /// their balance reaches recovery whatever the verification state. A
+    /// `deploying` row was claimed while live and stays reclaimable after the
+    /// deadline: the contract itself routes an expired deployment to recovery.
     pub async fn claim_sweep_batch(
         &self,
         chain_id: u64,
@@ -245,18 +254,38 @@ impl InvoiceRepository {
             r#"
             WITH candidates AS (
                 SELECT id
-                FROM invoices
-                WHERE chain_id = $1
-                  AND uncollected_count > 0
-                  AND sweep_batch_id IS NULL
-                  AND blocked_reason IS NULL
-                  AND status = ANY($5)
+                FROM invoices AS invoice
+                WHERE invoice.chain_id = $1
+                  AND invoice.uncollected_count > 0
+                  AND invoice.sweep_batch_id IS NULL
+                  AND invoice.blocked_reason IS NULL
                   AND (
-                    last_attempt_at IS NULL
-                    OR now() >= last_attempt_at
-                        + make_interval(secs => LEAST($3 * pow(2, sweep_attempts), $4))
+                    invoice.status IN ('expired', 'fulfilled', 'recovered')
+                    OR (
+                        invoice.status IN ('funded', 'deploying')
+                        AND (
+                            invoice.payer_policy_mode = 'permissionless'
+                            OR invoice.verification_completed_at IS NOT NULL
+                        )
+                        AND (
+                            invoice.status = 'deploying'
+                            OR invoice.expiration_timestamp >= COALESCE(
+                                (
+                                    SELECT last_block_timestamp
+                                    FROM indexer_cursor
+                                    WHERE chain_id = invoice.chain_id
+                                ),
+                                0
+                            )
+                        )
+                    )
                   )
-                ORDER BY id
+                  AND (
+                    invoice.last_attempt_at IS NULL
+                    OR now() >= invoice.last_attempt_at
+                        + make_interval(secs => LEAST($3 * pow(2, invoice.sweep_attempts), $4))
+                  )
+                ORDER BY invoice.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $2
             )
@@ -273,7 +302,6 @@ impl InvoiceRepository {
         .bind(limit)
         .bind(backoff_base_secs)
         .bind(backoff_cap_secs)
-        .bind(sweepable_statuses())
         .fetch_all(self.pool())
         .await
     }
@@ -804,6 +832,10 @@ mod tests {
     const SETTLEMENT_TIMESTAMP: u64 = 1_800_000_030;
 
     async fn insert_invoice(pool: &PgPool, amount: u64) -> Invoice {
+        insert_invoice_with(pool, amount, PayerPolicy::Permissionless).await
+    }
+
+    async fn insert_invoice_with(pool: &PgPool, amount: u64, policy: PayerPolicy) -> Invoice {
         let account_id = Uuid::from_u128(1);
         sqlx::query(
             r#"INSERT INTO accounts (id, api_key_hash, api_key_hint)
@@ -828,7 +860,7 @@ mod tests {
         let snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
-            PayerPolicy::Permissionless,
+            policy,
             factory,
             ChainId(CHAIN_ID),
             token,
@@ -1114,5 +1146,164 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].amount, "50");
         assert_eq!(open_batches(&pool).await, 0);
+    }
+
+    /// The invoice's deadline, as `insert_invoice_with` issues it.
+    const EXPIRATION: u64 = 1_900_000_000;
+
+    fn gated() -> PayerPolicy {
+        PayerPolicy::VerifiedEmail {
+            expected_email: "alice@example.com".into(),
+        }
+    }
+
+    /// Finalized transfers reached the amount and are waiting to be collected.
+    async fn fund(pool: &PgPool, invoice: &Invoice) {
+        sqlx::query(
+            "UPDATE invoices SET status = 'funded', confirmed_received = amount, uncollected_count = 1 WHERE id = $1",
+        )
+        .bind(invoice.id.0)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The chain clock as the indexer last recorded it.
+    async fn set_finalized_clock(pool: &PgPool, timestamp: u64) {
+        sqlx::query(
+            r#"
+            INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash, last_block_timestamp)
+            VALUES ($1, $2, 1, $3, $4)
+            ON CONFLICT (chain_id) DO UPDATE SET last_block_timestamp = EXCLUDED.last_block_timestamp
+            "#,
+        )
+        .bind(CHAIN_ID as i64)
+        .bind([0xe7u8; 20].as_slice())
+        .bind([0x11u8; 32].as_slice())
+        .bind(timestamp as i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn complete_verification(pool: &PgPool, invoice: &Invoice) {
+        sqlx::query("UPDATE invoices SET verification_completed_at = now() WHERE id = $1")
+            .bind(invoice.id.0)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn claimed(repo: &InvoiceRepository) -> Vec<Uuid> {
+        repo.claim_sweep_batch(CHAIN_ID, 10, 1.0, 60.0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    async fn status(pool: &PgPool, invoice: &Invoice) -> String {
+        sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice.id.0)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn permissionless_live_invoice_is_claimable(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice(&pool, 100).await;
+        fund(&pool, &invoice).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "deploying");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn verified_live_invoice_without_completion_is_not_claimable(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+
+        assert!(claimed(&repo).await.is_empty());
+        assert_eq!(status(&pool, &invoice).await, "funded");
+        // The funds are queued, not quarantined: the row still counts them.
+        let uncollected: i32 =
+            sqlx::query_scalar("SELECT uncollected_count FROM invoices WHERE id = $1")
+                .bind(invoice.id.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(uncollected, 1);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn verified_live_invoice_after_completion_is_claimable(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+        assert!(claimed(&repo).await.is_empty());
+
+        complete_verification(&pool, &invoice).await;
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "deploying");
+        // Once claimed, a deploying row stays reclaimable after the deadline
+        // passes: the contract routes it to recovery if it executes late.
+        set_finalized_clock(&pool, EXPIRATION + 60).await;
+        sqlx::query(
+            "UPDATE invoices SET last_attempt_at = now() - interval '1 hour' WHERE id = $1",
+        )
+        .bind(invoice.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn expired_unverified_invoice_is_claimable_for_recovery(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        sqlx::query(
+            "UPDATE invoices SET status = 'expired', confirmed_received = '40', uncollected_count = 1 WHERE id = $1",
+        )
+        .bind(invoice.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_finalized_clock(&pool, EXPIRATION + 60).await;
+
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "expired");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn verification_after_expiry_does_not_create_live_claim(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        // The finalized clock has passed the deadline; the indexer's expiry
+        // pass may not have flipped the row yet.
+        set_finalized_clock(&pool, EXPIRATION + 1).await;
+        complete_verification(&pool, &invoice).await;
+
+        assert!(claimed(&repo).await.is_empty());
+        assert_eq!(status(&pool, &invoice).await, "funded");
+
+        // Expiry, not verification, is what makes it claimable, and only for
+        // recovery: the row is claimed as `expired`, never promoted to
+        // `deploying`.
+        sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = $1")
+            .bind(invoice.id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "expired");
     }
 }

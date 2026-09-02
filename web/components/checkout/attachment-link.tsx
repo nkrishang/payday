@@ -22,16 +22,22 @@ type LinkState =
 export function AttachmentLink({
   paymentId,
   attachment,
+  payerSession = null,
 }: {
   paymentId: string;
   attachment: AttachmentDescriptor;
+  /** This tab's session; a gated invoice's descriptor is minted only for it. */
+  payerSession?: string | null;
 }) {
   const [state, setState] = useState<LinkState>({ status: "idle" });
 
   const open = async () => {
     setState({ status: "fetching" });
     try {
-      const descriptor = await payerClient.payments.attachment(paymentId);
+      const descriptor =
+        payerSession === null
+          ? await payerClient.payments.attachment(paymentId)
+          : await payerClient.payments.attachment(paymentId, payerSession);
       if (!descriptor.download_url) {
         throw new Error("The gateway returned no download link");
       }

@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use gateway_core::ChainId;
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
-    ProofRepository, WebhookRepository,
+    PayerSessionRepository, ProofRepository, WebhookRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use crate::api::error::ApiError;
 use crate::api::{Auth0Verifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
+use crate::payer_identity::PayerVerification;
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
 #[derive(Clone)]
@@ -23,7 +24,11 @@ pub struct AppState {
     pub attachments: AttachmentRepository,
     pub customers: CustomerRepository,
     pub proofs: ProofRepository,
+    pub payer_sessions: PayerSessionRepository,
     pub identity_verifier: Option<Auth0Verifier>,
+    /// The payer audience; `None` leaves gated invoices unverifiable and the
+    /// email routes answering `verification_unavailable`.
+    pub payer_verification: Option<PayerVerification>,
     pub chain_id: ChainId,
     pub factory_address: Address,
     pub usdc_address: Address,
@@ -59,16 +64,19 @@ impl AppState {
         status_stale_seconds: u64,
         attachment_store: Option<AttachmentStore>,
         attestor: Option<VerificationAttestor>,
+        payer_verification: Option<PayerVerification>,
     ) -> Self {
         let pool = repo.pool().clone();
         Self {
             webhooks: WebhookRepository::new(pool.clone()),
             attachments: AttachmentRepository::new(pool.clone()),
             customers: CustomerRepository::new(pool.clone()),
-            proofs: ProofRepository::new(pool),
+            proofs: ProofRepository::new(pool.clone()),
+            payer_sessions: PayerSessionRepository::new(pool),
             repo,
             accounts,
             identity_verifier,
+            payer_verification,
             chain_id,
             factory_address,
             usdc_address,

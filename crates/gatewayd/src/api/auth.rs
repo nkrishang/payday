@@ -26,8 +26,10 @@ const AUTHENTICATION_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 const CLOCK_SKEW: Duration = Duration::from_secs(30);
 const EMAIL_OTP_METHOD: &str = "email_otp";
 
-/// A fresh email-OTP authentication from the CLI application: the only
-/// credential that may issue or revoke API keys.
+/// A fresh email-OTP authentication from the verifier's own application. For
+/// the merchant audience that is the CLI, the only credential that may issue
+/// or revoke API keys; for the payer audience it is the proof that the
+/// merchant-asserted mailbox was just opened.
 #[derive(Clone, Debug)]
 pub struct Identity {
     pub issuer: String,

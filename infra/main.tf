@@ -28,6 +28,19 @@ locals {
   dashboard_environment = var.dashboard_auth0_client_id == "" ? [] : [
     { name = "PAYDAY_DASHBOARD_AUTH0_CLIENT_ID", value = var.dashboard_auth0_client_id }
   ]
+  # Payer email verification needs its own Auth0 API and application (see
+  # docs/authentication.md). Until both identifiers exist the settings are
+  # omitted as a group, and gatewayd answers verification_unavailable.
+  payer_verification_enabled = var.payer_auth0_audience != "" && var.payer_auth0_client_id != ""
+  payer_environment = local.payer_verification_enabled ? [
+    { name = "PAYDAY_PAYER_AUTH0_ISSUER", value = var.auth0_issuer },
+    { name = "PAYDAY_PAYER_AUTH0_AUDIENCE", value = var.payer_auth0_audience },
+    { name = "PAYDAY_PAYER_AUTH0_CLIENT_ID", value = var.payer_auth0_client_id },
+    { name = "PAYDAY_HOSTED_CHECKOUT_ORIGIN", value = local.checkout_base_url }
+  ] : []
+  payer_secrets = local.payer_verification_enabled ? [
+    { name = "PAYDAY_PAYER_REF_MASTER_KEY", valueFrom = aws_secretsmanager_secret.payer_ref_master_key.arn }
+  ] : []
 }
 
 resource "aws_vpc" "this" {
@@ -191,6 +204,17 @@ resource "aws_secretsmanager_secret_version" "webhook_encryption_key" {
   secret_string = random_id.webhook_encryption_key.b64_std
 }
 
+# Derives the merchant-scoped payer references; rotating it unlinks every
+# stored identity credential from the mailboxes that earned them.
+resource "random_id" "payer_ref_master_key" { byte_length = 32 }
+resource "aws_secretsmanager_secret" "payer_ref_master_key" {
+  name = "${var.name}/payer-ref-master-key"
+}
+resource "aws_secretsmanager_secret_version" "payer_ref_master_key" {
+  secret_id     = aws_secretsmanager_secret.payer_ref_master_key.id
+  secret_string = random_id.payer_ref_master_key.b64_std
+}
+
 resource "random_password" "admin_bearer" {
   length  = 48
   special = false
@@ -312,7 +336,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn] }] })
 }
 resource "aws_iam_role_policy" "status_secrets" {
   role   = aws_iam_role.status_execution.id
@@ -620,15 +644,15 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
-    ], local.dashboard_environment),
+    ], local.dashboard_environment, local.payer_environment),
     # The API verifies the deployed contract generation at startup, so it reads
     # the chain through the same RPC secret as the indexer.
-    secrets = [
+    secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
       { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
-    ],
+    ], local.payer_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 

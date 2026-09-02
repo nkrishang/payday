@@ -17,9 +17,14 @@ precondition fails the plan until it is set.
 The API task also requires an externally configured Auth0 tenant issuer, API
 audience, and Native application client ID, plus the merchant dashboard's
 Single Page Application client ID once it exists (`dashboard_auth0_client_id`;
-while empty, the variable is not passed to the task at all). Terraform passes
-these non-secret identifiers to ECS; embedded email OTP, connection, and
-dashboard application setup are documented in `docs/authentication.md`.
+while empty, the variable is not passed to the task at all), and the payer
+verification API and Native application once they exist
+(`payer_auth0_audience` and `payer_auth0_client_id`, set together; while
+empty, the payer settings and the generated `PAYDAY_PAYER_REF_MASTER_KEY`
+secret are not passed to the task and verification is unavailable). Terraform
+passes these non-secret identifiers to ECS; embedded email OTP, connection,
+dashboard, and payer application setup are documented in
+`docs/authentication.md`.
 
 The same ALB and certificate serve `payment_domain_name` and
 `status_domain_name`. The status hostname routes to an independent ECS service

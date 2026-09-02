@@ -51,11 +51,13 @@ start_postgres() {
     -e POSTGRES_USER=payday -e POSTGRES_PASSWORD="$postgres_password" -e POSTGRES_DB=gateway \
     -p "127.0.0.1:${pg_port}:5432" "$postgres_image" >/dev/null
   postgres_started=true
-  for _ in {1..60}; do
-    docker exec "$container" pg_isready -U payday -d gateway >/dev/null 2>&1 && break
+  # Probe over TCP: the image's bootstrap runs a temporary server on the Unix
+  # socket only, which a socket probe would mistake for the real one.
+  for _ in {1..120}; do
+    docker exec "$container" pg_isready -h 127.0.0.1 -U payday -d gateway >/dev/null 2>&1 && break
     sleep .25
   done
-  docker exec "$container" pg_isready -U payday -d gateway >/dev/null 2>&1 || {
+  docker exec "$container" pg_isready -h 127.0.0.1 -U payday -d gateway >/dev/null 2>&1 || {
     docker logs "$container" >&2
     echo "PostgreSQL did not become ready" >&2
     exit 1
@@ -139,6 +141,15 @@ load_local_env() {
   # local proof verification; production signs with a KMS key instead.
   export PAYDAY_ATTESTATION_SIGNER_KEY="${PAYDAY_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
   export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="${PAYDAY_DASHBOARD_AUTH0_CLIENT_ID:-payday-dashboard-local}"
+  # Payer email verification against the same development provider, which
+  # serves the payer client and audience next to the merchant ones.
+  export PAYDAY_PAYER_AUTH0_ISSUER="${PAYDAY_PAYER_AUTH0_ISSUER:-$PAYDAY_AUTH0_ISSUER}"
+  export PAYDAY_PAYER_AUTH0_AUDIENCE="${PAYDAY_PAYER_AUTH0_AUDIENCE:-payday-payer-local}"
+  export PAYDAY_PAYER_AUTH0_CLIENT_ID="${PAYDAY_PAYER_AUTH0_CLIENT_ID:-payday-payer-local}"
+  # A fixed local key: payer references derived here never leave the developer's database.
+  export PAYDAY_PAYER_REF_MASTER_KEY="${PAYDAY_PAYER_REF_MASTER_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
+  # The Next.js dev server (`just web`) is the hosted checkout locally.
+  export PAYDAY_HOSTED_CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-http://127.0.0.1:3002}"
 }
 
 # Both services compare the deployed runtime bytecode with these hashes at

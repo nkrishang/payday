@@ -190,33 +190,69 @@ pub struct VerificationRequirementsResponse {
     pub complete: bool,
 }
 
+/// Which facts one payer session has established. Each is independent
+/// (product plan §3.2); the policy mode decides which ones matter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerificationFacts {
+    pub email: bool,
+    pub document: bool,
+    pub liveness: bool,
+    pub identity_match: bool,
+}
+
+impl VerificationFacts {
+    /// Every fact at once: what an invoice-level completion implies.
+    pub const ALL: Self = Self {
+        email: true,
+        document: true,
+        liveness: true,
+        identity_match: true,
+    };
+
+    /// Whether these facts satisfy `mode`.
+    pub fn satisfy(self, mode: PayerPolicyMode) -> bool {
+        VerificationRequirementsResponse::from_facts(mode, self).complete
+    }
+}
+
 impl VerificationRequirementsResponse {
     /// The requirements a mode imposes, all at one status. `completed` is
     /// whether the invoice's verification has finished; a payer session that
     /// satisfies only part of the policy refines individual facts.
     pub fn for_mode(mode: PayerPolicyMode, completed: bool) -> Self {
-        let required = if completed {
-            VerificationFactStatus::Approved
-        } else {
-            VerificationFactStatus::Pending
-        };
-        let status = |needed: bool| {
-            if needed {
-                required
+        Self::from_facts(
+            mode,
+            if completed {
+                VerificationFacts::ALL
             } else {
-                VerificationFactStatus::NotRequired
-            }
+                VerificationFacts::default()
+            },
+        )
+    }
+
+    /// The requirements a mode imposes, each reported against the facts one
+    /// payer session has established. `complete` is true exactly when every
+    /// fact the mode needs is present.
+    pub fn from_facts(mode: PayerPolicyMode, facts: VerificationFacts) -> Self {
+        let status = |needed: bool, established: bool| match (needed, established) {
+            (false, _) => VerificationFactStatus::NotRequired,
+            (true, true) => VerificationFactStatus::Approved,
+            (true, false) => VerificationFactStatus::Pending,
         };
         let identity = matches!(
             mode,
             PayerPolicyMode::VerifiedIdentity | PayerPolicyMode::VerifiedIdentityUnattributed
         );
+        let matched = mode == PayerPolicyMode::VerifiedIdentity;
+        let complete = (!mode.is_gated() || facts.email)
+            && (!identity || (facts.document && facts.liveness))
+            && (!matched || facts.identity_match);
         Self {
-            email: status(mode.is_gated()),
-            document: status(identity),
-            liveness: status(identity),
-            identity_match: status(mode == PayerPolicyMode::VerifiedIdentity),
-            complete: !mode.is_gated() || completed,
+            email: status(mode.is_gated(), facts.email),
+            document: status(identity, facts.document),
+            liveness: status(identity, facts.liveness),
+            identity_match: status(matched, facts.identity_match),
+            complete,
         }
     }
 }
@@ -750,6 +786,48 @@ mod tests {
         assert_eq!(
             serde_json::to_value(matched.identity_match).unwrap(),
             "pending"
+        );
+    }
+
+    #[test]
+    fn session_facts_refine_each_requirement_and_complete_only_when_the_mode_is_met() {
+        let email_only = VerificationFacts {
+            email: true,
+            ..VerificationFacts::default()
+        };
+        let unattributed = VerificationFacts {
+            email: true,
+            document: true,
+            liveness: true,
+            identity_match: false,
+        };
+
+        let by_email = VerificationRequirementsResponse::from_facts(
+            PayerPolicyMode::VerifiedEmail,
+            email_only,
+        );
+        assert_eq!(by_email.email, VerificationFactStatus::Approved);
+        assert_eq!(by_email.document, VerificationFactStatus::NotRequired);
+        assert!(by_email.complete);
+
+        let matched = VerificationRequirementsResponse::from_facts(
+            PayerPolicyMode::VerifiedIdentity,
+            unattributed,
+        );
+        assert_eq!(matched.email, VerificationFactStatus::Approved);
+        assert_eq!(matched.document, VerificationFactStatus::Approved);
+        assert_eq!(matched.identity_match, VerificationFactStatus::Pending);
+        assert!(!matched.complete);
+        assert!(unattributed.satisfy(PayerPolicyMode::VerifiedIdentityUnattributed));
+        assert!(!unattributed.satisfy(PayerPolicyMode::VerifiedIdentity));
+        assert!(!email_only.satisfy(PayerPolicyMode::VerifiedIdentityUnattributed));
+        assert!(VerificationFacts::default().satisfy(PayerPolicyMode::Permissionless));
+        assert_eq!(
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedIdentity, true),
+            VerificationRequirementsResponse::from_facts(
+                PayerPolicyMode::VerifiedIdentity,
+                VerificationFacts::ALL
+            )
         );
     }
 

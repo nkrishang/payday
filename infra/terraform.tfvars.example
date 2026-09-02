@@ -11,6 +11,10 @@ auth0_client_id  = "your-native-application-client-id"
 # Auth0 Single Page Application the merchant dashboard signs in with (see
 # docs/authentication.md). Leave it out until that application exists.
 dashboard_auth0_client_id = "your-dashboard-spa-application-client-id"
+# Auth0 API and Native application payers verify their mailbox against (see
+# docs/authentication.md and auth0/payer.tf). Leave both out until they exist.
+payer_auth0_audience  = "https://api.payday.sh/payer"
+payer_auth0_client_id = "your-payer-native-application-client-id"
 route53_zone_id  = "Z0123456789EXAMPLE"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
 alarm_email      = "operator@example.com"

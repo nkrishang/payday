@@ -10,6 +10,47 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
+- Payer email verification. A gated invoice's payer proves ownership of the
+  mailbox the merchant asserted through
+  `POST /v1/payer/payments/{id}/verify/email/start` (the gateway sends the
+  code; the request names no email) and `…/verify/email/confirm` (the code),
+  exchanged against a dedicated Auth0 payer audience
+  (`auth0/actions/payday-payer-email-otp.js`). `start` mints an opaque payer
+  session, stored hashed and valid for 24 hours, that travels in
+  `Payday-Payer-Session` on every payer read and unlocks exactly that
+  invoice's content, QR, and attachment for that session; `GET …/verify`
+  reports the session's facts. One code per invoice per minute
+  (`429 otp_resend_cooldown` with `Retry-After`); permissionless invoices
+  answer `409 verification_not_required`, closed ones `410`. For
+  `verified_email` the invoice's `verification_completed_at` is set in the
+  same transaction; the identity modes record the mailbox and stay locked.
+  The write routes answer cross-origin requests from the hosted checkout only
+  (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`); the reads keep `*` and now admit the
+  session header. Configured by `PAYDAY_PAYER_AUTH0_ISSUER`,
+  `PAYDAY_PAYER_AUTH0_AUDIENCE`, `PAYDAY_PAYER_AUTH0_CLIENT_ID`, and
+  `PAYDAY_PAYER_REF_MASTER_KEY` (the merchant-scoped payer reference key).
+- Verification gate on settlement: the sweep claim itself, in SQL, admits a
+  live `funded` invoice only when its policy is permissionless or its
+  verification has completed and the finalized chain clock has not passed
+  its deadline; expired, fulfilled, and recovered invoices are always
+  claimable so their balance reaches recovery. Funds that arrive before a
+  gated invoice's verification are credited normally, stay on the same
+  address, and stamp `likely_unsolicited_at` once; verification before the
+  deadline lets that address settle, expiry without it moves the whole
+  balance to recovery, and verification after expiry cannot revive it.
+- Hosted checkout verification: the gate offers to send the code, takes it,
+  keeps the session in this tab's `sessionStorage` (never in server output,
+  local storage, or a URL), resumes it across reloads, and fetches the QR as
+  a blob with the session in a header. Locked invoices render nothing but the
+  issuer, heading, masked mailbox, and requirements; identity modes move on
+  to an identity step after the email.
+- SDK: `payer.verification.startEmail/confirmEmail/status` and
+  `payer.payments.qr(id, payerSession)` returning a `Blob`. `qrUrl` is gone:
+  a gated invoice's QR needs a session, which must never be in an image URL.
+- The development identity provider serves a `payday-payer-local` client and
+  audience next to the merchant ones; `just dev` and `just e2e` configure
+  the payer settings against it.
+
 - Invoice documents. `POST /v1/payments` now takes the document the payment
   fulfils: required `issuer` and `bill_to` parties (name, optional email and
   free-text details), a required `payer_policy` (`permissionless`,

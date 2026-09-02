@@ -130,6 +130,30 @@ issuance only, so replaying the same access token cannot rotate a key twice.
 The verified address is stored with the account for urgent payout-support
 notifications.
 
+## 3a. Install the payer audience and Action
+
+Payers prove ownership of the mailbox an invoice was issued to through a
+dedicated audience, so that a payer token is useless against the merchant API
+and a merchant token never unlocks an invoice. `gatewayd` drives the exchange
+itself: the payer never names an email, and the code goes to the address the
+merchant asserted.
+
+1. Open **Applications → APIs** and create an API named `Payday Payer` with
+   identifier `https://api.payday.sh/payer` (RS256).
+2. Let Terraform create the `Payday Payer Verification` application
+   (`auth0/payer.tf`), or create a **Native** application by hand with only
+   the passwordless OTP grant and the `email` connection enabled.
+3. Create a second **Post Login** Action named `Payday payer email OTP claims`
+   from `auth0/actions/payday-payer-email-otp.js` with two secrets:
+   - `PAYDAY_PAYER_AUDIENCE` = `https://api.payday.sh/payer`
+   - `PAYDAY_PAYER_CLIENT_ID` = the `Payday Payer Verification` Client ID
+4. Deploy it and add it to the Post Login flow next to the merchant Action.
+
+The payer Action is inert for every other audience and denies every other
+client on its own. It sets exactly five claims: method, client ID,
+authentication time, a random event ID, and the proven email, trimmed and
+lowercased so `gatewayd` can compare it with the merchant's assertion.
+
 ## 4. Configure Payday
 
 Configure `gatewayd` (or its untracked local `.env`) with:
@@ -139,7 +163,19 @@ export PAYDAY_AUTH0_ISSUER="https://<tenant-domain>/"
 export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
 export PAYDAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
 export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="<Payday-Dashboard-client-id>"
+# Payer email verification (all four together, or none).
+export PAYDAY_PAYER_AUTH0_ISSUER="https://<tenant-domain>/"
+export PAYDAY_PAYER_AUTH0_AUDIENCE="https://api.payday.sh/payer"
+export PAYDAY_PAYER_AUTH0_CLIENT_ID="<Payday-Payer-Verification-client-id>"
+# 32 random bytes, standard base64: derives the merchant-scoped payer references.
+export PAYDAY_PAYER_REF_MASTER_KEY="$(openssl rand -base64 32)"
+# The browser origin allowed to call the verification write routes; defaults
+# to PAYDAY_PUBLIC_BASE_URL.
+export PAYDAY_HOSTED_CHECKOUT_ORIGIN="https://payday.sh"
 ```
+
+Without the `PAYDAY_PAYER_*` settings the API still serves gated invoices, but
+their verification routes answer `503 verification_unavailable`.
 
 For AWS, set `auth0_issuer`, `auth0_audience`, and `auth0_client_id` in the
 untracked `infra/terraform.tfvars`; Terraform passes them to the API task.

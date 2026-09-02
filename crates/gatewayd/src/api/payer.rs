@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::api::attachments::{no_store, signed_descriptor};
 use crate::api::error::ApiError;
+use crate::api::payer_verification::session_token;
 use crate::state::AppState;
 
 #[derive(Clone)]
@@ -25,6 +26,9 @@ pub struct PayerAccess {
     /// `public_base_url` as a header value, for the merchant routes' CORS
     /// allow-list; built once so the router never has to fail.
     origin: HeaderValue,
+    /// The hosted checkout's origin: the only browser origin the payer
+    /// verification writes answer to. Defaults to the public base URL.
+    checkout_origin: HeaderValue,
     explorer_base_url: Option<String>,
 }
 
@@ -32,16 +36,27 @@ impl PayerAccess {
     pub fn new(
         public_base_url: impl Into<String>,
         explorer_base_url: Option<String>,
+        hosted_checkout_origin: Option<String>,
     ) -> Result<Self, String> {
         let public_base_url = validate_base_url(public_base_url.into(), "public base URL", true)?;
         let origin = HeaderValue::from_str(&public_base_url)
             .map_err(|_| "public base URL must be a valid header value".to_string())?;
+        let checkout_origin = match hosted_checkout_origin {
+            Some(url) => {
+                let url = validate_base_url(url, "hosted checkout origin", true)?;
+                HeaderValue::from_str(&url).map_err(|_| {
+                    "hosted checkout origin must be a valid header value".to_string()
+                })?
+            }
+            None => origin.clone(),
+        };
         let explorer_base_url = explorer_base_url
             .map(|url| validate_base_url(url, "explorer base URL", false))
             .transpose()?;
         Ok(Self {
             public_base_url,
             origin,
+            checkout_origin,
             explorer_base_url,
         })
     }
@@ -55,6 +70,10 @@ impl PayerAccess {
 
     pub fn origin_header(&self) -> HeaderValue {
         self.origin.clone()
+    }
+
+    pub fn checkout_origin_header(&self) -> HeaderValue {
+        self.checkout_origin.clone()
     }
 
     /// Link to the hosted checkout for one payment. Its origin is a different
@@ -128,12 +147,15 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// What one payer may see of an invoice. Payer sessions arrive in Slice 3;
-/// until then only permissionless invoices unlock their content.
+/// What one payer may see of an invoice. A permissionless invoice is open to
+/// anyone holding the link; a gated one unlocks only for a payer session
+/// that has satisfied its policy (product plan §4.6).
 pub struct PayerInvoiceAccess {
     pub invoice: Invoice,
     pub settlement_tx_hash: Option<String>,
-    pub verification_completed: bool,
+    /// The caller's session facts when a session was presented, otherwise
+    /// what the invoice as a whole has completed.
+    pub requirements: VerificationRequirementsResponse,
     pub content_unlocked: bool,
     /// Fetched only when the content is unlocked.
     pub attachment: Option<DbAttachment>,
@@ -148,7 +170,7 @@ fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerPaymentR
     let PayerInvoiceAccess {
         invoice,
         settlement_tx_hash,
-        verification_completed,
+        requirements,
         content_unlocked: unlocked,
         attachment,
     } = access;
@@ -164,7 +186,6 @@ fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerPaymentR
         mode,
         expected_email_hint: policy.expected_email().map(masked_email),
     };
-    let requirements = VerificationRequirementsResponse::for_mode(mode, verification_completed);
     let response = PaymentResponse::from_invoice(invoice, None);
     let settlement_tx_hash = settlement_tx_hash.filter(|_| unlocked);
     let settlement_explorer_url = settlement_tx_hash
@@ -209,15 +230,20 @@ fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerPaymentR
     }
 }
 
-fn parse_invoice_id(id: &str) -> Result<Uuid, ApiError> {
+pub(crate) fn parse_invoice_id(id: &str) -> Result<Uuid, ApiError> {
     id.strip_prefix("pay_")
         .and_then(|value| Uuid::from_str(value).ok())
         .ok_or_else(ApiError::payer_unauthorized)
 }
 
+/// One decision for every gated field: the content is unlocked when the
+/// invoice is permissionless, or when the presented session belongs to this
+/// invoice and has satisfied its policy. An unknown or expired session is
+/// simply no session; the invoice's own completion never unlocks a read.
 pub async fn authorized_invoice(
     state: &AppState,
     id: &str,
+    session_token: Option<&str>,
 ) -> Result<PayerInvoiceAccess, ApiError> {
     let uuid = parse_invoice_id(id)?;
     let row = state
@@ -233,7 +259,22 @@ pub async fn authorized_invoice(
         .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
         .map(|hash| hash.to_string());
     let invoice = Invoice::try_from(&row)?;
-    let content_unlocked = !invoice.issuance_snapshot.payer_policy.mode().is_gated();
+    let mode = invoice.issuance_snapshot.payer_policy.mode();
+    let session = match session_token {
+        Some(token) if mode.is_gated() => state.payer_sessions.find_active(token, row.id).await?,
+        _ => None,
+    };
+    let requirements = match &session {
+        Some(session) => VerificationRequirementsResponse::from_facts(mode, session.facts()),
+        None => VerificationRequirementsResponse::for_mode(
+            mode,
+            row.verification_completed_at.is_some(),
+        ),
+    };
+    let content_unlocked = !mode.is_gated()
+        || session
+            .as_ref()
+            .is_some_and(|session| session.satisfies(mode));
     let attachment = if content_unlocked && invoice.issuance_snapshot.attachment.is_some() {
         state.attachments.find_by_invoice(row.id).await?
     } else {
@@ -242,7 +283,7 @@ pub async fn authorized_invoice(
     Ok(PayerInvoiceAccess {
         invoice,
         settlement_tx_hash,
-        verification_completed: row.verification_completed_at.is_some(),
+        requirements,
         content_unlocked,
         attachment,
     })
@@ -251,8 +292,9 @@ pub async fn authorized_invoice(
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let access = authorized_invoice(&state, &id).await?;
+    let access = authorized_invoice(&state, &id, session_token(&headers)).await?;
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
@@ -262,11 +304,15 @@ pub async fn get(
     Ok((headers, Json(payer_response(&state, access))))
 }
 
+/// The payment QR. A gated invoice needs an unlocked session first; a
+/// closed one answers `410 payment_not_payable` even to an unlocked session,
+/// so the code never invites a transfer that would route to recovery.
 pub async fn qr(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let access = authorized_invoice(&state, &id).await?;
+    let access = authorized_invoice(&state, &id, session_token(&headers)).await?;
     if !access.content_unlocked {
         return Err(ApiError::verification_required());
     }
@@ -297,8 +343,9 @@ pub async fn qr(
 pub async fn attachment(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<AttachmentDescriptor>), ApiError> {
-    let access = authorized_invoice(&state, &id).await?;
+    let access = authorized_invoice(&state, &id, session_token(&headers)).await?;
     if !access.content_unlocked {
         return Err(ApiError::verification_required());
     }
@@ -393,6 +440,7 @@ mod tests {
         let access = PayerAccess::new(
             "https://pay.payday.sh/",
             Some("https://monadvision.com/".into()),
+            None,
         )
         .unwrap();
         let invoice = invoice();
@@ -426,16 +474,35 @@ mod tests {
 
     #[test]
     fn configuration_rejects_insecure_remote_urls() {
-        assert!(PayerAccess::new("http://pay.payday.sh", None).is_err());
-        assert!(PayerAccess::new("https://pay.payday.sh/base", None).is_err());
-        assert!(PayerAccess::new("https://user@pay.payday.sh", None).is_err());
-        assert!(PayerAccess::new("http://127.0.0.1:3000", None).is_ok());
+        assert!(PayerAccess::new("http://pay.payday.sh", None, None).is_err());
+        assert!(PayerAccess::new("https://pay.payday.sh/base", None, None).is_err());
+        assert!(PayerAccess::new("https://user@pay.payday.sh", None, None).is_err());
+        assert!(PayerAccess::new("http://127.0.0.1:3000", None, None).is_ok());
         assert!(
             PayerAccess::new(
                 "https://pay.payday.sh",
                 Some("http://monadvision.com".into()),
+                None,
             )
             .is_err()
         );
+        assert!(
+            PayerAccess::new(
+                "https://pay.payday.sh",
+                None,
+                Some("http://checkout.payday.sh".into()),
+            )
+            .is_err()
+        );
+        let split = PayerAccess::new(
+            "https://api.payday.sh",
+            None,
+            Some("https://payday.sh/".into()),
+        )
+        .unwrap();
+        assert_eq!(split.checkout_origin_header(), "https://payday.sh");
+        assert_eq!(split.origin_header(), "https://api.payday.sh");
+        let same = PayerAccess::new("https://payday.sh", None, None).unwrap();
+        assert_eq!(same.checkout_origin_header(), "https://payday.sh");
     }
 }
