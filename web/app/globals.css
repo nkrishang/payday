@@ -19,8 +19,14 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-danger: var(--danger);
+  --color-brand-black: #0f0f0e;
+  --color-brand-green: #a3d277;
+  --color-brand-yellow: #ead26d;
+  --color-brand-white: #f6f2ea;
+  --color-brand-grey: #94938d;
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-body: var(--font-albert), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-mono-face), ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --radius-card: 16px;
@@ -120,6 +126,18 @@
   :focus-visible {
     outline: 2px solid var(--ink);
     outline-offset: 2px;
+  }
+
+  .landing-page {
+    font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .landing-page .font-heading {
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .landing-page :focus-visible {
+    outline-color: #a3d277;
   }
 }
 
