@@ -21,13 +21,13 @@ export const metadata: Metadata = {
     template: "%s · Payday",
   },
   description:
-    "Create a USDC payment through a small API or CLI, share one link, and let Payday detect finalized transfers and settle the balance automatically.",
+    "Create a USDC payment through a small API or CLI, share one link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically.",
   openGraph: {
     type: "website",
     siteName: "Payday",
     title: "Payday — stablecoin payments that settle themselves",
     description:
-      "Create a USDC payment, share one link, and let Payday detect finalized transfers and settle the balance automatically.",
+      "Create a USDC payment, share one link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically.",
   },
 };
 

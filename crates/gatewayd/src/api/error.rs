@@ -17,7 +17,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "unauthorized",
-            message: "A valid bearer API key is required".into(),
+            message: "A valid bearer API key or dashboard access token is required".into(),
         }
     }
 
@@ -182,6 +182,211 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: msg.into(),
+        }
+    }
+
+    pub fn customer_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "customer_not_found",
+            message: "Customer not found".into(),
+        }
+    }
+
+    pub fn attachment_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "attachment_not_found",
+            message: "Attachment not found".into(),
+        }
+    }
+
+    pub fn attachment_scan_pending() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_scan_pending",
+            message: "The malware scan has not reported yet; retry finalize with backoff".into(),
+        }
+    }
+
+    /// `reason` is a short token or the scanner's verdict, never derived
+    /// from the uploaded bytes.
+    pub fn attachment_rejected(reason: &str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "attachment_rejected",
+            message: format!("The upload was rejected ({reason}); upload a new file"),
+        }
+    }
+
+    pub fn attachment_not_ready() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "Finalize the upload before attaching it to an invoice".into(),
+        }
+    }
+
+    /// The bucket expired a finalized upload before an invoice was issued
+    /// with it; the merchant starts over with a new upload.
+    pub fn attachment_expired() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "The upload expired before it was attached; upload the PDF again".into(),
+        }
+    }
+
+    /// Finalize was called before anything reached the presigned URL.
+    pub fn attachment_not_uploaded() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "Upload the PDF to upload_url before finalizing".into(),
+        }
+    }
+
+    pub fn attachment_already_attached() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_already_attached",
+            message: "This attachment already belongs to an issued invoice".into(),
+        }
+    }
+
+    pub fn payment_not_settled() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "payment_not_settled",
+            message: "Proof of Payment is available once the payment has settled".into(),
+        }
+    }
+
+    /// A gated invoice's content and payment mechanics stay hidden until the
+    /// payer has satisfied the policy (product plan §4.3).
+    pub fn verification_required() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "verification_required",
+            message: "Complete verification to view this invoice's payment details".into(),
+        }
+    }
+
+    /// The deployment has no payer Auth0 audience configured.
+    pub fn verification_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "verification_unavailable",
+            message: "Email verification is not available on this deployment".into(),
+        }
+    }
+
+    /// The deployment has no identity provider configured.
+    pub fn identity_verification_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "verification_unavailable",
+            message: "Identity verification is not available on this deployment".into(),
+        }
+    }
+
+    pub fn email_verification_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "email_verification_required",
+            message: "Verify the expected email in this session before starting the identity check"
+                .into(),
+        }
+    }
+
+    pub fn identity_in_review() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "identity_in_review",
+            message: "An earlier identity check is still being reviewed by the provider".into(),
+        }
+    }
+
+    pub fn review_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "review_required",
+            message: "Automated identity verification has stopped for this invoice; a human review is required".into(),
+        }
+    }
+
+    pub fn review_not_available() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "review_not_available",
+            message: "No declined identity attempt is waiting for review".into(),
+        }
+    }
+
+    pub fn verification_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "verification_not_found",
+            message: "Verification attempt not found".into(),
+        }
+    }
+
+    pub fn webhook_signature_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "webhook_signature_invalid",
+            message: "The callback signature or timestamp was not accepted".into(),
+        }
+    }
+
+    pub fn identity_provider_unavailable() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "identity_provider_unavailable",
+            message: "The verification provider did not respond; try again shortly".into(),
+        }
+    }
+
+    pub fn verification_not_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_not_required",
+            message: "This invoice does not require verification".into(),
+        }
+    }
+
+    pub fn payer_session_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "payer_session_invalid",
+            message: "The payer session is missing, invalid, or expired; start verification again"
+                .into(),
+        }
+    }
+
+    pub fn otp_resend_cooldown(retry_after_secs: u64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "otp_resend_cooldown",
+            message: format!(
+                "A code was sent recently; request another in {retry_after_secs} seconds"
+            ),
+        }
+    }
+
+    pub fn otp_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "otp_invalid",
+            message: "The code was not accepted; check it or request a new one".into(),
+        }
+    }
+
+    pub fn verification_not_started() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_not_started",
+            message: "Request a code before confirming one".into(),
         }
     }
 

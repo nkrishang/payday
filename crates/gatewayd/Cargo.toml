@@ -7,6 +7,14 @@ edition = "2024"
 gateway-core = { path = "../gateway-core" }
 gateway-db = { path = "../gateway-db" }
 alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-signer = { workspace = true }
+alloy-signer-aws = { workspace = true }
+alloy-signer-local = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -29,6 +37,9 @@ utoipa = { workspace = true }
 qrcode = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-sesv2 = { workspace = true }
+aws-sdk-kms = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+pdf-writer = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

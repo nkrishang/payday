@@ -1,4 +1,4 @@
-import type { PayerPayment } from "@payday/sdk";
+import type { UnlockedPayerPayment } from "@/lib/checkout-state";
 import { truncateAddress } from "@/lib/format";
 
 /**
@@ -6,7 +6,7 @@ import { truncateAddress } from "@/lib/format";
  * USDC on another network will not be credited and may be unrecoverable, and a
  * matching symbol in a wallet is not evidence of the right contract.
  */
-export function AssetNotice({ payment }: { payment: PayerPayment }) {
+export function AssetNotice({ payment }: { payment: UnlockedPayerPayment }) {
   return (
     <div className="rounded-[10px] border border-line bg-raised px-3.5 py-3">
       <p className="text-[13px] leading-relaxed text-muted">

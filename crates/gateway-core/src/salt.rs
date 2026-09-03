@@ -1,46 +1,25 @@
 use alloy_primitives::B256;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+/// The 32-byte CREATE3 salt committed into a payment address.
+///
+/// Issuance salts exist only through [`crate::derive_attribution`], which
+/// binds them to the canonical invoice and a fresh nonce. The tuple field is
+/// public so stored salts can be decoded from the database and so tests can
+/// exercise address derivation with arbitrary values; the API never accepts a
+/// client-supplied salt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Salt(pub B256);
-
-/// Generate a random 32-byte salt from the OS CSPRNG.
-///
-/// This is the only way the backend should create a `Salt`. The API never
-/// accepts client-supplied salts.
-pub fn generate_salt() -> Salt {
-    Salt(B256::from(rand::rng().random::<[u8; 32]>()))
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn generate_salt_is_32_bytes() {
-        let salt = generate_salt();
-        assert_eq!(salt.0.as_slice().len(), 32);
-    }
-
-    #[test]
-    fn two_salts_differ() {
-        let a = generate_salt();
-        let b = generate_salt();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn salt_is_not_all_zero() {
-        let salt = generate_salt();
-        assert_ne!(salt.0, B256::ZERO);
-    }
-
-    #[test]
     fn salt_round_trips_through_b256() {
-        let salt = generate_salt();
+        let salt = Salt(B256::repeat_byte(0x5a));
         let bytes = salt.0.to_string();
         let recovered: B256 = bytes.parse().unwrap();
-        assert_eq!(salt.0, recovered);
+        assert_eq!(Salt(recovered), salt);
     }
 }

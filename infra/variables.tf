@@ -104,6 +104,74 @@ variable "auth0_client_id" {
   }
 }
 
+variable "dashboard_auth0_client_id" {
+  description = <<-EOT
+    Public client ID of the Auth0 Single Page Application the merchant
+    dashboard signs in with; see docs/authentication.md. Leave empty until it
+    exists: gatewayd then accepts only API keys and the CLI's Native
+    application, and the variable is not passed to the task at all.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "payer_auth0_audience" {
+  description = <<-EOT
+    Identifier of the Auth0 API payers verify their mailbox against
+    (https://api.payday.sh/payer); see docs/authentication.md. Leave empty
+    with payer_auth0_client_id until both exist: the payer settings are then
+    not passed to the task at all and verification answers unavailable.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "payer_auth0_client_id" {
+  description = "Public client ID of the Auth0 Native application gatewayd exchanges payer codes with (auth0/payer.tf)."
+  type        = string
+  default     = ""
+  validation {
+    condition     = (var.payer_auth0_client_id == "") == (var.payer_auth0_audience == "")
+    error_message = "payer_auth0_audience and payer_auth0_client_id must be set together."
+  }
+}
+
+variable "didit_workflow_id" {
+  description = <<-EOT
+    The pinned Didit workflow for payer identity verification (document,
+    liveness, face match; declines expected-name mismatches); see
+    docs/authentication.md. Leave empty with the two Didit secrets until they
+    exist: the identity settings are then not passed to the task at all and
+    identity start answers unavailable.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "didit_api_key" {
+  description = "Didit API key. Prefer TF_VAR_didit_api_key from a secure environment."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "didit_webhook_secret" {
+  description = "Shared secret of the Didit webhook destination that points at /v1/webhooks/identity. Prefer TF_VAR_didit_webhook_secret."
+  type        = string
+  default     = ""
+  sensitive   = true
+  validation {
+    condition     = (var.didit_workflow_id == "") == (var.didit_api_key == "") && (var.didit_workflow_id == "") == (var.didit_webhook_secret == "")
+    error_message = "didit_workflow_id, didit_api_key, and didit_webhook_secret must be set together."
+  }
+}
+
+variable "admin_reviewer_id" {
+  description = "Recorded as the reviewer on manual verification decisions taken through the operator API."
+  type        = string
+  default     = "operator"
+}
+
 variable "route53_zone_id" {
   description = "ID of the public Route53 hosted zone containing the API domain_name."
   type        = string
@@ -139,6 +207,54 @@ variable "batch_sweeper_address" {
   validation {
     condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.batch_sweeper_address))
     error_message = "batch_sweeper_address must be a 20-byte 0x-prefixed EVM address."
+  }
+}
+
+variable "factory_code_hash" {
+  description = <<-EOT
+    keccak256 of the runtime bytecode deployed at factory_address, computed
+    with: cast keccak "$(cast code <factory_address> --rpc-url <rpc_url>)".
+    PaymentFactory and BatchSweeper are deployed together as one contract
+    generation; both services compare the live code with this hash at startup
+    and refuse to start on a mismatch.
+  EOT
+  type        = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{64}$", var.factory_code_hash))
+    error_message = "factory_code_hash must be a 32-byte 0x-prefixed keccak256 hash."
+  }
+}
+
+variable "batch_sweeper_code_hash" {
+  description = <<-EOT
+    keccak256 of the runtime bytecode deployed at batch_sweeper_address,
+    computed with: cast keccak "$(cast code <batch_sweeper_address> --rpc-url <rpc_url>)".
+    Deploy the sweeper with the factory it is bound to, as one generation;
+    never point a new factory at an old sweeper.
+  EOT
+  type        = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{64}$", var.batch_sweeper_code_hash))
+    error_message = "batch_sweeper_code_hash must be a 32-byte 0x-prefixed keccak256 hash."
+  }
+}
+
+variable "recovery_address" {
+  description = <<-EOT
+    Payday's custodial recovery wallet: the Ethereum address of the recovery
+    KMS key (cast wallet address --aws with recovery_kms_key_arn). gatewayd
+    stamps it on every invoice; overpayment remainders, expired balances, and
+    late transfers land here and are returned manually by the operator.
+    Null until the key exists: there is no safe placeholder, because every
+    invoice commits this address into its payment address, so the API task
+    definition refuses to plan while it is unset.
+  EOT
+  type        = string
+  default     = null
+  nullable    = true
+  validation {
+    condition     = var.recovery_address == null || can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address))
+    error_message = "recovery_address must be a 20-byte 0x-prefixed EVM address."
   }
 }
 

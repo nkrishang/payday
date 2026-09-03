@@ -1,4 +1,7 @@
-use crate::{api::error::ApiError, state::AppState};
+use crate::{
+    api::{auth::Reviewer, error::ApiError},
+    state::AppState,
+};
 use axum::{
     Extension, Json,
     extract::{Path, State},
@@ -9,7 +12,7 @@ use uuid::Uuid;
 
 pub async fn release(
     State(state): State<AppState>,
-    Extension(()): Extension<()>,
+    Extension(reviewer): Extension<Reviewer>,
     Path(reference): Path<String>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
     let id = reference
@@ -26,7 +29,7 @@ pub async fn release(
             ReleasePaymentError::NotBlocked => ApiError::invoice_not_blocked(),
             ReleasePaymentError::Database(error) => ApiError::from(error),
         })?;
-    tracing::info!(payment_id = %id, status = %row.status, "payment released by operator");
+    tracing::info!(payment_id = %id, status = %row.status, reviewer = %reviewer.0, "payment released by operator");
     Ok(Json(PaymentResponse::from_invoice(
         Invoice::try_from(&row)?,
         None,

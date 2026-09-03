@@ -40,6 +40,15 @@ pub enum IssueApiKeyError {
     Database(#[from] sqlx::Error),
 }
 
+/// Why an identity could not be mapped to an account.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionAccountError {
+    #[error("account is disabled")]
+    AccountDisabled,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
 #[derive(Clone)]
 pub struct AccountRepository {
     pool: PgPool,
@@ -224,6 +233,72 @@ impl AccountRepository {
         .fetch_optional(&self.pool)
         .await
         .map(|id| id.map(AccountId))
+    }
+
+    /// The account behind a verified identity, created on first sight. A
+    /// dashboard session never holds an API key, so the account starts with
+    /// none; `payday login` can add one later through the usual rotation.
+    pub async fn find_or_provision_by_identity(
+        &self,
+        issuer: &str,
+        subject: &str,
+        verified_email: &str,
+    ) -> Result<AccountId, ProvisionAccountError> {
+        if let Some(existing) = self.identity_account(issuer, subject, &self.pool).await? {
+            return existing;
+        }
+        // Two first sign-ins for one identity race here; the same lock the
+        // key issuance takes serializes them so exactly one account appears.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+            .bind(issuer)
+            .bind(subject)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(existing) = self.identity_account(issuer, subject, &mut *tx).await? {
+            return existing;
+        }
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (id, email) VALUES ($1, $2)")
+            .bind(id)
+            .bind(verified_email)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO account_identities (issuer, subject, account_id) VALUES ($1, $2, $3)",
+        )
+        .bind(issuer)
+        .bind(subject)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(AccountId(id))
+    }
+
+    async fn identity_account<'e, E: sqlx::PgExecutor<'e>>(
+        &self,
+        issuer: &str,
+        subject: &str,
+        executor: E,
+    ) -> Result<Option<Result<AccountId, ProvisionAccountError>>, sqlx::Error> {
+        let found = sqlx::query_as::<_, (Uuid, bool)>(
+            r#"SELECT account_id, disabled_at IS NOT NULL
+               FROM account_identities
+               JOIN accounts ON accounts.id = account_identities.account_id
+               WHERE issuer = $1 AND subject = $2"#,
+        )
+        .bind(issuer)
+        .bind(subject)
+        .fetch_optional(executor)
+        .await?;
+        Ok(found.map(|(id, disabled)| {
+            if disabled {
+                Err(ProvisionAccountError::AccountDisabled)
+            } else {
+                Ok(AccountId(id))
+            }
+        }))
     }
 
     pub async fn metadata(&self, account: AccountId) -> Result<ApiKeyMetadata, sqlx::Error> {
@@ -522,6 +597,70 @@ mod tests {
         let metadata = repo.metadata(first.account_id).await.unwrap();
         assert!(metadata.revoked_at.is_some());
         assert!(metadata.previous_key_expires_at.is_none());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn identity_is_provisioned_once_without_a_key_and_can_take_one_later(pool: PgPool) {
+        let repo = AccountRepository::new(pool.clone());
+        let first = repo
+            .find_or_provision_by_identity("issuer", "email|one", "one@example.com")
+            .await
+            .unwrap();
+        let again = repo
+            .find_or_provision_by_identity("issuer", "email|one", "changed@example.com")
+            .await
+            .unwrap();
+        assert_eq!(first, again, "the identity maps to one account");
+        assert_eq!(
+            repo.find_by_identity("issuer", "email|one").await.unwrap(),
+            Some(first)
+        );
+        let metadata = repo.metadata(first).await.unwrap();
+        assert!(
+            metadata.hint.is_none(),
+            "a dashboard account starts keyless"
+        );
+        assert_eq!(metadata.generation, 1);
+        assert!(repo.has_verified_email(first).await.unwrap());
+        let email: String = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
+            .bind(first.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(email, "one@example.com", "the first verified email sticks");
+
+        // The CLI's login rotates from the current generation, as for any
+        // existing identity, and gets a usable key.
+        let issued = repo
+            .issue_api_key("issuer", "email|one", Some(1), "event-1", FIRST_KEY)
+            .await
+            .unwrap();
+        assert_eq!(issued.account_id, first);
+        assert_eq!(issued.generation, 2);
+        assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), Some(first));
+
+        // An existing keyed identity is found, never duplicated.
+        let keyed = repo
+            .issue_api_key("issuer", "email|two", None, "event-2", SECOND_KEY)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.find_or_provision_by_identity("issuer", "email|two", "two@example.com")
+                .await
+                .unwrap(),
+            keyed.account_id
+        );
+
+        sqlx::query("UPDATE accounts SET disabled_at = now() WHERE id = $1")
+            .bind(first.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.find_or_provision_by_identity("issuer", "email|one", "one@example.com")
+                .await,
+            Err(ProvisionAccountError::AccountDisabled)
+        ));
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]

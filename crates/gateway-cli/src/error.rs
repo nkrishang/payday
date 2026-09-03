@@ -36,6 +36,13 @@ pub enum CliError {
     #[error("Payday returned {status}: {body}")]
     UnexpectedResponse { status: u16, body: String },
 
+    /// The malware scan did not report within the wait the CLI is willing to
+    /// block for; the upload is intact and can be finalized later.
+    #[error(
+        "Attachment {id} was not scanned within {seconds} seconds; no invoice was created\n→ Retry the command once the scan has reported."
+    )]
+    AttachmentScanTimeout { id: uuid::Uuid, seconds: u64 },
+
     /// Local input the CLI rejected before making a request.
     #[error("{0}")]
     InvalidInput(String),
@@ -56,6 +63,7 @@ impl CliError {
             CliError::InvalidInput(_) => "invalid_input",
             CliError::Transport { .. } => "transport_error",
             CliError::Api { code, .. } => code,
+            CliError::AttachmentScanTimeout { .. } => "attachment_scan_timeout",
             CliError::UnexpectedResponse { .. } => "unexpected_response",
             CliError::Config(_) => "configuration_error",
             CliError::Auth { .. } => "authentication_error",
@@ -72,7 +80,10 @@ impl CliError {
         match self {
             CliError::InvalidInput(_) | CliError::Config(_) => 2,
             CliError::Transport { .. } => 3,
-            CliError::Api { .. } | CliError::UnexpectedResponse { .. } | CliError::Auth { .. } => 1,
+            CliError::Api { .. }
+            | CliError::AttachmentScanTimeout { .. }
+            | CliError::UnexpectedResponse { .. }
+            | CliError::Auth { .. } => 1,
         }
     }
 

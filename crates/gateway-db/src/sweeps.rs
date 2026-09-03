@@ -6,7 +6,7 @@
 //! `sweep_batches` row owns one signer nonce; replacements for that nonce
 //! append their hashes so a receipt for any of them resolves the batch.
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{B256, Bytes, U256};
 use gateway_core::InvoiceStatus;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -71,19 +71,58 @@ impl BatchResolution {
     }
 }
 
+/// Why an amount left a payment address for the platform recovery wallet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryReason {
+    /// The address held more than the invoice amount when it settled.
+    Overpayment,
+    /// The invoice expired and its whole balance was recovered.
+    Expired,
+    /// Funds arrived after the contract existed and `recover()` forwarded them.
+    LateTransfer,
+}
+
+impl RecoveryReason {
+    /// The canonical string stored in `recovered_funds.reason`. This is the
+    /// single source of truth; the migration's CHECK constraint agrees with it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryReason::Overpayment => "overpayment",
+            RecoveryReason::Expired => "expired",
+            RecoveryReason::LateTransfer => "late_transfer",
+        }
+    }
+}
+
+/// One nonzero amount the platform recovery wallet received on an invoice's
+/// behalf in the finalized batch transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredFundsInput {
+    pub amount: U256,
+    pub reason: RecoveryReason,
+}
+
 /// What a finalized batch receipt established for one invoice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvoiceOutcome {
     /// The payment address was emptied in this transaction. `status` moves an
     /// open invoice to its terminal state; `None` keeps a terminal status when
     /// only late funds were collected. `execute_tx` records the batch as the
-    /// transaction that deployed the payment contract.
+    /// transaction that deployed the payment contract. `recovered` is the
+    /// amount that went to the platform recovery wallet in the batch
+    /// transaction, and `settlement_recovered` the amount the settlement
+    /// transaction sent there when somebody else deployed the contract; both
+    /// are written to the recovery ledger in the same database transaction,
+    /// keyed by the chain transaction that moved them. Zero recoveries pass
+    /// `None`.
     Drained {
         status: Option<InvoiceStatus>,
         execute_tx: bool,
         settlement_tx_hash: B256,
         settlement_block: u64,
         settlement_timestamp: u64,
+        settlement_recovered: Option<RecoveredFundsInput>,
+        recovered: Option<RecoveredFundsInput>,
     },
     /// The item failed for a reason that may clear; it returns to the queue
     /// behind exponential backoff.
@@ -195,6 +234,15 @@ impl InvoiceRepository {
     /// rows transition to `deploying`; every claimed row's `last_attempt_at`
     /// gates its reclaim after a crash or a failed submission. Row locks are
     /// released before any chain RPC begins.
+    ///
+    /// This query is the verification gate (product plan §4.8), not any
+    /// worker: a live funded invoice is claimable only when its policy is
+    /// permissionless or its verification has completed, and only while the
+    /// finalized chain clock has not passed its deadline. Closed invoices
+    /// (`expired`, `fulfilled`, `recovered`) are always claimable so that
+    /// their balance reaches recovery whatever the verification state. A
+    /// `deploying` row was claimed while live and stays reclaimable after the
+    /// deadline: the contract itself routes an expired deployment to recovery.
     pub async fn claim_sweep_batch(
         &self,
         chain_id: u64,
@@ -206,18 +254,38 @@ impl InvoiceRepository {
             r#"
             WITH candidates AS (
                 SELECT id
-                FROM invoices
-                WHERE chain_id = $1
-                  AND uncollected_count > 0
-                  AND sweep_batch_id IS NULL
-                  AND blocked_reason IS NULL
-                  AND status = ANY($5)
+                FROM invoices AS invoice
+                WHERE invoice.chain_id = $1
+                  AND invoice.uncollected_count > 0
+                  AND invoice.sweep_batch_id IS NULL
+                  AND invoice.blocked_reason IS NULL
                   AND (
-                    last_attempt_at IS NULL
-                    OR now() >= last_attempt_at
-                        + make_interval(secs => LEAST($3 * pow(2, sweep_attempts), $4))
+                    invoice.status IN ('expired', 'fulfilled', 'recovered')
+                    OR (
+                        invoice.status IN ('funded', 'deploying')
+                        AND (
+                            invoice.payer_policy_mode = 'permissionless'
+                            OR invoice.verification_completed_at IS NOT NULL
+                        )
+                        AND (
+                            invoice.status = 'deploying'
+                            OR invoice.expiration_timestamp >= COALESCE(
+                                (
+                                    SELECT last_block_timestamp
+                                    FROM indexer_cursor
+                                    WHERE chain_id = invoice.chain_id
+                                ),
+                                0
+                            )
+                        )
+                    )
                   )
-                ORDER BY id
+                  AND (
+                    invoice.last_attempt_at IS NULL
+                    OR now() >= invoice.last_attempt_at
+                        + make_interval(secs => LEAST($3 * pow(2, invoice.sweep_attempts), $4))
+                  )
+                ORDER BY invoice.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $2
             )
@@ -234,7 +302,6 @@ impl InvoiceRepository {
         .bind(limit)
         .bind(backoff_base_secs)
         .bind(backoff_cap_secs)
-        .bind(sweepable_statuses())
         .fetch_all(self.pool())
         .await
     }
@@ -499,24 +566,30 @@ impl InvoiceRepository {
     /// must have an outcome. Drained invoices have observations before the
     /// receipt's exact transaction position marked collected and their queue
     /// count recomputed from the ledger, so later indexing cannot re-queue
-    /// funds the sweep already moved.
+    /// funds the sweep already moved. Every nonzero recovery is appended to
+    /// `recovered_funds` in the same transaction, stamped with the receipt
+    /// block's `block_timestamp`, so the ledger can never disagree with the
+    /// invoice state it was derived from.
     pub async fn finalize_batch(
         &self,
         batch_id: Uuid,
         tx_hash: B256,
         block: u64,
         transaction_index: u64,
+        block_timestamp: u64,
         outcomes: &[(Uuid, InvoiceOutcome)],
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool().begin().await?;
         for (invoice_id, outcome) in outcomes {
-            let updated = match outcome {
+            let updated: u64 = match outcome {
                 InvoiceOutcome::Drained {
                     status,
                     execute_tx,
                     settlement_tx_hash,
                     settlement_block,
                     settlement_timestamp,
+                    settlement_recovered,
+                    recovered,
                 } => {
                     sqlx::query(
                         r#"
@@ -534,7 +607,7 @@ impl InvoiceRepository {
                     .bind(transaction_index as i64)
                     .execute(&mut *tx)
                     .await?;
-                    sqlx::query(
+                    let drained: Option<(i64, Vec<u8>)> = sqlx::query_as(
                         r#"
                         UPDATE invoices
                         SET status = COALESCE($4, status),
@@ -556,6 +629,7 @@ impl InvoiceRepository {
                             sweep_attempts = 0,
                             updated_at = now()
                         WHERE id = $1 AND sweep_batch_id = $7
+                        RETURNING chain_id, token_address
                         "#,
                     )
                     .bind(invoice_id)
@@ -568,12 +642,61 @@ impl InvoiceRepository {
                     .bind(settlement_tx_hash.as_slice())
                     .bind(*settlement_block as i64)
                     .bind(*settlement_timestamp as f64)
-                    .execute(&mut *tx)
-                    .await?
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    match drained {
+                        None => 0,
+                        Some((chain_id, token_address)) => {
+                            // Each ledger row is keyed by the chain transaction
+                            // that moved the funds: a third party's settlement
+                            // first, then the batch's own recovery. A receipt
+                            // is applied at most once per batch, so the
+                            // conflict target only fires if the same
+                            // transaction is replayed through another batch;
+                            // the ledger keeps its first record.
+                            let ledger_rows = [
+                                settlement_recovered.as_ref().map(|recovery| {
+                                    (
+                                        recovery,
+                                        settlement_tx_hash.as_slice(),
+                                        *settlement_block,
+                                        *settlement_timestamp,
+                                    )
+                                }),
+                                recovered.as_ref().map(|recovery| {
+                                    (recovery, tx_hash.as_slice(), block, block_timestamp)
+                                }),
+                            ];
+                            for (recovery, transaction_hash, block, timestamp) in
+                                ledger_rows.into_iter().flatten()
+                            {
+                                sqlx::query(
+                                    r#"
+                                    INSERT INTO recovered_funds
+                                        (id, invoice_id, chain_id, token_address, transaction_hash,
+                                         block_number, amount, reason, recovered_at)
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9))
+                                    ON CONFLICT (invoice_id, transaction_hash, reason) DO NOTHING
+                                    "#,
+                                )
+                                .bind(Uuid::now_v7())
+                                .bind(invoice_id)
+                                .bind(chain_id)
+                                .bind(token_address.as_slice())
+                                .bind(transaction_hash)
+                                .bind(block as i64)
+                                .bind(recovery.amount.to_string())
+                                .bind(recovery.reason.as_str())
+                                .bind(timestamp as f64)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                            1
+                        }
+                    }
                 }
-                InvoiceOutcome::Retry => {
-                    sqlx::query(
-                        r#"
+                InvoiceOutcome::Retry => sqlx::query(
+                    r#"
                         UPDATE invoices
                         SET sweep_batch_id = NULL,
                             sweep_attempts = sweep_attempts + 1,
@@ -581,15 +704,14 @@ impl InvoiceRepository {
                             updated_at = now()
                         WHERE id = $1 AND sweep_batch_id = $2
                         "#,
-                    )
-                    .bind(invoice_id)
-                    .bind(batch_id)
-                    .execute(&mut *tx)
-                    .await?
-                }
-                InvoiceOutcome::Blocked { reason } => {
-                    sqlx::query(
-                        r#"
+                )
+                .bind(invoice_id)
+                .bind(batch_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected(),
+                InvoiceOutcome::Blocked { reason } => sqlx::query(
+                    r#"
                         UPDATE invoices
                         SET status = CASE WHEN status IN ('deploying', 'expired') THEN 'blocked' ELSE status END,
                             blocked_reason = $3,
@@ -599,15 +721,15 @@ impl InvoiceRepository {
                             updated_at = now()
                         WHERE id = $1 AND sweep_batch_id = $2
                         "#,
-                    )
-                    .bind(invoice_id)
-                    .bind(batch_id)
-                    .bind(reason)
-                    .execute(&mut *tx)
-                    .await?
-                }
+                )
+                .bind(invoice_id)
+                .bind(batch_id)
+                .bind(reason)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected(),
             };
-            if updated.rows_affected() != 1 {
+            if updated != 1 {
                 return Err(sqlx::Error::Protocol(format!(
                     "invoice {invoice_id} is not part of sweep batch {batch_id}"
                 )));
@@ -646,15 +768,25 @@ impl InvoiceRepository {
         let (queued, in_flight, oldest_uncollected_secs): (i64, i64, Option<f64>) = sqlx::query_as(
             r#"
             SELECT
-                (SELECT count(*) FROM invoices
+                (SELECT count(*) FROM invoices invoice
                   WHERE chain_id = $1 AND uncollected_count > 0 AND sweep_batch_id IS NULL
-                    AND blocked_reason IS NULL AND status = ANY($2)),
+                    AND blocked_reason IS NULL AND status = ANY($2)
+                    AND (status IN ('expired', 'fulfilled', 'recovered') OR
+                         (status IN ('funded', 'deploying')
+                          AND (payer_policy_mode = 'permissionless' OR verification_completed_at IS NOT NULL)
+                          AND (status = 'deploying' OR expiration_timestamp >= COALESCE(
+                              (SELECT last_block_timestamp FROM indexer_cursor WHERE chain_id = invoice.chain_id), 0))))),
                 (SELECT count(*) FROM invoices WHERE chain_id = $1 AND sweep_batch_id IS NOT NULL),
                 (SELECT EXTRACT(EPOCH FROM now() - min(o.observed_at))::float8
                    FROM payment_observations o
                    JOIN invoices i ON i.id = o.invoice_id
                   WHERE i.chain_id = $1 AND o.collected_at_block IS NULL AND o.disposition <> 'error'
-                    AND i.blocked_reason IS NULL AND i.status = ANY($2))
+                    AND i.blocked_reason IS NULL AND i.status = ANY($2)
+                    AND (i.status IN ('expired', 'fulfilled', 'recovered') OR
+                         (i.status IN ('funded', 'deploying')
+                          AND (i.payer_policy_mode = 'permissionless' OR i.verification_completed_at IS NOT NULL)
+                          AND (i.status = 'deploying' OR i.expiration_timestamp >= COALESCE(
+                              (SELECT last_block_timestamp FROM indexer_cursor WHERE chain_id = i.chain_id), 0)))))
             "#,
         )
         .bind(chain_id as i64)
@@ -684,5 +816,541 @@ impl InvoiceRepository {
         sqlx::query_as::<_, (String, DateTime<Utc>)>("SELECT CASE WHEN heartbeat_at < now() - interval '30 seconds' THEN 'degraded' ELSE state END, heartbeat_at FROM sweeper_status WHERE chain_id=$1")
             .bind(chain_id as i64).fetch_optional(self.pool()).await
             .map(|row| row.map(|(state, heartbeat_at)| SweeperStatus { state, heartbeat_at }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use alloy_primitives::{U256, address};
+    use gateway_core::{
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
+        Party, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
+    };
+    use sqlx::PgPool;
+
+    use crate::{AccountId, CreateInvoiceInput};
+
+    const CHAIN_ID: u64 = 31337;
+    const TX_HASH: B256 = B256::repeat_byte(0xA1);
+    const BLOCK: u64 = 7;
+    const BLOCK_TIMESTAMP: u64 = 1_800_000_070;
+    /// A deployment somebody other than this worker mined, four blocks earlier.
+    const SETTLEMENT_TX_HASH: B256 = B256::repeat_byte(0xB2);
+    const SETTLEMENT_BLOCK: u64 = 3;
+    const SETTLEMENT_TIMESTAMP: u64 = 1_800_000_030;
+
+    async fn insert_invoice(pool: &PgPool, amount: u64) -> Invoice {
+        insert_invoice_with(pool, amount, PayerPolicy::Permissionless).await
+    }
+
+    async fn insert_invoice_with(pool: &PgPool, amount: u64, policy: PayerPolicy) -> Invoice {
+        let account_id = Uuid::from_u128(1);
+        sqlx::query(
+            r#"INSERT INTO accounts (id, api_key_hash, api_key_hint)
+               VALUES ($1, $2, 'test') ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(account_id)
+        .bind([1_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
+        let token = TokenAddress(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"));
+        let beneficiary =
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
+        let amount = Amount(U256::from(amount));
+        let recovery = RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
+        let party = |name: &str| Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        };
+        let snapshot = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            policy,
+            factory,
+            ChainId(CHAIN_ID),
+            token,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            recovery,
+        );
+        let invoice = Invoice::issue(
+            factory,
+            ChainId(CHAIN_ID),
+            token,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            recovery,
+            snapshot,
+        )
+        .unwrap();
+        let input = CreateInvoiceInput::from_invoice(
+            &invoice,
+            AccountId(account_id),
+            invoice.id.0.to_string(),
+            USDC_DECIMALS,
+            3_600,
+            "in:3600".into(),
+        );
+        InvoiceRepository::new(pool.clone())
+            .insert_issued(&input, None)
+            .await
+            .expect("row should be inserted");
+        invoice
+    }
+
+    async fn open_batch(repo: &InvoiceRepository, ids: &[Uuid]) -> Uuid {
+        repo.record_batch_submission(CHAIN_ID, ids, 0, 500_000, 100, 2, TX_HASH, &[0xAB])
+            .await
+            .unwrap()
+    }
+
+    fn overpayment(amount: u64) -> RecoveredFundsInput {
+        RecoveredFundsInput {
+            amount: U256::from(amount),
+            reason: RecoveryReason::Overpayment,
+        }
+    }
+
+    fn drained(recovered: Option<RecoveredFundsInput>) -> InvoiceOutcome {
+        InvoiceOutcome::Drained {
+            status: Some(InvoiceStatus::Fulfilled),
+            execute_tx: true,
+            settlement_tx_hash: TX_HASH,
+            settlement_block: BLOCK,
+            settlement_timestamp: BLOCK_TIMESTAMP,
+            settlement_recovered: None,
+            recovered,
+        }
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct LedgerRow {
+        chain_id: i64,
+        token_address: Vec<u8>,
+        transaction_hash: Vec<u8>,
+        block_number: i64,
+        amount: String,
+        reason: String,
+        recovered_at: DateTime<Utc>,
+    }
+
+    async fn ledger(pool: &PgPool, invoice_id: Uuid) -> Vec<LedgerRow> {
+        sqlx::query_as(
+            "SELECT chain_id, token_address, transaction_hash, block_number, amount, reason, recovered_at
+             FROM recovered_funds WHERE invoice_id = $1 ORDER BY created_at",
+        )
+        .bind(invoice_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn open_batches(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM sweep_batches WHERE resolved_at IS NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn finalize_batch_writes_recovery_ledger_atomically(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let member = insert_invoice(&pool, 100).await;
+        let outsider = insert_invoice(&pool, 200).await;
+        let batch = open_batch(&repo, &[member.id.0]).await;
+
+        // The member's ledger row is written before the outsider is rejected;
+        // the rejection must take the ledger row down with it.
+        let error = repo
+            .finalize_batch(
+                batch,
+                TX_HASH,
+                BLOCK,
+                1,
+                BLOCK_TIMESTAMP,
+                &[
+                    (member.id.0, drained(Some(overpayment(50)))),
+                    (outsider.id.0, drained(None)),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not part of sweep batch"));
+        assert!(ledger(&pool, member.id.0).await.is_empty());
+        assert_eq!(open_batches(&pool).await, 1);
+        let row = repo.find_by_id(member.id.0).await.unwrap().unwrap();
+        assert_eq!(row.sweep_batch_id, Some(batch));
+        assert_eq!(row.status, "created");
+
+        repo.finalize_batch(
+            batch,
+            TX_HASH,
+            BLOCK,
+            1,
+            BLOCK_TIMESTAMP,
+            &[(member.id.0, drained(Some(overpayment(50))))],
+        )
+        .await
+        .unwrap();
+        let rows = ledger(&pool, member.id.0).await;
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.chain_id, CHAIN_ID as i64);
+        assert_eq!(row.token_address, member.token.0.to_vec());
+        assert_eq!(row.transaction_hash, TX_HASH.to_vec());
+        assert_eq!(row.block_number, BLOCK as i64);
+        assert_eq!(row.amount, "50");
+        assert_eq!(row.reason, "overpayment");
+        assert_eq!(row.recovered_at.timestamp(), BLOCK_TIMESTAMP as i64);
+        assert_eq!(open_batches(&pool).await, 0);
+        assert!(ledger(&pool, outsider.id.0).await.is_empty());
+
+        let event: (String, serde_json::Value) = sqlx::query_as(
+            "SELECT event_type, payload FROM webhook_events WHERE invoice_id = $1 AND event_type = 'payment.recovered_funds'",
+        )
+        .bind(member.id.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event.0, "payment.recovered_funds");
+        assert_eq!(event.1["data"]["recovery"]["amount"], "50");
+        assert_eq!(event.1["data"]["recovery"]["reason"], "overpayment");
+        assert_eq!(event.1["data"]["payment"]["status"], "settled");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn third_party_settlement_and_late_collection_are_ledgered_together(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let member = insert_invoice(&pool, 100).await;
+        let outsider = insert_invoice(&pool, 200).await;
+        let batch = open_batch(&repo, &[member.id.0]).await;
+        // Somebody else deployed the contract while the address held 125, so
+        // their transaction sent the 25 remainder to the recovery wallet; a
+        // later transfer of 30 was forwarded by this batch's `recover()`.
+        let outcome = InvoiceOutcome::Drained {
+            status: Some(InvoiceStatus::Fulfilled),
+            execute_tx: false,
+            settlement_tx_hash: SETTLEMENT_TX_HASH,
+            settlement_block: SETTLEMENT_BLOCK,
+            settlement_timestamp: SETTLEMENT_TIMESTAMP,
+            settlement_recovered: Some(overpayment(25)),
+            recovered: Some(RecoveredFundsInput {
+                amount: U256::from(30),
+                reason: RecoveryReason::LateTransfer,
+            }),
+        };
+
+        let error = repo
+            .finalize_batch(
+                batch,
+                TX_HASH,
+                BLOCK,
+                1,
+                BLOCK_TIMESTAMP,
+                &[
+                    (member.id.0, outcome.clone()),
+                    (outsider.id.0, drained(None)),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not part of sweep batch"));
+        assert!(
+            ledger(&pool, member.id.0).await.is_empty(),
+            "both ledger rows roll back with the batch"
+        );
+
+        repo.finalize_batch(
+            batch,
+            TX_HASH,
+            BLOCK,
+            1,
+            BLOCK_TIMESTAMP,
+            &[(member.id.0, outcome)],
+        )
+        .await
+        .unwrap();
+        let mut rows = ledger(&pool, member.id.0).await;
+        // Both rows are written in one transaction, so `created_at` cannot
+        // order them.
+        rows.sort_by(|left, right| left.reason.cmp(&right.reason));
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.reason.as_str(),
+                    row.amount.as_str(),
+                    row.transaction_hash.clone(),
+                    row.block_number,
+                    row.recovered_at.timestamp(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "late_transfer",
+                    "30",
+                    TX_HASH.to_vec(),
+                    BLOCK as i64,
+                    BLOCK_TIMESTAMP as i64
+                ),
+                (
+                    "overpayment",
+                    "25",
+                    SETTLEMENT_TX_HASH.to_vec(),
+                    SETTLEMENT_BLOCK as i64,
+                    SETTLEMENT_TIMESTAMP as i64
+                ),
+            ]
+        );
+        let row = repo.find_by_id(member.id.0).await.unwrap().unwrap();
+        assert_eq!(row.status, "fulfilled");
+        assert_eq!(row.execute_tx_hash, None);
+        assert_eq!(row.settlement_tx_hash, Some(SETTLEMENT_TX_HASH.to_vec()));
+        let events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM webhook_events WHERE invoice_id = $1 AND event_type = 'payment.recovered_funds'",
+        )
+        .bind(member.id.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events, 2, "one recovery event per ledger row");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn replayed_receipt_does_not_duplicate_recovery(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice(&pool, 100).await;
+        let batch = open_batch(&repo, &[invoice.id.0]).await;
+        let outcomes = [(invoice.id.0, drained(Some(overpayment(50))))];
+
+        repo.finalize_batch(batch, TX_HASH, BLOCK, 1, BLOCK_TIMESTAMP, &outcomes)
+            .await
+            .unwrap();
+        assert_eq!(ledger(&pool, invoice.id.0).await.len(), 1);
+
+        // Re-applying the receipt to the closed batch is refused outright.
+        let error = repo
+            .finalize_batch(batch, TX_HASH, BLOCK, 1, BLOCK_TIMESTAMP, &outcomes)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not part of sweep batch"));
+        assert_eq!(ledger(&pool, invoice.id.0).await.len(), 1);
+
+        // Should the same transaction ever be applied through a later batch,
+        // the ledger's uniqueness guard keeps the first record.
+        let replay = open_batch(&repo, &[invoice.id.0]).await;
+        repo.finalize_batch(replay, TX_HASH, BLOCK, 1, BLOCK_TIMESTAMP, &outcomes)
+            .await
+            .unwrap();
+        let rows = ledger(&pool, invoice.id.0).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount, "50");
+        assert_eq!(open_batches(&pool).await, 0);
+    }
+
+    /// The invoice's deadline, as `insert_invoice_with` issues it.
+    const EXPIRATION: u64 = 1_900_000_000;
+
+    fn gated() -> PayerPolicy {
+        PayerPolicy::VerifiedEmail {
+            expected_email: "alice@example.com".into(),
+        }
+    }
+
+    /// Finalized transfers reached the amount and are waiting to be collected.
+    async fn fund(pool: &PgPool, invoice: &Invoice) {
+        sqlx::query(
+            "UPDATE invoices SET status = 'funded', confirmed_received = amount, uncollected_count = 1 WHERE id = $1",
+        )
+        .bind(invoice.id.0)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The chain clock as the indexer last recorded it.
+    async fn set_finalized_clock(pool: &PgPool, timestamp: u64) {
+        sqlx::query(
+            r#"
+            INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash, last_block_timestamp)
+            VALUES ($1, $2, 1, $3, $4)
+            ON CONFLICT (chain_id) DO UPDATE SET last_block_timestamp = EXCLUDED.last_block_timestamp
+            "#,
+        )
+        .bind(CHAIN_ID as i64)
+        .bind([0xe7u8; 20].as_slice())
+        .bind([0x11u8; 32].as_slice())
+        .bind(timestamp as i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn complete_verification(pool: &PgPool, invoice: &Invoice) {
+        sqlx::query("UPDATE invoices SET verification_completed_at = now() WHERE id = $1")
+            .bind(invoice.id.0)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn claimed(repo: &InvoiceRepository) -> Vec<Uuid> {
+        repo.claim_sweep_batch(CHAIN_ID, 10, 1.0, 60.0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    async fn status(pool: &PgPool, invoice: &Invoice) -> String {
+        sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice.id.0)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn permissionless_live_invoice_is_claimable(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice(&pool, 100).await;
+        fund(&pool, &invoice).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "deploying");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn verified_live_invoice_without_completion_is_not_claimable(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+
+        assert!(claimed(&repo).await.is_empty());
+        assert_eq!(status(&pool, &invoice).await, "funded");
+        // The funds are queued, not quarantined: the row still counts them.
+        let uncollected: i32 =
+            sqlx::query_scalar("SELECT uncollected_count FROM invoices WHERE id = $1")
+                .bind(invoice.id.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(uncollected, 1);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn verified_live_invoice_after_completion_is_claimable(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+        assert!(claimed(&repo).await.is_empty());
+
+        complete_verification(&pool, &invoice).await;
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "deploying");
+        // Once claimed, a deploying row stays reclaimable after the deadline
+        // passes: the contract routes it to recovery if it executes late.
+        set_finalized_clock(&pool, EXPIRATION + 60).await;
+        sqlx::query(
+            "UPDATE invoices SET last_attempt_at = now() - interval '1 hour' WHERE id = $1",
+        )
+        .bind(invoice.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn queue_stats_apply_the_live_verification_gate(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        sqlx::query(
+            r#"
+            INSERT INTO payment_observations
+                (chain_id, token_address, block_number, block_hash, block_timestamp,
+                 transaction_hash, transaction_index, log_index, sender_address,
+                 recipient_address, invoice_id, amount, disposition)
+            VALUES ($1, $2, 1, $3, $4, $5, 0, 0, $6, $7, $8, '100', 'credited')
+            "#,
+        )
+        .bind(CHAIN_ID as i64)
+        .bind(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").as_slice())
+        .bind([0x11u8; 32].as_slice())
+        .bind((EXPIRATION - 120) as i64)
+        .bind([0x22u8; 32].as_slice())
+        .bind([0x33u8; 20].as_slice())
+        .bind(invoice.payment_address.0.as_slice())
+        .bind(invoice.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+
+        let stats = repo.sweep_queue_stats(CHAIN_ID).await.unwrap();
+        assert_eq!(stats.queued, 0);
+        assert_eq!(stats.oldest_uncollected_secs, None);
+
+        complete_verification(&pool, &invoice).await;
+        let stats = repo.sweep_queue_stats(CHAIN_ID).await.unwrap();
+        assert_eq!(stats.queued, 1);
+        assert!(stats.oldest_uncollected_secs.is_some());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn expired_unverified_invoice_is_claimable_for_recovery(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        sqlx::query(
+            "UPDATE invoices SET status = 'expired', confirmed_received = '40', uncollected_count = 1 WHERE id = $1",
+        )
+        .bind(invoice.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_finalized_clock(&pool, EXPIRATION + 60).await;
+
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "expired");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn verification_after_expiry_does_not_create_live_claim(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice_with(&pool, 100, gated()).await;
+        fund(&pool, &invoice).await;
+        // The finalized clock has passed the deadline; the indexer's expiry
+        // pass may not have flipped the row yet.
+        set_finalized_clock(&pool, EXPIRATION + 1).await;
+        complete_verification(&pool, &invoice).await;
+
+        assert!(claimed(&repo).await.is_empty());
+        assert_eq!(status(&pool, &invoice).await, "funded");
+
+        // Expiry, not verification, is what makes it claimable, and only for
+        // recovery: the row is claimed as `expired`, never promoted to
+        // `deploying`.
+        sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = $1")
+            .bind(invoice.id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(claimed(&repo).await, [invoice.id.0]);
+        assert_eq!(status(&pool, &invoice).await, "expired");
     }
 }

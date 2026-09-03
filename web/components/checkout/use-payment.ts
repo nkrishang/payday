@@ -21,6 +21,8 @@ export interface LivePayment {
   pendingTxHash: string | null;
   /** Record a transfer this browser sent; starts the fast poll window. */
   markSent: (hash: string) => void;
+  /** Re-read now, for the moment verification changes what this tab may see. */
+  refresh: () => void;
 }
 
 /**
@@ -29,8 +31,12 @@ export interface LivePayment {
  * Reads go straight to the Payday API rather than through this app's server:
  * the payer routes are public, keyless and CORS-enabled, so a proxy would add a
  * hop and a second copy of the contract without buying anything.
+ *
+ * `payerSession` is this tab's opaque session, sent as a header on every read
+ * so a gated invoice unlocks here and nowhere else. The server-rendered
+ * payment never had it; the first read with a session replaces it.
  */
-export function usePayment(initial: PayerPayment): LivePayment {
+export function usePayment(initial: PayerPayment, payerSession: string | null = null): LivePayment {
   const [state, setState] = useState(() => ({
     payment: initial,
     // Captured on both server and client at first render, so the countdown
@@ -51,7 +57,9 @@ export function usePayment(initial: PayerPayment): LivePayment {
   const markSent = useCallback((hash: string) => {
     const send: PendingSend = {
       hash,
-      receivedAtSend: BigInt(latest.current.payment.received_base_units),
+      // Locked content has no credited total; nothing can be sent from a locked
+      // page, so this only runs with the mechanics present.
+      receivedAtSend: BigInt(latest.current.payment.received_base_units ?? "0"),
       at: Date.now(),
     };
     latest.current = { ...latest.current, pendingSend: send };
@@ -63,6 +71,7 @@ export function usePayment(initial: PayerPayment): LivePayment {
 
   useEffect(() => {
     let disposed = false;
+    const session = payerSession;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let inFlight: AbortController | null = null;
     let failures = 0;
@@ -83,7 +92,7 @@ export function usePayment(initial: PayerPayment): LivePayment {
           ? backoffMs(failures)
           : pollDelayMs({
               status: current.status,
-              receivedBaseUnits: current.received_base_units,
+              receivedBaseUnits: current.received_base_units ?? "0",
               documentHidden: typeof document !== "undefined" && document.hidden,
               msSinceSend: send ? Date.now() - send.at : null,
             });
@@ -99,7 +108,10 @@ export function usePayment(initial: PayerPayment): LivePayment {
       inFlight = controller;
 
       try {
-        const next = await payerClient.payments.get(id, { signal: controller.signal });
+        const next = await payerClient.payments.get(id, {
+          signal: controller.signal,
+          ...(session === null ? {} : { payerSession: session }),
+        });
         if (disposed) return;
         failures = 0;
         setReconnecting(false);
@@ -109,7 +121,7 @@ export function usePayment(initial: PayerPayment): LivePayment {
         // Our transfer has been credited once the gateway's total moves past
         // what it was when we sent, so the "confirming" state can end.
         const send = latest.current.pendingSend;
-        if (send && BigInt(next.received_base_units) > send.receivedAtSend) {
+        if (send && BigInt(next.received_base_units ?? "0") > send.receivedAtSend) {
           latest.current = { ...latest.current, pendingSend: null };
           setPendingSend(null);
         }
@@ -142,7 +154,11 @@ export function usePayment(initial: PayerPayment): LivePayment {
     };
 
     document.addEventListener("visibilitychange", onVisibility);
-    schedule();
+    // A session that just appeared (restored from this tab, or minted by
+    // verification) may unlock content the current payment withholds: read
+    // at once rather than after the next poll delay.
+    if (session === null) schedule();
+    else void tick();
 
     return () => {
       disposed = true;
@@ -151,7 +167,9 @@ export function usePayment(initial: PayerPayment): LivePayment {
       poke.current = () => {};
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [id]);
+  }, [id, payerSession]);
+
+  const refresh = useCallback(() => poke.current(), []);
 
   return {
     payment: state.payment,
@@ -159,6 +177,7 @@ export function usePayment(initial: PayerPayment): LivePayment {
     reconnecting,
     pendingTxHash: pendingSend?.hash ?? null,
     markSent,
+    refresh,
   };
 }
 

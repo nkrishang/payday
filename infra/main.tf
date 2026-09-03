@@ -1,4 +1,5 @@
 data "aws_availability_zones" "available" { state = "available" }
+data "aws_caller_identity" "current" {}
 
 locals {
   # Payer links point at the hosted checkout. gatewayd validates this as a bare
@@ -16,9 +17,44 @@ locals {
     { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
     { name = "PAYDAY_FACTORY_ADDRESS", value = var.factory_address },
     { name = "PAYDAY_BATCH_SWEEPER_ADDRESS", value = var.batch_sweeper_address },
+    { name = "PAYDAY_FACTORY_CODE_HASH", value = var.factory_code_hash },
+    { name = "PAYDAY_BATCH_SWEEPER_CODE_HASH", value = var.batch_sweeper_code_hash },
     { name = "PAYDAY_USDC_ADDRESS", value = var.usdc_address },
     { name = "RUST_LOG", value = "info" }
   ]
+  # The dashboard's Auth0 application is optional until it exists. Omit the
+  # variable rather than pass an empty value, so gatewayd sees the same absence
+  # as a deployment that has no dashboard.
+  dashboard_environment = var.dashboard_auth0_client_id == "" ? [] : [
+    { name = "PAYDAY_DASHBOARD_AUTH0_CLIENT_ID", value = var.dashboard_auth0_client_id }
+  ]
+  # Payer email verification needs its own Auth0 API and application (see
+  # docs/authentication.md). Until both identifiers exist the settings are
+  # omitted as a group, and gatewayd answers verification_unavailable.
+  payer_verification_enabled = var.payer_auth0_audience != "" && var.payer_auth0_client_id != ""
+  payer_environment = local.payer_verification_enabled ? [
+    { name = "PAYDAY_PAYER_AUTH0_ISSUER", value = var.auth0_issuer },
+    { name = "PAYDAY_PAYER_AUTH0_AUDIENCE", value = var.payer_auth0_audience },
+    { name = "PAYDAY_PAYER_AUTH0_CLIENT_ID", value = var.payer_auth0_client_id },
+    { name = "PAYDAY_HOSTED_CHECKOUT_ORIGIN", value = local.checkout_base_url }
+  ] : []
+  payer_secrets = local.payer_verification_enabled ? [
+    { name = "PAYDAY_PAYER_REF_MASTER_KEY", valueFrom = aws_secretsmanager_secret.payer_ref_master_key.arn }
+  ] : []
+  # Identity verification needs a Didit workflow, API key, and webhook secret
+  # (see docs/authentication.md). Until all three exist the settings are
+  # omitted as a group, and identity start answers verification_unavailable.
+  identity_verification_enabled = var.didit_workflow_id != ""
+  identity_environment = local.identity_verification_enabled ? [
+    { name = "PAYDAY_DIDIT_WORKFLOW_ID", value = var.didit_workflow_id },
+    { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
+    ] : [
+    { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
+  ]
+  identity_secrets = local.identity_verification_enabled ? [
+    { name = "PAYDAY_DIDIT_API_KEY", valueFrom = aws_secretsmanager_secret.didit_api_key[0].arn },
+    { name = "PAYDAY_DIDIT_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.didit_webhook_secret[0].arn }
+  ] : []
 }
 
 resource "aws_vpc" "this" {
@@ -182,6 +218,36 @@ resource "aws_secretsmanager_secret_version" "webhook_encryption_key" {
   secret_string = random_id.webhook_encryption_key.b64_std
 }
 
+# Derives the merchant-scoped payer references; rotating it unlinks every
+# stored identity credential from the mailboxes that earned them.
+resource "random_id" "payer_ref_master_key" { byte_length = 32 }
+resource "aws_secretsmanager_secret" "payer_ref_master_key" {
+  name = "${var.name}/payer-ref-master-key"
+}
+resource "aws_secretsmanager_secret_version" "payer_ref_master_key" {
+  secret_id     = aws_secretsmanager_secret.payer_ref_master_key.id
+  secret_string = random_id.payer_ref_master_key.b64_std
+}
+
+resource "aws_secretsmanager_secret" "didit_api_key" {
+  count = local.identity_verification_enabled ? 1 : 0
+  name  = "${var.name}/didit-api-key"
+}
+resource "aws_secretsmanager_secret_version" "didit_api_key" {
+  count         = local.identity_verification_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.didit_api_key[0].id
+  secret_string = var.didit_api_key
+}
+resource "aws_secretsmanager_secret" "didit_webhook_secret" {
+  count = local.identity_verification_enabled ? 1 : 0
+  name  = "${var.name}/didit-webhook-secret"
+}
+resource "aws_secretsmanager_secret_version" "didit_webhook_secret" {
+  count         = local.identity_verification_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.didit_webhook_secret[0].id
+  secret_string = var.didit_webhook_secret
+}
+
 resource "random_password" "admin_bearer" {
   length  = 48
   special = false
@@ -205,6 +271,43 @@ resource "aws_kms_key" "signer" {
 resource "aws_kms_alias" "signer" {
   name          = "alias/${var.name}-signer"
   target_key_id = aws_kms_key.signer.key_id
+}
+
+# The recovery wallet takes custody of overpayment remainders, expired
+# balances, and late transfers. Nothing in the stack signs with it: recovered
+# funds are reviewed and returned by hand, so no task role is granted kms:Sign.
+resource "aws_kms_key" "recovery" {
+  description              = "Payday recovery wallet; manual operator use only"
+  key_usage                = "SIGN_VERIFY"
+  customer_master_key_spec = "ECC_SECG_P256K1"
+  deletion_window_in_days  = 30
+  enable_key_rotation      = false
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+resource "aws_kms_alias" "recovery" {
+  name          = "alias/${var.name}-recovery"
+  target_key_id = aws_kms_key.recovery.key_id
+}
+
+# Signs the Payday-attested verification result carried in every Proof of
+# Payment. It is deliberately neither the sweep signer nor the recovery key: a
+# proof consumer trusts this address for attestations only, and it can never
+# move funds.
+resource "aws_kms_key" "attestation" {
+  description              = "${var.name} Proof of Payment attestation signer"
+  key_usage                = "SIGN_VERIFY"
+  customer_master_key_spec = "ECC_SECG_P256K1"
+  deletion_window_in_days  = 30
+  enable_key_rotation      = false
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+resource "aws_kms_alias" "attestation" {
+  name          = "alias/${var.name}-attestation"
+  target_key_id = aws_kms_key.attestation.key_id
 }
 
 resource "aws_ecr_repository" "api" {
@@ -266,7 +369,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], aws_secretsmanager_secret.didit_api_key[*].arn, aws_secretsmanager_secret.didit_webhook_secret[*].arn) }] })
 }
 resource "aws_iam_role_policy" "status_secrets" {
   role   = aws_iam_role.status_execution.id
@@ -296,6 +399,10 @@ resource "aws_iam_role_policy" "api_ses" {
   role   = aws_iam_role.api_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["ses:SendEmail"], Resource = aws_sesv2_email_identity.notifications.arn }] })
 }
+resource "aws_iam_role_policy" "api_attestation_kms" {
+  role   = aws_iam_role.api_task.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.attestation.arn }] })
+}
 resource "aws_iam_role" "indexer_task" {
   name               = "${var.name}-indexer-task"
   assume_role_policy = aws_iam_role.api_execution.assume_role_policy
@@ -303,6 +410,242 @@ resource "aws_iam_role" "indexer_task" {
 resource "aws_iam_role_policy" "indexer_kms" {
   role   = aws_iam_role.indexer_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.signer.arn }] })
+}
+
+# ---------------------------------------------------------------------------
+# Invoice attachments. One PDF per invoice, uploaded straight to S3 through a
+# presigned PUT signed by the API task role, scanned by GuardDuty Malware
+# Protection, and finalized by gatewayd only once the managed tag
+# GuardDutyMalwareScanStatus=NO_THREATS_FOUND is present.
+#
+# Object layout: every upload lands at uploads/<account_id>/<attachment_id>.pdf
+# and is never moved. The presigned PUT stamps the tag payday-upload=pending on
+# it (a signed header, so no upload can omit it); issuing an invoice rewrites
+# that tag to payday-upload=attached before the invoice commits. The lifecycle
+# rule expires only objects still tagged pending, so infrastructure can never
+# expire an attached PDF, and an abandoned upload is gone after seven days
+# without gatewayd having to track it.
+# ---------------------------------------------------------------------------
+
+resource "aws_kms_key" "attachments" {
+  description             = "${var.name} invoice attachment encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+resource "aws_kms_alias" "attachments" {
+  name          = "alias/${var.name}-attachments"
+  target_key_id = aws_kms_key.attachments.key_id
+}
+
+resource "aws_s3_bucket" "attachments" {
+  bucket = "${var.name}-invoice-attachments"
+}
+resource "aws_s3_bucket_ownership_controls" "attachments" {
+  bucket = aws_s3_bucket.attachments.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+resource "aws_s3_bucket_public_access_block" "attachments" {
+  bucket                  = aws_s3_bucket.attachments.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+resource "aws_s3_bucket_versioning" "attachments" {
+  bucket = aws_s3_bucket.attachments.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+resource "aws_s3_bucket_server_side_encryption_configuration" "attachments" {
+  bucket = aws_s3_bucket.attachments.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.attachments.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+resource "aws_s3_bucket_lifecycle_configuration" "attachments" {
+  bucket = aws_s3_bucket.attachments.id
+  rule {
+    id     = "expire-unattached-uploads"
+    status = "Enabled"
+    filter {
+      and {
+        prefix = "uploads/"
+        tags   = { payday-upload = "pending" }
+      }
+    }
+    expiration {
+      days = 7
+    }
+    # Versioning turns the expiration above into a delete marker; the version
+    # underneath is still tagged pending and goes seven days later.
+    noncurrent_version_expiration {
+      noncurrent_days = 7
+    }
+  }
+  depends_on = [aws_s3_bucket_versioning.attachments]
+}
+# The dashboard uploads from the browser, so the bucket must answer its
+# preflight. The presigned signature, not CORS, is what constrains the request.
+resource "aws_s3_bucket_cors_configuration" "attachments" {
+  bucket = aws_s3_bucket.attachments.id
+  cors_rule {
+    allowed_origins = [local.checkout_base_url]
+    allowed_methods = ["PUT"]
+    allowed_headers = ["*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
+  }
+}
+
+# GuardDuty scans every new object through this role, then tags it with the
+# verdict. The permissions are the AWS prerequisite policy for a bucket
+# encrypted with a customer managed key.
+resource "aws_iam_role" "malware_protection" {
+  name               = "${var.name}-attachments-malware-protection"
+  assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "malware-protection-plan.guardduty.amazonaws.com" }, Action = "sts:AssumeRole" }] })
+}
+resource "aws_iam_role_policy" "malware_protection" {
+  role = aws_iam_role.malware_protection.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "ManageScanTriggerRule"
+        Effect    = "Allow"
+        Action    = ["events:PutRule", "events:DeleteRule", "events:PutTargets", "events:RemoveTargets"]
+        Resource  = "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*"
+        Condition = { StringLike = { "events:ManagedBy" = "malware-protection-plan.guardduty.amazonaws.com" } }
+      },
+      {
+        Sid      = "MonitorScanTriggerRule"
+        Effect   = "Allow"
+        Action   = ["events:DescribeRule", "events:ListTargetsByRule"]
+        Resource = "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*"
+      },
+      {
+        Sid      = "TagScanVerdicts"
+        Effect   = "Allow"
+        Action   = ["s3:PutObjectTagging", "s3:GetObjectTagging", "s3:PutObjectVersionTagging", "s3:GetObjectVersionTagging"]
+        Resource = "${aws_s3_bucket.attachments.arn}/*"
+      },
+      {
+        Sid      = "EnableBucketEvents"
+        Effect   = "Allow"
+        Action   = ["s3:PutBucketNotification", "s3:GetBucketNotification"]
+        Resource = aws_s3_bucket.attachments.arn
+      },
+      {
+        Sid      = "PutValidationObject"
+        Effect   = "Allow"
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.attachments.arn}/malware-protection-resource-validation-object"
+      },
+      {
+        Sid      = "CheckBucketOwnership"
+        Effect   = "Allow"
+        Action   = "s3:ListBucket"
+        Resource = aws_s3_bucket.attachments.arn
+      },
+      {
+        Sid      = "ReadObjectsToScan"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion"]
+        Resource = "${aws_s3_bucket.attachments.arn}/*"
+      },
+      {
+        Sid       = "DecryptObjectsToScan"
+        Effect    = "Allow"
+        Action    = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource  = aws_kms_key.attachments.arn
+        Condition = { StringLike = { "kms:ViaService" = "s3.${var.aws_region}.amazonaws.com" } }
+      }
+    ]
+  })
+}
+resource "aws_guardduty_malware_protection_plan" "attachments" {
+  role = aws_iam_role.malware_protection.arn
+  protected_resource {
+    s3_bucket {
+      bucket_name = aws_s3_bucket.attachments.id
+    }
+  }
+  actions {
+    tagging {
+      status = "ENABLED"
+    }
+  }
+  # GuardDuty validates the role by writing a probe object at creation, so the
+  # permissions above and the bucket policy must already be in place.
+  depends_on = [aws_iam_role_policy.malware_protection, aws_s3_bucket_policy.attachments]
+}
+
+# Nobody reads an object before its scan came back clean, except the scanner
+# itself and the API task role, which checks the verdict tag in code before it
+# streams anything (HEAD is s3:GetObject too, so the role must be exempt to
+# report a pending scan at all). Presigned downloads are signed by the task
+# role and are only ever issued for attached, clean objects.
+resource "aws_s3_bucket_policy" "attachments" {
+  bucket = aws_s3_bucket.attachments.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource  = [aws_s3_bucket.attachments.arn, "${aws_s3_bucket.attachments.arn}/*"]
+        Condition = { Bool = { "aws:SecureTransport" = "false" } }
+      },
+      {
+        Sid       = "DenyReadsUntilScanIsClean"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = ["s3:GetObject", "s3:GetObjectVersion"]
+        Resource  = "${aws_s3_bucket.attachments.arn}/*"
+        Condition = {
+          StringNotEquals = { "s3:ExistingObjectTag/GuardDutyMalwareScanStatus" = "NO_THREATS_FOUND" }
+          ArnNotEquals    = { "aws:PrincipalArn" = [aws_iam_role.api_task.arn, aws_iam_role.malware_protection.arn] }
+        }
+      }
+    ]
+  })
+  depends_on = [aws_s3_bucket_public_access_block.attachments]
+}
+
+# What gatewayd may do with uploads, and nothing else: sign PUTs that carry the
+# pending tag, inspect and stream objects, read and rewrite tags, and delete
+# rejected uploads. No ListBucket, nothing outside uploads/.
+resource "aws_iam_role_policy" "api_attachments" {
+  role = aws_iam_role.api_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ManageUploads"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:GetObjectVersionTagging", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.attachments.arn}/uploads/*"
+      },
+      {
+        Sid       = "UseAttachmentKeyThroughS3"
+        Effect    = "Allow"
+        Action    = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource  = aws_kms_key.attachments.arn
+        Condition = { StringEquals = { "kms:ViaService" = "s3.${var.aws_region}.amazonaws.com" } }
+      }
+    ]
+  })
 }
 
 resource "aws_ecs_task_definition" "api" {
@@ -330,15 +673,30 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
-      { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address }
-    ]),
-    secrets = [
+      { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
+      { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address },
+      { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
+      { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
+    ], local.dashboard_environment, local.payer_environment, local.identity_environment),
+    # The API verifies the deployed contract generation at startup, so it reads
+    # the chain through the same RPC secret as the indexer.
+    secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
-    ],
+    ], local.payer_secrets, local.identity_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
+
+  # The recovery wallet is committed into every payment address, so the API
+  # must never start with a placeholder; fail the plan rather than the task.
+  lifecycle {
+    precondition {
+      condition     = var.recovery_address != null
+      error_message = "recovery_address must be set to the recovery KMS key's address (derive it with cast wallet address --aws from recovery_kms_key_arn) before the API task can be deployed"
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "status" {

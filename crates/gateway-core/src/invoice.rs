@@ -7,8 +7,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    Amount, BeneficiaryAddress, ChainId, FactoryAddress, PaymentAddress, RecoveryAddress, Salt,
-    TokenAddress, generate_salt, predict_payment_address,
+    ATTRIBUTION_VERSION, Amount, AttributionError, BeneficiaryAddress, CANONICALIZATION,
+    CanonicalIssuanceSnapshot, ChainId, FactoryAddress, PaymentAddress, RecoveryAddress,
+    SNAPSHOT_SCHEMA, Salt, TokenAddress, derive_attribution, predict_payment_address,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -145,10 +146,22 @@ pub struct Invoice {
     /// When the customer asked clients to stop using this invoice. This is
     /// advisory metadata and does not alter the immutable payment contract.
     pub cancellation_requested_at: Option<String>,
+    /// Proof material (product plan §5): the commitment scheme version, the
+    /// nonce and hash the salt was derived from, and the document that was
+    /// hashed. None of it is a settlement dependency.
+    pub attribution_version: u16,
+    pub attribution_nonce: B256,
+    pub attribution_hash: B256,
+    pub issuance_snapshot: CanonicalIssuanceSnapshot,
 }
 
 impl Invoice {
-    pub fn new(
+    /// Issue an invoice: commit to `snapshot`, derive the salt from it, and
+    /// compute the payment address. The typed parameters are the ones the
+    /// address is derived from, so the snapshot must describe exactly those;
+    /// otherwise a proof would verify against terms nobody was paid under.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
         factory: FactoryAddress,
         chain_id: ChainId,
         token: TokenAddress,
@@ -156,9 +169,67 @@ impl Invoice {
         amount: Amount,
         expiration_timestamp: u64,
         recovery: RecoveryAddress,
-    ) -> Self {
-        let salt = generate_salt();
-        Invoice {
+        snapshot: CanonicalIssuanceSnapshot,
+    ) -> Result<Self, AttributionError> {
+        let expected = CanonicalIssuanceSnapshot::new(
+            snapshot.issuer.clone(),
+            snapshot.bill_to.clone(),
+            snapshot.payer_policy.clone(),
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            recovery,
+        );
+        for (field, actual, wanted) in [
+            ("schema", &snapshot.schema, SNAPSHOT_SCHEMA),
+            (
+                "canonicalization",
+                &snapshot.canonicalization,
+                CANONICALIZATION,
+            ),
+            ("chain_id", &snapshot.chain_id, &expected.chain_id),
+            (
+                "token_address",
+                &snapshot.token_address,
+                &expected.token_address,
+            ),
+            (
+                "receiver_address",
+                &snapshot.receiver_address,
+                &expected.receiver_address,
+            ),
+            (
+                "recovery_address",
+                &snapshot.recovery_address,
+                &expected.recovery_address,
+            ),
+            (
+                "factory_address",
+                &snapshot.factory_address,
+                &expected.factory_address,
+            ),
+            (
+                "amount_base_units",
+                &snapshot.amount_base_units,
+                &expected.amount_base_units,
+            ),
+            (
+                "expiration_timestamp",
+                &snapshot.expiration_timestamp,
+                &expected.expiration_timestamp,
+            ),
+        ] {
+            if actual != wanted {
+                return Err(AttributionError::SnapshotMismatch { field });
+            }
+        }
+
+        let attribution = derive_attribution(&snapshot)?;
+        let salt = attribution.salt;
+        Ok(Invoice {
             id: generate_invoice_id(),
             chain_id,
             token,
@@ -184,7 +255,11 @@ impl Invoice {
             settled_at_timestamp: None,
             blocked_reason: None,
             cancellation_requested_at: None,
-        }
+            attribution_version: ATTRIBUTION_VERSION,
+            attribution_nonce: attribution.nonce,
+            attribution_hash: attribution.attribution_hash,
+            issuance_snapshot: snapshot,
+        })
     }
 
     /// Recompute the counterfactual address from the stored parameters. A
@@ -258,13 +333,56 @@ mod tests {
     }
 
     use crate::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, RecoveryAddress, TokenAddress,
-        predict_payment_address,
+        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Party, PayerPolicy, RecoveryAddress,
+        TokenAddress, predict_payment_address, recompute_salt,
     };
     use alloy_primitives::{U256, address};
 
+    fn party(name: &str) -> Party {
+        Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        }
+    }
+
+    /// Issue with a minimal permissionless snapshot built from the same terms.
+    fn issue(
+        factory: FactoryAddress,
+        chain_id: ChainId,
+        token: TokenAddress,
+        beneficiary: BeneficiaryAddress,
+        amount: Amount,
+        expiration_timestamp: u64,
+        recovery: RecoveryAddress,
+    ) -> Invoice {
+        let snapshot = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            PayerPolicy::Permissionless,
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            recovery,
+        );
+        Invoice::issue(
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            recovery,
+            snapshot,
+        )
+        .unwrap()
+    }
+
     fn sample_invoice() -> Invoice {
-        Invoice::new(
+        issue(
             FactoryAddress(address!("0x0000000000000000000000000000000000000001")),
             ChainId(1),
             TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6")),
@@ -338,7 +456,7 @@ mod tests {
         let expiration_timestamp = 1_900_000_000;
         let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
 
-        let invoice = Invoice::new(
+        let invoice = issue(
             factory,
             chain_id,
             token,
@@ -361,7 +479,7 @@ mod tests {
     fn new_invoice_payment_address_matches_predict() {
         // The address stored on the invoice must equal what predict_payment_address
         // returns for the same inputs — this is the integration test that ties
-        // generate_salt, generate_invoice_id, and predict_payment_address together.
+        // derive_attribution, generate_invoice_id, and predict_payment_address together.
         let invoice = sample_invoice();
 
         let expected = predict_payment_address(
@@ -400,7 +518,7 @@ mod tests {
         let expiration_timestamp = 1_900_000_000;
         let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
 
-        let a = Invoice::new(
+        let a = issue(
             factory,
             chain_id,
             token,
@@ -409,7 +527,7 @@ mod tests {
             expiration_timestamp,
             recovery,
         );
-        let b = Invoice::new(
+        let b = issue(
             factory,
             chain_id,
             token,
@@ -451,5 +569,106 @@ mod tests {
 
         assert_ne!(invoice.payment_address, later_expiration);
         assert_ne!(invoice.payment_address, other_recovery);
+    }
+
+    #[test]
+    fn issued_invoice_commits_to_its_snapshot() {
+        let invoice = sample_invoice();
+        assert_eq!(invoice.attribution_version, ATTRIBUTION_VERSION);
+        assert_eq!(
+            invoice.salt,
+            recompute_salt(invoice.attribution_nonce, invoice.attribution_hash)
+        );
+        assert_eq!(invoice.issuance_snapshot.amount_base_units, "100");
+        assert_eq!(invoice.issuance_snapshot.chain_id, "1");
+        assert_eq!(
+            invoice.issuance_snapshot.receiver_address,
+            invoice.beneficiary.0.to_checksum(None)
+        );
+    }
+
+    #[test]
+    fn issue_refuses_a_snapshot_that_describes_other_terms() {
+        let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
+        let chain_id = ChainId(1);
+        let token = TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6"));
+        let beneficiary =
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
+        let amount = Amount(U256::from(100));
+        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
+        let snapshot = || {
+            CanonicalIssuanceSnapshot::new(
+                party("Acme"),
+                party("Globex"),
+                PayerPolicy::Permissionless,
+                factory,
+                chain_id,
+                token,
+                beneficiary,
+                amount,
+                1_900_000_000,
+                recovery,
+            )
+        };
+        let mismatches: Vec<(&str, CanonicalIssuanceSnapshot)> = vec![
+            ("amount_base_units", {
+                let mut s = snapshot();
+                s.amount_base_units = "101".into();
+                s
+            }),
+            ("expiration_timestamp", {
+                let mut s = snapshot();
+                s.expiration_timestamp = "1900000001".into();
+                s
+            }),
+            ("receiver_address", {
+                let mut s = snapshot();
+                s.receiver_address = s.recovery_address.clone();
+                s
+            }),
+            ("token_address", {
+                let mut s = snapshot();
+                s.token_address = s.token_address.to_lowercase();
+                s
+            }),
+            ("schema", {
+                let mut s = snapshot();
+                s.schema = "payday.invoice.v2".into();
+                s
+            }),
+        ];
+        for (field, snapshot) in mismatches {
+            let error = Invoice::issue(
+                factory,
+                chain_id,
+                token,
+                beneficiary,
+                amount,
+                1_900_000_000,
+                recovery,
+                snapshot,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, AttributionError::SnapshotMismatch { field: f } if f == field),
+                "{field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn address_matches_parameters_uses_stored_salt_only() {
+        // Attribution metadata is proof material. Losing or corrupting it
+        // must never make a funded address look unsafe to sweep.
+        let mut invoice = sample_invoice();
+        invoice.attribution_nonce = B256::repeat_byte(0xEE);
+        invoice.attribution_hash = B256::repeat_byte(0xFF);
+        invoice.issuance_snapshot.notes = Some("rewritten after the fact".into());
+        invoice.issuance_snapshot.amount_base_units = "999".into();
+        invoice.attribution_version = 7;
+        assert!(invoice.address_matches_parameters());
+
+        invoice.salt = Salt(B256::repeat_byte(0x01));
+        assert!(!invoice.address_matches_parameters());
     }
 }

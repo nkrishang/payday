@@ -1,9 +1,18 @@
 mod api;
+mod attachments;
+mod attestation;
 mod config;
+mod deployment;
 mod dispatcher;
+mod identity;
+mod invoice_pdf;
+mod payer_identity;
 mod state;
 mod webhook_worker;
 
+use std::sync::Arc;
+
+use alloy_primitives::Address;
 use axum::serve;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -29,24 +38,151 @@ async fn main() {
     let cursor = gateway_db::CursorRepository::new(pool.clone());
     let health_cursor = cursor.clone();
     let notifications = gateway_db::NotificationRepository::new(pool.clone());
-    let identity_verifier = match config.auth0() {
-        Some(auth0) => Some(
-            api::Auth0Verifier::new(
-                auth0.issuer.clone(),
-                auth0.audience.clone(),
-                auth0.client_id.clone(),
-                config.dev_identity(),
+    // Auth0 discovery and AWS provider-chain loading are independent network
+    // work. Start them together, and retain one AWS configuration for S3, KMS,
+    // and SES; status-only mode uses neither AWS nor payer authentication.
+    let auth0 = config.auth0().map(|auth0| {
+        (
+            auth0.issuer.clone(),
+            auth0.audience.clone(),
+            auth0.client_id.clone(),
+            auth0.dashboard_client_id.clone(),
+        )
+    });
+    let dev_identity = config.dev_identity();
+    let status_only = config.status_only();
+    let (identity_verifier, aws) = tokio::join!(
+        async move {
+            match auth0 {
+                Some((issuer, audience, client_id, dashboard_client_id)) => Some(
+                    api::Auth0Verifier::new(
+                        issuer,
+                        audience,
+                        client_id,
+                        dashboard_client_id,
+                        dev_identity,
+                    )
+                    .await
+                    .expect("failed to initialize Auth0 JWT verification"),
+                ),
+                None => None,
+            }
+        },
+        async move {
+            if status_only {
+                None
+            } else {
+                Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
+            }
+        }
+    );
+    let attachment_store = config.attachments().map(|attachments| {
+        let storage = attachments::S3ObjectStorage::new(
+            aws.as_ref()
+                .expect("AWS configuration is loaded outside status-only mode"),
+            attachments.bucket.clone(),
+            attachments.s3_endpoint.as_deref(),
+            attachments.force_path_style,
+        );
+        attachments::AttachmentStore::new(Arc::new(storage), attachments.download_ttl)
+    });
+    let attestor = match config.attestation() {
+        Some(signer) => Some(
+            attestation::VerificationAttestor::from_config(
+                signer,
+                aws.as_ref()
+                    .expect("AWS configuration is loaded outside status-only mode"),
             )
             .await
-            .expect("failed to initialize Auth0 JWT verification"),
+            .unwrap_or_else(|error| panic!("{error}")),
         ),
         None => None,
     };
+    if let Some(attestor) = &attestor {
+        tracing::info!(address = %attestor.address(), "configured attestation signer");
+    }
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
         config.explorer_base_url().map(str::to_owned),
+        config.hosted_checkout_origin().map(str::to_owned),
     )
     .expect("invalid payer link configuration");
+    // The payer audience is its own Auth0 API and application (product plan
+    // §6.1); status-only mode never verifies anyone.
+    let payer_verification = match config.payer_verification() {
+        Some(payer_auth) if !config.status_only() => {
+            let verifier = api::Auth0Verifier::new(
+                payer_auth.issuer.clone(),
+                payer_auth.audience.clone(),
+                payer_auth.client_id.clone(),
+                None,
+                config.dev_identity(),
+            )
+            .await
+            .expect("failed to initialize payer Auth0 JWT verification");
+            let otp = payer_identity::Auth0Passwordless::new(
+                &payer_auth.issuer,
+                payer_auth.client_id.clone(),
+                payer_auth.audience.clone(),
+            )
+            .expect("failed to initialize payer Auth0 passwordless client");
+            Some(payer_identity::PayerVerification::new(
+                Arc::new(otp),
+                verifier,
+                payer_auth.payer_ref_master_key,
+            ))
+        }
+        Some(_) => None,
+        None => {
+            if !config.status_only() {
+                tracing::warn!(
+                    "PAYDAY_PAYER_AUTH0_* and PAYDAY_PAYER_REF_MASTER_KEY are unset; gated invoices cannot be verified"
+                );
+            }
+            None
+        }
+    };
+    // The identity provider is optional until its credentials exist; without
+    // it the identity modes can still be issued and email-verified, and the
+    // identity step answers verification_unavailable.
+    let identity_provider: Option<Arc<dyn identity::PayerIdentityProvider>> = match config.didit() {
+        Some(didit) if !config.status_only() => Some(Arc::new(
+            identity::didit::DiditProvider::new(identity::didit::DiditConfig {
+                api_key: didit.api_key.clone(),
+                workflow_id: didit.workflow_id.clone(),
+                webhook_secret: didit.webhook_secret.clone(),
+                base_url: didit.base_url.clone(),
+            })
+            .unwrap_or_else(|error| panic!("{error}")),
+        )),
+        Some(_) => None,
+        None => {
+            if !config.status_only() {
+                tracing::warn!("PAYDAY_DIDIT_* are unset; identity verification cannot be started");
+            }
+            None
+        }
+    };
+    // Every payment address this service hands out assumes the reviewed
+    // contract generation, so refuse to serve against any other deployment.
+    if let Some(settlement) = config.settlement() {
+        deployment::verify_deployment(
+            &settlement.rpc_url,
+            &deployment::ExpectedDeployment {
+                chain_id: config.chain_id().0,
+                factory: config.factory_address(),
+                factory_code_hash: settlement.factory_code_hash,
+                batch_sweeper: settlement.batch_sweeper_address,
+                batch_sweeper_code_hash: settlement.batch_sweeper_code_hash,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
+    }
+    // Status-only mode never issues invoices, so it has no wallet to stamp.
+    let recovery_address = config
+        .settlement()
+        .map_or(Address::ZERO, |settlement| settlement.recovery_address);
     let state = state::AppState::new(
         repo,
         accounts,
@@ -54,10 +190,15 @@ async fn main() {
         config.chain_id(),
         config.factory_address(),
         config.usdc_address(),
+        recovery_address,
         payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),
         config.status_stale_seconds(),
+        attachment_store,
+        attestor,
+        payer_verification,
+        identity_provider.clone(),
     );
     if !config.status_only()
         && let Some(key) = state.webhook_encryption_key
@@ -69,6 +210,7 @@ async fn main() {
         );
     }
 
+    let verifications = state.verifications.clone();
     let app = if config.status_only() {
         api::status_router(state)
     } else {
@@ -93,12 +235,23 @@ async fn main() {
     } else {
         None
     };
+    // Open hosted identity sessions are polled until the provider settles
+    // them; a lost webhook never strands a payer (product plan §6.2).
+    let reconciler = identity_provider.map(|provider| {
+        tokio::spawn(identity::reconciler::run(
+            verifications.clone(),
+            provider,
+            shutdown_rx.clone(),
+        ))
+    });
     let dispatcher = if !config.status_only() {
         if let Some(from) = config.notification_from_address() {
-            let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let aws = aws
+                .as_ref()
+                .expect("AWS configuration is loaded outside status-only mode");
             Some(tokio::spawn(dispatcher::run(
                 notifications,
-                aws_sdk_sesv2::Client::new(&aws),
+                aws_sdk_sesv2::Client::new(aws),
                 from.to_owned(),
                 shutdown_rx,
             )))
@@ -126,6 +279,9 @@ async fn main() {
     }
     let _ = shutdown_tx.send(true);
     if let Some(worker) = dispatcher {
+        let _ = worker.await;
+    }
+    if let Some(worker) = reconciler {
         let _ = worker.await;
     }
     if let Some(worker) = api_health {

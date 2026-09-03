@@ -31,28 +31,39 @@ your control.
 ## How amounts are routed
 
 - **Exact payment before expiry:** finalized payments accumulate until the
-  payment amount is reached. On pre-expiry execution, the complete native-USDC
-  balance is sent to the payout address.
+  payment amount is reached. On pre-expiry execution, exactly the invoice
+  amount of native USDC is sent to the payout address.
 - **Partial payment:** multiple payments can accumulate. If the total is still
   short when the payment expires, the complete native-USDC balance is routed
-  to the merchant-controlled refund address.
-- **Overpayment before expiry:** the complete balance, including the excess, is
-  sent to the payout address. Payday does not automatically refund the excess.
-- **Late payment:** native USDC is routed to the merchant-controlled refund
-  address, not automatically returned to the payer. This also applies to funds
-  sent after the payment address has already been swept.
+  to the Payday recovery wallet.
+- **Overpayment before expiry:** the payout address receives exactly the
+  invoice amount; the remainder is routed to the Payday recovery wallet.
+- **Late payment:** native USDC is routed to the Payday recovery wallet, not
+  automatically returned to the payer. This also applies to funds sent after
+  the payment address has already been swept.
 
 The on-chain boundary is inclusive: execution at the payment's expiration
 timestamp can settle a fully funded payment; execution with a later block
-timestamp routes its balance to the refund address. Finality, indexer, network, or sweep
-delays can therefore affect the eventual route even when a payer initiated a
-transfer earlier.
+timestamp routes its balance to the Payday recovery wallet. Finality, indexer,
+network, or sweep delays can therefore affect the eventual route even when a
+payer initiated a transfer earlier.
+
+## Custody and return of recovered funds
+
+The intended invoice amount never passes through Payday: it moves directly from
+the one-time address to the payout address. Payday takes custody of *recovered*
+amounts only — overpayment remainders, expired balances, and late transfers —
+in the Payday recovery wallet, a platform-controlled address the merchant cannot
+change. Every recovered amount is recorded against its payment and reported by
+a `payment.recovered_funds` webhook. Recovered funds are reviewed manually and
+returned by the operator; there is no automated disbursement, and the wallet is
+**not an automatic payer refund address**.
 
 ## Merchant responsibility
 
-The refund address is a merchant-controlled exception-handling destination,
-**not an automatic payer refund address**. Monitor and reconcile payout-address
-and refund-address receipts against orders. Establish your own process to identify
-payers and issue any appropriate refunds for partial, excess, duplicate, or
-late payments. Before accepting payments, verify that your organization can
-access both the payout and refund addresses.
+Reconcile payout-address receipts against orders, and treat a
+`payment.recovered_funds` event as a prompt to identify the payer so the return
+can be arranged. Tell payers who sent excess, late, or expired funds to contact
+you and Payday support for return handling. Refunds of amounts that settled to
+your payout address remain your own process. Before accepting payments, verify
+that your organization controls the payout address.

@@ -1,15 +1,20 @@
 mod accounts;
 mod admin;
+mod attachments;
 mod auth;
-mod error;
+mod customers;
+pub(crate) mod error;
 mod health;
+pub mod identity;
 mod invoices;
 mod middleware;
 mod openapi;
 pub mod payer;
+pub mod payer_verification;
+mod proof;
 mod routes;
 mod status;
 mod webhooks;
 
-pub(crate) use auth::Auth0Verifier;
+pub(crate) use auth::{Auth0Verifier, Identity};
 pub use routes::{router, status_router};

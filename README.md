@@ -1,6 +1,6 @@
 # Payday
 
-Payday is a stablecoin payment gateway for merchants: create a payment through a small API or CLI, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle the full balance automatically. Partial payments accumulate, overpayments are forwarded, expired funds go to the refund address, and every observed transfer remains in an auditable PostgreSQL ledger.
+Payday is a stablecoin payment gateway for merchants: create an invoice through a small API or CLI, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically. Partial payments accumulate; overpayment remainders, expired balances, and late transfers go to the Payday recovery wallet, where they are recorded per invoice and returned after manual review; and every observed transfer remains in an auditable PostgreSQL ledger.
 
 ## 60-second local quickstart
 
@@ -24,10 +24,13 @@ The CLI provides polished login, payment creation and tracking, payer links, acc
 
 ## Web
 
-`payday.sh` — the landing page and the hosted checkout at `/pay/{id}` — lives in
-[`web/`](web/). It is a Next.js app that consumes Payday's own public payer API
-through `@payday/sdk`, and it is where every `payment_url` points. Run it beside
-the local stack:
+`payday.sh` — the landing page, the hosted checkout at `/pay/{id}`, and the
+merchant dashboard at `/dashboard` — lives in [`web/`](web/). It is a Next.js
+app built on `@payday/sdk`: the checkout consumes the public payer API and is
+where every `payment_url` points; the dashboard signs in with an emailed code
+and uses the same merchant API as the SDK with that identity token, so no API
+key ever reaches the browser (see [docs/dashboard.md](docs/dashboard.md)). Run
+it beside the local stack:
 
 ```bash
 npm ci
@@ -48,6 +51,7 @@ See [web/README.md](web/README.md).
 - [CLI installation](docs/install.md)
 - [Payments API](docs/payments-api.md)
 - [Authentication and API keys](docs/authentication.md)
+- [Merchant dashboard](docs/dashboard.md)
 - [USDC indexer architecture](docs/usdc-indexer-architecture.md)
 - [Production deployment runbook](docs/production-runbook.md)
 - [Operational runbook index](docs/runbooks/README.md)
