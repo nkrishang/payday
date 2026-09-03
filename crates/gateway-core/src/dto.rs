@@ -3,8 +3,12 @@
 use alloy_primitives::utils::format_units;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use crate::{Invoice, InvoiceStatus, USDC_DECIMALS};
+use crate::{Invoice, InvoiceStatus, Party, PayerPolicy, PayerPolicyMode, USDC_DECIMALS};
+
+/// The only attachment type Payday accepts (product plan §4.2).
+pub const PDF_MIME_TYPE: &str = "application/pdf";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,19 +19,26 @@ pub struct CreatePaymentRequest {
     pub token_address: Option<String>,
     pub payout_address: String,
     pub amount: String,
+    pub issuer: Party,
+    pub bill_to: Party,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default = "empty_metadata")]
+    pub metadata: serde_json::Value,
+    pub payer_policy: PayerPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<Uuid>,
     /// Lifetime in seconds. Idempotent retries retain the original deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refund_address: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memo: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reference: Option<String>,
-    #[serde(default = "empty_metadata")]
-    pub metadata: serde_json::Value,
 }
 
 fn empty_metadata() -> serde_json::Value {
@@ -60,6 +71,27 @@ pub struct AsOfDto {
     pub at: String,
 }
 
+/// The attached PDF as presented to whoever may see the invoice. The
+/// `download_url` is a short-lived signed link, filled in by the route that
+/// serves it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentDescriptor {
+    pub id: Uuid,
+    pub filename: String,
+    pub mime_type: String,
+    pub byte_length: String,
+    /// `0x`-prefixed lowercase hex.
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttributionDto {
+    pub version: u16,
+    pub hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResponse {
     pub id: String,
@@ -68,7 +100,10 @@ pub struct PaymentResponse {
     pub address: String,
     pub address_explorer_url: Option<String>,
     pub payout_address: String,
-    pub refund_address: String,
+    /// Payday's custodial recovery wallet, committed into the payment address.
+    /// Overpayments, expired balances, and late transfers land here and are
+    /// returned by the operator. Merchant-visible; never in the payer response.
+    pub recovery_address: String,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
@@ -92,8 +127,18 @@ pub struct PaymentResponse {
     pub settled_block: Option<String>,
     pub self_settlement: SelfSettlementDto,
     pub attention: Option<AttentionDto>,
-    pub memo: Option<String>,
+    pub issuer: Party,
+    pub bill_to: Party,
+    pub notes: Option<String>,
+    pub heading: Option<String>,
     pub reference: Option<String>,
+    pub customer_id: Option<String>,
+    /// The complete policy including the merchant's assertions: merchant-only.
+    pub payer_policy: PayerPolicy,
+    pub attachment: Option<AttachmentDescriptor>,
+    pub verification_completed_at: Option<String>,
+    pub likely_unsolicited_at: Option<String>,
+    pub attribution: AttributionDto,
     pub metadata: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
@@ -106,46 +151,231 @@ pub struct PaymentResponse {
     pub as_of: Option<AsOfDto>,
 }
 
-/// Payment instructions and finalized status safe to expose to one payer.
+/// What the payer learns about the policy: the mode and a hint at whose
+/// mailbox is expected, never the assertion itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayerPolicyResponse {
+    pub mode: PayerPolicyMode,
+    pub expected_email_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationFactStatus {
+    NotRequired,
+    Pending,
+    Approved,
+    Declined,
+}
+
+impl VerificationFactStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Declined => "declined",
+        }
+    }
+}
+
+/// The independent facts behind the four modes (product plan §3.2), each
+/// reported on its own so the checkout can show what is still outstanding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationRequirementsResponse {
+    pub email: VerificationFactStatus,
+    pub document: VerificationFactStatus,
+    pub liveness: VerificationFactStatus,
+    pub identity_match: VerificationFactStatus,
+    pub complete: bool,
+}
+
+/// Which facts one payer session has established. Each is independent
+/// (product plan §3.2); the policy mode decides which ones matter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerificationFacts {
+    pub email: bool,
+    pub document: bool,
+    pub liveness: bool,
+    pub identity_match: bool,
+}
+
+impl VerificationFacts {
+    /// Every fact at once: what an invoice-level completion implies.
+    pub const ALL: Self = Self {
+        email: true,
+        document: true,
+        liveness: true,
+        identity_match: true,
+    };
+
+    /// Whether these facts satisfy `mode`.
+    pub fn satisfy(self, mode: PayerPolicyMode) -> bool {
+        VerificationRequirementsResponse::from_facts(mode, self).complete
+    }
+}
+
+impl VerificationRequirementsResponse {
+    /// The requirements a mode imposes, all at one status. `completed` is
+    /// whether the invoice's verification has finished; a payer session that
+    /// satisfies only part of the policy refines individual facts.
+    pub fn for_mode(mode: PayerPolicyMode, completed: bool) -> Self {
+        Self::from_facts(
+            mode,
+            if completed {
+                VerificationFacts::ALL
+            } else {
+                VerificationFacts::default()
+            },
+        )
+    }
+
+    /// The requirements a mode imposes, each reported against the facts one
+    /// payer session has established. `complete` is true exactly when every
+    /// fact the mode needs is present.
+    pub fn from_facts(mode: PayerPolicyMode, facts: VerificationFacts) -> Self {
+        let status = |needed: bool, established: bool| match (needed, established) {
+            (false, _) => VerificationFactStatus::NotRequired,
+            (true, true) => VerificationFactStatus::Approved,
+            (true, false) => VerificationFactStatus::Pending,
+        };
+        let identity = matches!(
+            mode,
+            PayerPolicyMode::VerifiedIdentity | PayerPolicyMode::VerifiedIdentityUnattributed
+        );
+        let matched = mode == PayerPolicyMode::VerifiedIdentity;
+        let complete = (!mode.is_gated() || facts.email)
+            && (!identity || (facts.document && facts.liveness))
+            && (!matched || facts.identity_match);
+        Self {
+            email: status(mode.is_gated(), facts.email),
+            document: status(identity, facts.document),
+            liveness: status(identity, facts.liveness),
+            identity_match: status(matched, facts.identity_match),
+            complete,
+        }
+    }
+}
+
+/// One verification attempt as the merchant sees it: statuses, the
+/// provider's reference, and allowlisted risk categories. Never anything the
+/// provider extracted (product plan §3.6).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationAttemptResponse {
+    pub id: String,
+    /// `email` or `identity`.
+    pub kind: String,
+    /// `pending`, `approved`, `declined`, `in_review`, `expired`,
+    /// `abandoned`, or `review_required`.
+    pub status: String,
+    /// `auth0`, `didit`, or `manual`.
+    pub provider: String,
+    pub provider_reference: Option<String>,
+    pub attempt_number: u16,
+    pub document: VerificationFactStatus,
+    pub liveness: VerificationFactStatus,
+    pub identity_match: VerificationFactStatus,
+    pub risk_codes: Vec<String>,
+    pub country_code: Option<String>,
+    pub verified_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+    pub review: Option<VerificationReviewResponse>,
+}
+
+/// A human review of one attempt: who decided what, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationReviewResponse {
+    pub requested_at: String,
+    /// `approved` or `declined` once decided.
+    pub decision: Option<String>,
+    pub reviewer: Option<String>,
+    pub note: Option<String>,
+    pub decided_at: Option<String>,
+}
+
+/// The merchant's verification view of one invoice: each fact on its own,
+/// every attempt, and what may happen next (product plan §7.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationDetailResponse {
+    pub payer_policy_mode: PayerPolicyMode,
+    pub verification_completed_at: Option<String>,
+    pub likely_unsolicited_at: Option<String>,
+    pub facts: VerificationRequirementsResponse,
+    pub attempts: Vec<VerificationAttemptResponse>,
+    /// The latest identity attempt was declined and a human may be asked.
+    pub review_available: bool,
+    /// The payer may resubmit from the checkout on their own.
+    pub retry_available: bool,
+}
+
+/// Invoice content revealed only once the payer may see it (product plan §4.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayerInvoiceDetails {
+    pub amount: String,
+    pub amount_base_units: String,
+    pub bill_to: Party,
+    pub notes: Option<String>,
+    pub reference: Option<String>,
+    pub attachment: Option<AttachmentDescriptor>,
+}
+
+/// Progressive disclosure for one payer. Every payment mechanic and invoice
+/// detail — including the settlement transaction, which would reveal the
+/// address and amount on chain — is present only when `content_unlocked` is
+/// true; a gated invoice shows the issuer, the heading, the policy, the
+/// lifecycle status, and what verification remains.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayerPaymentResponse {
     pub id: String,
-    pub chain: ChainDto,
-    pub token: TokenDto,
-    pub amount: String,
-    pub amount_base_units: String,
-    pub received: String,
-    pub received_base_units: String,
-    pub remaining: String,
-    pub remaining_base_units: String,
-    pub address: String,
+    pub issuer_name: String,
+    pub heading: Option<String>,
+    pub payer_policy: PayerPolicyResponse,
+    pub requirements: VerificationRequirementsResponse,
+    pub status: PaymentStatus,
+    /// Whether the gateway still considers this address payable.
+    pub payable: bool,
     pub expires_at: String,
     /// Gateway wall-clock time used by clients to render the deadline without
     /// trusting the payer device's clock.
     pub server_timestamp: String,
-    pub status: PaymentStatus,
-    /// Whether the gateway still considers this address payable.
-    pub payable: bool,
-    /// EIP-681 request for the amount still due, absent after the deadline or
-    /// after the payment has left the payable state.
-    pub payment_uri: Option<String>,
-    pub address_explorer_url: Option<String>,
     pub settlement_tx_hash: Option<String>,
     pub settlement_explorer_url: Option<String>,
     /// Safety guidance shown only when payout needs operator attention.
     pub payer_message: Option<String>,
+    pub content_unlocked: bool,
+    pub chain: Option<ChainDto>,
+    pub token: Option<TokenDto>,
+    pub amount: Option<String>,
+    pub amount_base_units: Option<String>,
+    pub received: Option<String>,
+    pub received_base_units: Option<String>,
+    pub remaining: Option<String>,
+    pub remaining_base_units: Option<String>,
+    pub address: Option<String>,
+    pub address_explorer_url: Option<String>,
+    /// EIP-681 request for the amount still due, absent after the deadline or
+    /// after the payment has left the payable state.
+    pub payment_uri: Option<String>,
+    pub invoice: Option<PayerInvoiceDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentSummaryResponse {
     pub id: String,
-    pub memo: Option<String>,
+    pub heading: Option<String>,
+    pub bill_to_name: String,
     pub reference: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: String,
     pub status: PaymentStatus,
     pub amount: String,
     pub received: String,
+    pub payer_policy_mode: PayerPolicyMode,
+    pub customer_id: Option<String>,
+    pub has_attachment: bool,
+    pub verification_completed_at: Option<String>,
+    pub likely_unsolicited_at: Option<String>,
     pub cancellation_requested_at: Option<String>,
 }
 
@@ -227,19 +457,41 @@ pub struct AttentionDto {
     pub action: String,
 }
 
+/// The public hint for an expected email: `a****@e***.com`. The mask is a
+/// fixed shape so it reveals neither the length of the local part nor any
+/// domain label beyond its first character and the TLD.
+pub fn masked_email(value: &str) -> String {
+    let first = |part: &str| part.chars().next().map(String::from).unwrap_or_default();
+    let (local, domain) = value.split_once('@').unwrap_or((value, ""));
+    let (label, tld) = match domain.rsplit_once('.') {
+        Some((head, tld)) => (head.split('.').next().unwrap_or(head), Some(tld)),
+        None => (domain, None),
+    };
+    let mut masked = format!("{}****@{}***", first(local), first(label));
+    if let Some(tld) = tld {
+        masked.push('.');
+        masked.push_str(tld);
+    }
+    masked
+}
+
 impl PaymentResponse {
+    /// Project the domain model. Fields that live only in the database row
+    /// (timestamps, transfers, the customer link, the attachment's filename)
+    /// are filled in by the handler.
     pub fn from_invoice(inv: Invoice, expires_in: Option<u64>) -> Self {
         let human = |units| format_units(units, USDC_DECIMALS).unwrap_or_default();
         let remaining = inv.amount.0.saturating_sub(inv.received.0);
         let status = payment_status(&inv);
         let attention = inv.blocked_reason.as_deref().map(attention);
+        let snapshot = inv.issuance_snapshot;
         Self {
             id: inv.id.to_string(),
             payment_url: String::new(),
             address: inv.payment_address.0.to_checksum(None),
             address_explorer_url: None,
             payout_address: inv.beneficiary.0.to_checksum(None),
-            refund_address: inv.recovery.0.to_checksum(None),
+            recovery_address: inv.recovery.0.to_checksum(None),
             expires_at: DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
                 .expect("validated timestamp")
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -277,8 +529,20 @@ impl PaymentResponse {
                 salt: inv.salt.0.to_string(),
             },
             attention,
-            memo: None,
-            reference: None,
+            issuer: snapshot.issuer,
+            bill_to: snapshot.bill_to,
+            notes: snapshot.notes,
+            heading: snapshot.heading,
+            reference: snapshot.reference,
+            customer_id: None,
+            payer_policy: snapshot.payer_policy,
+            attachment: None,
+            verification_completed_at: None,
+            likely_unsolicited_at: None,
+            attribution: AttributionDto {
+                version: inv.attribution_version,
+                hash: inv.attribution_hash.to_string(),
+            },
             metadata: serde_json::json!({}),
             created_at: String::new(),
             updated_at: String::new(),
@@ -327,8 +591,8 @@ fn attention(code: &str) -> AttentionDto {
             "Contact support to provide a compliant payout address.",
         ),
         "recovery_blacklisted" => (
-            "Circle has blacklisted the refund address.",
-            "Resolve the blacklist with Circle, then contact support to retry.",
+            "The Payday recovery wallet is restricted by the USDC issuer.",
+            "Payday is resolving it; no merchant action is needed. Contact Payday support only if the payment stays paused.",
         ),
         "payment_address_blacklisted" => (
             "Circle has blacklisted the payment address.",
@@ -354,20 +618,55 @@ fn attention(code: &str) -> AttentionDto {
 mod tests {
     use super::*;
     use crate::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, RecoveryAddress, TokenAddress,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, ExpectedIdentity,
+        FactoryAddress, RecoveryAddress, TokenAddress,
     };
     use alloy_primitives::{U256, address};
 
-    fn payment(status: InvoiceStatus, received: u64, blocked: Option<&str>) -> PaymentResponse {
-        let mut invoice = Invoice::new(
-            FactoryAddress(address!("0000000000000000000000000000000000000001")),
-            ChainId(143),
-            TokenAddress(address!("754704Bc059F8C67012fEd69BC8A327a5aafb603")),
-            BeneficiaryAddress(address!("70997970C51812dc3A010C7d01b50e0d17dc79C8")),
-            Amount(U256::from(1_000_000)),
+    fn party(name: &str) -> Party {
+        Party {
+            name: name.into(),
+            email: None,
+            details: None,
+        }
+    }
+
+    fn invoice(policy: PayerPolicy) -> Invoice {
+        let factory = FactoryAddress(address!("0000000000000000000000000000000000000001"));
+        let chain_id = ChainId(143);
+        let token = TokenAddress(address!("754704Bc059F8C67012fEd69BC8A327a5aafb603"));
+        let beneficiary = BeneficiaryAddress(address!("70997970C51812dc3A010C7d01b50e0d17dc79C8"));
+        let amount = Amount(U256::from(1_000_000));
+        let recovery = RecoveryAddress(address!("3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"));
+        let mut snapshot = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            policy,
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
             1_900_000_000,
-            RecoveryAddress(address!("3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")),
+            recovery,
         );
+        snapshot.heading = Some("March retainer".into());
+        snapshot.reference = Some("INV-7".into());
+        Invoice::issue(
+            factory,
+            chain_id,
+            token,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            recovery,
+            snapshot,
+        )
+        .unwrap()
+    }
+
+    fn payment(status: InvoiceStatus, received: u64, blocked: Option<&str>) -> PaymentResponse {
+        let mut invoice = invoice(PayerPolicy::Permissionless);
         invoice.status = status;
         invoice.received = Amount(U256::from(received));
         invoice.blocked_reason = blocked.map(str::to_owned);
@@ -411,20 +710,196 @@ mod tests {
         assert_eq!(json["status"], "awaiting_payment");
         assert_eq!(json["currency"], "USDC");
         assert!(json.get("beneficiary_address").is_none());
+        assert!(json.get("memo").is_none());
+        assert_eq!(
+            json["recovery_address"],
+            "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+        );
+        assert!(json.get("refund_address").is_none());
+        assert_eq!(json["issuer"]["name"], "Acme");
+        assert_eq!(json["bill_to"]["name"], "Globex");
+        assert_eq!(json["heading"], "March retainer");
+        assert_eq!(json["reference"], "INV-7");
+        assert_eq!(json["payer_policy"]["mode"], "permissionless");
+        assert_eq!(json["attribution"]["version"], 1);
+        assert!(
+            json["attribution"]["hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("0x")
+        );
 
         let summary = PaymentSummaryResponse {
             id: payment.id,
-            memo: None,
+            heading: payment.heading,
+            bill_to_name: payment.bill_to.name,
             reference: None,
             metadata: serde_json::json!({}),
             created_at: String::new(),
             status: payment.status,
             amount: payment.amount,
             received: payment.received,
+            payer_policy_mode: payment.payer_policy.mode(),
+            customer_id: None,
+            has_attachment: false,
+            verification_completed_at: None,
+            likely_unsolicited_at: None,
             cancellation_requested_at: None,
         };
         let summary = serde_json::to_value(summary).unwrap();
         assert!(summary.get("transfers").is_none());
         assert!(summary.get("self_settlement").is_none());
+        assert!(summary.get("payer_policy").is_none());
+        assert_eq!(summary["payer_policy_mode"], "permissionless");
+    }
+
+    #[test]
+    fn create_request_requires_the_document_and_rejects_retired_fields() {
+        let accepted = serde_json::json!({
+            "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "amount": "1",
+            "issuer": {"name": "Acme"},
+            "bill_to": {"name": "Globex"},
+            "payer_policy": {"mode": "permissionless"}
+        });
+        let request: CreatePaymentRequest = serde_json::from_value(accepted.clone()).unwrap();
+        assert_eq!(request.metadata, serde_json::json!({}));
+        assert!(request.attachment_id.is_none());
+
+        for (field, value) in [
+            (
+                "refund_address",
+                serde_json::json!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"),
+            ),
+            ("memo", serde_json::json!("Order 1234")),
+            ("line_items", serde_json::json!([])),
+        ] {
+            let mut rejected = accepted.clone();
+            rejected[field] = value;
+            let error = serde_json::from_value::<CreatePaymentRequest>(rejected).unwrap_err();
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
+        for required in ["issuer", "bill_to", "payer_policy"] {
+            let mut missing = accepted.clone();
+            missing.as_object_mut().unwrap().remove(required);
+            assert!(
+                serde_json::from_value::<CreatePaymentRequest>(missing).is_err(),
+                "{required} must be required"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_email_hint_masks_everything_but_the_shape() {
+        assert_eq!(masked_email("alice@example.com"), "a****@e***.com");
+        assert_eq!(masked_email("a@b.co"), "a****@b***.co");
+        assert_eq!(
+            masked_email("alexandra.longname@mail.example.co.uk"),
+            "a****@m***.uk"
+        );
+        assert_eq!(masked_email("x@localhost"), "x****@l***");
+        for email in ["alice@example.com", "alexandra.longname@mail.example.co.uk"] {
+            let masked = masked_email(email);
+            let (local, domain) = email.split_once('@').unwrap();
+            assert!(!masked.contains(local), "{masked}");
+            assert!(!masked.contains(domain), "{masked}");
+            assert_eq!(masked.matches('*').count(), 7);
+        }
+    }
+
+    #[test]
+    fn requirements_follow_the_mode_and_completion() {
+        let open =
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::Permissionless, false);
+        assert!(open.complete);
+        assert_eq!(open.email, VerificationFactStatus::NotRequired);
+
+        let email =
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, false);
+        assert!(!email.complete);
+        assert_eq!(email.email, VerificationFactStatus::Pending);
+        assert_eq!(email.document, VerificationFactStatus::NotRequired);
+
+        let unattributed = VerificationRequirementsResponse::for_mode(
+            PayerPolicyMode::VerifiedIdentityUnattributed,
+            true,
+        );
+        assert!(unattributed.complete);
+        assert_eq!(unattributed.document, VerificationFactStatus::Approved);
+        assert_eq!(unattributed.liveness, VerificationFactStatus::Approved);
+        assert_eq!(
+            unattributed.identity_match,
+            VerificationFactStatus::NotRequired
+        );
+
+        let matched =
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedIdentity, false);
+        assert_eq!(matched.identity_match, VerificationFactStatus::Pending);
+        assert_eq!(
+            serde_json::to_value(matched.identity_match).unwrap(),
+            "pending"
+        );
+    }
+
+    #[test]
+    fn session_facts_refine_each_requirement_and_complete_only_when_the_mode_is_met() {
+        let email_only = VerificationFacts {
+            email: true,
+            ..VerificationFacts::default()
+        };
+        let unattributed = VerificationFacts {
+            email: true,
+            document: true,
+            liveness: true,
+            identity_match: false,
+        };
+
+        let by_email = VerificationRequirementsResponse::from_facts(
+            PayerPolicyMode::VerifiedEmail,
+            email_only,
+        );
+        assert_eq!(by_email.email, VerificationFactStatus::Approved);
+        assert_eq!(by_email.document, VerificationFactStatus::NotRequired);
+        assert!(by_email.complete);
+
+        let matched = VerificationRequirementsResponse::from_facts(
+            PayerPolicyMode::VerifiedIdentity,
+            unattributed,
+        );
+        assert_eq!(matched.email, VerificationFactStatus::Approved);
+        assert_eq!(matched.document, VerificationFactStatus::Approved);
+        assert_eq!(matched.identity_match, VerificationFactStatus::Pending);
+        assert!(!matched.complete);
+        assert!(unattributed.satisfy(PayerPolicyMode::VerifiedIdentityUnattributed));
+        assert!(!unattributed.satisfy(PayerPolicyMode::VerifiedIdentity));
+        assert!(!email_only.satisfy(PayerPolicyMode::VerifiedIdentityUnattributed));
+        assert!(VerificationFacts::default().satisfy(PayerPolicyMode::Permissionless));
+        assert_eq!(
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedIdentity, true),
+            VerificationRequirementsResponse::from_facts(
+                PayerPolicyMode::VerifiedIdentity,
+                VerificationFacts::ALL
+            )
+        );
+    }
+
+    #[test]
+    fn merchant_response_carries_the_full_policy_for_identity_modes() {
+        let response = PaymentResponse::from_invoice(
+            invoice(PayerPolicy::VerifiedIdentity {
+                expected_email: "alice@example.com".into(),
+                expected_identity: ExpectedIdentity {
+                    first_name: "Alice".into(),
+                    last_name: "Smith".into(),
+                },
+            }),
+            None,
+        );
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["payer_policy"]["mode"], "verified_identity");
+        assert_eq!(
+            json["payer_policy"]["expected_identity"]["last_name"],
+            "Smith"
+        );
     }
 }

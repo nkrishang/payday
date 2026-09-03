@@ -15,7 +15,11 @@ import { NextResponse, type NextRequest } from "next/server";
  * dynamic content at all.
  */
 
-const NONCED_PATHS = ["/pay/"];
+/**
+ * The dashboard renders per request too: it holds a merchant's bearer token in
+ * memory and is never prerendered, so it is nonced for the same reason.
+ */
+const NONCED_PATHS = ["/pay/", "/dashboard"];
 
 const WALLETCONNECT = [
   "https://*.walletconnect.com",
@@ -35,6 +39,12 @@ function origin(url: string | undefined): string[] {
   }
 }
 
+/** The OTP issuer is configured as a bare Auth0 tenant domain or a full origin. */
+function issuerOrigin(domain: string | undefined): string[] {
+  if (!domain) return [];
+  return origin(domain.includes("://") ? domain : `https://${domain}`);
+}
+
 function policy(nonce: string | null, isDev: boolean): string {
   const api = origin(process.env.NEXT_PUBLIC_PAYDAY_API_URL);
   const connect = [
@@ -42,6 +52,10 @@ function policy(nonce: string | null, isDev: boolean): string {
     ...api,
     ...origin(process.env.NEXT_PUBLIC_RPC_URL),
     ...WALLETCONNECT,
+    // The dashboard signs in against the issuer and PUTs attachment bytes to
+    // the presigned upload origin directly from the browser.
+    ...issuerOrigin(process.env.NEXT_PUBLIC_AUTH0_DOMAIN),
+    ...origin(process.env.NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN),
   ];
 
   // 'strict-dynamic' lets the nonced bootstrap load Next's chunks; dev needs

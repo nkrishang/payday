@@ -16,10 +16,11 @@ only a SHA-256 digest and a final-six-character hint.
 | Auth0 issuer | Auth0 **Settings → Domain**, prefixed with `https://` and suffixed with `/` | API service, CLI, `infra/terraform.tfvars` |
 | Auth0 API audience | The API **Identifier** created below; use `https://api.payday.sh` | API service, CLI, `infra/terraform.tfvars` |
 | Auth0 client ID | Native application **Settings → Client ID** | API service, CLI, `infra/terraform.tfvars`; it is public |
+| Auth0 dashboard client ID | `Payday Dashboard` SPA application created by `auth0/dashboard.tf` | API service, web `NEXT_PUBLIC_AUTH0_CLIENT_ID`, Action secret; it is public |
 | Resend API key | Resend **API Keys → Create API Key** | Auth0 **Branding → Email Provider** only |
 
-The public Payday CLI application has no Auth0 client secret. The separate
-Terraform deployment identity is a confidential Management API application;
+Neither the public Payday CLI application nor the dashboard application has an
+Auth0 client secret. The separate Terraform deployment identity is a confidential Management API application;
 keep that application's secret only in the approved deployment secret store and
 environment. Never put either it or the Resend API key in this repository, ECS,
 or a user's CLI environment.
@@ -76,8 +77,8 @@ plan's daily sending limit.
    - Name: `Payday CLI`
    - Type: **Native**
    Record its public Client ID. `gatewayd` uses it as
-   `GATEWAY_AUTH0_CLIENT_ID`; non-production CLI testing uses it as the hidden
-   `PAYDAY_AUTH0_CLIENT_ID` override.
+   `PAYDAY_AUTH0_CLIENT_ID`; non-production CLI testing passes the same value
+   as the CLI's hidden `PAYDAY_AUTH0_CLIENT_ID` override.
 4. In that application's **Advanced Settings → Grant Types**, enable
    **Passwordless OTP**. Disable grants the CLI does not use, especially
    Password and Client Credentials. Do not create or distribute a client
@@ -112,29 +113,98 @@ connection settings alone are not this security boundary.
    named `Payday email OTP claims` on the latest supported Node runtime.
 2. Paste the tracked source from
    `auth0/actions/payday-email-otp.js` into the editor.
-3. Add two Action secrets:
+3. Add three Action secrets:
    - `PAYDAY_API_AUDIENCE` = `https://api.payday.sh`
    - `PAYDAY_CLIENT_ID` = the `Payday CLI` Client ID
+   - `PAYDAY_DASHBOARD_CLIENT_ID` = the `Payday Dashboard` Client ID
 4. Click **Deploy**.
 5. Open **Actions → Triggers → Post Login**, drag the deployed Action into the
    flow, and click **Apply**.
 
-The Action denies tokens for the Payday audience unless the client, connection,
-email authentication method, and authentication age match. It adds a random,
-signed authentication-event ID and the verified email address. The API accepts
-that event for one key issuance only, so replaying the same access token cannot
-rotate a key twice. The verified address is stored with the account for urgent
-payout-support notifications.
+The Action denies tokens for the Payday audience unless the client is one of
+the two configured IDs and the connection, email authentication method, and
+authentication age match. It sets the same claims for both clients — method,
+email, the client ID that authenticated, the authentication time, and a random
+signed authentication-event ID. The API accepts that event for one key
+issuance only, so replaying the same access token cannot rotate a key twice.
+The verified address is stored with the account for urgent payout-support
+notifications.
+
+## 3a. Install the payer audience and Action
+
+Payers prove ownership of the mailbox an invoice was issued to through a
+dedicated audience, so that a payer token is useless against the merchant API
+and a merchant token never unlocks an invoice. `gatewayd` drives the exchange
+itself: the payer never names an email, and the code goes to the address the
+merchant asserted.
+
+1. Open **Applications → APIs** and create an API named `Payday Payer` with
+   identifier `https://api.payday.sh/payer` (RS256).
+2. Let Terraform create the `Payday Payer Verification` application
+   (`auth0/payer.tf`), or create a **Native** application by hand with only
+   the passwordless OTP grant and the `email` connection enabled.
+3. Create a second **Post Login** Action named `Payday payer email OTP claims`
+   from `auth0/actions/payday-payer-email-otp.js` with two secrets:
+   - `PAYDAY_PAYER_AUDIENCE` = `https://api.payday.sh/payer`
+   - `PAYDAY_PAYER_CLIENT_ID` = the `Payday Payer Verification` Client ID
+4. Deploy it and add it to the Post Login flow next to the merchant Action.
+
+The payer Action is inert for every other audience and denies every other
+client on its own. It sets exactly five claims: method, client ID,
+authentication time, a random event ID, and the proven email, trimmed and
+lowercased so `gatewayd` can compare it with the merchant's assertion.
 
 ## 4. Configure Payday
 
 Configure `gatewayd` (or its untracked local `.env`) with:
 
 ```bash
-export GATEWAY_AUTH0_ISSUER="https://<tenant-domain>/"
-export GATEWAY_AUTH0_AUDIENCE="https://api.payday.sh"
-export GATEWAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
+export PAYDAY_AUTH0_ISSUER="https://<tenant-domain>/"
+export PAYDAY_AUTH0_AUDIENCE="https://api.payday.sh"
+export PAYDAY_AUTH0_CLIENT_ID="<Payday-CLI-client-id>"
+export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="<Payday-Dashboard-client-id>"
+# Payer email verification (all four together, or none).
+export PAYDAY_PAYER_AUTH0_ISSUER="https://<tenant-domain>/"
+export PAYDAY_PAYER_AUTH0_AUDIENCE="https://api.payday.sh/payer"
+export PAYDAY_PAYER_AUTH0_CLIENT_ID="<Payday-Payer-Verification-client-id>"
+# 32 random bytes, standard base64: derives the merchant-scoped payer references.
+export PAYDAY_PAYER_REF_MASTER_KEY="$(openssl rand -base64 32)"
+# The browser origin allowed to call the verification write routes; defaults
+# to PAYDAY_PUBLIC_BASE_URL.
+export PAYDAY_HOSTED_CHECKOUT_ORIGIN="https://payday.sh"
 ```
+
+Without the `PAYDAY_PAYER_*` settings the API still serves gated invoices, but
+their verification routes answer `503 verification_unavailable`.
+
+### Identity verification (Didit)
+
+The two identity modes use Didit's hosted document, liveness, and face-match
+session behind a thin provider boundary. Configure one workflow in the Didit
+console that requires all three checks and declines expected-name mismatches,
+create a webhook destination pointing at
+`https://api.payday.sh/v1/webhooks/identity`, and set (all three together, or
+none):
+
+```bash
+export PAYDAY_DIDIT_API_KEY="<Didit API key>"
+export PAYDAY_DIDIT_WORKFLOW_ID="<pinned workflow id>"
+export PAYDAY_DIDIT_WEBHOOK_SECRET="<the destination's shared secret>"
+# Optional; defaults to https://verification.didit.me.
+export PAYDAY_DIDIT_BASE_URL="https://verification.didit.me"
+# Recorded as the reviewer on manual verification decisions; defaults to
+# "operator".
+export PAYDAY_ADMIN_REVIEWER_ID="reviewer@example.com"
+```
+
+Without them the identity modes can still be issued and email-verified, and
+`identity/start` answers `503 verification_unavailable`. Payday sends Didit
+the payer reference (never the mailbox), Payday's own attempt id as metadata,
+the checkout URL to return to, and, for `verified_identity` only, the
+expected first and last name; it keeps statuses, the session reference, and
+risk categories, and never the extracted identity. Before enabling this in
+production, complete the data-processing, retention, consent, appeal, and
+human-review requirements in `features/product-plan.md` (Slice 0).
 
 For AWS, set `auth0_issuer`, `auth0_audience`, and `auth0_client_id` in the
 untracked `infra/terraform.tfvars`; Terraform passes them to the API task.
@@ -179,8 +249,7 @@ load the saved profile automatically:
   --token <USDC_ADDRESS> \
   --payout <PAYOUT_ADDRESS> \
   --amount 1.00 \
-  --expires-in 3600 \
-  --refund <REFUND_ADDRESS>
+  --expires-in 3600
 ./target/debug/payday get <PAYMENT_ID>
 ```
 
@@ -213,6 +282,35 @@ For compromise or decommissioning, `payday keys revoke` (or `-y`) immediately
 invalidates current and grace-period keys and removes the saved profile. A later
 `payday login` issues a new generation.
 
+## 7. Dashboard sessions
+
+The merchant dashboard at `payday.sh/dashboard` is a browser application, so it
+never holds an API key. It signs in with the same email OTP: the login form
+calls the issuer's `/passwordless/start` and `/oauth/token` endpoints directly
+with the `Payday Dashboard` client ID (`auth0/dashboard.tf`) and the Payday API
+audience, and receives a short-lived access token. That token is the session.
+It is kept in memory and mirrored to the tab's `sessionStorage` only so a
+reload does not demand a new code; it is never written to `localStorage`.
+
+The Post-Login Action admits the dashboard client only when its ID is set as
+the `PAYDAY_DASHBOARD_CLIENT_ID` secret, alongside `PAYDAY_CLIENT_ID` for the
+CLI; the claims are identical for both. `gatewayd` learns the same ID from
+`PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`.
+
+The API accepts a dashboard access token as a session credential on the
+payment, customer, and attachment routes: `Authorization: Bearer <token>`
+carries either an API key or an Auth0 token, and the identity `(iss, sub)`
+maps to the account, provisioning one without an API key on first sight. No
+key is issued or stored for a dashboard login. Key issuance and revocation
+(`/v1/account/api-key`) keep their stricter rule regardless of client: a fresh
+OTP within five minutes, and each signed authentication event mutates key
+state once.
+
+Locally, `payday-dev-identity` accepts `payday-dashboard-local` next to
+`payday-cli-local` for the `payday-api-local` audience and answers browser
+preflights, so the web dev server (`web/.env.example`) signs in against it
+with the code printed in the provider's log.
+
 ## Clean pre-launch database
 
 This release intentionally changes the initial schema rather than carrying
@@ -225,7 +323,8 @@ not deploy this build over the old test schema.
 ## Local and staging verification
 
 Automated tests use ephemeral RSA keys and PostgreSQL databases. They cover
-issuer, audience, client, email-method and freshness enforcement; JWKS rotation
+issuer, audience, client (CLI and dashboard), email-method and freshness
+enforcement; JWKS rotation
 and bounded outage behavior; one-time authentication-event consumption; atomic
 key replacement; tenant isolation; and the embedded OTP HTTP exchange.
 `scripts/e2e-anvil.sh` exercises the complete payment lifecycle and tenant

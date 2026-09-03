@@ -16,6 +16,7 @@ A stuck *sweep* is not fatal: the sweep worker pauses on its own and raises
 | `FinalityViolation` / `cursor hash mismatch` | A finalized block changed hash (reorg). The cursor no longer matches the canonical chain. |
 | `RPC error (…)` marked permanent (HTTP 400/401/403/404/413) | The provider rejected the request outright; usually a rotated or exhausted endpoint. |
 | `sweep transaction … targeted …, not configured BatchSweeper` | A recorded helper transaction hash points at a foreign transaction; the database was edited. |
+| Deployment verification failure at startup (factory or BatchSweeper code hash differs from `PAYDAY_FACTORY_CODE_HASH` / `PAYDAY_BATCH_SWEEPER_CODE_HASH`, or `BatchSweeper.factory()` is not `PAYDAY_FACTORY_ADDRESS`) | The chain does not carry the contract generation this build was configured for; see step 2a. `gatewayd` refuses to start on the same check. |
 | `exclusive indexer database lock` failure | Another indexer process is running or the lock is stuck. |
 | `indexer fatal` | Generic fatal error from the poll loop. |
 
@@ -51,6 +52,28 @@ different environment is the likelier explanation.
 
 3. Before resetting, verify no invoices were funded by transfers in the
    reverted blocks. If any were, those payments may need manual review.
+
+## Step 2a: Deployment verification refused
+
+Both services compare the runtime bytecode at `PAYDAY_FACTORY_ADDRESS` and
+`PAYDAY_BATCH_SWEEPER_ADDRESS` with the configured code hashes and check that
+the sweeper is bound to the configured factory before doing anything else. A
+refusal means the configuration and the chain disagree: a wrong address or
+RPC (another network, a provider serving a different chain), a hash recorded
+from the wrong build, or a factory pointed at an old sweeper. Recompute from
+the chain the services are meant to use and compare with the Terraform
+variables:
+
+```bash
+cast keccak "$(cast code <FACTORY_ADDRESS> --rpc-url "$MONAD_RPC_URL")"
+cast keccak "$(cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$MONAD_RPC_URL")"
+cast call <BATCH_SWEEPER_ADDRESS> 'factory()(address)' --rpc-url "$MONAD_RPC_URL"
+```
+
+Fix the configuration, never the check. If the contracts really changed, that
+is a new contract generation and needs the fresh-database procedure in
+[production-runbook.md](../production-runbook.md); do not repoint a running
+database at different contracts.
 
 ## Step 3: Database lock issue
 

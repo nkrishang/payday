@@ -1,9 +1,16 @@
 # Production runbook (AWS + Monad)
 
 This is the first-production deployment path for one operator. Terraform owns
-the AWS resources; Docker images contain the two Rust services; AWS KMS owns the
-non-exportable sweep key. Do not accept a real payment until the final end-to-end
-test in this runbook succeeds.
+the AWS resources; Docker images contain the two Rust services; AWS KMS owns
+the non-exportable sweep key, recovery key, and Proof of Payment attestation
+key. Do not accept a real payment until the final end-to-end test in this
+runbook succeeds.
+
+Two things Payday holds and one it never does: the sweep signer holds only MON
+for gas; the Payday recovery wallet holds recovered USDC (overpayment
+remainders, expired balances, late transfers) until the operator returns it by
+hand; the intended invoice amount moves directly from the payment address to
+the merchant and never passes through Payday.
 
 ## Accounts and assets the operator must provide
 
@@ -33,7 +40,10 @@ Required:
    sending domain before real users authenticate. Apply the reviewable Auth0
    attack-protection root and complete its launch checks in
    [`auth0/README.md`](../auth0/README.md); enabled tenant
-   defaults alone are not deployment evidence.
+   defaults alone are not deployment evidence. The merchant dashboard signs
+   in through a separate Single Page Application in the same tenant; its
+   setup is described in the dashboard section of
+   [authentication.md](authentication.md).
 
 No Docker Hub, Terraform Cloud, separate PostgreSQL vendor, Circle account, or
 third-party key-management account is required.
@@ -112,8 +122,14 @@ Every counterfactual payment address is derived from the factory address, so
 a factory can never be replaced once a real invoice exists: deploy the final
 `Payment`/`PaymentFactory` code before the first production invoice, and
 treat any later contract change as a new deployment with its own database.
-`BatchSweeper` holds no state and may be redeployed at any time; the indexer
-verifies at startup that it points at the configured factory.
+
+`PaymentFactory` and `BatchSweeper` are one **contract generation**: the
+factory embeds `Payment`'s creation code and the sweeper is bound to one
+factory. Always deploy the two together with the same script, and never point
+a new factory at an old sweeper. Both services pin the generation by the
+keccak256 of each contract's runtime bytecode and by the sweeper's bound
+factory, and refuse to start if the chain disagrees; a change of generation
+needs a fresh database, not a configuration edit.
 
 For an encrypted Foundry keystore:
 
@@ -133,16 +149,23 @@ forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
   --broadcast
 ```
 
-The script aborts if the RPC chain ID is not 143. Save both resulting addresses
-and deployment transactions. Verify that code exists at each address:
+The script aborts if the RPC chain ID is not 143. Save both resulting addresses,
+both deployment transactions, and both code hashes from the script output.
+Verify that code exists at each address and recompute the hashes from the
+chain, which is what the services will compare against:
 
 ```bash
 cast code <FACTORY_ADDRESS> --rpc-url "$MONAD_RPC_URL"
 cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$MONAD_RPC_URL"
+cast keccak "$(cast code <FACTORY_ADDRESS> --rpc-url "$MONAD_RPC_URL")"
+cast keccak "$(cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$MONAD_RPC_URL")"
+cast call <BATCH_SWEEPER_ADDRESS> 'factory()(address)' --rpc-url "$MONAD_RPC_URL"
 ```
 
-An empty `0x` result means deployment verification failed; stop there. Configure
-the helper address as `batch_sweeper_address` in Terraform.
+An empty `0x` result means deployment verification failed; stop there. The
+`factory()` call must return the factory you just deployed. Configure the
+addresses as `factory_address` and `batch_sweeper_address` and the hashes as
+`factory_code_hash` and `batch_sweeper_code_hash` in Terraform.
 
 ## 3. Create protected Terraform state storage
 
@@ -179,9 +202,15 @@ Replace every placeholder in `terraform.tfvars`, including:
 - API hostname and Route53 zone ID
 - alert email
 - `image_tag = "git-<full commit SHA>"`
-- deployed factory address
+- deployed `factory_address` and `batch_sweeper_address`, with their
+  `factory_code_hash` and `batch_sweeper_code_hash` from step 2
+- `recovery_address`, filled in during step 6 once the recovery key exists;
+  leave it unset until then. There is no safe placeholder, and the full apply
+  in step 7 refuses until it is set
 - current `usdc_start_block`
 - Auth0 issuer, API audience, and Native application client ID
+- `dashboard_auth0_client_id`, once the dashboard's Auth0 Single Page
+  Application exists; leave it out until then
 
 Supply the RPC URL without writing it to the tfvars file:
 
@@ -192,16 +221,20 @@ export TF_VAR_rpc_url="$MONAD_RPC_URL"
 Terraform stores generated credentials and the RPC URL in its encrypted state.
 Treat state files and saved plans as secrets.
 
-## 6. Bootstrap ECR and push images
+## 6. Bootstrap ECR, the recovery key, and push images
 
 The repositories must exist before images can be pushed, while ECS cannot start
-until those images exist:
+until those images exist. The recovery KMS key is created in the same targeted
+apply because its address is a Terraform input (`recovery_address`) that the
+API task needs before it can start:
 
 ```bash
 terraform -chdir=infra init -backend-config=backend.hcl
 terraform -chdir=infra apply \
   -target=aws_ecr_repository.api \
-  -target=aws_ecr_repository.indexer
+  -target=aws_ecr_repository.indexer \
+  -target=aws_kms_key.recovery \
+  -target=aws_kms_alias.recovery
 
 api_repo=$(terraform -chdir=infra output -raw api_ecr_repository_url)
 indexer_repo=$(terraform -chdir=infra output -raw indexer_ecr_repository_url)
@@ -213,6 +246,25 @@ scripts/push-images.sh <AWS_REGION> "$api_repo" "$indexer_repo" "$tag"
 The push script requires exactly `git-<full HEAD SHA>` and refuses a dirty
 worktree. Commit and review every source change before building. This makes the
 image-to-source relationship and rollback deterministic.
+
+Now derive the Payday recovery wallet from the recovery key and add it to
+`terraform.tfvars` as `recovery_address`, which has been unset until now:
+
+```bash
+export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw recovery_kms_key_arn)"
+cast wallet address --aws
+```
+
+KMS returns a public key, not an address; `cast` derives it. Verify the
+derivation independently before relying on it: every invoice commits this
+address into its payment address, and it cannot be changed for invoices that
+already exist. Replacing the key later therefore only affects invoices created
+after `recovery_address` changes, and because the recovery wallet is one of the
+parameters an `Idempotency-Key` commits to, a `POST /v1/payments` replay from
+before the change answers `409 idempotency_conflict`; the original payment must
+be fetched with `GET`. No task role is granted `kms:Sign` on this key;
+returning recovered funds is a manual operator action with the same `--aws`
+signer.
 
 ## 7. Create the complete AWS stack
 
@@ -230,11 +282,18 @@ terraform -chdir=infra apply deploy.tfplan
 ```
 
 Review the plan before applying it. In particular, reject unexplained database
-replacement/destruction, IAM permissions broader than the named secrets and KMS
-key, a worker count other than one, or plaintext/non-HTTPS endpoints.
+replacement/destruction, IAM permissions broader than the named secrets, the
+attachment bucket's `uploads/` prefix, and the named KMS keys (nothing may
+gain `kms:Sign` on the recovery key, and only the API task role may sign with
+the attestation key), a worker count other than one, or plaintext/non-HTTPS
+endpoints.
 
 AWS creates the TLS certificate, DNS record, ALB/WAF, ECS services, RDS database,
-Secrets Manager values, alarms, and KMS key. WAF request sampling is disabled so
+Secrets Manager values, alarms, KMS keys, the invoice attachment bucket, and
+its GuardDuty Malware Protection plan. Both services verify the contract
+generation against the chain as they start: if a task loops on a code-hash or
+bound-factory refusal, the tfvars and the deployment disagree — fix the values,
+never the check. WAF request sampling is disabled so
 the bearer header is not retained in samples. RDS verifies its server hostname
 and certificate against the checksum-pinned AWS global RDS CA bundle in the
 container. Confirm the SNS subscription link sent to the configured alert email.
@@ -260,7 +319,51 @@ The two addresses must match. Fund it with only enough MON for expected sweeps
 and maintain a low-balance alert operationally. The signer does not custody
 USDC; it pays gas to invoke the permissionless factory.
 
-## 9. Configure and test the CLI
+## 9. Verify attachment scanning
+
+Terraform created the `<name>-invoice-attachments` bucket and a GuardDuty
+Malware Protection plan for it; Malware Protection for S3 does not require
+the GuardDuty detector to be enabled. Confirm the plan is active with tagging
+on, and that GuardDuty turned on the bucket's EventBridge notifications:
+
+```bash
+aws guardduty list-malware-protection-plans
+aws guardduty get-malware-protection-plan --malware-protection-plan-id <id> \
+  --query '{status: Status, tagging: Actions.Tagging.Status}'
+aws s3api get-bucket-notification-configuration \
+  --bucket "$(terraform -chdir=infra output -raw attachment_bucket_name)"
+```
+
+`status` must be `ACTIVE`, `tagging` `ENABLED`, and the notification
+configuration must contain `EventBridgeConfiguration`. Then upload a small PDF
+through the CLI (`payday create --attachment`) or the dashboard and watch
+finalization move from `409 attachment_scan_pending` to an attachment
+descriptor within a few minutes; `aws s3api get-object-tagging` on
+`uploads/<account_id>/<attachment_id>.pdf` then shows
+`GuardDutyMalwareScanStatus=NO_THREATS_FOUND`. Uploading the EICAR test file
+must end in `422 attachment_rejected`. Malware findings appear in the
+GuardDuty console; nothing in Payday alarms on them.
+
+## 10. Derive and publish the attestation signer
+
+Every Proof of Payment carries a verification attestation signed with the
+attestation KMS key. Only the API task role can sign with it and it holds no
+funds. Derive its address exactly as for the other keys and verify the
+derivation independently:
+
+```bash
+export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw attestation_kms_key_arn)"
+cast wallet address --aws
+```
+
+Publish that address as Payday's trusted attestor, in the API documentation
+and wherever proofs are downloaded, so merchants and auditors can pass it to
+`payday proof verify proof.json --trusted-attestor <address>`; an attestation
+signed by anything else must fail verification. The address changes only if
+the key is replaced, which changes the trust anchor of every earlier proof,
+so treat replacement as an announced cut-over, never as routine rotation.
+
+## 11. Configure and test the CLI
 
 Authenticate through Auth0. Production API and Auth0 defaults are compiled into
 the CLI, and the key is saved securely in its XDG-aware credentials file:
@@ -274,21 +377,28 @@ cargo run --release -p gateway-cli --bin payday -- create \
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --payout <YOUR_PAYOUT_ADDRESS> \
   --expires-in 3600 \
-  --refund <YOUR_REFUND_ADDRESS> \
   --amount 0.01
 ```
 
-Pay exactly 0.01 native USDC to the returned payment address. Confirm that:
+The response's `recovery_address` must be the Payday recovery wallet from
+step 6. Pay exactly 0.01 native USDC to the returned payment address. Confirm
+that:
 
 1. CLI status progresses `awaiting_payment → paid → settled`, with
    `received_base_units`, `settlement_tx_hash`, `settled_at`, and `settled_block` set.
-2. The beneficiary receives the USDC.
+2. The beneficiary receives exactly the USDC amount.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
 5. Send a second, small payment to the same address and confirm it reaches
-   the refund wallet within a minute while the status stays `settled`.
+   the Payday recovery wallet within a minute while the status stays
+   `settled`, and that `recovered_funds` records it with reason
+   `late_transfer` (see the [smoke test](runbooks/end-to-end-smoke-test.md)).
+   Return it by hand from the recovery key afterwards.
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
+8. `payday proof download <id> --output proof.json` followed by
+   `payday proof verify proof.json --trusted-attestor <address from step 10>`
+   succeeds.
 
 Do not advertise or depend on the service until this succeeds.
 
@@ -323,6 +433,17 @@ manual rollback sets `image_tag` to a previous known-good image and applies
 again. Database migrations are embedded and run at service startup, so schema
 changes require a separately reviewed forward/backward compatibility plan.
 
+### Contract generation changes
+
+A change to `Payment`, `PaymentFactory`, or `BatchSweeper` is a new
+generation, not an update: existing invoices are committed to the old factory
+and would never match the new one. Deploy the factory and sweeper together
+(step 2), record the new addresses and code hashes, create a fresh database,
+update `factory_address`, `batch_sweeper_address`, `factory_code_hash`, and
+`batch_sweeper_code_hash` together, and apply. A build configured for one
+generation refuses to start against another, so a half-updated configuration
+fails closed rather than settling against the wrong contracts.
+
 To publish CLI binaries after CI is green, create and push a signed `v*` tag.
 The release workflow builds Linux, macOS Intel/Apple Silicon, and Windows assets
 and creates the GitHub Release.
@@ -340,6 +461,13 @@ and creates the GitHub Release.
 - Rotate account API keys with `payday keys rotate` as described in the
   secrets-rotation runbook. The previous key has a 24-hour grace period;
   `payday keys revoke` invalidates current and grace-period keys immediately.
+- Review the `recovered_funds` ledger and return held amounts by hand from the
+  recovery key; see "Reconciling recovered funds" in
+  `docs/runbooks/stuck-invoice.md`. Nothing automates a return.
+- Attached PDFs stay in the versioned, KMS-encrypted attachment bucket for as
+  long as their invoice; the lifecycle rule removes only uploads that were
+  never attached (still tagged `payday-upload=pending`) after seven days.
+  Include the bucket in the backup discipline applied to the database.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
   bypasses ECS and starts another task. Keep the ECS service at one task as an
   additional control.

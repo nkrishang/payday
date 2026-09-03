@@ -6,22 +6,28 @@ import {SafeTransferLib} from "foundry/lib/solady/src/utils/SafeTransferLib.sol"
 
 /// @notice Deployed by `PaymentFactory` at an invoice's counterfactual address.
 ///
-/// The constructor routes the balance present at deployment: to the receiver
-/// when the invoice is still live and fully funded, to the recovery address
-/// once it has expired. Deployment is a one-way door, so anything that lands
-/// at this address afterwards can be forwarded to the recovery address by
-/// anyone through `recover`; funds are never stranded.
+/// The constructor routes the balance present at deployment. While the invoice
+/// is live it pays the receiver exactly the invoice amount and forwards any
+/// remainder to the Payday recovery wallet; once the invoice has expired the
+/// whole balance goes to the recovery wallet instead. Deployment is a one-way
+/// door, so anything that lands at this address afterwards can be forwarded to
+/// the recovery wallet by anyone through `recover`. Funds are never stranded,
+/// and the receiver never takes more than the invoice amount: everything else
+/// is held by Payday for manual review and return.
 contract Payment {
     error InsufficientTokenBalance(uint256 balance, uint256 required);
 
-    /// @notice The balance present at deployment was paid to the invoice receiver.
+    /// @notice The receiver was paid the invoice amount at deployment. `amount` is always the
+    /// exact invoice amount, never the balance that happened to be present.
     event Settled(address indexed receiver, uint256 amount);
-    /// @notice A balance was forwarded to the recovery address, at deployment or via `recover`.
+    /// @notice A balance was forwarded to the Payday recovery wallet: the overpayment remainder
+    /// of a live deployment, the whole balance of an expired deployment, or a later balance
+    /// forwarded through `recover`.
     event Recovered(address indexed recovery, uint256 amount);
 
     address internal immutable token;
     address internal immutable recovery;
-    /// @notice True when deployment paid the receiver, false when it paid the recovery address.
+    /// @notice True when deployment paid the receiver, false when it paid the recovery wallet.
     bool public immutable settled;
 
     constructor(address token_, uint256 amount, address receiver, uint64 expirationTimestamp, address recovery_) {
@@ -39,15 +45,23 @@ contract Payment {
 
         if (balance < amount) revert InsufficientTokenBalance(balance, amount);
 
-        // Sweep the complete balance so an overpayment is never stranded at
-        // the deterministic payment address.
-        SafeTransferLib.safeTransfer({token: token_, to: receiver, amount: balance});
-        emit Settled(receiver, balance);
+        SafeTransferLib.safeTransfer({token: token_, to: receiver, amount: amount});
+        emit Settled(receiver, amount);
+
+        // An overpayment is Payday's to review and return, not the receiver's
+        // to keep, and it leaves in this same transaction so the deterministic
+        // address never strands it. A failed recovery transfer reverts the
+        // whole deployment: the receiver is not paid until both legs can clear.
+        uint256 remainder = balance - amount;
+        if (remainder != 0) {
+            SafeTransferLib.safeTransfer({token: token_, to: recovery_, amount: remainder});
+            emit Recovered(recovery_, remainder);
+        }
     }
 
-    /// @notice Forward the full token balance to the recovery address.
+    /// @notice Forward the full token balance to the Payday recovery wallet.
     /// Permissionless: the destination is committed into this address, so a
-    /// caller can only spend gas on the invoice owner's behalf.
+    /// caller can only spend gas on Payday's behalf.
     function recover() external returns (uint256 amount) {
         amount = ERC20(token).balanceOf(address(this));
         if (amount == 0) return 0;

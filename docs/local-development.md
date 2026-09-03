@@ -11,13 +11,22 @@ amount, or to `expired` when the finalized block timestamp passes the deadline.
 
 The sweep worker submits batches to `BatchSweeper`. For an address without
 code it calls `PaymentFactory.execute`, which deploys `Payment` at the
-counterfactual address; the constructor pays the beneficiary before expiry or
-the recovery address after it. For an address that already has code it calls
-`Payment.recover`, which forwards anything that arrived later to the recovery
-address. The finalized receipt decides the outcome: `Settled` → `fulfilled`,
-`Recovered` → `recovered`, `SweepRecovered` → late funds collected, and
-`SweepFailed` → retried or `blocked` after reading `paused()`,
-`isBlacklisted()`, and `balanceOf()` on the token.
+counterfactual address; before expiry the constructor pays the beneficiary
+exactly the invoice amount and sends any remainder to the Payday recovery
+wallet, and after expiry it sends the whole balance to that wallet. For an
+address that already has code it calls `Payment.recover`, which forwards
+anything that arrived later to the recovery wallet. The finalized receipt
+decides the outcome: `Settled` → `fulfilled` (with a `Recovered` remainder
+when overpaid), standalone `Recovered` → `recovered`, `SweepRecovered` → late
+funds collected, and `SweepFailed` → retried or `blocked` after reading
+`paused()`, `isBlacklisted()`, and `balanceOf()` on the token. Every nonzero
+recovery is written to the `recovered_funds` ledger in the transaction that
+resolves the batch, and each ledger row raises a `payment.recovered_funds`
+webhook.
+
+The recovery wallet is platform-controlled: `gatewayd` stamps
+`PAYDAY_RECOVERY_ADDRESS` on every invoice and rejects a create request that
+carries `refund_address`.
 
 ```
 created → funded → deploying → fulfilled
@@ -59,12 +68,12 @@ skipped.
 
 ## Prerequisites
 
-- Rust, Foundry (`anvil`, `cast`, `forge`), Docker, `just`, the PostgreSQL
-  client, and `jq`.
+- Rust, Foundry (`anvil`, `cast`, `forge`), Docker (it runs PostgreSQL and
+  the MinIO attachment store), `just`, the PostgreSQL client, and `jq`.
 - Node.js 20 or newer, for the TypeScript SDK and the `payday.sh` web app.
 
 Copy `.env.example` to `.env` if you want to override the checked-in local
-defaults. Start PostgreSQL, Anvil, the development identity provider,
+defaults. Start PostgreSQL, MinIO, Anvil, the development identity provider,
 `gatewayd`, and the indexer with multiplexed logs:
 
 ```bash
@@ -78,8 +87,13 @@ just seed
 ```
 
 The one-time code is printed in the `[identity]` log and the CLI saves the
-issued key in its local profile. Each run starts from a clean database and
-Anvil chain so their indexed histories cannot drift.
+issued key in its local profile. Each run starts from a clean database,
+attachment store, and Anvil chain so their indexed histories cannot drift.
+After the bootstrap deploys the contracts, the runner reads their runtime
+bytecode from the chain and exports `PAYDAY_FACTORY_CODE_HASH` and
+`PAYDAY_BATCH_SWEEPER_CODE_HASH` from it (overriding any `.env` value),
+because both services verify the deployed contract generation at startup and
+refuse to start on a mismatch.
 
 To open a created payment, run the hosted checkout in a third shell:
 
@@ -90,18 +104,29 @@ just web
 ```
 
 It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
-points at, so the `payment_url` the CLI prints opens the real checkout. Port
-3002 rather than 3001, which belongs to the development identity provider. See
-[web/README.md](../web/README.md).
+points at, so the `payment_url` the CLI prints opens the real checkout and the
+gateway accepts the dashboard's cross-origin requests (the merchant routes
+answer only that origin). Port 3002 rather than 3001, which belongs to the
+development identity provider. See [web/README.md](../web/README.md).
+
+For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_AUTH0_DOMAIN`,
+`NEXT_PUBLIC_AUTH0_CLIENT_ID`, and `NEXT_PUBLIC_AUTH0_AUDIENCE` (sign-in
+against the development identity provider, code printed in its log) and
+`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
+`http://127.0.0.1:9000`, so the page may PUT PDFs there). The example file
+carries working local values.
 
 ## Local Anvil end-to-end run
 
-`scripts/e2e-anvil.sh` runs the complete flow (exact, partial, overpaid, and
-batched payments; late transfers; third-party execution; a paused token; a
-blacklisted beneficiary and its operator release; an expired partial payment
-recovered automatically and completed late) against a fresh Anvil started with
+`scripts/e2e-anvil.sh` runs the complete flow (exact, partial, and batched
+payments; an overpayment split between the beneficiary and the Payday recovery
+wallet; late transfers; third-party execution; a paused token; a blacklisted
+beneficiary and its operator release; an expired partial payment recovered
+automatically and completed late; the `recovered_funds` ledger and its
+webhook events) against a fresh Anvil started with
 `--slots-in-an-epoch 1 --block-time 1`, which makes the node's
-`finalized` tag advance like a real chain. Use it whenever the contracts or
+`finalized` tag advance like a real chain, and a fresh MinIO container
+standing in for the attachment bucket. Use it whenever the contracts or
 the worker change:
 
 ```bash
@@ -121,7 +146,9 @@ anvil --chain-id 31337 --slots-in-an-epoch 1 --mixed-mining --block-time 1
 
 Run against a fresh Anvil. The script is safe to repeat on the same node, but
 it will not redeploy changed contract code over existing addresses: restart
-Anvil after editing a contract.
+Anvil after editing a contract, and recompute the code hashes below, because
+the services refuse to start against a generation that differs from the one
+they were configured for.
 
 ```bash
 forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
@@ -136,13 +163,43 @@ It deploys:
 - `MockUSDC`: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
 - `BatchSweeper`: `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`
 
-Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC.
+Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC. Account #5,
+`0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc`, is the local Payday recovery
+wallet (`PAYDAY_RECOVERY_ADDRESS`).
 
-### 3. Build and start the services manually
+Pin the deployed generation for both services (the runner does this for you):
 
-Ensure `.env` contains the local addresses, database URL, RPC URL, finality
-settings, start block, signer key, and identity settings. Start the identity
-provider:
+```bash
+export PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$(cast code 0x5FbDB2315678afecb367f032d93F642f64180aa3 --rpc-url http://127.0.0.1:8545)")"
+export PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$(cast code 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 --rpc-url http://127.0.0.1:8545)")"
+```
+
+### 3. Start the local attachment store
+
+MinIO stands in for the S3 attachment bucket (the runner does this for you).
+Nothing scans local uploads, so it also stands in for GuardDuty: the tag its
+scanner would write is set by hand, as described under
+[Attachments and the scan tag](#attachments-and-the-scan-tag).
+
+```bash
+docker run -d --rm --name payday-minio \
+  -e MINIO_ROOT_USER=payday-local -e MINIO_ROOT_PASSWORD=payday-local -e MINIO_BROWSER=off \
+  -p 127.0.0.1:9000:9000 minio/minio server /data
+curl -fsS http://127.0.0.1:9000/minio/health/live
+docker run --rm --network host \
+  -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
+  minio/mc mb --ignore-existing local/payday-attachments-local
+```
+
+`.env.example` carries the matching `PAYDAY_ATTACHMENT_*` and `AWS_*` values.
+
+### 4. Build and start the services manually
+
+Ensure `.env` contains the local addresses, recovery address, database URL,
+RPC URL, finality settings, start block, signer and attestation keys,
+attachment store, and identity settings, and that the two code hashes above
+are exported (the `.env.example` placeholders are zero and will be refused).
+Start the identity provider:
 
 ```bash
 cargo build --workspace
@@ -169,7 +226,7 @@ set -a; source .env; set +a
 PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
 ```
 
-### 4. Create a payment
+### 5. Create a payment
 
 Expirations must be at least ten minutes and at most a year ahead.
 
@@ -179,9 +236,11 @@ Expirations must be at least ten minutes and at most a year ahead.
   --token 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --payout 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --expires-in 3600 \
-  --refund 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
   --amount 1.5
 ```
+
+The response's `recovery_address` is the configured Payday recovery wallet;
+there is no flag to choose it.
 
 Copy `id` and `address` from the response, then transfer 1.5 USDC
 (`1500000` atomic units):
@@ -207,6 +266,27 @@ cast call 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
 cast call <payment_address> 'settled()(bool)' --rpc-url http://127.0.0.1:8545
 ```
 
+## Attachments and the scan tag
+
+`POST /v1/attachments` returns a presigned PUT aimed at MinIO; upload the PDF
+with the returned headers, then call `POST /v1/attachments/{id}/finalize`.
+Finalize answers `409 attachment_scan_pending` until the object carries the
+tag GuardDuty Malware Protection writes in production, and
+`422 attachment_rejected` for any other verdict. Stamp a clean verdict on an
+upload by its object key, `uploads/<account_id>/<attachment_id>.pdf`:
+
+```bash
+docker run --rm --network host \
+  -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
+  minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
+  'GuardDutyMalwareScanStatus=NO_THREATS_FOUND'
+```
+
+`mc tag list` on the same path shows the tags; set any other value to walk
+the rejection path. `scripts/e2e-anvil.sh` does the same through its
+`tag_object_scanned` helper. No lifecycle rule runs locally, so abandoned
+uploads stay until the container is removed.
+
 ## Automated tests
 
 ```bash
@@ -216,8 +296,10 @@ forge test
 just web-check   # SDK and web app: build, types, lint, unit tests
 ```
 
-Coverage includes exact, partial, and overpayment funding; finality-tag and
-confirmation gating; multi-range draining; range replay idempotency; chain
+Coverage includes exact, partial, and overpayment funding; the overpayment
+split between beneficiary and recovery and the `recovered_funds` ledger;
+deployment code-hash and bound-factory verification at startup; finality-tag
+and confirmation gating; multi-range draining; range replay idempotency; chain
 isolation; expiry by block timestamp; settlement, recovery, third-party
 execution, and late-fund collection through finalized receipts; failure
 classification (paused, blacklisted, underfunded, unknown); same-nonce fee
@@ -230,6 +312,20 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
 - `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
   Auth0 account-management settings (see `docs/authentication.md`)
+- `PAYDAY_PAYER_AUTH0_ISSUER`, `PAYDAY_PAYER_AUTH0_AUDIENCE`,
+  `PAYDAY_PAYER_AUTH0_CLIENT_ID`, `PAYDAY_PAYER_REF_MASTER_KEY` — the payer
+  email-verification audience and the payer-reference key, set together or not
+  at all; `just dev` and `just e2e` point them at the development provider's
+  `payday-payer-local` client and audience
+- `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
+  verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
+- `PAYDAY_DIDIT_API_KEY`, `PAYDAY_DIDIT_WORKFLOW_ID`,
+  `PAYDAY_DIDIT_WEBHOOK_SECRET` (optional `PAYDAY_DIDIT_BASE_URL`) — the
+  identity provider, set together or not at all; `just dev` leaves them unset,
+  so identity start answers `verification_unavailable` locally unless you
+  export a Didit sandbox key, and the hosted callback then needs a public URL
+- `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the reviewer on
+  `POST /v1/admin/verifications/{id}/decision`; defaults to `operator`
 - `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
   issuer; non-loopback HTTP issuers remain rejected
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
@@ -238,6 +334,15 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`
+- `PAYDAY_FACTORY_CODE_HASH`, `PAYDAY_BATCH_SWEEPER_CODE_HASH` — keccak256 of
+  the runtime bytecode at the two addresses
+  (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both services
+  compare them with the live chain at startup, also checking that
+  `BatchSweeper.factory()` is `PAYDAY_FACTORY_ADDRESS`, and refuse to start on
+  a mismatch. `just dev` and `just e2e` compute them from the running chain
+- `PAYDAY_RECOVERY_ADDRESS` — the Payday recovery wallet `gatewayd` stamps on
+  every invoice; a nonzero address, Anvil account #5 locally, the recovery KMS
+  key's address in production
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
   payment links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
@@ -247,7 +352,10 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   Monad uses `https://monadvision.com`, while Anvil leaves it unset
 - `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
   fresh database (the current block at first deployment)
-- `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally
+- `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally; read by
+  both services (`gatewayd` uses it for deployment verification and skips it,
+  along with the recovery address and code hashes, when
+  `PAYDAY_STATUS_ONLY=true`)
 - `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
   or `latest`
 - `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality
@@ -266,6 +374,24 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
 - `PAYDAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
   uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
+- `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding invoice PDFs;
+  `payday-attachments-local` on the runner's MinIO
+- `PAYDAY_ATTACHMENT_S3_ENDPOINT`, `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE` —
+  optional endpoint override and path-style addressing, set locally to reach
+  MinIO at `http://127.0.0.1:9000`; unset in production
+- `PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS` — lifetime of signed download URLs,
+  default 300
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` — MinIO's root
+  credentials locally (`payday-local`, region `us-east-1`); the ambient ECS
+  task role in production
+- `PAYDAY_ATTESTATION_SIGNER_KEY` — local key signing Proof of Payment
+  verification attestations (Anvil account #6, whose address
+  `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
+  mutually exclusive with `PAYDAY_ATTESTATION_KMS_KEY_ID`, the production KMS
+  secp256k1 key ARN. Exactly one is required unless `PAYDAY_STATUS_ONLY=true`
+- `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` — optional client ID of the dashboard's
+  Auth0 Single Page Application, whose access tokens `gatewayd` accepts next
+  to the CLI's; `payday-dashboard-local` with the development identity provider
 
 The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
 Terraform source is under `infra/`.

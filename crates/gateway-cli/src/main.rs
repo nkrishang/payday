@@ -4,26 +4,37 @@ mod client;
 mod credentials;
 mod error;
 mod presentation;
+mod proof;
 
 use std::io::{self, IsTerminal, Write};
+use std::path::Path;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use gateway_core::{
-    Amount, BeneficiaryAddress, CreatePaymentRequest, PaymentAddress, PaymentResponse,
-    PaymentStatus, RecoveryAddress, TokenAddress, USDC_DECIMALS, payment_id, resolve_expiration,
+    Amount, AttachmentDescriptor, BeneficiaryAddress, CreatePaymentRequest, Party, PayerPolicy,
+    PaymentAddress, PaymentResponse, PaymentStatus, ProofOfPayment, TokenAddress, USDC_DECIMALS,
+    payment_id, resolve_expiration,
 };
 use uuid::Uuid;
 
 use account::{AccountClient, ApiKeyMetadata};
 use cli::{
-    Cli, Command, CreateArgs, DocsTopic, GetArgs, KeyActionArgs, KeysCommand, LoginArgs,
-    OpsCommand, Profile, RevokeArgs, WebhooksCommand,
+    Cli, Command, CreateArgs, CustomersCommand, DocsTopic, GetArgs, KeyActionArgs, KeysCommand,
+    LoginArgs, OpsCommand, Profile, ProofCommand, RevokeArgs, WebhooksCommand,
 };
-use client::GatewayClient;
+use client::{CreateCustomerRequest, GatewayClient};
 use error::CliError;
 use presentation::{Presentation, terminal};
+
+/// Product plan §4.2: one PDF of at most 5 MiB per invoice.
+const MAX_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+/// How long `--attachment` waits for the malware scan before giving up; the
+/// SDK uses the same window.
+const SCAN_WAIT: Duration = Duration::from_secs(120);
+const SCAN_POLL_INITIAL: Duration = Duration::from_secs(1);
+const SCAN_POLL_MAX: Duration = Duration::from_secs(8);
 
 const PRODUCTION_AUTH0_ISSUER: &str = "https://dev-5ojfw164vnkjnk6m.us.auth0.com/";
 const PRODUCTION_AUTH0_CLIENT_ID: &str = "vL8df7gnvLdQtNllctp8FWkZZGuYjzsq";
@@ -33,6 +44,9 @@ struct Output {
     body: String,
     signed_in: Option<String>,
     next: Option<String>,
+    /// The command ran but its verdict is negative (a failed proof check):
+    /// the body is still printed, and the process exits 1.
+    failed: bool,
 }
 
 #[tokio::main]
@@ -62,6 +76,8 @@ async fn main() {
         @ (Command::Create(_) | Command::Get(_) | Command::List(_) | Command::Cancel(_)) => {
             run_payment(&cli, command).await
         }
+        Command::Customers(command) => run_customers(&cli, command).await,
+        Command::Proof(command) => run_proof(&cli, command).await,
         Command::Login(args) => run_login(&cli, args).await.map(account_output),
         Command::Logout => run_logout(&cli).map(account_output),
         Command::Whoami => run_whoami(&cli).await.map(account_output),
@@ -74,7 +90,13 @@ async fn main() {
     };
 
     match result {
-        Ok(output) => print_output(output, cli.json, io::stdout().is_terminal()),
+        Ok(output) => {
+            let failed = output.failed;
+            print_output(output, cli.json, io::stdout().is_terminal());
+            if failed {
+                std::process::exit(1);
+            }
+        }
         Err(err) => {
             if cli.json {
                 eprintln!("{}", err.json());
@@ -112,6 +134,7 @@ async fn run_ops(cli: &Cli, command: OpsCommand) -> Result<Output, CliError> {
         },
         signed_in: None,
         next: None,
+        failed: false,
     })
 }
 
@@ -134,6 +157,7 @@ async fn run_webhooks(cli: &Cli, command: WebhooksCommand) -> Result<Output, Cli
         body,
         signed_in: None,
         next: None,
+        failed: false,
     })
 }
 
@@ -194,14 +218,14 @@ fn print_output(output: Output, json: bool, interactive: bool) {
                 0x44, 0x44, 0x44,
             ))));
             format!(
-                "{}payday{}{} · stablecoin payments{}",
+                "{}payday{}{} · stablecoin invoices{}",
                 cyan.render(),
                 cyan.render_reset(),
                 dim.render(),
                 dim.render_reset(),
             )
         } else {
-            "payday · stablecoin payments".to_string()
+            "payday · stablecoin invoices".to_string()
         };
         println!("{brand}\n");
         if let Some(email) = output.signed_in {
@@ -224,6 +248,7 @@ fn account_output(body: String) -> Output {
         body,
         signed_in: None,
         next: None,
+        failed: false,
     }
 }
 
@@ -237,10 +262,10 @@ fn completions(shell: clap_complete::Shell) -> Result<String, CliError> {
 fn docs(topic: Option<DocsTopic>) -> &'static str {
     match topic {
         None => {
-            "  Payday guides\n\n    getting-started  Create and inspect your first payment\n    authentication   Sign in and manage API keys\n    environment      Configure Payday\n\n  → Run `payday docs <topic>` to read a guide."
+            "  Payday guides\n\n    getting-started  Issue and follow your first invoice\n    authentication   Sign in and manage API keys\n    environment      Configure Payday\n\n  → Run `payday docs <topic>` to read a guide."
         }
         Some(DocsTopic::GettingStarted) => {
-            "  Getting started\n\n    1. Run `payday login`\n    2. Create a payment: `payday create --amount 25 --to 0x…`\n    3. Follow it:    `payday get <PAYMENT_ID> --watch`\n\n  → Add --json for machine-readable output."
+            "  Getting started\n\n    1. Run `payday login`\n    2. Issue an invoice: `payday create --amount 25 --to 0x… --issuer 'Acme' --bill-to 'Globex'`\n    3. Follow it:       `payday get <PAYMENT_ID> --watch`\n    4. Once settled:    `payday proof download <PAYMENT_ID> --output proof.json`\n\n  → Add --json for machine-readable output; `--from-file invoice.json` sends a full API body."
         }
         Some(DocsTopic::Authentication) => {
             "  Authentication\n\n    payday login        Sign in by email and save a profile\n    payday whoami       Show the current account\n    payday keys rotate  Replace your API key\n    payday keys revoke  Immediately invalidate keys\n    payday logout       Remove saved credentials\n\n  → PAYDAY_API_KEY overrides saved credentials for scripts."
@@ -399,7 +424,7 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
     let presentation = Presentation::new(cli.color, cli.plain, cli.verbose);
     match command {
         Command::Create(args) => {
-            let payment = create(&client, args).await?;
+            let payment = create(&client, *args).await?;
             Ok(Output {
                 body: if cli.json {
                     json(&payment)?
@@ -408,23 +433,34 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
                 },
                 signed_in: None,
                 next: None,
+                failed: false,
             })
         }
         Command::Get(args) if args.watch => Ok(Output {
             body: watch(&client, &presentation, args, !cli.plain).await?,
             signed_in: None,
             next: None,
+            failed: false,
         }),
         Command::Get(args) => {
             let payment = get(&client, &args.reference).await?;
+            let mut body = if cli.json {
+                json(&payment)?
+            } else {
+                presentation.payment(&payment, false)
+            };
+            if let Some(path) = &args.pdf {
+                let pdf = client.invoice_pdf(&payment.id).await?;
+                write_file(path, &pdf)?;
+                if !cli.json {
+                    body.push_str(&format!("\n\n  ✓ Invoice PDF saved to {}", path.display()));
+                }
+            }
             Ok(Output {
-                body: if cli.json {
-                    json(&payment)?
-                } else {
-                    presentation.payment(&payment, false)
-                },
+                body,
                 signed_in: None,
                 next: None,
+                failed: false,
             })
         }
         Command::List(args) => {
@@ -449,15 +485,16 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
                 .next_cursor
                 .map(|cursor| {
                     format!(
-                        "Run `payday list --limit {} --starting-after {cursor}` for more payments.",
+                        "Run `payday list --limit {} --starting-after {cursor}` for more invoices.",
                         args.limit
                     )
                 })
-                .or_else(|| Some("Run `payday create` to accept a payment.".into()));
+                .or_else(|| Some("Run `payday create` to issue an invoice.".into()));
             Ok(Output {
                 body,
                 signed_in: None,
                 next,
+                failed: false,
             })
         }
         Command::Cancel(args) => {
@@ -475,9 +512,12 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
                 },
                 signed_in: None,
                 next: None,
+                failed: false,
             })
         }
-        Command::Login(_)
+        Command::Customers(_)
+        | Command::Proof(_)
+        | Command::Login(_)
         | Command::Logout
         | Command::Whoami
         | Command::Keys(_)
@@ -489,25 +529,181 @@ async fn run_payment(cli: &Cli, command: Command) -> Result<Output, CliError> {
     }
 }
 
+async fn run_customers(cli: &Cli, command: CustomersCommand) -> Result<Output, CliError> {
+    let client = GatewayClient::new(&cli.api_url, &api_key(cli)?)?;
+    let presentation = Presentation::new(cli.color, cli.plain, cli.verbose);
+    match command {
+        CustomersCommand::Create(args) => {
+            let customer = client
+                .create_customer(&CreateCustomerRequest {
+                    name: args.name,
+                    email: args.email,
+                    details: args.details,
+                })
+                .await?;
+            Ok(Output {
+                body: if cli.json {
+                    json(&customer)?
+                } else {
+                    presentation.customer(&customer, true)
+                },
+                signed_in: None,
+                next: None,
+                failed: false,
+            })
+        }
+        CustomersCommand::Get { id } => {
+            let customer = client.get_customer(id).await?;
+            Ok(Output {
+                body: if cli.json {
+                    json(&customer)?
+                } else {
+                    presentation.customer(&customer, false)
+                },
+                signed_in: None,
+                next: None,
+                failed: false,
+            })
+        }
+        CustomersCommand::List(args) => {
+            let page = client
+                .list_customers(args.limit, args.starting_after)
+                .await?;
+            let body = if cli.json {
+                json(&page)?
+            } else {
+                presentation.customers(&page.customers)
+            };
+            let next = page.next_cursor.map(|cursor| {
+                format!(
+                    "Run `payday customers list --limit {} --starting-after {cursor}` for more customers.",
+                    args.limit
+                )
+            });
+            Ok(Output {
+                body,
+                signed_in: None,
+                next,
+                failed: false,
+            })
+        }
+    }
+}
+
+async fn run_proof(cli: &Cli, command: ProofCommand) -> Result<Output, CliError> {
+    let presentation = Presentation::new(cli.color, cli.plain, cli.verbose);
+    match command {
+        ProofCommand::Download(args) => {
+            let client = GatewayClient::new(&cli.api_url, &api_key(cli)?)?;
+            let proof = client.proof(payment_reference(&args.reference)?).await?;
+            let encoded = json(&proof)?;
+            write_file(&args.output, format!("{encoded}\n").as_bytes())?;
+            Ok(Output {
+                body: if cli.json {
+                    encoded
+                } else {
+                    presentation.proof_saved(&proof, &args.output)
+                },
+                signed_in: None,
+                next: None,
+                failed: false,
+            })
+        }
+        // Verification is offline (bar --rpc-url) and needs no credentials.
+        ProofCommand::Verify(args) => {
+            let proof: ProofOfPayment =
+                serde_json::from_slice(&read_file(&args.proof)?).map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "{} is not a Proof of Payment: {error}",
+                        args.proof.display()
+                    ))
+                })?;
+            let attachment = args.attachment.as_deref().map(read_file).transpose()?;
+            let report = proof::verify(
+                &proof,
+                attachment.as_deref(),
+                &args.trusted_attestor,
+                args.rpc_url.as_deref(),
+            )
+            .await;
+            Ok(Output {
+                body: if cli.json {
+                    json(&report)?
+                } else {
+                    presentation.proof_report(&proof, &report)
+                },
+                signed_in: None,
+                next: None,
+                failed: !report.ok,
+            })
+        }
+    }
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, CliError> {
+    std::fs::read(path).map_err(|error| {
+        CliError::InvalidInput(format!("Could not read {}: {error}", path.display()))
+    })
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    std::fs::write(path, bytes).map_err(|error| {
+        CliError::InvalidInput(format!("Could not write {}: {error}", path.display()))
+    })
+}
+
 async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentResponse, CliError> {
-    require_nonblank("amount", &args.amount)?;
-    let amount = Amount::from_decimal_str(&args.amount, USDC_DECIMALS)
-        .map_err(|error| CliError::InvalidInput(format!("Amount {error}")))?;
-    if amount.0.is_zero() {
+    let mut req = match &args.from_file {
+        Some(path) => create_body(path, &read_file(path)?)?,
+        None => quick_request(&args)?,
+    };
+    validate_request(&req)?;
+    // The PDF is admitted before the invoice exists, so a rejected or
+    // unscanned file fails here and nothing is issued.
+    if let Some(path) = &args.attachment {
+        if req.attachment_id.is_some() {
+            return Err(CliError::InvalidInput(
+                "The invoice body already sets attachment_id; drop it or omit --attachment".into(),
+            ));
+        }
+        let (filename, bytes) = read_pdf(path)?;
+        let attachment = upload_attachment(client, &filename, bytes).await?;
+        req.attachment_id = Some(attachment.id);
+    }
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
+    client.create_payment(&req, &idempotency_key).await
+}
+
+/// `--from-file`: the API's create body verbatim. `CreatePaymentRequest`
+/// denies unknown fields, so a typo fails here exactly as it would remotely.
+fn create_body(path: &Path, bytes: &[u8]) -> Result<CreatePaymentRequest, CliError> {
+    serde_json::from_slice(bytes).map_err(|error| {
+        CliError::InvalidInput(format!(
+            "{} is not a valid invoice body: {error}\n→ See `payday docs getting-started` or docs/api-reference.md for the fields.",
+            path.display()
+        ))
+    })
+}
+
+/// The quick path: a permissionless invoice from names alone. The full
+/// document (contacts, notes, a gated policy, a customer, metadata) comes
+/// with `--from-file`. Recovery is Payday's wallet, configured by the
+/// platform; there is nothing for the merchant to send.
+fn quick_request(args: &CreateArgs) -> Result<CreatePaymentRequest, CliError> {
+    // clap requires these four unless --from-file is present.
+    let (Some(amount), Some(to), Some(issuer), Some(bill_to)) = (
+        args.amount.clone(),
+        args.to.clone(),
+        args.issuer.clone(),
+        args.bill_to.clone(),
+    ) else {
         return Err(CliError::InvalidInput(
-            "Amount must be greater than zero".into(),
+            "--amount, --to, --issuer, and --bill-to are required without --from-file".into(),
         ));
-    }
-    BeneficiaryAddress::from_str(&args.to)
-        .map_err(|error| CliError::InvalidInput(format!("Payout address {error}")))?;
-    if let Some(refund) = &args.refund_to {
-        RecoveryAddress::from_str(refund)
-            .map_err(|error| CliError::InvalidInput(format!("Refund address {error}")))?;
-    }
-    if let Some(token) = &args.token {
-        TokenAddress::from_str(token)
-            .map_err(|error| CliError::InvalidInput(format!("Token address {error}")))?;
-    }
+    };
+    require_nonblank("amount", &amount)?;
     let relative = args
         .expires_in
         .as_deref()
@@ -524,22 +720,119 @@ async fn create(client: &GatewayClient, args: CreateArgs) -> Result<PaymentRespo
         .map(str::parse)
         .transpose()
         .map_err(|_| CliError::InvalidInput("Expiry is too large".into()))?;
-    let idempotency_key = args
-        .idempotency_key
-        .unwrap_or_else(|| Uuid::now_v7().to_string());
-    let req = CreatePaymentRequest {
-        chain_id: args.chain_id.map(|value| value.to_string()),
-        token_address: args.token,
-        payout_address: args.to.clone(),
-        amount: args.amount,
-        expires_in,
-        expires_at: args.expires_at,
-        refund_address: Some(args.refund_to.unwrap_or(args.to)),
-        memo: args.memo,
-        reference: None,
-        metadata: serde_json::json!({}),
+    let party = |name: String| Party {
+        name,
+        email: None,
+        details: None,
     };
-    client.create_payment(&req, &idempotency_key).await
+    Ok(CreatePaymentRequest {
+        chain_id: args.chain_id.map(|value| value.to_string()),
+        token_address: args.token.clone(),
+        payout_address: to,
+        amount,
+        issuer: party(issuer),
+        bill_to: party(bill_to),
+        customer_id: None,
+        notes: None,
+        heading: args.heading.clone(),
+        reference: args.reference.clone(),
+        metadata: serde_json::json!({}),
+        payer_policy: PayerPolicy::Permissionless,
+        attachment_id: None,
+        expires_in,
+        expires_at: args.expires_at.clone(),
+    })
+}
+
+/// The checks worth a local round trip on either path; everything else is
+/// the API's to judge.
+fn validate_request(req: &CreatePaymentRequest) -> Result<(), CliError> {
+    let amount = Amount::from_decimal_str(&req.amount, USDC_DECIMALS)
+        .map_err(|error| CliError::InvalidInput(format!("Amount {error}")))?;
+    if amount.0.is_zero() {
+        return Err(CliError::InvalidInput(
+            "Amount must be greater than zero".into(),
+        ));
+    }
+    BeneficiaryAddress::from_str(&req.payout_address)
+        .map_err(|error| CliError::InvalidInput(format!("Payout address {error}")))?;
+    if let Some(token) = &req.token_address {
+        TokenAddress::from_str(token)
+            .map_err(|error| CliError::InvalidInput(format!("Token address {error}")))?;
+    }
+    Ok(())
+}
+
+fn read_pdf(path: &Path) -> Result<(String, Vec<u8>), CliError> {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            CliError::InvalidInput(format!(
+                "{} does not have a usable file name",
+                path.display()
+            ))
+        })?
+        .to_owned();
+    let bytes = read_file(path)?;
+    validate_pdf(&bytes)?;
+    Ok((filename, bytes))
+}
+
+/// The same gate the API applies at finalize, so a wrong file never leaves
+/// the machine.
+fn validate_pdf(bytes: &[u8]) -> Result<(), CliError> {
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(CliError::InvalidInput(
+            "Attachment must be a PDF; the file does not start with %PDF-".into(),
+        ));
+    }
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(CliError::InvalidInput(format!(
+            "Attachment must be at most 5 MiB; the file is {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Reserve a slot, PUT the bytes, then ask the API to admit them, backing
+/// off while the malware scan has not reported.
+async fn upload_attachment(
+    client: &GatewayClient,
+    filename: &str,
+    bytes: Vec<u8>,
+) -> Result<AttachmentDescriptor, CliError> {
+    let slot = client.create_attachment(filename).await?;
+    client.upload_attachment(&slot, bytes).await?;
+    let deadline = Instant::now() + SCAN_WAIT;
+    let mut delay = SCAN_POLL_INITIAL;
+    let mut announced = false;
+    loop {
+        match client.finalize_attachment(slot.id).await {
+            Ok(descriptor) => return Ok(descriptor),
+            Err(CliError::Api { code, .. }) if code == "attachment_scan_pending" => {
+                if Instant::now() + delay > deadline {
+                    return Err(CliError::AttachmentScanTimeout {
+                        id: slot.id,
+                        seconds: SCAN_WAIT.as_secs(),
+                    });
+                }
+                if !announced {
+                    eprintln!(
+                        "  · Waiting for the malware scan of {filename} (attachment {}, up to {} seconds)",
+                        slot.id,
+                        SCAN_WAIT.as_secs()
+                    );
+                    announced = true;
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(SCAN_POLL_MAX);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 async fn get(client: &GatewayClient, reference: &str) -> Result<PaymentResponse, CliError> {
@@ -949,8 +1242,67 @@ fn confirm(prompt: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_client, mask_email, payment_reference, valid_code, validate_email};
+    use std::path::Path;
+
+    use gateway_core::PayerPolicy;
+
+    use super::{
+        MAX_ATTACHMENT_BYTES, account_client, create_body, mask_email, payment_reference,
+        valid_code, validate_email, validate_pdf, validate_request,
+    };
     use crate::cli::{Cli, ColorChoice, Command, Profile};
+    use crate::error::CliError;
+
+    #[test]
+    fn from_file_bodies_are_the_api_body_and_reject_unknown_fields() {
+        let body = serde_json::json!({
+            "amount": "25",
+            "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "issuer": { "name": "Acme", "email": "ap@acme.example" },
+            "bill_to": { "name": "Globex", "details": "1 Globex Way" },
+            "heading": "March retainer",
+            "payer_policy": { "mode": "verified_email", "expected_email": "alice@globex.example" },
+            "expires_in": 3600
+        });
+        let req = create_body(Path::new("invoice.json"), body.to_string().as_bytes()).unwrap();
+        assert_eq!(req.issuer.email.as_deref(), Some("ap@acme.example"));
+        assert!(matches!(
+            req.payer_policy,
+            PayerPolicy::VerifiedEmail { .. }
+        ));
+        assert_eq!(req.expires_in, Some(3600));
+        validate_request(&req).unwrap();
+
+        let mut unknown = body.clone();
+        unknown["memo"] = "INV-1".into();
+        let error =
+            create_body(Path::new("invoice.json"), unknown.to_string().as_bytes()).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.to_string().contains("unknown field `memo`"),
+            "{error}"
+        );
+
+        let mut zero = body;
+        zero["amount"] = "0".into();
+        let req = create_body(Path::new("invoice.json"), zero.to_string().as_bytes()).unwrap();
+        assert!(validate_request(&req).is_err());
+    }
+
+    #[test]
+    fn attachments_must_be_pdfs_of_at_most_five_mebibytes() {
+        assert!(validate_pdf(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n").is_ok());
+        let error = validate_pdf(b"<html>not a pdf</html>").unwrap_err();
+        assert!(matches!(error, CliError::InvalidInput(ref message) if message.contains("%PDF-")));
+        assert!(validate_pdf(b"").is_err());
+
+        let mut largest = b"%PDF-".to_vec();
+        largest.resize(MAX_ATTACHMENT_BYTES, 0);
+        assert!(validate_pdf(&largest).is_ok());
+        largest.push(0);
+        let error = validate_pdf(&largest).unwrap_err();
+        assert!(error.to_string().contains("5 MiB"));
+    }
 
     #[test]
     fn references_resolve_only_as_complete_ids_or_addresses() {

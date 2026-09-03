@@ -25,6 +25,15 @@ BENEFICIARY_THIRD_PARTY="0x14dC79964da2C08b23698B3D3cc7Ca32193d9955"
 BENEFICIARY_PAUSED="0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
 BENEFICIARY_BLACKLISTED="0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
 RECOVERY="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+# Proof of Payment attestations are signed with Anvil account #6; its address,
+# 0x976EA74026E726554dB657fA54763abd0C3a0aa9, is the trusted attestor here.
+ATTESTATION_SIGNER_KEY="0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e"
+MINIO_PORT="${PAYDAY_MINIO_PORT:-9000}"
+MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-minio/minio}"
+MC_IMAGE="${PAYDAY_MC_IMAGE:-minio/mc}"
+# MinIO's root credentials double as the AWS credentials gatewayd signs with.
+MINIO_CREDENTIAL="payday-local"
+ATTACHMENT_BUCKET="payday-attachments-local"
 
 export PAYDAY_RPC_URL="$RPC_URL"
 export PAYDAY_API_URL="$API_URL"
@@ -37,6 +46,8 @@ export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
 export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
 export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
 export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
+# Recovery is platform-controlled: gatewayd stamps this wallet on every invoice.
+export PAYDAY_RECOVERY_ADDRESS="$RECOVERY"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
 export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
@@ -48,9 +59,25 @@ export PAYDAY_DEV_IDENTITY_ISSUER="http://127.0.0.1:3001"
 export PAYDAY_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
 export PAYDAY_AUTH0_CLIENT_ID="payday-cli-local"
 export PAYDAY_AUTH0_AUDIENCE="payday-api-local"
+export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="payday-dashboard-local"
+export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
+export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
+export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
+export PAYDAY_PAYER_REF_MASTER_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+export PAYDAY_HOSTED_CHECKOUT_ORIGIN="$API_URL"
+export PAYDAY_ATTESTATION_SIGNER_KEY="$ATTESTATION_SIGNER_KEY"
+# MinIO stands in for the S3 attachment bucket; see start_minio below.
+export PAYDAY_ATTACHMENT_BUCKET="$ATTACHMENT_BUCKET"
+export PAYDAY_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${MINIO_PORT}"
+export PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE=1
+export AWS_ACCESS_KEY_ID="$MINIO_CREDENTIAL"
+export AWS_SECRET_ACCESS_KEY="$MINIO_CREDENTIAL"
+export AWS_REGION=us-east-1
 
 logs="$(mktemp -d)"
 pids=()
+minio_container="payday-minio-e2e-$$"
+minio_started=false
 
 cleanup() {
   local status=$?
@@ -62,18 +89,25 @@ cleanup() {
       echo "--- $log ---" >&2
       tail -n 200 "$log" >&2
     done
+    if [[ "$minio_started" == true ]]; then
+      echo "--- minio ---" >&2
+      docker logs --tail 50 "$minio_container" >&2 2>&1 || true
+    fi
   fi
 
   if ((${#pids[@]})); then
     kill "${pids[@]}" 2>/dev/null || true
     wait "${pids[@]}" 2>/dev/null || true
   fi
+  if [[ "$minio_started" == true ]]; then
+    docker rm -f "$minio_container" >/dev/null 2>&1 || true
+  fi
   rm -rf "$logs"
   exit "$status"
 }
 trap cleanup EXIT INT TERM
 
-for command in anvil cast curl forge jq psql; do
+for command in anvil cast curl docker forge jq psql; do
   command -v "$command" >/dev/null || {
     echo "required command not found: $command" >&2
     exit 1
@@ -105,6 +139,65 @@ wait_for_api() {
   done
   echo "gatewayd did not become ready" >&2
   return 1
+}
+
+# The MinIO client, aimed at the suite's MinIO. Host networking reaches the
+# published loopback port on Linux and Docker Desktop alike.
+minio_client() {
+  docker run --rm --network host \
+    -e "MC_HOST_local=http://${MINIO_CREDENTIAL}:${MINIO_CREDENTIAL}@127.0.0.1:${MINIO_PORT}" \
+    "$MC_IMAGE" "$@"
+}
+
+# MinIO stands in for the S3 attachment bucket. Nothing scans local uploads,
+# so the suite stamps the verdict tag itself with tag_object_scanned.
+start_minio() {
+  docker info >/dev/null 2>&1 || {
+    echo "Docker daemon is not available" >&2
+    return 1
+  }
+  docker run -d --rm --name "$minio_container" \
+    -e MINIO_ROOT_USER="$MINIO_CREDENTIAL" -e MINIO_ROOT_PASSWORD="$MINIO_CREDENTIAL" -e MINIO_BROWSER=off \
+    -p "127.0.0.1:${MINIO_PORT}:9000" "$MINIO_IMAGE" server /data >/dev/null
+  minio_started=true
+  for _ in {1..100}; do
+    if curl --fail --silent --output /dev/null "http://127.0.0.1:${MINIO_PORT}/minio/health/live"; then
+      minio_client mb --ignore-existing "local/${ATTACHMENT_BUCKET}" >/dev/null
+      return
+    fi
+    sleep 0.1
+  done
+  echo "MinIO did not become ready" >&2
+  return 1
+}
+
+# Sets the tag GuardDuty Malware Protection writes after a clean scan on one
+# object of the attachment bucket, which is what finalize requires; every
+# other value, or no tag at all, must keep the upload unattachable.
+tag_object_scanned() {
+  local object_key=$1
+  minio_client tag set "local/${ATTACHMENT_BUCKET}/${object_key}" \
+    'GuardDutyMalwareScanStatus=NO_THREATS_FOUND' >/dev/null
+}
+
+# gatewayd and the indexer refuse to start unless the deployed runtime bytecode
+# hashes to these values, so they are computed from the freshly bootstrapped
+# chain rather than trusted from the environment.
+pin_deployment_code_hashes() {
+  local factory_code sweeper_code
+  factory_code="$(cast code "$FACTORY" --rpc-url "$RPC_URL")"
+  sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$RPC_URL")"
+  [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
+    echo "no code at PaymentFactory $FACTORY after the bootstrap" >&2
+    return 1
+  }
+  [[ -n "$sweeper_code" && "$sweeper_code" != 0x ]] || {
+    echo "no code at BatchSweeper $BATCH_SWEEPER after the bootstrap" >&2
+    return 1
+  }
+  PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$factory_code")"
+  PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$sweeper_code")"
+  export PAYDAY_FACTORY_CODE_HASH PAYDAY_BATCH_SWEEPER_CODE_HASH
 }
 
 create_invoice() {
@@ -173,13 +266,88 @@ set_blacklisted() {
 }
 
 # Raw request body for POST /v1/payments; built with jq so no shell quoting
-# is involved (bash 3.2 brace-expands nested quotes inside "$(...)").
+# is involved (bash 3.2 brace-expands nested quotes inside "$(...)"). Recovery
+# is not a request field: the platform stamps its own wallet on every invoice.
+# The document fields are the minimum an invoice carries: two parties and an
+# open payer policy.
 invoice_body() {
   local amount=$1 beneficiary=$2 expires_in=$3
   jq -cn --arg chain "$PAYDAY_CHAIN_ID" --arg token "$USDC" --arg beneficiary "$beneficiary" \
-    --arg amount "$amount" --argjson expires_in "$expires_in" --arg recovery "$RECOVERY" \
+    --arg amount "$amount" --argjson expires_in "$expires_in" \
     '{chain_id: $chain, token_address: $token, payout_address: $beneficiary,
-      amount: $amount, expires_in: $expires_in, refund_address: $recovery}'
+      amount: $amount, expires_in: $expires_in,
+      issuer: {name: "Payday E2E Issuer"}, bill_to: {name: "Payday E2E Customer"},
+      payer_policy: {mode: "permissionless"}}'
+}
+
+# A merchant API request with the primary account's key. The body, when
+# given, is JSON; extra curl arguments follow it.
+merchant_curl() {
+  local method=$1 path=$2 body=$3
+  shift 3
+  if [[ -n "$body" ]]; then
+    curl --silent --request "$method" --header "Authorization: Bearer $PAYDAY_API_KEY" \
+      --header "Content-Type: application/json" --data "$body" "$@" "$API_URL$path"
+  else
+    curl --silent --request "$method" --header "Authorization: Bearer $PAYDAY_API_KEY" \
+      "$@" "$API_URL$path"
+  fi
+}
+
+# The response body of a request that must succeed. The body slot is
+# positional, so pass "" before any extra curl arguments (e.g. --output).
+api_json() {
+  merchant_curl "$1" "$2" "${3:-}" --fail "${@:4}"
+}
+
+# Only the HTTP status of a request that may fail.
+api_status() {
+  merchant_curl "$1" "$2" "${3:-}" --output /dev/null --write-out '%{http_code}'
+}
+
+# Only the stable error code of a request that must fail.
+api_error_code() {
+  merchant_curl "$1" "$2" "${3:-}" | jq -r .error.code
+}
+
+# PUT a file to the presigned upload slot exactly as an SDK client would:
+# every returned header is signed and must be sent verbatim.
+upload_attachment() {
+  local slot=$1 file=$2 header
+  local args=(--fail --silent --output /dev/null --request PUT --upload-file "$file")
+  while IFS= read -r header; do
+    args+=(--header "$header")
+  done < <(jq -r '.headers | to_entries[] | "\(.key): \(.value)"' <<<"$slot")
+  curl "${args[@]}" "$(jq -er .upload_url <<<"$slot")"
+}
+
+# Reserve a slot, upload the file, and stamp the scan verdict. Prints the
+# attachment id; finalization is the caller's, so it can assert on it.
+stage_attachment() {
+  local file=$1 filename=$2 verdict=$3 slot id
+  slot="$(api_json POST /v1/attachments "$(jq -cn --arg filename "$filename" '{filename: $filename}')")"
+  id="$(jq -er .id <<<"$slot")"
+  upload_attachment "$slot" "$file"
+  if [[ -n "$verdict" ]]; then
+    minio_client tag set "local/${ATTACHMENT_BUCKET}/uploads/${account_id}/${id}.pdf" \
+      "GuardDutyMalwareScanStatus=${verdict}" >/dev/null
+  fi
+  echo "$id"
+}
+
+sha256_of() {
+  echo "0x$(shasum -a 256 "$1" | awk '{print $1}')"
+}
+
+lowercase() {
+  tr '[:upper:]' '[:lower:]' <<<"$1"
+}
+
+# Query text for wait_for_sql: the recovery ledger rows an invoice should carry.
+recovery_ledger_query() {
+  local invoice_id=$1 reason=$2 amount=$3
+  echo "SELECT count(*) FROM recovered_funds
+    WHERE invoice_id = '${invoice_id#pay_}'::uuid AND reason = '$reason' AND amount = '$amount'"
 }
 
 api_status_code() {
@@ -224,6 +392,10 @@ pids+=("$anvil_pid")
 wait_for_rpc
 forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
   --rpc-url "$RPC_URL" --private-key "$SIGNER_KEY" --broadcast >/dev/null
+pin_deployment_code_hashes
+
+echo "Starting MinIO as the local attachment store"
+start_minio
 
 echo "Starting gateway services"
 ./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
@@ -263,12 +435,27 @@ zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 36
 assert_eq 400 "$(api_status_code "$zero_beneficiary")" "a zero beneficiary was accepted"
 valid="$(invoice_body 1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 201 "$(api_status_code "$valid")" "a valid request was rejected"
+# Merchants no longer choose where recovered funds go; the field is unknown to
+# the API and must fail like any other unknown field. The exact code is the
+# API's decision, so only the class is asserted.
+with_refund_address="$(jq -c --arg recovery "$RECOVERY" '. + {refund_address: $recovery}' <<<"$valid")"
+refund_status="$(api_status_code "$with_refund_address")"
+[[ "$refund_status" != 201 && "$refund_status" -ge 400 && "$refund_status" -le 499 ]] || {
+  echo "a request carrying refund_address was not rejected: status $refund_status" >&2
+  exit 1
+}
 
 echo "Testing exact payment and API idempotency"
 exact="$(create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 exact_replay="$(create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 exact_id="$(jq -r .id <<<"$exact")"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
+assert_eq "$(lowercase "$RECOVERY")" "$(jq -r '.recovery_address | ascii_downcase' <<<"$exact")" \
+  "invoice does not carry the platform recovery wallet"
+[[ "$(jq -c 'has("refund_address")' <<<"$exact")" == false ]] || {
+  echo "the merchant response still exposes refund_address" >&2
+  exit 1
+}
 second_account_invoice="$(PAYDAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 [[ "$(jq -r .id <<<"$second_account_invoice")" != "$exact_id" ]] || {
   echo "account-scoped idempotency returned another account's invoice" >&2
@@ -311,16 +498,21 @@ assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL
   "partial payment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$partial_address"
 
-echo "Testing overpayment full-balance sweep"
+echo "Testing exact settlement with recovery of the remainder"
 overpayment="$(create_invoice 1 "$BENEFICIARY_OVERPAYMENT" 3600 "overpayment-$run_id")"
 overpayment_id="$(jq -r .id <<<"$overpayment")"
 overpayment_address="$(jq -r .address <<<"$overpayment")"
 overpayment_before="$(token_balance "$BENEFICIARY_OVERPAYMENT")"
+recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$overpayment_address" 1250000
 wait_for_status "$overpayment_id" settled
-assert_eq "$((overpayment_before + 1250000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
-  "overpayment beneficiary balance mismatch"
+assert_eq "$((overpayment_before + 1000000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
+  "beneficiary must receive exactly the invoice amount"
+assert_eq "$((recovery_before + 250000))" "$(token_balance "$RECOVERY")" \
+  "overpayment remainder did not reach the Payday recovery wallet"
 assert_payment_deployed_and_empty "$overpayment_address"
+wait_for_sql 1 "$(recovery_ledger_query "$overpayment_id" overpayment 250000)" \
+  "overpayment remainder was not recorded in the recovery ledger"
 
 echo "Testing one-transaction batch sweeping"
 batch_one="$(create_invoice 0.1 "$BENEFICIARY_EXACT" 3600 "batch-one-$run_id")"
@@ -362,14 +554,16 @@ assert_payment_deployed_and_empty "$batch_one_address"
 assert_payment_deployed_and_empty "$batch_two_address"
 assert_payment_deployed_and_empty "$batch_three_address"
 
-echo "Testing that a transfer after settlement is forwarded to the recovery address"
+echo "Testing that a transfer after settlement is forwarded to the Payday recovery wallet"
 recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$batch_one_address" 7
 send_usdc "$batch_one_address" 0
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late transfer was not collected"
-assert_eq "$((recovery_before + 7))" "$(token_balance "$RECOVERY")" "late transfer did not reach the recovery address"
+assert_eq "$((recovery_before + 7))" "$(token_balance "$RECOVERY")" "late transfer did not reach the Payday recovery wallet"
+wait_for_sql 1 "$(recovery_ledger_query "$batch_one_id" late_transfer 7)" \
+  "late transfer was not recorded in the recovery ledger"
 assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'error' AND disposition_reason = 'zero_amount'
@@ -434,18 +628,22 @@ wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == 
 cast rpc --rpc-url "$RPC_URL" evm_increaseTime 700 >/dev/null
 wait_for_status "$expired_id" returned
 assert_eq "$((recovery_before + 400000))" "$(token_balance "$RECOVERY")" \
-  "expired partial payment was not sent to recovery"
+  "expired partial payment was not sent to the Payday recovery wallet"
 assert_payment_deployed_and_empty "$expired_address"
 assert_eq false "$(cast call "$expired_address" 'settled()(bool)' --rpc-url "$RPC_URL")" \
   "deployed Payment must record recovery"
+wait_for_sql 1 "$(recovery_ledger_query "$expired_id" expired 400000)" \
+  "expired balance was not recorded in the recovery ledger"
 send_usdc "$expired_address" 600000
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${expired_id#pay_}'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late completion was not collected"
 assert_eq "$((recovery_before + 1000000))" "$(token_balance "$RECOVERY")" \
-  "late completion was not forwarded to recovery"
+  "late completion was not forwarded to the Payday recovery wallet"
 assert_eq returned "$(get_invoice "$expired_id" | jq -r .status)" "late completion changed the payment status"
 assert_eq 0 "$(token_balance "$expired_address")" "late completion stranded at the payment address"
+wait_for_sql 1 "$(recovery_ledger_query "$expired_id" late_transfer 600000)" \
+  "late completion was not recorded in the recovery ledger"
 
 echo "Checking that every helper transaction batch resolved"
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
@@ -454,6 +652,201 @@ assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND blocked_reason IS NULL
 ")" "collectable funds remain queued"
+
+echo "Checking that every recovery ledger row raised a payment.recovered_funds event"
+ledger_rows="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM recovered_funds
+")"
+[[ "$ledger_rows" -ge 4 ]] || {
+  echo "expected at least four recovery ledger rows (overpayment, late transfer, expired, late completion), found $ledger_rows" >&2
+  exit 1
+}
+assert_eq "$ledger_rows" "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM webhook_events WHERE event_type = 'payment.recovered_funds'
+")" "recovery ledger rows and payment.recovered_funds events differ"
+
+echo "Testing customers, PDF attachments, invoice documents, and Proof of Payment"
+account_id="$(api_json GET /v1/account | jq -er .account_id)"
+customer="$(api_json POST /v1/customers '{"name":"Globex Corporation","email":"ap@globex.example"}')"
+customer_id="$(jq -er .id <<<"$customer")"
+assert_eq "Globex Corporation" "$(api_json GET "/v1/customers/$customer_id" | jq -r .name)" \
+  "customer lookup returned the wrong record"
+assert_eq "$customer_id" "$(api_json GET "/v1/customers?limit=1" | jq -r '.customers[0].id')" \
+  "customer listing does not start with the newest customer"
+assert_eq 404 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header "Authorization: Bearer $SECOND_API_KEY" "$API_URL/v1/customers/$customer_id")" \
+  "cross-account customer lookup leaked a customer"
+
+pdf_file="$logs/attachment.pdf"
+printf '%%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%%%EOF' >"$pdf_file"
+pdf_sha256="$(sha256_of "$pdf_file")"
+attachment_id="$(stage_attachment "$pdf_file" contract.pdf "")"
+assert_eq 409 "$(api_status POST "/v1/attachments/$attachment_id/finalize")" \
+  "an unscanned upload was finalized"
+assert_eq attachment_scan_pending "$(api_error_code POST "/v1/attachments/$attachment_id/finalize")" \
+  "unscanned upload reported the wrong error"
+tag_object_scanned "uploads/${account_id}/${attachment_id}.pdf"
+finalized="$(api_json POST "/v1/attachments/$attachment_id/finalize")"
+assert_eq "$pdf_sha256" "$(jq -r .sha256 <<<"$finalized")" "finalized attachment hash mismatch"
+assert_eq "$(wc -c <"$pdf_file" | tr -d ' ')" "$(jq -r .byte_length <<<"$finalized")" \
+  "finalized attachment length mismatch"
+
+document_body="$(jq -c --arg customer "$customer_id" --arg attachment "$attachment_id" \
+  '. + {customer_id: $customer, attachment_id: $attachment, heading: "March retainer",
+        reference: "INV-2026-03", notes: "Net 30", issuer: {name: "Acme Corp", email: "billing@acme.example"},
+        bill_to: {name: "Globex Corporation"}}' <<<"$(invoice_body 3 "$BENEFICIARY_EXACT" 3600)")"
+documented="$(curl --fail --silent \
+  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Idempotency-Key: document-$run_id" --data "$document_body" "$API_URL/v1/payments")"
+documented_id="$(jq -er .id <<<"$documented")"
+assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
+  "issued invoice does not carry the attachment commitment"
+assert_eq "$customer_id" "$(jq -r .customer_id <<<"$documented")" "issued invoice lost its customer"
+assert_eq 1 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
+descriptor="$(api_json GET "/v1/payments/$documented_id/attachment")"
+downloaded="$logs/downloaded.pdf"
+curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"
+assert_eq "$pdf_sha256" "$(sha256_of "$downloaded")" "downloaded attachment bytes differ from the upload"
+reuse_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Idempotency-Key: document-reuse-$run_id" --data "$document_body" "$API_URL/v1/payments")"
+assert_eq 409 "$reuse_status" "an attached PDF was attached to a second invoice"
+
+gated_body="$(jq -c '. + {heading: "Gated retainer",
+  payer_policy: {mode: "verified_email", expected_email: "alice@example.test"}}' \
+  <<<"$(invoice_body 2 "$BENEFICIARY_EXACT" 3600)")"
+gated="$(curl --fail --silent \
+  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Idempotency-Key: gated-$run_id" --data "$gated_body" "$API_URL/v1/payments")"
+gated_id="$(jq -er .id <<<"$gated")"
+gated_payer="$(curl --fail --silent "$API_URL/v1/payer/payments/$gated_id")"
+assert_eq false "$(jq -r .content_unlocked <<<"$gated_payer")" "gated invoice unlocked its content"
+assert_eq null "$(jq -r .amount <<<"$gated_payer")" "gated invoice revealed its amount"
+assert_eq null "$(jq -r .address <<<"$gated_payer")" "gated invoice revealed its payment address"
+assert_eq "Gated retainer" "$(jq -r .heading <<<"$gated_payer")" "gated invoice hides its heading"
+assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "$API_URL/v1/payer/payments/$gated_id/attachment")" "gated invoice served its attachment"
+
+# Payer email verification against the development identity provider: the
+# gateway sends the code to the merchant-asserted mailbox and exchanges it on
+# the payer's behalf; the payer supplies nothing but the code.
+verify_payer_email() {
+  local id=$1 started session
+  started="$(curl --fail --silent --request POST --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" \
+    "$API_URL/v1/payer/payments/$id/verify/email/start")"
+  session="$(jq -er .payer_session <<<"$started")"
+  assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+    --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
+    --data '{"otp":"000000"}' "$API_URL/v1/payer/payments/$id/verify/email/confirm")" \
+    "a wrong code was accepted"
+  assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+    --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
+    --data "$(jq -cn --arg otp "$PAYDAY_DEV_IDENTITY_OTP" '{otp: $otp}')" \
+    "$API_URL/v1/payer/payments/$id/verify/email/confirm")" \
+    "the right code was not accepted"
+  echo "$session"
+}
+
+echo "Testing that a payment before email verification waits on the same address until verified"
+gated_address="$(jq -r .address <<<"$gated")"
+gated_before="$(token_balance "$BENEFICIARY_EXACT")"
+send_usdc "$gated_address" 2000000
+wait_for_invoice "$gated_id" '.received_base_units == "2000000" and .status == "paid"' \
+  "pre-verification payment credited"
+# Several indexer and sweep cycles pass; the live claim is gated in SQL.
+sleep 3
+gated_waiting="$(get_invoice "$gated_id")"
+assert_eq paid "$(jq -r .status <<<"$gated_waiting")" "unverified invoice was swept"
+assert_eq 2000000 "$(token_balance "$gated_address")" "unverified funds left the payment address"
+[[ "$(jq -r .likely_unsolicited_at <<<"$gated_waiting")" != null ]] || {
+  echo "pre-verification funding was not flagged as likely unsolicited" >&2
+  exit 1
+}
+assert_eq null "$(jq -r .verification_completed_at <<<"$gated_waiting")" "invoice completed without verification"
+gated_session="$(verify_payer_email "$gated_id")"
+gated_unlocked="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
+  "$API_URL/v1/payer/payments/$gated_id")"
+assert_eq true "$(jq -r .content_unlocked <<<"$gated_unlocked")" "verified session did not unlock the invoice"
+assert_eq "$gated_address" "$(jq -r .address <<<"$gated_unlocked")" "verified session saw a different address"
+assert_eq "Payday E2E Customer" "$(jq -r .invoice.bill_to.name <<<"$gated_unlocked")" "verified session did not see the document"
+assert_eq null "$(curl --fail --silent "$API_URL/v1/payer/payments/$gated_id" | jq -r .address)" \
+  "the bare link unlocked after another session verified"
+# The invoice is already fully funded, so even the verified session gets no
+# QR: the address must not be offered for a second payment. The bare link is
+# refused earlier, for want of a session.
+assert_eq 410 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header "Payday-Payer-Session: $gated_session" "$API_URL/v1/payer/payments/$gated_id/qr")" \
+  "a funded invoice offered its QR to the verified session"
+assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "$API_URL/v1/payer/payments/$gated_id/qr")" "the bare link fetched the QR"
+wait_for_status "$gated_id" settled
+assert_eq "$((gated_before + 2000000))" "$(token_balance "$BENEFICIARY_EXACT")" \
+  "verified invoice did not settle to the beneficiary"
+assert_payment_deployed_and_empty "$gated_address"
+[[ "$(get_invoice "$gated_id" | jq -r .verification_completed_at)" != null ]] || {
+  echo "settled invoice does not record its verification completion" >&2
+  exit 1
+}
+
+echo "Testing that an unverified invoice's balance moves to recovery at expiry"
+# Chain time already runs ahead of the wall clock by the earlier expiry test,
+# so the deadline must clear that gap before it is pushed past.
+unverified_body="$(jq -c '. + {payer_policy: {mode: "verified_email", expected_email: "carol@example.test"}}' \
+  <<<"$(invoice_body 1 "$BENEFICIARY_EXPIRED" 1500)")"
+unverified="$(curl --fail --silent \
+  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Idempotency-Key: unverified-expiry-$run_id" --data "$unverified_body" "$API_URL/v1/payments")"
+unverified_id="$(jq -er .id <<<"$unverified")"
+unverified_address="$(jq -r .address <<<"$unverified")"
+recovery_before="$(token_balance "$RECOVERY")"
+send_usdc "$unverified_address" 1000000
+wait_for_invoice "$unverified_id" '.received_base_units == "1000000" and .status == "paid"' \
+  "unverified payment credited"
+cast rpc --rpc-url "$RPC_URL" evm_increaseTime 1600 >/dev/null
+wait_for_status "$unverified_id" returned
+assert_eq "$((recovery_before + 1000000))" "$(token_balance "$RECOVERY")" \
+  "unverified expired balance did not reach the Payday recovery wallet"
+assert_payment_deployed_and_empty "$unverified_address"
+wait_for_sql 1 "$(recovery_ledger_query "$unverified_id" expired 1000000)" \
+  "unverified expired balance was not recorded in the recovery ledger"
+# Verification after expiry cannot revive settlement, so it is not even started.
+assert_eq 410 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  "$API_URL/v1/payer/payments/$unverified_id/verify/email/start")" \
+  "verification started on an expired invoice"
+
+invoice_pdf="$logs/invoice.pdf"
+api_json GET "/v1/payments/$documented_id/invoice.pdf" "" --output "$invoice_pdf"
+assert_eq "%PDF-" "$(head -c 5 "$invoice_pdf")" "invoice document is not a PDF"
+
+proof="$(api_json GET "/v1/payments/$exact_id/proof")"
+jq -e '.payment_address != null and .salt != null and .attribution_hash != null
+  and .attribution_nonce != null and .settlement_transaction_hash != null
+  and (.transfers | length) > 0 and .verification.signature != null
+  and .verification.signer == "0x976EA74026E726554dB657fA54763abd0C3a0aa9"' <<<"$proof" >/dev/null || {
+  echo "Proof of Payment is incomplete: $(jq -c . <<<"$proof")" >&2
+  exit 1
+}
+# The proof names the fulfilment transaction (the batch sweep), not a payer
+# transfer, and its attestation is bound to the issuance commitment.
+assert_eq "$(get_invoice "$exact_id" | jq -r .settlement_tx_hash)" \
+  "$(jq -r .settlement_transaction_hash <<<"$proof")" \
+  "proof settlement_transaction_hash is not the payment's settlement_tx_hash"
+assert_eq "$(jq -r .attribution_hash <<<"$proof")" \
+  "$(jq -r .verification.payload.attribution_hash <<<"$proof")" \
+  "attestation is not bound to the proof's attribution hash"
+assert_eq "$(jq -r .payment_address <<<"$proof")" \
+  "$(jq -r .verification.payload.payment_address <<<"$proof")" \
+  "attestation is not bound to the proof's payment address"
+assert_eq 409 "$(api_status GET "/v1/payments/$documented_id/proof")" \
+  "a proof was served for an unsettled invoice"
+
+not_pdf="$logs/not-a-pdf.pdf"
+printf 'this is plain text, not a PDF' >"$not_pdf"
+rejected_id="$(stage_attachment "$not_pdf" notes.pdf NO_THREATS_FOUND)"
+assert_eq 422 "$(api_status POST "/v1/attachments/$rejected_id/finalize")" \
+  "non-PDF bytes were finalized"
+assert_eq attachment_rejected "$(api_error_code POST "/v1/attachments/$rejected_id/finalize")" \
+  "rejected upload reported the wrong error"
 
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive gatewayd "$gatewayd_pid"

@@ -21,11 +21,11 @@ export PAYDAY_API_KEY="<operator-account-api-key>"
   --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --payout <PAYOUT_ADDRESS> \
   --expires-in 3600 \
-  --refund <REFUND_ADDRESS> \
   --amount 0.01
 ```
 
-Copy `id` and `address` from the JSON output.
+Copy `id` and `address` from the JSON output, and confirm `recovery_address`
+is the Payday recovery wallet configured as `recovery_address` in Terraform.
 
 ## Step 2: Send USDC to the payment address
 
@@ -69,6 +69,34 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
+## Step 5: Verify late funds reach the Payday recovery wallet
+
+Send a second, small transfer to the same payment address. It must reach the
+Payday recovery wallet within a minute while the status stays `settled`, and
+the `recovered_funds` ledger must record it:
+
+```bash
+cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
+  'transfer(address,uint256)' <PAYMENT_ADDRESS> 1000 \
+  --private-key <YOUR_PRIVATE_KEY> \
+  --rpc-url "$MONAD_RPC_URL"
+
+cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
+  'balanceOf(address)(uint256)' <RECOVERY_ADDRESS> \
+  --rpc-url "$MONAD_RPC_URL"
+```
+
+```sql
+-- See db-access.md
+SELECT reason, amount, encode(transaction_hash, 'hex') AS tx, recovered_at
+FROM recovered_funds
+WHERE invoice_id = '<PAYMENT_UUID>';
+```
+
+Expect one row with reason `late_transfer` and amount `1000`, and a
+`payment.recovered_funds` delivery on any registered webhook. Return the
+recovered amount by hand afterwards; nothing automates it.
+
 ## Expected results
 
 | Check | Expected |
@@ -76,7 +104,8 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 | Payment status | `settled` |
 | Payment address USDC balance | `0` |
 | Payment address code | Non-empty (contract deployed) |
-| Payout address USDC balance | Increased by the payment amount |
+| Payout address USDC balance | Increased by exactly the payment amount |
+| Recovery wallet USDC balance | Increased by the late transfer, with a matching `recovered_funds` row |
 
 ## Understanding the sweep transaction
 

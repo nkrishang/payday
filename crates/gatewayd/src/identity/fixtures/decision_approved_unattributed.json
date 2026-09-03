@@ -1,0 +1,30 @@
+{
+  "session_id": "9f1c0f6e-1111-4c1a-9c1e-000000000004",
+  "session_kind": "user",
+  "status": "Approved",
+  "expected_details": null,
+  "id_verifications": [
+    {
+      "node_id": "id-1",
+      "status": "Approved",
+      "warnings": [
+        {"feature": "ID_VERIFICATION", "risk": "POSSIBLE_SCREEN_CAPTURE", "log_type": "warning",
+         "short_description": "Possible screen capture"},
+        {"feature": "ID_VERIFICATION", "risk": "free text about SENTINEL_FIRST_NAME", "log_type": "info"}
+      ],
+      "document_type": "Identity Card",
+      "document_number": "SENTINEL_DOC_NUMBER",
+      "issuing_state": "DEU",
+      "first_name": "SENTINEL_FIRST_NAME",
+      "last_name": "SENTINEL_LAST_NAME",
+      "date_of_birth": "1900-01-01",
+      "portrait_image": "https://sentinel-images.example/portrait.jpg"
+    }
+  ],
+  "liveness_checks": [
+    {"node_id": "live-1", "status": "Approved", "warnings": [], "score": 99.0}
+  ],
+  "face_matches": [
+    {"node_id": "face-1", "status": "Approved", "warnings": [], "score": 94.4}
+  ]
+}

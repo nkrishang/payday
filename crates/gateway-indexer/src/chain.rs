@@ -16,7 +16,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, TransactionRequest};
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, Log, TransactionRequest};
 use alloy_sol_types::{SolCall, SolEvent, sol};
 use alloy_transport::TransportError;
 use async_trait::async_trait;
@@ -140,10 +140,37 @@ impl std::fmt::Display for RpcCode {
     }
 }
 
+/// Replace every `http://` or `https://` URL in `message` with `<rpc-url>`.
+/// Transport errors from reqwest and alloy print the full request URL, and
+/// the RPC URL carries the provider token, so any message derived from one
+/// must pass through here before it reaches a log line or a panic.
+pub(crate) fn redact_urls(message: &str) -> String {
+    let mut redacted = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = url_start(rest) {
+        redacted.push_str(&rest[..start]);
+        let url = &rest[start..];
+        let end = url
+            .find(|c: char| c.is_whitespace() || c == ')' || c == '"')
+            .unwrap_or(url.len());
+        redacted.push_str("<rpc-url>");
+        rest = &url[end..];
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+fn url_start(message: &str) -> Option<usize> {
+    match (message.find("http://"), message.find("https://")) {
+        (Some(http), Some(https)) => Some(http.min(https)),
+        (http, https) => http.or(https),
+    }
+}
+
 impl ChainError {
     fn rpc(operation: &'static str, err: TransportError) -> Self {
         if operation == "eth_getLogs" && is_log_range_too_large(&err) {
-            return Self::LogRangeTooLarge(err.to_string());
+            return Self::LogRangeTooLarge(redact_urls(&err.to_string()));
         }
 
         let (code, message, retryable) = if let Some(payload) = err.as_error_resp() {
@@ -159,9 +186,9 @@ impl ChainError {
                 .as_http_error()
                 .map(|http| !matches!(http.status, 400 | 401 | 403 | 404 | 413))
                 .unwrap_or(true);
-            (None, transport.to_string(), retryable)
+            (None, redact_urls(&transport.to_string()), retryable)
         } else {
-            (None, err.to_string(), false)
+            (None, redact_urls(&err.to_string()), false)
         };
 
         Self::Rpc {
@@ -243,8 +270,13 @@ pub struct SweepRequest {
 /// the batch receipt. Exactly one applies per item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SweepOutcome {
-    /// `Payment` was deployed and paid the receiver.
-    Settled { amount: U256 },
+    /// `Payment` was deployed and paid the receiver exactly `amount`. Any
+    /// overpayment went to the platform recovery wallet as `recovered_amount`
+    /// (zero when the address held exactly the invoice amount).
+    Settled {
+        amount: U256,
+        recovered_amount: U256,
+    },
     /// `Payment` was deployed after expiry and paid the recovery address.
     Recovered { amount: U256 },
     /// `Payment` already existed; `recover` forwarded `amount` (possibly zero).
@@ -252,6 +284,127 @@ pub enum SweepOutcome {
     /// `execute` or `recover` reverted. The bytes are `DeploymentFailed()` for
     /// any constructor failure, so they cannot classify the cause.
     Failed { revert_data: Bytes },
+}
+
+/// Events seen so far for one payment address while decoding a receipt.
+/// Kept separate from [`SweepOutcome`] so a duplicate event is detected no
+/// matter which order the node returned the logs in.
+#[derive(Default)]
+struct PendingOutcome {
+    settled: Option<U256>,
+    recovered: Option<U256>,
+    sweeper: Option<SweepOutcome>,
+}
+
+/// Decode the per-address outcomes of a `BatchSweeper.executeBatch` receipt.
+///
+/// Payment events (`Settled`, `Recovered`) describe fresh deployments and are
+/// keyed by the emitting contract; sweeper events (`SweepRecovered`,
+/// `SweepFailed`) describe items that hit an existing deployment or failed and
+/// name the payment address explicitly. A `Recovered` emitted by `recover()`
+/// precedes the sweeper's `SweepRecovered`, so the sweeper event wins for that
+/// address. Every other combination of two events for one address is a
+/// malformed receipt, which is reported as transient so the batch is retried
+/// against the node rather than finalized on a misreading.
+pub fn decode_sweep_outcomes(
+    logs: &[Log],
+    batch_sweeper: Address,
+    tx_hash: B256,
+) -> Result<HashMap<Address, SweepOutcome>, ChainError> {
+    let malformed = |event: &str, error: alloy_sol_types::Error| {
+        ChainError::Transient(format!("malformed {event} event in {tx_hash}: {error}"))
+    };
+    let duplicate = |event: &str, address: Address| {
+        ChainError::Transient(format!(
+            "malformed sweep receipt {tx_hash}: duplicate {event} event for payment address {address}"
+        ))
+    };
+    let conflict = |address: Address, detail: &str| {
+        ChainError::Transient(format!(
+            "malformed sweep receipt {tx_hash}: payment address {address} {detail}"
+        ))
+    };
+
+    let mut pending: HashMap<Address, PendingOutcome> = HashMap::new();
+    for log in logs {
+        let Some(topic) = log.topics().first() else {
+            continue;
+        };
+        if log.address() == batch_sweeper {
+            let (payment, outcome) = if *topic == SweepFailed::SIGNATURE_HASH {
+                let event = SweepFailed::decode_log(&log.inner)
+                    .map_err(|error| malformed("SweepFailed", error))?;
+                (
+                    event.data.paymentAddress,
+                    SweepOutcome::Failed {
+                        revert_data: event.data.revertData.clone(),
+                    },
+                )
+            } else if *topic == SweepRecovered::SIGNATURE_HASH {
+                let event = SweepRecovered::decode_log(&log.inner)
+                    .map_err(|error| malformed("SweepRecovered", error))?;
+                (
+                    event.data.paymentAddress,
+                    SweepOutcome::Collected {
+                        amount: event.data.amount,
+                    },
+                )
+            } else {
+                continue;
+            };
+            let entry = pending.entry(payment).or_default();
+            if entry.sweeper.is_some() {
+                return Err(duplicate("BatchSweeper", payment));
+            }
+            entry.sweeper = Some(outcome);
+        } else if *topic == Settled::SIGNATURE_HASH {
+            let event =
+                Settled::decode_log(&log.inner).map_err(|error| malformed("Settled", error))?;
+            let entry = pending.entry(log.address()).or_default();
+            if entry.settled.is_some() {
+                return Err(duplicate("Settled", log.address()));
+            }
+            entry.settled = Some(event.data.amount);
+        } else if *topic == Recovered::SIGNATURE_HASH {
+            let event =
+                Recovered::decode_log(&log.inner).map_err(|error| malformed("Recovered", error))?;
+            let entry = pending.entry(log.address()).or_default();
+            if entry.recovered.is_some() {
+                return Err(duplicate("Recovered", log.address()));
+            }
+            entry.recovered = Some(event.data.amount);
+        }
+    }
+
+    pending
+        .into_iter()
+        .map(|(address, entry)| {
+            let outcome = match (entry.sweeper, entry.settled, entry.recovered) {
+                (Some(_), Some(_), _) => {
+                    return Err(conflict(
+                        address,
+                        "both settled and reported by BatchSweeper",
+                    ));
+                }
+                // A reverted `recover()` emits nothing, so a `Recovered` next
+                // to a `SweepFailed` cannot have come from the failed item.
+                (Some(SweepOutcome::Failed { .. }), None, Some(_)) => {
+                    return Err(conflict(
+                        address,
+                        "both recovered and reported failed by BatchSweeper",
+                    ));
+                }
+                (Some(sweeper), None, _) => sweeper,
+                (None, Some(amount), recovered) => SweepOutcome::Settled {
+                    amount,
+                    recovered_amount: recovered.unwrap_or(U256::ZERO),
+                },
+                (None, None, Some(amount)) => SweepOutcome::Recovered { amount },
+                (None, None, None) => unreachable!("an entry is only created by an event"),
+            };
+            Ok((address, outcome))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,17 +437,27 @@ pub struct FailureProbe {
     pub balance: Option<U256>,
 }
 
+/// The transaction that deployed a `Payment` somebody else executed, with
+/// the amounts its constructor routed. `settled` is the `Settled` amount when
+/// the deployment paid the receiver; `recovered` is what went to the recovery
+/// wallet in that same transaction (the overpayment remainder of a live
+/// deployment or the whole balance of an expired one), zero when nothing did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettlementEvent {
     pub transaction_hash: B256,
     pub block_number: u64,
     pub block_hash: B256,
+    pub settled: Option<U256>,
+    pub recovered: U256,
 }
 
 /// Chain access needed by the indexer. Standard Ethereum JSON-RPC methods keep
 /// the implementation compatible with QuickNode and local Anvil.
 #[async_trait]
 pub trait ChainClient: Send + Sync {
+    /// Chain ID reported by the RPC endpoint.
+    async fn get_chain_id(&self) -> Result<u64, ChainError>;
+
     /// Newest block number the node reports.
     async fn latest_block_number(&self) -> Result<u64, ChainError>;
 
@@ -345,8 +508,9 @@ pub trait ChainClient: Send + Sync {
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
 
-    /// Transaction that created and drained `Payment`, searched only through
-    /// the finalized block whose hash the caller verified.
+    /// Transaction that created and drained `Payment`, with the amounts its
+    /// events carried, searched only through the finalized block whose hash
+    /// the caller verified.
     async fn payment_settlement_tx(
         &self,
         payment: Address,
@@ -364,6 +528,14 @@ pub trait ChainClient: Send + Sync {
         recovery: Address,
         block: u64,
     ) -> Result<FailureProbe, ChainError>;
+
+    /// `keccak256` of the runtime bytecode at `address` (latest block). An
+    /// address without code hashes as empty bytes; the caller treats any
+    /// mismatch with the expected generation as fatal.
+    async fn code_hash(&self, address: Address) -> Result<B256, ChainError>;
+
+    /// Factory bound into the given BatchSweeper's immutable constructor.
+    async fn batch_sweeper_factory(&self, batch_sweeper: Address) -> Result<Address, ChainError>;
 }
 
 /// Production [`ChainClient`] backed by an Alloy HTTP provider with a signing
@@ -407,22 +579,6 @@ impl AlloyChainClient {
             .get_chain_id()
             .await
             .map_err(|error| ChainError::rpc("eth_chainId", error))
-    }
-
-    /// Factory bound into the configured BatchSweeper's immutable constructor.
-    pub async fn get_batch_sweeper_factory(
-        &self,
-        batch_sweeper: Address,
-    ) -> Result<Address, ChainError> {
-        let output = self
-            .call_at(batch_sweeper, factoryCall {}.abi_encode().into(), None)
-            .await
-            .map_err(|error| ChainError::rpc("eth_call BatchSweeper.factory", error))?;
-        factoryCall::abi_decode_returns(&output).map_err(|error| {
-            ChainError::Transient(format!(
-                "could not decode BatchSweeper.factory response: {error}"
-            ))
-        })
     }
 
     async fn call_at(
@@ -486,6 +642,10 @@ pub fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
 
 #[async_trait]
 impl ChainClient for AlloyChainClient {
+    async fn get_chain_id(&self) -> Result<u64, ChainError> {
+        AlloyChainClient::get_chain_id(self).await
+    }
+
     async fn latest_block_number(&self) -> Result<u64, ChainError> {
         self.provider
             .get_block_number()
@@ -599,18 +759,61 @@ impl ChainClient for AlloyChainClient {
             })
             .collect::<Vec<_>>();
         logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
-        logs.first()
+        // The constructor always emits at least one of the two events, so the
+        // earliest is the deployment; an overpaid live deployment emits both
+        // in that one transaction and the ledger needs both amounts.
+        let (transaction_hash, block_number, block_hash) = logs
+            .first()
             .and_then(|log| Some((log.transaction_hash?, log.block_number?, log.block_hash?)))
-            .map(|(transaction_hash, block_number, block_hash)| SettlementEvent {
-                transaction_hash,
-                block_number,
-                block_hash,
-            })
             .ok_or_else(|| {
                 ChainError::Transient(format!(
                     "payment {payment} is deployed but has no finalized settlement event in blocks {from_block}..={to_block}"
                 ))
-            })
+            })?;
+        let malformed = |event: &str| {
+            ChainError::Transient(format!(
+                "malformed settlement transaction {transaction_hash} for payment {payment}: duplicate {event} event"
+            ))
+        };
+        let mut settled_amount = None;
+        let mut recovered_amount = None;
+        for log in logs
+            .iter()
+            .filter(|log| log.transaction_hash == Some(transaction_hash))
+        {
+            if log.topics()[0] == settled {
+                let event = Settled::decode_log(&log.inner).map_err(|error| {
+                    ChainError::Transient(format!(
+                        "malformed Settled event in {transaction_hash}: {error}"
+                    ))
+                })?;
+                if settled_amount.replace(event.data.amount).is_some() {
+                    return Err(malformed("Settled"));
+                }
+            } else {
+                let event = Recovered::decode_log(&log.inner).map_err(|error| {
+                    ChainError::Transient(format!(
+                        "malformed Recovered event in {transaction_hash}: {error}"
+                    ))
+                })?;
+                // `recover()` is intentionally callable more than once. A
+                // deployment and a later recovery can therefore emit several
+                // Recovered logs in one transaction; all are ledgered.
+                recovered_amount = Some(
+                    recovered_amount
+                        .unwrap_or(U256::ZERO)
+                        .checked_add(event.data.amount)
+                        .ok_or_else(|| malformed("Recovered amount overflow"))?,
+                );
+            }
+        }
+        Ok(SettlementEvent {
+            transaction_hash,
+            block_number,
+            block_hash,
+            settled: settled_amount,
+            recovered: recovered_amount.unwrap_or(U256::ZERO),
+        })
     }
 
     async fn sweep_receipt(
@@ -641,57 +844,7 @@ impl ChainClient for AlloyChainClient {
         let transaction_index = receipt.transaction_index.ok_or_else(|| {
             ChainError::Transient("execute receipt has no transaction index".to_string())
         })?;
-
-        let malformed = |event: &str, error: alloy_sol_types::Error| {
-            ChainError::Transient(format!("malformed {event} event in {tx_hash}: {error}"))
-        };
-        let mut outcomes = HashMap::new();
-        // Payment events describe fresh deployments; sweeper events describe
-        // items that hit an existing deployment or failed. A `Recovered`
-        // emitted by `recover` is superseded by the sweeper's `SweepRecovered`.
-        for log in receipt.logs() {
-            let Some(topic) = log.topics().first() else {
-                continue;
-            };
-            if log.address() == batch_sweeper {
-                if *topic == SweepFailed::SIGNATURE_HASH {
-                    let event = SweepFailed::decode_log(&log.inner)
-                        .map_err(|error| malformed("SweepFailed", error))?;
-                    outcomes.insert(
-                        event.data.paymentAddress,
-                        SweepOutcome::Failed {
-                            revert_data: event.data.revertData.clone(),
-                        },
-                    );
-                } else if *topic == SweepRecovered::SIGNATURE_HASH {
-                    let event = SweepRecovered::decode_log(&log.inner)
-                        .map_err(|error| malformed("SweepRecovered", error))?;
-                    outcomes.insert(
-                        event.data.paymentAddress,
-                        SweepOutcome::Collected {
-                            amount: event.data.amount,
-                        },
-                    );
-                }
-            } else if *topic == Settled::SIGNATURE_HASH {
-                let event =
-                    Settled::decode_log(&log.inner).map_err(|error| malformed("Settled", error))?;
-                outcomes.insert(
-                    log.address(),
-                    SweepOutcome::Settled {
-                        amount: event.data.amount,
-                    },
-                );
-            } else if *topic == Recovered::SIGNATURE_HASH {
-                let event = Recovered::decode_log(&log.inner)
-                    .map_err(|error| malformed("Recovered", error))?;
-                outcomes
-                    .entry(log.address())
-                    .or_insert(SweepOutcome::Recovered {
-                        amount: event.data.amount,
-                    });
-            }
-        }
+        let outcomes = decode_sweep_outcomes(receipt.logs(), batch_sweeper, tx_hash)?;
         Ok(Some(SweepReceipt {
             succeeded: receipt.status(),
             block,
@@ -826,6 +979,26 @@ impl ChainClient for AlloyChainClient {
             balance,
         })
     }
+
+    async fn code_hash(&self, address: Address) -> Result<B256, ChainError> {
+        self.provider
+            .get_code_at(address)
+            .await
+            .map(|code| keccak256(&code))
+            .map_err(|error| ChainError::rpc("eth_getCode", error))
+    }
+
+    async fn batch_sweeper_factory(&self, batch_sweeper: Address) -> Result<Address, ChainError> {
+        let output = self
+            .call_at(batch_sweeper, factoryCall {}.abi_encode().into(), None)
+            .await
+            .map_err(|error| ChainError::rpc("eth_call BatchSweeper.factory", error))?;
+        factoryCall::abi_decode_returns(&output).map_err(|error| {
+            ChainError::Transient(format!(
+                "could not decode BatchSweeper.factory response: {error}"
+            ))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -897,6 +1070,40 @@ mod tests {
     }
 
     #[test]
+    fn transport_error_messages_never_carry_the_rpc_url() {
+        let leaked = "error sending request for url (https://x.quiknode.pro/SECRET/)";
+        assert_eq!(
+            redact_urls(leaked),
+            "error sending request for url (<rpc-url>)"
+        );
+        assert_eq!(
+            redact_urls("tried \"https://a.example/T1\" then http://b.example/T2 next"),
+            "tried \"<rpc-url>\" then <rpc-url> next"
+        );
+        assert_eq!(
+            redact_urls("connection reset by peer"),
+            "connection reset by peer"
+        );
+
+        let transport = ChainError::rpc("eth_blockNumber", TransportErrorKind::custom_str(leaked));
+        let message = transport.to_string();
+        assert!(!message.contains("quiknode"), "{message}");
+        assert!(!message.contains("SECRET"), "{message}");
+        assert!(message.contains("eth_blockNumber RPC error: "), "{message}");
+        assert!(message.contains("<rpc-url>"), "{message}");
+
+        let payload = ChainError::rpc(
+            "eth_call",
+            rpc_error(-32000, "execution reverted: InsufficientTokenBalance", None),
+        );
+        assert!(
+            payload
+                .to_string()
+                .contains("execution reverted: InsufficientTokenBalance")
+        );
+    }
+
+    #[test]
     fn batch_calldata_includes_expiration_and_recovery() {
         let token = address!("0x0000000000000000000000000000000000000001");
         let receiver = address!("0x0000000000000000000000000000000000000002");
@@ -925,6 +1132,162 @@ mod tests {
     fn batch_gas_limit_scales_per_isolated_sweep() {
         assert_eq!(sweep_batch_gas_limit(1), 500_000);
         assert_eq!(sweep_batch_gas_limit(20), 8_100_000);
+    }
+
+    const SWEEPER: Address = address!("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0");
+    const PAYMENT: Address = address!("0x00000000000000000000000000000000000000AA");
+    const RECEIVER: Address = address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    const RECOVERY: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
+    const TX: B256 = b256!("0x00000000000000000000000000000000000000000000000000000000000000ff");
+
+    /// A receipt log as the node would return it, built from a typed event.
+    fn log(emitter: Address, data: alloy_primitives::LogData) -> Log {
+        Log {
+            inner: alloy_primitives::Log {
+                address: emitter,
+                data,
+            },
+            ..Log::default()
+        }
+    }
+
+    fn settled(amount: u64) -> Log {
+        log(
+            PAYMENT,
+            Settled {
+                receiver: RECEIVER,
+                amount: U256::from(amount),
+            }
+            .encode_log_data(),
+        )
+    }
+
+    fn recovered(amount: u64) -> Log {
+        log(
+            PAYMENT,
+            Recovered {
+                recovery: RECOVERY,
+                amount: U256::from(amount),
+            }
+            .encode_log_data(),
+        )
+    }
+
+    fn sweep_recovered(amount: u64) -> Log {
+        log(
+            SWEEPER,
+            SweepRecovered {
+                paymentAddress: PAYMENT,
+                token: address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"),
+                amount: U256::from(amount),
+            }
+            .encode_log_data(),
+        )
+    }
+
+    fn sweep_failed() -> Log {
+        log(
+            SWEEPER,
+            SweepFailed {
+                paymentAddress: PAYMENT,
+                token: address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"),
+                revertData: Bytes::from_static(&[0x30, 0x11, 0x64, 0x25]),
+            }
+            .encode_log_data(),
+        )
+    }
+
+    #[test]
+    fn receipt_combines_settled_and_recovered_events() {
+        let expected = HashMap::from([(
+            PAYMENT,
+            SweepOutcome::Settled {
+                amount: U256::from(100),
+                recovered_amount: U256::from(50),
+            },
+        )]);
+        assert_eq!(
+            decode_sweep_outcomes(&[settled(100), recovered(50)], SWEEPER, TX).unwrap(),
+            expected
+        );
+        assert_eq!(
+            decode_sweep_outcomes(&[recovered(50), settled(100)], SWEEPER, TX).unwrap(),
+            expected,
+            "log order must not matter"
+        );
+
+        assert_eq!(
+            decode_sweep_outcomes(&[settled(100)], SWEEPER, TX).unwrap(),
+            HashMap::from([(
+                PAYMENT,
+                SweepOutcome::Settled {
+                    amount: U256::from(100),
+                    recovered_amount: U256::ZERO,
+                },
+            )]),
+            "an exact payment records no recovery"
+        );
+        assert_eq!(
+            decode_sweep_outcomes(&[recovered(40)], SWEEPER, TX).unwrap(),
+            HashMap::from([(
+                PAYMENT,
+                SweepOutcome::Recovered {
+                    amount: U256::from(40),
+                },
+            )]),
+            "a standalone Recovered is an expired deployment"
+        );
+        // `recover()` emits Recovered before the sweeper's SweepRecovered.
+        let collected = HashMap::from([(
+            PAYMENT,
+            SweepOutcome::Collected {
+                amount: U256::from(30),
+            },
+        )]);
+        assert_eq!(
+            decode_sweep_outcomes(&[recovered(30), sweep_recovered(30)], SWEEPER, TX).unwrap(),
+            collected
+        );
+        assert_eq!(
+            decode_sweep_outcomes(&[sweep_recovered(30), recovered(30)], SWEEPER, TX).unwrap(),
+            collected
+        );
+        assert!(matches!(
+            decode_sweep_outcomes(&[sweep_failed()], SWEEPER, TX).unwrap(),
+            outcomes if matches!(outcomes[&PAYMENT], SweepOutcome::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn receipt_rejects_conflicting_duplicate_events() {
+        let malformed: [(&str, Vec<Log>); 8] = [
+            ("two Settled", vec![settled(100), settled(100)]),
+            ("two Recovered", vec![recovered(50), recovered(50)]),
+            (
+                "two sweeper events",
+                vec![sweep_recovered(30), sweep_failed()],
+            ),
+            (
+                "Settled then sweeper",
+                vec![settled(100), sweep_recovered(100)],
+            ),
+            ("sweeper then Settled", vec![sweep_failed(), settled(100)]),
+            // Only `recover()` pairs a Recovered with a sweeper event, and a
+            // failed item emitted nothing.
+            ("failed then Recovered", vec![sweep_failed(), recovered(30)]),
+            ("Recovered then failed", vec![recovered(30), sweep_failed()]),
+            (
+                "Settled, Recovered and sweeper",
+                vec![settled(100), recovered(50), sweep_recovered(150)],
+            ),
+        ];
+        for (name, logs) in malformed {
+            let error = decode_sweep_outcomes(&logs, SWEEPER, TX).unwrap_err();
+            assert!(matches!(error, ChainError::Transient(_)), "{name}");
+            let message = error.to_string();
+            assert!(message.contains(&TX.to_string()), "{name}: {message}");
+            assert!(message.contains(&PAYMENT.to_string()), "{name}: {message}");
+        }
     }
 
     #[test]

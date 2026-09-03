@@ -3,6 +3,11 @@ output "api_ecr_repository_url" { value = aws_ecr_repository.api.repository_url 
 output "indexer_ecr_repository_url" { value = aws_ecr_repository.indexer.repository_url }
 output "kms_key_arn" { value = aws_kms_key.signer.arn }
 output "kms_public_key_note" { value = "AWS KMS exposes the secp256k1 public key via GetPublicKey, not an Ethereum address; derive and independently verify the address before funding." }
+output "recovery_kms_key_arn" { value = aws_kms_key.recovery.arn }
+output "recovery_kms_public_key_note" { value = "Derive the recovery wallet address from this key's GetPublicKey output (cast wallet address --aws) and verify it independently before setting recovery_address; no task role can sign with it, recovered funds are returned by hand." }
+output "attestation_kms_key_arn" { value = aws_kms_key.attestation.arn }
+output "attestation_signer_note" { value = "Derive the attestor address from this key with AWS_KMS_KEY_ID=<arn> cast wallet address --aws, verify it independently, and publish it as the trusted attestor merchants pass to payday proof verify --trusted-attestor; only the API task role can sign with it and it never holds funds." }
+output "attachment_bucket_name" { value = aws_s3_bucket.attachments.id }
 output "database_url_secret_arn" { value = aws_secretsmanager_secret.database_url.arn }
 output "rpc_url_secret_arn" { value = aws_secretsmanager_secret.rpc_url.arn }
 output "webhook_encryption_key_secret_arn" { value = aws_secretsmanager_secret.webhook_encryption_key.arn }

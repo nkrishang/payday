@@ -3,15 +3,34 @@
 TypeScript applications can use the zero-runtime-dependency client in
 [`sdk/typescript`](../sdk/typescript/README.md).
 
-`/v1/payments` is the canonical customer API. All payment routes require bearer authentication and
-creates additionally require `Idempotency-Key`. A replay returns
+`/v1/payments` is the canonical customer API. An invoice is the document; a
+payment is its on-chain fulfilment, and the path keeps the payment name for
+compatibility. All payment routes require bearer authentication — an API key,
+or the short-lived Auth0 access token a signed-in dashboard holds — and creates
+additionally require `Idempotency-Key`. A replay returns
 `Idempotency-Replayed: true`.
 
-Create requests contain `amount` and `payout_address`; `refund_address` defaults
-to the payout address. Choose either `expires_in` (seconds) or RFC3339
-`expires_at`, or omit both for a 24-hour lifetime. `chain_id` and
-`token_address` default to the configured chain and USDC contract. `reference`
-and a small JSON-object `metadata` are optional.
+Create requests contain `amount`, `payout_address`, an `issuer` and a `bill_to`
+party (`name`, optional `email` and `details`), and a `payer_policy`
+(`permissionless`, `verified_email`, `verified_identity`, or
+`verified_identity_unattributed`; the verified modes name the expected email
+and, for `verified_identity`, the expected first and last name). Optional
+fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
+`customer_id`, and one finalized `attachment_id` for a scanned PDF. The amount
+is used directly; there are no line items. Exactly `amount` settles to
+`payout_address`; the response's `recovery_address` is the Payday recovery
+wallet the payment is committed to, where overpayment remainders, expired
+balances, and late transfers land before the operator returns them after manual
+review. It is platform-configured, so a request carrying `refund_address` is
+rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
+both for a 24-hour lifetime. `chain_id` and `token_address` default to the
+configured chain and USDC contract.
+
+Every immutable field, including the attachment's hash, takes part in
+idempotency: reusing a key with a different document returns
+`409 idempotency_conflict`. The issued invoice is canonicalized and committed
+into the payment address through the salt, which is what makes the Proof of
+Payment (`GET /v1/payments/{id}/proof`, after settlement) verifiable offline.
 
 Payments expose the public states `awaiting_payment`, `partially_paid`, `paid`,
 `settled`, `expired`, `returned`, and `needs_attention`; amounts are trimmed USDC strings and are
@@ -29,17 +48,27 @@ Address, settlement, and transfer explorer URLs are included when the configured
 chain has an explorer.
 
 The link is unauthenticated by design — anyone holding it may read the payment
-and pay it. `GET /v1/payer/payments/{id}` and its `/qr` accept no API key,
-return no merchant data, and send `Access-Control-Allow-Origin: *`, so a
-merchant can build a checkout of their own against them. Reproduce the guidance
-in [Payment safety](payment-safety.md) if you do.
+and pay it. `GET /v1/payer/payments/{id}`, its `/qr`, and its `/attachment`
+accept no API key, return no merchant data, and send
+`Access-Control-Allow-Origin: *`, so a merchant can build a checkout of their
+own against them. For the verified payer modes the page shows only the issuer
+name and heading until the payer's session satisfies the policy; the amount,
+bill-to, notes, reference, PDF, address, and QR are withheld
+(`content_unlocked: false`). Reproduce the guidance in
+[Payment safety](payment-safety.md) if you build your own.
 
 `GET /v1/payments` accepts `status`, `reference`, `starting_after`, and `limit`.
 `GET /v1/payments/{id}/transfers` returns finalized transfer provenance.
-`GET /v1/payments/{id}?wait_for=change&timeout=30` waits until the payment
-changes or the timeout elapses, avoiding a polling loop.
-`GET /v1/account` returns the authenticated account ID and `GET /v1/status`
-reports chain, indexer, finalized-head, and sweep-queue state.
+`GET /v1/payments/{id}/attachment` returns the PDF descriptor with a signed
+download URL, `GET /v1/payments/{id}/invoice.pdf` renders Payday's
+deterministic invoice summary, and `GET /v1/payments/{id}/proof` returns the
+Proof of Payment once settled. `GET /v1/payments/{id}?wait_for=change&timeout=30`
+waits until the payment changes or the timeout elapses, avoiding a polling
+loop. `/v1/customers` manages reusable counterparty records and
+`/v1/attachments` runs the presigned PDF upload and finalization; see the
+[HTTP API reference](api-reference.md). `GET /v1/account` returns the
+authenticated account ID and `GET /v1/status` reports chain, indexer,
+finalized-head, and sweep-queue state.
 
 ## HTTP contract and operational policy
 
@@ -77,7 +106,9 @@ export PAYDAY_API_KEY=payday_test_...
 PAYMENT=$(curl -fsS "$API/v1/payments" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: quickstart-$(date +%s)" \
-  -d '{"amount":"1.00","payout_address":"0x1111111111111111111111111111111111111111","refund_address":"0x2222222222222222222222222222222222222222","expires_in":3600}')
+  -d '{"amount":"1.00","payout_address":"0x1111111111111111111111111111111111111111",
+       "issuer":{"name":"Acme LLC"},"bill_to":{"name":"Customer Inc"},
+       "payer_policy":{"mode":"permissionless"},"expires_in":3600}')
 PAYMENT_ID=$(printf '%s' "$PAYMENT" | jq -r .id)
 PAYMENT_ADDRESS=$(printf '%s' "$PAYMENT" | jq -r .address)
 # Send test USDC to $PAYMENT_ADDRESS using the sandbox faucet/wallet; there is

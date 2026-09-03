@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatBaseUnits,
+  formatBytes,
   formatCountdown,
   formatDisplayAmount,
   groupDigits,
@@ -93,5 +94,17 @@ describe("truncateAddress", () => {
 
   it("leaves short values alone", () => {
     expect(truncateAddress("0x1234")).toBe("0x1234");
+  });
+});
+
+describe("formatBytes", () => {
+  it("reads an attachment's decimal byte_length at a sensible unit", () => {
+    expect(formatBytes("512")).toBe("512 B");
+    expect(formatBytes("48211")).toBe("47.1 KB");
+    expect(formatBytes("5242880")).toBe("5.0 MB");
+  });
+
+  it("says nothing for a value that is not a byte count", () => {
+    expect(formatBytes("nope")).toBe("");
   });
 });

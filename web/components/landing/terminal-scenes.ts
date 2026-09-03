@@ -3,8 +3,8 @@
  * crates/gateway-cli/src/presentation.rs — same glyphs, same row order, same
  * colours the CLI paints with ANSI.
  *
- * IDs and addresses are elided so no line exceeds 44 characters; the panel
- * clips rather than scrolls, and the hero column is narrow on a phone.
+ * IDs and addresses are elided so no line exceeds MAX_WIDTH characters; the
+ * panel clips rather than scrolls, and the hero column is narrow on a phone.
  */
 
 export type Tone = "dim" | "text" | "id" | "ok" | "warn";
@@ -51,7 +51,7 @@ const created: readonly Line[] = [
   [["  Pay to    ", "dim"], ["0xfF70…A0dF", "id"], ["  native USDC", "dim"]],
   [["  Expires   ", "dim"], ["in 1 hour", "text"]],
   [["  Payout    ", "dim"], ["0x7099…79C8", "id"]],
-  [["  Refund    ", "dim"], ["0x3C44…93BC", "id"]],
+  [["  Recovery  ", "dim"], ["0x9965…A4dc", "id"], ["  Payday", "dim"]],
 ];
 
 const listed: readonly Line[] = [
@@ -113,6 +113,8 @@ export const SCENES: readonly Scene[] = [
     label: "create",
     command: [
       [["$ ", "dim"], ["payday create --amount 25.00 \\", "text"]],
+      [["    --issuer 'Acme LLC' \\", "text"]],
+      [["    --bill-to 'Globex' \\", "text"]],
       [["    --to 0x7099…79C8 --expires-in 1h", "text"]],
     ],
     frames: reveal(created),

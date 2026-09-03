@@ -104,8 +104,8 @@ pub fn guidance(code: &str) -> (&'static str, &'static str) {
             "Contact Payday support to agree on recovery after the payment expires.",
         ),
         "recovery_blacklisted" => (
-            "The refund address is restricted by the USDC issuer.",
-            "Resolve the restriction with the USDC issuer, then contact Payday support.",
+            "The Payday recovery wallet is restricted by the USDC issuer.",
+            "Payday is resolving it; no merchant action is needed. Contact Payday support only if the payment stays paused.",
         ),
         "payment_address_blacklisted" => (
             "The payment address is restricted by the USDC issuer.",

@@ -1,8 +1,8 @@
-import type { PayerPayment } from "@payday/sdk";
+import type { UnlockedPayerPayment } from "@/lib/checkout-state";
 import { ArrowUpRight } from "lucide-react";
 import { CopyButton } from "@/components/ui/copy-button";
 
-export function AddressRow({ payment }: { payment: PayerPayment }) {
+export function AddressRow({ payment }: { payment: UnlockedPayerPayment }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">

@@ -7,6 +7,9 @@ pub use salt::*;
 mod amount;
 pub use amount::*;
 
+mod attribution;
+pub use attribution::*;
+
 mod invoice;
 pub use invoice::*;
 
@@ -21,3 +24,9 @@ pub use address::*;
 
 mod expiration;
 pub use expiration::*;
+
+mod proof;
+pub use proof::*;
+
+mod deployment;
+pub use deployment::*;

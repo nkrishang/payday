@@ -1,6 +1,5 @@
-import type { PayerPayment } from "@payday/sdk";
 import { AlertTriangle, ArrowUpRight, Check, Clock, Loader2 } from "lucide-react";
-import type { CheckoutView } from "@/lib/checkout-state";
+import type { CheckoutView, UnlockedPayerPayment } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
 import { config } from "@/lib/config";
 import { explorerTxUrl, formatDisplayAmount, truncateHash } from "@/lib/format";
@@ -16,13 +15,17 @@ const icons = {
   attention: AlertTriangle,
 } as const;
 
-/** Every state in which there is nothing left for the payer to send. */
+/**
+ * Every state in which there is nothing left for the payer to send. The
+ * invoice amount is not repeated here: the document block above the outcome
+ * already carries it, and this list is about what actually happened.
+ */
 export function Resolved({
   payment,
   view,
   pendingTxHash,
 }: {
-  payment: PayerPayment;
+  payment: UnlockedPayerPayment;
   view: CheckoutView;
   pendingTxHash: string | null;
 }) {
@@ -33,6 +36,8 @@ export function Resolved({
   const txUrl =
     (pendingTxHash ? explorerTxUrl(config.explorerUrl, pendingTxHash) : null) ??
     payment.settlement_explorer_url;
+
+  const received = BigInt(payment.received_base_units) > 0n;
 
   return (
     <div className="px-6 py-10 text-center sm:px-8">
@@ -52,42 +57,38 @@ export function Resolved({
         {view.detail}
       </p>
 
-      <dl className="mt-7 space-y-2.5 border-t border-line pt-5 text-[13px]">
-        <div className="flex items-baseline justify-between gap-3">
-          <dt className="text-faint">Amount</dt>
-          <dd className="tabular font-medium">
-            {formatDisplayAmount(payment.amount)} {payment.token.symbol}
-          </dd>
-        </div>
-        {BigInt(payment.received_base_units) > 0n ? (
-          <div className="flex items-baseline justify-between gap-3">
-            <dt className="text-faint">Received</dt>
-            <dd className="tabular font-medium">
-              {formatDisplayAmount(payment.received)} {payment.token.symbol}
-            </dd>
-          </div>
-        ) : null}
-        {txHash ? (
-          <div className="flex items-baseline justify-between gap-3">
-            <dt className="text-faint">Transaction</dt>
-            <dd className="font-mono">
-              {txUrl ? (
-                <a
-                  href={txUrl}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="inline-flex items-center gap-1 rounded transition-colors hover:text-ink"
-                >
-                  {truncateHash(txHash)}
-                  <ArrowUpRight className="size-3" />
-                </a>
-              ) : (
-                truncateHash(txHash)
-              )}
-            </dd>
-          </div>
-        ) : null}
-      </dl>
+      {received || txHash ? (
+        <dl className="mt-7 space-y-2.5 border-t border-line pt-5 text-[13px]">
+          {received ? (
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="text-faint">Received</dt>
+              <dd className="tabular font-medium">
+                {formatDisplayAmount(payment.received)} {payment.token.symbol}
+              </dd>
+            </div>
+          ) : null}
+          {txHash ? (
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="text-faint">Transaction</dt>
+              <dd className="font-mono">
+                {txUrl ? (
+                  <a
+                    href={txUrl}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center gap-1 rounded transition-colors hover:text-ink"
+                  >
+                    {truncateHash(txHash)}
+                    <ArrowUpRight className="size-3" />
+                  </a>
+                ) : (
+                  truncateHash(txHash)
+                )}
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
     </div>
   );
 }

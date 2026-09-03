@@ -89,3 +89,12 @@ export function explorerAddressUrl(explorerUrl: string | null, address: string):
 export function explorerTxUrl(explorerUrl: string | null, hash: string): string | null {
   return explorerUrl ? `${explorerUrl}/tx/${hash}` : null;
 }
+
+/** "48.2 KB", "1.5 MB" — for an attachment's `byte_length`, which arrives as a decimal string. */
+export function formatBytes(byteLength: string | number): string {
+  const bytes = Number(byteLength);
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

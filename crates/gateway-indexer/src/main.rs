@@ -1,5 +1,6 @@
 mod chain;
 mod config;
+mod deployment;
 mod indexer;
 
 use std::sync::Arc;
@@ -66,15 +67,20 @@ async fn main() {
         config.chain_id().0,
         "configured PAYDAY_CHAIN_ID does not match the RPC node's chain id"
     );
-    let helper_factory = chain_client
-        .get_batch_sweeper_factory(config.batch_sweeper_address())
-        .await
-        .expect("failed to query configured BatchSweeper factory");
-    assert_eq!(
-        helper_factory,
-        config.factory_address(),
-        "configured BatchSweeper is bound to a different PaymentFactory"
-    );
+    // The factory embeds Payment's creation code and the sweeper is bound to
+    // one factory, so a mismatched generation must never index or sweep.
+    deployment::verify_deployment(
+        &chain_client,
+        &deployment::ExpectedDeployment {
+            chain_id: config.chain_id().0,
+            factory: config.factory_address(),
+            factory_code_hash: config.factory_code_hash(),
+            batch_sweeper: config.batch_sweeper_address(),
+            batch_sweeper_code_hash: config.batch_sweeper_code_hash(),
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
     // The finality source must be answerable before any range is committed.
     chain_client
         .finalized_block_number()

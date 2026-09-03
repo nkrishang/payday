@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 gateway-core = { path = "../gateway-core" }
+alloy-primitives = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4.5"
 anstyle = "1"
@@ -26,3 +27,6 @@ uuid = { workspace = true }
 toml = "0.9"
 rpassword = "7"
 supports-hyperlinks = "3"
+
+[dev-dependencies]
+k256 = { workspace = true }

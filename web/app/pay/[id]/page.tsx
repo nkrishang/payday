@@ -35,5 +35,7 @@ export default async function PayPage({ params }: { params: Promise<{ id: string
   const { id } = await params;
   const payment = await loadPayment(id);
 
-  return <Checkout initial={payment} qrUrl={payerClient.payments.qrUrl(id)} />;
+  // Rendered without any payer session: the server never sees one, so a
+  // gated invoice always arrives locked and unlocks only in the browser.
+  return <Checkout initial={payment} />;
 }

@@ -1,26 +1,49 @@
 mod accounts;
+mod attachments;
 mod cursor;
+mod customers;
+mod identity;
 mod invoices;
 mod notifications;
+mod proofs;
 mod sweeps;
+mod verifications;
 mod webhooks;
 
 pub use accounts::{
     API_KEY_GRACE_HOURS, AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError,
-    IssuedApiKey,
+    IssuedApiKey, ProvisionAccountError,
+};
+pub use attachments::{
+    AttachInvoiceError, AttachmentRepository, AttachmentStatus, AttachmentStatusParseError,
+    CreateAttachmentUpload, DbAttachment,
 };
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
+pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
+pub use identity::{
+    ClaimedVerification, CredentialKind, DEFAULT_CREDENTIAL_LIFETIME, DbPayerCredential,
+    DbVerificationAttempt, DbVerificationReview, DecisionRecord, IDENTITY_POLL_INTERVAL,
+    IdentityCompletion, IdentityState, IdentityStatus, IdentityStatusParseError,
+    MAX_AUTOMATED_ATTEMPTS, MAX_POLL_BACKOFF, ReviewDecision, ReviewError, StartIdentityError,
+    VerificationRepository, poll_backoff,
+};
 pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
-    InvoiceRepository, PaymentObservation, RangeOutcome, ReleasePaymentError,
+    InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, IssuanceRequest,
+    PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
 };
 pub use notifications::{NotificationEvent, NotificationRepository};
+pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 pub use sweeps::{
-    BatchResolution, InvoiceOutcome, MinedBatch, SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats,
-    SweeperStatus,
+    BatchResolution, InvoiceOutcome, MinedBatch, RecoveredFundsInput, RecoveryReason,
+    SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats, SweeperStatus,
+};
+pub use verifications::{
+    CreatedPayerSession, DbPayerSession, EmailVerificationAttempt, PAYER_SESSION_TTL,
+    PayerSessionRepository, StartEmailVerificationError, VerificationCompletion, payer_ref,
 };
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,
