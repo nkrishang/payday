@@ -220,9 +220,13 @@ test("the attachment's signed URL is fetched on demand and never server-rendered
 
   await page.addInitScript(() => {
     (window as unknown as { __opened: string[] }).__opened = [];
-    window.open = (url) => {
-      (window as unknown as { __opened: string[] }).__opened.push(String(url));
-      return window;
+    window.open = () => {
+      const opened = (window as unknown as { __opened: string[] }).__opened;
+      return {
+        opener: null,
+        location: { replace: (url: string) => opened.push(String(url)) },
+        close: () => undefined,
+      } as unknown as Window;
     };
   });
   await page.goto("/pay/pay_invoice");

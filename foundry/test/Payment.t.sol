@@ -8,6 +8,15 @@ import {MockUSDC} from "foundry/src/MockUSDC.sol";
 import {Payment} from "foundry/src/Payment.sol";
 import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
+contract PaymentDeployer {
+    function deploy(address token, uint256 amount, address receiver, uint64 expirationTimestamp, address recovery)
+        external
+        returns (Payment)
+    {
+        return new Payment(token, amount, receiver, expirationTimestamp, recovery);
+    }
+}
+
 contract PaymentTest is Test {
     event Settled(address indexed receiver, uint256 amount);
     event Recovered(address indexed recovery, uint256 amount);
@@ -90,11 +99,12 @@ contract PaymentTest is Test {
     /// pin the custom error and the balances it reports.
     function test_underfunded_deployment_reverts_with_insufficient_token_balance() public {
         uint64 expirationTimestamp = uint64(block.timestamp + 1 hours);
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        PaymentDeployer deployer = new PaymentDeployer();
+        address predicted = vm.computeCreateAddress(address(deployer), vm.getNonce(address(deployer)));
         token.mint(predicted, 10e6 - 1);
 
         vm.expectRevert(abi.encodeWithSelector(Payment.InsufficientTokenBalance.selector, 10e6 - 1, 10e6));
-        new Payment(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY);
+        deployer.deploy(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY);
 
         assertEq(predicted.code.length, 0);
         assertEq(token.balanceOf(predicted), 10e6 - 1, "a partial payment stays put until completed or expired");

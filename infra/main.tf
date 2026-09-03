@@ -48,7 +48,7 @@ locals {
   identity_environment = local.identity_verification_enabled ? [
     { name = "PAYDAY_DIDIT_WORKFLOW_ID", value = var.didit_workflow_id },
     { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
-  ] : [
+    ] : [
     { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
   ]
   identity_secrets = local.identity_verification_enabled ? [
