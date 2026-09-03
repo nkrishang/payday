@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { Feather } from "lucide-react";
+import { PaymentScene } from "@/components/landing/payment-scene";
 
 export const metadata: Metadata = {
   title: "Payday — Make every stablecoin accountable",
@@ -8,65 +9,6 @@ export const metadata: Metadata = {
     "Payday turns stablecoin transfers into verified customer deposits, ready for your application to credit.",
   alternates: { canonical: "/" },
 };
-
-const PAYMENTS = [
-  {
-    initials: "OA",
-    email: "omar@finsystems.com",
-    reference: "REF # 2381",
-    token: "usdc",
-    amount: "2,500",
-    checks: ["Email", "Wallet", "KYC"],
-    state: "Received",
-  },
-  {
-    initials: "SM",
-    email: "sam@banana.app",
-    reference: "REF # 71144",
-    token: "ausd",
-    amount: "160",
-    checks: ["Email"],
-    state: "Waiting",
-  },
-  {
-    initials: "KM",
-    email: "kira@workato.so",
-    reference: "REF # 9926",
-    token: "usdt",
-    amount: "27,000",
-    checks: ["Email", "KYC"],
-    state: "Unverified",
-  },
-  {
-    initials: "JL",
-    email: "jamie@lattice.co",
-    reference: "REF # 5048",
-    token: "usdc",
-    amount: "4,850",
-    checks: ["Email", "Wallet"],
-    state: "Received",
-  },
-  {
-    initials: "AN",
-    email: "ana@northstar.io",
-    reference: "REF # 31607",
-    token: "ausd",
-    amount: "920",
-    checks: ["Email", "KYC"],
-    state: "Waiting",
-  },
-  {
-    initials: "RT",
-    email: "ravi@tandem.xyz",
-    reference: "REF # 8042",
-    token: "usdt",
-    amount: "12,400",
-    checks: ["Email", "Wallet", "KYC"],
-    state: "Received",
-  },
-] as const;
-
-const TOKEN_LABELS = { usdc: "USDC", usdt: "USDT", ausd: "AUSD" } as const;
 
 export default function Home() {
   return (
@@ -97,7 +39,7 @@ export default function Home() {
       </header>
 
       <main>
-        <section className="mx-auto flex min-h-[390px] max-w-[1120px] flex-col items-center px-5 pt-[clamp(48px,6vh,64px)] text-center sm:px-8">
+        <section className="landing-hero mx-auto flex min-h-[370px] max-w-[1120px] flex-col items-center px-5 pt-[clamp(48px,6vh,64px)] text-center sm:px-8">
           <h1 className="landing-reveal landing-delay-1 font-heading text-[clamp(38px,5vw,64px)] leading-[1.06] font-medium tracking-[-0.05em] text-balance">
             Make every stablecoin <span className="text-brand-yellow">accountable.</span>
           </h1>
@@ -127,17 +69,7 @@ export default function Home() {
           aria-label="Recent payments"
           className="landing-reveal landing-delay-4 payment-stage"
         >
-          <div className="payment-window">
-            <div className="payment-track">
-              {[0, 1].map((set) => (
-                <div key={set} aria-hidden={set === 1 ? true : undefined} className="payment-set">
-                  {PAYMENTS.map((payment) => (
-                    <PaymentRow key={`${set}-${payment.reference}`} payment={payment} />
-                  ))}
-                </div>
-              ))}
-            </div>
-          </div>
+          <PaymentScene />
         </section>
       </main>
 
@@ -179,64 +111,6 @@ export default function Home() {
         </div>
       </footer>
     </div>
-  );
-}
-
-function PaymentRow({ payment }: { payment: (typeof PAYMENTS)[number] }) {
-  const isVerified = payment.state !== "Unverified";
-
-  return (
-    <article className="payment-row">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#292a28] text-[13px] text-brand-grey">
-          {payment.initials}
-        </span>
-        <span className="truncate text-[13px] text-brand-yellow sm:text-[14px]">
-          {payment.email}
-        </span>
-      </div>
-
-      <div className="payment-reference flex items-center gap-2 text-[13px] text-[#c8c8c3]">
-        <Image src="/payment-icons/pdf.svg" alt="" width={22} height={22} className="size-[21px]" />
-        <span className="whitespace-nowrap">{payment.reference}</span>
-      </div>
-
-      <div className="flex items-center gap-2 text-[13px] text-[#c8c8c3] sm:text-[14px]">
-        <Image
-          src={`/payment-icons/${payment.token}.svg`}
-          alt={TOKEN_LABELS[payment.token]}
-          width={30}
-          height={30}
-          className="size-7 shrink-0 rounded-full"
-        />
-        <span className="tabular whitespace-nowrap">{payment.amount}</span>
-      </div>
-
-      <div
-        className={`payment-checks flex items-center gap-2 ${isVerified ? "text-[#31ae58]" : "text-brand-grey"}`}
-      >
-        <Image
-          src={`/payment-icons/${isVerified ? "verified" : "warning"}.svg`}
-          alt=""
-          width={28}
-          height={28}
-          className="size-7 shrink-0"
-        />
-        <span className="whitespace-nowrap text-[13px]">
-          {payment.checks.map((check, index) => (
-            <span key={check}>
-              {index > 0 && <span className="text-brand-grey/40"> | </span>}
-              {check}
-            </span>
-          ))}
-        </span>
-      </div>
-
-      <span className={`status-badge status-${payment.state.toLowerCase()}`}>
-        <span className="size-2.5 rounded-full bg-current" />
-        {payment.state}
-      </span>
-    </article>
   );
 }
 
