@@ -527,50 +527,77 @@ test("the landing page renders and is indexable", async ({ page }) => {
   const response = await page.goto("/");
 
   await expect(
-    page.getByRole("heading", { name: "Minimal API to accept and catalog stablecoin payments." }),
+    page.getByRole("heading", { name: "Make every stablecoin accountable." }),
   ).toBeVisible();
-  await expect(page.getByRole("heading", { name: "How it works" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Start Building" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Request a demo" })).toBeVisible();
   await expect(page.getByRole("img", { name: "Payday" }).first()).toBeVisible();
   expect(await page.locator('meta[name="robots"]').count()).toBe(0);
   expect(response?.status()).toBe(200);
   expect(errors).toEqual([]);
 });
 
-test("the landing page offers no sandbox or quickstart", async ({ page }) => {
+test("the landing page links to public documentation without obsolete environment copy", async ({
+  page,
+}) => {
   await page.goto("/");
   const body = (await page.locator("body").innerText()).toLowerCase();
 
   expect(body).not.toContain("sandbox");
   expect(body).not.toContain("quickstart");
-  await expect(page.getByRole("link", { name: "Docs" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Docs" })).toHaveAttribute(
+    "href",
+    "https://github.com/nkrishang/payday/tree/main/docs",
+  );
 });
 
-test("the hero terminal cycles through the CLI flows", async ({ page }) => {
+test("the payment carousel advances upward and settles with a bounce", async ({ page }) => {
   await page.goto("/");
 
-  // Every flow is always listed; only the running one is highlighted.
-  await expect(page.locator("[data-scene]")).toHaveText(["create", "list", "get --watch"]);
+  const track = page.locator(".scene-payment-track");
+  await expect(track.locator(".payment-row").first()).toBeVisible();
 
-  const active = page.locator('[data-scene][data-active="true"]');
-  // Server-rendered on the first scene, so it is never a blank box.
-  await expect(active).toHaveText("create");
-  await expect(active).toHaveText("list", { timeout: 15_000 });
-  await expect(active).toHaveText("get --watch", { timeout: 20_000 });
-  // The watch scene redraws in place, ending on a settled payment.
-  await expect(page.getByText(/Settled at/)).toBeVisible({ timeout: 20_000 });
+  const positions = await track.evaluate((element) => {
+    const animation = element
+      .getAnimations()
+      .find((candidate) => candidate.effect?.getTiming().duration === 36_000);
+    if (!animation) return [];
+
+    animation.pause();
+    return [360, 720, 1_080].map((time) => {
+      animation.currentTime = time;
+      return new DOMMatrix(getComputedStyle(element).transform).m42;
+    });
+  });
+
+  expect(positions).toHaveLength(3);
+  expect(positions[1]).toBeLessThan(positions[0]!);
+  expect(positions[2]).toBeGreaterThan(positions[1]!);
 });
 
-test("the hero terminal never changes size as scenes change", async ({ page }) => {
+test("the payment scene stays fixed as its verification panel opens and closes", async ({
+  page,
+}) => {
   await page.goto("/");
-  const panel = page.locator("[data-scene]").first().locator("xpath=ancestor::div[2]");
+  const stage = page.locator(".payment-stage");
 
-  const heights = new Set<number>();
-  for (let tick = 0; tick < 30; tick++) {
-    const box = await panel.boundingBox();
-    if (box) heights.add(Math.round(box.height));
-    await page.waitForTimeout(500);
-  }
+  const snapshots = await stage.evaluate((element) => {
+    const animations = element.getAnimations({ subtree: true });
+    const panel = element.querySelector<HTMLElement>(".checkout-panel")!;
 
-  // A window that resizes mid-scene shifts everything below it on the page.
-  expect([...heights]).toHaveLength(1);
+    animations.forEach((animation) => animation.pause());
+    return [0, 9_000, 27_000, 35_999].map((time) => {
+      animations.forEach((animation) => (animation.currentTime = time));
+      const bounds = element.getBoundingClientRect();
+      return {
+        width: Math.round(bounds.width),
+        height: Math.round(bounds.height),
+        panelOpacity: Number(getComputedStyle(panel).opacity),
+      };
+    });
+  });
+
+  expect(new Set(snapshots.map(({ width }) => width)).size).toBe(1);
+  expect(new Set(snapshots.map(({ height }) => height)).size).toBe(1);
+  expect(snapshots.map(({ panelOpacity }) => panelOpacity)).toEqual([0, 1, 1, 0]);
 });
