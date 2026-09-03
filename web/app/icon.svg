@@ -1,6 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
-  <rect width="48" height="48" rx="11" fill="#0b0b0b"/>
-  <path fill="#a3d277" fill-rule="evenodd"
-        d="M16 10 H28 A10 10 0 0 1 28 30 H22 V38 H16 Z
-           M22 16 H28 A4 4 0 0 1 28 24 H22 Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <rect width="400" height="400" fill="#0f0f0e"/>
+  <path
+    d="M40 330V150a80 80 0 0 1 160 0v100a80 80 0 0 0 160 0V70"
+    fill="none"
+    stroke="#a3d277"
+    stroke-width="40"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path d="M200 150v100" fill="none" stroke="#d6a9b8" stroke-width="40"/>
 </svg>
