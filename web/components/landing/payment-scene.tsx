@@ -177,7 +177,7 @@ function PaymentRow({
       </div>
 
       {isSelected ? (
-        <span className="relative h-10 min-w-[118px] justify-self-end">
+        <span className="payment-status-wrap relative h-10 min-w-[118px] justify-self-end">
           <span className="status-badge status-unverified scene-unverified-status absolute inset-0">
             <span className="size-2.5 rounded-full bg-current" />
             Unverified
