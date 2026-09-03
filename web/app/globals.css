@@ -129,6 +129,8 @@
   }
 
   .landing-page {
+    position: relative;
+    isolation: isolate;
     font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
   }
 
@@ -139,6 +141,18 @@
   .landing-page :focus-visible {
     outline-color: #a3d277;
   }
+}
+
+.landing-page::after {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("/paper-grain.svg");
+  background-size: 180px 180px;
+  content: "";
+  mix-blend-mode: soft-light;
+  opacity: 0.09;
 }
 
 .landing-reveal {
@@ -162,10 +176,105 @@
 }
 
 .payment-stage {
+  position: relative;
   height: clamp(330px, calc(100svh - 516px), 510px);
   overflow: hidden;
   background: #ead26d;
   padding-inline: 16px;
+}
+
+.payment-stage::before,
+.payment-stage::after {
+  position: absolute;
+  z-index: 10;
+  right: -2px;
+  left: -2px;
+  height: 42px;
+  pointer-events: none;
+  background-color: #0f100e;
+  background-image:
+    linear-gradient(to bottom, #0f100e 0%, rgb(15 16 14 / 96%) 24%, rgb(15 16 14 / 30%) 100%),
+    url("/paper-grain.svg");
+  background-repeat: no-repeat, repeat;
+  background-size:
+    100% 100%,
+    180px 180px;
+  content: "";
+}
+
+.payment-stage::before {
+  top: -1px;
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% 50%,
+    97% 72%,
+    94% 48%,
+    91% 68%,
+    87% 52%,
+    83% 76%,
+    79% 55%,
+    75% 70%,
+    71% 47%,
+    67% 67%,
+    63% 52%,
+    59% 80%,
+    55% 57%,
+    51% 73%,
+    47% 48%,
+    43% 69%,
+    39% 54%,
+    35% 78%,
+    31% 51%,
+    27% 70%,
+    23% 49%,
+    19% 74%,
+    15% 55%,
+    11% 77%,
+    7% 50%,
+    3% 68%,
+    0 54%
+  );
+  filter: drop-shadow(0 2px 0 rgb(246 242 234 / 18%)) drop-shadow(0 4px 3px rgb(15 16 14 / 24%));
+}
+
+.payment-stage::after {
+  bottom: -1px;
+  background-image:
+    linear-gradient(to top, #0f100e 0%, rgb(15 16 14 / 96%) 24%, rgb(15 16 14 / 30%) 100%),
+    url("/paper-grain.svg");
+  clip-path: polygon(
+    0 47%,
+    3% 28%,
+    7% 52%,
+    11% 25%,
+    15% 48%,
+    19% 31%,
+    23% 55%,
+    27% 34%,
+    31% 51%,
+    35% 24%,
+    39% 49%,
+    43% 30%,
+    47% 53%,
+    51% 27%,
+    55% 46%,
+    59% 22%,
+    63% 48%,
+    67% 29%,
+    71% 54%,
+    75% 32%,
+    79% 49%,
+    83% 25%,
+    87% 47%,
+    91% 30%,
+    94% 52%,
+    97% 27%,
+    100% 45%,
+    100% 100%,
+    0 100%
+  );
+  filter: drop-shadow(0 -2px 0 rgb(246 242 234 / 16%)) drop-shadow(0 -4px 3px rgb(15 16 14 / 22%));
 }
 
 .payment-scene {
@@ -305,8 +414,8 @@
   top: 50%;
   right: 0;
   width: 320px;
-  height: 292px;
-  margin-top: -146px;
+  height: 260px;
+  margin-top: -130px;
   border: 1px solid rgb(246 242 234 / 9%);
   border-radius: 15px;
   background: #111210;
@@ -991,15 +1100,29 @@
     padding-inline: 12px;
   }
 
+  .payment-stage::before,
+  .payment-stage::after {
+    height: 22px;
+  }
+
+  .payment-stage::before {
+    filter: drop-shadow(0 1px 0 rgb(246 242 234 / 14%)) drop-shadow(0 2px 2px rgb(15 16 14 / 18%));
+  }
+
+  .payment-stage::after {
+    filter: drop-shadow(0 -1px 0 rgb(246 242 234 / 12%)) drop-shadow(0 -2px 2px rgb(15 16 14 / 17%));
+  }
+
   .scene-payment-window {
     animation-name: scene-window-mobile;
   }
 
   .checkout-panel {
-    top: 78px;
+    z-index: 4;
+    top: 88px;
     right: 0;
     width: 100%;
-    height: 240px;
+    height: 220px;
     margin-top: 0;
   }
 
@@ -1060,11 +1183,11 @@
   14%,
   94%,
   100% {
-    transform: translate(0, -18px);
+    transform: translate(0, 2px);
   }
   18%,
   88% {
-    transform: translate(0, -142px);
+    transform: translate(0, -122px);
   }
 }
 

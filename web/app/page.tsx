@@ -73,7 +73,7 @@ export default function Home() {
         </section>
       </main>
 
-      <footer className="border-t border-brand-grey/20 bg-brand-black">
+      <footer className="bg-brand-black">
         <div className="mx-auto flex max-w-[1240px] flex-col gap-4 px-5 py-3.5 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <Image
