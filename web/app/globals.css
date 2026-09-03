@@ -177,7 +177,7 @@
 
 .payment-window {
   width: min(1000px, 100%);
-  height: 100%;
+  height: calc(100% + 18px);
   margin-inline: auto;
   overflow: hidden;
   transform: translateY(-18px);
@@ -185,10 +185,10 @@
     to bottom,
     transparent 0,
     black 11%,
-    black 87%,
+    black 98%,
     transparent 100%
   );
-  mask-image: linear-gradient(to bottom, transparent 0, black 11%, black 87%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, black 11%, black 98%, transparent 100%);
 }
 
 .payment-track {
@@ -199,11 +199,15 @@
 }
 
 .scene-payment-window {
+  position: relative;
+  z-index: 3;
   animation: scene-window 18s ease-in-out infinite;
   will-change: transform;
 }
 
 .scene-payment-track {
+  position: relative;
+  z-index: 1;
   transform: translateY(-426px);
   animation: scene-track 36s cubic-bezier(0.25, 0.8, 0.25, 1) infinite;
 }
@@ -295,24 +299,9 @@
   animation: phase-b-checks 36s ease-in-out infinite;
 }
 
-.scene-connector {
-  position: absolute;
-  z-index: 2;
-  top: 154px;
-  right: 330px;
-  width: 66px;
-  height: 3px;
-  border-radius: 999px;
-  background: #159bff;
-  opacity: 0;
-  transform: scaleX(0);
-  transform-origin: left;
-  animation: scene-connector 18s ease-in-out infinite;
-}
-
 .checkout-panel {
   position: absolute;
-  z-index: 4;
+  z-index: 1;
   top: 50%;
   right: 0;
   width: 320px;
@@ -324,8 +313,8 @@
   box-shadow: 0 22px 60px rgb(15 15 14 / 28%);
   color: #f6f2ea;
   opacity: 0;
-  transform: translateX(70px) scale(0.98);
-  animation: checkout-panel 18s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  transform: translateX(-260px) scale(0.98);
+  animation: checkout-panel 18s ease-in-out infinite;
   will-change: transform, opacity;
 }
 
@@ -599,16 +588,16 @@
 
 @keyframes scene-row-dim {
   0%,
-  15%,
-  94%,
+  12%,
+  98%,
   100% {
     opacity: 1;
-    filter: saturate(1);
+    filter: brightness(1) saturate(1);
   }
-  19%,
-  92% {
-    opacity: 0.28;
-    filter: saturate(0.45);
+  22%,
+  88% {
+    opacity: 1;
+    filter: brightness(0.45) saturate(0.45);
   }
 }
 
@@ -616,107 +605,95 @@
   0%,
   4.5%,
   46%,
-  54.5%,
-  97%,
+  56%,
+  99%,
   100% {
     border-color: #262724;
     box-shadow: 0 5px 18px rgb(15 15 14 / 10%);
     opacity: 1;
-    filter: saturate(1);
+    filter: brightness(1) saturate(1);
   }
   6.5%,
   38% {
     border-color: #159bff;
     box-shadow:
-      0 0 0 2px #159bff,
+      inset 0 0 0 2px #159bff,
       0 10px 30px rgb(21 155 255 / 18%);
     opacity: 1;
-    filter: saturate(1);
+    filter: brightness(1) saturate(1);
   }
   40%,
   44% {
     border-color: #31ae58;
     box-shadow:
-      0 0 0 2px #31ae58,
+      inset 0 0 0 2px #31ae58,
       0 10px 30px rgb(49 174 88 / 18%);
     opacity: 1;
-    filter: saturate(1);
+    filter: brightness(1) saturate(1);
   }
-  56.5%,
-  96% {
+  61%,
+  94% {
     border-color: #262724;
     box-shadow: 0 5px 18px rgb(15 15 14 / 10%);
-    opacity: 0.28;
-    filter: saturate(0.45);
+    opacity: 1;
+    filter: brightness(0.45) saturate(0.45);
   }
 }
 
 @keyframes scene-target-b {
   0%,
-  4.5%,
-  47%,
+  6%,
+  49%,
   54.5%,
   96%,
   100% {
     border-color: #262724;
     box-shadow: 0 5px 18px rgb(15 15 14 / 10%);
     opacity: 1;
-    filter: saturate(1);
+    filter: brightness(1) saturate(1);
   }
-  6.5%,
-  46% {
+  11%,
+  44% {
     border-color: #262724;
     box-shadow: 0 5px 18px rgb(15 15 14 / 10%);
-    opacity: 0.28;
-    filter: saturate(0.45);
+    opacity: 1;
+    filter: brightness(0.45) saturate(0.45);
   }
   56.5%,
   88% {
     border-color: #159bff;
     box-shadow:
-      0 0 0 2px #159bff,
+      inset 0 0 0 2px #159bff,
       0 10px 30px rgb(21 155 255 / 18%);
     opacity: 1;
-    filter: saturate(1);
+    filter: brightness(1) saturate(1);
   }
   90%,
   94% {
     border-color: #31ae58;
     box-shadow:
-      0 0 0 2px #31ae58,
+      inset 0 0 0 2px #31ae58,
       0 10px 30px rgb(49 174 88 / 18%);
     opacity: 1;
-    filter: saturate(1);
-  }
-}
-
-@keyframes scene-connector {
-  0%,
-  16%,
-  92%,
-  100% {
-    opacity: 0;
-    transform: scaleX(0);
-  }
-  19%,
-  88% {
-    opacity: 1;
-    transform: scaleX(1);
+    filter: brightness(1) saturate(1);
   }
 }
 
 @keyframes checkout-panel {
   0%,
   16%,
-  92%,
+  94%,
   100% {
     opacity: 0;
-    transform: translateX(70px) scale(0.98);
+    transform: translateX(-260px) scale(0.98);
   }
   20%,
   88% {
     opacity: 1;
     transform: translateX(0) scale(1);
+  }
+  90% {
+    opacity: 1;
   }
 }
 
@@ -1058,10 +1035,6 @@
     height: 52px;
   }
 
-  .scene-connector {
-    display: none;
-  }
-
   .payment-row {
     grid-template-columns: minmax(0, 1fr) 92px auto;
     gap: 10px;
@@ -1126,8 +1099,7 @@
     opacity: 1;
   }
 
-  .checkout-panel,
-  .scene-connector {
+  .checkout-panel {
     display: none;
   }
 }

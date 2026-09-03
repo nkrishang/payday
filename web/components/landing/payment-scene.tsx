@@ -69,7 +69,6 @@ export function PaymentScene() {
         <PaymentTrack />
       </div>
 
-      <div className="scene-connector" aria-hidden="true" />
       <CheckoutPanel />
     </div>
   );
