@@ -9,12 +9,13 @@ import {
   PaydayError,
 } from "@payday/sdk";
 import { ArrowLeft, ArrowRight, Loader2 } from "lucide-react";
+import Image from "next/image";
 import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { controlStyles } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
-import { formatDisplayAmount, truncateAddress } from "@/lib/format";
+import { clampWords, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { AttachmentUpload } from "./attachment-upload";
 import { buildCreatePayment, EMPTY_VALUES } from "./create-payment";
@@ -392,11 +393,7 @@ export function RequestComposer({
           <div key={step} data-direction={direction} className="dash-step">
             {step === 0 ? (
               <div className="dash-stagger grid gap-5">
-                <Labeled
-                  label="Amount"
-                  error={shown("amount")}
-                  hint="USDC, used exactly as written. There are no line items."
-                >
+                <Labeled label="Amount" required error={shown("amount")}>
                   <span className="relative block">
                     <input
                       autoFocus
@@ -412,8 +409,15 @@ export function RequestComposer({
                     />
                     <span
                       aria-hidden="true"
-                      className="absolute top-1/2 right-4 -translate-y-1/2 text-[13px] text-faint"
+                      className="absolute top-1/2 right-4 flex -translate-y-1/2 items-center gap-1.5 text-[13px] text-faint"
                     >
+                      <Image
+                        src="/payment-icons/usdc.svg"
+                        width={64}
+                        height={64}
+                        alt=""
+                        className="size-4 shrink-0 rounded-full"
+                      />
                       USDC
                     </span>
                   </span>
@@ -422,6 +426,7 @@ export function RequestComposer({
                 {issuers.length > 1 ? (
                   <Choice
                     label="Issued by"
+                    required
                     error={shown("issuerId")}
                     options={issuers.map((entry) => ({
                       id: entry.id,
@@ -439,6 +444,7 @@ export function RequestComposer({
                 {issuer && issuer.payout_addresses.length > 1 ? (
                   <Choice
                     label="Settles to"
+                    required
                     error={shown("payoutAddressId")}
                     options={issuer.payout_addresses.map((entry) => ({
                       id: entry.id,
@@ -452,10 +458,16 @@ export function RequestComposer({
                 ) : null}
 
                 <div>
-                  <span className="block text-[12px] font-medium text-muted">Expires in</span>
+                  <span className="block text-[12px] font-medium text-muted">
+                    Expires in
+                    <span aria-hidden="true" className="ml-2 font-normal text-faint">
+                      Required
+                    </span>
+                  </span>
                   <div
                     role="radiogroup"
                     aria-label="Expires in"
+                    aria-required="true"
                     className="mt-1.5 inline-flex rounded-[10px] border border-line bg-surface p-1"
                   >
                     {EXPIRIES.map((option) => (
@@ -479,7 +491,7 @@ export function RequestComposer({
 
                   {draft.expiry === CUSTOM ? (
                     <div className="mt-3 max-w-[280px]">
-                      <Labeled label="Date and time" error={errors.expiresAt}>
+                      <Labeled label="Date and time" required error={errors.expiresAt}>
                         <input
                           type="datetime-local"
                           min={localMoment(new Date(openedAt + MIN_LEAD_MS))}
@@ -492,10 +504,6 @@ export function RequestComposer({
                       </Labeled>
                     </div>
                   ) : null}
-
-                  <p className="mt-1.5 text-[12px] text-faint">
-                    After this the address stops being payable; late transfers are recovered.
-                  </p>
                 </div>
               </div>
             ) : null}
@@ -519,7 +527,7 @@ export function RequestComposer({
                 ) : null}
 
                 <div className="grid gap-5 sm:grid-cols-2">
-                  <Labeled label="Billed to" error={shown("billName")}>
+                  <Labeled label="Billed to" required error={shown("billName")}>
                     <input
                       autoFocus
                       maxLength={255}
@@ -530,15 +538,7 @@ export function RequestComposer({
                       className={cn(controlStyles, "h-11")}
                     />
                   </Labeled>
-                  <Labeled
-                    label="Their email"
-                    error={shown("billEmail")}
-                    hint={
-                      draft.customerId
-                        ? undefined
-                        : "Saved as a customer, so the next request can pick them."
-                    }
-                  >
+                  <Labeled label="Email" error={shown("billEmail")}>
                     <input
                       type="email"
                       value={draft.billEmail}
@@ -550,10 +550,7 @@ export function RequestComposer({
                 </div>
 
                 <div className="grid gap-5 sm:grid-cols-2">
-                  <Labeled
-                    label="What it is for"
-                    hint="Shown before verification on gated requests."
-                  >
+                  <Labeled label="Reason">
                     <input
                       maxLength={200}
                       placeholder="March retainer"
@@ -562,7 +559,7 @@ export function RequestComposer({
                       className={cn(controlStyles, "h-11")}
                     />
                   </Labeled>
-                  <Labeled label="Reference" hint="Your own invoice number, if you keep one.">
+                  <Labeled label="Reference">
                     <input
                       maxLength={128}
                       placeholder="INV-001"
@@ -573,11 +570,12 @@ export function RequestComposer({
                   </Labeled>
                 </div>
 
-                <Labeled label="Notes" hint="Carried on the request and its PDF.">
+                <Labeled label="Notes">
                   <textarea
                     maxLength={4000}
+                    placeholder="Thanks for your business — let us know if anything looks off."
                     value={draft.notes}
-                    onChange={(event) => set("notes", event.target.value)}
+                    onChange={(event) => set("notes", clampWords(event.target.value, 50))}
                     className={cn(controlStyles, "min-h-20 py-2 leading-relaxed")}
                   />
                 </Labeled>
@@ -635,7 +633,7 @@ export function RequestComposer({
                     </Labeled>
                     {draft.mode === "verified_identity" ? (
                       <div className="grid gap-5 sm:grid-cols-2">
-                        <Labeled label="Expected first name" error={shown("firstName")}>
+                        <Labeled label="Expected first name" required error={shown("firstName")}>
                           <input
                             maxLength={255}
                             value={draft.firstName}
@@ -644,7 +642,7 @@ export function RequestComposer({
                             className={cn(controlStyles, "h-11")}
                           />
                         </Labeled>
-                        <Labeled label="Expected last name" error={shown("lastName")}>
+                        <Labeled label="Expected last name" required error={shown("lastName")}>
                           <input
                             maxLength={255}
                             value={draft.lastName}
@@ -667,7 +665,17 @@ export function RequestComposer({
                   className="grid gap-3 rounded-[12px] border border-line bg-surface px-4 py-4 text-[13.5px]"
                 >
                   <Row label="Amount">
-                    <span className="tabular">{formatDisplayAmount(draft.amount.trim())} USDC</span>
+                    <span className="tabular inline-flex items-center justify-end gap-1">
+                      {formatDisplayAmount(draft.amount.trim())}
+                      <Image
+                        src="/payment-icons/usdc.svg"
+                        width={64}
+                        height={64}
+                        alt=""
+                        className="size-3.5 shrink-0 rounded-full"
+                      />
+                      USDC
+                    </span>
                   </Row>
                   <Row label="Issued by">{issuer?.name}</Row>
                   <Row label="Settles to">
@@ -693,10 +701,6 @@ export function RequestComposer({
                   <Row label="Expires in">{expiryLabel(draft)}</Row>
                   {attachment ? <Row label="Attachment">{attachment.filename}</Row> : null}
                 </dl>
-                <p className="text-[13px] leading-relaxed text-muted">
-                  Issued requests are immutable: the amount, the parties, and the policy are
-                  committed to the address the payer sends to.
-                </p>
                 {failure ? (
                   <p role="alert" className="text-[13px] text-danger">
                     {failure}
@@ -769,7 +773,7 @@ function Preview({
   return (
     <aside className="rounded-[16px] border border-line bg-surface p-5 lg:sticky lg:top-6">
       <p className="text-[11px] tracking-[0.12em] text-faint uppercase">Deposit request</p>
-      <p className="mt-3 flex items-baseline gap-1.5">
+      <p className="mt-3 flex items-center gap-1.5">
         <span
           className={cn(
             "tabular font-heading text-[30px] leading-none font-medium tracking-[-0.03em] transition-colors",
@@ -778,7 +782,16 @@ function Preview({
         >
           {amount && AMOUNT.test(amount) ? formatDisplayAmount(amount) : "0.00"}
         </span>
-        <span className="text-[13px] text-faint">USDC</span>
+        <span className="flex items-center gap-1 text-[13px] text-faint">
+          <Image
+            src="/payment-icons/usdc.svg"
+            width={64}
+            height={64}
+            alt=""
+            className="size-4 shrink-0 rounded-full"
+          />
+          USDC
+        </span>
       </p>
       {title ? <p className="mt-1.5 text-[13px] text-muted">{title}</p> : null}
 
@@ -821,20 +834,35 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 function Choice({
   label,
   error,
+  required,
   options,
   selected,
   onSelect,
 }: {
   label: string;
   error?: string | undefined;
+  /** See `Labeled`'s own `required`: worth setting only where it is not obvious. */
+  required?: boolean | undefined;
   options: ReadonlyArray<{ id: string; title: string; detail?: string; mono?: boolean }>;
   selected: string;
   onSelect: (id: string) => void;
 }) {
   return (
     <div>
-      <span className="block text-[12px] font-medium text-muted">{label}</span>
-      <div role="radiogroup" aria-label={label} className="mt-1.5 grid gap-2 sm:grid-cols-2">
+      <span className="block text-[12px] font-medium text-muted">
+        {label}
+        {required ? (
+          <span aria-hidden="true" className="ml-2 font-normal text-faint">
+            Required
+          </span>
+        ) : null}
+      </span>
+      <div
+        role="radiogroup"
+        aria-label={label}
+        aria-required={required ? true : undefined}
+        className="mt-1.5 grid gap-2 sm:grid-cols-2"
+      >
         {options.map((option) => (
           <label
             key={option.id}

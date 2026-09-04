@@ -72,7 +72,7 @@ describe("CustomerForm update", () => {
     expect(screen.getByLabelText("Details")).toHaveValue(CUSTOMER.details);
     await user.clear(screen.getByLabelText("Email"));
     await user.clear(screen.getByLabelText("Details"));
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
     // PATCH is a full replacement, so an emptied field must travel as null;
@@ -85,5 +85,19 @@ describe("CustomerForm update", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Saved");
     expect(onSaved).toHaveBeenCalledWith({ ...CUSTOMER, email: null, details: null });
     expect(push).not.toHaveBeenCalled();
+  });
+
+  it("disables Save until a field actually differs from what is stored", async () => {
+    const user = userEvent.setup();
+    renderForm({ customer: CUSTOMER });
+
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Name"), " Inc.");
+    expect(save).toBeEnabled();
+
+    await user.type(screen.getByLabelText("Name"), "{backspace}{backspace}{backspace}{backspace}{backspace}");
+    expect(save).toBeDisabled();
   });
 });

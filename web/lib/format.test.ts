@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampWords,
   formatBaseUnits,
   formatBytes,
   formatCountdown,
@@ -106,5 +107,16 @@ describe("formatBytes", () => {
 
   it("says nothing for a value that is not a byte count", () => {
     expect(formatBytes("nope")).toBe("");
+  });
+});
+
+describe("clampWords", () => {
+  it("leaves text at or under the limit untouched, whitespace included", () => {
+    expect(clampWords("a  b\nc", 3)).toBe("a  b\nc");
+    expect(clampWords("", 3)).toBe("");
+  });
+
+  it("cuts a paste past the limit down to the first N words", () => {
+    expect(clampWords("one two three four five", 3)).toBe("one two three");
   });
 });

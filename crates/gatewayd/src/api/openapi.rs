@@ -391,6 +391,28 @@ struct CustomerPage {
     customers: Vec<Customer>,
     next_cursor: Option<uuid::Uuid>,
 }
+#[derive(Serialize, ToSchema)]
+struct CustomerStats {
+    /// Deposit requests billed to this customer, of any status.
+    request_count: i64,
+    /// Confirmed on chain across all of this customer's invoices. Base units,
+    /// like an invoice's own `amount_base_units` — scale for display.
+    collected_base_units: String,
+    /// Outstanding on the ones still open — awaiting payment or partially paid. Base units.
+    pending_base_units: String,
+}
+/// `getCustomer` only: a list of many customers would mean one aggregate
+/// query per row.
+#[derive(Serialize, ToSchema)]
+struct CustomerDetail {
+    id: uuid::Uuid,
+    name: String,
+    email: Option<String>,
+    details: Option<String>,
+    created_at: String,
+    updated_at: String,
+    stats: CustomerStats,
+}
 #[derive(Deserialize, ToSchema)]
 struct IssuerRequest {
     /// 1–255 bytes, and unique among your identities: case and surrounding
@@ -581,7 +603,7 @@ fn request_verification_review() {}
 fn create_customer() {}
 #[utoipa::path(get, path="/v1/customers", operation_id="listCustomers", tag="customers", params(("starting_after"=Option<uuid::Uuid>, Query, description="Customer id returned as next_cursor"),("limit"=Option<u32>, Query, minimum=1, maximum=100)), responses((status=200,body=CustomerPage),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn list_customers() {}
-#[utoipa::path(get, path="/v1/customers/{id}", operation_id="getCustomer", tag="customers", params(("id"=uuid::Uuid, Path)), responses((status=200,body=Customer),(status=401,body=ErrorResponse),(status=404,description="customer_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/customers/{id}", operation_id="getCustomer", tag="customers", params(("id"=uuid::Uuid, Path)), responses((status=200,body=CustomerDetail),(status=401,body=ErrorResponse),(status=404,description="customer_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn get_customer() {}
 #[utoipa::path(patch, path="/v1/customers/{id}", operation_id="updateCustomer", tag="customers", params(("id"=uuid::Uuid, Path)), request_body(content=CustomerRequest, description="Replaces every editable field; an omitted or null email or details clears it"), responses((status=200,body=Customer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn update_customer() {}
@@ -636,7 +658,7 @@ fn delete_payout_address() {}
 
 #[derive(OpenApi)]
 #[openapi(paths(create_payment,list_payments,get_payment,cancel_payment,transfers,payment_attachment,invoice_pdf,proof,payment_verification,request_verification_review,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,ExpectedIdentity,PayerPolicyMode,PayerPolicy,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationReview,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,ExpectedIdentity,PayerPolicyMode,PayerPolicy,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationReview,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
  modifiers(&Security), tags((name="payments",description="Invoice issuance, documents, and payment tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 

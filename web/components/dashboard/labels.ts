@@ -27,7 +27,8 @@ export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; descr
     {
       value: "permissionless",
       label: "Permissionless",
-      description: "Anyone holding the link can view and pay it. Content is visible immediately.",
+      description:
+        "Anyone holding a link to the deposit request can view payment details and pay it.",
     },
     {
       value: "verified_email",
@@ -45,7 +46,7 @@ export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; descr
       value: "verified_identity_unattributed",
       label: "Verified identity, unattributed",
       description:
-        "Email ownership plus a document and liveness check, without asserting who the payer is.",
+        "Email ownership plus a document and liveness check, without asserting an expected payer identity.",
     },
   ];
 

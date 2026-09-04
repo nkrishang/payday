@@ -177,8 +177,9 @@ export PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$(cast code 0x9fE46736679d
 ### 3. Start the local attachment store
 
 MinIO stands in for the S3 attachment bucket (the runner does this for you).
-Nothing scans local uploads, so it also stands in for GuardDuty: the tag its
-scanner would write is set by hand, as described under
+Nothing scans local uploads, so `just dev` also runs a small stand-in for
+GuardDuty: a few seconds after a PDF lands it stamps the clean verdict
+finalize is waiting on, as described under
 [Attachments and the scan tag](#attachments-and-the-scan-tag).
 
 ```bash
@@ -272,19 +273,28 @@ cast call <payment_address> 'settled()(bool)' --rpc-url http://127.0.0.1:8545
 with the returned headers, then call `POST /v1/attachments/{id}/finalize`.
 Finalize answers `409 attachment_scan_pending` until the object carries the
 tag GuardDuty Malware Protection writes in production, and
-`422 attachment_rejected` for any other verdict. Stamp a clean verdict on an
-upload by its object key, `uploads/<account_id>/<attachment_id>.pdf`:
+`422 attachment_rejected` for any other verdict.
+
+Under `just dev`, `local-runner.sh`'s `start_scan_stub` polls the bucket and
+stamps a clean verdict on every upload within a couple of seconds, so a
+manual upload through the browser finalizes almost immediately instead of
+sitting out finalize's 2-minute poll timeout. It only fills in the tag when
+none is present yet, so stamping one by hand first still walks the rejection
+path — set any other value on the object key,
+`uploads/<account_id>/<attachment_id>.pdf`, before the stub gets to it:
 
 ```bash
 docker run --rm --network host \
   -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
   minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
-  'GuardDutyMalwareScanStatus=NO_THREATS_FOUND'
+  'GuardDutyMalwareScanStatus=THREATS_FOUND'
 ```
 
-`mc tag list` on the same path shows the tags; set any other value to walk
-the rejection path. `scripts/e2e-anvil.sh` does the same through its
-`tag_object_scanned` helper. No lifecycle rule runs locally, so abandoned
+`mc tag list` on the same path shows the tags. `scripts/e2e-anvil.sh` controls
+verdicts the same way, deterministically, through its own `tag_object_scanned`
+helper — reach for `just e2e` instead when the rejection path needs reliable
+coverage rather than a race against the stub. No lifecycle rule runs locally,
+so abandoned
 uploads stay until the container is removed.
 
 ## Automated tests

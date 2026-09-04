@@ -98,6 +98,16 @@ pub struct DbInvoice {
     pub likely_unsolicited_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
 }
 
+/// See [`InvoiceRepository::customer_stats`].
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CustomerInvoiceStats {
+    pub request_count: i64,
+    /// Base units, like an invoice's own `amount_base_units` — the caller
+    /// scales for display; a token's decimals live per invoice, not here.
+    pub collected_base_units: String,
+    pub pending_base_units: String,
+}
+
 /// A stored invoice row could not be decoded into the domain model. This
 /// signals corrupt or out-of-contract data in the database, not client error.
 #[derive(Debug, Error)]
@@ -774,6 +784,31 @@ impl InvoiceRepository {
         .bind(issuer_id)
         .bind(verification)
         .fetch_all(&self.pool)
+        .await
+    }
+
+    /// One customer's totals: how many requests, how much has actually been
+    /// confirmed on chain across all of them (whatever became of it after —
+    /// swept, or recovered), and how much remains outstanding on the ones
+    /// still open (`created`: awaiting payment or partially paid). Base
+    /// units, as a decimal string — exact arithmetic never touches a float.
+    pub async fn customer_stats(
+        &self,
+        account: AccountId,
+        customer_id: Uuid,
+    ) -> Result<CustomerInvoiceStats, sqlx::Error> {
+        sqlx::query_as::<_, CustomerInvoiceStats>(
+            r#"SELECT
+                 count(*) AS request_count,
+                 COALESCE(SUM(confirmed_received::numeric), 0)::text AS collected_base_units,
+                 COALESCE(SUM(amount::numeric - confirmed_received::numeric)
+                   FILTER (WHERE status = 'created'), 0)::text AS pending_base_units
+               FROM invoices
+               WHERE account_id = $1 AND customer_id = $2"#,
+        )
+        .bind(account.0)
+        .bind(customer_id)
+        .fetch_one(&self.pool)
         .await
     }
 
@@ -1783,6 +1818,78 @@ pub(crate) mod tests {
                 .map(|commitment: AttachmentCommitment| commitment.id),
             Some(document.id)
         );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn customer_stats_sums_confirmed_receipts_and_open_balances(pool: PgPool) {
+        let owner = account(&pool, 1).await;
+        let repo = InvoiceRepository::new(pool.clone());
+        let customer = Uuid::now_v7();
+        sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, 'Globex')")
+            .bind(customer)
+            .bind(owner.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Untouched: fully pending, nothing confirmed yet.
+        let mut awaiting = issuance_input(owner, "stats-awaiting", None);
+        awaiting.customer_id = Some(customer);
+        repo.insert_issued(&awaiting, None).await.unwrap();
+
+        // Partially paid: still open, half its amount confirmed.
+        let mut partial = issuance_input(owner, "stats-partial", None);
+        partial.customer_id = Some(customer);
+        let partial_id = repo.insert_issued(&partial, None).await.unwrap().row.id;
+        sqlx::query("UPDATE invoices SET confirmed_received = '400000' WHERE id = $1")
+            .bind(partial_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Settled: fully confirmed, no longer open — excluded from pending.
+        let mut settled = issuance_input(owner, "stats-settled", None);
+        settled.customer_id = Some(customer);
+        let settled_id = repo.insert_issued(&settled, None).await.unwrap().row.id;
+        sqlx::query(
+            "UPDATE invoices SET status = 'fulfilled', confirmed_received = amount WHERE id = $1",
+        )
+        .bind(settled_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A different customer's invoice must not leak into these totals.
+        let other_customer = Uuid::now_v7();
+        sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, 'Initech')")
+            .bind(other_customer)
+            .bind(owner.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut other = issuance_input(owner, "stats-other-customer", None);
+        other.customer_id = Some(other_customer);
+        repo.insert_issued(&other, None).await.unwrap();
+
+        let stats = repo.customer_stats(owner, customer).await.unwrap();
+        assert_eq!(stats.request_count, 3);
+        // Collected: the partial's confirmed receipt plus the settled invoice's full amount.
+        assert_eq!(stats.collected_base_units, "1400000");
+        // Pending: the untouched invoice's full amount plus the partial's remaining balance.
+        assert_eq!(stats.pending_base_units, "1600000");
+
+        // A customer with no invoices at all reads as zero, not null.
+        let empty_customer = Uuid::now_v7();
+        sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, 'Nobody')")
+            .bind(empty_customer)
+            .bind(owner.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let empty = repo.customer_stats(owner, empty_customer).await.unwrap();
+        assert_eq!(empty.request_count, 0);
+        assert_eq!(empty.collected_base_units, "0");
+        assert_eq!(empty.pending_base_units, "0");
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]

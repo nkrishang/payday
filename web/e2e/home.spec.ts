@@ -117,8 +117,8 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
   // The merchant's own side is chosen, never retyped: no issuer fields here.
   await expect(page.getByLabel("Issued by")).toHaveCount(0);
   await page.getByLabel("Billed to").fill("Globex LLC");
-  await page.getByLabel("Their email").fill("ap@globex.example");
-  await page.getByLabel("What it is for").fill("Onboarding deposit");
+  await page.getByLabel("Email").fill("ap@globex.example");
+  await page.getByLabel("Reason").fill("Onboarding deposit");
   await page.getByRole("button", { name: "Continue" }).click();
 
   // A gated policy needs a mailbox to check, and the mailbox is already known:
@@ -138,7 +138,7 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
   // party — even when that changes afterwards.
   await expected.fill("peter@initrode.example");
   await page.getByRole("button", { name: "Back" }).click();
-  await page.getByLabel("Their email").fill("billing@globex.example");
+  await page.getByLabel("Email").fill("billing@globex.example");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(expected).toHaveValue("peter@initrode.example");
   await page.getByRole("button", { name: "Continue" }).click();
@@ -235,7 +235,7 @@ test("a billed party becomes a customer, and the next request can pick them", as
   await page.getByRole("button", { name: "Continue" }).click();
   const billed = `Initech ${Date.now()}`;
   await page.getByLabel("Billed to").fill(billed);
-  await page.getByLabel("Their email").fill("ap@initech.example");
+  await page.getByLabel("Email").fill("ap@initech.example");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Issue deposit request" }).click();
@@ -252,7 +252,7 @@ test("a billed party becomes a customer, and the next request can pick them", as
   await page.getByLabel("Customer").click();
   await page.getByRole("option", { name: billed }).click();
   await expect(page.getByLabel("Billed to")).toHaveValue(billed);
-  await expect(page.getByLabel("Their email")).toHaveValue("ap@initech.example");
+  await expect(page.getByLabel("Email")).toHaveValue("ap@initech.example");
 });
 
 test("adding a wallet saves, and the row settles rather than staying dirty", async ({ page }) => {
@@ -349,7 +349,9 @@ test("two identities cannot share a name", async ({ page }) => {
   await expect(row.getByRole("button", { name: "Save" })).toBeDisabled();
 });
 
-test("a request row opens in place, showing the payer's view and its link", async ({ page }) => {
+test("a request row opens in place, showing an abbreviated link to the payer's view", async ({
+  page,
+}) => {
   await signIn(page, "detail@example.com");
   await setUpIdentity(page, "Acme Inc.");
   await page.getByRole("button", { name: "Cancel" }).click();
@@ -358,9 +360,11 @@ test("a request row opens in place, showing the payer's view and its link", asyn
   // In place: the list stays where it was, filters and page included.
   await expect(page).toHaveURL(/\/dashboard$/);
 
-  const payer = page.getByRole("region", { name: "Payer's view" });
-  await expect(payer).toContainText("Acme Corp");
-  await expect(payer.getByRole("button", { name: /Copy shareable link/ })).toBeVisible();
+  // Abbreviated to the link itself rather than a full preview of the page.
+  const payerLink = page.getByRole("link", { name: /\/pay\// });
+  await expect(payerLink).toBeVisible();
+  await expect(payerLink).toHaveAttribute("href", /\/pay\//);
+  await expect(payerLink).toHaveAttribute("target", "_blank");
 });
 
 test("an identity can be renamed, and moving its contact address unproves it", async ({ page }) => {

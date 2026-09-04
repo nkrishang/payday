@@ -268,7 +268,7 @@ export function IssuerSetup({
             <Labeled
               label="Issued by"
               error={step === 0 && name ? (nameError ?? undefined) : undefined}
-              hint="Appears on every request issued under this identity."
+              hint="Appears on every deposit request issued under this identity."
             >
               <input
                 autoFocus={step === 0}

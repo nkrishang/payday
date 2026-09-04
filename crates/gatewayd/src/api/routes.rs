@@ -3305,7 +3305,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.status(), StatusCode::OK);
-        assert_eq!(json_body(fetched).await["name"], "Globex");
+        let fetched = json_body(fetched).await;
+        assert_eq!(fetched["name"], "Globex");
+        // Only `get` carries stats, and a customer with no invoices yet reads
+        // as zero rather than null.
+        assert_eq!(fetched["stats"]["request_count"], 0);
+        assert_eq!(fetched["stats"]["collected_base_units"], "0");
+        assert_eq!(fetched["stats"]["pending_base_units"], "0");
 
         // Update replaces every editable field: the omitted email clears.
         let updated = app

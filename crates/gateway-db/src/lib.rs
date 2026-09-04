@@ -29,9 +29,9 @@ pub use identity::{
     VerificationRepository, poll_backoff,
 };
 pub use invoices::{
-    CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
-    InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, IssuanceRequest,
-    PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
+    CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice, DbInvoiceError,
+    DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository,
+    IssuanceRequest, PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
 };
 pub use issuers::{
     CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,

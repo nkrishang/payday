@@ -1035,6 +1035,32 @@ async function objectStore(req, res, url) {
   return false;
 }
 
+/**
+ * Mirrors gatewayd's `customer_stats`: how many requests, how much has
+ * actually been confirmed across all of them, and how much remains on the
+ * ones still open. Base units — `payment.amount`/`.received` here are
+ * display decimal strings, so scale by the token's decimals to match.
+ */
+function customerStats(customerId) {
+  const own = [...store.payments.values()].filter(
+    (payment) => payment.customer_id === customerId,
+  );
+  let collected = 0;
+  let pending = 0;
+  for (const payment of own) {
+    collected += Number(payment.received);
+    if (payment.status === "awaiting_payment" || payment.status === "partially_paid") {
+      pending += Number(payment.amount) - Number(payment.received);
+    }
+  }
+  const baseUnits = (decimal) => Math.round(decimal * 1_000_000).toString();
+  return {
+    request_count: own.length,
+    collected_base_units: baseUnits(collected),
+    pending_base_units: baseUnits(pending),
+  };
+}
+
 async function customers(req, res, url) {
   if (url.pathname === "/v1/customers") {
     if (req.method === "POST") {
@@ -1061,7 +1087,9 @@ async function customers(req, res, url) {
   if (!match) return false;
   const existing = store.customers.get(decodeURIComponent(match[1]));
   if (!existing) return fail(res, 404, "customer_not_found", "No such customer");
-  if (req.method === "GET") return send(res, 200, existing);
+  if (req.method === "GET") {
+    return send(res, 200, { ...existing, stats: customerStats(existing.id) });
+  }
   if (req.method === "PATCH") {
     let record;
     try {

@@ -2,6 +2,7 @@
 
 import type { Customer, Issuer, Payment } from "@payday/sdk";
 import { ArrowUpRight } from "lucide-react";
+import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -153,10 +154,6 @@ export function DashboardHome() {
       ) : view === "issued" && issued ? (
         <Issued
           payment={issued}
-          onAnother={() => {
-            setIssued(null);
-            show("compose");
-          }}
           onTrack={() => {
             setTracking(issued.id);
             show("overview");
@@ -229,12 +226,10 @@ function Overview({
 /** The link is the deliverable, so it is what the page hands over first. */
 function Issued({
   payment,
-  onAnother,
   onTrack,
   onDone,
 }: {
   payment: Payment;
-  onAnother: () => void;
   onTrack: () => void;
   onDone: () => void;
 }) {
@@ -265,8 +260,16 @@ function Issued({
         Deposit request issued<span className="text-brand-yellow">.</span>
       </h1>
       <p className="dash-rise dash-delay-3 mx-auto mt-3 max-w-[420px] text-[15px] text-muted">
-        <span className="tabular text-ink">
-          {formatDisplayAmount(payment.amount)} {payment.token.symbol}
+        <span className="tabular inline-flex items-center gap-1 text-ink">
+          {formatDisplayAmount(payment.amount)}
+          <Image
+            src="/payment-icons/usdc.svg"
+            width={64}
+            height={64}
+            alt=""
+            className="size-4 shrink-0 rounded-full"
+          />
+          {payment.token.symbol}
         </span>{" "}
         from {payment.bill_to.name}
       </p>
@@ -298,15 +301,10 @@ function Issued({
         >
           Track this request
         </button>
-        <Button variant="ghost" onClick={onAnother}>
-          Create another
-        </Button>
         <Button variant="ghost" onClick={onDone}>
           Done
         </Button>
       </div>
-
-      <p className="mt-8 font-mono text-[12px] text-faint">{payment.id}</p>
     </div>
   );
 }

@@ -128,8 +128,8 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
 
   // Billing: the customer came through the link, and the PDF is asked for here.
   await expect(page.getByLabel("Billed to")).toHaveValue(customerName);
-  await expect(page.getByLabel("Their email")).toHaveValue("ap@initrode.example");
-  await page.getByLabel("What it is for").fill("Design retainer");
+  await expect(page.getByLabel("Email")).toHaveValue("ap@initrode.example");
+  await page.getByLabel("Reason").fill("Design retainer");
   await page.getByLabel("Reference").fill("INV-2001");
   await page.getByLabel("Notes").fill("Net 15.");
 
@@ -184,7 +184,6 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await expect(page.getByRole("button", { name: /Design retainer/, expanded: true })).toBeVisible();
   await expect(page.getByText("Awaiting payment").first()).toBeVisible();
   await expect(page.getByRole("progressbar", { name: "Received" })).toBeVisible();
-  await expect(page.getByRole("list", { name: "Progress" })).toContainText("Issued");
   await expect(page.getByText("INV-2001").first()).toBeVisible();
   await expect(page.getByText("Net 15.")).toBeVisible();
   await expect(page.getByText("retainer.pdf")).toBeVisible();

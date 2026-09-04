@@ -371,6 +371,16 @@ export interface CreateCustomer { name: string; email?: string; details?: string
 export interface UpdateCustomer { name: string; email?: string | null; details?: string | null }
 export interface ListCustomersParams { starting_after?: string; limit?: number }
 export interface CustomerPage { customers: Customer[]; next_cursor: string | null }
+/** Base units, like a payment's own `amount_base_units` — scale for display. */
+export interface CustomerStats {
+  request_count: number;
+  collected_base_units: string;
+  pending_base_units: string;
+}
+/** Only `customers.get` carries stats; a list of many would mean one aggregate query per row. */
+export interface CustomerDetail extends Customer {
+  stats: CustomerStats;
+}
 
 /** A presigned slot to PUT one PDF into; `headers` must be sent verbatim with the PUT. */
 export interface AttachmentUpload {
@@ -655,7 +665,7 @@ export class PaydayClient {
   readonly customers = {
     create: (customer: CreateCustomer): Promise<Customer> =>
       this.request("/v1/customers", { method: "POST", body: customer }),
-    get: (id: string): Promise<Customer> =>
+    get: (id: string): Promise<CustomerDetail> =>
       this.request(`/v1/customers/${encodeURIComponent(id)}`),
     list: (params: ListCustomersParams = {}): Promise<CustomerPage> =>
       this.request(`/v1/customers${query(params)}`),

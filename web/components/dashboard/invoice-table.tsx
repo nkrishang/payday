@@ -1,11 +1,12 @@
 "use client";
 
 import type { Customer, Issuer, PaymentStatus } from "@payday/sdk";
-import { ChevronRight, Paperclip } from "lucide-react";
+import { ChevronRight, Paperclip, Plus } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 import { AddButton } from "@/components/ui/add-button";
 import { Amount } from "@/components/ui/amount";
-import { Button } from "@/components/ui/button";
+import { Button, buttonStyles } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { StatusDot } from "@/components/ui/status-dot";
@@ -47,13 +48,25 @@ export function InvoiceTable({
   customers,
   initialOpen,
   onCompose,
+  composeHref,
+  lockedCustomerId,
 }: {
   /** Resolves the issuer badge on each row; the request stores only the id. */
   identities: Issuer[];
   customers: Customer[];
   /** A request to open on arrival — what "Track this request" hands over. */
   initialOpen?: string | undefined;
-  onCompose: () => void;
+  /** Opens the composer in place, on the dashboard's own table. */
+  onCompose?: (() => void) | undefined;
+  /** Issues pre-billed to this customer instead, on a customer's own page. */
+  composeHref?: string | undefined;
+  /**
+   * Scopes the table to one customer's own requests, the way a customer's page
+   * embeds this table. The Bill-to filter would only ever narrow to the one
+   * customer it is already narrowed to, so it is dropped rather than shown
+   * disabled.
+   */
+  lockedCustomerId?: string | undefined;
 }) {
   const [openId, setOpenId] = useState<string | null>(initialOpen ?? null);
   // Rows that have been opened at least once keep their detail mounted, so
@@ -63,7 +76,7 @@ export function InvoiceTable({
   );
   const [status, setStatus] = useState<PaymentStatus | "">("");
   const [verification, setVerification] = useState<VerificationFilter | "">("");
-  const [customer, setCustomer] = useState("");
+  const [customer, setCustomer] = useState(lockedCustomerId ?? "");
   // Cursors of the pages visited, so "Previous" is a pop rather than a re-walk.
   const [cursors, setCursors] = useState<string[]>([]);
   const after = cursors[cursors.length - 1];
@@ -95,22 +108,32 @@ export function InvoiceTable({
     setFetched((current) => (current.has(id) ? current : new Set([...current, id])));
   };
 
-  const filtered = Boolean(status || verification || customer);
+  // The locked customer is not a filter the page applied; it is scope the
+  // caller already narrowed to, so it should not read "no matches" for a
+  // customer with no requests at all.
+  const filtered = Boolean(status || verification || (!lockedCustomerId && customer));
 
   return (
     <section aria-label="Deposit requests">
-      <div>
-        <h1 className="font-heading text-[30px] leading-tight font-medium tracking-[-0.045em]">
-          Deposit requests<span className="text-brand-yellow">.</span>
-        </h1>
-        <p className="mt-1.5 text-[13px] text-muted">
-          Every request issued, where its payment stands, and where its verification stands.
-        </p>
-      </div>
+      {lockedCustomerId ? null : (
+        <div>
+          <h1 className="font-heading text-[30px] leading-tight font-medium tracking-[-0.045em]">
+            Deposit requests<span className="text-brand-yellow">.</span>
+          </h1>
+          <p className="mt-1.5 text-[13px] text-muted">
+            Every request issued, where its payment stands, and where its verification stands.
+          </p>
+        </div>
+      )}
 
       {/* The control sits with the filters rather than beside the heading: both
           act on the table under them, and both end at its right edge. */}
-      <div className="mt-6 flex flex-wrap items-end justify-between gap-3">
+      <div
+        className={cn(
+          "flex flex-wrap items-end justify-between gap-3",
+          lockedCustomerId ? "" : "mt-6",
+        )}
+      >
         <div className="flex flex-wrap items-end gap-3">
           <MenuSelect
             label="Status"
@@ -150,16 +173,18 @@ export function InvoiceTable({
               })),
             ]}
           />
-          <MenuSelect
-            label="Bill to"
-            className="w-[190px]"
-            value={customer}
-            onChange={(next) => narrow(() => setCustomer(next))}
-            options={[
-              { value: "", label: "Any customer" },
-              ...customers.map((entry): MenuOption => ({ value: entry.id, label: entry.name })),
-            ]}
-          />
+          {lockedCustomerId ? null : (
+            <MenuSelect
+              label="Bill to"
+              className="w-[190px]"
+              value={customer}
+              onChange={(next) => narrow(() => setCustomer(next))}
+              options={[
+                { value: "", label: "Any customer" },
+                ...customers.map((entry): MenuOption => ({ value: entry.id, label: entry.name })),
+              ]}
+            />
+          )}
         </div>
         <div className="flex items-center gap-3">
           {page.loading ? (
@@ -167,7 +192,17 @@ export function InvoiceTable({
               Loading…
             </span>
           ) : null}
-          <AddButton label="New deposit request" onClick={onCompose} />
+          {onCompose ? (
+            <AddButton label="New deposit request" onClick={onCompose} />
+          ) : composeHref ? (
+            <Link
+              href={composeHref}
+              aria-label="New deposit request for this customer"
+              className={cn(buttonStyles({ size: "sm" }), "w-9 px-0")}
+            >
+              <Plus className="size-4" />
+            </Link>
+          ) : null}
         </div>
       </div>
 
@@ -177,33 +212,53 @@ export function InvoiceTable({
 
       <div className="mt-4 overflow-x-auto rounded-[16px] border border-line bg-surface">
         {/* Fixed rather than content-driven, so the headers sit over their own
-            column whatever the rows hold — including when there are none. */}
-        <table className="w-full min-w-[960px] table-fixed text-[13px]">
-          {/* Widths follow the longest thing each column really holds —
-              "Awaiting payment", a six-figure amount — rather than an even
-              split, which left the wide ones running into their neighbour.
-              Request is the widest because it also carries the disclosure
-              control, and anything it clips is a line away in the open row. */}
+            column whatever the rows hold — including when there are none.
+            Request is the widest because it also carries the disclosure
+            control, and anything it clips is a line away in the open row.
+            On a customer's own page, status, policy, verification, and when
+            it was created all read faster as a picture than as more columns,
+            and the open row already draws that picture — so that table stays
+            to what is scanned across many requests at once: what, who, and
+            how much. */}
+        <table className={cn("w-full table-fixed text-[13px]", !lockedCustomerId && "min-w-[960px]")}>
           <colgroup>
-            <col className="w-[17%]" />
-            <col className="w-[9%]" />
-            <col className="w-[11%]" />
-            <col className="w-[10%]" />
-            <col className="w-[16%]" />
-            <col className="w-[12%]" />
-            <col className="w-[15%]" />
-            <col className="w-[10%]" />
+            {lockedCustomerId ? (
+              <>
+                <col className="w-[54%]" />
+                <col className="w-[24%]" />
+                <col className="w-[22%]" />
+              </>
+            ) : (
+              <>
+                <col className="w-[17%]" />
+                <col className="w-[9%]" />
+                <col className="w-[11%]" />
+                <col className="w-[10%]" />
+                <col className="w-[16%]" />
+                <col className="w-[12%]" />
+                <col className="w-[15%]" />
+                <col className="w-[10%]" />
+              </>
+            )}
           </colgroup>
           <thead className="border-b border-line text-[11px] font-medium tracking-[0.1em] text-faint uppercase">
             <tr>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Request</th>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Issued by</th>
-              <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Bill to</th>
+              {lockedCustomerId ? null : (
+                <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Bill to</th>
+              )}
               <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Amount</th>
-              <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Status</th>
-              <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Policy</th>
-              <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Verification</th>
-              <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Created</th>
+              {lockedCustomerId ? null : (
+                <>
+                  <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Status</th>
+                  <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Policy</th>
+                  <th className="px-4 py-3 text-left font-medium whitespace-nowrap">
+                    Verification
+                  </th>
+                  <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Created</th>
+                </>
+              )}
             </tr>
           </thead>
           {invoices.map((invoice) => {
@@ -263,33 +318,39 @@ export function InvoiceTable({
                       <span className="text-faint">—</span>
                     )}
                   </td>
-                  <td className="truncate px-4 py-3 text-left">{invoice.bill_to_name}</td>
+                  {lockedCustomerId ? null : (
+                    <td className="truncate px-4 py-3 text-left">{invoice.bill_to_name}</td>
+                  )}
                   <td className="px-4 py-3 text-right">
                     <Amount value={invoice.amount} />
                   </td>
-                  <td className="px-4 py-3 text-left">
-                    <StatusBadge status={invoice.status} />
-                  </td>
-                  <td className="truncate px-4 py-3 text-left">
-                    {modeLabel(invoice.payer_policy_mode)}
-                  </td>
-                  <td className="px-4 py-3 text-left">
-                    <VerificationBadge
-                      mode={invoice.payer_policy_mode}
-                      completedAt={invoice.verification_completed_at}
-                      unsolicitedAt={invoice.likely_unsolicited_at}
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap text-muted">
-                    {formatShortDate(invoice.created_at)}
-                  </td>
+                  {lockedCustomerId ? null : (
+                    <>
+                      <td className="px-4 py-3 text-left">
+                        <StatusBadge status={invoice.status} />
+                      </td>
+                      <td className="truncate px-4 py-3 text-left">
+                        {modeLabel(invoice.payer_policy_mode)}
+                      </td>
+                      <td className="px-4 py-3 text-left">
+                        <VerificationBadge
+                          mode={invoice.payer_policy_mode}
+                          completedAt={invoice.verification_completed_at}
+                          unsolicitedAt={invoice.likely_unsolicited_at}
+                        />
+                      </td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap text-muted">
+                        {formatShortDate(invoice.created_at)}
+                      </td>
+                    </>
+                  )}
                 </tr>
 
                 {/* Kept in the tree so its height can animate, and inert while
                     closed so nothing inside is reachable by tab or by a
                     screen reader. */}
                 <tr>
-                  <td colSpan={8} className="p-0">
+                  <td colSpan={lockedCustomerId ? 3 : 8} className="p-0">
                     <div className="dash-expand" data-open={open}>
                       <div inert={!open} className="border-t border-line">
                         {fetched.has(invoice.id) ? <InvoiceRowDetail id={invoice.id} /> : null}
@@ -303,7 +364,7 @@ export function InvoiceTable({
           {!page.loading && invoices.length === 0 ? (
             <tbody>
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-muted">
+                <td colSpan={lockedCustomerId ? 3 : 8} className="px-4 py-10 text-center text-muted">
                   {filtered ? "No requests match these filters." : "No deposit requests yet."}
                 </td>
               </tr>

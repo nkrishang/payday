@@ -5,7 +5,7 @@ import { FileText, Loader2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { controlStyles, Problem } from "@/components/ui/field";
 import { fileProblem, uploadAttachment, type UploadState } from "@/lib/attachment-upload";
-import { formatBytes, truncateAddress } from "@/lib/format";
+import { formatBytes } from "@/lib/format";
 import { useMerchant } from "./session";
 
 /**
@@ -101,10 +101,7 @@ export function AttachmentUpload({
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium">{attachment.filename}</span>
           <span className="block text-[12px] text-faint">
-            Ready · {formatBytes(attachment.byte_length)} · SHA-256{" "}
-            <span className="font-mono" title={attachment.sha256}>
-              {truncateAddress(attachment.sha256, 10, 6)}
-            </span>
+            Ready · {formatBytes(attachment.byte_length)}
           </span>
         </span>
         <button
