@@ -74,6 +74,7 @@ fn enrich_response(
     response.address_explorer_url = state.payer.address_url(&response.address);
     response.metadata = row.metadata.0.clone();
     response.customer_id = row.customer_id.map(|id| id.to_string());
+    response.issuer_id = row.issuer_id.map(|id| id.to_string());
     // The signed download link is added by the attachment route.
     response.attachment = attachment.as_ref().and_then(DbAttachment::descriptor);
     response.verification_completed_at = row.verification_completed_at.map(|v| v.to_rfc3339());
@@ -237,6 +238,17 @@ pub async fn create_payment(
             "customer_id does not identify one of your customers",
         ));
     }
+    if let Some(issuer_id) = req.issuer_id
+        && state
+            .issuers
+            .get_for_account(account, issuer_id)
+            .await?
+            .is_none()
+    {
+        return Err(ApiError::invalid_request(
+            "issuer_id does not identify one of your issuer identities",
+        ));
+    }
     let attachment = match req.attachment_id {
         Some(attachment_id) => Some(
             state
@@ -271,6 +283,7 @@ pub async fn create_payment(
         reference: req.reference.as_deref(),
         metadata: &req.metadata,
         customer_id: req.customer_id,
+        issuer_id: req.issuer_id,
         payer_policy: &payer_policy,
         attachment_id: req.attachment_id,
         attachment: attachment_commitment.as_ref(),
@@ -370,6 +383,7 @@ pub async fn create_payment(
         expiration.intent.clone(),
     );
     input.customer_id = req.customer_id;
+    input.issuer_id = req.issuer_id;
     input.metadata = req.metadata.clone();
 
     let issued = match state.repo.insert_issued(&input, req.attachment_id).await {
@@ -526,9 +540,18 @@ pub struct GetQuery {
 pub struct ListQuery {
     status: Option<String>,
     reference: Option<String>,
+    customer_id: Option<Uuid>,
+    issuer_id: Option<Uuid>,
+    /// Verification is a separate fact from the payment's status, so it is a
+    /// separate filter: `not_required`, `pending`, `verified`, or
+    /// `likely_unsolicited`.
+    verification: Option<String>,
     limit: Option<u32>,
     starting_after: Option<String>,
 }
+
+const VERIFICATION_FILTERS: [&str; 4] =
+    ["not_required", "pending", "verified", "likely_unsolicited"];
 
 pub async fn list_payments(
     State(state): State<AppState>,
@@ -541,6 +564,11 @@ pub async fn list_payments(
         .map(str::parse::<PaymentStatus>)
         .transpose()
         .map_err(|_| ApiError::invalid_request("unknown payment status"))?;
+    if let Some(verification) = query.verification.as_deref()
+        && !VERIFICATION_FILTERS.contains(&verification)
+    {
+        return Err(ApiError::invalid_request("unknown verification filter"));
+    }
     let limit = query.limit.unwrap_or(20);
     if !(1..=100).contains(&limit) {
         return Err(ApiError::invalid_request("limit must be between 1 and 100"));
@@ -567,6 +595,9 @@ pub async fn list_payments(
             account,
             status.map(PaymentStatus::as_str),
             query.reference.as_deref(),
+            query.customer_id,
+            query.issuer_id,
+            query.verification.as_deref(),
             starting_after,
             limit,
         )
@@ -592,6 +623,7 @@ pub async fn list_payments(
                 received: response.received,
                 payer_policy_mode: response.payer_policy.mode(),
                 customer_id: row.customer_id.map(|id| id.to_string()),
+                issuer_id: row.issuer_id.map(|id| id.to_string()),
                 has_attachment,
                 verification_completed_at: row.verification_completed_at.map(|v| v.to_rfc3339()),
                 likely_unsolicited_at: row.likely_unsolicited_at.map(|v| v.to_rfc3339()),

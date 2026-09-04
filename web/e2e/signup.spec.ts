@@ -32,8 +32,8 @@ test("the hero opens a sign-up dialog that signs a new merchant in", async ({ pa
   await dialog.getByLabel("One-time code").fill(OTP);
   await dialog.getByRole("button", { name: "Continue" }).click();
 
-  await expect(page).toHaveURL(/\/dashboard\/invoices$/);
-  await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(page.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
 
   // The token is the session: this tab only, never localStorage.
   const storage = await page.evaluate(() => ({
@@ -63,7 +63,7 @@ test("a wrong code is refused without losing the dialog, and the digits stay sel
   await page.keyboard.type(OTP);
   await expect(dialog.getByLabel("One-time code")).toHaveValue(OTP);
   await dialog.getByRole("button", { name: "Continue" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
 });
 
 test("a new code is offered only once the one in flight has expired", async ({ page }) => {
@@ -94,7 +94,7 @@ test("a new code is offered only once the one in flight has expired", async ({ p
 
   await dialog.getByLabel("One-time code").fill(OTP);
   await dialog.getByRole("button", { name: "Continue" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
 });
 
 test("closing the dialog abandons the attempt", async ({ page }) => {
@@ -125,6 +125,6 @@ test("a visitor who still holds a session goes straight to the dashboard", async
   });
 
   await page.getByRole("button", { name: "Start Building" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });

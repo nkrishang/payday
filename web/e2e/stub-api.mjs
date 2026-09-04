@@ -186,6 +186,70 @@ function verifyStatus(payment, session) {
 }
 
 /** A gated invoice before verification: only the issuer, heading, and policy leave the API. */
+/**
+ * A merchant-issued payment as its payer sees it: everything withheld while
+ * the policy is gated, since this projection carries no payer session.
+ */
+function projectForPayer(payment) {
+  const mode = payment.payer_policy.mode;
+  const gated = GATED.has(mode);
+  const shared = {
+    id: payment.id,
+    issuer_name: payment.issuer.name,
+    heading: payment.heading,
+    payer_policy: { mode, expected_email_hint: gated ? "a****@e***.com" : null },
+    requirements: requirements(mode, Boolean(payment.verification_completed_at)),
+    status: payment.status,
+    payable: payment.status === "awaiting_payment" || payment.status === "partially_paid",
+    expires_at: payment.expires_at,
+    server_timestamp: String(Math.floor(Date.now() / 1000)),
+    settlement_tx_hash: payment.settlement_tx_hash ?? null,
+    settlement_explorer_url: payment.settlement_explorer_url ?? null,
+    payer_message: null,
+  };
+  if (gated && !payment.verification_completed_at) {
+    return {
+      ...shared,
+      content_unlocked: false,
+      chain: null,
+      token: null,
+      amount: null,
+      amount_base_units: null,
+      received: null,
+      received_base_units: null,
+      remaining: null,
+      remaining_base_units: null,
+      address: null,
+      address_explorer_url: null,
+      payment_uri: null,
+      invoice: null,
+    };
+  }
+  return {
+    ...shared,
+    content_unlocked: true,
+    chain: payment.chain,
+    token: payment.token,
+    amount: payment.amount,
+    amount_base_units: payment.amount_base_units,
+    received: payment.received,
+    received_base_units: payment.received_base_units,
+    remaining: payment.remaining,
+    remaining_base_units: payment.remaining_base_units,
+    address: payment.address,
+    address_explorer_url: payment.address_explorer_url ?? null,
+    payment_uri: `ethereum:${payment.token.address}@${payment.chain.id}/transfer?address=${payment.address}&uint256=${payment.remaining_base_units}`,
+    invoice: {
+      amount: payment.amount,
+      amount_base_units: payment.amount_base_units,
+      bill_to: payment.bill_to,
+      notes: payment.notes,
+      reference: payment.reference,
+      attachment: payment.attachment,
+    },
+  };
+}
+
 function locked(mode, facts = requirements(mode)) {
   return base({
     heading: "Consulting — August",
@@ -306,8 +370,12 @@ function scenarioFor(id) {
 /* Merchant state                                                            */
 /* ------------------------------------------------------------------------ */
 
+const VERIFICATION_FILTERS = ["not_required", "pending", "verified", "likely_unsolicited"];
+
 const store = {
   customers: new Map(),
+  /** account key -> { issuers, payoutAddresses, issuerAddresses } */
+  issuerWorlds: new Map(),
   /** id -> { id, filename, bytes, finalizeCalls, status, descriptor } */
   attachments: new Map(),
   /** id -> full PaymentResponse */
@@ -340,7 +408,11 @@ function merchantPayment(input, extra = {}) {
   const id = extra.id ?? `pay_${randomUUID()}`;
   const created = extra.created_at ?? new Date().toISOString();
   const amountUnits = toBaseUnits(input.amount);
-  const expiresIn = input.expires_in ?? 86_400;
+  // A chosen moment wins over a duration, as it does at the API; the response
+  // still reports the lifetime it works out to.
+  const expiresIn = input.expires_at
+    ? Math.round((Date.parse(input.expires_at) - Date.parse(created)) / 1000)
+    : (input.expires_in ?? 86_400);
   const receivedUnits = extra.received_base_units ?? "0";
   const remainingUnits = (
     BigInt(amountUnits) > BigInt(receivedUnits) ? BigInt(amountUnits) - BigInt(receivedUnits) : 0n
@@ -379,6 +451,7 @@ function merchantPayment(input, extra = {}) {
     bill_to: input.bill_to,
     notes: input.notes ?? null,
     heading: input.heading ?? null,
+    issuer_id: input.issuer_id ?? null,
     reference: input.reference ?? null,
     customer_id: input.customer_id ?? null,
     payer_policy: input.payer_policy,
@@ -444,6 +517,7 @@ function summary(payment) {
     id: payment.id,
     heading: payment.heading,
     bill_to_name: payment.bill_to.name,
+    issuer_id: payment.issuer_id ?? null,
     reference: payment.reference,
     metadata: payment.metadata,
     payer_policy_mode: payment.payer_policy.mode,
@@ -672,7 +746,9 @@ seed();
 
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, PATCH, PUT, OPTIONS",
+  // The same list gatewayd allows the dashboard origin, so a method the real
+  // API would refuse at the preflight is not silently fine here.
+  "access-control-allow-methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
   "access-control-allow-headers":
     "authorization, content-type, accept, idempotency-key, payday-payer-session, x-amz-tagging",
   "access-control-max-age": "600",
@@ -722,7 +798,23 @@ async function readJson(req) {
 }
 
 function authorized(req) {
-  return req.headers.authorization === `Bearer ${DASHBOARD_TOKEN}`;
+  return String(req.headers.authorization ?? "").startsWith(`Bearer ${DASHBOARD_TOKEN}`);
+}
+
+/** Which merchant a request speaks for; the bare token is one account too. */
+function accountKey(req) {
+  return String(req.headers.authorization ?? "").slice(`Bearer ${DASHBOARD_TOKEN}`.length);
+}
+
+/** That account's issuer world, created on first sight. */
+function issuerWorld(req) {
+  const key = accountKey(req);
+  let world = store.issuerWorlds.get(key);
+  if (!world) {
+    world = { issuers: new Map(), payoutAddresses: new Map(), issuerAddresses: new Map() };
+    store.issuerWorlds.set(key, world);
+  }
+  return world;
 }
 
 function paginate(items, params) {
@@ -772,10 +864,16 @@ async function payer(req, res, url) {
 
   const id = decodeURIComponent(match[1]);
   const scenario = scenarioFor(id);
-  if (!scenario) return fail(res, 401, "invalid_payment_link", "Payment link is not valid");
+  // The scenarios drive the checkout specs; anything else the merchant side
+  // issued is projected from the store, as the real payer route serves any
+  // payment rather than a fixed cast.
+  const issued = scenario ? null : store.payments.get(id);
+  if (!scenario && !issued) {
+    return fail(res, 401, "invalid_payment_link", "Payment link is not valid");
+  }
 
   const session = sessionFor(req, id);
-  const payment = { ...scenario(id, session), id };
+  const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued), id };
   const mode = payment.payer_policy.mode;
 
   if (match[2] === "/verify/email/start") {
@@ -876,8 +974,11 @@ async function issuer(req, res, url) {
         error_description: "Wrong email or verification code.",
       });
     }
+    // The token carries the mailbox it was minted for, so issuer identities
+    // are per-merchant here as they are in the API: specs that need an empty
+    // account and specs that need a set-up one can run side by side.
     return send(res, 200, {
-      access_token: DASHBOARD_TOKEN,
+      access_token: `${DASHBOARD_TOKEN}.${String(body.username ?? "").replace(/[^a-z0-9]+/gi, "-")}`,
       token_type: "Bearer",
       expires_in: 300,
       scope: "openid",
@@ -974,6 +1075,182 @@ async function customers(req, res, url) {
   return fail(res, 405, "method_not_allowed", "method not allowed");
 }
 
+/**
+ * Issuer identities and payout addresses. The emailed code is the same fixed
+ * OTP the issuer half of this stub accepts, and the cooldown is not modelled:
+ * the specs exercise the flow, not the rate limit.
+ */
+/** One name per account, however it is cased — the rule the column enforces. */
+function nameTaken(world, name, exceptId) {
+  const wanted = name.trim().toLowerCase();
+  return [...world.issuers.values()].some(
+    (row) => row.id !== exceptId && row.name.trim().toLowerCase() === wanted,
+  );
+}
+
+async function issuerIdentities(req, res, url) {
+  const world = issuerWorld(req);
+  const shape = (row) => ({
+    ...row,
+    payout_addresses: (world.issuerAddresses.get(row.id) ?? [])
+      .map((id) => world.payoutAddresses.get(id))
+      .filter(Boolean),
+  });
+
+  if (url.pathname === "/v1/issuers") {
+    if (req.method === "POST") {
+      const body = await readJson(req);
+      const name = String(body.name ?? "").trim();
+      const email = String(body.contact_email ?? "")
+        .trim()
+        .toLowerCase();
+      if (!name) return fail(res, 400, "invalid_request", "name is required");
+      if (!email.includes("@"))
+        return fail(res, 400, "invalid_request", "contact_email is required");
+      const now = new Date().toISOString();
+      const row = {
+        id: randomUUID(),
+        name,
+        contact_email: email,
+        details: body.details ?? null,
+        email_verified: false,
+        email_verified_at: null,
+        created_at: now,
+        updated_at: now,
+      };
+      world.issuers.set(row.id, row);
+      return send(res, 201, shape(row));
+    }
+    if (req.method === "GET") {
+      const all = [...world.issuers.values()].sort((a, b) =>
+        b.created_at.localeCompare(a.created_at),
+      );
+      return send(res, 200, { issuers: all.map(shape), next_cursor: null });
+    }
+    return fail(res, 405, "method_not_allowed", "method not allowed");
+  }
+
+  if (url.pathname === "/v1/payout-addresses") {
+    if (req.method === "POST") {
+      const body = await readJson(req);
+      const address = String(body.address ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+        return fail(res, 400, "invalid_request", "invalid address");
+      }
+      const existing = [...world.payoutAddresses.values()].find(
+        (row) => row.address.toLowerCase() === address.toLowerCase(),
+      );
+      const label = String(body.label ?? "").trim();
+      if (label && !/^[A-Za-z0-9][A-Za-z0-9 ._'&()-]{0,19}$/.test(label)) {
+        return fail(res, 400, "invalid_request", "invalid label");
+      }
+      if (existing) return send(res, 201, existing);
+      const row = {
+        id: randomUUID(),
+        address,
+        label: label || null,
+        created_at: new Date().toISOString(),
+      };
+      world.payoutAddresses.set(row.id, row);
+      return send(res, 201, row);
+    }
+    if (req.method === "GET") {
+      return send(res, 200, { payout_addresses: [...world.payoutAddresses.values()] });
+    }
+    return fail(res, 405, "method_not_allowed", "method not allowed");
+  }
+
+  const address = url.pathname.match(/^\/v1\/payout-addresses\/([^/]+)$/);
+  if (address) {
+    if (req.method !== "DELETE") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const id = decodeURIComponent(address[1]);
+    if (!world.payoutAddresses.delete(id)) {
+      return fail(res, 404, "payout_address_not_found", "No such payout address");
+    }
+    for (const [issuerId, ids] of world.issuerAddresses) {
+      world.issuerAddresses.set(
+        issuerId,
+        ids.filter((entry) => entry !== id),
+      );
+    }
+    res.writeHead(204, CORS);
+    return res.end();
+  }
+
+  const match = url.pathname.match(
+    /^\/v1\/issuers\/([^/]+)(\/verify\/email\/start|\/verify\/email\/confirm|\/payout-addresses)?$/,
+  );
+  if (!match) return false;
+  const row = world.issuers.get(decodeURIComponent(match[1]));
+  if (!row) return fail(res, 404, "issuer_not_found", "No such issuer identity");
+
+  if (match[2] === "/verify/email/start") {
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    if (row.email_verified) {
+      return fail(res, 409, "issuer_email_already_verified", "Already verified");
+    }
+    return send(res, 202, {
+      contact_email: row.contact_email,
+      resend_available_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+  }
+
+  if (match[2] === "/verify/email/confirm") {
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const body = await readJson(req);
+    if (String(body.otp ?? "").trim() !== OTP) {
+      return fail(res, 401, "otp_invalid", "The code was not accepted");
+    }
+    row.email_verified = true;
+    row.email_verified_at = new Date().toISOString();
+    row.updated_at = row.email_verified_at;
+    return send(res, 200, shape(row));
+  }
+
+  if (match[2] === "/payout-addresses") {
+    if (req.method !== "PUT") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const body = await readJson(req);
+    const ids = Array.isArray(body.payout_address_ids) ? body.payout_address_ids : [];
+    for (const id of ids) {
+      if (!world.payoutAddresses.has(id)) {
+        return fail(res, 404, "payout_address_not_found", "No such payout address");
+      }
+    }
+    world.issuerAddresses.set(row.id, ids);
+    return send(res, 200, shape(row));
+  }
+
+  if (req.method === "GET") return send(res, 200, shape(row));
+  if (req.method === "PATCH") {
+    const body = await readJson(req);
+    const email = String(body.contact_email ?? "")
+      .trim()
+      .toLowerCase();
+    if (!String(body.name ?? "").trim() || !email.includes("@")) {
+      return fail(res, 400, "invalid_request", "name and contact_email are required");
+    }
+    if (nameTaken(world, String(body.name), row.id)) {
+      return fail(res, 409, "issuer_name_taken", "Another identity already uses this name");
+    }
+    if (email !== row.contact_email) {
+      row.email_verified = false;
+      row.email_verified_at = null;
+    }
+    row.name = String(body.name).trim();
+    row.contact_email = email;
+    row.details = body.details ?? null;
+    row.updated_at = new Date().toISOString();
+    return send(res, 200, shape(row));
+  }
+  if (req.method === "DELETE") {
+    world.issuers.delete(row.id);
+    world.issuerAddresses.delete(row.id);
+    res.writeHead(204, CORS);
+    return res.end();
+  }
+  return fail(res, 405, "method_not_allowed", "method not allowed");
+}
+
 async function attachments(req, res, url) {
   if (url.pathname === "/v1/attachments") {
     if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
@@ -1058,6 +1335,14 @@ function validateCreate(body) {
   }
   if (body.customer_id !== undefined && !store.customers.has(body.customer_id))
     return "customer_id is not yours";
+  if (body.expires_at !== undefined) {
+    if (body.expires_in !== undefined) return "choose only one of expires_in or expires_at";
+    const at = Date.parse(body.expires_at);
+    if (Number.isNaN(at)) return "expires_at must be an RFC 3339 timestamp";
+    const lead = at - Date.now();
+    if (lead < 10 * 60_000) return "expiry must be at least 10 minutes from now";
+    if (lead > 366 * 24 * 3600_000) return "expiry must be no more than 366 days from now";
+  }
   return null;
 }
 
@@ -1084,8 +1369,33 @@ async function payments(req, res, url) {
     }
     if (req.method === "GET") {
       const status = url.searchParams.get("status");
+      const customer = url.searchParams.get("customer_id");
+      const issuer = url.searchParams.get("issuer_id");
+      const verification = url.searchParams.get("verification");
+      if (verification && !VERIFICATION_FILTERS.includes(verification)) {
+        return fail(res, 400, "invalid_request", "unknown verification filter");
+      }
+      const verified = (payment) => {
+        switch (verification) {
+          case "not_required":
+            return payment.payer_policy.mode === "permissionless";
+          case "pending":
+            return (
+              payment.payer_policy.mode !== "permissionless" && !payment.verification_completed_at
+            );
+          case "verified":
+            return Boolean(payment.verification_completed_at);
+          case "likely_unsolicited":
+            return Boolean(payment.likely_unsolicited_at);
+          default:
+            return true;
+        }
+      };
       const all = [...store.payments.values()]
         .filter((payment) => !status || payment.status === status)
+        .filter((payment) => !customer || payment.customer_id === customer)
+        .filter((payment) => !issuer || payment.issuer_id === issuer)
+        .filter(verified)
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
       const { page, next } = paginate(all, url.searchParams);
       return send(res, 200, { payments: page.map(summary), next_cursor: next });
@@ -1163,6 +1473,7 @@ createServer(async (req, res) => {
     if (url.pathname.startsWith("/v1/")) {
       if (!authorized(req)) return fail(res, 401, "unauthorized", "Missing or invalid credential");
       if ((await customers(req, res, url)) !== false) return;
+      if ((await issuerIdentities(req, res, url)) !== false) return;
       if ((await attachments(req, res, url)) !== false) return;
       if ((await payments(req, res, url)) !== false) return;
     }

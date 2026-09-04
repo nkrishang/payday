@@ -43,10 +43,10 @@ export function CustomerDetail({ id }: { id: string }) {
           </p>
         </div>
         <Link
-          href={`/dashboard/invoices/new?customer=${encodeURIComponent(record.id)}`}
+          href={`/dashboard?customer=${encodeURIComponent(record.id)}`}
           className={buttonStyles({ size: "sm" })}
         >
-          New invoice for this customer
+          New deposit request for this customer
         </Link>
       </div>
 

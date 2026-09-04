@@ -20,7 +20,14 @@ import { useMerchant, useResource } from "./session";
  * own, every attempt with the provider's reference and risk categories, the
  * reviewer's outcome, and the two things that can happen next. The
  * provider's extracted identity is never here, because the API never sends it.
+ *
+ * Renders nothing — rule included — when it has nothing to add to the verdict
+ * beside it, which is the ordinary case for a policy that only checks a
+ * mailbox and has been answered.
  */
+
+/** The rule that separates this from the verdict above it. */
+const RULE = "mt-4 border-t border-line pt-4";
 export function VerificationActivity({ paymentId }: { paymentId: string }) {
   const { client } = useMerchant();
   const [version, setVersion] = useState(0);
@@ -32,7 +39,7 @@ export function VerificationActivity({ paymentId }: { paymentId: string }) {
 
   if (detail.error) {
     return (
-      <div className="grid gap-3">
+      <div className={`${RULE} grid gap-3`}>
         <Problem>{detail.error}</Problem>
         <div>
           <Button variant="secondary" size="sm" onClick={detail.reload}>
@@ -44,7 +51,7 @@ export function VerificationActivity({ paymentId }: { paymentId: string }) {
   }
   if (!detail.data) {
     return (
-      <p role="status" className="text-[13px] text-faint">
+      <p role="status" className={`${RULE} text-[13px] text-faint`}>
         Loading verification…
       </p>
     );
@@ -69,9 +76,19 @@ export function VerificationActivity({ paymentId }: { paymentId: string }) {
     }
   };
 
+  // A policy that only checks a mailbox has exactly one fact, and the verdict
+  // above already is that fact. Breaking it out repeats the same word twice
+  // under two labels; only a policy with several facts has anything to break.
+  const several = factsInPlay(data).length > 1;
+  // With one fact, no attempt recorded, and nothing offered to do next, every
+  // row here would restate the verdict above.
+  if (!several && data.attempts.length === 0 && !data.retry_available && !data.review_available) {
+    return null;
+  }
+
   return (
-    <div className="grid gap-4" aria-label="Verification activity">
-      <Facts detail={data} />
+    <div className={`${RULE} grid gap-4`} aria-label="Verification activity">
+      {several ? <Facts detail={data} /> : null}
       {data.attempts.length > 0 ? (
         <ol className="grid gap-2" aria-label="Verification attempts">
           {data.attempts.map((attempt) => (
@@ -80,9 +97,10 @@ export function VerificationActivity({ paymentId }: { paymentId: string }) {
             </li>
           ))}
         </ol>
-      ) : (
+      ) : several && !data.facts.complete ? (
+        // Only where there was something to watch and it has not happened.
         <p className="text-[13px] text-muted">The payer has not started verifying yet.</p>
-      )}
+      ) : null}
       {data.retry_available ? (
         <p className="text-[12px] leading-relaxed text-faint">
           The payer may try the identity check once more from the payment page.
@@ -122,10 +140,15 @@ const FACT_STATUS: Record<
   declined: { label: "Declined", tone: "warning" },
 };
 
-function Facts({ detail }: { detail: VerificationDetail }) {
-  const facts = (Object.keys(FACT_LABEL) as Array<keyof typeof FACT_LABEL>).filter(
+/** The facts this policy actually asks for, in the order they are checked. */
+function factsInPlay(detail: VerificationDetail): Array<keyof typeof FACT_LABEL> {
+  return (Object.keys(FACT_LABEL) as Array<keyof typeof FACT_LABEL>).filter(
     (key) => detail.facts[key] !== "not_required",
   );
+}
+
+function Facts({ detail }: { detail: VerificationDetail }) {
+  const facts = factsInPlay(detail);
   return (
     <dl
       className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]"

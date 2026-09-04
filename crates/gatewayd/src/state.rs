@@ -2,7 +2,8 @@ use alloy_primitives::Address;
 use gateway_core::{ChainId, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
-    PayerSessionRepository, ProofRepository, VerificationRepository, WebhookRepository,
+    IssuerRepository, PayerSessionRepository, ProofRepository, VerificationRepository,
+    WebhookRepository,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -24,6 +25,7 @@ pub struct AppState {
     pub accounts: AccountRepository,
     pub attachments: AttachmentRepository,
     pub customers: CustomerRepository,
+    pub issuers: IssuerRepository,
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
     pub verifications: VerificationRepository,
@@ -78,6 +80,7 @@ impl AppState {
             webhooks: WebhookRepository::new(pool.clone()),
             attachments: AttachmentRepository::new(pool.clone()),
             customers: CustomerRepository::new(pool.clone()),
+            issuers: IssuerRepository::new(pool.clone()),
             proofs: ProofRepository::new(pool.clone()),
             payer_sessions: PayerSessionRepository::new(pool.clone()),
             verifications: VerificationRepository::new(pool),

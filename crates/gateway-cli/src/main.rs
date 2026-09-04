@@ -733,6 +733,7 @@ fn quick_request(args: &CreateArgs) -> Result<CreatePaymentRequest, CliError> {
         issuer: party(issuer),
         bill_to: party(bill_to),
         customer_id: None,
+        issuer_id: None,
         notes: None,
         heading: args.heading.clone(),
         reference: args.reference.clone(),

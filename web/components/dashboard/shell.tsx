@@ -1,86 +1,90 @@
 "use client";
 
-import { LogOut } from "lucide-react";
+import { ArrowLeft, LogOut } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { Logo } from "@/components/ui/logo";
-import { cn } from "@/lib/cn";
-import { LOGIN_PATH, MerchantGate, useMerchant } from "./session";
-
-const NAV = [
-  { href: "/dashboard/invoices", label: "Invoices" },
-  { href: "/dashboard/customers", label: "Customers" },
-] as const;
+import { HOME_PATH, MerchantGate, useMerchant } from "./session";
 
 /**
- * The frame around every dashboard page. The login page renders inside it
- * without the session gate; everything else waits for a merchant.
+ * The frame around every dashboard page.
+ *
+ * `dash` carries the landing page's palette and type (globals.css), and the
+ * header is the landing page's own: the same wordmark at the same size, the
+ * same Docs and Pricing links, on the same 76px rule. There are no section
+ * tabs — everything a merchant does day to day is on `/dashboard` itself, and
+ * the pages that remain are details of one record, which the back link and the
+ * wordmark both return from.
  */
 export function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
-  if (pathname === LOGIN_PATH) {
-    return (
-      <div className="flex min-h-dvh flex-col bg-canvas">
-        <header className="px-5 py-5 sm:px-8">
-          <Link href="/" className="inline-block rounded-md">
-            <Logo className="h-[18px]" />
-          </Link>
-        </header>
-        <main className="flex flex-1 items-start justify-center px-4 pb-16 sm:px-6">
+  return (
+    <div className="dash min-h-dvh bg-canvas">
+      <MerchantGate>
+        <Header />
+        <main className="mx-auto max-w-[1120px] px-5 py-8 sm:px-8">
+          {pathname === HOME_PATH ? null : (
+            <Link
+              href={HOME_PATH}
+              className="mb-6 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted transition-colors hover:text-ink"
+            >
+              <ArrowLeft className="size-3.5" />
+              Dashboard
+            </Link>
+          )}
           {children}
         </main>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-dvh bg-canvas">
-      <MerchantGate>
-        <Header pathname={pathname} />
-        <main className="mx-auto max-w-5xl px-5 py-8 sm:px-8">{children}</main>
       </MerchantGate>
     </div>
   );
 }
 
-function Header({ pathname }: { pathname: string }) {
+function Header() {
   const { signOut } = useMerchant();
 
   return (
-    <header className="border-b border-line bg-surface">
-      <nav className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-5 sm:px-8">
-        <Link href="/dashboard/invoices" className="rounded-md">
-          <Logo className="h-[18px]" />
+    <header className="border-b border-brand-grey/20">
+      <nav className="mx-auto flex h-[76px] max-w-[1240px] items-center justify-between px-5 sm:px-8">
+        {/* Named by the wordmark's own alt text, so it is not a second "Dashboard". */}
+        <Link href={HOME_PATH} className="rounded-md">
+          <Image
+            src="/payday-logo-full.svg"
+            width={3600}
+            height={1000}
+            priority
+            alt="Payday"
+            className="h-auto w-[116px] sm:w-[140px]"
+          />
         </Link>
-        <ul className="flex flex-1 items-center gap-1">
-          {NAV.map((item) => {
-            const active = pathname.startsWith(item.href);
-            return (
-              <li key={item.href}>
-                <Link
-                  href={item.href}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
-                    active ? "bg-raised text-ink" : "text-muted hover:text-ink",
-                  )}
-                >
-                  {item.label}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-        <button
-          type="button"
-          onClick={signOut}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-muted transition-colors hover:bg-raised hover:text-ink"
-        >
-          <LogOut className="size-3.5" />
-          Sign out
-        </button>
+
+        <div className="flex items-center text-[15px] text-brand-grey sm:text-[16px]">
+          {/* The landing page's two links keep its spacing; signing out is not
+              one of them, so a rule and a wider gap set it apart. */}
+          <div className="flex items-center gap-6 sm:gap-9">
+            <a
+              href="https://github.com/nkrishang/payday/tree/main/docs"
+              className="transition-colors hover:text-brand-white"
+            >
+              Docs
+            </a>
+            <Link href="/#pricing" className="transition-colors hover:text-brand-white">
+              Pricing
+            </Link>
+          </div>
+
+          <span aria-hidden="true" className="mx-5 h-5 w-px bg-brand-grey/25 sm:mx-7" />
+
+          <button
+            type="button"
+            onClick={signOut}
+            className="inline-flex items-center gap-2 transition-colors hover:text-brand-white"
+          >
+            <LogOut aria-hidden="true" className="size-4" />
+            Sign out
+          </button>
+        </div>
       </nav>
     </header>
   );

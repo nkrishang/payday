@@ -331,6 +331,10 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
 - `PAYDAY_DEV_IDENTITY_ISSUER` — token issuer; must exactly match
   `PAYDAY_AUTH0_ISSUER`
+- `PAYDAY_DEV_IDENTITY_OTP` — the code the development provider emails for
+  every sign-in, instead of a random one it only prints to its log
+  (`DEV IDENTITY OTP <email> <code>`). Local convenience only; the provider
+  refuses to bind anything but loopback, and Auth0 issues the real codes
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`

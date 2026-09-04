@@ -1339,3 +1339,298 @@
     display: none;
   }
 }
+
+/*
+ * The dashboard, in the landing page's clothes.
+ *
+ * Payday is a dark product on either colour scheme — the marketing page says
+ * so, and a merchant arriving from "Start Building" should not watch the
+ * ground flip to white. Rather than restyle every dashboard page, `.dash`
+ * redefines the theme tokens the pages already read, so a table, a form
+ * control, and a status badge all follow. Both halves of each token are
+ * restated: Tailwind's `--color-*` resolve `var(--*)` where they are declared,
+ * so overriding the raw value alone would never reach `bg-surface`.
+ */
+.dash {
+  color-scheme: dark;
+  /* The hero's wave is drawn 160px wider than the page on each side and drifts
+     sideways, which is a decoration, not content: clipped rather than allowed
+     to put a horizontal scrollbar under the whole dashboard. `clip` and not
+     `hidden`, so the composer's sticky preview still sticks. */
+  overflow-x: clip;
+  /* `body` resolves `color: var(--ink)` outside this block, so on a light
+     system it would keep the light theme's near-black for everything that
+     inherits — headings, radio labels, table cells — over a ground this page
+     forces dark regardless. The colour is restated here, where `--ink` is the
+     dark one. */
+  color: var(--ink);
+  --canvas: #070707;
+  --surface: #121311;
+  --raised: #1b1c19;
+  --ink: #f6f2ea;
+  --muted: #b0afa9;
+  --faint: #8b8a84;
+  --line: #232420;
+  --line-strong: #35362f;
+  /* Primary actions are the hero's green button, not an inverted slab. */
+  --inverse: #a3d277;
+  --inverse-ink: #0f0f0e;
+  --success: #8fd6a3;
+  --warning: #f5c451;
+  --danger: #f87171;
+  --logo-accent: #a3d277;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-inverse: var(--inverse);
+  --color-inverse-ink: var(--inverse-ink);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  position: relative;
+  isolation: isolate;
+  font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* The page's own ground, so an overscroll bounce is not a white flash. */
+body:has(.dash) {
+  background-color: #070707;
+}
+
+.dash .font-heading {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+.dash :focus-visible {
+  outline-color: #a3d277;
+}
+
+/* The landing page's paper grain, over the whole surface. */
+.dash::after {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("/paper-grain.svg");
+  background-size: 180px 180px;
+  content: "";
+  mix-blend-mode: soft-light;
+  opacity: 0.09;
+}
+
+/*
+ * The empty state's ground. The same dithered wave that sits behind the hero,
+ * faded out well before the content starts so nothing reads through it.
+ */
+.dash-hero {
+  position: relative;
+}
+
+.dash-hero::before {
+  position: absolute;
+  z-index: -1;
+  top: -180px;
+  right: -160px;
+  left: -160px;
+  height: 520px;
+  pointer-events: none;
+  background-image: url("/dither-waves.svg");
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: cover;
+  content: "";
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 52%, transparent 86%);
+  mask-image: linear-gradient(to bottom, black 0%, black 52%, transparent 86%);
+  opacity: 0.5;
+  animation: dither-wave-drift 18s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+/*
+ * Entrances. One view leaves before the next arrives, which is why the leave
+ * is half the enter's length: the swap should read as a single movement.
+ */
+.dash-enter {
+  animation: dash-enter 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dash-leave {
+  animation: dash-leave 140ms ease-in both;
+}
+
+.dash-rise {
+  animation: dash-rise 460ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dash-delay-1 {
+  animation-delay: 60ms;
+}
+
+.dash-delay-2 {
+  animation-delay: 120ms;
+}
+
+.dash-delay-3 {
+  animation-delay: 180ms;
+}
+
+.dash-delay-4 {
+  animation-delay: 240ms;
+}
+
+.dash-delay-5 {
+  animation-delay: 300ms;
+}
+
+/* A step arrives from the side it was reached from. */
+.dash-step {
+  animation: dash-step-forward 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dash-step[data-direction="back"] {
+  animation-name: dash-step-back;
+}
+
+/* Rows inside a step, so a form assembles rather than appearing at once. */
+.dash-stagger > * {
+  animation: dash-rise 380ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dash-stagger > *:nth-child(1) {
+  animation-delay: 40ms;
+}
+
+.dash-stagger > *:nth-child(2) {
+  animation-delay: 90ms;
+}
+
+.dash-stagger > *:nth-child(3) {
+  animation-delay: 140ms;
+}
+
+.dash-stagger > *:nth-child(4) {
+  animation-delay: 190ms;
+}
+
+.dash-stagger > *:nth-child(5) {
+  animation-delay: 240ms;
+}
+
+/* The issued check draws itself once, after the panel has settled. */
+.dash-check-ring {
+  stroke-dasharray: 170;
+  stroke-dashoffset: 170;
+  animation: dash-draw 520ms cubic-bezier(0.65, 0, 0.35, 1) 80ms both;
+}
+
+.dash-check-mark {
+  stroke-dasharray: 34;
+  stroke-dashoffset: 34;
+  animation: dash-draw 300ms cubic-bezier(0.65, 0, 0.35, 1) 420ms both;
+}
+
+@keyframes dash-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dash-leave {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes dash-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dash-step-forward {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dash-step-back {
+  from {
+    opacity: 0;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dash-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/*
+ * The setup form's action bar. It is the form's own footer — in flow, after
+ * every section — but stuck to the bottom of the viewport while any of the form
+ * is still below the fold, so the action is never a scroll away from the
+ * section being answered. Once the form ends it settles into place on its own,
+ * which a fixed bar could not do. The ground is opaque enough that the fields
+ * passing beneath it stay legible.
+ */
+.dash-formbar {
+  /* Near-opaque: fields sliding under it must not read through the bar. */
+  background: color-mix(in oklab, var(--canvas) 97%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 -12px 16px -12px rgb(0 0 0 / 55%);
+  /* Bleeds past the form's own width so nothing shows at its edges. */
+  margin-inline: -12px;
+  padding-inline: 12px;
+}
+
+/*
+ * An expanding row. The grid track carries the height so it can be animated
+ * without measuring it, and the panel stays mounted — `inert` keeps what is
+ * closed out of the tab order and off the accessibility tree, which `display:
+ * none` would do at the cost of the animation.
+ */
+.dash-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dash-expand[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.dash-expand > * {
+  overflow: hidden;
+}

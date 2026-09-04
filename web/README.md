@@ -12,7 +12,9 @@ page renders only what it was sent — nothing withheld enters the React tree.
 
 The landing page's "Start Building" opens that same sign-in as a dialog, which
 is all a sign-up is here: the API provisions an account on first sight of a
-verified identity.
+verified identity. Either way it ends on `/dashboard`, whose empty state issues
+a merchant's first deposit request in the page — four steps and a running
+preview, no modal and no second route.
 
 The dashboard uses the merchant API with a short-lived identity token obtained
 from an emailed code, held in memory and this tab's `sessionStorage` only; no

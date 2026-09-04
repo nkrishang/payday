@@ -44,6 +44,15 @@ const PAYER_AUDIENCE: &str = "payday-payer-local";
 /// reverse.
 const EMAIL_OTP_TTL: Duration = Duration::from_secs(300);
 
+/// How long an issued access token stays valid, matching Auth0's default
+/// lifetime for a resource server. It is the dashboard session's whole length —
+/// the API accepts the token until it expires and there is nothing to refresh
+/// it with — so a short one here does not make development safer, it just signs
+/// a merchant out mid-invoice. The freshness the account routes insist on is a
+/// separate window (`AUTHENTICATION_MAX_AGE` in gatewayd) measured from the
+/// token's own `authenticated_at`, and is unaffected by this.
+const ACCESS_TOKEN_TTL: u64 = 24 * 60 * 60;
+
 /// The audience a client may request, if any. A merchant client cannot mint
 /// a payer token and the payer client cannot reach the merchant API.
 fn audience_for(client_id: &str) -> Option<&'static str> {
@@ -250,7 +259,7 @@ async fn token(
         sub: format!("email|{subject}"),
         iss: state.issuer.clone(),
         aud: request.audience,
-        exp: now + 300,
+        exp: now + ACCESS_TOKEN_TTL,
         azp: request.client_id.clone(),
         method: "email_otp",
         client_id: request.client_id,
@@ -262,9 +271,11 @@ async fn token(
     header.kid = Some(state.kid.clone());
     let access_token = encode(&header, &claims, &state.encoding_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(
-        serde_json::json!({"access_token": access_token, "token_type": "Bearer", "expires_in": 300}),
-    ))
+    Ok(Json(serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": ACCESS_TOKEN_TTL,
+    })))
 }
 
 async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {

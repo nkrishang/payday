@@ -285,12 +285,20 @@ invalidates current and grace-period keys and removes the saved profile. A later
 ## 7. Dashboard sessions
 
 The merchant dashboard at `payday.sh/dashboard` is a browser application, so it
-never holds an API key. It signs in with the same email OTP: the login form
-calls the issuer's `/passwordless/start` and `/oauth/token` endpoints directly
-with the `Payday Dashboard` client ID (`auth0/dashboard.tf`) and the Payday API
-audience, and receives a short-lived access token. That token is the session.
-It is kept in memory and mirrored to the tab's `sessionStorage` only so a
-reload does not demand a new code; it is never written to `localStorage`.
+never holds an API key. It signs in with the same email OTP: the landing page's
+sign-up dialog, which is the only way in, calls the issuer's
+`/passwordless/start` and `/oauth/token` endpoints directly with the
+`Payday Dashboard` client ID (`auth0/dashboard.tf`) and the Payday API
+audience, and receives an access token. That token is the session. It is kept
+in memory and mirrored to the tab's `sessionStorage` only so a reload does not
+demand a new code; it is never written to `localStorage`.
+
+Nothing refreshes it: the session runs for the token's own lifetime, which the
+issuer sets (Auth0's for the API audience; `ACCESS_TOKEN_TTL` in
+`payday-dev-identity` locally, matching Auth0's 24-hour default). When it
+lapses the browser stops sending it and the dashboard sends the merchant to the
+landing page for a new code. That is a different window from the five-minute
+freshness key issuance demands, below.
 
 The Post-Login Action admits the dashboard client only when its ID is set as
 the `PAYDAY_DASHBOARD_CLIENT_ID` secret, alongside `PAYDAY_CLIENT_ID` for the

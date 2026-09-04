@@ -4,6 +4,7 @@ mod cursor;
 mod customers;
 mod identity;
 mod invoices;
+mod issuers;
 mod notifications;
 mod proofs;
 mod sweeps;
@@ -31,6 +32,10 @@ pub use invoices::{
     CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
     InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, IssuanceRequest,
     PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
+};
+pub use issuers::{
+    CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,
+    ISSUER_NAME_UNIQUE, IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
 };
 pub use notifications::{NotificationEvent, NotificationRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};

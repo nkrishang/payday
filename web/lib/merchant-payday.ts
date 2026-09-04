@@ -119,6 +119,31 @@ export const merchantSession = {
 };
 
 /**
+ * The mailbox the session's token was issued for, from the identity claim both
+ * Auth0's merchant action and `payday-dev-identity` set. Read straight off the
+ * token rather than verified: nothing is authorized on it here — it only
+ * greets the merchant and pre-fills their own address — and the API checks the
+ * signature on every call it is sent with. Anything that is not a JWT (an e2e
+ * stub token, say) simply has no mailbox.
+ */
+export function sessionEmail(accessToken: string): string | null {
+  const payload = accessToken.split(".")[1];
+  if (!payload) return null;
+  try {
+    const bytes = Uint8Array.from(
+      atob(payload.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0),
+    );
+    const claims = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+    const email = claims["https://api.payday.sh/auth/email"];
+    return typeof email === "string" && email ? email : null;
+  } catch {
+    // A token we cannot read is still a perfectly good bearer credential.
+    return null;
+  }
+}
+
+/**
  * A merchant client for the API this deployment is configured against. The
  * optional `fetcher` exists for the attachment uploader, which watches the
  * SDK's presigned PUT go by to report the scanning stage; everything else uses
@@ -155,7 +180,8 @@ async function passwordless(
   if (!response.ok) {
     throw new EmailOtpError(
       data?.error_description ?? data?.error ?? "Sign-in request failed",
-      data?.error ?? (response.status === 401 || response.status === 403 ? "invalid_grant" : "http_error"),
+      data?.error ??
+        (response.status === 401 || response.status === 403 ? "invalid_grant" : "http_error"),
       response.status,
     );
   }
@@ -198,7 +224,8 @@ export async function confirmEmailOtp(
   if (typeof data?.access_token !== "string" || !data.access_token) {
     throw new EmailOtpError("Issuer returned no access token", "invalid_response", 200);
   }
-  const expiresIn = typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : 300;
+  const expiresIn =
+    typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : 300;
   const session = { accessToken: data.access_token, expiresAt: Date.now() + expiresIn * 1000 };
   merchantSession.set(session);
   return session;

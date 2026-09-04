@@ -193,6 +193,46 @@ impl ApiError {
         }
     }
 
+    pub fn issuer_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "issuer_not_found",
+            message: "Issuer identity not found".into(),
+        }
+    }
+
+    pub fn payout_address_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "payout_address_not_found",
+            message: "Payout address not found".into(),
+        }
+    }
+
+    pub fn issuer_name_taken() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_name_taken",
+            message: "Another of your issuer identities already uses this name".into(),
+        }
+    }
+
+    pub fn issuer_in_use() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_in_use",
+            message: "Requests were issued under this identity; it cannot be deleted".into(),
+        }
+    }
+
+    pub fn issuer_email_already_verified() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_email_already_verified",
+            message: "This contact address is already verified".into(),
+        }
+    }
+
     pub fn attachment_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

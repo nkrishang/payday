@@ -50,6 +50,13 @@ export interface CreatePayment {
   bill_to: Party;
   payer_policy: PayerPolicy;
   customer_id?: string;
+  /**
+   * The saved issuer identity this is issued under. `issuer` above is still
+   * the snapshot the document carries and what the address commits to; this
+   * only records which identity it came from, and keeps pointing at it after
+   * that identity is renamed or moved to another mailbox.
+   */
+  issuer_id?: string;
   notes?: string;
   heading?: string;
   reference?: string;
@@ -98,6 +105,8 @@ export interface Payment {
   heading: string | null;
   reference: string | null;
   customer_id: string | null;
+  /** The issuer identity it was issued under; immutable once issued. */
+  issuer_id: string | null;
   metadata: Record<string, JsonValue>;
   /** Full policy including assertions; merchant-only, never on the payer route. */
   payer_policy: PayerPolicy;
@@ -276,6 +285,7 @@ export interface PaymentSummary {
   metadata: Record<string, JsonValue>;
   payer_policy_mode: PayerPolicyMode;
   customer_id: string | null;
+  issuer_id: string | null;
   has_attachment: boolean;
   verification_completed_at: string | null;
   likely_unsolicited_at: string | null;
@@ -285,13 +295,68 @@ export interface PaymentSummary {
   received: string;
   cancellation_requested_at: string | null;
 }
-export interface ListPaymentsParams { starting_after?: string; status?: PaymentStatus; reference?: string; limit?: number }
+/** Verification is a separate fact from the payment's status, so it filters separately. */
+export type VerificationFilter = "not_required" | "pending" | "verified" | "likely_unsolicited";
+export interface ListPaymentsParams {
+  starting_after?: string;
+  status?: PaymentStatus;
+  reference?: string;
+  /** Only requests billed to this customer. */
+  customer_id?: string;
+  /** Only requests issued under this identity. */
+  issuer_id?: string;
+  verification?: VerificationFilter;
+  limit?: number;
+}
 export interface PaymentPage { payments: PaymentSummary[]; next_cursor: string | null }
 export interface Transfer {
   transaction_hash: string; explorer_url: string | null; sender: string; amount: string; amount_base_units: string;
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
 }
 export interface CancelPaymentResponse { payment: Payment; advisory: string }
+
+/** A saved payout wallet, EIP-55 checksummed and unique per account. */
+export interface PayoutAddress {
+  id: string;
+  address: string;
+  label: string | null;
+  created_at: string;
+}
+
+/**
+ * A saved issuer identity: the party an invoice is issued under, its contact
+ * mailbox, and the wallets it may settle to. Issuance is unchanged — a payment
+ * still carries its own `issuer` and `payout_address` snapshot — so editing an
+ * identity never touches an invoice already issued.
+ */
+export interface Issuer {
+  id: string;
+  name: string;
+  contact_email: string;
+  details: string | null;
+  /** Whether the contact mailbox was proven with an emailed code. */
+  email_verified: boolean;
+  email_verified_at: string | null;
+  /** In association order; the first is the sensible default. */
+  payout_addresses: PayoutAddress[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateIssuer {
+  name: string;
+  contact_email: string;
+  details?: string;
+}
+export interface ListIssuersParams { starting_after?: string; limit?: number }
+export interface IssuerPage { issuers: Issuer[]; next_cursor: string | null }
+/** Where the code went, and when another may be asked for. */
+export interface StartIssuerEmailVerification {
+  contact_email: string;
+  resend_available_at: string;
+}
+export interface CreatePayoutAddress { address: string; label?: string }
+export interface PayoutAddressList { payout_addresses: PayoutAddress[] }
 
 export interface Customer {
   id: string;
@@ -596,6 +661,55 @@ export class PaydayClient {
       this.request(`/v1/customers${query(params)}`),
     update: (id: string, customer: UpdateCustomer): Promise<Customer> =>
       this.request(`/v1/customers/${encodeURIComponent(id)}`, { method: "PATCH", body: customer }),
+  };
+
+  /**
+   * Saved issuer identities. An identity is a convenience for whoever issues:
+   * `payments.create` still takes the party and the payout address inline and
+   * snapshots them, so nothing here can change an invoice already issued. The
+   * contact mailbox is the exception worth proving — payers are told to write
+   * to it — and it is proven with the same emailed code the dashboard signs in
+   * with.
+   */
+  readonly issuers = {
+    create: (issuer: CreateIssuer): Promise<Issuer> =>
+      this.request("/v1/issuers", { method: "POST", body: issuer }),
+    get: (id: string): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}`),
+    list: (params: ListIssuersParams = {}): Promise<IssuerPage> =>
+      this.request(`/v1/issuers${query(params)}`),
+    /** Full replacement; a different `contact_email` clears the verification. */
+    update: (id: string, issuer: CreateIssuer): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "PATCH", body: issuer }),
+    remove: (id: string): Promise<void> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    /**
+     * Emails a code to the identity's stored contact address — the request
+     * never names a mailbox. One code per identity per minute
+     * (`otp_resend_cooldown`).
+     */
+    startEmailVerification: (id: string): Promise<StartIssuerEmailVerification> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}/verify/email/start`, { method: "POST" }),
+    confirmEmailVerification: (id: string, otp: string): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}/verify/email/confirm`, {
+        method: "POST",
+        body: { otp },
+      }),
+    /** Replaces the whole set of addresses this identity may settle to. */
+    setPayoutAddresses: (id: string, payoutAddressIds: string[]): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}/payout-addresses`, {
+        method: "PUT",
+        body: { payout_address_ids: payoutAddressIds },
+      }),
+  };
+
+  readonly payoutAddresses = {
+    /** Saving a wallet you already saved returns the row you have. */
+    create: (input: CreatePayoutAddress): Promise<PayoutAddress> =>
+      this.request("/v1/payout-addresses", { method: "POST", body: input }),
+    list: (): Promise<PayoutAddressList> => this.request("/v1/payout-addresses"),
+    remove: (id: string): Promise<void> =>
+      this.request(`/v1/payout-addresses/${encodeURIComponent(id)}`, { method: "DELETE" }),
   };
 
   readonly attachments = {

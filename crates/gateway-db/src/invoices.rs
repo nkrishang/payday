@@ -79,6 +79,9 @@ pub struct DbInvoice {
     /// Optional link to the merchant's customer record; the parties below are
     /// the snapshot taken at issuance.
     pub customer_id: Option<Uuid>,
+    /// Optional link to the issuer identity this was issued under. Immutable,
+    /// so it still names the identity after a rename.
+    pub issuer_id: Option<Uuid>,
     pub issuer: Option<sqlx::types::Json<Party>>,
     pub bill_to: Option<sqlx::types::Json<Party>>,
     pub notes: Option<String>,
@@ -345,6 +348,7 @@ pub struct CreateInvoiceInput {
     pub account_id: AccountId,
     pub idempotency_key: String,
     pub customer_id: Option<Uuid>,
+    pub issuer_id: Option<Uuid>,
     pub issuer: Party,
     pub bill_to: Party,
     pub notes: Option<String>,
@@ -388,6 +392,7 @@ pub struct IssuanceRequest<'a> {
     pub reference: Option<&'a str>,
     pub metadata: &'a serde_json::Value,
     pub customer_id: Option<Uuid>,
+    pub issuer_id: Option<Uuid>,
     pub payer_policy: &'a PayerPolicy,
     pub attachment_id: Option<Uuid>,
     pub attachment: Option<&'a gateway_core::AttachmentCommitment>,
@@ -409,6 +414,7 @@ pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> boo
         && existing.reference.as_deref() == request.reference
         && existing.metadata.0 == *request.metadata
         && existing.customer_id == request.customer_id
+        && existing.issuer_id == request.issuer_id
         && existing.issuer.as_ref().map(|party| &party.0) == Some(request.issuer)
         && existing.bill_to.as_ref().map(|party| &party.0) == Some(request.bill_to)
         && existing.notes.as_deref() == request.notes
@@ -488,6 +494,7 @@ impl CreateInvoiceInput {
             account_id,
             idempotency_key,
             customer_id: None,
+            issuer_id: None,
             issuer: snapshot.issuer.clone(),
             bill_to: snapshot.bill_to.clone(),
             notes: snapshot.notes.clone(),
@@ -541,6 +548,7 @@ impl CreateInvoiceInput {
                 reference: self.reference.as_deref(),
                 metadata: &self.metadata,
                 customer_id: self.customer_id,
+                issuer_id: self.issuer_id,
                 payer_policy: &self.payer_policy,
                 attachment_id,
                 attachment: existing_attachment
@@ -615,14 +623,14 @@ impl InvoiceRepository {
         let inserted = sqlx::query_as::<_, DbInvoice>(
             r#"
             INSERT INTO invoices
-                (id, account_id, idempotency_key, customer_id, issuer, bill_to, notes, heading,
+                (id, account_id, idempotency_key, customer_id, issuer_id, issuer, bill_to, notes, heading,
                  reference, metadata, payer_policy_mode, expected_email, expected_identity,
                  chain_id, factory_address, token_address, token_decimals, beneficiary_address,
                  expiration_timestamp, expires_in_secs, expiration_intent, recovery_address,
                  amount, net_amount, salt, payment_address, issuance_snapshot,
                  attribution_version, attribution_nonce, attribution_hash, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                    $18, $19, $20, $21, $22, $23, $23, $24, $25, $26, $27, $28, $29, 'created')
+                    $18, $19, $20, $21, $22, $23, $24, $24, $25, $26, $27, $28, $29, $30, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -631,6 +639,7 @@ impl InvoiceRepository {
         .bind(input.account_id.0)
         .bind(&input.idempotency_key)
         .bind(input.customer_id)
+        .bind(input.issuer_id)
         .bind(sqlx::types::Json(&input.issuer))
         .bind(sqlx::types::Json(&input.bill_to))
         .bind(&input.notes)
@@ -717,11 +726,18 @@ impl InvoiceRepository {
     }
 
     /// List an account's invoices, newest first, plus one row to signal another page.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_for_account(
         &self,
         account: AccountId,
         status: Option<&str>,
         reference: Option<&str>,
+        customer_id: Option<Uuid>,
+        issuer_id: Option<Uuid>,
+        // `not_required`, `pending`, `verified`, or `likely_unsolicited`:
+        // verification is a separate fact from the payment's status, so it is
+        // a separate filter.
+        verification: Option<&str>,
         starting_after: Option<Uuid>,
         limit: u32,
     ) -> Result<Vec<DbInvoice>, sqlx::Error> {
@@ -739,6 +755,14 @@ impl InvoiceRepository {
                     ($2 = 'needs_attention' AND (candidate.status = 'blocked' OR candidate.blocked_reason IS NOT NULL)))
                  AND ($3::text IS NULL OR candidate.reference = $3)
                  AND ($4 IS NULL OR (candidate.created_at, candidate.id) < (cursor.created_at, cursor.id))
+                 AND ($6::uuid IS NULL OR candidate.customer_id = $6)
+                 AND ($7::uuid IS NULL OR candidate.issuer_id = $7)
+                 AND ($8::text IS NULL OR
+                    ($8 = 'not_required' AND candidate.payer_policy_mode = 'permissionless') OR
+                    ($8 = 'pending' AND candidate.payer_policy_mode <> 'permissionless'
+                        AND candidate.verification_completed_at IS NULL) OR
+                    ($8 = 'verified' AND candidate.verification_completed_at IS NOT NULL) OR
+                    ($8 = 'likely_unsolicited' AND candidate.likely_unsolicited_at IS NOT NULL))
                ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT $5"#,
         )
         .bind(account.0)
@@ -746,6 +770,9 @@ impl InvoiceRepository {
         .bind(reference)
         .bind(starting_after)
         .bind(i64::from(limit) + 1)
+        .bind(customer_id)
+        .bind(issuer_id)
+        .bind(verification)
         .fetch_all(&self.pool)
         .await
     }
@@ -1308,6 +1335,7 @@ pub(crate) mod tests {
             id: Uuid::now_v7(),
             account_id: Uuid::from_u128(1),
             idempotency_key: "key".to_string(),
+            issuer_id: None,
             chain_id: 1,
             factory_address: vec![1u8; 20],
             token_address: vec![2u8; 20],
@@ -1503,21 +1531,30 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(
-            repo.list_for_account(owner, None, None, None, 20)
+            repo.list_for_account(owner, None, None, None, None, None, None, 20)
                 .await
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            repo.list_for_account(owner, Some("awaiting_payment"), None, None, 1)
-                .await
-                .unwrap()
-                .len(),
+            repo.list_for_account(
+                owner,
+                Some("awaiting_payment"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                1
+            )
+            .await
+            .unwrap()
+            .len(),
             2
         );
         assert_eq!(
-            repo.list_for_account(owner, None, Some("order-2"), None, 20)
+            repo.list_for_account(owner, None, Some("order-2"), None, None, None, None, 20)
                 .await
                 .unwrap()
                 .iter()

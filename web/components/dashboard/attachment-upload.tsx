@@ -14,14 +14,23 @@ import { useMerchant } from "./session";
  * form learns the finalized descriptor's id and nothing else.
  */
 export function AttachmentUpload({
+  value,
   onChange,
   onBusyChange,
 }: {
+  /**
+   * What the caller already holds. The composer unmounts this when its step
+   * changes, so without it a finished upload would come back as an empty
+   * picker while the request still carried the file.
+   */
+  value?: AttachmentDescriptor | null;
   onChange: (attachment: AttachmentDescriptor | null) => void;
   onBusyChange: (busy: boolean) => void;
 }) {
   const { accessToken } = useMerchant();
-  const [state, setState] = useState<UploadState>({ status: "idle" });
+  const [state, setState] = useState<UploadState>(() =>
+    value ? { status: "ready", attachment: value } : { status: "idle" },
+  );
   const [problem, setProblem] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
 
