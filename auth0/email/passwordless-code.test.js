@@ -15,7 +15,7 @@ const terraform = fs.readFileSync(
 test("contains the complete, non-enumerating sign-in message", () => {
   for (const copy of [
     "Enter this one-time code in your terminal",
-    "This code expires in 3 minutes",
+    "This code expires in 5 minutes",
     "If you didn't request this, you can safely ignore this email",
     "support@payday.sh",
   ]) {
@@ -34,7 +34,7 @@ test("Terraform owns the branded template and its stated lifetime", () => {
   assert.match(terraform, /strategy\s*=\s*"email"/);
   assert.match(terraform, /syntax\s*=\s*"liquid"/);
   assert.match(terraform, /email\/passwordless-code\.liquid/);
-  assert.match(terraform, /time_step\s*=\s*180/);
+  assert.match(terraform, /time_step\s*=\s*300/);
   assert.match(terraform, /length\s*=\s*6/);
   assert.match(terraform, /brute_force_protection\s*=\s*true/);
 });

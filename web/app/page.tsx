@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { PaymentScene } from "@/components/landing/payment-scene";
+import { StartBuilding } from "@/components/landing/signup-dialog";
 
 export const metadata: Metadata = {
   title: "Payday — Make every stablecoin accountable",
@@ -48,13 +49,7 @@ export default function Home() {
             <br className="hidden sm:block" /> ready for your application to credit.
           </p>
           <div className="landing-reveal landing-delay-3 mt-9 flex w-full max-w-[410px] flex-col justify-center gap-3.5 min-[440px]:flex-row">
-            <a
-              href="https://github.com/nkrishang/payday"
-              className="flex h-14 items-center justify-center gap-3 rounded-[8px] bg-brand-green px-5 text-[16px] font-medium text-brand-black transition-transform hover:-translate-y-0.5"
-            >
-              Start Building
-              <ArrowRight />
-            </a>
+            <StartBuilding />
             <a
               href="mailto:contact@payday.sh?subject=Payday%20demo"
               className="flex h-14 items-center justify-center rounded-[8px] border border-brand-green px-5 text-[16px] font-medium text-brand-green transition-colors hover:bg-brand-green/10"
@@ -113,14 +108,6 @@ function SocialLink({ label, children }: { label: string; children: React.ReactN
     >
       {children}
     </a>
-  );
-}
-
-function ArrowRight() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-5" fill="none">
-      <path d="M5 12h14M14 7l5 5-5 5" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
   );
 }
 

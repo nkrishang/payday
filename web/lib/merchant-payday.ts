@@ -20,6 +20,15 @@ import { config } from "./config";
 const PASSWORDLESS_OTP_GRANT = "http://auth0.com/oauth/grant-type/passwordless/otp";
 const SESSION_KEY = "payday.dashboard.session";
 
+/**
+ * How long an emailed code stays usable, which the issuer decides and does not
+ * publish: Auth0's passwordless connection is configured for this window in
+ * `auth0/passwordless.tf`, and `payday-dev-identity` enforces the same one
+ * locally. A page that offers to send another code must not do so while the
+ * first still works, so it counts this down rather than guessing.
+ */
+export const EMAIL_OTP_LIFETIME_MS = 5 * 60 * 1000;
+
 export interface MerchantSession {
   accessToken: string;
   /** Unix milliseconds after which the token is no longer sent. */

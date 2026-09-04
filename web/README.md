@@ -10,6 +10,10 @@ allowed to fulfil the payment. For a gated invoice the API withholds the
 amount, parties, attachment, and address until the payer verifies, and the
 page renders only what it was sent — nothing withheld enters the React tree.
 
+The landing page's "Start Building" opens that same sign-in as a dialog, which
+is all a sign-up is here: the API provisions an account on first sight of a
+verified identity.
+
 The dashboard uses the merchant API with a short-lived identity token obtained
 from an emailed code, held in memory and this tab's `sessionStorage` only; no
 API key exists in the browser. Its pages render per request as empty shells
@@ -48,9 +52,11 @@ stub plays the merchant API behind a fake bearer check, the presigned upload
 target, and the OTP issuer (code `123456`). It covers what unit tests cannot:
 that the page hydrates, that polling moves the DOM on its own, that states
 which must not offer an address really do not, that a gated invoice's withheld
-fields are absent from both the HTML and the DOM, that a merchant can sign in,
-upload a PDF, issue an invoice, and download its proof, and that the CSP each
-route is served can actually be satisfied.
+fields are absent from both the HTML and the DOM, that a merchant can sign in —
+from the landing page as well as the login page — upload a PDF, issue an
+invoice, and download its proof, and that the CSP each route is served can
+actually be satisfied. The sign-up dialog's five-minute resend window is driven
+by Playwright's clock rather than waited out.
 
 ## Configuration
 

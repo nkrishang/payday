@@ -183,6 +183,62 @@
   z-index: 1;
 }
 
+/*
+ * The sign-up dialog is portalled to the body, outside .landing-page, so it
+ * carries the landing page's type and focus colour itself. Centring comes from
+ * Tailwind's `translate`, which leaves `transform` free for the entrance.
+ */
+.landing-dialog {
+  font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
+  animation: landing-dialog-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* The landing page's paper grain, which does not reach a portalled child. */
+.landing-dialog::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image: url("/paper-grain.svg");
+  background-size: 180px 180px;
+  content: "";
+  mix-blend-mode: soft-light;
+  opacity: 0.09;
+}
+
+.landing-dialog .font-heading {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+.landing-dialog :focus-visible {
+  outline-color: #a3d277;
+}
+
+.landing-dialog-scrim {
+  animation: landing-dialog-scrim-in 200ms ease-out both;
+}
+
+@keyframes landing-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes landing-dialog-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .landing-reveal {
   animation: landing-reveal 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }

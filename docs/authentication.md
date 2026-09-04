@@ -86,7 +86,7 @@ plan's daily sending limit.
 5. Follow [`auth0/README.md`](../auth0/README.md) to import the existing Email
    connection and apply the tracked Terraform configuration. The CLI selects
    Code on each passwordless request; Terraform fixes the code at six digits
-   and the expiry at three minutes, enables signups and brute-force protection,
+   and the expiry at five minutes, enables signups and brute-force protection,
    and installs the branded template. This connection does not prohibit another
    authorized client from requesting a magic link. Auth0 supports HTML only for
    passwordless templates; it cannot attach a separate plain-text MIME part. In

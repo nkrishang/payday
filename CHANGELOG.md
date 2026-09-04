@@ -207,11 +207,22 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `/qr`. No other route allows cross-origin reads.
 - A `checkout_base_url` Terraform variable naming the origin that serves the
   checkout, which is where every `payment_url` points.
+- Sign-up from the landing page: the hero's "Start Building" opens a dialog
+  that runs the dashboard's own emailed-code exchange, and the API provisions
+  an account on first sight of the identity, so there is no separate
+  registration. A merchant already holding a session goes straight to the
+  dashboard instead. While a code is live the dialog counts its window down;
+  once the window closes it offers to send another, so two codes are never
+  outstanding at once.
 
 ### Changed
 
 - `issuer`, `bill_to`, and `payer_policy` are required on `POST /v1/payments`;
   a body without them is rejected. An issued invoice is immutable.
+- An emailed one-time code is good for five minutes rather than three, in the
+  Auth0 passwordless connection, in its email, and in `payday-dev-identity`,
+  which previously kept codes until they were used and now refuses and
+  discards an expired one.
 - Cross-origin access to the merchant routes (payments, customers,
   attachments) is allowed from the configured web origin only
   (`PAYDAY_PUBLIC_BASE_URL`) for `GET`, `POST`, and `PATCH` with the

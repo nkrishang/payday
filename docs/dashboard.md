@@ -9,8 +9,13 @@ before the API has the final word.
 
 ## Signing in
 
-The dashboard signs in with the same emailed one-time code as the CLI. The
-login page asks the identity issuer for a code, exchanges it for a short-lived
+The dashboard signs in with the same emailed one-time code as the CLI, from
+either `/dashboard/login` or the landing page's "Start Building", which opens
+the same exchange in a dialog. There is no separate registration: the API
+provisions an account the first time it sees a verified identity, so a first
+code creates the account and every later one signs into it.
+
+The page asks the identity issuer for a code, exchanges it for a short-lived
 access token for the Payday API audience, and that token is the session
 ([Authentication § 7](authentication.md#7-dashboard-sessions)). It is kept in
 memory and mirrored to the tab's `sessionStorage` so a reload does not demand a
@@ -18,6 +23,13 @@ new code; it is never written to `localStorage`, never placed in a URL, and
 ends with the tab. **No API key exists in the browser** — the API accepts the
 identity token directly on the payment, customer, and attachment routes, and
 maps it to the merchant account. Signing out clears the token.
+
+A code is good for five minutes, which the issuer enforces and does not
+publish, so the page counts the same window down from
+`EMAIL_OTP_LIFETIME_MS` and only offers to send another once it closes —
+a merchant is never holding two live codes at once. Changing the window means
+changing `auth0/passwordless.tf`, `payday-dev-identity`, and that constant
+together.
 
 Locally the issuer is `payday-dev-identity` (the code is printed in its log)
 and the client ID is `payday-dashboard-local`; in production it is the
