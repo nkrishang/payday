@@ -6,10 +6,28 @@ import { Logo } from "@/components/ui/logo";
 export function CheckoutFrame({
   children,
   aside,
+  embedded,
 }: {
   children: ReactNode;
   aside?: ReactNode;
+  /** Dropped inside another page (the onboarding walkthrough's live payer
+   * preview) rather than owning the viewport: no page header, no forced
+   * full-height main, just the card and its footnote. */
+  embedded?: boolean | undefined;
 }) {
+  if (embedded) {
+    return (
+      <div className="w-full max-w-[440px]">
+        <div className="overflow-hidden rounded-[16px] border border-line bg-surface">
+          {children}
+        </div>
+        <p className="mt-5 text-center text-xs leading-relaxed text-faint">
+          Status reflects finalized on-chain activity only.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-dvh flex-col bg-canvas">
       <header className="flex items-center justify-between px-5 py-5 sm:px-8">

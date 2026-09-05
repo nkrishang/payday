@@ -10,13 +10,15 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use chrono::Utc;
 use uuid::Uuid;
 
 use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, CanonicalIssuanceSnapshot, ChainId,
-    CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto, Invoice, PDF_MIME_TYPE, Party,
-    PaymentListResponse, PaymentResponse, PaymentStatus, PaymentSummaryResponse, RecoveryAddress,
-    TokenAddress, TransferDto, USDC_DECIMALS, parse_expiration, validate_expiration_window,
+    CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto, Invoice, OnboardingPaymentResponse,
+    PDF_MIME_TYPE, Party, PayerPolicy, PaymentListResponse, PaymentResponse, PaymentStatus,
+    PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto, USDC_DECIMALS,
+    parse_expiration, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -26,7 +28,8 @@ use crate::invoice_pdf::render_invoice_pdf;
 use crate::state::AppState;
 use gateway_db::{
     AccountId, AttachmentStatus, CreateInvoiceInput, DbAttachment, DbInvoice,
-    InsertIssuedInvoiceError, IssuanceRequest, same_issuance,
+    InsertIssuedInvoiceError, IssuanceRequest, OnboardingClaim, PAYER_SESSION_TTL,
+    StartEmailVerificationError, same_issuance,
 };
 
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
@@ -36,6 +39,10 @@ const MAX_PARTY_DETAILS_BYTES: usize = 4000;
 const MAX_NOTES_BYTES: usize = 4000;
 const MAX_HEADING_BYTES: usize = 200;
 const MAX_REFERENCE_CHARS: usize = 128;
+/// The onboarding walkthrough's reserved, Payday-owned mailbox. The only
+/// thing `onboarding_payment` can ever pay is an invoice addressed to this
+/// exact email — never a real payer's.
+const ONBOARDING_EMAIL: &str = "onboarding@payday.sh";
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
@@ -659,6 +666,102 @@ pub async fn cancel_payment(
     Ok(Json(CancelPaymentResponse {
         payment: to_response(&state, account, row).await?,
         advisory: "Cancellation is advisory only and does not alter the payment contract or its encoded settlement terms".into(),
+    }))
+}
+
+/// The onboarding walkthrough's one real demo transfer and verification
+/// (see `docs/local-development.md`-adjacent design notes: the walkthrough
+/// issues a real, self-billed `verified_email` invoice through the normal
+/// create endpoint, then calls this one to make it real end to end).
+///
+/// This is deliberately narrow, not a general "settle any invoice" or
+/// "verify any payer" affordance: it refuses anything not addressed to
+/// Payday's own reserved mailbox, and at most one call per account ever
+/// reaches the chain (`gateway_db::OnboardingDemoPaymentRepository`).
+/// Verification is completed the same way `payer_verification::confirm_email`
+/// does after a real Auth0 code checks out — minting a session, then
+/// approving its email fact — except there is no code to check: Payday
+/// owns `onboarding@payday.sh`, so proving control of it here would only
+/// ever be proving Payday's own address to Payday.
+pub async fn onboarding_payment(
+    State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
+    Path(reference): Path<String>,
+) -> Result<Json<OnboardingPaymentResponse>, ApiError> {
+    let signer = state.onboarding_payer()?;
+    let payer_verification = state
+        .payer_verification
+        .as_ref()
+        .ok_or_else(ApiError::onboarding_payment_unavailable)?;
+
+    let row = resolve_payment(&state, account, &reference).await?;
+    let invoice = Invoice::try_from(&row)?;
+    let eligible = row.status == "created"
+        && invoice.issuance_snapshot.bill_to.email.as_deref() == Some(ONBOARDING_EMAIL)
+        && matches!(
+            &invoice.issuance_snapshot.payer_policy,
+            PayerPolicy::VerifiedEmail { expected_email } if expected_email == ONBOARDING_EMAIL
+        );
+    if !eligible {
+        return Err(ApiError::onboarding_payment_not_eligible());
+    }
+
+    let claim = state.onboarding_demo_payments.claim(account, row.id).await?;
+    if claim == OnboardingClaim::Conflict {
+        return Err(ApiError::onboarding_payment_already_claimed());
+    }
+
+    // Minting and approving a session is cheap and safe to repeat on a retry
+    // (it only ever adds harmless extra rows for this one demo invoice); the
+    // on-chain transfer below is the part that must never happen twice, and
+    // that is what `claim` above actually guards.
+    let session = state.payer_sessions.create(row.id, PAYER_SESSION_TTL).await?;
+    state
+        .payer_sessions
+        .begin_email_verification(session.id, Duration::ZERO)
+        .await
+        .map_err(|error| match error {
+            StartEmailVerificationError::Cooldown { .. } => {
+                ApiError::internal("unexpected onboarding verification cooldown")
+            }
+            StartEmailVerificationError::Database(error) => error.into(),
+        })?;
+    let payer_ref = payer_verification.payer_ref(account.0, ONBOARDING_EMAIL);
+    // A fresh event id every call: unlike a real payer's OTP, there is no
+    // single external event to key on, and minting another approved session
+    // on retry is harmless, so nothing needs deduplicating here.
+    state
+        .payer_sessions
+        .approve_email(session.id, payer_ref, Utc::now(), &Uuid::now_v7().to_string())
+        .await?;
+
+    let tx_hash = match claim {
+        OnboardingClaim::AlreadySubmitted(tx_hash) => tx_hash,
+        OnboardingClaim::Claimed | OnboardingClaim::PendingRetry => {
+            let tx_hash = signer
+                .send_usdc(
+                    state.usdc_address,
+                    invoice.payment_address.0,
+                    invoice.amount.0,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, payment_id = %row.id, "onboarding demo transfer failed");
+                    ApiError::internal("failed to submit the onboarding demo transfer")
+                })?
+                .to_string();
+            state
+                .onboarding_demo_payments
+                .record_tx_hash(account, row.id, &tx_hash)
+                .await?;
+            tx_hash
+        }
+        OnboardingClaim::Conflict => unreachable!("handled above"),
+    };
+
+    Ok(Json(OnboardingPaymentResponse {
+        payer_session: session.token,
+        tx_hash,
     }))
 }
 

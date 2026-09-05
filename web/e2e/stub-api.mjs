@@ -1432,11 +1432,29 @@ async function payments(req, res, url) {
   }
 
   const match = url.pathname.match(
-    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers|\/verification|\/verification\/review)?$/,
+    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers|\/verification|\/verification\/review|\/onboarding-payment)?$/,
   );
   if (!match) return false;
   const payment = store.payments.get(decodeURIComponent(match[1]));
   if (!payment) return fail(res, 404, "payment_not_found", "No such payment");
+  if (match[2] === "/onboarding-payment") {
+    // The real endpoint verifies and pays for real; the stub has no real
+    // chain to wait on, so it settles the stored payment immediately.
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const txHash = hex32(`onboarding-tx:${payment.id}`);
+    Object.assign(payment, {
+      verification_completed_at: payment.verification_completed_at ?? new Date().toISOString(),
+      status: "settled",
+      received: payment.amount,
+      received_base_units: payment.amount_base_units,
+      remaining: "0",
+      remaining_base_units: "0",
+      settlement_tx_hash: txHash,
+      settlement_explorer_url: `https://monadvision.com/tx/${txHash}`,
+      updated_at: new Date().toISOString(),
+    });
+    return send(res, 200, { payer_session: `stub-onboarding-session:${payment.id}`, tx_hash: txHash });
+  }
   if (match[2] === "/verification/review") {
     if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
     const attempts = payment.verification_attempts ?? [];

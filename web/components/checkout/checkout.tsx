@@ -18,15 +18,28 @@ import { usePayment, useSecondsRemaining } from "./use-payment";
 import { VerificationGate } from "./verification-gate";
 import { WalletPay } from "./wallet-pay";
 
-export function Checkout({ initial }: { initial: PayerPayment }) {
+export function Checkout({
+  initial,
+  embedded,
+}: {
+  initial: PayerPayment;
+  /** See `CheckoutFrame`: renders without page-owning chrome. */
+  embedded?: boolean | undefined;
+}) {
   return (
     <WalletProviders>
-      <CheckoutBody initial={initial} />
+      <CheckoutBody initial={initial} embedded={embedded} />
     </WalletProviders>
   );
 }
 
-function CheckoutBody({ initial }: { initial: PayerPayment }) {
+function CheckoutBody({
+  initial,
+  embedded,
+}: {
+  initial: PayerPayment;
+  embedded?: boolean | undefined;
+}) {
   // This tab's payer session, if it has one. It rides along on every read,
   // so a gated invoice unlocks here after verification and stays unlocked
   // across a reload; it never reaches the server-rendered page.
@@ -51,6 +64,7 @@ function CheckoutBody({ initial }: { initial: PayerPayment }) {
 
   return (
     <CheckoutFrame
+      embedded={embedded}
       aside={
         reconnecting ? (
           <span className="text-[12px] text-faint" role="status">

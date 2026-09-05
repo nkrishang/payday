@@ -6,6 +6,7 @@ mod identity;
 mod invoices;
 mod issuers;
 mod notifications;
+mod onboarding;
 mod proofs;
 mod sweeps;
 mod verifications;
@@ -38,6 +39,7 @@ pub use issuers::{
     ISSUER_NAME_UNIQUE, IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
 };
 pub use notifications::{NotificationEvent, NotificationRepository};
+pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;

@@ -314,6 +314,8 @@ export interface Transfer {
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
 }
 export interface CancelPaymentResponse { payment: Payment; advisory: string }
+/** Internal: the dashboard onboarding walkthrough's one real demo transfer. */
+export interface OnboardingPaymentResponse { payer_session: string; tx_hash: string }
 
 /** A saved payout wallet, EIP-55 checksummed and unique per account. */
 export interface PayoutAddress {
@@ -637,6 +639,14 @@ export class PaydayClient {
       this.request(`/v1/payments${query(params)}`),
     cancel: (id: string): Promise<CancelPaymentResponse> =>
       this.request(`/v1/payments/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+    /**
+     * Internal: the dashboard onboarding walkthrough's one real demo
+     * transfer and verification. Refuses `409 onboarding_payment_not_eligible`
+     * for anything not addressed to Payday's own onboarding mailbox — not a
+     * general merchant feature.
+     */
+    onboardingPayment: (id: string): Promise<OnboardingPaymentResponse> =>
+      this.request(`/v1/payments/${encodeURIComponent(id)}/onboarding-payment`, { method: "POST" }),
     transfers: (id: string): Promise<Transfer[]> =>
       this.request(`/v1/payments/${encodeURIComponent(id)}/transfers`),
     /** The invoice's PDF attachment with a short-lived `download_url`. */

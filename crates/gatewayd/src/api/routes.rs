@@ -66,6 +66,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/payments/{id}", get(invoices::get_payment))
         .route("/v1/payments/{id}/cancel", post(invoices::cancel_payment))
+        .route(
+            "/v1/payments/{id}/onboarding-payment",
+            post(invoices::onboarding_payment),
+        )
         .route("/v1/payments/{id}/transfers", get(invoices::transfers))
         .route(
             "/v1/payments/{id}/attachment",
@@ -325,6 +329,7 @@ mod tests {
             Some(attestor()),
             payer_verification,
             identity,
+            None,
         );
         (state, storage)
     }

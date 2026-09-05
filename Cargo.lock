@@ -2691,6 +2691,7 @@ name = "gatewayd"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "alloy-network",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-types-eth",

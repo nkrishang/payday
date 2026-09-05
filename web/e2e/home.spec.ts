@@ -104,67 +104,74 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
   await expect(save).toBeEnabled();
   await save.click();
 
-  // Setting up leads straight into what it was for.
-  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
-  const next = page.getByRole("button", { name: "Continue" });
-  await expect(next).toBeDisabled();
-  await page.getByLabel("Amount").fill("0");
-  await expect(page.getByText("Must be more than zero.")).toBeVisible();
-  await page.getByLabel("Amount").fill("250");
-  await expect(next).toBeEnabled();
-  await next.click();
+  // Setting up leads into a guided tour, not the blank composer — and there
+  // is no way to skip it.
+  await expect(page.getByRole("heading", { name: "Welcome to Payday." })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 
-  // The merchant's own side is chosen, never retyped: no issuer fields here.
-  await expect(page.getByLabel("Issued by")).toHaveCount(0);
-  await page.getByLabel("Billed to").fill("Globex LLC");
-  await page.getByLabel("Email").fill("ap@globex.example");
-  await page.getByLabel("Reason").fill("Onboarding deposit");
+  // Every field is fixed and inert: this is Payday billing itself, so the
+  // merchant can watch the whole product work before using it for real.
+  await expect(page.getByLabel("Amount")).toHaveValue("0.000001");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByLabel("Billed to")).toHaveValue("Payday");
+  await expect(page.getByLabel("Email")).toHaveValue("onboarding@payday.sh");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByLabel("Expected payer email")).toHaveValue("onboarding@payday.sh");
   await page.getByRole("button", { name: "Continue" }).click();
 
-  // A gated policy needs a mailbox to check, and the mailbox is already known:
-  // it arrives holding the billed party's, so the step answers itself.
-  await page.getByRole("radio", { name: "Verified email" }).check();
-  const expected = page.getByLabel("Expected payer email");
-  await expect(expected).toHaveValue("ap@globex.example");
-  await expect(expected).toHaveAttribute("aria-required", "true");
-  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
-
-  // Cleared, it says what it wants rather than leaving the button dark.
-  await expected.fill("");
-  await expect(page.getByText("Required for a verified policy.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
-
-  // Once typed it is the payer's own address, and stops following the billed
-  // party — even when that changes afterwards.
-  await expected.fill("peter@initrode.example");
-  await page.getByRole("button", { name: "Back" }).click();
-  await page.getByLabel("Email").fill("billing@globex.example");
-  await page.getByRole("button", { name: "Continue" }).click();
-  await expect(expected).toHaveValue("peter@initrode.example");
-  await page.getByRole("button", { name: "Continue" }).click();
-
-  // The review states the request as values, not as a sentence.
+  // The review is real values, exactly as the real composer's is.
   const summary = page.getByLabel("Request summary");
-  await expect(summary).toContainText("250.00 USDC");
+  await expect(summary).toContainText("0.000001");
   await expect(summary).toContainText("Acme Inc.");
-  await expect(summary).toContainText("Globex LLC");
+  await expect(summary).toContainText("Payday");
   await expect(summary).toContainText("Verified email");
-  await page.getByRole("button", { name: "Issue deposit request" }).click();
 
-  await expect(page.getByRole("heading", { name: "Deposit request issued." })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open the payer's view" })).toHaveAttribute(
-    "href",
-    /\/pay\//,
+  // Billed to a party typed fresh, exactly like the real composer: Payday
+  // becomes a saved customer, not just a name on this one invoice.
+  const customerCreated = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith("/v1/customers"),
   );
+  const created = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith("/v1/payments"),
+  );
+  await page.getByRole("button", { name: "Issue deposit request" }).click();
+  expect((await customerCreated).postDataJSON()).toEqual({
+    name: "Payday",
+    email: "onboarding@payday.sh",
+  });
+  const body = (await created).postDataJSON();
+  expect(body.customer_id).toBeTruthy();
+  expect(body.bill_to).toMatchObject({ name: "Payday", email: "onboarding@payday.sh" });
+  expect(body.payer_policy).toEqual({
+    mode: "verified_email",
+    expected_email: "onboarding@payday.sh",
+  });
+
+  // The success screen is not the usual three-CTA one — it shows the real
+  // payer's view instead, live, and only lets the merchant through once it
+  // has actually settled.
+  await expect(page.getByRole("heading", { name: "Deposit request issued." })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open the payer's view" })).toHaveCount(0);
+  // The stub settles synchronously, so "disabled" is not reliably observable
+  // here the way it is against the real, slower chain — only that it does not
+  // let the merchant through until settlement has actually been reported.
+  const getStarted = page.getByRole("button", { name: "Get started" });
+  await expect(page.getByText("Transaction")).toBeVisible();
+  await expect(getStarted).toBeEnabled();
+  await getStarted.click();
 
   // Back on a dashboard whose list is still empty (the probe is stubbed): the
   // table is there with its columns and its own control, as the others are.
-  await page.getByRole("button", { name: "Done" }).click();
   const requests = page.getByRole("region", { name: "Deposit requests" });
   await expect(requests.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
   await expect(requests.getByRole("columnheader", { name: "Request" })).toBeVisible();
   await expect(requests.getByText("No deposit requests yet.")).toBeVisible();
   await expect(requests.getByRole("button", { name: "New deposit request" })).toHaveCount(1);
+
+  // Payday itself is there in the customers table, not hidden: a real,
+  // reusable counterparty like any other. Scoped to the customer row's own
+  // link (by href) since the wordmark in the header is also named "Payday".
+  await expect(page.locator('a[href*="/dashboard/customers/"]', { hasText: "Payday" })).toBeVisible();
 });
 
 test("the composer keeps a running preview and can be stepped back through", async ({ page }) => {

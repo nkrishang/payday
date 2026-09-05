@@ -403,6 +403,11 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
   mutually exclusive with `PAYDAY_ATTESTATION_KMS_KEY_ID`, the production KMS
   secp256k1 key ARN. Exactly one is required unless `PAYDAY_STATUS_ONLY=true`
+- `PAYDAY_ONBOARDING_PAYER_KEY` — local key that pays the dashboard onboarding
+  walkthrough's one self-issued deposit request (Anvil account #1); mutually
+  exclusive with `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
+  key. Unlike attestation, both may be unset in any environment, including
+  production — that simply disables `POST /v1/payments/{id}/onboarding-payment`
 - `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` — optional client ID of the dashboard's
   Auth0 Single Page Application, whose access tokens `gatewayd` accepts next
   to the CLI's; `payday-dashboard-local` with the development identity provider

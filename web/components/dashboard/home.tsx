@@ -14,6 +14,8 @@ import { CustomerTable } from "./customer-table";
 import { InvoiceTable } from "./invoice-table";
 import { IssuerManager } from "./issuer-manager";
 import { IssuerSetup } from "./issuer-setup";
+import { OnboardingSuccess } from "./onboarding-success";
+import { OnboardingWalkthrough } from "./onboarding-walkthrough";
 import { RequestComposer } from "./request-composer";
 import { useResource } from "./session";
 
@@ -32,7 +34,7 @@ import { useResource } from "./session";
  * it.
  */
 
-type View = "overview" | "setup" | "compose" | "issued";
+type View = "overview" | "setup" | "compose" | "issued" | "onboarding";
 
 /** Usable on an invoice once its mailbox is proven and it can be paid to. */
 function usable(issuer: Issuer): boolean {
@@ -52,6 +54,12 @@ export function DashboardHome() {
   const [view, setView] = useState<View>("overview");
   const [leavingTo, setLeavingTo] = useState<View | null>(null);
   const [issued, setIssued] = useState<Payment | null>(null);
+  // The identity that just finished onboarding, and the one real deposit
+  // request the walkthrough issues under it. `onboardingPayment` becoming
+  // non-null is what actually switches the walkthrough over to its success
+  // screen — `view` alone does not, so a stale re-render can never hijack it.
+  const [onboardingIssuer, setOnboardingIssuer] = useState<Issuer | null>(null);
+  const [onboardingPayment, setOnboardingPayment] = useState<Payment | null>(null);
   // A customer's page links here to bill them; the composer opens on them.
   const [billed, setBilled] = useState<string | null>(null);
   // A request to open once the overview comes back, so "Track this request"
@@ -128,14 +136,42 @@ export function DashboardHome() {
 
   return (
     <div key={view} className={leavingTo === null ? "dash-enter" : "dash-leave"}>
-      {view === "setup" || forcedSetup ? (
+      {onboardingPayment ? (
+        <OnboardingSuccess
+          payment={onboardingPayment}
+          onDone={() => {
+            anything.reload();
+            issuers.reload();
+            customers.reload();
+            setOnboardingIssuer(null);
+            setOnboardingPayment(null);
+            show("overview");
+          }}
+        />
+      ) : onboardingIssuer ? (
+        <OnboardingWalkthrough issuer={onboardingIssuer} onIssued={setOnboardingPayment} />
+      ) : view === "setup" || forcedSetup ? (
         <IssuerSetup
           issuers={identities}
           onCancel={forcedSetup ? null : () => show("overview")}
-          onDone={() => {
+          onDone={(issuer) => {
             issuers.reload();
-            // Straight on to the thing the identity was for.
-            show("compose");
+            if (forcedSetup) {
+              // A first-time identity gets a guided tour, not the blank composer.
+              // Set directly rather than through `show()`: that helper's 140ms
+              // leave/enter delay would leave `view` still "overview" for a
+              // moment after `issuers.reload()` resolves, and a freshly-ready
+              // issuer flips `forcedSetup` false mid-transition — the ternary
+              // above would fall all the way through to the real Overview for
+              // one frame. `onboardingIssuer` alone must gate this branch, and
+              // `view` must change in the same tick as it's set.
+              setOnboardingIssuer(issuer);
+              setView("onboarding");
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            } else {
+              // Adding another identity later: straight on to the thing it was for.
+              show("compose");
+            }
           }}
         />
       ) : view === "compose" ? (

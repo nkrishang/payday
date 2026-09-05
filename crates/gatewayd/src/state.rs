@@ -2,8 +2,8 @@ use alloy_primitives::Address;
 use gateway_core::{ChainId, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
-    IssuerRepository, PayerSessionRepository, ProofRepository, VerificationRepository,
-    WebhookRepository,
+    IssuerRepository, OnboardingDemoPaymentRepository, PayerSessionRepository, ProofRepository,
+    VerificationRepository, WebhookRepository,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -16,6 +16,7 @@ use crate::api::{Auth0Verifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
 use crate::identity::PayerIdentityProvider;
+use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
@@ -29,6 +30,7 @@ pub struct AppState {
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
     pub verifications: VerificationRepository,
+    pub onboarding_demo_payments: OnboardingDemoPaymentRepository,
     pub identity_verifier: Option<Auth0Verifier>,
     /// The document-and-liveness provider; `None` leaves identity start
     /// answering `verification_unavailable`.
@@ -54,6 +56,9 @@ pub struct AppState {
     /// status-only mode, whose router never reaches the routes that need them.
     attachment_store: Option<AttachmentStore>,
     attestor: Option<VerificationAttestor>,
+    /// `None` unless a deployment has deliberately funded and configured a
+    /// wallet for the onboarding walkthrough's one demo transfer.
+    onboarding_payer: Option<OnboardingPayerSigner>,
 }
 
 impl AppState {
@@ -74,6 +79,7 @@ impl AppState {
         attestor: Option<VerificationAttestor>,
         payer_verification: Option<PayerVerification>,
         identity: Option<Arc<dyn PayerIdentityProvider>>,
+        onboarding_payer: Option<OnboardingPayerSigner>,
     ) -> Self {
         let pool = repo.pool().clone();
         Self {
@@ -83,7 +89,9 @@ impl AppState {
             issuers: IssuerRepository::new(pool.clone()),
             proofs: ProofRepository::new(pool.clone()),
             payer_sessions: PayerSessionRepository::new(pool.clone()),
-            verifications: VerificationRepository::new(pool),
+            verifications: VerificationRepository::new(pool.clone()),
+            onboarding_demo_payments: OnboardingDemoPaymentRepository::new(pool),
+            onboarding_payer,
             identity,
             repo,
             accounts,
@@ -114,6 +122,12 @@ impl AppState {
         self.attestor
             .as_ref()
             .ok_or_else(|| ApiError::internal("attestation signing is not configured"))
+    }
+
+    pub fn onboarding_payer(&self) -> Result<&OnboardingPayerSigner, ApiError> {
+        self.onboarding_payer
+            .as_ref()
+            .ok_or_else(ApiError::onboarding_payment_unavailable)
     }
 
     pub fn cached_proof(

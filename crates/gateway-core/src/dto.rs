@@ -398,6 +398,16 @@ pub struct CancelPaymentResponse {
     pub advisory: String,
 }
 
+/// The onboarding walkthrough's one real demo transfer: a payer session
+/// already proven to have verified the reserved onboarding mailbox (so the
+/// dashboard can unlock the embedded payer view immediately), and the hash
+/// of the transfer that was just broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingPaymentResponse {
+    pub payer_session: String,
+    pub tx_hash: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {

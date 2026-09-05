@@ -174,6 +174,13 @@ load_local_env() {
   # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
   # local proof verification; production signs with a KMS key instead.
   export PAYDAY_ATTESTATION_SIGNER_KEY="${PAYDAY_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
+  # Pays the onboarding walkthrough's one self-issued deposit request, so a
+  # brand new merchant sees a real transfer settle before doing anything else.
+  # Anvil account #1 (0x70997970C51812dc3A010C7d01b50e0d17dc79C8), already
+  # minted 1,000,000 test USDC by Bootstrap.s.sol and otherwise unused
+  # locally — a different account than PAYDAY_SIGNER_KEY so the two never
+  # contend for a nonce.
+  export PAYDAY_ONBOARDING_PAYER_KEY="${PAYDAY_ONBOARDING_PAYER_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
   export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="${PAYDAY_DASHBOARD_AUTH0_CLIENT_ID:-payday-dashboard-local}"
   # Payer email verification against the same development provider, which
   # serves the payer client and audience next to the merchant ones.
