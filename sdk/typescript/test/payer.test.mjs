@@ -14,12 +14,12 @@ function mockFetch(handler) {
 const requirementsNone = { email: "not_required", merchant_session: "not_required", complete: true };
 
 const payerPayment = {
-  id: "pay_0198f80c-8d2f-7dc1-a369-90556a64f700",
+  id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   issuer_name: "Acme LLC",
   heading: "March retainer",
   payer_policy: { mode: "permissionless", expected_email_hint: null },
   requirements: requirementsNone,
-  status: "awaiting_payment",
+  status: "awaiting_deposit",
   payable: true,
   expires_at: "2026-09-01T00:00:00Z",
   server_timestamp: "1788000000",
@@ -34,22 +34,22 @@ const payerPayment = {
   remaining: "25.00", remaining_base_units: "25000000",
   address: "0x1111111111111111111111111111111111111111",
   address_explorer_url: null,
-  payment_uri: "ethereum:0x754704Bc059F8C67012fEd69BC8A327a5aafb603@143/transfer?address=0x1111111111111111111111111111111111111111&uint256=25000000",
-  invoice: {
+  deposit_uri: "ethereum:0x754704Bc059F8C67012fEd69BC8A327a5aafb603@143/transfer?address=0x1111111111111111111111111111111111111111&uint256=25000000",
+  details: {
     amount: "25.00", amount_base_units: "25000000",
-    bill_to: { name: "Customer Inc" }, notes: null, reference: "INV-1042",
-    attachment: { id: "att_1", filename: "invoice.pdf", mime_type: "application/pdf", byte_length: "5", sha256: "0xabc" },
+    payer: { name: "Customer Inc" }, notes: null, reference: "INV-1042",
+    attachment: { id: "att_1", filename: "request.pdf", mime_type: "application/pdf", byte_length: "5", sha256: "0xabc" },
   },
 };
 
-/** What a gated invoice looks like before its payer has verified anything. */
+/** What a gated deposit request looks like before its payer has verified anything. */
 const lockedPayment = {
   id: payerPayment.id,
   issuer_name: "Acme LLC",
   heading: "March retainer",
   payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
   requirements: { ...requirementsNone, email: "pending", complete: false },
-  status: "awaiting_payment",
+  status: "awaiting_deposit",
   payable: true,
   expires_at: "2026-09-01T00:00:00Z",
   server_timestamp: "1788000000",
@@ -61,8 +61,8 @@ const lockedPayment = {
   amount: null, amount_base_units: null,
   received: null, received_base_units: null,
   remaining: null, remaining_base_units: null,
-  address: null, address_explorer_url: null, payment_uri: null,
-  invoice: null,
+  address: null, address_explorer_url: null, deposit_uri: null,
+  details: null,
 };
 
 test("payer reads use the public route and send no authorization", async () => {
@@ -71,24 +71,24 @@ test("payer reads use the public route and send no authorization", async () => {
   }));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test/", fetch: mock.fetch });
 
-  const payment = await client.payments.get(payerPayment.id);
+  const payment = await client.depositRequests.get(payerPayment.id);
 
   assert.equal(payment.remaining_base_units, "25000000");
   assert.equal(payment.payable, true);
   assert.equal(payment.content_unlocked, true);
-  assert.equal(payment.invoice.reference, "INV-1042");
-  assert.equal(mock.calls[0].url, `https://example.test/v1/payer/payments/${payerPayment.id}`);
+  assert.equal(payment.details.reference, "INV-1042");
+  assert.equal(mock.calls[0].url, `https://example.test/v1/payer/deposit-requests/${payerPayment.id}`);
   assert.equal(mock.calls[0].init.method, "GET");
   assert.equal(mock.calls[0].init.headers.Authorization, undefined);
   assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
   assert.equal(mock.calls[0].init.cache, "no-store");
 });
 
-test("a locked gated invoice carries null mechanics and no invoice content", async () => {
+test("a locked gated deposit request carries null mechanics and no invoice content", async () => {
   const mock = mockFetch(() => new Response(JSON.stringify(lockedPayment)));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const payment = await client.payments.get(lockedPayment.id);
+  const payment = await client.depositRequests.get(lockedPayment.id);
 
   assert.equal(payment.content_unlocked, false);
   assert.equal(payment.issuer_name, "Acme LLC");
@@ -96,7 +96,7 @@ test("a locked gated invoice carries null mechanics and no invoice content", asy
   assert.equal(payment.requirements.complete, false);
   for (const field of [
     "chain", "token", "amount", "amount_base_units", "received", "received_base_units",
-    "remaining", "remaining_base_units", "address", "address_explorer_url", "payment_uri", "invoice",
+    "remaining", "remaining_base_units", "address", "address_explorer_url", "deposit_uri", "details",
   ]) {
     assert.equal(payment[field], null, `${field} must be withheld while locked`);
   }
@@ -107,23 +107,23 @@ test("payer reads forward a session token and an abort signal, and encode the id
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
   const controller = new AbortController();
 
-  await client.payments.get("pay_a/b", { signal: controller.signal, payerSession: "pps_token" });
+  await client.depositRequests.get("dr_a/b", { signal: controller.signal, payerSession: "pps_token" });
 
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb");
   assert.equal(mock.calls[0].init.signal, controller.signal);
   assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_token");
   assert.equal(mock.calls[0].init.headers.Authorization, undefined);
 });
 
 test("payer attachment reads use the public sub-route with an optional session", async () => {
-  const mock = mockFetch(() => new Response(JSON.stringify(payerPayment.invoice.attachment)));
+  const mock = mockFetch(() => new Response(JSON.stringify(payerPayment.details.attachment)));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const open = await client.payments.attachment("pay_a/b");
-  await client.payments.attachment("pay_a/b", "pps_token");
+  const open = await client.depositRequests.attachment("dr_a/b");
+  await client.depositRequests.attachment("dr_a/b", "pps_token");
 
-  assert.equal(open.filename, "invoice.pdf");
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/attachment");
+  assert.equal(open.filename, "request.pdf");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/attachment");
   assert.equal(mock.calls[0].init.method, "GET");
   assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
   assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_token");
@@ -135,7 +135,7 @@ test("a locked attachment surfaces verification_required", async () => {
   }), { status: 401 }));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await assert.rejects(client.payments.attachment("pay_1"), (error) => {
+  await assert.rejects(client.depositRequests.attachment("dr_1"), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "verification_required");
     assert.equal(error.status, 401);
@@ -147,10 +147,10 @@ test("the QR is fetched as a blob with the session in a header, never the URL", 
   const mock = mockFetch(() => new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } }));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test/", fetch: mock.fetch });
 
-  const svg = await client.payments.qr("pay_a/b", "pps_token");
+  const svg = await client.depositRequests.qr("dr_a/b", "pps_token");
 
   assert.equal(await svg.text(), "<svg/>");
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/qr");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/qr");
   assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_token");
   assert.equal(mock.calls[0].init.headers.Accept, "image/svg+xml");
   assert.ok(!mock.calls[0].url.includes("pps_token"));
@@ -159,8 +159,8 @@ test("the QR is fetched as a blob with the session in a header, never the URL", 
 test("payer client defaults to the production API origin", async () => {
   const mock = mockFetch(() => new Response(JSON.stringify(payerPayment)));
   const client = new PaydayPayerClient({ fetch: mock.fetch });
-  await client.payments.get("pay_1");
-  assert.equal(mock.calls[0].url, "https://api.payday.sh/v1/payer/payments/pay_1");
+  await client.depositRequests.get("dr_1");
+  assert.equal(mock.calls[0].url, "https://api.payday.sh/v1/payer/deposit-requests/dr_1");
 });
 
 test("email verification starts without naming a mailbox and confirms with the session", async () => {
@@ -170,24 +170,24 @@ test("email verification starts without naming a mailbox and confirms with the s
   )));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const started = await client.verification.startEmail("pay_a/b");
-  const resent = await client.verification.startEmail("pay_a/b", { payerSession: started.payer_session });
-  const confirmed = await client.verification.confirmEmail("pay_a/b", "123456", started.payer_session);
-  const current = await client.verification.status("pay_a/b", { payerSession: started.payer_session });
+  const started = await client.verification.startEmail("dr_a/b");
+  const resent = await client.verification.startEmail("dr_a/b", { payerSession: started.payer_session });
+  const confirmed = await client.verification.confirmEmail("dr_a/b", "123456", started.payer_session);
+  const current = await client.verification.status("dr_a/b", { payerSession: started.payer_session });
 
   assert.equal(started.payer_session, "pps_new");
   assert.equal(resent.payer_session, "pps_new");
   assert.equal(confirmed.requirements.email, "approved");
   assert.equal(current.requirements.complete, true);
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify/email/start");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/verify/email/start");
   assert.equal(mock.calls[0].init.method, "POST");
   assert.equal(mock.calls[0].init.body, undefined);
   assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
   assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_new");
-  assert.equal(mock.calls[2].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify/email/confirm");
+  assert.equal(mock.calls[2].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/verify/email/confirm");
   assert.deepEqual(JSON.parse(mock.calls[2].init.body), { otp: "123456" });
   assert.equal(mock.calls[2].init.headers["Payday-Payer-Session"], "pps_new");
-  assert.equal(mock.calls[3].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify");
+  assert.equal(mock.calls[3].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/verify");
   assert.equal(mock.calls[3].init.method, "GET");
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
 });
@@ -206,11 +206,11 @@ test("email persistence continuation is exposed and can be retried without an OT
     },
   });
   let proof;
-  await assert.rejects(client.verification.confirmEmail("pay_1", "123456", "pps"), (error) => {
+  await assert.rejects(client.verification.confirmEmail("dr_1", "123456", "pps"), (error) => {
     proof = error.continuation;
     return error.code === "verification_persistence_unavailable" && proof === "signed-proof";
   });
-  await client.verification.continueEmail("pay_1", proof, "pps");
+  await client.verification.continueEmail("dr_1", proof, "pps");
   assert.deepEqual(calls, [{ otp: "123456" }, { continuation: "signed-proof" }]);
 });
 
@@ -222,12 +222,12 @@ test("a wrong code and a cooled-down resend surface their codes", async () => {
   }), { status: url.endsWith("/confirm") ? 401 : 429, headers: { "retry-after": "42" } }));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await assert.rejects(client.verification.confirmEmail("pay_1", "000000", "pps"), (error) => {
+  await assert.rejects(client.verification.confirmEmail("dr_1", "000000", "pps"), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "otp_invalid");
     return true;
   });
-  await assert.rejects(client.verification.startEmail("pay_1", { payerSession: "pps" }), (error) => {
+  await assert.rejects(client.verification.startEmail("dr_1", { payerSession: "pps" }), (error) => {
     assert.equal(error.code, "otp_resend_cooldown");
     assert.equal(error.status, 429);
     return true;
@@ -253,38 +253,38 @@ test("a client secret is exchanged once for a session, and the failures are told
   });
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const session = await client.verification.exchangeClientSecret("pay_a/b", "cs_secret");
+  const session = await client.verification.exchangeClientSecret("dr_a/b", "cs_secret");
   assert.equal(session.payer_session, "pps_opened");
   assert.equal(session.requirements.merchant_session, "approved");
   assert.equal(session.requirements.complete, true);
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/session");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/session");
   assert.equal(mock.calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), { client_secret: "cs_secret" });
   assert.equal(mock.calls[0].init.headers.Authorization, undefined);
   assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
 
-  await assert.rejects(client.verification.exchangeClientSecret("pay_a/b", "cs_secret"), (error) => {
+  await assert.rejects(client.verification.exchangeClientSecret("dr_a/b", "cs_secret"), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "client_secret_used");
     assert.equal(error.status, 409);
     return true;
   });
-  await assert.rejects(client.verification.exchangeClientSecret("pay_a/b", "cs_other"), (error) => {
+  await assert.rejects(client.verification.exchangeClientSecret("dr_a/b", "cs_other"), (error) => {
     assert.equal(error.code, "client_secret_invalid");
     assert.equal(error.status, 401);
     return true;
   });
 });
 
-test("an unknown or malformed link surfaces invalid_payment_link", async () => {
+test("an unknown or malformed link surfaces invalid_deposit_link", async () => {
   const mock = mockFetch(() => new Response(JSON.stringify({
-    error: { code: "invalid_payment_link", message: "Payment link is not valid" }, request_id: "req-9",
+    error: { code: "invalid_deposit_link", message: "Deposit link is not valid" }, request_id: "req-9",
   }), { status: 401 }));
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await assert.rejects(client.payments.get("pay_missing"), (error) => {
+  await assert.rejects(client.depositRequests.get("dr_missing"), (error) => {
     assert.ok(error instanceof PaydayError);
-    assert.equal(error.code, "invalid_payment_link");
+    assert.equal(error.code, "invalid_deposit_link");
     assert.equal(error.status, 401);
     assert.equal(error.requestId, "req-9");
     return true;

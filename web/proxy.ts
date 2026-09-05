@@ -76,7 +76,7 @@ function policy(nonce: string | null, isDev: boolean): string {
     // React writes style attributes (the received-amount bar), and those are
     // covered by style-src in browsers without style-src-attr support.
     "style-src 'self' 'unsafe-inline'",
-    // Wallet icons arrive as data URIs over EIP-6963; the payment QR is an SVG
+    // Wallet icons arrive as data URIs over EIP-6963; the deposit QR is an SVG
     // served by the API, which is a plain-HTTP loopback origin in development
     // and so is named explicitly rather than covered by `https:`.
     `img-src 'self' data: blob: https: ${api.join(" ")}`.trimEnd(),

@@ -10,6 +10,37 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- Deposits and deposit requests are the product's two primitives, and every
+  surface now says so. The API resource `/v1/payments` is
+  `/v1/deposit-requests` (payer routes `/v1/payer/deposit-requests/{id}`,
+  the operator release route `/v1/admin/deposit-requests/{id}/release`, the
+  rendered document `…/request.pdf`, the onboarding demo `…/onboarding-deposit`);
+  IDs are `dr_…`; the request body's `bill_to` party is `payer`, list
+  summaries carry `payer_name`, `payment_url` is `deposit_url`, the payer
+  response's `payment_uri` is `deposit_uri` and its unlocked `invoice` block
+  is `details`, and `paid_at`/`paid_at_block` are `deposited_at`/
+  `deposited_at_block`. Public statuses are `awaiting_deposit`,
+  `partially_deposited`, `deposited`, `settled`, `expired`, `returned`, and
+  `needs_attention`. Webhook events are `deposit_request.deposited`,
+  `.settled`, `.expired`, `.returned` (formerly `payment.refunded`),
+  `.needs_attention`, `.likely_unsolicited`, and `.recovered_funds`, with
+  `data.deposit_request` in place of `data.payment` and the envelope's status
+  vocabulary now identical to the API's (migration `0020`, which also rewrites
+  queued events). Error codes follow: `deposit_request_not_found`,
+  `deposit_request_not_payable`, `deposit_request_not_settled`,
+  `invalid_deposit_link`, `deposit_request_not_blocked`, and
+  `onboarding_deposit_*`. `GET /v1/status` reports
+  `deposit_indexing_and_settlement`. The SDK's `payments` namespace is
+  `depositRequests` (`DepositRequest`, `CreateDepositRequest`,
+  `DepositRequestStatus`, `PayerDepositRequest`, `requestPdf`,
+  `onboardingDeposit`); the dashboard lists deposits at `/dashboard/deposits`
+  and the composer, checkout, PDF, and emails speak of deposit requests,
+  payers, and deposits. The Proof of Payment keeps its name and its frozen
+  `payday.proof.v1` field names (`payment_id`, `payment_address`, the
+  `payday.invoice` snapshot schema with `bill_to`), because those are
+  hash-committed and signed formats that change only with a version bump.
+  The two migrations both numbered `0018` on `main` are now `0018` and
+  `0019`, which unblocks every `sqlx::test`.
 - Merchants sign in through Privy instead of Auth0. The landing page's
   "Start Building" dialog runs Privy's email code exchange; what the browser
   holds is Privy's identity token, and that token is the dashboard session

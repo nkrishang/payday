@@ -5,14 +5,14 @@ block. If the cursor is far behind the chain head (e.g. after a long downtime
 or a fresh deploy with an old start block), you can skip ahead to a recent
 block to avoid replaying unnecessary history.
 
-**Only do this if no invoices were created before the new cursor block.**
-Invoices created before the cursor block will never be detected because the
+**Only do this if no deposit requests were created before the new cursor block.**
+Deposit requests created before the cursor block will never be detected because the
 indexer only scans forward.
 
 ## When to reset
 
 - After a fresh deployment where `usdc_start_block` was set too early
-- After the indexer was down for a long time and no invoices are pending
+- After the indexer was down for a long time and no deposit requests are pending
 - After a cursor hash mismatch (see [indexer-fatal-halt.md](indexer-fatal-halt.md))
 
 ## Step 1: Find the target block
@@ -74,10 +74,10 @@ tick (every 2 seconds by default). No restart is needed.
 
 If the indexer was stopped, restart it — see [service-restart.md](service-restart.md).
 
-## Step 5: Verify invoices are progressing
+## Step 5: Verify deposit requests are progressing
 
 ```bash
-curl -fsS "$PAYDAY_API_URL/v1/payments/<INVOICE_ID>" \
+curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
 ```
 

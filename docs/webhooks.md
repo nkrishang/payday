@@ -32,39 +32,39 @@ status/error, timestamp, and duration history.
 ## Event types
 
 Lifecycle events map internal transitions as follows and happen at most once
-per payment: funded → `payment.paid`, fulfilled → `payment.settled`, expired →
-`payment.expired`, recovered → `payment.refunded`, blocked →
-`payment.needs_attention`. Each is inserted by the same database transaction
+per deposit request: funded → `deposit_request.deposited`, fulfilled → `deposit_request.settled`, expired →
+`deposit_request.expired`, recovered → `deposit_request.returned`, blocked →
+`deposit_request.needs_attention`. Each is inserted by the same database transaction
 that updates the lifecycle row.
 
 | Event | When |
 |---|---|
-| `payment.paid`, `payment.settled`, `payment.expired`, `payment.refunded`, `payment.needs_attention` | The lifecycle transitions above |
-| `payment.recovered_funds` | Payday's recovery wallet received funds on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per recovered amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
-| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied — a proven mailbox, or a merchant-session client secret exchanged by the hosted checkout |
-| `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: funds were first observed before the payer policy was satisfied, so the payment is flagged as likely unsolicited |
+| `deposit_request.deposited`, `deposit_request.settled`, `deposit_request.expired`, `deposit_request.returned`, `deposit_request.needs_attention` | The lifecycle transitions above |
+| `deposit_request.recovered_funds` | Payday's recovery wallet received funds on the deposit request's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per recovered amount, written in the transaction that records it, so **a deposit request can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
+| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the deposit request's payer policy was satisfied — a proven mailbox, or a merchant-session client secret exchanged by the hosted checkout |
+| `deposit_request.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: funds were first observed before the payer policy was satisfied, so the deposit request is flagged as likely unsolicited |
 
-`verification.approved` and `payment.likely_unsolicited` are inserted by the
-same `invoices` trigger as the lifecycle events, in the transaction that first
+`verification.approved` and `deposit_request.likely_unsolicited` are inserted by the
+same `invoices` table trigger as the lifecycle events, in the transaction that first
 sets `verification_completed_at` or `likely_unsolicited_at`; nothing sets
 those columns until the payer-policy features are enabled for an account.
 
 ## Payload
 
 Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
-`occurred_at`, and `data`. Every payment event carries `data.payment` with the
+`occurred_at`, and `data`. Every deposit request event carries `data.deposit_request` with the
 public status, `amount`, `received`, `reference`, `metadata`, and four policy
 fields: `payer_policy_mode`, `payer_reference`, `verification_completed_at`,
 and `likely_unsolicited_at`. `payer_reference` is your own identifier for the
-payer on a `merchant_session` payment (`null` otherwise), so a `payment.paid`
-or `payment.settled` handler can credit that user's ledger directly. The
+payer on a `merchant_session` deposit (`null` otherwise), so a `deposit_request.deposited`
+or `deposit_request.settled` handler can credit that user's ledger directly. The
 payload never includes the expected email or the payer's own data.
-`payment.needs_attention` adds
-`data.payment.attention`. Lifecycle payloads carry no recovery flag by design:
-a `payment.settled` for an overpaid payment is indistinguishable from one for
-an exact payment, and `payment.recovered_funds` is the recovery signal.
+`deposit_request.needs_attention` adds
+`data.deposit_request.attention`. Lifecycle payloads carry no recovery flag by design:
+a `deposit_request.settled` for an overpaid deposit request is indistinguishable from one for
+an exact deposit, and `deposit_request.recovered_funds` is the recovery signal.
 
-`payment.recovered_funds` adds `data.recovery`:
+`deposit_request.recovered_funds` adds `data.recovery`:
 
 ```json
 {
@@ -80,7 +80,7 @@ an exact payment, and `payment.recovered_funds` is the recovery signal.
 `amount` is in base units and `reason` is one of `overpayment`, `expired`, or
 `late_transfer`. Recovered funds are held by Payday, reviewed manually, and
 returned by the operator; use these events to reconcile what Payday holds for
-your payments.
+your deposit requests.
 
-Test events are sent only to the requested endpoint, require no invoice, and
+Test events are sent only to the requested endpoint, require no deposit request, and
 cannot consume a real lifecycle event's uniqueness key.

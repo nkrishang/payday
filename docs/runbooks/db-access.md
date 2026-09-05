@@ -165,7 +165,7 @@ SELECT chain_id, last_block, encode(last_block_hash, 'hex') AS last_block_hash
 FROM indexer_cursor;
 ```
 
-### Check invoice statuses
+### Check deposit request statuses
 
 ```sql
 SELECT id, status, amount_base_units, payment_address, created_at
@@ -174,7 +174,7 @@ ORDER BY created_at DESC
 LIMIT 10;
 ```
 
-### Check payment observations
+### Check deposit observations
 
 ```sql
 SELECT block_number, sender, recipient, amount, status

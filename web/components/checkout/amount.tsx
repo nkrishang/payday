@@ -1,11 +1,11 @@
-import type { UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { formatDisplayAmount, receivedPercent } from "@/lib/format";
 
 /**
  * The amount still owed, as the page's heading. Once anything has been
  * credited the label changes to "Remaining", because the number does too.
  */
-export function AmountDue({ payment }: { payment: UnlockedPayerPayment }) {
+export function AmountDue({ payment }: { payment: UnlockedPayerDepositRequest }) {
   const received = BigInt(payment.received_base_units);
   const outstanding = BigInt(payment.remaining_base_units) > 0n;
   const shown = outstanding ? payment.remaining : payment.amount;
@@ -24,7 +24,7 @@ export function AmountDue({ payment }: { payment: UnlockedPayerPayment }) {
 }
 
 /** Shown only once something has been credited, so the payer sees their progress. */
-export function ReceivedProgress({ payment }: { payment: UnlockedPayerPayment }) {
+export function ReceivedProgress({ payment }: { payment: UnlockedPayerDepositRequest }) {
   const received = BigInt(payment.received_base_units);
   if (received === 0n) return null;
 

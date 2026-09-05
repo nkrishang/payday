@@ -1,17 +1,17 @@
-import type { PayerPayment } from "@payday/sdk";
-import type { UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { PayerDepositRequest } from "@payday/sdk";
+import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
 
-/** A permissionless invoice: everything the payer route can disclose is present. */
-const UNLOCKED: UnlockedPayerPayment = {
-  id: "pay_0198f80c-8d2f-7dc1-a369-90556a64f700",
+/** A permissionless deposit request: everything the payer route can disclose is present. */
+const UNLOCKED: UnlockedPayerDepositRequest = {
+  id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   issuer_name: "Acme Corp",
   heading: null,
   payer_policy: { mode: "permissionless", expected_email_hint: null },
   requirements: { email: "not_required", merchant_session: "not_required", complete: true },
-  status: "awaiting_payment",
+  status: "awaiting_deposit",
   payable: true,
   expires_at: "2026-09-01T00:00:00Z",
   server_timestamp: "1788000000",
@@ -29,26 +29,26 @@ const UNLOCKED: UnlockedPayerPayment = {
   remaining_base_units: "25000000",
   address: ADDRESS,
   address_explorer_url: null,
-  payment_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
-  invoice: {
+  deposit_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
+  details: {
     amount: "25.00",
     amount_base_units: "25000000",
-    bill_to: { name: "Globex Corporation" },
+    payer: { name: "Globex Corporation" },
     notes: null,
     reference: null,
     attachment: null,
   },
 };
 
-export function payment(overrides: Partial<UnlockedPayerPayment> = {}): UnlockedPayerPayment {
+export function payment(overrides: Partial<UnlockedPayerDepositRequest> = {}): UnlockedPayerDepositRequest {
   return { ...UNLOCKED, ...overrides };
 }
 
 /**
- * A gated invoice before verification: exactly what the payer route sends,
+ * A gated deposit request before verification: exactly what the payer route sends,
  * with every mechanic and document field null.
  */
-export function lockedPayment(overrides: Partial<PayerPayment> = {}): PayerPayment {
+export function lockedPayment(overrides: Partial<PayerDepositRequest> = {}): PayerDepositRequest {
   return {
     ...UNLOCKED,
     payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
@@ -64,17 +64,17 @@ export function lockedPayment(overrides: Partial<PayerPayment> = {}): PayerPayme
     remaining_base_units: null,
     address: null,
     address_explorer_url: null,
-    payment_uri: null,
-    invoice: null,
+    deposit_uri: null,
+    details: null,
     ...overrides,
   };
 }
 
 /**
- * A merchant-session invoice before its app has opened it: locked like an
+ * A merchant-session deposit request before its app has opened it: locked like an
  * email-gated one, with no mailbox hint and no step the payer can take here.
  */
-export function merchantSessionPayment(overrides: Partial<PayerPayment> = {}): PayerPayment {
+export function merchantSessionPayment(overrides: Partial<PayerDepositRequest> = {}): PayerDepositRequest {
   return lockedPayment({
     payer_policy: { mode: "merchant_session", expected_email_hint: null },
     requirements: { email: "not_required", merchant_session: "pending", complete: false },

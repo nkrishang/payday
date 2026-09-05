@@ -8,7 +8,7 @@ import { Field, Input, Problem } from "@/components/ui/field";
 import { payerClient } from "@/lib/payday";
 
 /**
- * Proves the payer owns the mailbox the invoice was issued to. The payer
+ * Proves the payer owns the mailbox the deposit request was issued to. The payer
  * never types an address: the gateway sends the code to the merchant's
  * asserted email and only the code comes back here. The session the gateway
  * mints on `start` is handed up to be stored for this tab and sent on every

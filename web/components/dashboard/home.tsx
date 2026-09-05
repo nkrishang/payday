@@ -1,6 +1,6 @@
 "use client";
 
-import type { AccountMetadata, Customer, Issuer, Payment } from "@payday/sdk";
+import type { AccountMetadata, Customer, Issuer, DepositRequest } from "@payday/sdk";
 import { ArrowUpRight } from "lucide-react";
 import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -13,7 +13,7 @@ import { formatDisplayAmount } from "@/lib/format";
 import { AccountSection } from "./account-section";
 import { ApiKeySection } from "./api-key-manager";
 import { CustomerTable } from "./customer-table";
-import { InvoiceTable } from "./invoice-table";
+import { DepositTable } from "./deposit-table";
 import { IssuerManager } from "./issuer-manager";
 import { IssuerSetup } from "./issuer-setup";
 import { OnboardingSuccess } from "./onboarding-success";
@@ -26,7 +26,7 @@ import { useResource } from "./session";
  *
  * Everything a merchant does day to day is on this one page: the deposit
  * requests, the identities they are issued under, the customers they are
- * billed to, and the flow that issues a new one. The only other dashboard
+ * addressed to, and the flow that issues a new one. The only other dashboard
  * pages are the detail of one record.
  *
  * A new account is not shown a description of the product — it is put to work
@@ -39,7 +39,7 @@ import { useResource } from "./session";
 
 type View = "overview" | "setup" | "compose" | "issued" | "onboarding";
 
-/** Usable on an invoice once its mailbox is proven. */
+/** Usable on a deposit request once its mailbox is proven. */
 function usable(issuer: Issuer): boolean {
   return issuer.email_verified;
 }
@@ -53,19 +53,19 @@ export function DashboardHome() {
   const issuers = useResource("issuers", (client) => client.issuers.list({ limit: 50 }));
   // Only ever asks whether anything exists: the table below loads its own page
   // with its own filter and cursor.
-  const anything = useResource("home", (client) => client.payments.list({ limit: 1 }));
+  const anything = useResource("home", (client) => client.depositRequests.list({ limit: 1 }));
   // The filters and the composer both pick from these; loaded once, here.
   const customers = useResource("customers", (client) => client.customers.list({ limit: 100 }));
 
   const [view, setView] = useState<View>("overview");
   const [leavingTo, setLeavingTo] = useState<View | null>(null);
-  const [issued, setIssued] = useState<Payment | null>(null);
+  const [issued, setIssued] = useState<DepositRequest | null>(null);
   // The identity that just finished onboarding, and the one real deposit
-  // request the walkthrough issues under it. `onboardingPayment` becoming
+  // request the walkthrough issues under it. `onboardingDeposit` becoming
   // non-null is what actually switches the walkthrough over to its success
   // screen — `view` alone does not, so a stale re-render can never hijack it.
   const [onboardingIssuer, setOnboardingIssuer] = useState<Issuer | null>(null);
-  const [onboardingPayment, setOnboardingPayment] = useState<Payment | null>(null);
+  const [onboardingDeposit, setOnboardingDeposit] = useState<DepositRequest | null>(null);
   // A customer's page links here to bill them; the composer opens on them.
   const [billed, setBilled] = useState<string | null>(null);
   // A request to open once the overview comes back, so "Track this request"
@@ -131,7 +131,7 @@ export function DashboardHome() {
   const accountWallet = account.data.wallet_address;
   const identities = issuers.data.issuers;
   const ready = identities.filter(usable);
-  const started = anything.data.payments.length > 0;
+  const started = anything.data.deposit_requests.length > 0;
   // Setting up gates issuing, never looking: an account that has issued from
   // the API or the full form must still see what it has. With neither an
   // identity nor a request there is nothing to look at, so the page is the
@@ -149,15 +149,15 @@ export function DashboardHome() {
 
   return (
     <div key={view} className={leavingTo === null ? "dash-enter" : "dash-leave"}>
-      {onboardingPayment ? (
+      {onboardingDeposit ? (
         <OnboardingSuccess
-          payment={onboardingPayment}
+          payment={onboardingDeposit}
           onDone={() => {
             anything.reload();
             issuers.reload();
             customers.reload();
             setOnboardingIssuer(null);
-            setOnboardingPayment(null);
+            setOnboardingDeposit(null);
             show("overview");
           }}
         />
@@ -166,7 +166,7 @@ export function DashboardHome() {
           issuer={onboardingIssuer}
           payoutAddress={accountWallet ?? onboardingIssuer.payout_addresses[0]?.address ?? null}
           onWalletChanged={account.reload}
-          onIssued={setOnboardingPayment}
+          onIssued={setOnboardingDeposit}
         />
       ) : view === "setup" || forcedSetup ? (
         <IssuerSetup
@@ -262,7 +262,7 @@ function Overview({
       {/* Raised over the sections below: each entrance animation is its own
           stacking context, so a later one would paint over an open filter. */}
       <div className="dash-hero dash-rise relative z-20 pt-2">
-        <InvoiceTable
+        <DepositTable
           identities={identities}
           customers={customers}
           initialOpen={openRequest}
@@ -299,7 +299,7 @@ function Issued({
   onTrack,
   onDone,
 }: {
-  payment: Payment;
+  payment: DepositRequest;
   onTrack: () => void;
   onDone: () => void;
 }) {
@@ -341,19 +341,19 @@ function Issued({
           />
           {payment.token.symbol}
         </span>{" "}
-        from {payment.bill_to.name}
+        from {payment.payer.name}
       </p>
 
       <div className="dash-rise dash-delay-4 mt-7 flex items-center gap-2 rounded-[12px] border border-line bg-surface py-2 pr-2 pl-4 text-left">
         <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-muted">
-          {payment.payment_url.replace(/^https?:\/\//, "")}
+          {payment.deposit_url.replace(/^https?:\/\//, "")}
         </span>
-        <CopyButton value={payment.payment_url} label="payment link" className="bg-raised" />
+        <CopyButton value={payment.deposit_url} label="deposit link" className="bg-raised" />
       </div>
 
       <div className="dash-rise dash-delay-5 mt-5 flex flex-wrap items-center justify-center gap-2.5">
         <a
-          href={payment.payment_url}
+          href={payment.deposit_url}
           target="_blank"
           rel="noreferrer noopener"
           className={cn(

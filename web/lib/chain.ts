@@ -6,8 +6,8 @@ import { config } from "./config";
 /**
  * A deployment serves exactly one chain and one USDC contract — gatewayd
  * rejects any other `chain_id` or `token_address` with 422 — so the wallet
- * stack is configured once from env rather than discovered per payment. The
- * checkout still verifies the payment's chain and token against these values
+ * stack is configured once from env rather than discovered per deposit request. The
+ * checkout still verifies the deposit request's chain and token against these values
  * before it will let anyone sign.
  */
 export const paydayChain = defineChain({
@@ -46,7 +46,7 @@ export const wagmiConfig = createConfig({
             showQrModal: true,
             metadata: {
               name: "Payday",
-              description: "Stablecoin payments that settle themselves",
+              description: "Stablecoin deposits that settle themselves",
               url: "https://payday.sh",
               icons: [],
             },

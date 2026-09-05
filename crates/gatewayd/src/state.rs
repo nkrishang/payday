@@ -120,7 +120,7 @@ impl AppState {
     pub fn onboarding_payer(&self) -> Result<&OnboardingPayerSigner, ApiError> {
         self.onboarding_payer
             .as_ref()
-            .ok_or_else(ApiError::onboarding_payment_unavailable)
+            .ok_or_else(ApiError::onboarding_deposit_unavailable)
     }
 
     pub fn cached_proof(

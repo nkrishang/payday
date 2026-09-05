@@ -4,9 +4,9 @@ import { StatusDot } from "@/components/ui/status-dot";
 import { formatDate, modeLabel } from "./labels";
 
 /**
- * Verification is a separate fact from payment. A gated invoice can be funded
+ * Verification is a separate fact from the deposit. A gated request can be funded
  * before its payer has verified — that is the "likely unsolicited" case — and
- * a verified invoice can still be unpaid. Both components keep the two apart.
+ * a verified request can still be unfunded. Both components keep the two apart.
  */
 
 type Facts = {

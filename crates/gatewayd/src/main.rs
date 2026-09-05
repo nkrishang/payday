@@ -4,9 +4,9 @@ mod attestation;
 mod config;
 mod deployment;
 mod dispatcher;
-mod invoice_pdf;
 mod onboarding_payer;
 mod payer_identity;
+mod request_pdf;
 mod state;
 mod webhook_worker;
 

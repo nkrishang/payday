@@ -1,8 +1,8 @@
 "use client";
 
-import type { PayerPayment } from "@payday/sdk";
+import type { PayerDepositRequest } from "@payday/sdk";
 import { useCallback, useState } from "react";
-import { checkoutView, unlockedPayment } from "@/lib/checkout-state";
+import { checkoutView, unlockedDepositRequest } from "@/lib/checkout-state";
 import { usePayerSession } from "@/lib/payer-session";
 import { StatusDot } from "@/components/ui/status-dot";
 import { AddressRow } from "./address-row";
@@ -10,12 +10,12 @@ import { AmountDue, ReceivedProgress } from "./amount";
 import { AssetNotice } from "./asset-notice";
 import { Countdown } from "./countdown";
 import { CheckoutFrame } from "./frame";
-import { InvoiceDetails } from "./invoice-details";
+import { RequestDetails } from "./request-details";
 import { ClientSecretExchange, type ClientSecretStatus } from "./merchant-session";
 import { WalletProviders } from "./providers";
 import { QrPanel } from "./qr-panel";
 import { Resolved } from "./resolved";
-import { usePayment, useSecondsRemaining } from "./use-payment";
+import { useDepositRequest, useSecondsRemaining } from "./use-deposit-request";
 import { VerificationGate } from "./verification-gate";
 import { WalletPay } from "./wallet-pay";
 
@@ -23,7 +23,7 @@ export function Checkout({
   initial,
   embedded,
 }: {
-  initial: PayerPayment;
+  initial: PayerDepositRequest;
   /** See `CheckoutFrame`: renders without page-owning chrome. */
   embedded?: boolean | undefined;
 }) {
@@ -38,14 +38,14 @@ function CheckoutBody({
   initial,
   embedded,
 }: {
-  initial: PayerPayment;
+  initial: PayerDepositRequest;
   embedded?: boolean | undefined;
 }) {
   // This tab's payer session, if it has one. It rides along on every read,
-  // so a gated invoice unlocks here after verification and stays unlocked
+  // so a gated deposit request unlocks here after verification and stays unlocked
   // across a reload; it never reaches the server-rendered page.
   const [payerSession, setPayerSession] = usePayerSession(initial.id);
-  const { payment, receivedAt, reconnecting, pendingTxHash, markSent, refresh } = usePayment(
+  const { payment, receivedAt, reconnecting, pendingTxHash, markSent, refresh } = useDepositRequest(
     initial,
     payerSession,
   );
@@ -57,7 +57,7 @@ function CheckoutBody({
     },
     [setPayerSession],
   );
-  // A merchant-session invoice arrives with its client secret in the URL
+  // A merchant-session deposit request arrives with its client secret in the URL
   // fragment. The exchange below reads it once, on the client only, and the
   // session it mints takes the same path the email flow's session does.
   const merchantSession = payment.payer_policy.mode === "merchant_session";
@@ -73,7 +73,7 @@ function CheckoutBody({
   });
   // Null exactly when the phase is one of the locked ones: the same narrowing
   // decides the phase and what may enter the tree.
-  const unlocked = unlockedPayment(payment);
+  const unlocked = unlockedDepositRequest(payment);
 
   return (
     <CheckoutFrame
@@ -115,7 +115,7 @@ function CheckoutBody({
         />
       ) : (
         <>
-          <InvoiceDetails payment={unlocked} payerSession={payerSession} />
+          <RequestDetails payment={unlocked} payerSession={payerSession} />
 
           {view.showInstructions ? (
             <section aria-label={view.title} className="px-5 py-6 sm:px-6">

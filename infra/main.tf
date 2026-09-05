@@ -379,22 +379,22 @@ resource "aws_iam_role_policy" "indexer_kms" {
 }
 
 # ---------------------------------------------------------------------------
-# Invoice attachments. One PDF per invoice, uploaded straight to S3 through a
+# Deposit request attachments. One PDF per deposit request, uploaded straight to S3 through a
 # presigned PUT signed by the API task role, scanned by GuardDuty Malware
 # Protection, and finalized by gatewayd only once the managed tag
 # GuardDutyMalwareScanStatus=NO_THREATS_FOUND is present.
 #
 # Object layout: every upload lands at uploads/<account_id>/<attachment_id>.pdf
 # and is never moved. The presigned PUT stamps the tag payday-upload=pending on
-# it (a signed header, so no upload can omit it); issuing an invoice rewrites
-# that tag to payday-upload=attached before the invoice commits. The lifecycle
+# it (a signed header, so no upload can omit it); issuing a deposit request rewrites
+# that tag to payday-upload=attached before the deposit request commits. The lifecycle
 # rule expires only objects still tagged pending, so infrastructure can never
 # expire an attached PDF, and an abandoned upload is gone after seven days
 # without gatewayd having to track it.
 # ---------------------------------------------------------------------------
 
 resource "aws_kms_key" "attachments" {
-  description             = "${var.name} invoice attachment encryption"
+  description             = "${var.name} deposit request attachment encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
   lifecycle {
@@ -653,7 +653,7 @@ resource "aws_ecs_task_definition" "api" {
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 
-  # The recovery wallet is committed into every payment address, so the API
+  # The recovery wallet is committed into every deposit address, so the API
   # must never start with a placeholder; fail the plan rather than the task.
   lifecycle {
     precondition {
@@ -1062,7 +1062,7 @@ resource "aws_cloudwatch_log_metric_filter" "notification_missing_contact" {
 }
 resource "aws_cloudwatch_metric_alarm" "notification_missing_contact" {
   alarm_name          = "${var.name}-notification-missing-contact"
-  alarm_description   = "A blocked payment cannot notify its merchant by email; recover the account contact and contact the merchant manually"
+  alarm_description   = "A blocked deposit request cannot notify its merchant by email; recover the account contact and contact the merchant manually"
   namespace           = var.name
   metric_name         = aws_cloudwatch_log_metric_filter.notification_missing_contact.metric_transformation[0].name
   statistic           = "Sum"
@@ -1080,7 +1080,7 @@ locals {
     sweep_paused = {
       pattern     = "\"sweep worker paused\""
       period      = 60
-      description = "The sweep worker cannot resolve its in-flight batch; see docs/runbooks/stuck-invoice.md"
+      description = "The sweep worker cannot resolve its in-flight batch; see docs/runbooks/stuck-deposit-request.md"
     }
     signer_low_balance = {
       pattern     = "\"sweep signer balance low\""

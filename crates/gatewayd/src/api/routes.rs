@@ -13,8 +13,8 @@ use crate::api::admin;
 use crate::api::attachments;
 use crate::api::auth;
 use crate::api::customers;
+use crate::api::deposit_requests;
 use crate::api::health;
-use crate::api::invoices;
 use crate::api::issuers;
 use crate::api::merchant_session;
 use crate::api::payer;
@@ -70,28 +70,41 @@ pub fn router(state: AppState) -> Router {
                 .delete(accounts::revoke),
         )
         .route(
-            "/v1/payments",
-            post(invoices::create_payment).get(invoices::list_payments),
+            "/v1/deposit-requests",
+            post(deposit_requests::create_deposit_request)
+                .get(deposit_requests::list_deposit_requests),
         )
-        .route("/v1/payments/{id}", get(invoices::get_payment))
-        .route("/v1/payments/{id}/cancel", post(invoices::cancel_payment))
         .route(
-            "/v1/payments/{id}/onboarding-payment",
-            post(invoices::onboarding_payment),
+            "/v1/deposit-requests/{id}",
+            get(deposit_requests::get_deposit_request),
         )
-        .route("/v1/payments/{id}/transfers", get(invoices::transfers))
         .route(
-            "/v1/payments/{id}/attachment",
-            get(attachments::payment_attachment),
+            "/v1/deposit-requests/{id}/cancel",
+            post(deposit_requests::cancel_deposit_request),
         )
-        .route("/v1/payments/{id}/invoice.pdf", get(invoices::invoice_pdf))
-        .route("/v1/payments/{id}/proof", get(proof::get_proof))
         .route(
-            "/v1/payments/{id}/verification",
+            "/v1/deposit-requests/{id}/onboarding-deposit",
+            post(deposit_requests::onboarding_deposit),
+        )
+        .route(
+            "/v1/deposit-requests/{id}/transfers",
+            get(deposit_requests::transfers),
+        )
+        .route(
+            "/v1/deposit-requests/{id}/attachment",
+            get(attachments::deposit_request_attachment),
+        )
+        .route(
+            "/v1/deposit-requests/{id}/request.pdf",
+            get(deposit_requests::request_pdf),
+        )
+        .route("/v1/deposit-requests/{id}/proof", get(proof::get_proof))
+        .route(
+            "/v1/deposit-requests/{id}/verification",
             get(verification::merchant_detail),
         )
         .route(
-            "/v1/payments/{id}/client-secret",
+            "/v1/deposit-requests/{id}/client-secret",
             post(merchant_session::mint),
         )
         .route(
@@ -144,7 +157,10 @@ pub fn router(state: AppState) -> Router {
         .layer(merchant_cors);
 
     let administration = Router::new()
-        .route("/v1/admin/payments/{id}/release", post(admin::release))
+        .route(
+            "/v1/admin/deposit-requests/{id}/release",
+            post(admin::release),
+        )
         .route_layer(middleware::from_fn(auth::require_admin))
         .layer(RequestBodyLimitLayer::new(16 * 1024));
 
@@ -155,11 +171,14 @@ pub fn router(state: AppState) -> Router {
     // This must never be extended to the API-key routes.
     let payer_session_header = HeaderName::from_static(payer_verification::PAYER_SESSION_HEADER);
     let payer = Router::new()
-        .route("/v1/payer/payments/{id}", get(payer::get))
-        .route("/v1/payer/payments/{id}/qr", get(payer::qr))
-        .route("/v1/payer/payments/{id}/attachment", get(payer::attachment))
+        .route("/v1/payer/deposit-requests/{id}", get(payer::get))
+        .route("/v1/payer/deposit-requests/{id}/qr", get(payer::qr))
         .route(
-            "/v1/payer/payments/{id}/verify",
+            "/v1/payer/deposit-requests/{id}/attachment",
+            get(payer::attachment),
+        )
+        .route(
+            "/v1/payer/deposit-requests/{id}/verify",
             get(payer_verification::status),
         )
         .layer(
@@ -175,15 +194,15 @@ pub fn router(state: AppState) -> Router {
     // hosted checkout (product plan §7.1). No `Any` here, ever.
     let payer_verification = Router::new()
         .route(
-            "/v1/payer/payments/{id}/verify/email/start",
+            "/v1/payer/deposit-requests/{id}/verify/email/start",
             post(payer_verification::start_email),
         )
         .route(
-            "/v1/payer/payments/{id}/verify/email/confirm",
+            "/v1/payer/deposit-requests/{id}/verify/email/confirm",
             post(payer_verification::confirm_email),
         )
         .route(
-            "/v1/payer/payments/{id}/session",
+            "/v1/payer/deposit-requests/{id}/session",
             post(merchant_session::exchange),
         )
         .layer(RequestBodyLimitLayer::new(8 * 1024))
@@ -477,7 +496,7 @@ mod tests {
         let confirmed = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{id}/verify/email/confirm"),
+                &format!("/v1/payer/deposit-requests/{id}/verify/email/confirm"),
                 Some(session),
                 Some(&json!({"otp": OTP})),
             ))
@@ -489,7 +508,10 @@ mod tests {
     async fn payer_read(app: &Router, id: &str, session: Option<&str>) -> Value {
         json_body(
             app.clone()
-                .oneshot(payer_get(&format!("/v1/payer/payments/{id}"), session))
+                .oneshot(payer_get(
+                    &format!("/v1/payer/deposit-requests/{id}"),
+                    session,
+                ))
                 .await
                 .unwrap(),
         )
@@ -500,7 +522,7 @@ mod tests {
         let started = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{id}/verify/email/start"),
+                &format!("/v1/payer/deposit-requests/{id}/verify/email/start"),
                 None,
                 None,
             ))
@@ -570,7 +592,7 @@ mod tests {
             "amount": "1",
             "expires_in": 3600,
             "issuer": {"name": "Acme"},
-            "bill_to": {"name": "Globex"},
+            "payer": {"name": "Globex"},
             "payer_policy": {"mode": "permissionless"}
         })
     }
@@ -632,7 +654,7 @@ mod tests {
     }
 
     fn create_request(key: &str, idempotency_key: &str, body: &Value) -> Request<Body> {
-        Request::post("/v1/payments")
+        Request::post("/v1/deposit-requests")
             .header(header::AUTHORIZATION, format!("Bearer {key}"))
             .header(header::CONTENT_TYPE, "application/json")
             .header("idempotency-key", idempotency_key)
@@ -695,14 +717,14 @@ mod tests {
     async fn get_invoice_rejects_missing_and_wrong_credentials(pool: PgPool) {
         assert_unauthorized(
             app(pool.clone()).await,
-            Request::get("/v1/payments/not-an-id")
+            Request::get("/v1/deposit-requests/not-an-id")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
         assert_unauthorized(
             app(pool).await,
-            Request::get("/v1/payments/not-an-id")
+            Request::get("/v1/deposit-requests/not-an-id")
                 .header(
                     header::AUTHORIZATION,
                     "Bearer payday_live_fedcba9876543210fedcba9876543210",
@@ -717,14 +739,14 @@ mod tests {
     async fn create_invoice_rejects_missing_and_wrong_credentials(pool: PgPool) {
         assert_unauthorized(
             app(pool.clone()).await,
-            Request::post("/v1/payments")
+            Request::post("/v1/deposit-requests")
                 .body(Body::from("{}"))
                 .unwrap(),
         )
         .await;
         assert_unauthorized(
             app(pool).await,
-            Request::post("/v1/payments")
+            Request::post("/v1/deposit-requests")
                 .header(
                     header::AUTHORIZATION,
                     "Bearer payday_live_fedcba9876543210fedcba9876543210",
@@ -740,7 +762,7 @@ mod tests {
         let response = app(pool)
             .await
             .oneshot(
-                Request::get("/v1/payments/not-an-id")
+                Request::get("/v1/deposit-requests/not-an-id")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -758,7 +780,7 @@ mod tests {
         let response = app(pool)
             .await
             .oneshot(
-                Request::post("/v1/payments")
+                Request::post("/v1/deposit-requests")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(vec![b'x'; 64 * 1024 + 1]))
@@ -780,7 +802,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = json_body(response).await;
-        assert_eq!(body["status"], "awaiting_payment");
+        assert_eq!(body["status"], "awaiting_deposit");
         assert_eq!(body["amount"], "1.000000");
         assert_eq!(body["amount_base_units"], "1000000");
         assert_eq!(body["received"], "0.000000");
@@ -790,7 +812,7 @@ mod tests {
         assert!(body["attention"].is_null());
         assert!(body["address"].as_str().unwrap().starts_with("0x"));
         let id = body["id"].as_str().unwrap();
-        assert!(id.starts_with("pay_"));
+        assert!(id.starts_with("dr_"));
 
         let replay = app
             .clone()
@@ -806,7 +828,7 @@ mod tests {
         let rejected_prefix = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payments/{}", &id[..16]))
+                Request::get(format!("/v1/deposit-requests/{}", &id[..16]))
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -822,7 +844,7 @@ mod tests {
         let list_response = app
             .clone()
             .oneshot(
-                Request::get("/v1/payments")
+                Request::get("/v1/deposit-requests")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -830,7 +852,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list_response.status(), StatusCode::OK);
-        assert_eq!(json_body(list_response).await["payments"][0]["id"], id);
+        assert_eq!(
+            json_body(list_response).await["deposit_requests"][0]["id"],
+            id
+        );
 
         let second = app
             .clone()
@@ -843,7 +868,7 @@ mod tests {
         let first_page = app
             .clone()
             .oneshot(
-                Request::get("/v1/payments?limit=1")
+                Request::get("/v1/deposit-requests?limit=1")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -851,21 +876,23 @@ mod tests {
             .await
             .unwrap();
         let first_page = json_body(first_page).await;
-        assert_eq!(first_page["payments"].as_array().unwrap().len(), 1);
-        assert_eq!(first_page["payments"][0]["id"], second_id);
+        assert_eq!(first_page["deposit_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["deposit_requests"][0]["id"], second_id);
         assert_eq!(first_page["next_cursor"], second_id);
         let second_page = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payments?limit=1&starting_after={second_id}"))
-                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
-                    .body(Body::empty())
-                    .unwrap(),
+                Request::get(format!(
+                    "/v1/deposit-requests?limit=1&starting_after={second_id}"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
         let second_page = json_body(second_page).await;
-        assert_eq!(second_page["payments"][0]["id"], id);
+        assert_eq!(second_page["deposit_requests"][0]["id"], id);
         assert!(second_page["next_cursor"].is_null());
 
         let legacy_route = app
@@ -946,7 +973,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::get(format!("/v1/payments/{id}"))
+                Request::get(format!("/v1/deposit-requests/{id}"))
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1002,7 +1029,7 @@ mod tests {
         let lagging = json_body(lagging).await;
         assert_eq!(lagging["status"], "degraded");
         assert_eq!(
-            lagging["components"]["payment_indexing_and_settlement"]["status"],
+            lagging["components"]["deposit_indexing_and_settlement"]["status"],
             "degraded"
         );
 
@@ -1021,7 +1048,7 @@ mod tests {
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
             "issuer": {"name": "Acme"},
-            "bill_to": {"name": "Globex"},
+            "payer": {"name": "Globex"},
             "payer_policy": {"mode": "permissionless"},
             "reference": "Order 1234"
         });
@@ -1039,7 +1066,7 @@ mod tests {
         assert_eq!(created["reference"], "Order 1234");
         assert!(created.get("memo").is_none());
         assert_eq!(created["issuer"]["name"], "Acme");
-        assert_eq!(created["bill_to"]["name"], "Globex");
+        assert_eq!(created["payer"]["name"], "Globex");
         assert_eq!(created["payer_policy"]["mode"], "permissionless");
         assert_eq!(created["attribution"]["version"], 1);
         assert!(created["attachment"].is_null());
@@ -1048,7 +1075,7 @@ mod tests {
         let found = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payments/{address}"))
+                Request::get(format!("/v1/deposit-requests/{address}"))
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1061,7 +1088,7 @@ mod tests {
         let listed = app
             .clone()
             .oneshot(
-                Request::get("/v1/payments")
+                Request::get("/v1/deposit-requests")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1069,11 +1096,14 @@ mod tests {
             .await
             .unwrap();
         let listed = json_body(listed).await;
-        assert_eq!(listed["payments"][0]["id"], id);
-        assert!(listed["payments"][0].get("transfers").is_none());
-        assert_eq!(listed["payments"][0]["bill_to_name"], "Globex");
-        assert_eq!(listed["payments"][0]["payer_policy_mode"], "permissionless");
-        assert_eq!(listed["payments"][0]["has_attachment"], false);
+        assert_eq!(listed["deposit_requests"][0]["id"], id);
+        assert!(listed["deposit_requests"][0].get("transfers").is_none());
+        assert_eq!(listed["deposit_requests"][0]["payer_name"], "Globex");
+        assert_eq!(
+            listed["deposit_requests"][0]["payer_policy_mode"],
+            "permissionless"
+        );
+        assert_eq!(listed["deposit_requests"][0]["has_attachment"], false);
 
         // A retry that names a staged-but-unfinalized upload is a different
         // request from the one issued without an attachment.
@@ -1093,7 +1123,7 @@ mod tests {
 
         let cancelled = app
             .oneshot(
-                Request::post(format!("/v1/payments/{id}/cancel"))
+                Request::post(format!("/v1/deposit-requests/{id}/cancel"))
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1102,8 +1132,8 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled.status(), StatusCode::OK);
         let cancelled = json_body(cancelled).await;
-        assert_eq!(cancelled["payment"]["status"], "awaiting_payment");
-        assert!(cancelled["payment"]["cancellation_requested_at"].is_string());
+        assert_eq!(cancelled["deposit_request"]["status"], "awaiting_deposit");
+        assert!(cancelled["deposit_request"]["cancellation_requested_at"].is_string());
         assert!(
             cancelled["advisory"]
                 .as_str()
@@ -1121,11 +1151,11 @@ mod tests {
             .await
             .unwrap();
         let created = json_body(created).await;
-        let payment_url = created["payment_url"].as_str().unwrap();
+        let deposit_url = created["deposit_url"].as_str().unwrap();
         let id = created["id"].as_str().unwrap();
-        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
-        assert!(!payment_url.contains("token"));
-        assert!(payment_url.ends_with(&format!("/pay/{id}")));
+        let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
+        assert!(!deposit_url.contains("token"));
+        assert!(deposit_url.ends_with(&format!("/pay/{id}")));
 
         // The checkout is hosted at PAYDAY_PUBLIC_BASE_URL, so this service only
         // forwards the link that merchants have already shared.
@@ -1162,7 +1192,7 @@ mod tests {
         let cors = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}"))
                     .header(header::ORIGIN, "https://payday.sh")
                     .body(Body::empty())
                     .unwrap(),
@@ -1174,7 +1204,7 @@ mod tests {
         let status = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1184,14 +1214,14 @@ mod tests {
         assert_eq!(status.headers()[header::CACHE_CONTROL], "no-store");
         let status = json_body(status).await;
         assert_eq!(status["id"], id);
-        assert_eq!(status["status"], "awaiting_payment");
+        assert_eq!(status["status"], "awaiting_deposit");
         assert_eq!(status["content_unlocked"], true);
         assert_eq!(status["issuer_name"], "Acme");
         assert_eq!(status["amount_base_units"], "1000000");
-        assert_eq!(status["invoice"]["bill_to"]["name"], "Globex");
+        assert_eq!(status["details"]["payer"]["name"], "Globex");
         assert_eq!(status["payer_policy"]["mode"], "permissionless");
         assert_eq!(status["requirements"]["complete"], true);
-        assert!(status["payment_uri"].as_str().unwrap().starts_with(
+        assert!(status["deposit_uri"].as_str().unwrap().starts_with(
             "ethereum:0x0000000000000000000000000000000000000000@1/transfer?address="
         ));
         for private in [
@@ -1214,7 +1244,7 @@ mod tests {
         let qr = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}/qr"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}/qr"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1235,7 +1265,7 @@ mod tests {
         let partial = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1243,10 +1273,10 @@ mod tests {
             .unwrap();
         let partial = json_body(partial).await;
         assert_eq!(partial["remaining_base_units"], "750000");
-        assert_eq!(partial["status"], "partially_paid");
+        assert_eq!(partial["status"], "partially_deposited");
         assert_eq!(partial["payable"], true);
         assert!(
-            partial["payment_uri"]
+            partial["deposit_uri"]
                 .as_str()
                 .unwrap()
                 .ends_with("uint256=750000")
@@ -1260,7 +1290,7 @@ mod tests {
         let expired = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1268,11 +1298,11 @@ mod tests {
             .unwrap();
         let expired = json_body(expired).await;
         assert_eq!(expired["payable"], false);
-        assert!(expired["payment_uri"].is_null());
+        assert!(expired["deposit_uri"].is_null());
         let closed_qr = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}/qr"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}/qr"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1281,7 +1311,7 @@ mod tests {
         assert_eq!(closed_qr.status(), StatusCode::GONE);
         assert_eq!(
             json_body(closed_qr).await["error"]["code"],
-            "payment_not_payable"
+            "deposit_request_not_payable"
         );
     }
 
@@ -1298,7 +1328,7 @@ mod tests {
             "amount": "25",
             "expires_in": 3600,
             "issuer": {"name": "Acme Corp", "email": "billing@acme.example", "details": "1 Main St"},
-            "bill_to": {"name": "Globex"},
+            "payer": {"name": "Globex"},
             "notes": "Net 30",
             "heading": "March retainer",
             "reference": "INV-1",
@@ -1348,7 +1378,7 @@ mod tests {
         vary("issuer", &|b| {
             b["issuer"]["email"] = json!("ap@acme.example")
         });
-        vary("bill_to", &|b| b["bill_to"]["name"] = json!("Initech"));
+        vary("payer", &|b| b["payer"]["name"] = json!("Initech"));
         vary("notes", &|b| b["notes"] = json!("Net 60"));
         vary("heading", &|b| {
             b.as_object_mut().unwrap().remove("heading");
@@ -1549,7 +1579,7 @@ mod tests {
         let payer = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1560,7 +1590,7 @@ mod tests {
         assert_eq!(payer["content_unlocked"], false);
         assert_eq!(payer["issuer_name"], "Acme");
         assert_eq!(payer["heading"], "March retainer");
-        assert_eq!(payer["status"], "awaiting_payment");
+        assert_eq!(payer["status"], "awaiting_deposit");
         assert_eq!(payer["payer_policy"]["mode"], "verified_email");
         assert_eq!(
             payer["payer_policy"]["expected_email_hint"],
@@ -1576,7 +1606,7 @@ mod tests {
             "remaining",
             "address",
             "address_explorer_url",
-            "payment_uri",
+            "deposit_uri",
             "chain",
             "token",
             "invoice",
@@ -1604,7 +1634,7 @@ mod tests {
         let qr = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}/qr"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}/qr"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1619,7 +1649,7 @@ mod tests {
         let withheld = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}/attachment"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}/attachment"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1632,7 +1662,10 @@ mod tests {
         );
         let merchant_pdf = app
             .clone()
-            .oneshot(get_request(KEY, &format!("/v1/payments/{id}/attachment")))
+            .oneshot(get_request(
+                KEY,
+                &format!("/v1/deposit-requests/{id}/attachment"),
+            ))
             .await
             .unwrap();
         assert_eq!(merchant_pdf.status(), StatusCode::OK);
@@ -1650,7 +1683,7 @@ mod tests {
         sqlx::query(
             "UPDATE invoices SET verification_completed_at = now(), settlement_tx_hash = $2 WHERE id = $1",
         )
-        .bind(Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap())
+        .bind(Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap())
         .bind(settlement.as_slice())
         .execute(&pool)
         .await
@@ -1658,7 +1691,7 @@ mod tests {
         let completed = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1680,7 +1713,7 @@ mod tests {
             .unwrap();
         let open_id = json_body(open).await["id"].as_str().unwrap().to_owned();
         sqlx::query("UPDATE invoices SET settlement_tx_hash = $2 WHERE id = $1")
-            .bind(Uuid::parse_str(open_id.strip_prefix("pay_").unwrap()).unwrap())
+            .bind(Uuid::parse_str(open_id.strip_prefix("dr_").unwrap()).unwrap())
             .bind(settlement.as_slice())
             .execute(&pool)
             .await
@@ -1688,7 +1721,7 @@ mod tests {
         let open_payer = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{open_id}"))
+                Request::get(format!("/v1/payer/deposit-requests/{open_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1701,7 +1734,7 @@ mod tests {
 
         let merchant = app
             .oneshot(
-                Request::get(format!("/v1/payments/{id}"))
+                Request::get(format!("/v1/deposit-requests/{id}"))
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1732,7 +1765,7 @@ mod tests {
 
         let listed = app
             .oneshot(
-                Request::get("/v1/payments")
+                Request::get("/v1/deposit-requests")
                     .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1740,7 +1773,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            json_body(listed).await["payments"]
+            json_body(listed).await["deposit_requests"]
                 .as_array()
                 .unwrap()
                 .is_empty(),
@@ -1762,7 +1795,7 @@ mod tests {
         assert!(created.get("refund_address").is_none());
 
         let id = created["id"].as_str().unwrap();
-        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
         let row = InvoiceRepository::new(pool.clone())
             .find_by_id(uuid)
             .await
@@ -1925,7 +1958,7 @@ mod tests {
 
         let cross_account = app
             .oneshot(
-                Request::get(format!("/v1/payments/{first_id}"))
+                Request::get(format!("/v1/deposit-requests/{first_id}"))
                     .header(header::AUTHORIZATION, format!("Bearer {SECOND}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2063,7 +2096,7 @@ mod tests {
         assert_eq!(json_body(key_metadata).await["generation"], 3);
 
         let invoice_request = |key: &str| {
-            Request::get("/v1/payments/not-an-id")
+            Request::get("/v1/deposit-requests/not-an-id")
                 .header(header::AUTHORIZATION, format!("Bearer {key}"))
                 .body(Body::empty())
                 .unwrap()
@@ -2143,11 +2176,11 @@ mod tests {
         let later = privy.token(MERCHANT_DID, "dashboard@example.com", Some(MERCHANT_WALLET));
         let listed = app
             .clone()
-            .oneshot(get_request(&later, "/v1/payments"))
+            .oneshot(get_request(&later, "/v1/deposit-requests"))
             .await
             .unwrap();
         assert_eq!(listed.status(), StatusCode::OK);
-        assert_eq!(json_body(listed).await["payments"][0]["id"], id);
+        assert_eq!(json_body(listed).await["deposit_requests"][0]["id"], id);
         assert_eq!(
             accounts
                 .metadata(account)
@@ -2162,12 +2195,12 @@ mod tests {
         let stranger = privy.token("did:privy:someoneelse", "other@example.com", None);
         let listed = app
             .clone()
-            .oneshot(get_request(&stranger, "/v1/payments"))
+            .oneshot(get_request(&stranger, "/v1/deposit-requests"))
             .await
             .unwrap();
         assert_eq!(listed.status(), StatusCode::OK);
         assert!(
-            json_body(listed).await["payments"]
+            json_body(listed).await["deposit_requests"]
                 .as_array()
                 .unwrap()
                 .is_empty()
@@ -2196,12 +2229,12 @@ mod tests {
             ),
             other.token(MERCHANT_DID, "dashboard@example.com", None),
         ] {
-            assert_unauthorized(app.clone(), get_request(&bad, "/v1/payments")).await;
+            assert_unauthorized(app.clone(), get_request(&bad, "/v1/deposit-requests")).await;
         }
 
         // A deployment without a Privy app refuses every session outright.
         let keys_only = build(pool, None, Address::ZERO, RECOVERY).await.router;
-        assert_unauthorized(keys_only, get_request(&later, "/v1/payments")).await;
+        assert_unauthorized(keys_only, get_request(&later, "/v1/deposit-requests")).await;
     }
 
     /// Reserve an upload slot; returns the attachment id and its object key.
@@ -2346,7 +2379,7 @@ mod tests {
             .clone()
             .oneshot(get_request(
                 KEY,
-                &format!("/v1/payments/{payment_id}/attachment"),
+                &format!("/v1/deposit-requests/{payment_id}/attachment"),
             ))
             .await
             .unwrap();
@@ -2365,10 +2398,12 @@ mod tests {
         let payer = app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/payer/payments/{payment_id}/attachment"))
-                    .header(header::ORIGIN, "https://payday.sh")
-                    .body(Body::empty())
-                    .unwrap(),
+                Request::get(format!(
+                    "/v1/payer/deposit-requests/{payment_id}/attachment"
+                ))
+                .header(header::ORIGIN, "https://payday.sh")
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -2392,8 +2427,8 @@ mod tests {
             .unwrap();
         let plain_id = json_body(plain).await["id"].as_str().unwrap().to_owned();
         for path in [
-            format!("/v1/payments/{plain_id}/attachment"),
-            format!("/v1/payer/payments/{plain_id}/attachment"),
+            format!("/v1/deposit-requests/{plain_id}/attachment"),
+            format!("/v1/payer/deposit-requests/{plain_id}/attachment"),
         ] {
             let response = app.clone().oneshot(get_request(KEY, &path)).await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
@@ -2498,14 +2533,14 @@ mod tests {
             .clone()
             .oneshot(get_request(
                 OTHER,
-                &format!("/v1/payments/{payment_id}/attachment"),
+                &format!("/v1/deposit-requests/{payment_id}/attachment"),
             ))
             .await
             .unwrap();
         assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             json_body(foreign).await["error"]["code"],
-            "payment_not_found"
+            "deposit_request_not_found"
         );
 
         for (name, body) in [
@@ -2617,7 +2652,7 @@ mod tests {
             .unwrap();
         assert_eq!(seed.status(), StatusCode::CREATED);
         let seed_id = json_body(seed).await["id"].as_str().unwrap().to_owned();
-        let seed_uuid = Uuid::parse_str(seed_id.strip_prefix("pay_").unwrap()).unwrap();
+        let seed_uuid = Uuid::parse_str(seed_id.strip_prefix("dr_").unwrap()).unwrap();
 
         // The racer: a row under the key "raced", inserted but not yet
         // committed. The handler's pre-insert lookup cannot see it, so the
@@ -2732,7 +2767,7 @@ mod tests {
         let origin = payer_access().origin().to_owned();
         assert_eq!(origin, "http://127.0.0.1:3000");
         let preflight = |origin: &str| {
-            Request::options("/v1/payments")
+            Request::options("/v1/deposit-requests")
                 .header(header::ORIGIN, origin)
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                 .header(
@@ -3138,7 +3173,7 @@ mod tests {
             app.clone()
                 .oneshot(get_request(
                     KEY,
-                    &format!("/v1/payments/{}", issued["id"].as_str().unwrap()),
+                    &format!("/v1/deposit-requests/{}", issued["id"].as_str().unwrap()),
                 ))
                 .await
                 .unwrap(),
@@ -3169,7 +3204,7 @@ mod tests {
         // A request is findable by the identity it was issued under, by the
         // customer it is billed to, and by where its verification stands —
         // three separate facts, three separate filters.
-        let listed = |query: &str| get_request(KEY, &format!("/v1/payments?{query}"));
+        let listed = |query: &str| get_request(KEY, &format!("/v1/deposit-requests?{query}"));
         for (query, expected) in [
             (format!("issuer_id={issuer_id}"), 1),
             (format!("issuer_id={}", Uuid::now_v7()), 0),
@@ -3178,7 +3213,7 @@ mod tests {
         ] {
             let page = json_body(app.clone().oneshot(listed(&query)).await.unwrap()).await;
             assert_eq!(
-                page["payments"].as_array().unwrap().len(),
+                page["deposit_requests"].as_array().unwrap().len(),
                 expected,
                 "{query}"
             );
@@ -3426,15 +3461,17 @@ mod tests {
         let id = json_body(created).await["id"].as_str().unwrap().to_owned();
 
         let fetch = || {
-            app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{id}/invoice.pdf")))
+            app.clone().oneshot(get_request(
+                KEY,
+                &format!("/v1/deposit-requests/{id}/request.pdf"),
+            ))
         };
         let first = fetch().await.unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(first.headers()[header::CONTENT_TYPE], "application/pdf");
         assert_eq!(
             first.headers()[header::CONTENT_DISPOSITION],
-            format!("attachment; filename=\"invoice-{id}.pdf\"").as_str()
+            format!("attachment; filename=\"deposit-request-{id}.pdf\"").as_str()
         );
         assert_eq!(first.headers()[header::CACHE_CONTROL], "no-store");
         let first = to_bytes(first.into_body(), 1024 * 1024).await.unwrap();
@@ -3449,7 +3486,7 @@ mod tests {
 
         assert_unauthorized(
             app.clone(),
-            Request::get(format!("/v1/payments/{id}/invoice.pdf"))
+            Request::get(format!("/v1/deposit-requests/{id}/request.pdf"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3466,16 +3503,17 @@ mod tests {
             .unwrap();
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
-        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
         let address =
             Address::parse_checksummed(created["address"].as_str().unwrap(), None).unwrap();
-        let proof_request = |key: &str| get_request(key, &format!("/v1/payments/{id}/proof"));
+        let proof_request =
+            |key: &str| get_request(key, &format!("/v1/deposit-requests/{id}/proof"));
 
         let early = app.clone().oneshot(proof_request(KEY)).await.unwrap();
         assert_eq!(early.status(), StatusCode::CONFLICT);
         assert_eq!(
             json_body(early).await["error"]["code"],
-            "payment_not_settled"
+            "deposit_request_not_settled"
         );
 
         // Settle it the way the indexer would: one credited transfer, then
@@ -3590,7 +3628,7 @@ mod tests {
         let pending = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{email_id}"),
+                &format!("/v1/payer/deposit-requests/{email_id}"),
                 Some(&session),
             ))
             .await
@@ -3609,7 +3647,7 @@ mod tests {
         let again = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{email_id}/verify/email/start"),
+                &format!("/v1/payer/deposit-requests/{email_id}/verify/email/start"),
                 Some(&session),
                 None,
             ))
@@ -3623,7 +3661,7 @@ mod tests {
         );
         assert_eq!(tenant.started.lock().unwrap().len(), 1);
 
-        let confirm_path = format!("/v1/payer/payments/{email_id}/verify/email/confirm");
+        let confirm_path = format!("/v1/payer/deposit-requests/{email_id}/verify/email/confirm");
         let wrong = app
             .clone()
             .oneshot(payer_post(
@@ -3711,7 +3749,7 @@ mod tests {
         let unlocked = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{email_id}"),
+                &format!("/v1/payer/deposit-requests/{email_id}"),
                 Some(&session),
             ))
             .await
@@ -3721,17 +3759,20 @@ mod tests {
         assert_eq!(unlocked["content_unlocked"], true);
         assert_eq!(unlocked["address"], email_created["address"]);
         assert_eq!(unlocked["amount"], "1.000000");
-        assert_eq!(unlocked["invoice"]["bill_to"]["name"], "Globex");
-        assert_eq!(unlocked["invoice"]["reference"], "INV-9");
+        assert_eq!(unlocked["details"]["payer"]["name"], "Globex");
+        assert_eq!(unlocked["details"]["reference"], "INV-9");
         assert!(
-            unlocked["payment_uri"]
+            unlocked["deposit_uri"]
                 .as_str()
                 .unwrap()
                 .starts_with("ethereum:")
         );
         let bare = app
             .clone()
-            .oneshot(payer_get(&format!("/v1/payer/payments/{email_id}"), None))
+            .oneshot(payer_get(
+                &format!("/v1/payer/deposit-requests/{email_id}"),
+                None,
+            ))
             .await
             .unwrap();
         let bare = json_body(bare).await;
@@ -3741,7 +3782,7 @@ mod tests {
         let stale = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{email_id}"),
+                &format!("/v1/payer/deposit-requests/{email_id}"),
                 Some("expired-or-forged"),
             ))
             .await
@@ -3752,7 +3793,7 @@ mod tests {
         let qr = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{email_id}/qr"),
+                &format!("/v1/payer/deposit-requests/{email_id}/qr"),
                 Some(&session),
             ))
             .await
@@ -3767,7 +3808,7 @@ mod tests {
         let qr_bare = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{email_id}/qr"),
+                &format!("/v1/payer/deposit-requests/{email_id}/qr"),
                 None,
             ))
             .await
@@ -3782,7 +3823,7 @@ mod tests {
         let other = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{other_id}"),
+                &format!("/v1/payer/deposit-requests/{other_id}"),
                 Some(&session),
             ))
             .await
@@ -3793,7 +3834,7 @@ mod tests {
         let other_qr = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{other_id}/qr"),
+                &format!("/v1/payer/deposit-requests/{other_id}/qr"),
                 Some(&session),
             ))
             .await
@@ -3802,7 +3843,7 @@ mod tests {
         let other_status = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{other_id}/verify"),
+                &format!("/v1/payer/deposit-requests/{other_id}/verify"),
                 Some(&session),
             ))
             .await
@@ -3815,7 +3856,7 @@ mod tests {
         let own_status = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{email_id}/verify"),
+                &format!("/v1/payer/deposit-requests/{email_id}/verify"),
                 Some(&session),
             ))
             .await
@@ -3828,7 +3869,10 @@ mod tests {
         // The merchant sees the invoice complete; settlement may proceed.
         let merchant = json_body(
             app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{email_id}")))
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/deposit-requests/{email_id}"),
+                ))
                 .await
                 .unwrap(),
         )
@@ -3837,7 +3881,7 @@ mod tests {
 
         // A terminal invoice never accepts an expired bearer. Re-proving the
         // asserted mailbox explicitly mints a fresh, invoice-scoped receipt session.
-        let email_uuid = Uuid::parse_str(email_id.strip_prefix("pay_").unwrap()).unwrap();
+        let email_uuid = Uuid::parse_str(email_id.strip_prefix("dr_").unwrap()).unwrap();
         sqlx::query("UPDATE invoices SET status = 'fulfilled', settlement_tx_hash = $2, settled_at = now() WHERE id = $1")
             .bind(email_uuid)
             .bind([0x44u8; 32].as_slice())
@@ -3867,7 +3911,7 @@ mod tests {
             app.clone()
                 .oneshot(get_request(
                     KEY,
-                    &format!("/v1/payments/{email_id}/verification"),
+                    &format!("/v1/deposit-requests/{email_id}/verification"),
                 ))
                 .await
                 .unwrap(),
@@ -3903,7 +3947,7 @@ mod tests {
         let refused = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{open_id}/verify/email/start"),
+                &format!("/v1/payer/deposit-requests/{open_id}/verify/email/start"),
                 None,
                 None,
             ))
@@ -3917,7 +3961,7 @@ mod tests {
         let open_status = json_body(
             app.clone()
                 .oneshot(payer_get(
-                    &format!("/v1/payer/payments/{open_id}/verify"),
+                    &format!("/v1/payer/deposit-requests/{open_id}/verify"),
                     None,
                 ))
                 .await
@@ -3937,14 +3981,14 @@ mod tests {
         )
         .await;
         sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = $1")
-            .bind(Uuid::parse_str(expired_id.strip_prefix("pay_").unwrap()).unwrap())
+            .bind(Uuid::parse_str(expired_id.strip_prefix("dr_").unwrap()).unwrap())
             .execute(&pool)
             .await
             .unwrap();
         let too_late = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{expired_id}/verify/email/start"),
+                &format!("/v1/payer/deposit-requests/{expired_id}/verify/email/start"),
                 None,
                 None,
             ))
@@ -3956,7 +4000,7 @@ mod tests {
         let unknown = app
             .clone()
             .oneshot(payer_post(
-                "/v1/payer/payments/pay_not-an-id/verify/email/start",
+                "/v1/payer/deposit-requests/dr_not-an-id/verify/email/start",
                 None,
                 None,
             ))
@@ -3976,7 +4020,7 @@ mod tests {
         let down = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{gated_id}/verify/email/start"),
+                &format!("/v1/payer/deposit-requests/{gated_id}/verify/email/start"),
                 None,
                 None,
             ))
@@ -3995,7 +4039,7 @@ mod tests {
         let unavailable = plain
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{gated_id}/verify/email/start"),
+                &format!("/v1/payer/deposit-requests/{gated_id}/verify/email/start"),
                 None,
                 None,
             ))
@@ -4007,7 +4051,10 @@ mod tests {
             "verification_unavailable"
         );
         let read = plain
-            .oneshot(payer_get(&format!("/v1/payer/payments/{gated_id}"), None))
+            .oneshot(payer_get(
+                &format!("/v1/payer/deposit-requests/{gated_id}"),
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(read.status(), StatusCode::OK);
@@ -4028,7 +4075,7 @@ mod tests {
     /// Exchange a client secret from the hosted checkout.
     fn exchange_request(id: &str, secret: &str) -> Request<Body> {
         payer_post(
-            &format!("/v1/payer/payments/{id}/session"),
+            &format!("/v1/payer/deposit-requests/{id}/session"),
             None,
             Some(&json!({"client_secret": secret})),
         )
@@ -4040,7 +4087,7 @@ mod tests {
         sqlx::query_as(
             "SELECT event_type, payload FROM webhook_events WHERE invoice_id = $1 ORDER BY created_at, id",
         )
-        .bind(Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap())
+        .bind(Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap())
         .fetch_all(pool)
         .await
         .unwrap()
@@ -4068,7 +4115,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
-        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
         let secret = created["client_secret"].as_str().unwrap().to_owned();
         assert!(secret.starts_with("cs_"), "{secret}");
         assert_eq!(secret.len(), 46);
@@ -4078,7 +4125,7 @@ mod tests {
         assert!(created["payer_policy"].get("expected_email").is_none());
         assert!(created["verification_completed_at"].is_null());
         assert_eq!(
-            created["payment_url"],
+            created["deposit_url"],
             format!("http://127.0.0.1:3000/pay/{id}")
         );
 
@@ -4113,7 +4160,7 @@ mod tests {
         // that minted it.
         let fetched = json_body(
             app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
                 .await
                 .unwrap(),
         )
@@ -4185,7 +4232,7 @@ mod tests {
         let extra_field = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/payments/{id}/session"),
+                &format!("/v1/payer/deposit-requests/{id}/session"),
                 None,
                 Some(&json!({"client_secret": secret, "payer_reference": "user_1"})),
             ))
@@ -4225,10 +4272,10 @@ mod tests {
         assert_eq!(unlocked["content_unlocked"], true);
         assert_eq!(unlocked["address"], created["address"]);
         assert_eq!(unlocked["amount"], "1.000000");
-        assert_eq!(unlocked["invoice"]["reference"], "dep-8042");
+        assert_eq!(unlocked["details"]["reference"], "dep-8042");
         assert_eq!(unlocked["requirements"]["complete"], true);
         assert!(
-            unlocked["payment_uri"]
+            unlocked["deposit_uri"]
                 .as_str()
                 .unwrap()
                 .starts_with("ethereum:")
@@ -4236,7 +4283,7 @@ mod tests {
         let qr = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{id}/qr"),
+                &format!("/v1/payer/deposit-requests/{id}/qr"),
                 Some(&session),
             ))
             .await
@@ -4250,7 +4297,7 @@ mod tests {
         let own_status = json_body(
             app.clone()
                 .oneshot(payer_get(
-                    &format!("/v1/payer/payments/{id}/verify"),
+                    &format!("/v1/payer/deposit-requests/{id}/verify"),
                     Some(&session),
                 ))
                 .await
@@ -4264,7 +4311,7 @@ mod tests {
         //    merchant's own payer reference on it.
         let merchant = json_body(
             app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
                 .await
                 .unwrap(),
         )
@@ -4280,20 +4327,32 @@ mod tests {
         );
         let approved = &events[0].1;
         assert_eq!(approved["type"], "verification.approved");
-        assert_eq!(approved["data"]["payment"]["id"], uuid.to_string());
+        assert_eq!(approved["data"]["deposit_request"]["id"], uuid.to_string());
         assert_eq!(
-            approved["data"]["payment"]["payer_policy_mode"],
+            approved["data"]["deposit_request"]["payer_policy_mode"],
             "merchant_session"
         );
-        assert_eq!(approved["data"]["payment"]["payer_reference"], "user_123");
-        assert_eq!(approved["data"]["payment"]["reference"], "dep-8042");
-        assert_eq!(approved["data"]["payment"]["metadata"]["order"], "8042");
-        assert!(approved["data"]["payment"]["verification_completed_at"].is_string());
-        assert_eq!(approved["data"]["payment"]["status"], "awaiting_payment");
+        assert_eq!(
+            approved["data"]["deposit_request"]["payer_reference"],
+            "user_123"
+        );
+        assert_eq!(approved["data"]["deposit_request"]["reference"], "dep-8042");
+        assert_eq!(
+            approved["data"]["deposit_request"]["metadata"]["order"],
+            "8042"
+        );
+        assert!(approved["data"]["deposit_request"]["verification_completed_at"].is_string());
+        assert_eq!(
+            approved["data"]["deposit_request"]["status"],
+            "awaiting_deposit"
+        );
 
         let activity = json_body(
             app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{id}/verification")))
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/deposit-requests/{id}/verification"),
+                ))
                 .await
                 .unwrap(),
         )
@@ -4317,7 +4376,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 KEY,
-                &format!("/v1/payments/{id}/client-secret"),
+                &format!("/v1/deposit-requests/{id}/client-secret"),
                 &json!({}),
             ))
             .await
@@ -4361,7 +4420,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 OTHER,
-                &format!("/v1/payments/{id}/client-secret"),
+                &format!("/v1/deposit-requests/{id}/client-secret"),
                 &json!({}),
             ))
             .await
@@ -4382,7 +4441,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 KEY,
-                &format!("/v1/payments/{open_id}/client-secret"),
+                &format!("/v1/deposit-requests/{open_id}/client-secret"),
                 &json!({}),
             ))
             .await
@@ -4404,7 +4463,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 KEY,
-                &format!("/v1/payments/{email_id}/client-secret"),
+                &format!("/v1/deposit-requests/{email_id}/client-secret"),
                 &json!({}),
             ))
             .await
@@ -4426,7 +4485,7 @@ mod tests {
         );
 
         // 7. The payer pays from the checkout. Funding and settlement raise
-        //    payment.paid and payment.settled, each carrying the payer
+        //    deposit_request.deposited and deposit_request.settled, each carrying the payer
         //    reference the merchant's ledger credits by.
         let address =
             Address::parse_checksummed(created["address"].as_str().unwrap(), None).unwrap();
@@ -4455,12 +4514,12 @@ mod tests {
         .unwrap();
         let paid = json_body(
             app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
                 .await
                 .unwrap(),
         )
         .await;
-        assert_eq!(paid["status"], "paid");
+        assert_eq!(paid["status"], "deposited");
         assert!(
             paid["likely_unsolicited_at"].is_null(),
             "verified before funding"
@@ -4480,10 +4539,14 @@ mod tests {
                 .iter()
                 .map(|(kind, _)| kind.as_str())
                 .collect::<Vec<_>>(),
-            ["verification.approved", "payment.paid", "payment.settled"]
+            [
+                "verification.approved",
+                "deposit_request.deposited",
+                "deposit_request.settled"
+            ]
         );
         for (kind, payload) in &events {
-            let payment = &payload["data"]["payment"];
+            let payment = &payload["data"]["deposit_request"];
             assert_eq!(payment["payer_reference"], "user_123", "{kind}");
             assert_eq!(payment["payer_policy_mode"], "merchant_session", "{kind}");
             assert_eq!(payment["metadata"]["order"], "8042", "{kind}");
@@ -4495,16 +4558,25 @@ mod tests {
             assert!(!serialized.contains("cs_"), "{kind}: {serialized}");
             assert!(!serialized.contains(&session), "{kind}");
         }
-        assert_eq!(events[1].1["data"]["payment"]["status"], "paid");
-        assert_eq!(events[1].1["data"]["payment"]["received"], "1000000");
-        assert_eq!(events[2].1["data"]["payment"]["status"], "settled");
+        assert_eq!(
+            events[1].1["data"]["deposit_request"]["status"],
+            "deposited"
+        );
+        assert_eq!(
+            events[1].1["data"]["deposit_request"]["received"],
+            "1000000"
+        );
+        assert_eq!(events[2].1["data"]["deposit_request"]["status"], "settled");
 
         // 8. The proof attests the merchant session; the snapshot carries
         //    the merchant's assertion; it verifies offline.
         let proof: ProofOfPayment = serde_json::from_value(
             json_body(
                 app.clone()
-                    .oneshot(get_request(KEY, &format!("/v1/payments/{id}/proof")))
+                    .oneshot(get_request(
+                        KEY,
+                        &format!("/v1/deposit-requests/{id}/proof"),
+                    ))
                     .await
                     .unwrap(),
             )
@@ -4543,7 +4615,7 @@ mod tests {
                 .oneshot(json_request(
                     "POST",
                     KEY,
-                    &format!("/v1/payments/{id}/client-secret"),
+                    &format!("/v1/deposit-requests/{id}/client-secret"),
                     &json!({}),
                 ))
                 .await
@@ -4565,7 +4637,7 @@ mod tests {
         assert_eq!(receipt_view["content_unlocked"], true);
         assert_eq!(receipt_view["status"], "settled");
         assert_eq!(receipt_view["payable"], false);
-        assert!(receipt_view["payment_uri"].is_null());
+        assert!(receipt_view["deposit_uri"].is_null());
         assert_eq!(webhook_events(&pool, &id).await.len(), 3);
     }
 
@@ -4630,7 +4702,7 @@ mod tests {
         .await;
         assert_eq!(created["payer_policy"]["payer_reference"], "User_ABC");
         let id = created["id"].as_str().unwrap().to_owned();
-        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
         let secret = created["client_secret"].as_str().unwrap().to_owned();
 
         // Email codes are not this mode's method, whichever way they are asked for.
@@ -4639,7 +4711,7 @@ mod tests {
             let refused = app
                 .clone()
                 .oneshot(payer_post(
-                    &format!("/v1/payer/payments/{id}/{path}"),
+                    &format!("/v1/payer/deposit-requests/{id}/{path}"),
                     None,
                     body.as_ref(),
                 ))
@@ -4698,7 +4770,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 KEY,
-                &format!("/v1/payments/{id}/client-secret"),
+                &format!("/v1/deposit-requests/{id}/client-secret"),
                 &json!({}),
             ))
             .await
@@ -4712,30 +4784,30 @@ mod tests {
         assert_eq!(too_late_exchange.status(), StatusCode::GONE);
         assert_eq!(
             json_body(too_late_exchange).await["error"]["code"],
-            "payment_not_payable"
+            "deposit_request_not_payable"
         );
         let unknown = app
             .clone()
-            .oneshot(exchange_request("pay_not-an-id", fresh_secret))
+            .oneshot(exchange_request("dr_not-an-id", fresh_secret))
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             json_body(unknown).await["error"]["code"],
-            "invalid_payment_link"
+            "invalid_deposit_link"
         );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn payer_writes_answer_cors_for_the_hosted_checkout_only(pool: PgPool) {
         let (app, _) = app_with_payer_verification(pool).await;
-        let path = "/v1/payer/payments/pay_x/verify/email/start";
+        let path = "/v1/payer/deposit-requests/dr_x/verify/email/start";
         // The client-secret exchange is a verification write like the email
         // routes, with the same one-origin answer.
         let session_preflight = app
             .clone()
             .oneshot(
-                Request::options("/v1/payer/payments/pay_x/session")
+                Request::options("/v1/payer/deposit-requests/dr_x/session")
                     .header(header::ORIGIN, CHECKOUT_ORIGIN)
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
@@ -4751,7 +4823,7 @@ mod tests {
         let foreign_session = app
             .clone()
             .oneshot(
-                Request::options("/v1/payer/payments/pay_x/session")
+                Request::options("/v1/payer/deposit-requests/dr_x/session")
                     .header(header::ORIGIN, "https://evil.example")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .body(Body::empty())
@@ -4840,7 +4912,7 @@ mod tests {
         // header, so a self-hosted checkout can present it.
         let read_preflight = app
             .oneshot(
-                Request::options("/v1/payer/payments/pay_x")
+                Request::options("/v1/payer/deposit-requests/dr_x")
                     .header(header::ORIGIN, "https://merchant.example")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
                     .header(

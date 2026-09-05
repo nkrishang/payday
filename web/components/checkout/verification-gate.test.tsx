@@ -1,4 +1,4 @@
-import type { PayerPayment } from "@payday/sdk";
+import type { PayerDepositRequest } from "@payday/sdk";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { checkoutView, type CheckoutLocalState } from "@/lib/checkout-state";
@@ -9,7 +9,7 @@ import { VerificationGate } from "./verification-gate";
 const open: CheckoutLocalState = { secondsRemaining: 3_600, pendingTxHash: null };
 
 function gate(
-  payment: PayerPayment,
+  payment: PayerDepositRequest,
   local = open,
   payerSession: string | null = null,
   clientSecretStatus: ClientSecretStatus = "none",
@@ -35,7 +35,7 @@ describe("VerificationGate", () => {
     expect(screen.getByText("Consulting — August")).toBeInTheDocument();
     expect(screen.getByText("a****@e***.com")).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: /verify to view this invoice/i }),
+      screen.getByRole("heading", { name: /verify to view this deposit request/i }),
     ).toBeInTheDocument();
     // The masked hint is the only mailbox-shaped string on the page.
     expect(container.textContent).not.toMatch(/alice|example\.com/);
@@ -61,9 +61,9 @@ describe("VerificationGate", () => {
     const { container } = render(gate(merchantSessionPayment({ heading: "Deposit 500 USDC" })));
 
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Acme Corp");
-    expect(screen.getByText("Payment from")).toBeInTheDocument();
+    expect(screen.getByText("Deposit request from")).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: /open this payment from acme corp/i }),
+      screen.getByRole("heading", { name: /open this deposit request from acme corp/i }),
     ).toBeInTheDocument();
     expect(screen.getByText(/sign in there and open it again/i)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
@@ -76,8 +76,8 @@ describe("VerificationGate", () => {
     render(
       gate(merchantSessionPayment(), { ...open, exchangingClientSecret: true }, null, "exchanging"),
     );
-    expect(screen.getByRole("status")).toHaveTextContent(/opening your payment/i);
-    expect(screen.getByRole("heading", { name: /opening your payment/i })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/opening your deposit request/i);
+    expect(screen.getByRole("heading", { name: /opening your deposit request/i })).toBeInTheDocument();
   });
 
   it("says when the link was already opened, and where to go", () => {

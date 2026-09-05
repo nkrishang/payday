@@ -1,8 +1,8 @@
-import type { UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { ArrowUpRight } from "lucide-react";
 import { CopyButton } from "@/components/ui/copy-button";
 
-export function AddressRow({ payment }: { payment: UnlockedPayerPayment }) {
+export function AddressRow({ payment }: { payment: UnlockedPayerDepositRequest }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
@@ -25,7 +25,7 @@ export function AddressRow({ payment }: { payment: UnlockedPayerPayment }) {
         <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
           {payment.address}
         </span>
-        <CopyButton value={payment.address} label="payment address" className="bg-surface" />
+        <CopyButton value={payment.address} label="deposit address" className="bg-surface" />
       </div>
     </div>
   );

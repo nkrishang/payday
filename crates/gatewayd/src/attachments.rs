@@ -1260,8 +1260,8 @@ mod tests {
     #[test]
     fn download_disposition_keeps_only_header_safe_characters() {
         assert_eq!(
-            content_disposition("March invoice.pdf"),
-            "attachment; filename=\"March invoice.pdf\""
+            content_disposition("March request.pdf"),
+            "attachment; filename=\"March request.pdf\""
         );
         assert_eq!(
             content_disposition("a\"b\\c\r\n;é.pdf"),

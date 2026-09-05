@@ -1,4 +1,4 @@
-import type { CreatePayment, Party, PayerPolicy, PayerPolicyMode } from "@payday/sdk";
+import type { CreateDepositRequest, Party, PayerPolicy, PayerPolicyMode } from "@payday/sdk";
 
 /**
  * The modes the composer can produce. `merchant_session` is not one of them:
@@ -9,7 +9,7 @@ import type { CreatePayment, Party, PayerPolicy, PayerPolicyMode } from "@payday
 export type ComposerMode = Exclude<PayerPolicyMode, "merchant_session">;
 
 /**
- * The `POST /v1/payments` body, built from what the composer collected.
+ * The `POST /v1/deposit-requests` body, built from what the composer collected.
  *
  * The composer asks its questions over four steps and keeps a draft of
  * strings; this turns that draft into the request the SDK sends. Only the
@@ -17,7 +17,7 @@ export type ComposerMode = Exclude<PayerPolicyMode, "merchant_session">;
  * API's to enforce, and its message is shown verbatim when it refuses.
  */
 
-export interface PaymentValues {
+export interface DepositRequestValues {
   /** The saved identity this is issued under, when there is one. */
   issuerId: string;
   issuerName: string;
@@ -40,7 +40,7 @@ export interface PaymentValues {
   expectedEmail: string;
 }
 
-export const EMPTY_VALUES: PaymentValues = {
+export const EMPTY_VALUES: DepositRequestValues = {
   issuerId: "",
   issuerName: "",
   issuerEmail: "",
@@ -68,7 +68,7 @@ function party(name: string, email: string, details: string): Party {
   };
 }
 
-function policy(values: PaymentValues): PayerPolicy {
+function policy(values: DepositRequestValues): PayerPolicy {
   const expected_email = values.expectedEmail.trim();
   switch (values.mode) {
     case "permissionless":
@@ -78,10 +78,10 @@ function policy(values: PaymentValues): PayerPolicy {
   }
 }
 
-export function buildCreatePayment(
-  values: PaymentValues,
+export function buildCreateDepositRequest(
+  values: DepositRequestValues,
   attachmentId: string | null,
-): CreatePayment {
+): CreateDepositRequest {
   const optional = (value: string) => (value.trim() ? { value: value.trim() } : null);
   const heading = optional(values.heading);
   const reference = optional(values.reference);
@@ -100,7 +100,7 @@ export function buildCreatePayment(
     amount: values.amount.trim(),
     payout_address: values.payoutAddress.trim(),
     issuer: party(values.issuerName, values.issuerEmail, values.issuerDetails),
-    bill_to: party(values.billName, values.billEmail, values.billDetails),
+    payer: party(values.billName, values.billEmail, values.billDetails),
     payer_policy: policy(values),
     ...(values.customerId ? { customer_id: values.customerId } : {}),
     ...(values.issuerId ? { issuer_id: values.issuerId } : {}),

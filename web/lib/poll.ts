@@ -1,8 +1,8 @@
-import type { PaymentStatus } from "@payday/sdk";
+import type { DepositRequestStatus } from "@payday/sdk";
 import { isTerminalStatus } from "./checkout-state";
 
 /**
- * How often the checkout re-reads the payment.
+ * How often the checkout re-reads the deposit request.
  *
  * The person who just paid is the case that has to feel instant, and that is
  * the one case we can detect precisely: their transaction receipt starts a
@@ -22,7 +22,7 @@ export const SEND_WINDOW_MS = 90_000;
 export const MAX_BACKOFF_MS = 30_000;
 
 export interface PollInput {
-  status: PaymentStatus;
+  status: DepositRequestStatus;
   receivedBaseUnits: string;
   /** True when the tab is in the background; polling pauses and resumes on focus. */
   documentHidden: boolean;
@@ -33,7 +33,7 @@ export interface PollInput {
 export function pollDelayMs(input: PollInput): number | null {
   if (isTerminalStatus(input.status)) return null;
 
-  // An expired payment that never received anything can no longer change.
+  // An expired deposit request that never received anything can no longer change.
   if (input.status === "expired" && BigInt(input.receivedBaseUnits) === 0n) return null;
 
   if (input.documentHidden) return null;

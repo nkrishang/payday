@@ -32,7 +32,7 @@ const DASHBOARD_CLIENT_ID: &str = "payday-dashboard-local";
 const AUDIENCE: &str = "payday-api-local";
 /// The payer application and its own audience, mirroring the production
 /// payer Action: gatewayd exchanges a payer's code here, and the token it
-/// gets back is good for nothing but unlocking an invoice.
+/// gets back is good for nothing but unlocking a deposit request.
 const PAYER_CLIENT_ID: &str = "payday-payer-local";
 const PAYER_AUDIENCE: &str = "payday-payer-local";
 
@@ -47,7 +47,7 @@ const EMAIL_OTP_TTL: Duration = Duration::from_secs(300);
 /// lifetime for a resource server. It is the dashboard session's whole length —
 /// the API accepts the token until it expires and there is nothing to refresh
 /// it with — so a short one here does not make development safer, it just signs
-/// a merchant out mid-invoice. The freshness the account routes insist on is a
+/// a merchant out mid-request. The freshness the account routes insist on is a
 /// separate window (`AUTHENTICATION_MAX_AGE` in gatewayd) measured from the
 /// token's own `authenticated_at`, and is unaffected by this.
 const ACCESS_TOKEN_TTL: u64 = 24 * 60 * 60;

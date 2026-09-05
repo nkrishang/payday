@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { lockedPayment, merchantSessionPayment, payment } from "@/test/fixtures";
-import { checkoutView, isTerminalStatus, unlockedPayment } from "./checkout-state";
+import { checkoutView, isTerminalStatus, unlockedDepositRequest } from "./checkout-state";
 
 const open = { secondsRemaining: 3_600, pendingTxHash: null };
 
@@ -15,7 +15,7 @@ describe("checkoutView", () => {
   it("asks for the remainder once a partial transfer lands", () => {
     const view = checkoutView(
       payment({
-        status: "partially_paid",
+        status: "partially_deposited",
         received: "10.00",
         received_base_units: "10000000",
         remaining: "15.00",
@@ -61,7 +61,7 @@ describe("checkoutView", () => {
     expect(view.showInstructions).toBe(false);
   });
 
-  it("tells an exactly paid payer only that the invoice amount reached the merchant", () => {
+  it("tells an exactly paid payer only that the requested amount reached the merchant", () => {
     const view = checkoutView(
       payment({
         status: "settled",
@@ -74,7 +74,7 @@ describe("checkoutView", () => {
       open,
     );
     expect(view.phase).toBe("settled");
-    expect(view.detail).toMatch(/Exactly the invoice amount reached the merchant/);
+    expect(view.detail).toMatch(/Exactly the requested amount reached the merchant/);
     expect(view.detail).not.toMatch(/recovery wallet/);
   });
 
@@ -91,20 +91,20 @@ describe("checkoutView", () => {
       open,
     );
     expect(view.phase).toBe("settled");
-    expect(view.detail).toMatch(/Exactly the invoice amount reached the merchant/);
-    expect(view.detail).toMatch(/above the invoice amount went to the Payday recovery wallet/);
+    expect(view.detail).toMatch(/Exactly the requested amount reached the merchant/);
+    expect(view.detail).toMatch(/above the requested amount went to the Payday recovery wallet/);
     expect(view.detail).toMatch(/Payday support/);
     expect(view.detail).not.toMatch(/refund/i);
   });
 
-  it("treats paid as in-progress, because settlement has not happened yet", () => {
-    const view = checkoutView(payment({ status: "paid" }), open);
-    expect(view.phase).toBe("paid");
+  it("treats deposited as in-progress, because settlement has not happened yet", () => {
+    const view = checkoutView(payment({ status: "deposited" }), open);
+    expect(view.phase).toBe("deposited");
     expect(view.isTerminal).toBe(false);
-    expect(view.detail).toMatch(/settling the invoice amount to the merchant/);
+    expect(view.detail).toMatch(/settling the requested amount to the merchant/);
   });
 
-  it("separates an expired payment that received nothing from one holding funds", () => {
+  it("separates an expired deposit request that received nothing from one holding funds", () => {
     expect(checkoutView(payment({ status: "expired", payable: false }), open).phase).toBe(
       "expired_empty",
     );
@@ -131,10 +131,10 @@ describe("checkoutView", () => {
   });
 
   it("never calls the recovery wallet a refund address", () => {
-    const statuses = ["partially_paid", "expired", "returned"] as const;
+    const statuses = ["partially_deposited", "expired", "returned"] as const;
     for (const status of statuses) {
       const view = checkoutView(
-        payment({ status, payable: status === "partially_paid", received_base_units: "1" }),
+        payment({ status, payable: status === "partially_deposited", received_base_units: "1" }),
         open,
       );
       expect(view.detail, status).not.toMatch(/refund/i);
@@ -155,8 +155,8 @@ describe("checkoutView", () => {
     expect(view.showInstructions).toBe(false);
   });
 
-  it("never shows payment instructions in a state that is not payable", () => {
-    const closed = ["settled", "returned", "expired", "needs_attention", "paid"] as const;
+  it("never shows deposit instructions in a state that is not payable", () => {
+    const closed = ["settled", "returned", "expired", "needs_attention", "deposited"] as const;
     for (const status of closed) {
       const view = checkoutView(payment({ status, payable: false }), open);
       expect(view.showInstructions, status).toBe(false);
@@ -164,7 +164,7 @@ describe("checkoutView", () => {
   });
 });
 
-describe("checkoutView for a gated invoice", () => {
+describe("checkoutView for a gated deposit request", () => {
   it("requires verification while the gateway withholds the content", () => {
     const view = checkoutView(lockedPayment(), open);
     expect(view.phase).toBe("verification_required");
@@ -174,8 +174,8 @@ describe("checkoutView for a gated invoice", () => {
 
   it("puts the lock ahead of every lifecycle state, so a locked page never reports an outcome", () => {
     const statuses = [
-      "partially_paid",
-      "paid",
+      "partially_deposited",
+      "deposited",
       "settled",
       "expired",
       "returned",
@@ -213,7 +213,7 @@ describe("checkoutView for a gated invoice", () => {
   it("sends a merchant-session payer back to the app, and shows progress while the secret is exchanged", () => {
     const bare = checkoutView(merchantSessionPayment(), open);
     expect(bare.phase).toBe("app_required");
-    expect(bare.title).toBe("Open this payment from Acme Corp");
+    expect(bare.title).toBe("Open this deposit request from Acme Corp");
     expect(bare.showInstructions).toBe(false);
     expect(`${bare.label} ${bare.title} ${bare.detail}`).not.toMatch(
       /email|code|25|0x9a3f|USDC|Globex/,
@@ -242,8 +242,8 @@ describe("checkoutView for a gated invoice", () => {
     ).toBe("app_required");
   });
 
-  it("still asks the bare link to verify after another session completed the invoice", () => {
-    // The API reports the invoice's own completion without a session; this
+  it("still asks the bare link to verify after another session completed the deposit request", () => {
+    // The API reports the deposit request's own completion without a session; this
     // tab has no session, so it must verify itself.
     const view = checkoutView(
       lockedPayment({
@@ -255,22 +255,22 @@ describe("checkoutView for a gated invoice", () => {
   });
 });
 
-describe("unlockedPayment", () => {
+describe("unlockedDepositRequest", () => {
   it("returns the mechanics when the gateway unlocked them", () => {
-    const unlocked = unlockedPayment(payment());
+    const unlocked = unlockedDepositRequest(payment());
     expect(unlocked?.address).toBe("0x9a3f0000000000000000000000000000000000c2");
     expect(unlocked?.token.symbol).toBe("USDC");
   });
 
   it("treats a locked response as locked regardless of status", () => {
-    expect(unlockedPayment(lockedPayment())).toBeNull();
+    expect(unlockedDepositRequest(lockedPayment())).toBeNull();
   });
 
   it("treats a response that claims to be unlocked but lacks a mechanic as locked", () => {
     // The API nulls every gated field together; a response that disagrees with
     // its own flag must not be rendered with holes.
-    expect(unlockedPayment(payment({ address: null } as never))).toBeNull();
-    expect(unlockedPayment(payment({ token: null } as never))).toBeNull();
+    expect(unlockedDepositRequest(payment({ address: null } as never))).toBeNull();
+    expect(unlockedDepositRequest(payment({ token: null } as never))).toBeNull();
   });
 });
 
@@ -279,7 +279,7 @@ describe("isTerminalStatus", () => {
     expect(isTerminalStatus("settled")).toBe(true);
     expect(isTerminalStatus("returned")).toBe(true);
     expect(isTerminalStatus("needs_attention")).toBe(true);
-    expect(isTerminalStatus("awaiting_payment")).toBe(false);
+    expect(isTerminalStatus("awaiting_deposit")).toBe(false);
     expect(isTerminalStatus("expired")).toBe(false);
   });
 });

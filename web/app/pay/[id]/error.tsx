@@ -5,7 +5,7 @@ import { useEffect } from "react";
 import { CheckoutFrame } from "@/components/checkout/frame";
 import { Button } from "@/components/ui/button";
 
-export default function PaymentError({
+export default function DepositError({
   error,
   reset,
 }: {
@@ -19,9 +19,9 @@ export default function PaymentError({
   return (
     <CheckoutFrame>
       <div className="px-6 py-14 text-center sm:px-8">
-        <h1 className="text-xl font-semibold tracking-tight">This payment could not be loaded</h1>
+        <h1 className="text-xl font-semibold tracking-tight">This deposit request could not be loaded</h1>
         <p className="mx-auto mt-3 max-w-[38ch] text-[15px] leading-relaxed text-muted">
-          The payment itself is unaffected — this page could not reach Payday. Try again in a
+          The deposit request itself is unaffected — this page could not reach Payday. Try again in a
           moment.
         </p>
         <Button onClick={reset} className="mt-8" variant="secondary">

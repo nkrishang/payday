@@ -1,12 +1,12 @@
 import { AlertTriangle, ArrowUpRight, Check, Clock, Loader2 } from "lucide-react";
-import type { CheckoutView, UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { CheckoutView, UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
 import { config } from "@/lib/config";
 import { explorerTxUrl, formatDisplayAmount, truncateHash } from "@/lib/format";
 
 const icons = {
   settled: Check,
-  paid: Loader2,
+  deposited: Loader2,
   confirming: Loader2,
   closing: Clock,
   expired_empty: Clock,
@@ -17,7 +17,7 @@ const icons = {
 
 /**
  * Every state in which there is nothing left for the payer to send. The
- * invoice amount is not repeated here: the document block above the outcome
+ * requested amount is not repeated here: the document block above the outcome
  * already carries it, and this list is about what actually happened.
  */
 export function Resolved({
@@ -25,12 +25,12 @@ export function Resolved({
   view,
   pendingTxHash,
 }: {
-  payment: UnlockedPayerPayment;
+  payment: UnlockedPayerDepositRequest;
   view: CheckoutView;
   pendingTxHash: string | null;
 }) {
   const Icon = icons[view.phase as keyof typeof icons] ?? Clock;
-  const spinning = view.phase === "paid" || view.phase === "confirming";
+  const spinning = view.phase === "deposited" || view.phase === "confirming";
 
   const txHash = pendingTxHash ?? payment.settlement_tx_hash;
   const txUrl =

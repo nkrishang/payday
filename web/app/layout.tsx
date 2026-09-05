@@ -23,17 +23,17 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://payday.sh"),
   title: {
-    default: "Payday — stablecoin payments that settle themselves",
+    default: "Payday — stablecoin deposits that settle themselves",
     template: "%s · Payday",
   },
   description:
-    "Create a USDC payment through a small API, share one link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically.",
+    "Create a USDC deposit request through a small API, share one link, and let Payday detect finalized transfers and settle exactly the requested amount to your wallet automatically.",
   openGraph: {
     type: "website",
     siteName: "Payday",
-    title: "Payday — stablecoin payments that settle themselves",
+    title: "Payday — stablecoin deposits that settle themselves",
     description:
-      "Create a USDC payment, share one link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically.",
+      "Create a USDC deposit request, share one link, and let Payday detect finalized transfers and settle exactly the requested amount to your wallet automatically.",
   },
 };
 

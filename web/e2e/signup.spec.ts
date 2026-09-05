@@ -33,7 +33,7 @@ test("the hero opens a sign-up dialog that signs a new merchant in", async ({ pa
   await dialog.getByRole("button", { name: "Continue" }).click();
 
   await expect(page).toHaveURL(/\/dashboard$/);
-  await expect(page.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deposits." })).toBeVisible();
 
   // The session is Privy's to keep (the stub keeps it in this tab); the page
   // itself stores no credential of its own anywhere.

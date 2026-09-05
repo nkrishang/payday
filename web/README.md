@@ -1,12 +1,12 @@
 # payday.sh
 
 The landing page, the hosted checkout at `/pay/{id}` (where every
-`payment_url` points), and the merchant dashboard at `/dashboard`.
+`deposit_url` points), and the merchant dashboard at `/dashboard`.
 
 The checkout is built on Payday's own public payer API through
 [`@payday/sdk`](../sdk/typescript). Those routes take no API key and expose no
-merchant data, because a payment link is open by design: anyone holding it is
-allowed to fulfil the payment. For a gated invoice the API withholds the
+merchant data, because a deposit link is open by design: anyone holding it is
+allowed to fund the deposit request. For a gated request the API withholds the
 amount, parties, attachment, and address until the payer verifies, and the
 page renders only what it was sent — nothing withheld enters the React tree.
 
@@ -27,7 +27,7 @@ request as empty shells and fetch everything client-side. See
 
 The gateway must be running (`just dev` from the repository root, which also
 starts Anvil, the indexer, and the local identity provider for payer codes),
-and `PAYDAY_PUBLIC_BASE_URL` must point here so created payments link somewhere
+and `PAYDAY_PUBLIC_BASE_URL` must point here so created deposit requests link somewhere
 that can render them.
 
 ```bash
@@ -51,8 +51,8 @@ npm run test:e2e  --workspace @payday/web
 ```
 
 The browser suite runs against `e2e/stub-api.mjs`, a stand-in for the Payday
-API. For the checkout the scenario is chosen by the payment id —
-`/pay/pay_settled`, `/pay/pay_gated-email`, and so on. Because the checkout
+API. For the checkout the scenario is chosen by the deposit request id —
+`/pay/dr_settled`, `/pay/dr_gated-email`, and so on. Because the checkout
 renders on the server, intercepting in the browser would miss the first paint
 entirely, so the app itself is pointed at the stub. For the dashboard the same
 stub plays the merchant API behind a fake bearer check and the presigned upload
@@ -61,9 +61,9 @@ target, and Privy itself is replaced at bundle time by `test/privy-stub.tsx`
 accepted code (`123456`, which the stub's payer and issuer-mailbox
 verifications accept too). It covers what unit tests cannot: that the page
 hydrates, that polling moves the DOM on its own, that states which must not
-offer an address really do not, that a gated invoice's withheld fields are
+offer an address really do not, that a gated deposit request's withheld fields are
 absent from both the HTML and the DOM, that a merchant can sign in from the
-landing page, upload a PDF, issue an invoice, and download its proof, and that
+landing page, upload a PDF, issue a deposit request, and download its proof, and that
 the CSP each route is served can actually be satisfied. The sign-up dialog's
 resend cooldown is driven by Playwright's clock rather than waited out.
 
@@ -87,9 +87,9 @@ challenge it may present), per Privy's CSP guidance.
 ## How it holds together
 
 **One render on the server, then polling in the browser.** `app/pay/[id]/page.tsx`
-fetches the payment server-side, so the page arrives with the amount, address,
+fetches the deposit request server-side, so the page arrives with the amount, address,
 QR and status already in it — no spinner, no layout shift, and it still reads
-correctly with JavaScript disabled. `usePayment` then keeps it live by reading
+correctly with JavaScript disabled. `useDepositRequest` then keeps it live by reading
 the API directly from the browser; the payer routes are public and CORS-enabled,
 so proxying through this app would add a hop and a second copy of the contract
 without buying anything. The dashboard calls the merchant routes the same way,
@@ -104,17 +104,17 @@ background tab pauses. Holding open connections on an unauthenticated endpoint
 would improve a case that is already handled. See `lib/poll.ts`.
 
 **Two safety rules live in `lib/checkout-state.ts`, with tests.** The payer's
-device clock never decides that a payment expired — chain time does, so a
+device clock never decides that a deposit request expired — chain time does, so a
 countdown reaching zero moves the page to "the deadline has been reached" and
-waits for the server. And payment instructions disappear the moment the payment
+waits for the server. And deposit instructions disappear the moment the request
 stops being payable, because funds sent afterwards route to the Payday recovery
 wallet rather than back to the payer; the page tells payers to contact the
 merchant and Payday support for return handling.
 
-**A locked invoice is absent, not hidden.** `unlockedPayment` in
+**A locked deposit request is absent, not hidden.** `unlockedDepositRequest` in
 `lib/checkout-state.ts` narrows the payer response to the shape whose
 mechanics are present; every component that renders an amount, address, QR, or
-attachment takes that narrowed type, so a gated invoice's withheld content
+attachment takes that narrowed type, so a gated request's withheld content
 cannot be rendered by accident and the page shows only the issuer, heading, and
 masked mailbox until the API unlocks it. The attachment's signed URL is fetched
 on click and never server-rendered.
@@ -124,7 +124,7 @@ string and as integer `_base_units`. Arithmetic uses base units as `BigInt`;
 `lib/format.ts` does the rest.
 
 **The wallet transfer is verified before it is signed.** `WalletPay` checks the
-payment's chain and token contract against this deployment's configured values,
+deposit request's chain and token contract against this deployment's configured values,
 then sends a plain ERC-20 `transfer` of `remaining_base_units` re-read at the
 moment of signing. No approval, no contract call, nothing that can redirect
 funds.

@@ -503,7 +503,7 @@ mod tests {
         let without = verify_proof(&proof, None, &[]).unwrap();
         assert!(!without.attachment_verified);
 
-        // A JSON round trip (as `GET /v1/payments/{id}/proof` serves it) is lossless.
+        // A JSON round trip (as `GET /v1/deposit-requests/{id}/proof` serves it) is lossless.
         let json = serde_json::to_string(&proof).unwrap();
         let parsed: ProofOfPayment = serde_json::from_str(&json).unwrap();
         assert_eq!(

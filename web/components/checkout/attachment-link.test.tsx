@@ -28,12 +28,12 @@ describe("AttachmentLink", () => {
 
   it("fetches the signed URL only when asked, then opens it in a new tab", async () => {
     const fetchDescriptor = vi
-      .spyOn(payerClient.payments, "attachment")
+      .spyOn(payerClient.depositRequests, "attachment")
       .mockResolvedValue({ ...ATTACHMENT, download_url: DOWNLOAD_URL });
     const tab = { opener: window, location: { replace: vi.fn() }, close: vi.fn() };
     open.mockReturnValue(tab as unknown as Window);
 
-    const { container } = render(<AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} />);
+    const { container } = render(<AttachmentLink paymentId="dr_1" attachment={ATTACHMENT} />);
 
     // Nothing is fetched, and no URL is in the markup, until the click.
     expect(fetchDescriptor).not.toHaveBeenCalled();
@@ -44,34 +44,34 @@ describe("AttachmentLink", () => {
 
     await waitFor(() => expect(open).toHaveBeenCalledWith("", "_blank"));
     expect(tab.location.replace).toHaveBeenCalledWith(DOWNLOAD_URL);
-    expect(fetchDescriptor).toHaveBeenCalledWith("pay_1");
+    expect(fetchDescriptor).toHaveBeenCalledWith("dr_1");
     expect(container.innerHTML).not.toContain("X-Amz-Signature");
   });
 
-  it("presents this tab's session so a gated invoice's descriptor is minted for it", async () => {
+  it("presents this tab's session so a gated deposit request's descriptor is minted for it", async () => {
     const fetchDescriptor = vi
-      .spyOn(payerClient.payments, "attachment")
+      .spyOn(payerClient.depositRequests, "attachment")
       .mockResolvedValue({ ...ATTACHMENT, download_url: DOWNLOAD_URL });
     open.mockReturnValue({ opener: null, location: { replace: vi.fn() } } as unknown as Window);
 
     const { container } = render(
-      <AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} payerSession="pps_token" />,
+      <AttachmentLink paymentId="dr_1" attachment={ATTACHMENT} payerSession="pps_token" />,
     );
     fireEvent.click(screen.getByRole("button", { name: /INV-1042\.pdf/ }));
 
-    await waitFor(() => expect(fetchDescriptor).toHaveBeenCalledWith("pay_1", "pps_token"));
+    await waitFor(() => expect(fetchDescriptor).toHaveBeenCalledWith("dr_1", "pps_token"));
     // The session is a header on the request, never part of the page.
     expect(container.innerHTML).not.toContain("pps_token");
   });
 
   it("falls back to a plain link when the browser blocks the tab", async () => {
-    vi.spyOn(payerClient.payments, "attachment").mockResolvedValue({
+    vi.spyOn(payerClient.depositRequests, "attachment").mockResolvedValue({
       ...ATTACHMENT,
       download_url: DOWNLOAD_URL,
     });
     open.mockReturnValue(null);
 
-    render(<AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} />);
+    render(<AttachmentLink paymentId="dr_1" attachment={ATTACHMENT} />);
     fireEvent.click(screen.getByRole("button", { name: /INV-1042\.pdf/ }));
 
     const link = await screen.findByRole("link", { name: /Open INV-1042\.pdf/ });
@@ -80,11 +80,11 @@ describe("AttachmentLink", () => {
   });
 
   it("tells a locked payer to verify first", async () => {
-    vi.spyOn(payerClient.payments, "attachment").mockRejectedValue(
+    vi.spyOn(payerClient.depositRequests, "attachment").mockRejectedValue(
       new PaydayError("Verify first", "verification_required", 401),
     );
 
-    render(<AttachmentLink paymentId="pay_1" attachment={ATTACHMENT} />);
+    render(<AttachmentLink paymentId="dr_1" attachment={ATTACHMENT} />);
     fireEvent.click(screen.getByRole("button", { name: /INV-1042\.pdf/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/verify first/i);

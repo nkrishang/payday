@@ -749,9 +749,9 @@ impl InvoiceRepository {
                LEFT JOIN invoices cursor ON cursor.account_id = $1 AND cursor.id = $4
                WHERE candidate.account_id = $1
                  AND ($2::text IS NULL OR
-                    ($2 = 'awaiting_payment' AND candidate.status = 'created' AND candidate.confirmed_received = '0') OR
-                    ($2 = 'partially_paid' AND candidate.status = 'created' AND candidate.confirmed_received <> '0') OR
-                    ($2 = 'paid' AND candidate.status IN ('funded', 'deploying')) OR
+                    ($2 = 'awaiting_deposit' AND candidate.status = 'created' AND candidate.confirmed_received = '0') OR
+                    ($2 = 'partially_deposited' AND candidate.status = 'created' AND candidate.confirmed_received <> '0') OR
+                    ($2 = 'deposited' AND candidate.status IN ('funded', 'deploying')) OR
                     ($2 = 'settled' AND candidate.status = 'fulfilled') OR
                     ($2 = 'expired' AND candidate.status = 'expired') OR
                     ($2 = 'returned' AND candidate.status = 'recovered') OR
@@ -1568,7 +1568,7 @@ pub(crate) mod tests {
         assert_eq!(
             repo.list_for_account(
                 owner,
-                Some("awaiting_payment"),
+                Some("awaiting_deposit"),
                 None,
                 None,
                 None,
@@ -2008,11 +2008,11 @@ pub(crate) mod tests {
                 .map(|(kind, _)| kind.as_str())
                 .collect::<Vec<_>>(),
             [
-                "payment.likely_unsolicited",
-                "payment.needs_attention",
-                "payment.paid",
-                "payment.recovered_funds",
-                "payment.settled",
+                "deposit_request.deposited",
+                "deposit_request.likely_unsolicited",
+                "deposit_request.needs_attention",
+                "deposit_request.recovered_funds",
+                "deposit_request.settled",
                 "verification.approved",
             ]
         );
@@ -2038,13 +2038,13 @@ pub(crate) mod tests {
                     "{kind} carries {secret}: {serialized}"
                 );
             }
-            let payment = payload["data"]["payment"]
+            let payment = payload["data"]["deposit_request"]
                 .as_object()
                 .unwrap_or_else(|| panic!("{kind} has no payment object: {serialized}"));
             let mut keys: BTreeSet<&str> = payment.keys().map(String::as_str).collect();
             assert_eq!(
                 keys.remove("attention"),
-                kind == "payment.needs_attention",
+                kind == "deposit_request.needs_attention",
                 "{kind}: only the attention event carries the attention object"
             );
             assert_eq!(keys, allowlist, "{kind}");
@@ -2070,18 +2070,18 @@ pub(crate) mod tests {
         assert!(repo.block_invoice(id, "retries_exhausted").await.unwrap());
         assert!(!repo.block_invoice(id, "retries_exhausted").await.unwrap());
         let (email_count, webhook_count): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM notification_outbox WHERE invoice_id=$1), (SELECT count(*) FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention')",
+            "SELECT (SELECT count(*) FROM notification_outbox WHERE invoice_id=$1), (SELECT count(*) FROM webhook_events WHERE invoice_id=$1 AND event_type='deposit_request.needs_attention')",
         ).bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!((email_count, webhook_count), (1, 1));
         let payload: serde_json::Value = sqlx::query_scalar(
-            "SELECT payload FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention'",
+            "SELECT payload FROM webhook_events WHERE invoice_id=$1 AND event_type='deposit_request.needs_attention'",
         ).bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!(
-            payload["data"]["payment"]["attention"]["reason_code"],
+            payload["data"]["deposit_request"]["attention"]["reason_code"],
             "retries_exhausted"
         );
         assert!(
-            payload["data"]["payment"]["attention"]["message"]
+            payload["data"]["deposit_request"]["attention"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("Funds remain safe")
@@ -2095,7 +2095,7 @@ pub(crate) mod tests {
             Err(ReleasePaymentError::NotBlocked)
         ));
 
-        sqlx::query("DELETE FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention'")
+        sqlx::query("DELETE FROM webhook_events WHERE invoice_id=$1 AND event_type='deposit_request.needs_attention'")
             .bind(id)
             .execute(&pool)
             .await
@@ -2123,7 +2123,7 @@ pub(crate) mod tests {
         let terminal = repo.release_blocked(id).await.unwrap();
         assert_eq!(terminal.status, "fulfilled");
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE invoice_id=$1 AND event_type='payment.needs_attention'")
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE invoice_id=$1 AND event_type='deposit_request.needs_attention'")
                 .bind(id).fetch_one(&pool).await.unwrap(),
             1
         );

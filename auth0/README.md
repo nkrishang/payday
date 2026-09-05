@@ -8,7 +8,7 @@ email-provider settings as described in
 
 Auth0 is not how merchants sign in. Merchants use Privy; Auth0's job is the
 cheap, account-free proof that a mailbox was just opened — a payer's on a
-gated invoice, or an issuer identity's contact address — which happens many
+gated deposit request, or an issuer identity's contact address — which happens many
 times more often than a merchant signs up and never needs a user of its own.
 
 ## Bootstrap or update
@@ -67,7 +67,7 @@ cleanup lands.
 
 `payer.tf` declares the `Payday Payer Verification` application and enables
 the passwordless email connection for it. It is the client `gatewayd` uses to
-prove a payer owns the mailbox an invoice was issued to: the API asks Auth0 to
+prove a payer owns the mailbox a deposit request was issued to: the API asks Auth0 to
 email the code and exchanges it server-side, so the application is public
 (native, no secret) and needs only the passwordless OTP grant. Its tokens are
 requested for a separate payer API audience (`https://api.payday.sh/payer`),

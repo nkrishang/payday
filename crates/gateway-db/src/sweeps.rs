@@ -1013,16 +1013,16 @@ mod tests {
         assert!(ledger(&pool, outsider.id.0).await.is_empty());
 
         let event: (String, serde_json::Value) = sqlx::query_as(
-            "SELECT event_type, payload FROM webhook_events WHERE invoice_id = $1 AND event_type = 'payment.recovered_funds'",
+            "SELECT event_type, payload FROM webhook_events WHERE invoice_id = $1 AND event_type = 'deposit_request.recovered_funds'",
         )
         .bind(member.id.0)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(event.0, "payment.recovered_funds");
+        assert_eq!(event.0, "deposit_request.recovered_funds");
         assert_eq!(event.1["data"]["recovery"]["amount"], "50");
         assert_eq!(event.1["data"]["recovery"]["reason"], "overpayment");
-        assert_eq!(event.1["data"]["payment"]["status"], "settled");
+        assert_eq!(event.1["data"]["deposit_request"]["status"], "settled");
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
@@ -1117,7 +1117,7 @@ mod tests {
         assert_eq!(row.execute_tx_hash, None);
         assert_eq!(row.settlement_tx_hash, Some(SETTLEMENT_TX_HASH.to_vec()));
         let events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM webhook_events WHERE invoice_id = $1 AND event_type = 'payment.recovered_funds'",
+            "SELECT count(*) FROM webhook_events WHERE invoice_id = $1 AND event_type = 'deposit_request.recovered_funds'",
         )
         .bind(member.id.0)
         .fetch_one(&pool)

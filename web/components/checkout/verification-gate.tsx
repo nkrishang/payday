@@ -1,14 +1,14 @@
-import type { PayerPayment } from "@payday/sdk";
+import type { PayerDepositRequest } from "@payday/sdk";
 import type { CheckoutView } from "@/lib/checkout-state";
 import { Lock } from "lucide-react";
 import { EmailVerification } from "./email-verification";
 import { MerchantSessionGate, type ClientSecretStatus } from "./merchant-session";
 
 /**
- * What a gated invoice shows before the payer has verified: the issuer, the
+ * What a gated deposit request shows before the payer has verified: the issuer, the
  * heading, and the one way in that the policy allows. For a verified-email
- * invoice that is a masked hint of the mailbox and the controls for the code;
- * for a merchant-session invoice it is the name of the app that opens it,
+ * request that is a masked hint of the mailbox and the controls for the code;
+ * for a merchant-session request it is the name of the app that opens it,
  * because nothing on this page can. Nothing else is in the tree — the API
  * does not send the amount, parties, attachment, or address, and this
  * component never asks for them.
@@ -22,7 +22,7 @@ export function VerificationGate({
   onCodeSent,
   onVerified,
 }: {
-  payment: PayerPayment;
+  payment: PayerDepositRequest;
   view: CheckoutView;
   payerSession: string | null;
   clientSecretStatus: ClientSecretStatus;
@@ -36,7 +36,7 @@ export function VerificationGate({
   return (
     <div className="px-5 py-6 sm:px-6">
       <p className="text-[11px] font-medium tracking-[0.14em] text-faint uppercase">
-        {merchantSession ? "Payment from" : "Invoice from"}
+        Deposit request from
       </p>
       <h1 className="mt-1.5 text-[22px] font-semibold tracking-tight">{payment.issuer_name}</h1>
       {payment.heading ? (
@@ -62,8 +62,8 @@ export function VerificationGate({
         ) : (
           <>
             <p className="mt-2 text-[13px] leading-relaxed text-muted">
-              The amount, payment details, and attachment are shown once the payer verifies the
-              email address this invoice was issued to.
+              The amount, deposit details, and attachment are shown once the payer verifies the
+              email address this deposit request was issued to.
             </p>
 
             {expected_email_hint ? (

@@ -8,7 +8,7 @@ import { useResource } from "./session";
 
 /**
  * What the merchant may know about a payer's verification beyond the verdict
- * beside it: every attempt made against the invoice, with its status and
+ * beside it: every attempt made against the deposit request, with its status and
  * when it happened. The payer's session and the code they typed are never
  * here, because the API never sends them.
  *
@@ -19,7 +19,7 @@ import { useResource } from "./session";
 /** The rule that separates this from the verdict above it. */
 const RULE = "mt-4 border-t border-line pt-4";
 export function VerificationActivity({ paymentId }: { paymentId: string }) {
-  const detail = useResource(paymentId, (client) => client.payments.verification(paymentId));
+  const detail = useResource(paymentId, (client) => client.depositRequests.verification(paymentId));
 
   if (detail.error) {
     return (

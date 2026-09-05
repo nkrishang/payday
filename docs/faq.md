@@ -1,12 +1,12 @@
 # Customer FAQ
 
-## What is the difference between an invoice and a payment?
+## What is the difference between a deposit request and a deposit?
 
-The invoice is the document you issue: issuer and bill-to parties, one amount,
+The deposit request is the document you issue: issuer and payer parties, one amount,
 optional notes, heading, reference, and metadata, a payer policy, and at most
-one PDF. The payment is its on-chain fulfilment at a one-time address. The API
-path stays `/v1/payments`; everything else says invoice. Issued invoices are
-immutable — to change one, cancel it and issue another.
+one PDF. The deposit is its on-chain fulfilment at a one-time address. The API
+resource is the deposit request, and the deposit's state is read from it.
+Issued deposit requests are immutable — to change one, cancel it and issue another.
 
 ## Can I add line items or tax?
 
@@ -26,17 +26,17 @@ unsolicited. Payday reports pass or fail, not the payer's own data.
 
 ## How do PDF attachments work?
 
-One PDF per invoice, at most 5 MiB. The SDK's `attachments.upload` and the
+One PDF per deposit request, at most 5 MiB. The SDK's `attachments.upload` and the
 dashboard's upload control reserve a presigned slot,
 send the bytes straight to storage, and wait for the malware scan to admit the
-file; only then can its `attachment_id` be attached to an invoice. The file's
-SHA-256 is committed into the payment address and appears in the Proof of
+file; only then can its `attachment_id` be attached to a deposit request. The file's
+SHA-256 is committed into the deposit address and appears in the Proof of
 Payment. Reads return a signed URL valid for a few minutes.
 
 ## What is Proof of Payment and how do I verify it?
 
-Once an invoice settles, `GET /v1/payments/{id}/proof` exports the canonical
-invoice, the nonce and salt, the payment address, the settling transfer, and a
+Once a deposit request settles, `GET /v1/deposit-requests/{id}/proof` exports the canonical
+deposit request, the nonce and salt, the deposit address, the settling transfer, and a
 Payday-signed verification attestation. Anyone holding it can recompute the
 hash, salt, and address and check the transfer offline, with no Payday access;
 the checks are published as `gateway_core::verify_proof`, and the attached
@@ -46,39 +46,39 @@ with payers or auditors at your discretion; it is not a public link.
 ## Which asset and networks can pay?
 
 Each deployment accepts one exact Circle-issued native USDC contract on one EVM
-chain. Use the `chain` and `token` returned with the payment. A matching symbol
+chain. Use the `chain` and `token` returned with the deposit request. A matching symbol
 is not enough: bridged USDC, USDC on another chain, look-alike tokens, and the
 chain's gas currency do not count and may be unrecoverable.
 
-## What is the payment address?
+## What is the deposit address?
 
-It is a unique counterfactual smart-contract address for one payment. USDC can
+It is a unique counterfactual smart-contract address for one deposit request. USDC can
 arrive before the contract exists; deployment later routes its balance under
 the amount, payout, expiry, and Payday recovery terms committed into that
 address. Never reuse it for another order.
 
 ## What should I give the payer?
 
-Prefer the returned `payment_url`. It shows the invoice, network, token,
+Prefer the returned `deposit_url`. It shows the deposit request, network, token,
 remaining amount, address, QR/wallet request, deadline, and finalized live
-status — after verification, for a gated invoice. Send it to the payer. If
+status — after verification, for a gated deposit request. Send it to the payer. If
 integrating your own UI, reproduce all safety guidance in
-[Payment safety](payment-safety.md).
+[Deposit safety](deposit-safety.md).
 
 ## Why has a wallet transaction not appeared?
 
 Payday credits only finalized native-USDC transfers. Inclusion or wallet
 confirmation can precede Payday's finality boundary and indexing cursor. Check
 `as_of`, `indexer_freshness`, transfer provenance, and `/v1/status`; poll
-`GET /v1/payments/{id}` or register a webhook rather than treating submission
-as payment.
+`GET /v1/deposit-requests/{id}` or register a webhook rather than treating submission
+as a deposit.
 
-## What happens with exact, partial, or excess payment?
+## What happens with exact, partial, or excess deposits?
 
-- Exact and cumulative partial transfers become `paid` once finalized credits
+- Exact and cumulative partial transfers become `deposited` once finalized credits
   reach the requested amount.
-- `partially_paid` remains open while the finalized total is short.
-- On-time execution sends exactly the invoice amount to payout. Any excess goes
+- `partially_deposited` remains open while the finalized total is short.
+- On-time execution sends exactly the requested amount to payout. Any excess goes
   to the Payday recovery wallet and is returned after manual review; it is
   never forwarded to the merchant.
 - If execution happens after expiry, the complete balance goes to the Payday
@@ -89,27 +89,27 @@ Leave time for inclusion, finality, and settlement before the deadline.
 ## Where do expired or late funds go?
 
 An underpaid address is recovered after expiry. Native USDC sent after expiry
-or after the payment contract executes is routed to the Payday recovery wallet
-(`recovery_address` on the payment). Payday holds those funds, records each
-amount against the payment, reviews it manually, and returns it; the wallet is
+or after the deposit contract executes is routed to the Payday recovery wallet
+(`recovery_address` on the deposit request). Payday holds those funds, records each
+amount against the deposit request, reviews it manually, and returns it; the wallet is
 not the payer's and not the merchant's. Payers should contact the merchant and
 Payday support for return handling.
 
 ## Can I cancel or refund through Payday?
 
-`POST /v1/payments/{id}/cancel` is advisory: it stops
-Payday clients from presenting the payment but cannot disable an EVM address or
+`POST /v1/deposit-requests/{id}/cancel` is advisory: it stops
+Payday clients from presenting the deposit request but cannot disable an EVM address or
 alter its contract. There is no refund endpoint. Funds that settled to your
 payout address are yours to refund through your own wallet/process; recovered
 funds (overpayments, late or expired transfers) are returned by Payday after
-manual review, and `payment.recovered_funds` webhooks tell you when Payday
-holds something for one of your payments.
+manual review, and `deposit_request.recovered_funds` webhooks tell you when Payday
+holds something for one of your deposit requests.
 
-## How do I find and reconcile payments?
+## How do I find and reconcile deposits?
 
-Save the `pay_…` ID and your own `reference`. Look up an invoice by complete
-ID or payment address. List newest-first with optional status/reference
-filters and cursor pagination; summaries carry the heading, bill-to name,
+Save the `dr_…` ID and your own `reference`. Look up a deposit request by complete
+ID or deposit address. List newest-first with optional status/reference
+filters and cursor pagination; summaries carry the heading, payer name,
 policy mode, customer, and verification state. The transfers endpoint provides
 finalized sender, transaction, amount, block, disposition, and collection
 state, and the Proof of Payment is the durable reconciliation record.
@@ -117,8 +117,8 @@ state, and the Proof of Payment is the durable reconciliation record.
 ## Should I poll or use webhooks?
 
 Use signed webhooks for lifecycle automation and API long polling
-(`wait_for=change`) for an active screen. Webhooks report paid, settled,
-expired, refunded, and attention transitions, plus every amount recovered by
+(`wait_for=change`) for an active screen. Webhooks report deposited, settled,
+expired, returned, and attention transitions, plus every amount recovered by
 Payday. Verify the HMAC over the exact raw body, reject stale timestamps, and
 deduplicate by event ID. See [Webhooks](webhooks.md).
 
@@ -126,7 +126,7 @@ deduplicate by event ID. See [Webhooks](webhooks.md).
 
 Automatic movement stopped because Payday cannot safely continue. Do not send
 more funds. Follow the response's `attention.action` and contact support with
-the payment and request IDs. Settlement and later-fund recovery stay paused
+the deposit request ID and the API request ID. Settlement and later-fund recovery stay paused
 until an operator resolves and releases the condition; funds are not necessarily
 lost or delivered.
 
@@ -151,12 +151,12 @@ shown only at issuance. See [Authentication and API keys](authentication.md).
 
 `https://api.sandbox.payday.sh` is an isolated Monad testnet service with test
 USDC and `payday_test_…` credentials. It exercises real indexing/finality rather than a
-fake “mark paid” endpoint. See [Sandbox](sandbox.md).
+fake “mark deposited” endpoint. See [Sandbox](sandbox.md).
 
 ## Where can I get help?
 
-Check the public service status first. For payment or authentication support,
-email `support@payday.sh` with the payment ID and API `request_id`. Never send
+Check the public service status first. For deposit or authentication support,
+email `support@payday.sh` with the deposit request ID and API `request_id`. Never send
 API keys, OTPs, signer keys, webhook secrets, or unnecessary personal data.
 Report software or documentation defects through
 [GitHub issues](https://github.com/nkrishang/payday/issues).

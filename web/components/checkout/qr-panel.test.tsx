@@ -23,20 +23,20 @@ describe("QrPanel", () => {
   });
 
   it("fetches the QR for the amount still due, with the session in a header, and shows it from an object URL", async () => {
-    const qr = vi.spyOn(payerClient.payments, "qr").mockResolvedValue(SVG);
+    const qr = vi.spyOn(payerClient.depositRequests, "qr").mockResolvedValue(SVG);
 
     render(<QrPanel payment={payment()} payerSession="pps_token" />);
 
     const img = await screen.findByRole("img");
     expect(img).toHaveAttribute("src", "blob:qr-1");
-    expect(qr).toHaveBeenCalledWith("pay_0198f80c-8d2f-7dc1-a369-90556a64f700", "pps_token", {
+    expect(qr).toHaveBeenCalledWith("dr_0198f80c-8d2f-7dc1-a369-90556a64f700", "pps_token", {
       signal: expect.any(AbortSignal),
     });
     expect(img.getAttribute("src")).not.toContain("pps_token");
   });
 
-  it("re-fetches when a partial payment lowers the remainder, and revokes the old image", async () => {
-    vi.spyOn(payerClient.payments, "qr").mockResolvedValue(SVG);
+  it("re-fetches when a partial deposit lowers the remainder, and revokes the old image", async () => {
+    vi.spyOn(payerClient.depositRequests, "qr").mockResolvedValue(SVG);
     const { rerender } = render(<QrPanel payment={payment()} />);
     await screen.findByRole("img");
 
@@ -47,11 +47,11 @@ describe("QrPanel", () => {
   });
 
   it("removes itself when the gateway stops serving the code", async () => {
-    // The QR route answers 410 once the payment is no longer payable, which
+    // The QR route answers 410 once the deposit request is no longer payable, which
     // reaches this component as a failed fetch. Showing a stale address after
     // that would invite a transfer that routes to the Payday recovery wallet
     // rather than back to the payer.
-    vi.spyOn(payerClient.payments, "qr").mockRejectedValue(new Error("410"));
+    vi.spyOn(payerClient.depositRequests, "qr").mockRejectedValue(new Error("410"));
 
     const { container } = render(<QrPanel payment={payment()} />);
 

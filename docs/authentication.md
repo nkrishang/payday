@@ -12,7 +12,7 @@ wallet as where the account's deposits settle by default. Payday never sees a
 password, never generates a code, and never holds the wallet's key.
 
 **Payers and issuer mailboxes are proven through Auth0.** A payer opening a
-gated invoice, or a merchant proving an issuer identity's contact address,
+gated deposit request, or a merchant proving an issuer identity's contact address,
 must show that a mailbox was just opened — but neither is a Payday customer,
 and those checks run many times more often than a merchant signs up. Creating
 a Privy user for each would be paying for accounts that exist for one code.
@@ -47,8 +47,8 @@ it or the Resend API key in this repository, ECS, or a developer's shell.
 ### Launch authorization limitations
 
 At launch, a Privy identity maps to one Payday account with one active,
-unnamed server-side API key. That key can both create payments and read every
-payment owned by the account. Payday does not yet provide read-only or otherwise
+unnamed server-side API key. That key can both create deposits and read every
+deposit owned by the account. Payday does not yet provide read-only or otherwise
 scoped keys, multiple concurrent named keys, source-IP allowlists, or
 team/organization membership. Share it only with principals that may exercise
 the account's full authority; rotation eventually disrupts every integration
@@ -141,7 +141,7 @@ verify the reviewable tenant controls and operational checklist in
 [`auth0/README.md`](../auth0/README.md) before launch. That root enables
 brute-force and suspicious-IP blocking and notifications; breached-password
 detection is intentionally irrelevant to this passwordless-only tenant. Keep
-the OTP email wording non-enumerating and free of payment data.
+the OTP email wording non-enumerating and free of deposit data.
 
 ## 4. Configure Payday
 
@@ -166,7 +166,7 @@ it cannot; afterwards it refreshes the set every five minutes or on an unknown
 key id, and fails closed once it has gone an hour without a successful
 refresh. Without `PAYDAY_PRIVY_APP_ID` every dashboard session is refused and
 only API keys authenticate. Without the `PAYDAY_PAYER_*` settings the API
-still serves gated invoices, but their verification routes — and issuer
+still serves gated deposit requests, but their verification routes — and issuer
 mailbox verification — answer `503 verification_unavailable`.
 
 The web app is built with the same app id as `NEXT_PUBLIC_PRIVY_APP_ID`
@@ -236,7 +236,7 @@ into the local database with `scripts/local-api-key.sh` instead.
 ## Clean pre-launch database
 
 This release intentionally changes the initial schema rather than carrying
-forward the global test key and pre-release invoices. Immediately before the
+forward the global test key and pre-release deposit requests. Immediately before the
 first deployment of this release, stop both services, delete the pre-release
 database contents, recreate an empty `gateway` database/schema, and then start
 the API and indexer so embedded migrations create the schema from scratch. Do
@@ -251,7 +251,7 @@ the wallet exists; JWKS rotation and bounded outage behavior; account
 provisioning and wallet adoption; key issuance, rotation, and revocation from
 a session and their refusal to an API key; atomic key replacement; tenant
 isolation; and the payer OTP exchange. `scripts/e2e-anvil.sh` exercises the
-complete payment lifecycle and tenant isolation without contacting Privy or
+complete deposit request lifecycle and tenant isolation without contacting Privy or
 Auth0.
 
 Hosted Privy, hosted Auth0, and email delivery cannot be reproduced by local
@@ -263,7 +263,7 @@ unit tests. Before launch, additionally:
    key's predecessor keeps working through its grace window and fails
    immediately after revocation, and that an API key cannot call
    `POST /v1/account/api-key`.
-3. Issue a gated invoice and verify it as a payer with a real mailbox;
+3. Issue a gated deposit request and verify it as a payer with a real mailbox;
    confirm a reused/expired/wrong code fails and Auth0 does not reveal whether
    an address already exists.
 4. Deliver real payer codes to Gmail and one other mailbox; inspect the raw

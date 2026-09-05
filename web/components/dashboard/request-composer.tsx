@@ -4,7 +4,7 @@ import {
   type AttachmentDescriptor,
   type Customer,
   type Issuer,
-  type Payment,
+  type DepositRequest,
   PaydayError,
 } from "@payday/sdk";
 import { ArrowLeft, ArrowRight, Loader2 } from "lucide-react";
@@ -17,7 +17,7 @@ import { cn } from "@/lib/cn";
 import { clampWords, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { AttachmentUpload } from "./attachment-upload";
-import { buildCreatePayment, EMPTY_VALUES, type ComposerMode } from "./create-payment";
+import { buildCreateDepositRequest, EMPTY_VALUES, type ComposerMode } from "./create-deposit-request";
 import { AMOUNT, EMAIL } from "./field-rules";
 import { Labeled } from "./labeled";
 import { formatDate, MODES, modeLabel } from "./labels";
@@ -26,7 +26,7 @@ import { useMerchant } from "./session";
 /**
  * Issuing a deposit request without leaving the page.
  *
- * This is the only way to issue one. It asks everything `POST /v1/payments`
+ * This is the only way to issue one. It asks everything `POST /v1/deposit-requests`
  * takes, but in the order a merchant answers it — how much, who owes it, what
  * they must prove, then a look before it is issued — and keeps a running
  * preview beside the questions, because an issued request is immutable and the
@@ -34,7 +34,7 @@ import { useMerchant } from "./session";
  *
  * The merchant's own side is chosen, never retyped: the issuer identity comes
  * from what they set up, the wallet is the account's own unless a saved one
- * is picked, and the invoice still carries its own snapshot of both.
+ * is picked, and the deposit request still carries its own snapshot of both.
  */
 
 /** The `payoutAddressId` that means the account's own wallet. */
@@ -42,9 +42,9 @@ const ACCOUNT_WALLET = "account";
 
 interface Draft {
   amount: string;
-  /** A saved customer, or "" while the billed party is being typed fresh. */
+  /** A saved customer, or "" while the payer is being typed fresh. */
   customerId: string;
-  /** The chosen issuer identity, whose party the invoice snapshots. */
+  /** The chosen issuer identity, whose party the deposit request snapshots. */
   issuerId: string;
   /** `ACCOUNT_WALLET`, or one of the identity's saved wallets. */
   payoutAddressId: string;
@@ -192,7 +192,7 @@ export function RequestComposer({
   customers: Customer[];
   /** A customer to open on, when a customer's own page sent us here. */
   billed?: string | undefined;
-  onIssued: (payment: Payment) => void;
+  onIssued: (payment: DepositRequest) => void;
   onCancel: () => void;
 }) {
   const { client, signOut } = useMerchant();
@@ -210,7 +210,7 @@ export function RequestComposer({
   // save the same counterparty twice.
   const savedCustomer = useRef<string | null>(null);
   // A verified policy checks a mailbox, and the mailbox it usually checks is
-  // the billed party's — so it follows that field until someone types their
+  // the payer's — so it follows that field until someone types their
   // own, after which it is theirs and stops moving.
   const [expectedEdited, setExpectedEdited] = useState(false);
   const [attachment, setAttachment] = useState<AttachmentDescriptor | null>(null);
@@ -266,7 +266,7 @@ export function RequestComposer({
       : (issuer?.payout_addresses.find((entry) => entry.id === draft.payoutAddressId)?.address ??
         "");
 
-  /** Choosing a saved customer fills the billed party from it. */
+  /** Choosing a saved customer fills the payer from it. */
   const chooseCustomer = (id: string) => {
     idempotencyKey.current = null;
     setFailure(null);
@@ -326,7 +326,7 @@ export function RequestComposer({
     setFailure(null);
     idempotencyKey.current ??= crypto.randomUUID();
     try {
-      // A billed party typed fresh becomes a customer, so the next request can
+      // A payer typed fresh becomes a customer, so the next request can
       // pick them rather than retype them — and so they appear in the list.
       let customerId = draft.customerId;
       if (!customerId) {
@@ -338,8 +338,8 @@ export function RequestComposer({
         ).id;
         customerId = savedCustomer.current;
       }
-      const payment = await client.payments.create(
-        buildCreatePayment(
+      const payment = await client.depositRequests.create(
+        buildCreateDepositRequest(
           {
             ...EMPTY_VALUES,
             amount: draft.amount,
@@ -347,8 +347,8 @@ export function RequestComposer({
             // below is the snapshot the document keeps.
             issuerId: draft.issuerId,
             customerId,
-            // The invoice keeps its own snapshot of the identity, so a later
-            // edit to it cannot reach an invoice already issued.
+            // The deposit request keeps its own snapshot of the identity, so a later
+            // edit to it cannot reach a request already issued.
             payoutAddress,
             expiresInHours: draft.expiry === CUSTOM ? "" : draft.expiry,
             expiresAt: chosenMoment(draft),
@@ -559,7 +559,7 @@ export function RequestComposer({
                 ) : null}
 
                 <div className="grid gap-5 sm:grid-cols-2">
-                  <Labeled label="Billed to" required error={shown("billName")}>
+                  <Labeled label="Payer" required error={shown("billName")}>
                     <input
                       autoFocus
                       maxLength={255}
@@ -696,14 +696,14 @@ export function RequestComposer({
                       <span className="text-muted"> · Payday wallet</span>
                     ) : null}
                   </Row>
-                  <Row label="Billed to">
+                  <Row label="Payer">
                     {draft.billName.trim()}
                     {draft.billEmail.trim() ? (
                       <span className="text-muted"> · {draft.billEmail.trim()}</span>
                     ) : null}
                   </Row>
                   <Row label="Verification">
-                    {/* The expected mailbox follows the billed party even
+                    {/* The expected mailbox follows the payer even
                         while the policy is open, so it is only part of this
                         request when a policy actually checks it. */}
                     {gated ? modeLabel(draft.mode) : "—"}

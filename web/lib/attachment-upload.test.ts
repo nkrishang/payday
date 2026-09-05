@@ -15,7 +15,7 @@ const SLOT = {
 
 const DESCRIPTOR = {
   id: SLOT.id,
-  filename: "invoice.pdf",
+  filename: "request.pdf",
   mime_type: "application/pdf",
   byte_length: "9",
   sha256: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
@@ -50,7 +50,7 @@ function stubExchange(finalizeAnswers: Array<() => Response>) {
   return { calls, fetcher };
 }
 
-const file = () => new File(["%PDF-1.4\n"], "invoice.pdf", { type: "application/pdf" });
+const file = () => new File(["%PDF-1.4\n"], "request.pdf", { type: "application/pdf" });
 
 describe("uploadAttachment", () => {
   beforeEach(() => {
@@ -99,7 +99,7 @@ describe("uploadAttachment", () => {
 
     expect(result).toBeNull();
     expect(states.map((state) => state.status)).toEqual(["pending_upload", "scanning", "rejected"]);
-    expect(states.at(-1)).toMatchObject({ status: "rejected", filename: "invoice.pdf" });
+    expect(states.at(-1)).toMatchObject({ status: "rejected", filename: "request.pdf" });
   });
 
   it("treats a refused PUT as a failure before any scan", async () => {
@@ -123,7 +123,7 @@ describe("uploadAttachment", () => {
 
 describe("fileProblem", () => {
   it("answers the obvious cases before any request is made", () => {
-    expect(fileProblem({ name: "invoice.pdf", size: 10, type: "application/pdf" })).toBeNull();
+    expect(fileProblem({ name: "request.pdf", size: 10, type: "application/pdf" })).toBeNull();
     expect(fileProblem({ name: "INVOICE.PDF", size: 10, type: "" })).toBeNull();
     expect(fileProblem({ name: "photo.png", size: 10, type: "image/png" })).toMatch(/PDF/);
     expect(fileProblem({ name: "empty.pdf", size: 0, type: "application/pdf" })).toMatch(/empty/);

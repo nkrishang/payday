@@ -23,7 +23,7 @@ import { useMerchant } from "./session";
  * because a different mailbox is a different claim), prove the one it has,
  * and attach or drop saved wallets. Deposits settle to the account's own
  * Payday wallet unless a saved one is chosen on the request, so an identity
- * needs none to be issued under. Nothing here can reach an invoice already
+ * needs none to be issued under. Nothing here can reach a deposit request already
  * issued; those carry their own snapshot.
  */
 

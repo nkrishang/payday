@@ -1,14 +1,14 @@
 import Link from "next/link";
 import { CheckoutFrame } from "@/components/checkout/frame";
 
-export default function PaymentNotFound() {
+export default function DepositNotFound() {
   return (
     <CheckoutFrame>
       <div className="px-6 py-14 text-center sm:px-8">
-        <h1 className="text-xl font-semibold tracking-tight">This payment link is not valid</h1>
+        <h1 className="text-xl font-semibold tracking-tight">This deposit link is not valid</h1>
         <p className="mx-auto mt-3 max-w-[36ch] text-[15px] leading-relaxed text-muted">
-          It may have been mistyped, or the payment may never have existed. Ask the merchant for a
-          new link — payment addresses are single-use and must never be reused.
+          It may have been mistyped, or the deposit request may never have existed. Ask the merchant for a
+          new link — deposit addresses are single-use and must never be reused.
         </p>
         <Link
           href="/"

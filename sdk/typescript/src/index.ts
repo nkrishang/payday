@@ -1,11 +1,11 @@
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-export type PaymentStatus = "awaiting_payment" | "partially_paid" | "paid" | "settled" | "expired" | "returned" | "needs_attention";
+export type DepositRequestStatus = "awaiting_deposit" | "partially_deposited" | "deposited" | "settled" | "expired" | "returned" | "needs_attention";
 
 export interface Chain { id: string; name: string }
 export interface Token { symbol: string; address: string; decimals: number }
 export interface AsOf { block: string; at: string }
 
-/** A named party on an invoice. `details` is bounded free text rendered verbatim, never parsed. */
+/** A named party on a deposit request: the issuer or the payer. `details` is bounded free text rendered verbatim, never parsed. */
 export interface Party {
   name: string;
   email?: string;
@@ -20,7 +20,7 @@ export type PayerPolicyMode = "permissionless" | "verified_email" | "merchant_se
  * application has already signed in, by your own identifier; your server then
  * hands that payer the single-use `client_secret` the create response
  * carries, and no code or vendor is involved. Every assertion is
- * merchant-supplied and immutable once the invoice is issued.
+ * merchant-supplied and immutable once the deposit request is issued.
  */
 export type PayerPolicy =
   | { mode: "permissionless" }
@@ -33,17 +33,17 @@ export interface AttachmentDescriptor {
   mime_type: "application/pdf";
   /** Decimal string, like every exact integer on the API. */
   byte_length: string;
-  /** 0x-prefixed lowercase hex of the stored bytes; committed into the payment address. */
+  /** 0x-prefixed lowercase hex of the stored bytes; committed into the deposit address. */
   sha256: string;
   /** Short-lived signed URL, present only on attachment reads. */
   download_url?: string;
 }
 
-export interface CreatePayment {
+export interface CreateDepositRequest {
   amount: string;
   payout_address: string;
   issuer: Party;
-  bill_to: Party;
+  payer: Party;
   payer_policy: PayerPolicy;
   customer_id?: string;
   /**
@@ -57,7 +57,7 @@ export interface CreatePayment {
   heading?: string;
   reference?: string;
   metadata?: Record<string, JsonValue>;
-  /** A finalized attachment from `attachments.upload`; one PDF per invoice. */
+  /** A finalized attachment from `attachments.upload`; one PDF per deposit request. */
   attachment_id?: string;
   expires_in?: number;
   expires_at?: string;
@@ -65,13 +65,13 @@ export interface CreatePayment {
   token_address?: string;
 }
 
-/** The commitment that ties the issued document to the payment address. */
+/** The commitment that ties the issued deposit request to the deposit address. */
 export interface Attribution { version: number; hash: string }
 
-export interface Payment {
+export interface DepositRequest {
   id: string;
-  payment_url: string;
-  status: PaymentStatus;
+  deposit_url: string;
+  status: DepositRequestStatus;
   chain: Chain;
   currency: string;
   token: Token;
@@ -79,7 +79,7 @@ export interface Payment {
   address_explorer_url: string | null;
   payout_address: string;
   /**
-   * Payday's custodial recovery wallet, committed into the payment address.
+   * Payday's custodial recovery wallet, committed into the deposit address.
    * Overpayment remainders, expired balances, and late transfers land there
    * and are returned by the operator after manual review; merchants cannot
    * choose it.
@@ -96,7 +96,7 @@ export interface Payment {
   net_amount: string;
   net_amount_base_units: string;
   issuer: Party;
-  bill_to: Party;
+  payer: Party;
   notes: string | null;
   heading: string | null;
   reference: string | null;
@@ -108,11 +108,11 @@ export interface Payment {
   payer_policy: PayerPolicy;
   attachment: AttachmentDescriptor | null;
   /**
-   * `merchant_session` only, and only on the `201` that issued the payment:
+   * `merchant_session` only, and only on the `201` that issued the deposit request:
    * the first single-use client secret, valid for fifteen minutes. Absent on
    * every later read and on idempotent replays; the API stores only its hash.
-   * Send the payer to `checkoutUrl(payment, client_secret)`; mint another with
-   * `payments.createClientSecret` when they come back.
+   * Send the payer to `checkoutUrl(depositRequest, client_secret)`; mint another with
+   * `depositRequests.createClientSecret` when they come back.
    */
   client_secret?: string;
   client_secret_expires_at?: string;
@@ -124,8 +124,8 @@ export interface Payment {
   updated_at: string;
   expires_at: string;
   expires_in?: number;
-  paid_at: string | null;
-  paid_at_block: string | null;
+  deposited_at: string | null;
+  deposited_at_block: string | null;
   settled_at: string | null;
   settled_block: string | null;
   expired_at: string | null;
@@ -149,7 +149,7 @@ export interface VerificationRequirements {
   complete: boolean;
 }
 
-/** A fresh single-use client secret for a `merchant_session` payment. Returned once; stored hashed. */
+/** A fresh single-use client secret for a `merchant_session` deposit request. Returned once; stored hashed. */
 export interface ClientSecret { client_secret: string; expires_at: string }
 
 /** A payer session minted by exchanging a client secret on the hosted checkout. */
@@ -163,14 +163,14 @@ export interface ExchangeClientSecret {
 export const CLIENT_SECRET_FRAGMENT_KEY = "cs";
 
 /**
- * The URL to send an authenticated payer to for a `merchant_session` payment:
- * the payment page with the client secret in the fragment, which never reaches
+ * The URL to send an authenticated payer to for a `merchant_session` deposit request:
+ * the deposit page with the client secret in the fragment, which never reaches
  * a server log, a Referer header, or an analytics beacon. Redirect to it or
  * open it in a frame; never write it to a log.
  */
-export function checkoutUrl(payment: Pick<Payment, "payment_url">, clientSecret: string): string {
+export function checkoutUrl(depositRequest: Pick<DepositRequest, "deposit_url">, clientSecret: string): string {
   if (!clientSecret) throw new TypeError("clientSecret is required");
-  return `${payment.payment_url}#${CLIENT_SECRET_FRAGMENT_KEY}=${encodeURIComponent(clientSecret)}`;
+  return `${depositRequest.deposit_url}#${CLIENT_SECRET_FRAGMENT_KEY}=${encodeURIComponent(clientSecret)}`;
 }
 
 /** The policy as the payer may see it: the mode and a masked mailbox hint such as `a****@e***.com`. */
@@ -179,7 +179,7 @@ export interface PayerPolicySummary { mode: PayerPolicyMode; expected_email_hint
 /** A payer session minted by `verification.startEmail`; the token is opaque and stored hashed by the API. */
 export interface StartEmailVerification { payer_session: string; expires_at: string }
 
-/** What a session (or, without one, the invoice) has established. */
+/** What a session (or, without one, the deposit request) has established. */
 export interface VerificationStatus {
   requirements: VerificationRequirements;
 }
@@ -197,7 +197,7 @@ export interface VerificationAttempt {
   created_at: string;
 }
 
-/** The merchant's verification view of one invoice: each fact on its own and every attempt. */
+/** The merchant's verification view of one deposit request: each fact on its own and every attempt. */
 export interface VerificationDetail {
   payer_policy_mode: PayerPolicyMode;
   verification_completed_at: string | null;
@@ -206,34 +206,34 @@ export interface VerificationDetail {
   attempts: VerificationAttempt[];
 }
 
-/** Invoice content that a gated invoice withholds until verification completes. */
-export interface PayerInvoiceDetails {
+/** Deposit request content that a gated request withholds until verification completes. */
+export interface PayerDepositRequestDetails {
   amount: string;
   amount_base_units: string;
-  bill_to: Party;
+  payer: Party;
   notes: string | null;
   reference: string | null;
   attachment: AttachmentDescriptor | null;
 }
 
 /**
- * The narrowed projection served to anyone holding a payment link.
+ * The narrowed projection served to anyone holding a deposit link.
  *
  * Deliberately carries no merchant data: no payout or recovery address, no
- * metadata, customer, or policy assertions. The payment page is world-readable,
- * so this is the only payment shape safe to render on it.
+ * metadata, customer, or policy assertions. The deposit page is world-readable,
+ * so this is the only deposit request shape safe to render on it.
  *
- * Gated invoices disclose progressively. Until `content_unlocked` is true the
- * mechanics (`chain`, `token`, amounts, `address`, `payment_uri`) and `invoice`
+ * Gated deposit requests disclose progressively. Until `content_unlocked` is true the
+ * mechanics (`chain`, `token`, amounts, `address`, `deposit_uri`) and `details`
  * are null; only the issuer name, heading, status, and requirement state show.
  */
-export interface PayerPayment {
+export interface PayerDepositRequest {
   id: string;
   issuer_name: string;
   heading: string | null;
   payer_policy: PayerPolicySummary;
   requirements: VerificationRequirements;
-  status: PaymentStatus;
+  status: DepositRequestStatus;
   /** Whether the gateway still considers this address payable. */
   payable: boolean;
   expires_at: string;
@@ -255,14 +255,14 @@ export interface PayerPayment {
   address: string | null;
   address_explorer_url: string | null;
   /** EIP-681 request for the amount still due; null while locked or once not payable. */
-  payment_uri: string | null;
-  invoice: PayerInvoiceDetails | null;
+  deposit_uri: string | null;
+  details: PayerDepositRequestDetails | null;
 }
 
-export interface PaymentSummary {
+export interface DepositRequestSummary {
   id: string;
   heading: string | null;
-  bill_to_name: string;
+  payer_name: string;
   reference: string | null;
   metadata: Record<string, JsonValue>;
   payer_policy_mode: PayerPolicyMode;
@@ -272,16 +272,16 @@ export interface PaymentSummary {
   verification_completed_at: string | null;
   likely_unsolicited_at: string | null;
   created_at: string;
-  status: PaymentStatus;
+  status: DepositRequestStatus;
   amount: string;
   received: string;
   cancellation_requested_at: string | null;
 }
-/** Verification is a separate fact from the payment's status, so it filters separately. */
+/** Verification is a separate fact from the deposit request's status, so it filters separately. */
 export type VerificationFilter = "not_required" | "pending" | "verified" | "likely_unsolicited";
-export interface ListPaymentsParams {
+export interface ListDepositRequestsParams {
   starting_after?: string;
-  status?: PaymentStatus;
+  status?: DepositRequestStatus;
   reference?: string;
   /** Only requests billed to this customer. */
   customer_id?: string;
@@ -290,14 +290,14 @@ export interface ListPaymentsParams {
   verification?: VerificationFilter;
   limit?: number;
 }
-export interface PaymentPage { payments: PaymentSummary[]; next_cursor: string | null }
+export interface DepositRequestPage { deposit_requests: DepositRequestSummary[]; next_cursor: string | null }
 export interface Transfer {
   transaction_hash: string; explorer_url: string | null; sender: string; amount: string; amount_base_units: string;
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
 }
-export interface CancelPaymentResponse { payment: Payment; advisory: string }
+export interface CancelDepositRequestResponse { deposit_request: DepositRequest; advisory: string }
 /** Internal: the dashboard onboarding walkthrough's one real demo transfer. */
-export interface OnboardingPaymentResponse { payer_session: string; tx_hash: string }
+export interface OnboardingDepositResponse { payer_session: string; tx_hash: string }
 
 /** A saved payout wallet, EIP-55 checksummed and unique per account. */
 export interface PayoutAddress {
@@ -308,10 +308,10 @@ export interface PayoutAddress {
 }
 
 /**
- * A saved issuer identity: the party an invoice is issued under, its contact
- * mailbox, and the wallets it may settle to. Issuance is unchanged — a payment
- * still carries its own `issuer` and `payout_address` snapshot — so editing an
- * identity never touches an invoice already issued.
+ * A saved issuer identity: the party a deposit request is issued under, its contact
+ * mailbox, and the wallets it may settle to. Issuance is unchanged — a deposit
+ * request still carries its own `issuer` and `payout_address` snapshot — so
+ * editing an identity never touches a request already issued.
  */
 export interface Issuer {
   id: string;
@@ -355,7 +355,7 @@ export interface CreateCustomer { name: string; email?: string; details?: string
 export interface UpdateCustomer { name: string; email?: string | null; details?: string | null }
 export interface ListCustomersParams { starting_after?: string; limit?: number }
 export interface CustomerPage { customers: Customer[]; next_cursor: string | null }
-/** Base units, like a payment's own `amount_base_units` — scale for display. */
+/** Base units, like a deposit request's own `amount_base_units` — scale for display. */
 export interface CustomerStats {
   request_count: number;
   collected_base_units: string;
@@ -409,7 +409,7 @@ export interface ProofTransfer {
 /**
  * What Payday signs about a verification outcome. The issuance commitment
  * (attribution hash, chain, CREATE3 address) is in the signed payload so the
- * attestation vouches for this invoice only, not for any proof reusing its id.
+ * attestation vouches for this deposit request only, not for any proof reusing its id.
  */
 export interface VerificationAttestationPayload {
   version: string;
@@ -433,8 +433,10 @@ export interface SignedVerificationAttestation {
 }
 
 /**
- * Offline-verifiable record tying the issued invoice to its payment address,
- * the transfers that paid it, and the transaction that settled it. It is
+ * Offline-verifiable record tying the issued deposit request to its deposit address,
+ * the transfers that funded it, and the transaction that settled it. The
+ * `payday.proof.v1` field names (`payment_id`, `payment_address`) and the
+ * `payday.invoice` snapshot schema are frozen with that version. It is
  * checked without Payday: `gateway_core::verify_proof` holds the offline
  * checks.
  */
@@ -451,9 +453,9 @@ export interface ProofOfPayment {
   payment_address: string;
   token_address: string;
   /**
-   * The fulfilment transaction (the payment's `settlement_tx_hash`) that
+   * The fulfilment transaction (the deposit request's `settlement_tx_hash`) that
    * forwarded the funds to the receiver; not one of `transfers`, which are the
-   * payer's USDC transfers into the payment address.
+   * payer's USDC transfers into the deposit address.
    */
   settlement_transaction_hash: string;
   transfers: ProofTransfer[];
@@ -560,7 +562,7 @@ interface RequestOptions {
 /**
  * Every Payday response is `Cache-Control: no-store`, so requests opt out of
  * caching explicitly. This also stops frameworks that patch `fetch` with a
- * caching default (Next.js) from serving a stale payment.
+ * caching default (Next.js) from serving a stale deposit request.
  */
 async function send(
   fetcher: typeof globalThis.fetch,
@@ -635,53 +637,53 @@ export class PaydayClient {
     if (!this.fetcher) throw new TypeError("fetch is required");
   }
 
-  readonly payments = {
-    create: (payment: CreatePayment, idempotencyKey: string): Promise<Payment> => {
+  readonly depositRequests = {
+    create: (depositRequest: CreateDepositRequest, idempotencyKey: string): Promise<DepositRequest> => {
       if (!idempotencyKey) throw new TypeError("idempotencyKey is required");
-      return this.request("/v1/payments", { method: "POST", body: payment, idempotencyKey });
+      return this.request("/v1/deposit-requests", { method: "POST", body: depositRequest, idempotencyKey });
     },
-    get: (id: string, options: { waitForChange?: boolean; timeout?: number } = {}): Promise<Payment> => {
+    get: (id: string, options: { waitForChange?: boolean; timeout?: number } = {}): Promise<DepositRequest> => {
       const params = options.waitForChange ? { wait_for: "change", timeout: options.timeout } : {};
-      return this.request(`/v1/payments/${encodeURIComponent(id)}${query(params)}`);
+      return this.request(`/v1/deposit-requests/${encodeURIComponent(id)}${query(params)}`);
     },
-    list: (params: ListPaymentsParams = {}): Promise<PaymentPage> =>
-      this.request(`/v1/payments${query(params)}`),
-    cancel: (id: string): Promise<CancelPaymentResponse> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+    list: (params: ListDepositRequestsParams = {}): Promise<DepositRequestPage> =>
+      this.request(`/v1/deposit-requests${query(params)}`),
+    cancel: (id: string): Promise<CancelDepositRequestResponse> =>
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
     /**
      * Internal: the dashboard onboarding walkthrough's one real demo
-     * transfer and verification. Refuses `409 onboarding_payment_not_eligible`
+     * transfer and verification. Refuses `409 onboarding_deposit_not_eligible`
      * for anything not addressed to Payday's own onboarding mailbox — not a
      * general merchant feature.
      */
-    onboardingPayment: (id: string): Promise<OnboardingPaymentResponse> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/onboarding-payment`, { method: "POST" }),
+    onboardingDeposit: (id: string): Promise<OnboardingDepositResponse> =>
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/onboarding-deposit`, { method: "POST" }),
     transfers: (id: string): Promise<Transfer[]> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/transfers`),
-    /** The invoice's PDF attachment with a short-lived `download_url`. */
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/transfers`),
+    /** The deposit request's PDF attachment with a short-lived `download_url`. */
     attachment: (id: string): Promise<AttachmentDescriptor> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/attachment`),
-    /** Payday's deterministic invoice summary; the same invoice always renders byte-identical bytes. */
-    invoicePdf: async (id: string): Promise<Blob> => {
-      const response = await this.send(`/v1/payments/${encodeURIComponent(id)}/invoice.pdf`, { accept: "application/pdf" });
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/attachment`),
+    /** Payday's deterministic summary of the deposit request as a PDF; the same request always renders byte-identical bytes. */
+    requestPdf: async (id: string): Promise<Blob> => {
+      const response = await this.send(`/v1/deposit-requests/${encodeURIComponent(id)}/request.pdf`, { accept: "application/pdf" });
       return response.blob();
     },
-    /** Available once the payment is settled; `409 payment_not_settled` before. */
+    /** Available once the deposit is settled; `409 deposit_request_not_settled` before. */
     proof: (id: string): Promise<ProofOfPayment> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/proof`),
-    /** Every verification attempt on the invoice, each fact reported separately. */
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/proof`),
+    /** Every verification attempt on the deposit request, each fact reported separately. */
     verification: (id: string): Promise<VerificationDetail> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/verification`),
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/verification`),
     /**
-     * A fresh single-use client secret for a `merchant_session` payment, for a
+     * A fresh single-use client secret for a `merchant_session` deposit request, for a
      * payer your application signs in again after the first secret was spent
      * or expired. Earlier unspent secrets stay valid until they expire.
-     * `409 verification_not_required` for a permissionless payment,
+     * `409 verification_not_required` for a permissionless deposit request,
      * `409 verification_method_not_applicable` for a `verified_email` one, and
-     * `410 payment_not_payable` once the payment is closed without having verified.
+     * `410 deposit_request_not_payable` once the request is closed without having verified.
      */
     createClientSecret: (id: string): Promise<ClientSecret> =>
-      this.request(`/v1/payments/${encodeURIComponent(id)}/client-secret`, { method: "POST" }),
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/client-secret`, { method: "POST" }),
   };
 
   readonly customers = {
@@ -697,8 +699,8 @@ export class PaydayClient {
 
   /**
    * Saved issuer identities. An identity is a convenience for whoever issues:
-   * `payments.create` still takes the party and the payout address inline and
-   * snapshots them, so nothing here can change an invoice already issued. The
+   * `depositRequests.create` still takes the party and the payout address inline and
+   * snapshots them, so nothing here can change a deposit request already issued. The
    * contact mailbox is the exception worth proving — payers are told to write
    * to it — and it is proven with the same emailed code the dashboard signs in
    * with.
@@ -853,12 +855,12 @@ export class PaydayClient {
 }
 
 /**
- * Keyless client for the public payer routes behind a `payment_url`.
+ * Keyless client for the public payer routes behind a `deposit_url`.
  *
- * A payment link is intentionally open: anyone holding it may view the payment
- * and fulfil it. These routes accept no API key, so never pass a secret here.
+ * A deposit link is intentionally open: anyone holding it may view the deposit
+ * request and fulfil it. These routes accept no API key, so never pass a secret here.
  * A payer session token, obtained by completing verification on a gated
- * invoice, travels in `Payday-Payer-Session` and unlocks the withheld content.
+ * deposit request, travels in `Payday-Payer-Session` and unlocks the withheld content.
  */
 export class PaydayPayerClient {
   private readonly baseUrl: string;
@@ -870,30 +872,30 @@ export class PaydayPayerClient {
     if (!this.fetcher) throw new TypeError("fetch is required");
   }
 
-  readonly payments = {
-    get: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<PayerPayment> =>
-      request<PayerPayment>(this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}`, payerOptions(options)),
+  readonly depositRequests = {
+    get: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<PayerDepositRequest> =>
+      request<PayerDepositRequest>(this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}`, payerOptions(options)),
 
     /**
-     * The invoice's PDF with a short-lived `download_url`. Answers
+     * The deposit request's PDF with a short-lived `download_url`. Answers
      * `401 verification_required` while the content is still gated.
      */
     attachment: (id: string, payerSession?: string, options: { signal?: AbortSignal } = {}): Promise<AttachmentDescriptor> =>
       request<AttachmentDescriptor>(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/attachment`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/attachment`,
         payerOptions({ ...options, ...(payerSession === undefined ? {} : { payerSession }) }),
       ),
 
     /**
-     * The payment's QR: an SVG of the same EIP-681 request the page shows, for
+     * The deposit request's QR: an SVG of the same EIP-681 request the page shows, for
      * the amount still due. Render it from an object URL. It answers
      * `401 verification_required` while the content is gated and
-     * `410 payment_not_payable` the moment the address must stop being shown.
+     * `410 deposit_request_not_payable` the moment the address must stop being shown.
      * The session travels in a header, never in the URL.
      */
     qr: async (id: string, payerSession?: string, options: { signal?: AbortSignal } = {}): Promise<Blob> => {
       const response = await send(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/qr`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/qr`,
         payerOptions({ ...options, ...(payerSession === undefined ? {} : { payerSession }), accept: "image/svg+xml" }),
       );
       return response.blob();
@@ -901,7 +903,7 @@ export class PaydayPayerClient {
   };
 
   /**
-   * Email verification for a gated invoice. The code goes to the mailbox the
+   * Email verification for a gated deposit request. The code goes to the mailbox the
    * merchant asserted at issuance; the payer only ever types the code. These
    * writes answer cross-origin requests from the hosted checkout only.
    */
@@ -909,25 +911,25 @@ export class PaydayPayerClient {
     /** Send (or, with a session, resend) the code and get the session it belongs to. */
     startEmail: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<StartEmailVerification> =>
       request<StartEmailVerification>(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/start`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/verify/email/start`,
         { method: "POST", ...payerOptions(options) },
       ),
     /** Exchange the code; answers `401 otp_invalid` for a wrong one. */
     confirmEmail: (id: string, otp: string, payerSession: string, options: { signal?: AbortSignal } = {}): Promise<VerificationStatus> =>
       request<VerificationStatus>(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/confirm`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/verify/email/confirm`,
         { method: "POST", body: { otp }, ...payerOptions({ ...options, payerSession }) },
       ),
     /** Resume persistence after `verification_persistence_unavailable`, without reusing the spent OTP. */
     continueEmail: (id: string, continuation: string, payerSession: string, options: { signal?: AbortSignal } = {}): Promise<VerificationStatus> =>
       request<VerificationStatus>(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify/email/confirm`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/verify/email/confirm`,
         { method: "POST", body: { continuation }, ...payerOptions({ ...options, payerSession }) },
       ),
-    /** The session's facts, or the invoice's without a session. */
+    /** The session's facts, or the deposit request's without a session. */
     status: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<VerificationStatus> =>
       request<VerificationStatus>(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/verify`,
         payerOptions(options),
       ),
     /**
@@ -938,7 +940,7 @@ export class PaydayPayerClient {
      */
     exchangeClientSecret: (id: string, clientSecret: string, options: { signal?: AbortSignal } = {}): Promise<ExchangeClientSecret> =>
       request<ExchangeClientSecret>(
-        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/session`,
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/session`,
         { method: "POST", body: { client_secret: clientSecret }, ...payerOptions(options) },
       ),
   };

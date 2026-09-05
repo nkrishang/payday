@@ -5,7 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * The stub keeps issuer identities per mailbox, exactly as the API keeps them
  * per account, so each test signs in as its own merchant: one that has set
- * nothing up, and one that has. Payments and customers stay shared, which the
+ * nothing up, and one that has. Deposit requests and customers stay shared, which the
  * rest of the suite depends on.
  */
 
@@ -34,16 +34,16 @@ function truncate(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
-/** Answers the payments probe as an empty account, so setup is the whole page. */
+/** Answers the deposit requests probe as an empty account, so setup is the whole page. */
 async function withoutHistory(page: Page) {
   await page.route(
-    (url) => url.pathname === "/v1/payments",
+    (url) => url.pathname === "/v1/deposit-requests",
     async (route) => {
       if (route.request().method() !== "GET") return route.continue();
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ payments: [], next_cursor: null }),
+        body: JSON.stringify({ deposit_requests: [], next_cursor: null }),
       });
     },
   );
@@ -111,7 +111,7 @@ test("a new merchant is put straight to work: identity, contact, first request",
   await expect(page.getByLabel("Amount")).toHaveValue("0.000001");
   await expect(page.getByText(truncate(wallet))).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByLabel("Billed to")).toHaveValue("Payday");
+  await expect(page.getByLabel("Payer")).toHaveValue("Payday");
   await expect(page.getByLabel("Email")).toHaveValue("onboarding@payday.sh");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Expected payer email")).toHaveValue("onboarding@payday.sh");
@@ -125,13 +125,13 @@ test("a new merchant is put straight to work: identity, contact, first request",
   await expect(summary).toContainText("Verified email");
   await expect(summary).toContainText(truncate(wallet));
 
-  // Billed to a party typed fresh, exactly like the real composer: Payday
+  // A payer typed fresh, exactly like the real composer: Payday
   // becomes a saved customer, not just a name on this one invoice.
   const customerCreated = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/v1/customers"),
   );
   const created = page.waitForRequest(
-    (request) => request.method() === "POST" && request.url().endsWith("/v1/payments"),
+    (request) => request.method() === "POST" && request.url().endsWith("/v1/deposit-requests"),
   );
   await page.getByRole("button", { name: "Issue deposit request" }).click();
   expect((await customerCreated).postDataJSON()).toEqual({
@@ -141,7 +141,7 @@ test("a new merchant is put straight to work: identity, contact, first request",
   const body = (await created).postDataJSON();
   expect(body.customer_id).toBeTruthy();
   expect(body.payout_address).toBe(wallet);
-  expect(body.bill_to).toMatchObject({ name: "Payday", email: "onboarding@payday.sh" });
+  expect(body.payer).toMatchObject({ name: "Payday", email: "onboarding@payday.sh" });
   expect(body.payer_policy).toEqual({
     mode: "verified_email",
     expected_email: "onboarding@payday.sh",
@@ -162,8 +162,8 @@ test("a new merchant is put straight to work: identity, contact, first request",
 
   // Back on a dashboard whose list is still empty (the probe is stubbed): the
   // table is there with its columns and its own control, as the others are.
-  const requests = page.getByRole("region", { name: "Deposit requests" });
-  await expect(requests.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
+  const requests = page.getByRole("region", { name: "Deposits" });
+  await expect(requests.getByRole("heading", { name: "Deposits." })).toBeVisible();
   await expect(requests.getByRole("columnheader", { name: "Request" })).toBeVisible();
   await expect(requests.getByText("No deposit requests yet.")).toBeVisible();
   await expect(requests.getByRole("button", { name: "New deposit request" })).toHaveCount(1);
@@ -195,7 +195,7 @@ test("the composer keeps a running preview and can be stepped back through", asy
   ).toHaveText("—");
 
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Billed to").fill("Globex LLC");
+  await page.getByLabel("Payer").fill("Globex LLC");
   await expect(preview).toContainText("Globex LLC");
 
   // Back keeps what was typed rather than starting the request over.
@@ -203,7 +203,7 @@ test("the composer keeps a running preview and can be stepped back through", asy
   await expect(page.getByLabel("Amount")).toHaveValue("40.5");
 
   await page.getByRole("button", { name: "Cancel" }).click();
-  await expect(page.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deposits." })).toBeVisible();
 });
 
 test("a set-up merchant sees their requests, identities, and customers on one page", async ({
@@ -213,7 +213,7 @@ test("a set-up merchant sees their requests, identities, and customers on one pa
   await setUpIdentity(page, "Acme Inc.");
   await page.getByRole("button", { name: "Cancel" }).click();
 
-  await expect(page.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deposits." })).toBeVisible();
   await expect(page.getByRole("button", { name: /Consulting — August/ })).toBeVisible();
 
   // The identity, with its proof, is managed here too. A line each: the name,
@@ -237,14 +237,14 @@ test("a set-up merchant sees their requests, identities, and customers on one pa
   await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
 });
 
-test("a billed party becomes a customer, and the next request can pick them", async ({ page }) => {
+test("a payer becomes a customer, and the next request can pick them", async ({ page }) => {
   await signIn(page, "repeat@example.com");
   await setUpIdentity(page, "Acme Inc.");
 
   await page.getByLabel("Amount").fill("80");
   await page.getByRole("button", { name: "Continue" }).click();
   const billed = `Initech ${Date.now()}`;
-  await page.getByLabel("Billed to").fill(billed);
+  await page.getByLabel("Payer").fill(billed);
   await page.getByLabel("Email").fill("ap@initech.example");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -261,7 +261,7 @@ test("a billed party becomes a customer, and the next request can pick them", as
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Customer").click();
   await page.getByRole("option", { name: billed }).click();
-  await expect(page.getByLabel("Billed to")).toHaveValue(billed);
+  await expect(page.getByLabel("Payer")).toHaveValue(billed);
   await expect(page.getByLabel("Email")).toHaveValue("ap@initech.example");
 });
 

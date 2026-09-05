@@ -40,7 +40,7 @@ uses `payday_live_`.
 Point the SDK or `curl` at the sandbox origin with a `payday_test_` key:
 
 ```bash
-curl -fsS "https://api.sandbox.payday.sh/v1/payments/<PAYMENT_ID>" \
+curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
   -H "Authorization: Bearer payday_test_..."
 ```
 

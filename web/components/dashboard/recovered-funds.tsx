@@ -1,15 +1,15 @@
-import type { Payment } from "@payday/sdk";
+import type { DepositRequest } from "@payday/sdk";
 import { ArrowUpRight } from "lucide-react";
 import { formatBaseUnits, formatDisplayAmount, truncateHash } from "@/lib/format";
 import { formatDate } from "./labels";
 
 /**
  * Balances that went to the Payday recovery wallet rather than to the payout
- * address, read from the payment itself: the overpayment remainder on a
- * settled invoice, the whole balance of a returned one, and every transfer the
+ * address, read from the deposit request itself: the overpayment remainder on a
+ * settled request, the whole balance of a returned one, and every transfer the
  * indexer classified as late. Renders nothing when there is nothing.
  */
-export function RecoveredFunds({ payment }: { payment: Payment }) {
+export function RecoveredFunds({ payment }: { payment: DepositRequest }) {
   const received = BigInt(payment.received_base_units);
   const amount = BigInt(payment.amount_base_units);
   const remainder = payment.status === "settled" && received > amount ? received - amount : 0n;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildCreatePayment, EMPTY_VALUES } from "./create-payment";
+import { buildCreateDepositRequest, EMPTY_VALUES } from "./create-deposit-request";
 
-describe("buildCreatePayment", () => {
+describe("buildCreateDepositRequest", () => {
   const filled = {
     ...EMPTY_VALUES,
     issuerName: " Acme Corp ",
@@ -12,17 +12,17 @@ describe("buildCreatePayment", () => {
   };
 
   it("builds each policy shape without stray fields", () => {
-    expect(buildCreatePayment({ ...filled, mode: "permissionless" }, null).payer_policy).toEqual({
+    expect(buildCreateDepositRequest({ ...filled, mode: "permissionless" }, null).payer_policy).toEqual({
       mode: "permissionless",
     });
-    expect(buildCreatePayment({ ...filled, mode: "verified_email" }, null).payer_policy).toEqual({
+    expect(buildCreateDepositRequest({ ...filled, mode: "verified_email" }, null).payer_policy).toEqual({
       mode: "verified_email",
       expected_email: "Alice@Example.com",
     });
   });
 
   it("omits blank optionals, trims parties, and converts hours to seconds", () => {
-    const body = buildCreatePayment(
+    const body = buildCreateDepositRequest(
       { ...filled, heading: "  ", reference: "INV-1", expiresInHours: "48" },
       "0198f80c-8d2f-7dc1-a369-90556a64f7aa",
     );
@@ -35,7 +35,7 @@ describe("buildCreatePayment", () => {
   });
 
   it("sends a chosen moment as a moment, in place of any duration", () => {
-    const body = buildCreatePayment(
+    const body = buildCreateDepositRequest(
       { ...filled, expiresInHours: "48", expiresAt: "2026-09-11T17:30:00.000Z" },
       null,
     );

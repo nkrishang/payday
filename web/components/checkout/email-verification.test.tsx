@@ -16,7 +16,7 @@ function renderForm(overrides: Partial<Parameters<typeof EmailVerification>[0]> 
   };
   const view = render(
     <EmailVerification
-      paymentId="pay_1"
+      paymentId="dr_1"
       hint="a****@e***.com"
       payerSession={null}
       {...handlers}
@@ -41,14 +41,14 @@ describe("EmailVerification", () => {
     fireEvent.click(screen.getByRole("button", { name: /send a code to a\*\*\*\*@e\*\*\*\.com/i }));
 
     await waitFor(() => expect(onSession).toHaveBeenCalledWith("pps_new"));
-    expect(start).toHaveBeenCalledWith("pay_1", {});
+    expect(start).toHaveBeenCalledWith("dr_1", {});
     expect(onCodeSent).toHaveBeenCalled();
     expect(container.innerHTML).not.toContain("pps_new");
 
     // The parent stores the session and hands it back down.
     rerender(
       <EmailVerification
-        paymentId="pay_1"
+        paymentId="dr_1"
         hint="a****@e***.com"
         payerSession="pps_new"
         onSession={onSession}
@@ -62,7 +62,7 @@ describe("EmailVerification", () => {
     fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
 
     await waitFor(() => expect(onVerified).toHaveBeenCalled());
-    expect(confirm).toHaveBeenCalledWith("pay_1", "123456", "pps_new");
+    expect(confirm).toHaveBeenCalledWith("dr_1", "123456", "pps_new");
   });
 
   it("keeps the form up and says so when the code is wrong", async () => {
@@ -78,7 +78,7 @@ describe("EmailVerification", () => {
     await screen.findByRole("textbox", { name: /one-time code/i });
     rerender(
       <EmailVerification
-        paymentId="pay_1"
+        paymentId="dr_1"
         hint="a****@e***.com"
         payerSession="pps"
         onSession={onSession}
@@ -106,7 +106,7 @@ describe("EmailVerification", () => {
     fireEvent.click(screen.getByRole("button", { name: /send a code/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/sent a moment ago/i);
-    expect(start).toHaveBeenCalledWith("pay_1", { payerSession: "pps_stored" });
+    expect(start).toHaveBeenCalledWith("dr_1", { payerSession: "pps_stored" });
     expect(screen.getByRole("textbox", { name: /one-time code/i })).toBeInTheDocument();
   });
 

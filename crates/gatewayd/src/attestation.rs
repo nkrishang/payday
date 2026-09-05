@@ -111,7 +111,7 @@ mod tests {
     fn payload(result: &str) -> VerificationAttestationPayload {
         VerificationAttestationPayload {
             version: ATTESTATION_VERSION.into(),
-            payment_id: "pay_0198f80c-8d2f-7dc1-a369-90556a64f700".into(),
+            payment_id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700".into(),
             attribution_hash: alloy_primitives::B256::repeat_byte(0x11).to_string(),
             chain_id: "143".into(),
             payment_address: Address::repeat_byte(0x22).to_checksum(None),

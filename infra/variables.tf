@@ -39,7 +39,7 @@ variable "payment_route53_zone_id" {
 variable "checkout_base_url" {
   description = <<-EOT
     Origin serving the hosted checkout at /pay/{id}, which is where every
-    payment_url points. In production this is the Vercel-hosted site at
+    deposit_url points. In production this is the Vercel-hosted site at
     https://payday.sh. Leave empty to keep links on payment_domain_name, which
     this service answers with a 301 to this origin.
   EOT
@@ -68,7 +68,7 @@ variable "status_domain_name" {
 }
 
 variable "status_indexer_stale_seconds" {
-  description = "Age at which an unchanged payment cursor makes public status degraded."
+  description = "Age at which an unchanged deposit cursor makes public status degraded."
   type        = number
   default     = 120
   validation {
@@ -199,10 +199,10 @@ variable "recovery_address" {
   description = <<-EOT
     Payday's custodial recovery wallet: the Ethereum address of the recovery
     KMS key (cast wallet address --aws with recovery_kms_key_arn). gatewayd
-    stamps it on every invoice; overpayment remainders, expired balances, and
+    stamps it on every deposit request; overpayment remainders, expired balances, and
     late transfers land here and are returned manually by the operator.
     Null until the key exists: there is no safe placeholder, because every
-    invoice commits this address into its payment address, so the API task
+    deposit request commits this address into its deposit address, so the API task
     definition refuses to plan while it is unset.
   EOT
   type        = string

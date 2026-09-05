@@ -83,7 +83,7 @@ export function CustomerForm({
       <Field label="Email">
         <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
       </Field>
-      <Field label="Details" hint="Free text shown verbatim on invoices billed to this customer.">
+      <Field label="Details" hint="Free text shown verbatim on deposit requests addressed to this customer.">
         <Textarea
           maxLength={4000}
           value={details}

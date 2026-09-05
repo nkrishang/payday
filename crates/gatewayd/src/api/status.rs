@@ -87,7 +87,7 @@ pub struct PublicStatus {
 #[derive(Serialize)]
 struct PublicComponents {
     api_and_database: PublicComponent,
-    payment_indexing_and_settlement: PublicComponent,
+    deposit_indexing_and_settlement: PublicComponent,
 }
 #[derive(Serialize)]
 struct PublicComponent {
@@ -143,7 +143,7 @@ async fn public(state: &AppState) -> PublicStatus {
             api_and_database: PublicComponent {
                 status: if api_ok { "operational" } else { "outage" },
             },
-            payment_indexing_and_settlement: PublicComponent {
+            deposit_indexing_and_settlement: PublicComponent {
                 status: if payment_ok {
                     "operational"
                 } else {
@@ -165,13 +165,13 @@ pub async fn html(State(state): State<AppState>) -> Response {
         (
             "#16a34a",
             "All systems operational",
-            "Payments are being detected and settled normally.",
+            "Deposits are being detected and settled normally.",
         )
     } else {
         (
             "#d97706",
             "Some systems are degraded",
-            "Payment detection or settlement may be delayed. Funds remain safe; no action is needed from payers.",
+            "Deposit detection or settlement may be delayed. Funds remain safe; no action is needed from payers.",
         )
     };
     let api = if status.components.api_and_database.status == "operational" {
@@ -179,13 +179,13 @@ pub async fn html(State(state): State<AppState>) -> Response {
     } else {
         "Outage"
     };
-    let payment = if status.components.payment_indexing_and_settlement.status == "operational" {
+    let payment = if status.components.deposit_indexing_and_settlement.status == "operational" {
         "Operational"
     } else {
         "Degraded"
     };
     let body = format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Payday Status</title><style>body{{margin:0;background:#f8fafc;color:#172033;font:16px system-ui,sans-serif}}main{{max-width:680px;margin:10vh auto;padding:24px}}h1{{font-size:30px}}.banner,.component{{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:20px;margin:16px 0;box-shadow:0 2px 8px #0f172a0d}}.banner{{border-left:6px solid {color}}}.banner p{{color:#526078;line-height:1.5;margin:8px 0 0}}.row{{display:flex;justify-content:space-between;gap:20px}}.state{{color:{color};font-weight:650}}footer{{color:#64748b;margin-top:28px;font-size:14px}}</style></head><body><main><h1>Payday service status</h1><div class="banner" role="status" aria-live="polite"><strong>{headline}</strong><p>{detail}</p></div><div class="component row"><span>API and database</span><span class="state">{api}</span></div><div class="component row"><span>Payment indexing and settlement</span><span class="state">{payment}</span></div><footer>Automatically refreshed every 60 seconds.</footer></main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Payday Status</title><style>body{{margin:0;background:#f8fafc;color:#172033;font:16px system-ui,sans-serif}}main{{max-width:680px;margin:10vh auto;padding:24px}}h1{{font-size:30px}}.banner,.component{{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:20px;margin:16px 0;box-shadow:0 2px 8px #0f172a0d}}.banner{{border-left:6px solid {color}}}.banner p{{color:#526078;line-height:1.5;margin:8px 0 0}}.row{{display:flex;justify-content:space-between;gap:20px}}.state{{color:{color};font-weight:650}}footer{{color:#64748b;margin-top:28px;font-size:14px}}</style></head><body><main><h1>Payday service status</h1><div class="banner" role="status" aria-live="polite"><strong>{headline}</strong><p>{detail}</p></div><div class="component row"><span>API and database</span><span class="state">{api}</span></div><div class="component row"><span>Deposit indexing and settlement</span><span class="state">{payment}</span></div><footer>Automatically refreshed every 60 seconds.</footer></main></body></html>"#
     );
     (
         StatusCode::OK,

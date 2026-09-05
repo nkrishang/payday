@@ -1,4 +1,5 @@
-//! Customer invoice handlers.
+//! Deposit request handlers: the merchant API for issuing, reading, listing,
+//! and cancelling deposit requests.
 
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,17 +15,18 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, CanonicalIssuanceSnapshot, ChainId,
-    CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto, Invoice, OnboardingPaymentResponse,
-    PDF_MIME_TYPE, Party, PayerPolicy, PayerPolicyMode, PaymentListResponse, PaymentResponse,
-    PaymentStatus, PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto,
-    USDC_DECIMALS, parse_expiration, validate_expiration_window,
+    Amount, AsOfDto, BeneficiaryAddress, CancelDepositRequestResponse, CanonicalIssuanceSnapshot,
+    ChainId, CreateDepositRequest, DepositRequestListResponse, DepositRequestResponse,
+    DepositRequestStatus, DepositRequestSummaryResponse, FactoryAddress, IndexerFreshnessDto,
+    Invoice, OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerPolicy, PayerPolicyMode,
+    RecoveryAddress, TokenAddress, TransferDto, USDC_DECIMALS, parse_expiration,
+    validate_expiration_window,
 };
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
 use crate::attachments::{AttachmentError, StorageError, content_disposition};
-use crate::invoice_pdf::render_invoice_pdf;
+use crate::request_pdf::render_request_pdf;
 use crate::state::AppState;
 use gateway_db::{
     AccountId, AttachmentStatus, CLIENT_SECRET_TTL, CreateInvoiceInput, DbAttachment, DbInvoice,
@@ -40,7 +42,7 @@ const MAX_NOTES_BYTES: usize = 4000;
 const MAX_HEADING_BYTES: usize = 200;
 const MAX_REFERENCE_CHARS: usize = 128;
 /// The onboarding walkthrough's reserved, Payday-owned mailbox. The only
-/// thing `onboarding_payment` can ever pay is an invoice addressed to this
+/// thing `onboarding_deposit` can ever pay is an invoice addressed to this
 /// exact email — never a real payer's.
 const ONBOARDING_EMAIL: &str = "onboarding@payday.sh";
 
@@ -49,13 +51,13 @@ const ONBOARDING_EMAIL: &str = "onboarding@payday.sh";
 /// outside the schema contract (see [`gateway_db::DbInvoiceError`]).
 ///
 /// A free function rather than a `TryFrom` impl: the orphan rule forbids
-/// implementing a foreign trait for the foreign `PaymentResponse` from a row
+/// implementing a foreign trait for the foreign `DepositRequestResponse` from a row
 /// type that now also lives outside this crate.
 async fn to_response(
     state: &AppState,
     account: AccountId,
     row: DbInvoice,
-) -> Result<PaymentResponse, ApiError> {
+) -> Result<DepositRequestResponse, ApiError> {
     let (transfers, freshness) = state
         .repo
         .response_metadata_for_account(account, &[row.id])
@@ -70,14 +72,14 @@ fn enrich_response(
     attachment: Option<DbAttachment>,
     transfers: Vec<gateway_db::DbInvoiceTransfer>,
     freshness: Vec<gateway_db::DbIndexerFreshness>,
-) -> Result<PaymentResponse, ApiError> {
+) -> Result<DepositRequestResponse, ApiError> {
     let expires_in = row
         .expiration_intent
         .strip_prefix("in:")
         .and_then(|v| v.parse().ok());
     let invoice = Invoice::try_from(&row)?;
-    let mut response = PaymentResponse::from_invoice(invoice.clone(), expires_in);
-    response.payment_url = state.payer.payment_url(&invoice)?;
+    let mut response = DepositRequestResponse::from_invoice(invoice.clone(), expires_in);
+    response.deposit_url = state.payer.deposit_url(&invoice)?;
     response.address_explorer_url = state.payer.address_url(&response.address);
     response.metadata = row.metadata.0.clone();
     response.customer_id = row.customer_id.map(|id| id.to_string());
@@ -88,8 +90,8 @@ fn enrich_response(
     response.likely_unsolicited_at = row.likely_unsolicited_at.map(|v| v.to_rfc3339());
     response.created_at = row.created_at.to_rfc3339();
     response.updated_at = row.updated_at.to_rfc3339();
-    response.paid_at = row.paid_at.map(|value| value.to_rfc3339());
-    response.paid_at_block = row.funded_at_block.map(|value| value.to_string());
+    response.deposited_at = row.paid_at.map(|value| value.to_rfc3339());
+    response.deposited_at_block = row.funded_at_block.map(|value| value.to_string());
     response.expired_at = row.expired_at.map(|value| value.to_rfc3339());
     response.settlement_tx_hash = row
         .settlement_tx_hash
@@ -154,12 +156,12 @@ fn enrich_response(
 
 // --- Handlers ---
 
-pub async fn create_payment(
+pub async fn create_deposit_request(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     headers: HeaderMap,
-    Json(req): Json<CreatePaymentRequest>,
-) -> Result<(StatusCode, HeaderMap, Json<PaymentResponse>), ApiError> {
+    Json(req): Json<CreateDepositRequest>,
+) -> Result<(StatusCode, HeaderMap, Json<DepositRequestResponse>), ApiError> {
     // 1. Extract idempotency key from header.
     let idempotency_key = headers
         .get("idempotency-key")
@@ -284,7 +286,7 @@ pub async fn create_payment(
         expiration_intent: &expiration.intent,
         recovery: state.recovery_address.as_slice(),
         issuer: &req.issuer,
-        bill_to: &req.bill_to,
+        bill_to: &req.payer,
         notes: req.notes.as_deref(),
         heading: req.heading.as_deref(),
         reference: req.reference.as_deref(),
@@ -349,7 +351,7 @@ pub async fn create_payment(
     let recovery = RecoveryAddress(state.recovery_address);
     let mut snapshot = CanonicalIssuanceSnapshot::new(
         req.issuer.clone(),
-        req.bill_to.clone(),
+        req.payer.clone(),
         payer_policy.clone(),
         factory,
         ChainId(chain_id),
@@ -468,19 +470,21 @@ pub async fn create_payment(
     Ok((StatusCode::CREATED, HeaderMap::new(), Json(response)))
 }
 
-fn replayed(response: PaymentResponse) -> (StatusCode, HeaderMap, Json<PaymentResponse>) {
+fn replayed(
+    response: DepositRequestResponse,
+) -> (StatusCode, HeaderMap, Json<DepositRequestResponse>) {
     let mut response_headers = HeaderMap::new();
     response_headers.insert("Idempotency-Replayed", HeaderValue::from_static("true"));
     (StatusCode::OK, response_headers, Json(response))
 }
 
-pub async fn get_payment(
+pub async fn get_deposit_request(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
     Query(query): Query<GetQuery>,
-) -> Result<Json<PaymentResponse>, ApiError> {
-    let mut row = resolve_payment(&state, account, &reference).await?;
+) -> Result<Json<DepositRequestResponse>, ApiError> {
+    let mut row = resolve_deposit_request(&state, account, &reference).await?;
     if query.wait_for.is_none() && query.timeout.is_some() {
         return Err(ApiError::invalid_request(
             "timeout requires wait_for=change",
@@ -503,7 +507,7 @@ pub async fn get_payment(
                 (tokio::time::Instant::now() + Duration::from_millis(250)).min(deadline),
             )
             .await;
-            row = resolve_payment(&state, account, &reference).await?;
+            row = resolve_deposit_request(&state, account, &reference).await?;
             if row.updated_at != initial || tokio::time::Instant::now() >= deadline {
                 break;
             }
@@ -518,22 +522,22 @@ pub async fn transfers(
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
 ) -> Result<Json<Vec<TransferDto>>, ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     Ok(Json(to_response(&state, account, row).await?.transfers))
 }
 
 /// Payday's invoice summary as a PDF download, rendered deterministically
 /// from the same response the JSON route serves.
-pub async fn invoice_pdf(
+pub async fn request_pdf(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
 ) -> Result<Response, ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     let response = to_response(&state, account, row).await?;
-    let bytes = render_invoice_pdf(&response).map_err(|error| {
+    let bytes = render_request_pdf(&response).map_err(|error| {
         tracing::error!(error = %error, payment_id = %response.id, "invoice PDF rendering failed");
-        ApiError::internal("failed to render the invoice PDF")
+        ApiError::internal("failed to render the deposit request PDF")
     })?;
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -543,7 +547,7 @@ pub async fn invoice_pdf(
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&content_disposition(&format!(
-            "invoice-{}.pdf",
+            "deposit-request-{}.pdf",
             response.id
         )))
         .map_err(|_| ApiError::internal("invalid download filename"))?,
@@ -577,17 +581,17 @@ pub struct ListQuery {
 const VERIFICATION_FILTERS: [&str; 4] =
     ["not_required", "pending", "verified", "likely_unsolicited"];
 
-pub async fn list_payments(
+pub async fn list_deposit_requests(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Query(query): Query<ListQuery>,
-) -> Result<Json<PaymentListResponse>, ApiError> {
+) -> Result<Json<DepositRequestListResponse>, ApiError> {
     let status = query
         .status
         .as_deref()
-        .map(str::parse::<PaymentStatus>)
+        .map(str::parse::<DepositRequestStatus>)
         .transpose()
-        .map_err(|_| ApiError::invalid_request("unknown payment status"))?;
+        .map_err(|_| ApiError::invalid_request("unknown deposit request status"))?;
     if let Some(verification) = query.verification.as_deref()
         && !VERIFICATION_FILTERS.contains(&verification)
     {
@@ -600,7 +604,7 @@ pub async fn list_payments(
     let starting_after = query
         .starting_after
         .as_deref()
-        .map(full_payment_id)
+        .map(full_deposit_request_id)
         .transpose()?;
     if let Some(cursor) = starting_after
         && state
@@ -610,14 +614,14 @@ pub async fn list_payments(
             .is_none()
     {
         return Err(ApiError::invalid_request(
-            "starting_after does not identify one of your payments",
+            "starting_after does not identify one of your deposit requests",
         ));
     }
     let mut rows = state
         .repo
         .list_for_account(
             account,
-            status.map(PaymentStatus::as_str),
+            status.map(DepositRequestStatus::as_str),
             query.reference.as_deref(),
             query.customer_id,
             query.issuer_id,
@@ -628,17 +632,17 @@ pub async fn list_payments(
         .await?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let next_cursor = has_more.then(|| format!("pay_{}", rows.last().expect("nonzero limit").id));
+    let next_cursor = has_more.then(|| format!("dr_{}", rows.last().expect("nonzero limit").id));
     let payments = rows
         .into_iter()
         .map(|row| -> Result<_, ApiError> {
             let invoice = Invoice::try_from(&row)?;
             let has_attachment = invoice.issuance_snapshot.attachment.is_some();
-            let response = PaymentResponse::from_invoice(invoice, None);
-            Ok(PaymentSummaryResponse {
+            let response = DepositRequestResponse::from_invoice(invoice, None);
+            Ok(DepositRequestSummaryResponse {
                 id: response.id,
                 heading: response.heading,
-                bill_to_name: response.bill_to.name,
+                payer_name: response.payer.name,
                 reference: row.reference,
                 metadata: row.metadata.0,
                 created_at: row.created_at.to_rfc3339(),
@@ -655,34 +659,35 @@ pub async fn list_payments(
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok(Json(PaymentListResponse {
-        payments,
+    Ok(Json(DepositRequestListResponse {
+        deposit_requests: payments,
         next_cursor,
     }))
 }
 
-fn full_payment_id(value: &str) -> Result<Uuid, ApiError> {
-    let suffix = value.strip_prefix("pay_").ok_or_else(|| {
-        ApiError::invalid_request("starting_after must be a complete pay_ payment ID")
+fn full_deposit_request_id(value: &str) -> Result<Uuid, ApiError> {
+    let suffix = value.strip_prefix("dr_").ok_or_else(|| {
+        ApiError::invalid_request("starting_after must be a complete dr_ deposit request ID")
     })?;
-    Uuid::parse_str(suffix)
-        .map_err(|_| ApiError::invalid_request("starting_after must be a complete pay_ payment ID"))
+    Uuid::parse_str(suffix).map_err(|_| {
+        ApiError::invalid_request("starting_after must be a complete dr_ deposit request ID")
+    })
 }
 
-pub async fn cancel_payment(
+pub async fn cancel_deposit_request(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
-) -> Result<Json<CancelPaymentResponse>, ApiError> {
-    let invoice = resolve_payment(&state, account, &reference).await?;
+) -> Result<Json<CancelDepositRequestResponse>, ApiError> {
+    let invoice = resolve_deposit_request(&state, account, &reference).await?;
     let row = state
         .repo
         .request_cancellation(account, invoice.id)
         .await?
-        .ok_or_else(ApiError::payment_not_found)?;
-    Ok(Json(CancelPaymentResponse {
-        payment: to_response(&state, account, row).await?,
-        advisory: "Cancellation is advisory only and does not alter the payment contract or its encoded settlement terms".into(),
+        .ok_or_else(ApiError::deposit_request_not_found)?;
+    Ok(Json(CancelDepositRequestResponse {
+        deposit_request: to_response(&state, account, row).await?,
+        advisory: "Cancellation is advisory only and does not alter the deposit contract or its encoded settlement terms".into(),
     }))
 }
 
@@ -700,18 +705,18 @@ pub async fn cancel_payment(
 /// approving its email fact — except there is no code to check: Payday
 /// owns `onboarding@payday.sh`, so proving control of it here would only
 /// ever be proving Payday's own address to Payday.
-pub async fn onboarding_payment(
+pub async fn onboarding_deposit(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
-) -> Result<Json<OnboardingPaymentResponse>, ApiError> {
+) -> Result<Json<OnboardingDepositResponse>, ApiError> {
     let signer = state.onboarding_payer()?;
     let payer_verification = state
         .payer_verification
         .as_ref()
-        .ok_or_else(ApiError::onboarding_payment_unavailable)?;
+        .ok_or_else(ApiError::onboarding_deposit_unavailable)?;
 
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     let invoice = Invoice::try_from(&row)?;
     let eligible = row.status == "created"
         && invoice.issuance_snapshot.bill_to.email.as_deref() == Some(ONBOARDING_EMAIL)
@@ -720,7 +725,7 @@ pub async fn onboarding_payment(
             PayerPolicy::VerifiedEmail { expected_email } if expected_email == ONBOARDING_EMAIL
         );
     if !eligible {
-        return Err(ApiError::onboarding_payment_not_eligible());
+        return Err(ApiError::onboarding_deposit_not_eligible());
     }
 
     let claim = state
@@ -728,7 +733,7 @@ pub async fn onboarding_payment(
         .claim(account, row.id)
         .await?;
     if claim == OnboardingClaim::Conflict {
-        return Err(ApiError::onboarding_payment_already_claimed());
+        return Err(ApiError::onboarding_deposit_already_claimed());
     }
 
     // Minting and approving a session is cheap and safe to repeat on a retry
@@ -787,32 +792,32 @@ pub async fn onboarding_payment(
         OnboardingClaim::Conflict => unreachable!("handled above"),
     };
 
-    Ok(Json(OnboardingPaymentResponse {
+    Ok(Json(OnboardingDepositResponse {
         payer_session: session.token,
         tx_hash,
     }))
 }
 
-pub(crate) async fn resolve_payment(
+pub(crate) async fn resolve_deposit_request(
     state: &AppState,
     account: AccountId,
     reference: &str,
 ) -> Result<DbInvoice, ApiError> {
-    if let Some(uuid) = gateway_core::payment_id(reference) {
+    if let Some(uuid) = gateway_core::deposit_request_id(reference) {
         return state
             .repo
             .find_by_id_for_account(account, uuid)
             .await?
-            .ok_or_else(ApiError::payment_not_found);
+            .ok_or_else(ApiError::deposit_request_not_found);
     }
     if let Ok(address) = Address::from_str(reference) {
         return state
             .repo
             .find_by_payment_address_for_account(account, address.as_slice())
             .await?
-            .ok_or_else(ApiError::payment_not_found);
+            .ok_or_else(ApiError::deposit_request_not_found);
     }
-    Err(ApiError::invalid_payment_reference())
+    Err(ApiError::invalid_deposit_reference())
 }
 
 fn unix_now() -> u64 {
@@ -919,9 +924,9 @@ fn reject_nul_in_json(field: &str, value: &serde_json::Value) -> Result<(), ApiE
     Ok(())
 }
 
-fn validate_document(req: &CreatePaymentRequest) -> Result<(), ApiError> {
+fn validate_document(req: &CreateDepositRequest) -> Result<(), ApiError> {
     validate_party("issuer", &req.issuer)?;
-    validate_party("bill_to", &req.bill_to)?;
+    validate_party("payer", &req.payer)?;
     if req
         .notes
         .as_ref()
@@ -982,12 +987,12 @@ fn validate_document(req: &CreatePaymentRequest) -> Result<(), ApiError> {
 mod tests {
     use super::*;
 
-    fn request(overrides: serde_json::Value) -> CreatePaymentRequest {
+    fn request(overrides: serde_json::Value) -> CreateDepositRequest {
         let mut json = serde_json::json!({
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
             "issuer": {"name": "Acme"},
-            "bill_to": {"name": "Globex"},
+            "payer": {"name": "Globex"},
             "payer_policy": {"mode": "permissionless"}
         });
         for (key, value) in overrides.as_object().unwrap() {
@@ -1022,8 +1027,8 @@ mod tests {
                 serde_json::json!({"issuer": {"name": "  "}}),
             ),
             (
-                "long bill_to",
-                serde_json::json!({"bill_to": {"name": long(255)}}),
+                "long payer",
+                serde_json::json!({"payer": {"name": long(255)}}),
             ),
             (
                 "short email",
@@ -1031,7 +1036,7 @@ mod tests {
             ),
             (
                 "long details",
-                serde_json::json!({"bill_to": {"name": "Globex", "details": long(4000)}}),
+                serde_json::json!({"payer": {"name": "Globex", "details": long(4000)}}),
             ),
             ("long notes", serde_json::json!({"notes": long(4000)})),
             ("long heading", serde_json::json!({"heading": long(200)})),
@@ -1043,7 +1048,7 @@ mod tests {
             ("nul in notes", serde_json::json!({"notes": "Net\u{0}30"})),
             (
                 "nul in party name",
-                serde_json::json!({"bill_to": {"name": "Glo\u{0}bex"}}),
+                serde_json::json!({"payer": {"name": "Glo\u{0}bex"}}),
             ),
             (
                 "escape in heading",

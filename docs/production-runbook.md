@@ -3,13 +3,13 @@
 This is the first-production deployment path for one operator. Terraform owns
 the AWS resources; Docker images contain the two Rust services; AWS KMS owns
 the non-exportable sweep key, recovery key, and Proof of Payment attestation
-key. Do not accept a real payment until the final end-to-end test in this
+key. Do not accept a real deposit until the final end-to-end test in this
 runbook succeeds.
 
 Two things Payday holds and one it never does: the sweep signer holds only MON
 for gas; the Payday recovery wallet holds recovered USDC (overpayment
 remainders, expired balances, late transfers) until the operator returns it by
-hand; the intended invoice amount moves directly from the payment address to
+hand; the intended requested amount moves directly from the deposit address to
 the merchant and never passes through Payday.
 
 ## Accounts and assets the operator must provide
@@ -32,7 +32,7 @@ Required:
    deployment. The AWS KMS sweep address also needs a deliberately small MON gas
    balance after deployment.
 6. **A wallet with a small amount of native Monad USDC** for the production
-   smoke payment. Circle Mint is not required; USDC can come from a supported
+   smoke deposit. Circle Mint is not required; USDC can come from a supported
    exchange or bridge.
 7. **A Privy app** for merchant sign-in — email login only, embedded wallets
    created on login, identity tokens enabled, and the dashboard's origin
@@ -57,14 +57,14 @@ third-party key-management account is required.
 - The indexer/sweeper and PostgreSQL database have no public hostname or inbound
   internet access.
 - `payday.sh` and `www.payday.sh` remain available for a Vercel-hosted website or
-  documentation. They are not required to run the payment service.
+  documentation. They are not required to run the deposit request service.
 
 Create two **public hosted zones**, `api.payday.sh` and `pay.payday.sh`, in
 Route53. AWS assigns four authoritative nameservers to each. In Vercel's DNS
 settings for `payday.sh`, add each zone's four separate `NS` records: name
-`api` for the API zone and name `pay` for the payment zone. Do not change the
+`api` for the API zone and name `pay` for the deposit request zone. Do not change the
 nameservers for the whole `payday.sh` domain. Set `route53_zone_id` to the API
-zone ID and `payment_route53_zone_id` to the payment zone ID; Terraform creates
+zone ID and `payment_route53_zone_id` to the deposit request zone ID; Terraform creates
 each alias and ACM validation record in the zone that owns its hostname.
 
 Wait until `dig NS api.payday.sh` and `dig NS pay.payday.sh` return their
@@ -118,13 +118,13 @@ privileged administrative key. Use a dedicated
 deployment wallet rather than the KMS sweep key, and retain its transaction
 record even though it has no post-deployment authority.
 
-Every counterfactual payment address is derived from the factory address, so
-a factory can never be replaced once a real invoice exists: deploy the final
-`Payment`/`PaymentFactory` code before the first production invoice, and
+Every counterfactual deposit address is derived from the factory address, so
+a factory can never be replaced once a real deposit request exists: deploy the final
+`DepositRequest`/`PaymentFactory` code before the first production deposit request, and
 treat any later contract change as a new deployment with its own database.
 
 `PaymentFactory` and `BatchSweeper` are one **contract generation**: the
-factory embeds `Payment`'s creation code and the sweeper is bound to one
+factory embeds `DepositRequest`'s creation code and the sweeper is bound to one
 factory. Always deploy the two together with the same script, and never point
 a new factory at an old sweeper. Both services pin the generation by the
 keccak256 of each contract's runtime bytecode and by the sweeper's bound
@@ -185,9 +185,9 @@ Immediately before the first deployment, record the current block:
 cast block-number --rpc-url "$MONAD_RPC_URL"
 ```
 
-Use that value as `usdc_start_block`. No invoices can predate the first launch,
+Use that value as `usdc_start_block`. No deposit requests can predate the first launch,
 so scanning all historical USDC transfers would waste RPC requests without
-finding a payable invoice.
+finding a payable deposit request.
 
 ## 5. Configure Terraform
 
@@ -256,12 +256,12 @@ cast wallet address --aws
 ```
 
 KMS returns a public key, not an address; `cast` derives it. Verify the
-derivation independently before relying on it: every invoice commits this
-address into its payment address, and it cannot be changed for invoices that
-already exist. Replacing the key later therefore only affects invoices created
+derivation independently before relying on it: every deposit request commits this
+address into its deposit address, and it cannot be changed for deposit requests that
+already exist. Replacing the key later therefore only affects deposit requests created
 after `recovery_address` changes, and because the recovery wallet is one of the
-parameters an `Idempotency-Key` commits to, a `POST /v1/payments` replay from
-before the change answers `409 idempotency_conflict`; the original payment must
+parameters an `Idempotency-Key` commits to, a `POST /v1/deposit-requests` replay from
+before the change answers `409 idempotency_conflict`; the original deposit request must
 be fetched with `GET`. No task role is granted `kms:Sign` on this key;
 returning recovered funds is a manual operator action with the same `--aws`
 signer.
@@ -289,7 +289,7 @@ the attestation key), a worker count other than one, or plaintext/non-HTTPS
 endpoints.
 
 AWS creates the TLS certificate, DNS record, ALB/WAF, ECS services, RDS database,
-Secrets Manager values, alarms, KMS keys, the invoice attachment bucket, and
+Secrets Manager values, alarms, KMS keys, the deposit request attachment bucket, and
 its GuardDuty Malware Protection plan. Both services verify the contract
 generation against the chain as they start: if a task loops on a code-hash or
 bound-factory refusal, the tfvars and the deployment disagree — fix the values,
@@ -321,7 +321,7 @@ USDC; it pays gas to invoke the permissionless factory.
 
 ## 9. Verify attachment scanning
 
-Terraform created the `<name>-invoice-attachments` bucket and a GuardDuty
+Terraform created the `<name>-deposit request-attachments` bucket and a GuardDuty
 Malware Protection plan for it; Malware Protection for S3 does not require
 the GuardDuty detector to be enabled. Confirm the plan is active with tagging
 on, and that GuardDuty turned on the bucket's EventBridge notifications:
@@ -371,32 +371,32 @@ dashboard's API key section (`docs/authentication.md` § 5). Then, with that key
 ```bash
 export PAYDAY_API_KEY="<the key, from your secret store>"
 curl --fail "https://api.payday.sh/health"
-curl --fail -sS "https://api.payday.sh/v1/payments" \
+curl --fail -sS "https://api.payday.sh/v1/deposit-requests" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: launch-check-$(date +%s)" \
   -d '{"amount":"0.01","payout_address":"<YOUR_PAYOUT_ADDRESS>",
-       "issuer":{"name":"Payday"},"bill_to":{"name":"Launch check"},
+       "issuer":{"name":"Payday"},"payer":{"name":"Launch check"},
        "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
 The response's `recovery_address` must be the Payday recovery wallet from
-step 6. Pay exactly 0.01 native USDC to the returned payment address. Confirm
+step 6. Pay exactly 0.01 native USDC to the returned deposit address. Confirm
 that:
 
-1. `GET /v1/payments/{id}` progresses `awaiting_payment → paid → settled`, with
+1. `GET /v1/deposit-requests/{id}` progresses `awaiting_deposit → deposited → settled`, with
    `received_base_units`, `settlement_tx_hash`, `settled_at`, and `settled_block` set.
 2. The beneficiary receives exactly the USDC amount.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
-5. Send a second, small payment to the same address and confirm it reaches
+5. Send a second, small deposit to the same address and confirm it reaches
    the Payday recovery wallet within a minute while the status stays
    `settled`, and that `recovered_funds` records it with reason
    `late_transfer` (see the [smoke test](runbooks/end-to-end-smoke-test.md)).
    Return it by hand from the recovery key afterwards.
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
-8. `GET /v1/payments/{id}/proof` returns a proof whose attestation `signer`
+8. `GET /v1/deposit-requests/{id}/proof` returns a proof whose attestation `signer`
    is the address from step 10, and `gateway_core::verify_proof` accepts it
    with that address as the trusted attestor.
 
@@ -408,7 +408,7 @@ Do not advertise or depend on the service until this succeeds.
 
 Migration `0010` adds the verified-email contact and notification outbox.
 Existing accounts begin without an email and must sign in again;
-payment creation refuses to create additional unnotifiable payments until a
+deposit creation refuses to create additional unnotifiable deposits until a
 verified email has been captured. During this
 rollout, query the production database through the procedure in
 [`db-access.md`](runbooks/db-access.md):
@@ -421,7 +421,7 @@ WHERE disabled_at IS NULL AND email IS NULL;
 
 Contact each affected merchant through the existing support channel and have
 them authenticate again. Do not declare the notification rollout complete
-until this count is zero. If a legacy blocked invoice still snapshots no
+until this count is zero. If a legacy blocked deposit request still snapshots no
 contact, `payday-notification-missing-contact` alarms immediately; notify that
 merchant manually and recover their verified contact before releasing it.
 
@@ -435,8 +435,8 @@ changes require a separately reviewed forward/backward compatibility plan.
 
 ### Contract generation changes
 
-A change to `Payment`, `PaymentFactory`, or `BatchSweeper` is a new
-generation, not an update: existing invoices are committed to the old factory
+A change to `DepositRequest`, `PaymentFactory`, or `BatchSweeper` is a new
+generation, not an update: existing deposit requests are committed to the old factory
 and would never match the new one. Deploy the factory and sweeper together
 (step 2), record the new addresses and code hashes, create a fresh database,
 update `factory_address`, `batch_sweeper_address`, `factory_code_hash`, and
@@ -459,9 +459,9 @@ fails closed rather than settling against the wrong contracts.
   revoking invalidates current and grace-period keys immediately.
 - Review the `recovered_funds` ledger and return held amounts by hand from the
   recovery key; see "Reconciling recovered funds" in
-  `docs/runbooks/stuck-invoice.md`. Nothing automates a return.
+  `docs/runbooks/stuck-deposit-request.md`. Nothing automates a return.
 - Attached PDFs stay in the versioned, KMS-encrypted attachment bucket for as
-  long as their invoice; the lifecycle rule removes only uploads that were
+  long as their deposit request; the lifecycle rule removes only uploads that were
   never attached (still tagged `payday-upload=pending`) after seven days.
   Include the bucket in the backup discipline applied to the database.
 - The retained PostgreSQL advisory lock rejects a second indexer even if someone
