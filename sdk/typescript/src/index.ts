@@ -71,16 +71,24 @@ export interface Payment {
   chain: Chain;
   currency: string;
   token: Token;
-  address: string;
+  /**
+   * The one-time payment address. Null until the payer attests the wallet
+   * they will pay from: the address commits to that attestation, so it
+   * cannot exist before it.
+   */
+  address: string | null;
   address_explorer_url: string | null;
   payout_address: string;
   /**
-   * Payday's custodial recovery wallet, committed into the payment address.
-   * Overpayment remainders, expired balances, and late transfers land there
-   * and are returned by the operator after manual review; merchants cannot
-   * choose it.
+   * The wallet the payer attested, once they have. Only transfers from it
+   * are the payer's; overpayment remainders, expired balances, and late
+   * transfers return to it.
    */
-  recovery_address: string;
+  payer_wallet: string | null;
+  /** Always equal to `payer_wallet`: the address's recovery term. */
+  recovery_address: string | null;
+  /** When the attestation was accepted and the address derived. */
+  wallet_bound_at: string | null;
   amount: string;
   amount_base_units: string;
   received: string;
@@ -104,7 +112,7 @@ export interface Payment {
   payer_policy: PayerPolicy;
   attachment: AttachmentDescriptor | null;
   verification_completed_at: string | null;
-  /** Set when finalized funds arrived before the policy's verification completed. */
+  /** Set when finalized funds first arrived from a wallet other than the attested one. */
   likely_unsolicited_at: string | null;
   attribution: Attribution;
   created_at: string;
@@ -120,7 +128,8 @@ export interface Payment {
   settlement_tx_hash: string | null;
   settlement_explorer_url: string | null;
   as_of: AsOf | null;
-  self_settlement: { factory: string; salt: string };
+  /** What a third party needs to execute the contract; null until the address exists. */
+  self_settlement: { factory: string; salt: string } | null;
   attention: { code: string; message: string; action: string } | null;
   transfers: Transfer[];
   indexer_freshness: { last_indexed_block: string | null; last_finalized_block: string | null; cursor_updated_at: string | null };
@@ -128,9 +137,16 @@ export interface Payment {
 
 export type VerificationFactStatus = "not_required" | "pending" | "approved" | "declined";
 
-/** Each fact the policy needs, on its own. */
+/**
+ * Each fact the policy needs, on its own. `email` is the identity policy and
+ * `complete` is whether the session satisfies it (which unlocks the content).
+ * `wallet` is never `not_required`: every request needs the payer's wallet
+ * attestation before it has an address, and it belongs to the request, not
+ * the session.
+ */
 export interface VerificationRequirements {
   email: VerificationFactStatus;
+  wallet: VerificationFactStatus;
   complete: boolean;
 }
 
@@ -151,7 +167,7 @@ export interface VerificationStatus {
  */
 export interface VerificationAttempt {
   id: string;
-  kind: "email";
+  kind: "email" | "wallet";
   status: "pending" | "approved" | "abandoned";
   verified_at: string | null;
   created_at: string;
@@ -212,11 +228,38 @@ export interface PayerPayment {
   received_base_units: string | null;
   remaining: string | null;
   remaining_base_units: string | null;
+  /** The wallet bound to this request, once a payer has attested one. */
+  payer_wallet: string | null;
+  /** Present once unlocked and a wallet is bound; null before either. */
   address: string | null;
   address_explorer_url: string | null;
-  /** EIP-681 request for the amount still due; null while locked or once not payable. */
+  /** EIP-681 request for the amount still due; null while locked, unbound, or once not payable. */
   payment_uri: string | null;
   invoice: PayerInvoiceDetails | null;
+}
+
+/** EIP-712 typed data exactly as `eth_signTypedData_v4` / viem's `signTypedData` take it. */
+export interface PayerAttestationTypedData {
+  domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  primaryType: "PayerAttestation";
+  types: {
+    EIP712Domain: Array<{ name: string; type: string }>;
+    PayerAttestation: Array<{ name: string; type: string }>;
+  };
+  message: {
+    statement: string;
+    attributionHash: string;
+    wallet: string;
+    nonce: string;
+    expiresAt: number;
+  };
+}
+
+/** A wallet challenge: the session it belongs to and the document to sign. */
+export interface WalletChallenge {
+  payer_session: string;
+  expires_at: string;
+  typed_data: PayerAttestationTypedData;
 }
 
 export interface PaymentSummary {
@@ -336,7 +379,12 @@ export interface AttachmentUpload {
 
 export interface AttachmentCommitment { id: string; byte_length: string; sha256: string }
 
-/** The exact document hashed at issuance; every string is canonical (decimal amounts, EIP-55 addresses). */
+/**
+ * The exact document hashed at issuance; every string is canonical (decimal
+ * amounts, EIP-55 addresses). It carries no recovery address: that is the
+ * payer's attested wallet, which enters the payment address through the
+ * attestation rather than through this document.
+ */
 export interface CanonicalIssuanceSnapshot {
   schema: "payday.invoice";
   canonicalization: "RFC8785";
@@ -352,8 +400,28 @@ export interface CanonicalIssuanceSnapshot {
   chain_id: string;
   token_address: string;
   receiver_address: string;
-  recovery_address: string;
   factory_address: string;
+}
+
+/**
+ * The payer's wallet attestation as the proof carries it: the exact typed
+ * data the wallet signed, its EIP-712 digest, and the signature. The proof's
+ * salt is `keccak256("PAYDAY_SALT_V2" || attribution_hash || digest)` and the
+ * wallet is the address's recovery term.
+ */
+export interface PayerWalletAttestation {
+  address: string;
+  typed_data: PayerAttestationTypedData;
+  digest: string;
+  signature: string;
+  method: "ecdsa";
+}
+
+/** One fact Payday observed: the proven mailbox or the accepted wallet signature. */
+export interface VerificationFact {
+  kind: "mailbox" | "wallet";
+  provider: "auth0" | "payday";
+  at: string;
 }
 
 export interface ProofTransfer {
@@ -367,9 +435,10 @@ export interface ProofTransfer {
 }
 
 /**
- * What Payday signs about a verification outcome. The issuance commitment
- * (attribution hash, chain, CREATE3 address) is in the signed payload so the
- * attestation vouches for this invoice only, not for any proof reusing its id.
+ * What Payday signs about a verification outcome. The commitment (attribution
+ * hash, chain, CREATE3 address, payer wallet, and the nonce inside the wallet's
+ * attestation) is in the signed payload so the attestation vouches for this
+ * request and this payer only, not for any proof reusing its id.
  */
 export interface VerificationAttestationPayload {
   version: string;
@@ -380,9 +449,13 @@ export interface VerificationAttestationPayload {
   chain_id: string;
   /** EIP-55 checksummed CREATE3 payment address. */
   payment_address: string;
+  payer_wallet: string;
+  wallet_nonce: string;
   payer_policy_mode: PayerPolicyMode;
   result: string;
   verified_at: string | null;
+  wallet_bound_at: string;
+  facts: VerificationFact[];
 }
 
 /** Payday-attested, not address-committed: verification happens after issuance. */
@@ -393,23 +466,25 @@ export interface SignedVerificationAttestation {
 }
 
 /**
- * Offline-verifiable record tying the issued invoice to its payment address,
- * the transfers that paid it, and the transaction that settled it. It is
- * checked without Payday: `gateway_core::verify_proof` holds the offline
- * checks.
+ * Offline-verifiable record tying the issued invoice to the wallet its payer
+ * attested, to the payment address both commit to, to the transfers from that
+ * wallet that paid it, and to the transaction that settled it. It is checked
+ * without Payday: `gateway_core::verify_proof` holds the offline checks.
  */
 export interface ProofOfPayment {
   version: string;
   payment_id: string;
   canonical_issuance_snapshot: CanonicalIssuanceSnapshot;
   canonicalization: string;
-  attribution_nonce: string;
   attribution_hash: string;
+  payer_wallet: PayerWalletAttestation;
   salt: string;
   chain_id: string;
   factory_address: string;
   payment_address: string;
   token_address: string;
+  /** The payer's attested wallet. */
+  recovery_address: string;
   /**
    * The fulfilment transaction (the payment's `settlement_tx_hash`) that
    * forwarded the funds to the receiver; not one of `transfers`, which are the
@@ -879,6 +954,40 @@ export class PaydayPayerClient {
       request<VerificationStatus>(
         this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify`,
         payerOptions(options),
+      ),
+  };
+
+  /**
+   * The payer's wallet attestation. Once the session satisfies the request's
+   * policy (at once, for a permissionless request), `challenge` returns the
+   * EIP-712 document the wallet must sign, and `attest` hands the signature
+   * back. The signature binds that wallet to the request and derives its
+   * payment address; only transfers from that wallet count, and anything
+   * Payday returns goes back to it. These writes answer cross-origin requests
+   * from the hosted checkout only.
+   */
+  readonly wallet = {
+    /**
+     * Mint the challenge for `wallet`. For a permissionless request with no
+     * session yet, the response carries a fresh `payer_session` to keep.
+     * Answers `409 wallet_already_bound` once a wallet is bound.
+     */
+    challenge: (id: string, wallet: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<WalletChallenge> =>
+      request<WalletChallenge>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/wallet/challenge`,
+        { method: "POST", body: { wallet }, ...payerOptions(options) },
+      ),
+    /**
+     * Submit the wallet's signature over the challenge's typed data. Answers
+     * the unlocked payment, now carrying `address` and `payer_wallet`;
+     * `401 wallet_signature_invalid` for a signature that does not recover to
+     * `wallet`, `409 wallet_challenge_required` when no challenge is
+     * outstanding, `409 wallet_already_bound` when another wallet won.
+     */
+    attest: (id: string, wallet: string, signature: string, payerSession: string, options: { signal?: AbortSignal } = {}): Promise<PayerPayment> =>
+      request<PayerPayment>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/wallet/attest`,
+        { method: "POST", body: { wallet, signature }, ...payerOptions({ ...options, payerSession }) },
       ),
   };
 }

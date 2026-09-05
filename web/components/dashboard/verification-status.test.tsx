@@ -61,7 +61,7 @@ describe("VerificationStatus", () => {
       />,
     );
     expect(screen.getByRole("note")).toHaveTextContent(/Likely unsolicited/);
-    expect(screen.getByRole("note")).toHaveTextContent(/not quarantined/);
+    expect(screen.getByRole("note")).toHaveTextContent(/a wallet other than the one the payer signed with/);
     expect(screen.queryByText("Expected identity")).not.toBeInTheDocument();
   });
 });

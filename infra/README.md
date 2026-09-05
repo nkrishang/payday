@@ -1,6 +1,6 @@
 # AWS deployment
 
-Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, a private versioned S3 bucket for invoice attachments scanned by GuardDuty Malware Protection, and four KMS keys: three secp256k1 keys (the sweep signer, the Payday recovery wallet, and the Proof of Payment attestation signer) and one symmetric key encrypting attachments. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
+Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, a private versioned S3 bucket for invoice attachments scanned by GuardDuty Malware Protection, and four KMS keys: three secp256k1 keys (the sweep signer, the Proof of Payment attestation signer, and a legacy recovery wallet kept only until its balance is returned) and one symmetric key encrypting attachments. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
 
 The contract generation is pinned: `factory_code_hash` and
 `batch_sweeper_code_hash` are the keccak256 of the runtime bytecode at
@@ -8,10 +8,10 @@ The contract generation is pinned: `factory_code_hash` and
 (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`), deployed together
 as one generation. Both services compare them with the chain at startup and
 refuse to start on a mismatch, which is why the API task now also reads the RPC
-secret. `recovery_address` is the address of the recovery key, derived with
-`cast wallet address --aws` from `recovery_kms_key_arn` after a targeted apply
-of that key; see `docs/production-runbook.md`. It has no safe placeholder:
-leave it unset until the key exists, and the API task definition's
+secret. The `recovery` KMS key is legacy: payments now return excess and late
+funds to the payer's own attested wallet, so gatewayd no longer reads its
+address; keep it only until any balance it holds has been returned by hand
+(see `docs/production-runbook.md`). The API task definition's
 precondition fails the plan until it is set.
 
 The API task also requires the Privy app merchants sign in to
@@ -60,18 +60,15 @@ export TF_VAR_rpc_url='https://your-paid-provider.example/...'
 terraform init -backend-config=backend.hcl
 terraform fmt -check -recursive
 terraform validate
-terraform apply -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer \
-  -target=aws_kms_key.recovery -target=aws_kms_alias.recovery
+terraform apply -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer
 # Build and push Dockerfile's API/indexer targets using image_tag now.
-# Derive the recovery wallet and set recovery_address in terraform.tfvars:
-AWS_KMS_KEY_ID="$(terraform output -raw recovery_kms_key_arn)" cast wallet address --aws
 terraform plan -out=deploy.tfplan
 terraform apply deploy.tfplan
 # Derive the Proof of Payment attestor address and publish it as the trusted attestor:
 AWS_KMS_KEY_ID="$(terraform output -raw attestation_kms_key_arn)" cast wallet address --aws
 ```
 
-Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address, code hash, or USDC start block is defaulted, and `recovery_address` defaults to null so the plan fails closed until the real key's address is set. Retrieve generated values from Secrets Manager rather than Terraform output.
+Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address, code hash, or USDC start block is defaulted. Retrieve generated values from Secrets Manager rather than Terraform output.
 After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do not deliver until it is confirmed.
 The stack verifies `notification_domain_name` with SES Easy DKIM. Before launch,
 also move the SES account out of the sandbox in this region and verify a test
@@ -140,8 +137,7 @@ from the verified SES identity, work the attachment bucket as described above,
 and `kms:GetPublicKey`/`kms:Sign` with the attestation key alone. The status
 execution role can read only the database secret. Indexer execution can read only database/RPC secrets. The
 indexer task role can only `kms:GetPublicKey` and `kms:Sign` on the signer
-key. No role at all can sign with the recovery key: recovered funds are
-returned by an operator by hand, never by the stack. RDS
+key. No role at all can sign with the legacy recovery key. RDS
 connections use hostname and certificate verification against the
 checksum-pinned AWS global RDS CA bundle in the image. Secrets Manager version
 rotation is not observed by running ECS tasks. Force a new API deployment after
@@ -154,4 +150,4 @@ WAF request sampling is disabled because samples can contain the bearer `Authori
 
 ## Destroy protection
 
-RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. All four KMS keys (sweep signer, recovery, attestation, attachments) have Terraform `prevent_destroy`; the recovery key holds custody of recovered USDC, so confirm the wallet is empty and every `recovered_funds` row has been returned before removing that guard, and the attachment key is the only way to read stored PDFs. The attachment bucket is not force-destroyed: empty it deliberately, after confirming no invoice still references its objects, before a teardown. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.
+RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. All four KMS keys (sweep signer, recovery, attestation, attachments) have Terraform `prevent_destroy`; the legacy recovery key may still hold USDC recovered before payments returned funds to the payer's own wallet, so confirm it is empty before removing that guard and the resource, and the attachment key is the only way to read stored PDFs. The attachment bucket is not force-destroyed: empty it deliberately, after confirming no invoice still references its objects, before a teardown. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.

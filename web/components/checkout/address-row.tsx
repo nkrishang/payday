@@ -1,8 +1,9 @@
-import type { UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { ReadyPayerPayment } from "@/lib/checkout-state";
 import { ArrowUpRight } from "lucide-react";
 import { CopyButton } from "@/components/ui/copy-button";
+import { truncateAddress } from "@/lib/format";
 
-export function AddressRow({ payment }: { payment: UnlockedPayerPayment }) {
+export function AddressRow({ payment }: { payment: ReadyPayerPayment }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
@@ -27,6 +28,13 @@ export function AddressRow({ payment }: { payment: UnlockedPayerPayment }) {
         </span>
         <CopyButton value={payment.address} label="payment address" className="bg-surface" />
       </div>
+      <p className="mt-2 text-[12px] leading-relaxed text-faint">
+        Send from{" "}
+        <span className="font-mono text-muted" title={payment.payer_wallet}>
+          {truncateAddress(payment.payer_wallet)}
+        </span>{" "}
+        only, the wallet you signed with. Transfers from any other wallet are not credited to you.
+      </p>
     </div>
   );
 }

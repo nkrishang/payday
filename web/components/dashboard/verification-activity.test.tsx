@@ -24,7 +24,7 @@ const VERIFIED: VerificationDetail = {
   payer_policy_mode: "verified_email",
   verification_completed_at: "2026-08-25T10:05:00Z",
   likely_unsolicited_at: null,
-  facts: { email: "approved", complete: true },
+  facts: { email: "approved", wallet: "pending", complete: true },
   attempts: [ABANDONED_ATTEMPT, EMAIL_ATTEMPT],
 };
 
@@ -59,7 +59,7 @@ describe("VerificationActivity", () => {
     const { verification } = renderActivity({
       ...VERIFIED,
       verification_completed_at: null,
-      facts: { email: "pending", complete: false },
+      facts: { email: "pending", wallet: "pending", complete: false },
       attempts: [],
     });
 

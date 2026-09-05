@@ -59,7 +59,8 @@ export function ConnectSheet({
             </Dialog.Close>
           </div>
           <Dialog.Description className="mt-1 text-[13px] text-muted">
-            Payday never asks for a signature beyond the transfer itself.
+            Payday asks for one signature to prove this is your wallet, then the transfer itself.
+            Nothing else, ever.
           </Dialog.Description>
 
           <ul className="mt-4 space-y-1.5">

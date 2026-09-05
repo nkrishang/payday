@@ -270,17 +270,22 @@ Two indicators sit beside the payment status and mean different things.
 the gateway records that the expected payer completed the policy's checks;
 *Verified*, with the completion time, afterwards.
 
-**Likely unsolicited** — shown, with the time, when finalized funds arrived at a
-gated invoice before its verification completed. The address is not
-quarantined: settlement waits for verification, and unverified funds are
-recovered at expiry.
+**Payer wallet** — the wallet the payer signed the request's attestation
+with, shown on the detail page with the address once it exists (the address
+is created from that signature; before it, the row says so). Only that
+wallet's transfers are the payer's.
 
-**Recovered funds** — a section on the detail page, present only when something
-went to the Payday recovery wallet rather than the payout address: the
-overpayment remainder on a settled invoice, the full balance of a returned one,
-and every transfer the indexer classified as late, each with its transaction
-hash and whether it has been collected. Recovered balances are returned after
-review; quote the hash to support.
+**Likely unsolicited** — shown, with the time, when finalized funds arrived
+from a wallet other than the attested one. The funds still count and settle;
+the flag says the attested wallet did not pay them, and no Proof of Payment
+will claim it did.
+
+**Returned to the payer** — a section on the detail page, present only when
+something went back to the payer's attested wallet rather than the payout
+address: the overpayment remainder on a settled invoice, the full balance of
+a returned one, and every transfer the indexer classified as late, each with
+its transaction hash and whether it has been collected. Returns are on-chain
+and automatic.
 
 ## Customers
 

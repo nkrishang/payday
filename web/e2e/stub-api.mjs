@@ -22,7 +22,8 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";
 const FACTORY = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
-const RECOVERY = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+/** The wallet the stub's payers attest; the address commits to it, and excess funds return to it. */
+const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const PAYOUT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const SETTLEMENT_TX = "0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190";
 const ATTESTOR = "0x976EA74026E726554dB657fA54763abd0C3a0aa9";
@@ -44,10 +45,11 @@ const QR_SVG =
 const GATED = new Set(["verified_email"]);
 
 /** `VerificationRequirementsResponse::for_mode` */
-function requirements(mode, completed = false) {
+function requirements(mode, completed = false, walletBound = true) {
   const required = completed ? "approved" : "pending";
   return {
     email: GATED.has(mode) ? required : "not_required",
+    wallet: walletBound ? "approved" : "pending",
     complete: !GATED.has(mode) || completed,
   };
 }
@@ -88,6 +90,7 @@ function base(overrides = {}) {
     received_base_units: "0",
     remaining: "25.000000",
     remaining_base_units: "25000000",
+    payer_wallet: PAYER_WALLET,
     address: ADDRESS,
     address_explorer_url: null,
     payment_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
@@ -103,10 +106,19 @@ function base(overrides = {}) {
   };
 }
 
+/** An unlocked request whose payer has not signed yet: content, no address. */
+const UNBOUND = {
+  requirements: requirements("permissionless", false, false),
+  payer_wallet: null,
+  address: null,
+  address_explorer_url: null,
+  payment_uri: null,
+};
+
 /**
- * Payer sessions minted by the verification routes:
- * token -> { id, emailVerified }. A session is good for exactly the payment
- * it was started on.
+ * Payer sessions minted by the verification and wallet routes:
+ * token -> { id, emailVerified, walletBound }. A session is good for exactly
+ * the payment it was started on.
  */
 const sessions = new Map();
 
@@ -173,6 +185,7 @@ function projectForPayer(payment) {
       received_base_units: null,
       remaining: null,
       remaining_base_units: null,
+      payer_wallet: null,
       address: null,
       address_explorer_url: null,
       payment_uri: null,
@@ -182,6 +195,7 @@ function projectForPayer(payment) {
   return {
     ...shared,
     content_unlocked: true,
+    payer_wallet: payment.payer_wallet,
     chain: payment.chain,
     token: payment.token,
     amount: payment.amount,
@@ -218,6 +232,7 @@ function locked(mode, facts = requirements(mode)) {
     received_base_units: null,
     remaining: null,
     remaining_base_units: null,
+    payer_wallet: null,
     address: null,
     address_explorer_url: null,
     payment_uri: null,
@@ -267,6 +282,9 @@ const scenarios = {
       },
     }),
   "gated-email": (id, session) => gatedFor("verified_email", session),
+  // No wallet signed yet: the page must ask for the signature before it
+  // shows any address, and show the address once this session has signed.
+  unbound: (id, session) => (session?.walletBound ? base() : base(UNBOUND)),
   partial: () => base(PARTIAL),
   paid: () => base({ ...FULL, ...CLOSED, status: "paid" }),
   settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
@@ -376,7 +394,11 @@ function merchantPayment(input, extra = {}) {
     address,
     address_explorer_url: null,
     payout_address: input.payout_address,
-    recovery_address: RECOVERY,
+    // Issued payments in this stub are already bound to the stub payer's
+    // wallet, as a request whose payer has signed would be.
+    payer_wallet: PAYER_WALLET,
+    recovery_address: PAYER_WALLET,
+    wallet_bound_at: created,
     expires_at: new Date(Date.parse(created) + expiresIn * 1000).toISOString(),
     expires_in: expiresIn,
     amount: fromBaseUnits(amountUnits),
@@ -411,7 +433,7 @@ function merchantPayment(input, extra = {}) {
     verification_completed_at: null,
     likely_unsolicited_at: null,
     verification_attempts: [],
-    attribution: { version: 1, hash: hex32(`attribution:${id}`) },
+    attribution: { version: 2, hash: hex32(`attribution:${id}`) },
     metadata: input.metadata ?? {},
     created_at: created,
     updated_at: created,
@@ -440,9 +462,9 @@ function verificationDetail(payment) {
     verification_completed_at: payment.verification_completed_at,
     likely_unsolicited_at: payment.likely_unsolicited_at,
     facts: completed
-      ? requirements(mode, true)
+      ? requirements(mode, true, Boolean(payment.payer_wallet))
       : {
-          ...requirements(mode),
+          ...requirements(mode, false, Boolean(payment.payer_wallet)),
           email: attempts.some(
             (attempt) => attempt.kind === "email" && attempt.status === "approved",
           )
@@ -486,7 +508,7 @@ function proofFor(payment) {
     }));
   const gated = GATED.has(payment.payer_policy.mode);
   return {
-    version: "payday.proof.v1",
+    version: "payday.proof.v2",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
       schema: "payday.invoice",
@@ -509,29 +531,73 @@ function proofFor(payment) {
       chain_id: "143",
       token_address: TOKEN,
       receiver_address: payment.payout_address,
-      recovery_address: RECOVERY,
       factory_address: FACTORY,
     },
     canonicalization: "RFC8785",
-    attribution_nonce: hex32(`nonce:${payment.id}`),
     attribution_hash: payment.attribution.hash,
+    payer_wallet: {
+      address: PAYER_WALLET,
+      typed_data: typedData(payment.attribution.hash, PAYER_WALLET, hex32(`nonce:${payment.id}`)),
+      digest: hex32(`digest:${payment.id}`),
+      signature: `0x${"cd".repeat(65)}`,
+      method: "ecdsa",
+    },
     salt: payment.self_settlement.salt,
     chain_id: "143",
     factory_address: FACTORY,
     payment_address: payment.address,
     token_address: TOKEN,
+    recovery_address: PAYER_WALLET,
     settlement_transaction_hash: payment.settlement_tx_hash,
     transfers,
     verification: {
       payload: {
-        version: "payday.attestation.v1",
+        version: "payday.attestation.v2",
         payment_id: payment.id,
+        attribution_hash: payment.attribution.hash,
+        chain_id: "143",
+        payment_address: payment.address,
+        payer_wallet: PAYER_WALLET,
+        wallet_nonce: hex32(`nonce:${payment.id}`),
         payer_policy_mode: payment.payer_policy.mode,
         result: gated ? "approved" : "not_required",
         verified_at: payment.verification_completed_at,
+        wallet_bound_at: payment.wallet_bound_at,
+        facts: [{ kind: "wallet", provider: "payday", at: payment.wallet_bound_at }],
       },
       signer: ATTESTOR,
       signature: `0x${"ab".repeat(65)}`,
+    },
+  };
+}
+
+/** `PayerAttestation::typed_data`: the EIP-712 document a payer's wallet signs. */
+function typedData(attributionHash, wallet, nonce) {
+  return {
+    domain: { name: "Payday", version: "1", chainId: 143, verifyingContract: FACTORY },
+    primaryType: "PayerAttestation",
+    types: {
+      EIP712Domain: [
+        { name: "name", type: "string" },
+        { name: "version", type: "string" },
+        { name: "chainId", type: "uint256" },
+        { name: "verifyingContract", type: "address" },
+      ],
+      PayerAttestation: [
+        { name: "statement", type: "string" },
+        { name: "attributionHash", type: "bytes32" },
+        { name: "wallet", type: "address" },
+        { name: "nonce", type: "bytes32" },
+        { name: "expiresAt", type: "uint256" },
+      ],
+    },
+    message: {
+      statement:
+        "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request, and any funds Payday returns go back to it.",
+      attributionHash,
+      wallet,
+      nonce,
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
     },
   };
 }
@@ -885,10 +951,14 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm)?$/,
+    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest)?$/,
   );
   if (!match) return false;
-  const write = match[2] === "/verify/email/start" || match[2] === "/verify/email/confirm";
+  const write =
+    match[2] === "/verify/email/start" ||
+    match[2] === "/verify/email/confirm" ||
+    match[2] === "/wallet/challenge" ||
+    match[2] === "/wallet/attest";
   if (req.method !== (write ? "POST" : "GET")) {
     return fail(res, 405, "method_not_allowed", "method not allowed");
   }
@@ -912,7 +982,7 @@ async function payer(req, res, url) {
     // The code goes to the merchant's asserted mailbox; the request names none.
     const reused = session ?? null;
     const token = reused ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
-    if (!reused) sessions.set(token, { id, emailVerified: false });
+    if (!reused) sessions.set(token, { id, emailVerified: false, walletBound: false });
     return send(res, 200, {
       payer_session: token,
       expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
@@ -934,6 +1004,40 @@ async function payer(req, res, url) {
       return fail(res, 401, "payer_session_invalid", "Start verification again");
     }
     return send(res, 200, verifyStatus(payment));
+  }
+
+  // The wallet step: a challenge for the connected wallet, then its
+  // signature. The stub verifies nothing; it records that this session
+  // signed, which is what the scenarios key the address on.
+  if (match[2] === "/wallet/challenge") {
+    const body = await readJson(req);
+    if (!/^0x[0-9a-fA-F]{40}$/.test(String(body.wallet ?? ""))) {
+      return fail(res, 400, "invalid_request", "wallet must be a 20-byte EVM address");
+    }
+    if (payment.address) {
+      return fail(res, 409, "wallet_already_bound", `Already bound to ${payment.payer_wallet}`);
+    }
+    if (GATED.has(mode) && !session?.emailVerified) {
+      return fail(res, 401, session ? "verification_required" : "payer_session_invalid", "Verify first");
+    }
+    let token = session ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
+    if (!session) sessions.set(token, { id, emailVerified: false, walletBound: false });
+    return send(res, 200, {
+      payer_session: token,
+      expires_at: new Date(Date.now() + 600 * 1000).toISOString(),
+      typed_data: typedData(hex32(`attribution:${id}`), body.wallet, hex32(`nonce:${token}`)),
+    });
+  }
+
+  if (match[2] === "/wallet/attest") {
+    if (!session) return fail(res, 401, "payer_session_invalid", "Request a challenge first");
+    const body = await readJson(req);
+    if (!/^0x[0-9a-fA-F]{130}$/.test(String(body.signature ?? ""))) {
+      return fail(res, 401, "wallet_signature_invalid", "Bad signature");
+    }
+    session.walletBound = true;
+    const current = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued), id };
+    return send(res, 200, current);
   }
 
   if (match[2] === "/qr") {

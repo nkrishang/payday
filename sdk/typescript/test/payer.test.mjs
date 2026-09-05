@@ -249,3 +249,50 @@ test("an unknown or malformed link surfaces invalid_payment_link", async () => {
   });
 });
 
+
+test("the wallet step mints a challenge for the wallet and submits its signature with the session", async () => {
+  const challenge = {
+    payer_session: "pps_wallet",
+    expires_at: "2026-09-02T00:10:00Z",
+    typed_data: { primaryType: "PayerAttestation", domain: {}, types: {}, message: {} },
+  };
+  const bound = { ...payerPayment, payer_wallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" };
+  const mock = mockFetch((url) => new Response(JSON.stringify(url.endsWith("/challenge") ? challenge : bound)));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const minted = await client.wallet.challenge("pay_a/b", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+  const attested = await client.wallet.attest(
+    "pay_a/b",
+    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    `0x${"ab".repeat(65)}`,
+    minted.payer_session,
+  );
+
+  assert.equal(minted.typed_data.primaryType, "PayerAttestation");
+  assert.equal(attested.payer_wallet, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/wallet/challenge");
+  assert.equal(mock.calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body), { wallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" });
+  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
+  assert.equal(mock.calls[1].url, "https://example.test/v1/payer/payments/pay_a%2Fb/wallet/attest");
+  assert.deepEqual(JSON.parse(mock.calls[1].init.body), {
+    wallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    signature: `0x${"ab".repeat(65)}`,
+  });
+  assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_wallet");
+  for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
+});
+
+test("a wallet that is already bound surfaces wallet_already_bound", async () => {
+  const mock = mockFetch(() => new Response(
+    JSON.stringify({ error: { code: "wallet_already_bound", message: "bound" } }),
+    { status: 409 },
+  ));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+  await assert.rejects(client.wallet.challenge("pay_1", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"), (error) => {
+    assert.ok(error instanceof PaydayError);
+    assert.equal(error.code, "wallet_already_bound");
+    assert.equal(error.status, 409);
+    return true;
+  });
+});

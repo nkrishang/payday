@@ -239,6 +239,11 @@ resource "aws_kms_alias" "signer" {
   target_key_id = aws_kms_key.signer.key_id
 }
 
+# Retained for any balance recovered under the pre-2026-09 scheme, in which
+# this wallet was every payment's recovery term. Payments now return excess
+# and late funds to the payer's own attested wallet, so nothing new lands
+# here and gatewayd no longer reads its address; remove it once the balance
+# is confirmed empty (it carries prevent_destroy, see the README).
 # The recovery wallet takes custody of overpayment remainders, expired
 # balances, and late transfers. Nothing in the stack signs with it: recovered
 # funds are reviewed and returned by hand, so no task role is granted kms:Sign.
@@ -638,7 +643,6 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
-      { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
     ], local.payer_environment, local.identity_environment),
@@ -652,15 +656,6 @@ resource "aws_ecs_task_definition" "api" {
     ], local.payer_secrets, local.identity_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
-
-  # The recovery wallet is committed into every payment address, so the API
-  # must never start with a placeholder; fail the plan rather than the task.
-  lifecycle {
-    precondition {
-      condition     = var.recovery_address != null
-      error_message = "recovery_address must be set to the recovery KMS key's address (derive it with cast wallet address --aws from recovery_kms_key_arn) before the API task can be deployed"
-    }
-  }
 }
 
 resource "aws_ecs_task_definition" "status" {

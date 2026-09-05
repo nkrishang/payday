@@ -17,19 +17,23 @@ email). Optional
 fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 `customer_id`, and one finalized `attachment_id` for a scanned PDF. The amount
 is used directly; there are no line items. Exactly `amount` settles to
-`payout_address`; the response's `recovery_address` is the Payday recovery
-wallet the payment is committed to, where overpayment remainders, expired
-balances, and late transfers land before the operator returns them after manual
-review. It is platform-configured, so a request carrying `refund_address` is
-rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
+`payout_address`. The response's `address` is null at creation: the payment
+address exists only once the payer has attested, from the hosted page, the
+wallet they will pay from (`payer_wallet`), which is the address's recovery
+term (`recovery_address`), where overpayment remainders, expired balances,
+and late transfers return on-chain. The binding raises a `payment.ready`
+webhook. Recovery is never a request field, so a request carrying
+`refund_address` is rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
 both for a 24-hour lifetime. `chain_id` and `token_address` default to the
 configured chain and USDC contract.
 
 Every immutable field, including the attachment's hash, takes part in
 idempotency: reusing a key with a different document returns
-`409 idempotency_conflict`. The issued invoice is canonicalized and committed
-into the payment address through the salt, which is what makes the Proof of
-Payment (`GET /v1/payments/{id}/proof`, after settlement) verifiable offline.
+`409 idempotency_conflict`. The issued invoice is canonicalized and, together
+with the payer's wallet attestation, committed into the payment address
+through the salt, which is what makes the Proof of Payment
+(`GET /v1/payments/{id}/proof`, after settlement) verifiable offline: the
+document, the wallet, the address, and the transfers from that wallet.
 
 Payments expose the public states `awaiting_payment`, `partially_paid`, `paid`,
 `settled`, `expired`, `returned`, and `needs_attention`; amounts are trimmed USDC strings and are
@@ -53,7 +57,9 @@ accept no API key, return no merchant data, and send
 own against them. For the verified payer modes the page shows only the issuer
 name and heading until the payer's session satisfies the policy; the amount,
 bill-to, notes, reference, PDF, address, and QR are withheld
-(`content_unlocked: false`). Reproduce the guidance in
+(`content_unlocked: false`). Every request then takes the wallet step
+(`/wallet/challenge` and `/wallet/attest`, see the API reference) before the
+address, QR, and wallet button appear. Reproduce the guidance in
 [Payment safety](payment-safety.md) if you build your own.
 
 `GET /v1/payments` accepts `status`, `reference`, `starting_after`, and `limit`.

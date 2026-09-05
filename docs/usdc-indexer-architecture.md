@@ -102,7 +102,10 @@ including a mint with `from == address(0)`, is credited because the resulting
 USDC is spendable by the payment contract. A zero-value transfer is retained
 with an `error` disposition. A transfer to an invoice in any other status is
 retained with a `late` disposition: it never counts toward the amount, but it
-sits at the address and is queued for recovery through `Payment.recover`.
+sits at the address and is queued for return to the payer through
+`Payment.recover`. A nonzero transfer from any wallet but the invoice's
+attested payer wallet is credited too, but flags the invoice
+`likely_unsolicited_at` once, at its chain time.
 Every nonzero observation also records the block and transaction index of the
 sweep that collected it, so the ledger always says which funds are still at the
 address. If payer identity or compliance policy requires a nonzero sender, make
@@ -290,24 +293,26 @@ the cumulative amount reaches the requested amount.
 
 Before expiration, the Payment constructor requires a balance of at least the
 invoice amount, transfers exactly that amount to the beneficiary, and sends any
-remainder to the Payday recovery wallet, so an overpayment present before
-execution is neither stranded nor forwarded to the merchant. After expiration,
-execution instead transfers the complete balance to the recovery wallet without
-requiring the invoice amount. Both the expiration timestamp and the recovery
-wallet are committed into the deterministic address; the wallet is platform
-configuration (`PAYDAY_RECOVERY_ADDRESS`), not a merchant choice.
+remainder back to the payer's attested wallet, so an overpayment present
+before execution is neither stranded nor forwarded to the merchant. After
+expiration, execution instead transfers the complete balance to that wallet
+without requiring the invoice amount. Both the expiration timestamp and the
+recovery wallet are committed into the deterministic address; the wallet is
+the one the payer attested when the address was derived, not a merchant or
+platform choice. An invoice without a bound wallet has no address and nothing
+to sweep.
 
 Factory execution is permissionless, so anyone can recover an expired partial
 payment; the indexer also does it automatically once the invoice is `expired`,
 reporting the outcome as `recovered`.
 
 Transfers sent after the Payment contract has executed are forwarded to the
-recovery wallet by `Payment.recover`, which anyone may call and which the
+payer's wallet by `Payment.recover`, which anyone may call and which the
 sweep worker calls automatically; they are never credited to the invoice. The
 API still describes the address as single-use so merchants do not present it
 after settlement.
 
-Every nonzero amount the recovery wallet receives — an overpayment remainder,
+Every nonzero amount the payer's wallet receives back — an overpayment remainder,
 an expired balance, or a late transfer — is a `recovered_funds` row keyed by
 invoice, transaction, and reason, inserted in the transaction that finalizes
 the batch, so a replayed receipt cannot double-count and the ledger is never
@@ -346,7 +351,7 @@ forwarded to it. Per item the receipt carries one of:
   two regardless of event order and rejects a duplicate or conflicting pair as
   a malformed receipt;
 - `Recovered` alone from the payment address: the deployment paid the whole
-  balance to the recovery wallet after expiry (`recovered`);
+  balance back to the payer's wallet after expiry (`recovered`);
 - `SweepRecovered` from the helper: the contract pre-existed and `recover`
   forwarded the reported amount; an open invoice in this position was executed
   by someone else and `Payment.settled()` at the receipt block says how;
