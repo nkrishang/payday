@@ -48,8 +48,6 @@
   --success: #15803d;
   --warning: #b45309;
   --danger: #b91c1c;
-  /* The wordmark's green, darkened to the same hue for a light ground. */
-  --logo-accent: #557f26;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -68,8 +66,6 @@
     --success: #4ade80;
     --warning: #fbbf24;
     --danger: #f87171;
-    /* On dark, the wordmark's own green. */
-    --logo-accent: #a3d277;
   }
 }
 
@@ -1341,23 +1337,34 @@
 }
 
 /*
- * The dashboard, in the landing page's clothes.
+ * The rest of the app, in the landing page's clothes.
  *
  * Payday is a dark product on either colour scheme — the marketing page says
- * so, and a merchant arriving from "Start Building" should not watch the
- * ground flip to white. Rather than restyle every dashboard page, `.dash`
- * redefines the theme tokens the pages already read, so a table, a form
- * control, and a status badge all follow. Both halves of each token are
- * restated: Tailwind's `--color-*` resolve `var(--*)` where they are declared,
- * so overriding the raw value alone would never reach `bg-surface`.
+ * so, and a merchant arriving from "Start Building" (or a payer arriving from
+ * a payment link) should not watch the ground flip to white. Rather than
+ * restyle every page by hand, `.dash`/`.brand-dark` redefine the theme tokens
+ * the pages already read, so a table, a form control, and a status badge all
+ * follow. Both halves of each token are restated: Tailwind's `--color-*`
+ * resolve `var(--*)` where they are declared, so overriding the raw value
+ * alone would never reach `bg-surface`.
+ *
+ * `.dash` is the dashboard's own name for this and carries one thing only it
+ * needs (the hero wave's overflow clipping); `.brand-dark` is the same theme
+ * for anything else that wants it — currently the hosted checkout — without
+ * borrowing a name that means "dashboard".
+ *
+ * `body:has(.dash, .brand-dark)` restates the same tokens a second time, on
+ * body itself. Radix's `Dialog.Portal` (the wallet picker, the identity
+ * check's confirmation) mounts to `document.body` by default, which is a
+ * *sibling* of `.dash`/`.brand-dark`, not a descendant — without this, a
+ * portalled dialog over a branded page would silently fall back to the
+ * generic light/dark tokens instead of inheriting the brand ones, since CSS
+ * custom properties only inherit down the tree they are declared on.
  */
-.dash {
+.dash,
+.brand-dark,
+body:has(.dash, .brand-dark) {
   color-scheme: dark;
-  /* The hero's wave is drawn 160px wider than the page on each side and drifts
-     sideways, which is a decoration, not content: clipped rather than allowed
-     to put a horizontal scrollbar under the whole dashboard. `clip` and not
-     `hidden`, so the composer's sticky preview still sticks. */
-  overflow-x: clip;
   /* `body` resolves `color: var(--ink)` outside this block, so on a light
      system it would keep the light theme's near-black for everything that
      inherits — headings, radio labels, table cells — over a ground this page
@@ -1378,7 +1385,6 @@
   --success: #8fd6a3;
   --warning: #f5c451;
   --danger: #f87171;
-  --logo-accent: #a3d277;
 
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
@@ -1394,26 +1400,43 @@
   --color-warning: var(--warning);
   --color-danger: var(--danger);
 
-  position: relative;
-  isolation: isolate;
   font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
 }
 
+.dash,
+.brand-dark {
+  position: relative;
+  isolation: isolate;
+}
+
+.dash {
+  /* The hero's wave is drawn 160px wider than the page on each side and drifts
+     sideways, which is a decoration, not content: clipped rather than allowed
+     to put a horizontal scrollbar under the whole dashboard. `clip` and not
+     `hidden`, so the composer's sticky preview still sticks. */
+  overflow-x: clip;
+}
+
 /* The page's own ground, so an overscroll bounce is not a white flash. */
-body:has(.dash) {
+body:has(.dash, .brand-dark) {
   background-color: #070707;
 }
 
-.dash .font-heading {
+.dash .font-heading,
+.brand-dark .font-heading,
+body:has(.dash, .brand-dark) .font-heading {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
-.dash :focus-visible {
+.dash :focus-visible,
+.brand-dark :focus-visible,
+body:has(.dash, .brand-dark) :focus-visible {
   outline-color: #a3d277;
 }
 
 /* The landing page's paper grain, over the whole surface. */
-.dash::after {
+.dash::after,
+.brand-dark::after {
   position: fixed;
   z-index: 50;
   inset: 0;
