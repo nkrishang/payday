@@ -143,12 +143,19 @@ struct Payment {
     chain: Chain,
     currency: String,
     token: Token,
-    address: String,
+    /// The one-time payment address; null until the payer attests the
+    /// wallet they will pay from, which the address commits to.
+    address: Option<String>,
     address_explorer_url: Option<String>,
     payout_address: String,
-    /// Payday's custodial recovery wallet for overpayments, expired balances,
-    /// and late transfers; configured by the platform, not the merchant.
-    recovery_address: String,
+    /// The wallet the payer attested, once they have. Only transfers from
+    /// it are the payer's; overpayments, expired balances, and late
+    /// transfers return to it.
+    payer_wallet: Option<String>,
+    /// Always equal to `payer_wallet`: the address's recovery term.
+    recovery_address: Option<String>,
+    /// When the attestation was accepted and the address derived.
+    wallet_bound_at: Option<String>,
     expires_in: Option<u64>,
     amount: String,
     amount_base_units: String,
@@ -192,7 +199,8 @@ struct Payment {
     settlement_tx_hash: Option<String>,
     settlement_explorer_url: Option<String>,
     as_of: Option<AsOf>,
-    self_settlement: SelfSettlement,
+    /// Null until the address exists.
+    self_settlement: Option<SelfSettlement>,
     attention: Option<Attention>,
     transfers: Vec<Transfer>,
     indexer_freshness: IndexerFreshness,
@@ -241,10 +249,13 @@ enum VerificationFactStatus {
     Approved,
     Declined,
 }
-/// Each fact the policy needs, on its own.
+/// Each fact the policy needs, on its own. `wallet` is never `not_required`:
+/// every request needs the payer's wallet attestation before it has an
+/// address. `complete` is the identity policy alone.
 #[derive(Serialize, ToSchema)]
 struct VerificationRequirements {
     email: VerificationFactStatus,
+    wallet: VerificationFactStatus,
     /// The merchant's application opened the checkout by exchanging a
     /// client secret.
     merchant_session: VerificationFactStatus,
@@ -254,7 +265,7 @@ struct VerificationRequirements {
 #[derive(Serialize, ToSchema)]
 struct VerificationAttempt {
     id: String,
-    /// email or merchant_session.
+    /// email, wallet, or merchant_session.
     kind: String,
     /// pending, approved, or abandoned. A merchant_session attempt is
     /// recorded approved: the exchange is the proof.
@@ -515,8 +526,41 @@ struct CanonicalIssuanceSnapshot {
     chain_id: String,
     token_address: String,
     receiver_address: String,
-    recovery_address: String,
     factory_address: String,
+}
+/// EIP-712 typed data as a wallet signs it (`eth_signTypedData_v4`).
+#[derive(Serialize, ToSchema)]
+struct PayerAttestationTypedData {
+    #[schema(value_type = Object)]
+    domain: serde_json::Value,
+    #[serde(rename = "primaryType")]
+    primary_type: String,
+    #[schema(value_type = Object)]
+    types: serde_json::Value,
+    #[schema(value_type = Object)]
+    message: serde_json::Value,
+}
+/// The payer's wallet attestation: the exact typed data the wallet signed
+/// (`{statement, attributionHash, wallet, nonce, expiresAt}` under the
+/// Payday domain), its EIP-712 digest, and the signature. The proof's salt
+/// is `keccak256("PAYDAY_SALT_V2" || attribution_hash || digest)` and the
+/// wallet is the address's recovery term.
+#[derive(Serialize, ToSchema)]
+struct PayerWalletAttestation {
+    address: String,
+    typed_data: PayerAttestationTypedData,
+    digest: String,
+    signature: String,
+    /// `ecdsa`.
+    method: String,
+}
+/// One fact Payday observed: `mailbox` (provider `auth0`) or `wallet`
+/// (provider `payday`), and when.
+#[derive(Serialize, ToSchema)]
+struct VerificationFact {
+    kind: String,
+    provider: String,
+    at: String,
 }
 #[derive(Serialize, ToSchema)]
 struct ProofTransfer {
@@ -536,14 +580,20 @@ struct VerificationAttestationPayload {
     attribution_hash: String,
     chain_id: String,
     payment_address: String,
+    payer_wallet: String,
+    /// The nonce inside the payer's signed attestation; Payday's word is
+    /// that it was issued only after the policy passed.
+    wallet_nonce: String,
     payer_policy_mode: PayerPolicyMode,
     /// `not_required`, `approved`, or `pending`.
     result: String,
     verified_at: Option<String>,
+    wallet_bound_at: String,
+    facts: Vec<VerificationFact>,
 }
 /// Payday-attested, not address-committed: verification happens after
 /// issuance. `signature` recovers to `signer` over
-/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V1" || JCS(payload))`.
+/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V2" || JCS(payload))`.
 #[derive(Serialize, ToSchema)]
 struct SignedVerificationAttestation {
     payload: VerificationAttestationPayload,
@@ -556,13 +606,15 @@ struct ProofOfPayment {
     payment_id: String,
     canonical_issuance_snapshot: CanonicalIssuanceSnapshot,
     canonicalization: String,
-    attribution_nonce: String,
     attribution_hash: String,
+    payer_wallet: PayerWalletAttestation,
     salt: String,
     chain_id: String,
     factory_address: String,
     payment_address: String,
     token_address: String,
+    /// The payer's attested wallet.
+    recovery_address: String,
     settlement_transaction_hash: String,
     transfers: Vec<ProofTransfer>,
     verification: SignedVerificationAttestation,
@@ -587,7 +639,7 @@ fn transfers() {}
 fn payment_attachment() {}
 #[utoipa::path(get, path="/v1/payments/{id}/invoice.pdf", operation_id="getInvoicePdf", tag="payments", params(("id"=String, Path)), responses((status=200,description="Deterministic invoice summary as application/pdf, served as an attachment"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn invoice_pdf() {}
-#[utoipa::path(get, path="/v1/payments/{id}/proof", operation_id="getProofOfPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Verifiable offline; gateway_core::verify_proof holds the checks",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="payment_not_settled",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/payments/{id}/proof", operation_id="getProofOfPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Verifiable offline; gateway_core::verify_proof holds the checks",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="payment_not_settled, or payment_sender_mismatch when credited funds came from a wallet other than the attested one",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn proof() {}
 #[utoipa::path(get, path="/v1/payments/{id}/verification", operation_id="getPaymentVerification", tag="payments", params(("id"=String, Path)), responses((status=200,description="Every verification attempt on the invoice with each fact reported separately",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn payment_verification() {}
@@ -806,14 +858,21 @@ mod tests {
         let proof = &d["components"]["schemas"]["ProofOfPayment"]["properties"];
         for documented in [
             "canonical_issuance_snapshot",
-            "attribution_nonce",
+            "payer_wallet",
             "salt",
             "payment_address",
+            "recovery_address",
             "transfers",
             "verification",
         ] {
             assert!(proof[documented].is_object(), "{documented}");
         }
+        assert!(proof["attribution_nonce"].is_null());
+        let payment = &d["components"]["schemas"]["Payment"]["properties"];
+        assert!(payment["payer_wallet"].is_object());
+        assert!(payment["wallet_bound_at"].is_object());
+        let requirements = &d["components"]["schemas"]["VerificationRequirements"]["properties"];
+        assert!(requirements["wallet"].is_object());
         let attempt = &d["components"]["schemas"]["VerificationAttempt"]["properties"];
         for documented in ["kind", "status", "verified_at", "created_at"] {
             assert!(attempt[documented].is_object(), "{documented}");

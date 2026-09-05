@@ -1,8 +1,9 @@
 //! Proof of Payment (product plan §5.5, guide §Slice 2.6): everything a
-//! holder needs to recompute hash → salt → CREATE3 address offline and tie
-//! the invoice to the transfers that paid it and the transaction that
-//! settled it, plus a fresh Payday-signed attestation of the verification
-//! outcome bound to that same issuance commitment.
+//! holder needs to recompute hash → attestation → salt → CREATE3 address
+//! offline and tie the request to the transfers from the attested wallet
+//! that paid it and the transaction that settled it, plus a fresh
+//! Payday-signed attestation of the verification facts bound to that same
+//! commitment.
 
 use alloy_primitives::{Address, B256};
 use axum::Extension;
@@ -11,7 +12,7 @@ use axum::extract::{Path, State};
 use chrono::SecondsFormat;
 use gateway_core::{
     ATTESTATION_VERSION, CANONICALIZATION, Invoice, InvoiceStatus, PROOF_VERSION, ProofOfPayment,
-    ProofTransfer, VerificationAttestationPayload,
+    ProofTransfer, VerificationAttestationPayload, VerificationFact,
 };
 use gateway_db::AccountId;
 
@@ -37,6 +38,11 @@ pub async fn get_proof(
                 .to_string(),
             _ => return Err(ApiError::payment_not_settled()),
         };
+    // A fulfilled invoice was funded, and funds only reach a bound address.
+    let binding = invoice
+        .binding
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("fulfilled invoice has no payer wallet binding"))?;
     let attestor = state.attestor()?;
     // A fulfilled invoice and its proof inputs are immutable. Account and
     // signer are in the key so cached material can never cross ownership or
@@ -65,10 +71,19 @@ pub async fn get_proof(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    // The proof's claim is that the attested wallet paid. Money from any
+    // other wallet was credited and settled, but it is not that claim, and
+    // no proof is issued for it.
+    if transfers
+        .iter()
+        .any(|transfer| transfer.sender != binding.payer_wallet.to_checksum(None))
+    {
+        return Err(ApiError::payment_sender_mismatch());
+    }
 
-    // Permissionless invoices verify nothing. Gated modes report whether the
-    // policy was satisfied before settlement; the payer flows of Slices 3
-    // and 4 are what set that timestamp.
+    // Permissionless invoices verify no identity. Gated modes report whether
+    // the policy was satisfied; the wallet binding is a fact about every
+    // invoice, recorded with the attempt that made it.
     let mode = invoice.issuance_snapshot.payer_policy.mode();
     let result = if !mode.is_gated() {
         "not_required"
@@ -77,21 +92,60 @@ pub async fn get_proof(
     } else {
         "pending"
     };
+    let rfc3339 = |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let attempts = state
+        .payer_sessions
+        .attempts_for_invoice(account.0, row.id)
+        .await?;
+    let mut facts = Vec::new();
+    if let Some(mailbox) = attempts
+        .iter()
+        .filter(|attempt| attempt.kind == "email" && attempt.status == "approved")
+        .filter_map(|attempt| attempt.verified_at)
+        .min()
+    {
+        facts.push(VerificationFact {
+            kind: "mailbox".into(),
+            provider: "auth0".into(),
+            at: rfc3339(mailbox),
+        });
+    }
+    // A merchant-session request's identity fact is the merchant's own
+    // sign-in, vouched for by the client secret its server released.
+    if let Some(opened) = attempts
+        .iter()
+        .filter(|attempt| attempt.kind == "merchant_session" && attempt.status == "approved")
+        .filter_map(|attempt| attempt.verified_at)
+        .min()
+    {
+        facts.push(VerificationFact {
+            kind: "merchant_session".into(),
+            provider: "merchant".into(),
+            at: rfc3339(opened),
+        });
+    }
+    facts.push(VerificationFact {
+        kind: "wallet".into(),
+        provider: "payday".into(),
+        at: binding.bound_at.clone(),
+    });
     let verification = attestor
         .attest(VerificationAttestationPayload {
             version: ATTESTATION_VERSION.into(),
             payment_id: invoice.id.to_string(),
-            // The issuance commitment goes into the signed bytes so the
-            // attestation vouches for this invoice only, not for any proof
-            // that reuses its id.
+            // The commitment goes into the signed bytes so the attestation
+            // vouches for this invoice and this payer only, not for any
+            // proof that reuses its id.
             attribution_hash: invoice.attribution_hash.to_string(),
             chain_id: invoice.chain_id.0.to_string(),
-            payment_address: invoice.payment_address.0.to_checksum(None),
+            payment_address: binding.payment_address.0.to_checksum(None),
+            payer_wallet: binding.payer_wallet.to_checksum(None),
+            wallet_nonce: binding.attestation.typed_data.message.nonce.clone(),
             payer_policy_mode: mode.as_str().into(),
             result: result.into(),
-            verified_at: row
-                .verification_completed_at
-                .map(|at| at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+            verified_at: row.verification_completed_at.map(rfc3339),
+            wallet_bound_at: binding.bound_at.clone(),
+            facts,
         })
         .await
         .map_err(|error| {
@@ -102,15 +156,16 @@ pub async fn get_proof(
     let proof = ProofOfPayment {
         version: PROOF_VERSION.into(),
         payment_id: invoice.id.to_string(),
-        canonical_issuance_snapshot: invoice.issuance_snapshot,
+        canonical_issuance_snapshot: invoice.issuance_snapshot.clone(),
         canonicalization: CANONICALIZATION.into(),
-        attribution_nonce: invoice.attribution_nonce.to_string(),
         attribution_hash: invoice.attribution_hash.to_string(),
-        salt: invoice.salt.0.to_string(),
+        payer_wallet: binding.attestation.clone(),
+        salt: binding.salt.0.to_string(),
         chain_id: invoice.chain_id.0.to_string(),
         factory_address: invoice.factory.0.to_checksum(None),
-        payment_address: invoice.payment_address.0.to_checksum(None),
+        payment_address: binding.payment_address.0.to_checksum(None),
         token_address: invoice.token.0.to_checksum(None),
+        recovery_address: binding.recovery.0.to_checksum(None),
         settlement_transaction_hash,
         transfers,
         verification,

@@ -65,6 +65,7 @@ const STATUS_LABEL: Record<VerificationAttempt["status"], string> = {
 /** An attempt in the merchant's words: what happened, by which method. */
 const KIND_LABEL: Record<VerificationAttempt["kind"], string> = {
   email: "Email verification",
+  wallet: "Wallet attestation",
   merchant_session: "Opened by your app",
 };
 

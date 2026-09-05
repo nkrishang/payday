@@ -2490,6 +2490,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "base64",
+ "chrono",
  "gateway-core",
  "hmac 0.12.1",
  "rand 0.9.5",
@@ -2519,6 +2520,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-kms",
+ "chrono",
  "futures",
  "gateway-core",
  "gateway-db",

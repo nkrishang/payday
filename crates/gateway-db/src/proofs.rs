@@ -59,17 +59,13 @@ impl ProofRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InvoiceRepository;
-    use crate::invoices::tests::{account, issuance_input};
+    use crate::invoices::tests::{account, insert_bound, issuance_input};
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn proof_read_model_lists_only_credited_transfers_in_chain_order(pool: PgPool) {
         let owner = account(&pool, 1).await;
-        let issued = InvoiceRepository::new(pool.clone())
-            .insert_issued(&issuance_input(owner, "proof", None), None)
-            .await
-            .unwrap()
-            .row;
+        let issued = insert_bound(&pool, &issuance_input(owner, "proof", None), None).await;
+        let payment_address = issued.payment_address.clone().unwrap();
         let observation = |block: i64, index: i64, disposition: &str, amount: &str| {
             let reason = if disposition == "late" {
                 "'invoice_expired'"
@@ -87,7 +83,7 @@ mod tests {
                 hash = "11".repeat(32),
                 tx = format!("{:02x}", block).repeat(32),
                 sender = "f3".repeat(20),
-                recipient = hex_bytes(&issued.payment_address),
+                recipient = hex_bytes(&payment_address),
                 invoice = issued.id,
             )
         };
@@ -122,7 +118,7 @@ mod tests {
         assert!(
             transfers
                 .iter()
-                .all(|transfer| transfer.recipient_address == issued.payment_address)
+                .all(|transfer| transfer.recipient_address == payment_address)
         );
         assert!(
             repo.settlement_transfers(Uuid::now_v7())

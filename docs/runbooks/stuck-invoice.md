@@ -13,18 +13,19 @@ created → funded → deploying → fulfilled
 - `deploying`: claimed by the sweep worker; a helper transaction is in flight
   or being retried.
 - `fulfilled`: the `Payment` contract paid the beneficiary exactly the invoice
-  amount; any overpayment remainder went to the Payday recovery wallet.
-- `recovered`: the `Payment` contract paid the whole balance to the Payday
-  recovery wallet (the invoice expired before it could be settled).
+  amount; any overpayment remainder went back to the payer's attested wallet.
+- `recovered`: the `Payment` contract paid the whole balance back to the
+  payer's attested wallet (the invoice expired before it could be settled).
 - `expired`: chain time passed the deadline while the invoice was open. Any
   balance at the address is recovered automatically; the status becomes
   `recovered` when that finalizes.
 - `blocked`: the worker gave up on the invoice; `blocked_reason` says why.
 
-Funds that arrive after the contract exists are forwarded to the Payday
-recovery wallet automatically and never change the status. Every nonzero
-recovery — overpayment remainder, expired balance, or late transfer — is a row
-in `recovered_funds` (see "Reconciling recovered funds" below). The API reports
+Funds that arrive after the contract exists are forwarded to the payer's
+attested wallet automatically and never change the status. Every nonzero
+return — overpayment remainder, expired balance, or late transfer — is a row
+in `recovered_funds` (see "Reconciling returned funds" below). An invoice
+that never had its wallet bound has no address and can only wait or expire. The API reports
 `received_base_units`, `execute_tx_hash`, `resolved_at_block`, and
 `blocked_reason` for every invoice.
 
@@ -121,8 +122,8 @@ The worker stopped trying. `blocked_reason` is one of:
 
 | Reason | Meaning | Action |
 |--------|---------|--------|
-| `beneficiary_blacklisted` | Circle blacklisted the beneficiary | Agree a new destination with the merchant; after expiry the balance can be recovered to the Payday recovery wallet instead |
-| `recovery_blacklisted` | Circle blacklisted the Payday recovery wallet | This is Payday's own wallet, so the operator resolves it with Circle. Every existing invoice is committed to that address, so a replacement recovery key only helps invoices created after `recovery_address` changes; funds on existing invoices stay put until the restriction is lifted. The recovery wallet is also one of the parameters an `Idempotency-Key` commits to, so a merchant replaying a create from before the change gets `409 idempotency_conflict` and must fetch the original payment with `GET` |
+| `beneficiary_blacklisted` | Circle blacklisted the beneficiary | Agree a new destination with the merchant; after expiry the balance returns to the payer's wallet instead |
+| `recovery_blacklisted` | Circle blacklisted the payer's attested wallet, the address's recovery term | Only the payer can resolve this with Circle. The wallet is committed into the address, so nothing can redirect the return; contact the merchant so they can reach the payer. An exact, on-time balance never touches the recovery term, so an exact payment still settles |
 | `payment_address_blacklisted` | Circle blacklisted the payment address itself | Compliance escalation; nothing can move the funds |
 | `balance_below_amount` | The chain balance is below the credited amount | Finalized history disagreed with the ledger; investigate the RPC provider before anything else |
 | `retries_exhausted` | Repeated unclassified failures | Read the receipts of the batches in `sweep_batches` for this invoice |
@@ -142,8 +143,8 @@ unset PAYDAY_ADMIN_SECRET
 ```
 
 A terminal (`fulfilled`/`recovered`) invoice can also carry a `blocked_reason`
-when a *late* transfer could not be forwarded to the Payday recovery wallet;
-clear only the reason in that case.
+when a *late* transfer could not be forwarded to the payer's wallet; clear
+only the reason in that case.
 
 The API atomically rejects unknown or already-released invoices, uses database
 time to choose `expired` or `deploying`, and only clears the reason on terminal
@@ -157,13 +158,12 @@ Configure merchant webhooks with `POST /v1/webhooks`; see
 snapshots verified email into a separate outbox and sends through SES. Set
 `PAYDAY_NOTIFICATION_FROM_ADDRESS`; AWS credentials require `ses:SendEmail`.
 
-## Reconciling recovered funds
+## Reconciling returned funds
 
-The Payday recovery wallet (the address of the recovery KMS key, exposed as
-`recovery_kms_key_arn`) holds overpayment remainders, expired balances, and
-late transfers. Nothing in the stack can sign with that key — no task role has
-`kms:Sign` on it — so returns are a manual operator action. The ledger is the
-source of truth for what is held and why:
+Overpayment remainders, expired balances, and late transfers go back on-chain
+to the payer's attested wallet, the recovery term committed into every
+payment address. Payday holds nothing and returns nothing by hand. The ledger
+is the record of what went back, where, and why:
 
 ```sql
 -- See db-access.md
@@ -174,13 +174,14 @@ JOIN invoices i ON i.id = r.invoice_id
 ORDER BY r.recovered_at DESC;
 ```
 
-One row per nonzero recovery, unique on `(invoice_id, transaction_hash,
+One row per nonzero return, unique on `(invoice_id, transaction_hash,
 reason)`, written in the same transaction that finalized the sweep; each row
-also raised a `payment.recovered_funds` webhook for the merchant. Reconcile the
-wallet's USDC balance against the sum of `amount` (base units) less anything
-already returned, identify the payer with the merchant, and return the funds
-from the recovery key by hand, recording the return transaction alongside the
-ledger row.
+also raised a `payment.recovered_funds` webhook for the merchant. The
+transaction named by the row is the return itself, into
+`invoices.payer_wallet`. The one case needing a human is a payer who paid
+from a wallet other than the one they attested (`likely_unsolicited_at` set):
+the return went to the attested wallet, and the merchant may need to tell
+them so.
 
 ## Sweep worker paused
 

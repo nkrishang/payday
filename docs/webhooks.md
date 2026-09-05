@@ -40,26 +40,28 @@ that updates the lifecycle row.
 | Event | When |
 |---|---|
 | `payment.paid`, `payment.settled`, `payment.expired`, `payment.refunded`, `payment.needs_attention` | The lifecycle transitions above |
-| `payment.recovered_funds` | Payday's recovery wallet received funds on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per recovered amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
+| `payment.recovered_funds` | Funds went back to the payer's attested wallet on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per returned amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
 | `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied — a proven mailbox, or a merchant-session client secret exchanged by the hosted checkout |
-| `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: funds were first observed before the payer policy was satisfied, so the payment is flagged as likely unsolicited |
+| `payment.ready` | Raised by the database when `wallet_bound_at` is first set: the payer attested their wallet and the payment address now exists. This is the moment an integration may quote the address |
+| `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: finalized funds arrived from a wallet other than the attested one. They count toward the amount and settle, but they are not the payer's, and no Proof of Payment is issued |
 
-`verification.approved` and `payment.likely_unsolicited` are inserted by the
-same `invoices` trigger as the lifecycle events, in the transaction that first
-sets `verification_completed_at` or `likely_unsolicited_at`; nothing sets
-those columns until the payer-policy features are enabled for an account.
+`verification.approved`, `payment.ready`, and `payment.likely_unsolicited`
+are inserted by the same `invoices` trigger as the lifecycle events, in the
+transaction that first sets `verification_completed_at`, `wallet_bound_at`,
+or `likely_unsolicited_at`.
 
 ## Payload
 
 Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
 `occurred_at`, and `data`. Every payment event carries `data.payment` with the
-public status, `amount`, `received`, `reference`, `metadata`, and four policy
+public status, `amount`, `received`, `reference`, `metadata`, four policy
 fields: `payer_policy_mode`, `payer_reference`, `verification_completed_at`,
-and `likely_unsolicited_at`. `payer_reference` is your own identifier for the
-payer on a `merchant_session` payment (`null` otherwise), so a `payment.paid`
-or `payment.settled` handler can credit that user's ledger directly. The
-payload never includes the expected email or the payer's own data.
-`payment.needs_attention` adds
+and `likely_unsolicited_at`, and the binding: `payer_wallet`, `address`, and
+`wallet_bound_at` (all null before `payment.ready`). `payer_reference` is your
+own identifier for the payer on a `merchant_session` payment (`null`
+otherwise), so a `payment.paid` or `payment.settled` handler can credit that
+user's ledger directly. The payload never includes the expected email or the
+payer's own data. `payment.needs_attention` adds
 `data.payment.attention`. Lifecycle payloads carry no recovery flag by design:
 a `payment.settled` for an overpaid payment is indistinguishable from one for
 an exact payment, and `payment.recovered_funds` is the recovery signal.
@@ -78,9 +80,9 @@ an exact payment, and `payment.recovered_funds` is the recovery signal.
 ```
 
 `amount` is in base units and `reason` is one of `overpayment`, `expired`, or
-`late_transfer`. Recovered funds are held by Payday, reviewed manually, and
-returned by the operator; use these events to reconcile what Payday holds for
-your payments.
+`late_transfer`. Returned funds went to the payer's attested wallet on-chain
+in the named transaction; nothing is held by Payday. Use these events to
+explain to a payer where the difference went.
 
 Test events are sent only to the requested endpoint, require no invoice, and
 cannot consume a real lifecycle event's uniqueness key.

@@ -153,7 +153,16 @@ fn layout(invoice: &PaymentResponse) -> Vec<Line> {
         "Token",
         &format!("{} {}", invoice.token.symbol, invoice.token.address),
     );
-    lines.field("Payment address", &invoice.address);
+    lines.field(
+        "Payment address",
+        invoice
+            .address
+            .as_deref()
+            .unwrap_or("Assigned once the payer attests the wallet they will pay from"),
+    );
+    if let Some(wallet) = &invoice.payer_wallet {
+        lines.field("Payer wallet", wallet);
+    }
 
     if let Some(attachment) = &invoice.attachment {
         lines.section("Attachment");
@@ -168,8 +177,9 @@ fn layout(invoice: &PaymentResponse) -> Vec<Line> {
     lines.text(
         Font::Regular,
         8.0,
-        "The payment address commits to this invoice: the hash above, a random nonce, and the \
-         derived salt reproduce it offline from the Proof of Payment.",
+        "The payment address commits to this invoice and to the payer's wallet attestation: the \
+         hash above and the attestation's digest reproduce the salt and the address offline from \
+         the Proof of Payment.",
     );
     lines.finish()
 }
@@ -379,10 +389,11 @@ fn encode(text: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{U256, address};
+    use alloy_primitives::{B256, U256, address};
     use gateway_core::{
         Amount, AttachmentDescriptor, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId,
-        FactoryAddress, Invoice, Party, PayerPolicy, RecoveryAddress, TokenAddress,
+        FactoryAddress, Invoice, Party, PayerAttestation, PayerPolicy, TokenAddress,
+        sign_payer_attestation, wallet_of,
     };
     use uuid::Uuid;
 
@@ -394,7 +405,6 @@ mod tests {
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(1_500_000));
-        let recovery = RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
         let mut snapshot = CanonicalIssuanceSnapshot::new(
             Party {
                 name: "Acme Corp".into(),
@@ -415,22 +425,32 @@ mod tests {
             beneficiary,
             amount,
             1_900_000_000,
-            recovery,
         );
         snapshot.heading = Some("March retainer — “final”".into());
         snapshot.reference = Some("INV-42".into());
         snapshot.notes = notes.map(str::to_owned);
-        let invoice = Invoice::issue(
+        let mut invoice = Invoice::issue(
             factory,
             ChainId(143),
             token,
             beneficiary,
             amount,
             1_900_000_000,
-            recovery,
             snapshot,
         )
         .unwrap();
+        let key = [7u8; 32];
+        let message = PayerAttestation::new(
+            invoice.attribution_hash,
+            wallet_of(&key),
+            B256::repeat_byte(0x11),
+            1_900_000_000,
+        );
+        let attestation = sign_payer_attestation(&key, &message, 143, factory.0);
+        let binding = invoice
+            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .unwrap();
+        invoice.binding = Some(binding);
         let mut response = PaymentResponse::from_invoice(invoice, None);
         response.created_at = "2026-09-01T12:00:00+00:00".into();
         response.attachment = Some(AttachmentDescriptor {

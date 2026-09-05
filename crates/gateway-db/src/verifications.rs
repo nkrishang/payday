@@ -6,6 +6,10 @@
 //! session accumulates verification facts; the invoice's own
 //! `verification_completed_at` is set separately and gates settlement.
 //!
+//! The session also carries the one-time wallet challenge: a nonce issued
+//! once the policy is satisfied, which the payer's wallet signs inside its
+//! attestation. It is consumed by the binding that accepts the signature
+//! (`InvoiceRepository::bind_payer_wallet`).
 //! A client secret is the merchant-session mode's credential: minted for one
 //! invoice by the merchant API, returned once, stored hashed, and spent by
 //! exactly one exchange, which mints the payer session that carries the
@@ -18,6 +22,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use gateway_core::{PayerPolicyMode, VerificationFacts};
 use hmac::{Hmac, Mac};
+use rand::Rng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -64,6 +69,10 @@ pub struct DbPayerSession {
     pub invoice_id: Uuid,
     pub payer_ref: Option<Vec<u8>>,
     pub email_verified_at: Option<DateTime<Utc>>,
+    /// The outstanding wallet challenge, if one was issued and not yet
+    /// consumed.
+    pub wallet_nonce: Option<Vec<u8>>,
+    pub wallet_nonce_expires_at: Option<DateTime<Utc>>,
     /// Set when the session was minted by exchanging a merchant client secret.
     pub merchant_session_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -71,9 +80,13 @@ pub struct DbPayerSession {
 }
 
 impl DbPayerSession {
+    /// The session's own facts. The wallet fact belongs to the invoice, not
+    /// the session, so it is reported as absent here; callers that know the
+    /// invoice's binding fill it in.
     pub fn facts(&self) -> VerificationFacts {
         VerificationFacts {
             email: self.email_verified_at.is_some(),
+            wallet: false,
             merchant_session: self.merchant_session_verified_at.is_some(),
         }
     }
@@ -82,6 +95,20 @@ impl DbPayerSession {
     pub fn satisfies(&self, mode: PayerPolicyMode) -> bool {
         self.facts().satisfy(mode)
     }
+
+    /// The unexpired challenge this session holds, if any.
+    pub fn wallet_challenge(&self, now: DateTime<Utc>) -> Option<WalletChallenge> {
+        let nonce = B256::try_from(self.wallet_nonce.as_deref()?).ok()?;
+        let expires_at = self.wallet_nonce_expires_at?;
+        (expires_at > now).then_some(WalletChallenge { nonce, expires_at })
+    }
+}
+
+/// A one-time wallet challenge issued to a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalletChallenge {
+    pub nonce: B256,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// A freshly minted session. `token` exists only here and in the response
@@ -225,7 +252,8 @@ impl PayerSessionRepository {
     ) -> Result<Option<DbPayerSession>, sqlx::Error> {
         sqlx::query_as::<_, DbPayerSession>(
             r#"
-            SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
+            SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
+                   wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
             FROM payer_sessions
             WHERE token_hash = $1 AND invoice_id = $2 AND expires_at > now()
             "#,
@@ -234,6 +262,33 @@ impl PayerSessionRepository {
         .bind(invoice_id)
         .fetch_optional(&self.pool)
         .await
+    }
+
+    /// Issue (or replace) the session's wallet challenge: 32 random bytes the
+    /// payer's wallet must sign, void after `ttl`. Callers check that the
+    /// session satisfies the invoice's policy first; the challenge is what
+    /// orders the wallet signature after the identity step.
+    pub async fn issue_wallet_challenge(
+        &self,
+        session_id: Uuid,
+        ttl: Duration,
+    ) -> Result<WalletChallenge, sqlx::Error> {
+        let nonce = B256::from(rand::rng().random::<[u8; 32]>());
+        let expires_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            UPDATE payer_sessions
+            SET wallet_nonce = $2,
+                wallet_nonce_expires_at = LEAST(expires_at, now() + make_interval(secs => $3))
+            WHERE id = $1 AND expires_at > now()
+            RETURNING wallet_nonce_expires_at
+            "#,
+        )
+        .bind(session_id)
+        .bind(nonce.as_slice())
+        .bind(ttl.as_secs_f64())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(WalletChallenge { nonce, expires_at })
     }
 
     pub async fn delete(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
@@ -383,7 +438,8 @@ impl PayerSessionRepository {
         {
             let session = sqlx::query_as::<_, DbPayerSession>(
                 r#"
-                SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
+                SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
+                       wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
                 FROM payer_sessions WHERE id = $1
                 "#,
             )
@@ -422,7 +478,8 @@ impl PayerSessionRepository {
             UPDATE payer_sessions
             SET payer_ref = $2, email_verified_at = COALESCE(email_verified_at, $3)
             WHERE id = $1 AND expires_at > $3
-            RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
+            RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
+                      wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
             "#,
         )
         .bind(session_id)
@@ -546,7 +603,8 @@ impl PayerSessionRepository {
             INSERT INTO payer_sessions
                 (id, token_hash, invoice_id, expires_at, merchant_session_verified_at)
             VALUES ($1, $2, $3, $4 + make_interval(secs => $5), $4)
-            RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
+            RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
+                      wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
             "#,
         )
         .bind(session_id)
@@ -843,6 +901,71 @@ mod tests {
         );
     }
 
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn wallet_challenges_are_per_session_expire_and_are_consumed_by_binding(pool: PgPool) {
+        let repo = PayerSessionRepository::new(pool.clone());
+        let row = invoice(&pool, "challenge", PayerPolicy::Permissionless).await;
+        let session = repo.create(row.id, PAYER_SESSION_TTL).await.unwrap();
+        let found = repo
+            .find_active(&session.token, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.wallet_challenge(Utc::now()), None);
+
+        let first = repo
+            .issue_wallet_challenge(session.id, Duration::from_secs(600))
+            .await
+            .unwrap();
+        let second = repo
+            .issue_wallet_challenge(session.id, Duration::from_secs(600))
+            .await
+            .unwrap();
+        assert_ne!(first.nonce, second.nonce, "each challenge is fresh");
+        let found = repo
+            .find_active(&session.token, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // Only the latest challenge stands, and only until it expires.
+        assert_eq!(found.wallet_challenge(Utc::now()), Some(second));
+        assert_eq!(
+            found.wallet_challenge(second.expires_at + Duration::from_secs(1)),
+            None
+        );
+        assert!(second.expires_at <= session.expires_at);
+
+        // The binding consumes it; a bound invoice lists the wallet attempt.
+        crate::invoices::tests::bind_for_test(
+            &pool,
+            row.id,
+            &crate::invoices::tests::TEST_PAYER_KEY,
+        )
+        .await;
+        let attempts = repo
+            .attempts_for_invoice(row.account_id, row.id)
+            .await
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].kind, "wallet");
+        assert_eq!(attempts[0].status, "approved");
+        assert!(attempts[0].verified_at.is_some());
+
+        // An expired session cannot be challenged.
+        sqlx::query(
+            "UPDATE payer_sessions SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1",
+        )
+        .bind(session.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.issue_wallet_challenge(session.id, Duration::from_secs(600))
+                .await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
     fn merchant_policy() -> PayerPolicy {
         PayerPolicy::MerchantSession {
             payer_reference: "user_123".into(),
@@ -993,7 +1116,14 @@ mod tests {
         assert!(opened.invoice_completed_at.is_some());
 
         // Settled: a fresh secret still opens a receipt session, but the
-        // invoice's own completion is already recorded and never moves.
+        // invoice's own completion is already recorded and never moves. Only
+        // a bound invoice can have settled, so bind the payer's wallet first.
+        crate::invoices::tests::bind_for_test(
+            &pool,
+            row.id,
+            &crate::invoices::tests::TEST_PAYER_KEY,
+        )
+        .await;
         sqlx::query("UPDATE invoices SET status = 'fulfilled', settlement_tx_hash = $2, settled_at = now() WHERE id = $1")
             .bind(row.id)
             .bind([0x44u8; 32].as_slice())
@@ -1017,11 +1147,19 @@ mod tests {
             .attempts_for_invoice(row.account_id, row.id)
             .await
             .unwrap();
-        assert_eq!(attempts.len(), 2);
+        // Two exchanges and the wallet binding between them.
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(
+            attempts
+                .iter()
+                .filter(|attempt| attempt.kind == "merchant_session")
+                .count(),
+            2
+        );
         assert!(
             attempts
                 .iter()
-                .all(|attempt| attempt.kind == "merchant_session")
+                .all(|attempt| attempt.kind == "merchant_session" || attempt.kind == "wallet")
         );
     }
 }

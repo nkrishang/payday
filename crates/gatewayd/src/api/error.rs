@@ -294,6 +294,52 @@ impl ApiError {
         }
     }
 
+    /// Funds credited to the payment came from a wallet other than the one
+    /// the payer attested, so no proof can claim the attested wallet paid.
+    pub fn payment_sender_mismatch() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "payment_sender_mismatch",
+            message: "Credited transfers came from a wallet other than the payer's attested wallet; no Proof of Payment can be issued".into(),
+        }
+    }
+
+    /// The request has no payment address yet: the payer has not attested
+    /// the wallet they will pay from.
+    pub fn wallet_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_required",
+            message: "The payment address exists once the payer has attested their wallet".into(),
+        }
+    }
+
+    pub fn wallet_already_bound(wallet: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_already_bound",
+            message: format!("This deposit request is already bound to wallet {wallet}"),
+        }
+    }
+
+    /// No unexpired challenge is outstanding for the session.
+    pub fn wallet_challenge_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_challenge_required",
+            message: "Request a wallet challenge first; the previous one was used or expired"
+                .into(),
+        }
+    }
+
+    pub fn wallet_signature_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "wallet_signature_invalid",
+            message: "The signature does not recover to the stated wallet. Sign the challenge with that wallet; smart-contract wallets are not supported yet".into(),
+        }
+    }
+
     /// A gated invoice's content and payment mechanics stay hidden until the
     /// payer has satisfied the policy (product plan §4.3).
     pub fn verification_required() -> Self {

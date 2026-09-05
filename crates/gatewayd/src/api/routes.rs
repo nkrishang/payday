@@ -19,6 +19,7 @@ use crate::api::issuers;
 use crate::api::merchant_session;
 use crate::api::payer;
 use crate::api::payer_verification;
+use crate::api::payer_wallet;
 use crate::api::proof;
 use crate::api::status;
 use crate::api::verification;
@@ -170,9 +171,10 @@ pub fn router(state: AppState) -> Router {
                 .max_age(Duration::from_secs(86_400)),
         );
 
-    // Verification writes send a code to the merchant's customer and mint
-    // sessions, so unlike the reads they answer one browser origin only: the
-    // hosted checkout (product plan §7.1). No `Any` here, ever.
+    // Verification writes send a code to the merchant's customer, mint
+    // sessions, and bind wallets, so unlike the reads they answer one
+    // browser origin only: the hosted checkout (product plan §7.1). No
+    // `Any` here, ever.
     let payer_verification = Router::new()
         .route(
             "/v1/payer/payments/{id}/verify/email/start",
@@ -181,6 +183,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/payer/payments/{id}/verify/email/confirm",
             post(payer_verification::confirm_email),
+        )
+        .route(
+            "/v1/payer/payments/{id}/wallet/challenge",
+            post(payer_wallet::challenge),
+        )
+        .route(
+            "/v1/payer/payments/{id}/wallet/attest",
+            post(payer_wallet::attest),
         )
         .route(
             "/v1/payer/payments/{id}/session",
@@ -247,7 +257,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use alloy_primitives::{Address, address};
+    use alloy_primitives::Address;
     use alloy_signer_local::PrivateKeySigner;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
@@ -270,8 +280,8 @@ mod tests {
     use crate::payer_identity::testing::{FakeTenant, OTP};
 
     const KEY: &str = "payday_live_0123456789abcdef0123456789abcdef";
-    /// The platform recovery wallet this test deployment is configured with.
-    const RECOVERY: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
+    /// The wallet the test payer signs attestations with.
+    const PAYER_KEY: [u8; 32] = [7u8; 32];
     /// A minimal PDF, byte for byte what the e2e suite uploads.
     const PDF: &[u8] = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF";
 
@@ -291,7 +301,6 @@ mod tests {
         accounts: AccountRepository,
         merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
-        recovery: Address,
         payer_verification: Option<PayerVerification>,
     ) -> (AppState, Arc<MemoryObjectStorage>) {
         let storage = Arc::new(MemoryObjectStorage::default());
@@ -303,7 +312,6 @@ mod tests {
             ChainId(1),
             factory,
             Address::ZERO,
-            recovery,
             payer_access(),
             "payday_live_".into(),
             None,
@@ -349,7 +357,7 @@ mod tests {
 
     async fn app_with_payer_verification(pool: PgPool) -> (Router, Arc<FakeTenant>) {
         let (verification, tenant) = payer_verification();
-        let app = build_with(pool, None, Address::ZERO, RECOVERY, Some(verification))
+        let app = build_with(pool, None, Address::ZERO, Some(verification))
             .await
             .router;
         (app, tenant)
@@ -361,36 +369,30 @@ mod tests {
     const MERCHANT_WALLET: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     async fn app(pool: PgPool) -> Router {
-        app_with_recovery(pool, RECOVERY).await
-    }
-
-    async fn app_with_recovery(pool: PgPool, recovery: Address) -> Router {
-        build(pool, None, Address::ZERO, recovery).await.router
+        build(pool, None, Address::ZERO).await.router
     }
 
     /// The same deployment reconfigured with another factory.
     async fn app_with_factory(pool: PgPool, factory: Address) -> Router {
-        build(pool, None, factory, RECOVERY).await.router
+        build(pool, None, factory).await.router
     }
 
     async fn test_app(pool: PgPool) -> TestApp {
-        build(pool, None, Address::ZERO, RECOVERY).await
+        build(pool, None, Address::ZERO).await
     }
 
     async fn build(
         pool: PgPool,
         merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
-        recovery: Address,
     ) -> TestApp {
-        build_with(pool, merchant_verifier, factory, recovery, None).await
+        build_with(pool, merchant_verifier, factory, None).await
     }
 
     async fn build_with(
         pool: PgPool,
         merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
-        recovery: Address,
         payer_verification: Option<PayerVerification>,
     ) -> TestApp {
         let accounts = AccountRepository::new(pool.clone());
@@ -417,7 +419,6 @@ mod tests {
             accounts,
             merchant_verifier,
             factory,
-            recovery,
             payer_verification,
         );
         TestApp {
@@ -449,6 +450,61 @@ mod tests {
         request
             .body(Body::from(body.map(Value::to_string).unwrap_or_default()))
             .unwrap()
+    }
+
+    /// The payer's wallet step over HTTP: ask for the challenge, sign it
+    /// with `key`, and attest. Returns the unlocked payer response (which
+    /// now carries the address) and the session the binding was made in.
+    async fn bind_wallet(
+        app: &Router,
+        id: &str,
+        session: Option<&str>,
+        key: &[u8; 32],
+    ) -> (Value, String) {
+        let wallet = gateway_core::wallet_of(key);
+        let challenge = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{id}/wallet/challenge"),
+                session,
+                Some(&json!({"wallet": wallet.to_checksum(None)})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::OK, "wallet challenge");
+        let challenge = json_body(challenge).await;
+        let session = challenge["payer_session"].as_str().unwrap().to_owned();
+        let signature = sign_challenge(&challenge, key);
+        let attested = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{id}/wallet/attest"),
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(attested.status(), StatusCode::OK, "wallet attest");
+        (json_body(attested).await, session)
+    }
+
+    /// Sign the typed data a challenge response carries, as a wallet would.
+    fn sign_challenge(challenge: &Value, key: &[u8; 32]) -> String {
+        let typed: gateway_core::PayerAttestationTypedData =
+            serde_json::from_value(challenge["typed_data"].clone()).unwrap();
+        let message = gateway_core::PayerAttestation::new(
+            typed.message.attribution_hash.parse().unwrap(),
+            typed.message.wallet.parse().unwrap(),
+            typed.message.nonce.parse().unwrap(),
+            typed.message.expires_at,
+        );
+        gateway_core::sign_payer_attestation(
+            key,
+            &message,
+            typed.domain.chain_id,
+            typed.domain.verifying_contract.parse().unwrap(),
+        )
+        .signature
     }
 
     async fn create_gated(
@@ -788,7 +844,11 @@ mod tests {
         assert!(body["settlement_tx_hash"].is_null());
         assert!(body["settled_block"].is_null());
         assert!(body["attention"].is_null());
-        assert!(body["address"].as_str().unwrap().starts_with("0x"));
+        // No address until the payer attests a wallet.
+        assert!(body["address"].is_null());
+        assert!(body["payer_wallet"].is_null());
+        assert!(body["recovery_address"].is_null());
+        assert!(body["self_settlement"].is_null());
         let id = body["id"].as_str().unwrap();
         assert!(id.starts_with("pay_"));
 
@@ -978,7 +1038,6 @@ mod tests {
             AccountRepository::new(pool.clone()),
             None,
             Address::ZERO,
-            RECOVERY,
             None,
         );
         let app = status_router(state);
@@ -1032,18 +1091,21 @@ mod tests {
             .unwrap();
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap();
-        let address = created["address"].as_str().unwrap();
         assert_eq!(created["chain"]["id"], "1");
         assert_eq!(created["token"]["address"], Address::ZERO.to_checksum(None));
-        assert_eq!(created["recovery_address"], RECOVERY.to_checksum(None));
+        assert!(created["recovery_address"].is_null());
         assert_eq!(created["reference"], "Order 1234");
         assert!(created.get("memo").is_none());
         assert_eq!(created["issuer"]["name"], "Acme");
         assert_eq!(created["bill_to"]["name"], "Globex");
         assert_eq!(created["payer_policy"]["mode"], "permissionless");
-        assert_eq!(created["attribution"]["version"], 1);
+        assert_eq!(created["attribution"]["version"], 2);
         assert!(created["attachment"].is_null());
         assert_eq!(created["expires_in"], 86_400);
+        // The address exists once the payer binds a wallet, and it is the
+        // merchant's lookup key from then on.
+        let (bound, _) = bind_wallet(&app, id, None, &PAYER_KEY).await;
+        let address = bound["address"].as_str().unwrap();
 
         let found = app
             .clone()
@@ -1191,6 +1253,8 @@ mod tests {
         assert_eq!(status["invoice"]["bill_to"]["name"], "Globex");
         assert_eq!(status["payer_policy"]["mode"], "permissionless");
         assert_eq!(status["requirements"]["complete"], true);
+        assert!(status["payment_uri"].is_null(), "no wallet is bound yet");
+        let (status, _) = bind_wallet(&app, id, None, &PAYER_KEY).await;
         assert!(status["payment_uri"].as_str().unwrap().starts_with(
             "ethereum:0x0000000000000000000000000000000000000000@1/transfer?address="
         ));
@@ -1599,7 +1663,8 @@ mod tests {
                 "payer response leaked {secret}"
             );
         }
-        assert!(!serialized.contains(created["address"].as_str().unwrap()));
+        // Nothing to leak: no wallet has been bound, so no address exists.
+        assert!(created["address"].is_null());
 
         let qr = app
             .clone()
@@ -1749,50 +1814,242 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn create_uses_configured_recovery_address(pool: PgPool) {
+    async fn payer_wallet_binding_derives_the_address_and_is_final(pool: PgPool) {
         let app = app(pool.clone()).await;
         let created = app
             .clone()
-            .oneshot(create_request(KEY, "platform-recovery", &valid_body()))
+            .oneshot(create_request(KEY, "bind", &valid_body()))
             .await
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let created = json_body(created).await;
-        assert_eq!(created["recovery_address"], RECOVERY.to_checksum(None));
+        let id = created["id"].as_str().unwrap().to_owned();
+        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        assert!(created["address"].is_null());
         assert!(created.get("refund_address").is_none());
 
-        let id = created["id"].as_str().unwrap();
-        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        // Before the wallet step the payer sees the request but no address,
+        // and nothing invites a transfer.
+        let open = app
+            .clone()
+            .oneshot(payer_get(&format!("/v1/payer/payments/{id}"), None))
+            .await
+            .unwrap();
+        let open = json_body(open).await;
+        assert_eq!(open["content_unlocked"], true);
+        assert_eq!(open["amount"], "1.000000");
+        assert!(open["address"].is_null());
+        assert!(open["payment_uri"].is_null());
+        assert!(open["payer_wallet"].is_null());
+        assert_eq!(open["requirements"]["wallet"], "pending");
+        assert_eq!(open["requirements"]["complete"], true);
+        let qr = app
+            .clone()
+            .oneshot(payer_get(&format!("/v1/payer/payments/{id}/qr"), None))
+            .await
+            .unwrap();
+        assert_eq!(qr.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(qr).await["error"]["code"], "wallet_required");
+
+        // The challenge is the EIP-712 document the wallet signs, minted on
+        // a session the permissionless request did not have yet.
+        let wallet = gateway_core::wallet_of(&PAYER_KEY);
+        let challenge_path = format!("/v1/payer/payments/{id}/wallet/challenge");
+        let attest_path = format!("/v1/payer/payments/{id}/wallet/attest");
+        let challenge = app
+            .clone()
+            .oneshot(payer_post(
+                &challenge_path,
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None)})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::OK);
+        let challenge = json_body(challenge).await;
+        let session = challenge["payer_session"].as_str().unwrap().to_owned();
+        assert_eq!(challenge["typed_data"]["primaryType"], "PayerAttestation");
+        assert_eq!(challenge["typed_data"]["domain"]["name"], "Payday");
+        assert_eq!(challenge["typed_data"]["domain"]["chainId"], 1);
+        assert_eq!(
+            challenge["typed_data"]["domain"]["verifyingContract"],
+            Address::ZERO.to_checksum(None)
+        );
+        assert_eq!(
+            challenge["typed_data"]["message"]["wallet"],
+            wallet.to_checksum(None)
+        );
+        assert_eq!(
+            challenge["typed_data"]["message"]["attributionHash"],
+            created["attribution"]["hash"]
+        );
+        assert!(
+            challenge["typed_data"]["message"]["statement"]
+                .as_str()
+                .unwrap()
+                .contains("Only transfers from this wallet")
+        );
+
+        // Another key's signature over the same document binds nothing.
+        let forged = sign_challenge(&challenge, &[9u8; 32]);
+        let refused = app
+            .clone()
+            .oneshot(payer_post(
+                &attest_path,
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": forged})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "wallet_signature_invalid"
+        );
+        let unbound = InvoiceRepository::new(pool.clone())
+            .find_by_id(uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(unbound.payment_address.is_none());
+
+        // The wallet's own signature binds it: the address appears, the
+        // wallet is what it commits to, and only transfers from it count.
+        let signature = sign_challenge(&challenge, &PAYER_KEY);
+        let bound = app
+            .clone()
+            .oneshot(payer_post(
+                &attest_path,
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bound.status(), StatusCode::OK);
+        let bound = json_body(bound).await;
+        let address = bound["address"].as_str().unwrap().to_owned();
+        assert!(address.starts_with("0x"));
+        assert_eq!(bound["payer_wallet"], wallet.to_checksum(None));
+        assert_eq!(bound["requirements"]["wallet"], "approved");
+        assert!(
+            bound["payment_uri"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("address={address}"))
+        );
+        for private in ["recovery_address", "self_settlement", "payout_address"] {
+            assert!(bound.get(private).is_none(), "{private}");
+        }
+
+        // The merchant sees the same address, the wallet as the recovery
+        // term, and the material to settle it themselves; the row's binding
+        // recomputes to the address it stored.
+        let merchant = app
+            .clone()
+            .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+            .await
+            .unwrap();
+        let merchant = json_body(merchant).await;
+        assert_eq!(merchant["address"], address);
+        assert_eq!(merchant["payer_wallet"], wallet.to_checksum(None));
+        assert_eq!(merchant["recovery_address"], wallet.to_checksum(None));
+        assert!(merchant["wallet_bound_at"].is_string());
+        assert!(merchant["self_settlement"]["salt"].is_string());
         let row = InvoiceRepository::new(pool.clone())
             .find_by_id(uuid)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.recovery_address, RECOVERY.to_vec());
         let invoice = Invoice::try_from(&row).unwrap();
-        assert_eq!(invoice.recovery.0, RECOVERY);
-        assert!(
-            invoice.address_matches_parameters(),
-            "the payment address must commit to the platform recovery wallet"
-        );
+        let binding = invoice.binding.as_ref().unwrap();
+        assert_eq!(binding.payer_wallet, wallet);
+        assert_eq!(binding.recovery.0, wallet);
+        assert_eq!(binding.payment_address.0.to_checksum(None), address);
+        assert!(invoice.address_matches_parameters());
         assert_eq!(
-            created["address"],
-            invoice.payment_address.0.to_checksum(None)
+            binding.salt,
+            gateway_core::recompute_salt(
+                invoice.attribution_hash,
+                binding.attestation.digest.parse().unwrap()
+            )
         );
+        let events: Vec<String> =
+            sqlx::query_scalar("SELECT event_type FROM webhook_events WHERE invoice_id = $1")
+                .bind(uuid)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(events, ["payment.ready"]);
 
-        // The wallet is committed into the address, so a replay against a
-        // deployment with a different recovery wallet cannot be the same
-        // request.
-        let other = address!("0x000000000000000000000000000000000000dEaD");
-        let replay = app_with_recovery(pool, other)
-            .await
-            .oneshot(create_request(KEY, "platform-recovery", &valid_body()))
+        // The challenge was consumed by the binding; the request takes no
+        // second wallet, and the merchant's verification view lists the
+        // wallet attempt.
+        let spent = app
+            .clone()
+            .oneshot(payer_post(
+                &attest_path,
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+            ))
             .await
             .unwrap();
-        assert_eq!(replay.status(), StatusCode::CONFLICT);
+        assert_eq!(spent.status(), StatusCode::CONFLICT);
         assert_eq!(
-            json_body(replay).await["error"]["code"],
-            "idempotency_conflict"
+            json_body(spent).await["error"]["code"],
+            "wallet_challenge_required"
+        );
+        let other = gateway_core::wallet_of(&[9u8; 32]);
+        let taken = app
+            .clone()
+            .oneshot(payer_post(
+                &challenge_path,
+                None,
+                Some(&json!({"wallet": other.to_checksum(None)})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(taken.status(), StatusCode::CONFLICT);
+        let taken = json_body(taken).await;
+        assert_eq!(taken["error"]["code"], "wallet_already_bound");
+        assert!(
+            taken["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&wallet.to_checksum(None))
+        );
+        let verification = app
+            .clone()
+            .oneshot(get_request(KEY, &format!("/v1/payments/{id}/verification")))
+            .await
+            .unwrap();
+        let verification = json_body(verification).await;
+        assert_eq!(verification["facts"]["wallet"], "approved");
+        assert_eq!(verification["facts"]["email"], "not_required");
+        assert_eq!(verification["attempts"][0]["kind"], "wallet");
+        assert_eq!(verification["attempts"][0]["status"], "approved");
+
+        // A gated request takes the wallet step only from a session that
+        // has satisfied its policy.
+        let (gated_id, _) = create_gated(
+            &app,
+            "bind-gated",
+            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            "Gated",
+        )
+        .await;
+        let no_session = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{gated_id}/wallet/challenge"),
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None)})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(no_session.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(no_session).await["error"]["code"],
+            "payer_session_invalid"
         );
     }
 
@@ -1938,7 +2195,7 @@ mod tests {
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn a_dashboard_session_can_issue_inspect_rotate_and_revoke_keys(pool: PgPool) {
         let (privy, session) = merchant_session();
-        let app = build(pool, Some(privy.verifier), Address::ZERO, RECOVERY)
+        let app = build(pool, Some(privy.verifier), Address::ZERO)
             .await
             .router;
         let with_session = |method: &str, path: &str, body: &str| {
@@ -2110,14 +2367,9 @@ mod tests {
         let privy = PrivyApp::new();
         // The very first session, before Privy has finished making the wallet.
         let early = privy.token(MERCHANT_DID, "Dashboard@Example.com", None);
-        let app = build(
-            pool.clone(),
-            Some(privy.verifier.clone()),
-            Address::ZERO,
-            RECOVERY,
-        )
-        .await
-        .router;
+        let app = build(pool.clone(), Some(privy.verifier.clone()), Address::ZERO)
+            .await
+            .router;
 
         let created = app
             .clone()
@@ -2200,7 +2452,7 @@ mod tests {
         }
 
         // A deployment without a Privy app refuses every session outright.
-        let keys_only = build(pool, None, Address::ZERO, RECOVERY).await.router;
+        let keys_only = build(pool, None, Address::ZERO).await.router;
         assert_unauthorized(keys_only, get_request(&later, "/v1/payments")).await;
     }
 
@@ -2631,15 +2883,11 @@ mod tests {
         .execute(&mut *racer)
         .await
         .unwrap();
-        sqlx::query(
-            "UPDATE racer SET id = $1, idempotency_key = 'raced', payment_address = $2, salt = $3",
-        )
-        .bind(Uuid::now_v7())
-        .bind(Address::repeat_byte(0x77).as_slice())
-        .bind([0x77u8; 32].as_slice())
-        .execute(&mut *racer)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE racer SET id = $1, idempotency_key = 'raced'")
+            .bind(Uuid::now_v7())
+            .execute(&mut *racer)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO invoices SELECT * FROM racer")
             .execute(&mut *racer)
             .await
@@ -3467,8 +3715,9 @@ mod tests {
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
         let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
-        let address =
-            Address::parse_checksummed(created["address"].as_str().unwrap(), None).unwrap();
+        let (bound, _) = bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        let address = Address::parse_checksummed(bound["address"].as_str().unwrap(), None).unwrap();
+        let payer_wallet = gateway_core::wallet_of(&PAYER_KEY);
         let proof_request = |key: &str| get_request(key, &format!("/v1/payments/{id}/proof"));
 
         let early = app.clone().oneshot(proof_request(KEY)).await.unwrap();
@@ -3491,7 +3740,7 @@ mod tests {
         .bind(Address::ZERO.as_slice())
         .bind([1u8; 32].as_slice())
         .bind([3u8; 32].as_slice())
-        .bind(Address::repeat_byte(0xf3).as_slice())
+        .bind(payer_wallet.as_slice())
         .bind(address.as_slice())
         .bind(uuid)
         .execute(&pool)
@@ -3506,6 +3755,36 @@ mod tests {
         .await
         .unwrap();
 
+        // Money from a stranger's wallet was credited and settled, but it is
+        // not the attested wallet paying, so no proof claims it was.
+        sqlx::query(
+            r#"INSERT INTO payment_observations
+                 (chain_id, token_address, block_number, block_hash, block_timestamp,
+                  transaction_hash, transaction_index, log_index, sender_address,
+                  recipient_address, invoice_id, amount, disposition)
+               VALUES (1, $1, 4, $2, 1800000001, $3, 0, 0, $4, $5, $6, '5', 'credited')"#,
+        )
+        .bind(Address::ZERO.as_slice())
+        .bind([2u8; 32].as_slice())
+        .bind([4u8; 32].as_slice())
+        .bind(Address::repeat_byte(0xf3).as_slice())
+        .bind(address.as_slice())
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mismatch = app.clone().oneshot(proof_request(KEY)).await.unwrap();
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(mismatch).await["error"]["code"],
+            "payment_sender_mismatch"
+        );
+        sqlx::query("DELETE FROM payment_observations WHERE transaction_hash = $1")
+            .bind([4u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+
         let served = app.clone().oneshot(proof_request(KEY)).await.unwrap();
         assert_eq!(served.status(), StatusCode::OK);
         let proof: ProofOfPayment = serde_json::from_value(json_body(served).await).unwrap();
@@ -3517,6 +3796,22 @@ mod tests {
             "permissionless"
         );
         assert!(proof.verification.payload.verified_at.is_none());
+        assert_eq!(
+            proof.verification.payload.payer_wallet,
+            payer_wallet.to_checksum(None)
+        );
+        assert_eq!(proof.payer_wallet.address, payer_wallet.to_checksum(None));
+        assert_eq!(proof.recovery_address, payer_wallet.to_checksum(None));
+        assert_eq!(
+            proof
+                .verification
+                .payload
+                .facts
+                .iter()
+                .map(|fact| fact.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["wallet"]
+        );
         assert_eq!(
             proof.verification.signer,
             attestor().address().to_checksum(None)
@@ -3537,6 +3832,7 @@ mod tests {
         let verified = verify_proof(&proof, None, &[attestor().address()])
             .unwrap_or_else(|error| panic!("the served proof must verify offline: {error}"));
         assert_eq!(verified.payment_address, address);
+        assert_eq!(verified.payer_wallet, payer_wallet);
         assert_eq!(verified.attestation_signer, attestor().address());
 
         let mut tampered = proof.clone();
@@ -3719,16 +4015,30 @@ mod tests {
         assert_eq!(unlocked.status(), StatusCode::OK);
         let unlocked = json_body(unlocked).await;
         assert_eq!(unlocked["content_unlocked"], true);
-        assert_eq!(unlocked["address"], email_created["address"]);
         assert_eq!(unlocked["amount"], "1.000000");
         assert_eq!(unlocked["invoice"]["bill_to"]["name"], "Globex");
         assert_eq!(unlocked["invoice"]["reference"], "INV-9");
+        // Unlocked is not yet payable: the address waits for the wallet
+        // step, which this verified session may now take.
+        assert!(email_created["address"].is_null());
+        assert!(unlocked["address"].is_null());
+        assert!(unlocked["payment_uri"].is_null());
+        assert_eq!(unlocked["requirements"]["wallet"], "pending");
+        let (bound, _) = bind_wallet(&app, &email_id, Some(&session), &PAYER_KEY).await;
+        assert!(bound["address"].as_str().unwrap().starts_with("0x"));
+        assert_eq!(bound["requirements"]["wallet"], "approved");
         assert!(
-            unlocked["payment_uri"]
+            bound["payment_uri"]
                 .as_str()
                 .unwrap()
                 .starts_with("ethereum:")
         );
+        let merchant_view = app
+            .clone()
+            .oneshot(get_request(KEY, &format!("/v1/payments/{email_id}")))
+            .await
+            .unwrap();
+        assert_eq!(json_body(merchant_view).await["address"], bound["address"]);
         let bare = app
             .clone()
             .oneshot(payer_get(&format!("/v1/payer/payments/{email_id}"), None))
@@ -3878,8 +4188,13 @@ mod tests {
         assert_eq!(activity["facts"]["email"], "approved");
         assert_eq!(activity["facts"]["complete"], true);
         let attempts = activity["attempts"].as_array().unwrap();
-        assert!(attempts.len() >= 2, "{activity}");
-        assert!(attempts.iter().all(|attempt| attempt["kind"] == "email"));
+        assert!(attempts.len() >= 3, "{activity}");
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt["kind"] == "email" || attempt["kind"] == "wallet")
+        );
+        assert_eq!(activity["facts"]["wallet"], "approved");
         assert!(
             attempts.iter().any(
                 |attempt| attempt["status"] == "approved" && attempt["verified_at"].is_string()
@@ -3989,9 +4304,7 @@ mod tests {
         );
 
         // Without a payer audience the routes say so; the reads still work.
-        let plain = build(pool.clone(), None, Address::ZERO, RECOVERY)
-            .await
-            .router;
+        let plain = build(pool.clone(), None, Address::ZERO).await.router;
         let unavailable = plain
             .clone()
             .oneshot(payer_post(

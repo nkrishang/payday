@@ -4,9 +4,10 @@ import { StatusDot } from "@/components/ui/status-dot";
 import { formatDate, modeLabel } from "./labels";
 
 /**
- * Verification is a separate fact from payment. A gated invoice can be funded
- * before its payer has verified — that is the "likely unsolicited" case — and
- * a verified invoice can still be unpaid. Both components keep the two apart.
+ * Verification is a separate fact from payment. A request can receive funds
+ * from a wallet other than the one its payer attested — that is the "likely
+ * unsolicited" case — and a verified request can still be unpaid. Both
+ * components keep the two apart.
  */
 
 type Facts = {
@@ -36,7 +37,7 @@ export function VerificationBadge(facts: Facts) {
       {facts.unsolicitedAt ? (
         <span
           className="inline-flex items-center gap-1 rounded-md border border-warning/40 px-1.5 py-0.5 text-[11px] font-medium text-warning"
-          title={`Finalized funds arrived ${formatDate(facts.unsolicitedAt)}, before verification completed`}
+          title={`Finalized funds arrived ${formatDate(facts.unsolicitedAt)} from a wallet other than the one the payer signed with`}
         >
           <AlertTriangle className="size-3" />
           Likely unsolicited
@@ -96,9 +97,9 @@ export function VerificationStatus({
           <AlertTriangle className="mt-0.5 size-4 shrink-0" />
           <span>
             <span className="font-medium">Likely unsolicited.</span> Finalized funds arrived{" "}
-            {formatDate(unsolicitedAt)}, before the expected payer verified. The address is not
-            quarantined; settlement waits for verification, and unverified funds are recovered at
-            expiry.
+            {formatDate(unsolicitedAt)} from a wallet other than the one the payer signed with.
+            They still count toward the amount and settle as usual, but no Proof of Payment can
+            claim the attested wallet paid them.
           </span>
         </p>
       ) : null}

@@ -27,11 +27,56 @@ function watchConsole(page: Page): string[] {
 }
 
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";
+/** The wallet the stub's payers attest; the fake provider below signs as it. */
+const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
 async function expectNoInstructions(page: Page) {
   await expect(page.getByText(ADDRESS)).toHaveCount(0);
   await expect(page.getByRole("img", { name: /QR code/i })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /pay with wallet/i })).toHaveCount(0);
+}
+
+/**
+ * A minimal EIP-1193 wallet at `window.ethereum`, which wagmi's injected
+ * connector picks up: one account, on the configured chain, that signs any
+ * typed data with a fixed signature. Enough to walk the wallet step without a
+ * real extension; the stub API accepts any well-formed signature.
+ */
+async function installFakeWallet(page: Page) {
+  await page.addInitScript(
+    ({ wallet }) => {
+      const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+      const signed: unknown[] = [];
+      const provider = {
+        isFakeWallet: true,
+        request: async ({ method, params }: { method: string; params?: unknown[] }) => {
+          switch (method) {
+            case "eth_requestAccounts":
+            case "eth_accounts":
+              return [wallet];
+            case "eth_chainId":
+              return "0x8f";
+            case "wallet_switchEthereumChain":
+              return null;
+            case "eth_signTypedData_v4":
+              signed.push(params);
+              return `0x${"ab".repeat(64)}1b`;
+            default:
+              throw Object.assign(new Error(`unsupported ${method}`), { code: 4200 });
+          }
+        },
+        on: (event: string, listener: (...args: unknown[]) => void) => {
+          if (!listeners.has(event)) listeners.set(event, new Set());
+          listeners.get(event)!.add(listener);
+        },
+        removeListener: (event: string, listener: (...args: unknown[]) => void) => {
+          listeners.get(event)?.delete(listener);
+        },
+      };
+      Object.assign(window, { ethereum: provider, __signed: signed });
+    },
+    { wallet: PAYER_WALLET },
+  );
 }
 
 test("an open payment shows everything needed to pay it", async ({ page }) => {
@@ -113,7 +158,7 @@ test("an overpaid settled payment says where the remainder went", async ({ page 
   await expect(page.getByText("Payment complete")).toBeVisible();
   await expect(page.getByText(/Exactly the invoice amount reached the merchant/)).toBeVisible();
   await expect(
-    page.getByText(/above the invoice amount went to the Payday recovery wallet/),
+    page.getByText(/above the invoice amount went back to the wallet you signed with/),
   ).toBeVisible();
   // The receipt shows both what was asked for and what actually arrived.
   await expect(page.getByText("25.00 USDC")).toBeVisible();
@@ -141,9 +186,7 @@ test("an expired payment holding funds says where they went", async ({ page }) =
   await page.goto("/pay/pay_expired-funded");
 
   await expect(page.getByText("The deadline passed before this payment completed")).toBeVisible();
-  await expect(
-    page.getByText(/recovery wallet, which is not automatically the payer/),
-  ).toBeVisible();
+  await expect(page.getByText(/goes back to the wallet you signed with/)).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -151,8 +194,54 @@ test("a returned payment does the same", async ({ page }) => {
   await page.goto("/pay/pay_returned");
 
   await expect(page.getByText("This payment was not completed in time")).toBeVisible();
-  await expect(page.getByText(/recovery wallet/)).toBeVisible();
+  await expect(page.getByText(/back to the wallet you signed with/)).toBeVisible();
   await expectNoInstructions(page);
+});
+
+test("an unbound request takes the payer's signature before it shows any address", async ({
+  page,
+  request,
+}) => {
+  await installFakeWallet(page);
+  const sessionInUrls: string[] = [];
+  page.on("request", (sent) => {
+    if (/pps_/.test(sent.url())) sessionInUrls.push(sent.url());
+  });
+  await page.goto("/pay/pay_unbound");
+
+  // The content is open, the address is not: nothing invites a transfer yet.
+  await expect(page.getByText("Wallet required")).toBeVisible();
+  await expect(page.getByText("Amount due")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("25.00");
+  await expect(page.getByText(/Only transfers from that wallet count/)).toBeVisible();
+  await expectNoInstructions(page);
+  const html = await (await request.get("/pay/pay_unbound")).text();
+  expect(html).not.toContain(ADDRESS);
+
+  // Connect the fake wallet, then sign the challenge it is handed.
+  await page.getByRole("button", { name: /connect the wallet you will pay from/i }).click();
+  await page.getByRole("dialog").getByRole("button").filter({ hasText: /injected/i }).click();
+  await expect(page.getByRole("button", { name: /sign to get your deposit address/i })).toBeVisible();
+  await page.getByRole("button", { name: /sign to get your deposit address/i }).click();
+
+  // The signature created the address; the page now offers it, tied to the
+  // wallet that signed.
+  await expect(page.getByText(ADDRESS)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/Send from/)).toBeVisible();
+  await expect(page.getByRole("img", { name: /QR code/i })).toBeVisible();
+  await expect(page.getByText("Wallet required")).toHaveCount(0);
+  // What the wallet was asked to sign is the API's document, verbatim.
+  const signed = await page.evaluate(() => (window as unknown as { __signed: unknown[] }).__signed);
+  expect(signed).toHaveLength(1);
+  const [signer, json] = signed[0] as [string, string];
+  expect(signer.toLowerCase()).toBe(PAYER_WALLET.toLowerCase());
+  const typed = JSON.parse(json);
+  expect(typed.primaryType).toBe("PayerAttestation");
+  expect(typed.domain.chainId).toBe(143);
+  expect(typed.message.wallet.toLowerCase()).toBe(PAYER_WALLET.toLowerCase());
+  expect(typed.message.statement).toContain("Only transfers from this wallet");
+  // The session never reached a URL.
+  expect(sessionInUrls).toEqual([]);
 });
 
 test("a paused payment shows the gateway's own words", async ({ page }) => {

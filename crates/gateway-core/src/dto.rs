@@ -102,13 +102,19 @@ pub struct PaymentResponse {
     pub id: String,
     /// Shareable, payment-scoped page for the payer.
     pub payment_url: String,
-    pub address: String,
+    /// The one-time payment address. `None` until the payer attests the
+    /// wallet they will pay from: the address commits to that wallet, so it
+    /// cannot exist before.
+    pub address: Option<String>,
     pub address_explorer_url: Option<String>,
     pub payout_address: String,
-    /// Payday's custodial recovery wallet, committed into the payment address.
-    /// Overpayments, expired balances, and late transfers land here and are
-    /// returned by the operator. Merchant-visible; never in the payer response.
-    pub recovery_address: String,
+    /// The wallet the payer attested, once they have. Overpayments, expired
+    /// balances, and late transfers return to it: it is the address's
+    /// recovery term, so `recovery_address` always equals it.
+    pub payer_wallet: Option<String>,
+    pub recovery_address: Option<String>,
+    /// When the payer's attestation was accepted and the address derived.
+    pub wallet_bound_at: Option<String>,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
@@ -130,7 +136,9 @@ pub struct PaymentResponse {
     pub settlement_explorer_url: Option<String>,
     pub settled_at: Option<String>,
     pub settled_block: Option<String>,
-    pub self_settlement: SelfSettlementDto,
+    /// What a third party needs to execute the payment contract themselves;
+    /// absent until the address exists.
+    pub self_settlement: Option<SelfSettlementDto>,
     pub attention: Option<AttentionDto>,
     pub issuer: Party,
     pub bill_to: Party,
@@ -197,54 +205,65 @@ impl VerificationFactStatus {
 
 /// The facts behind the modes (product plan §3.2), each reported on its own
 /// so the checkout can show what is still outstanding.
+///
+/// `email` is the policy's identity fact and belongs to a payer session;
+/// `complete` is true once the session satisfies the policy, which unlocks
+/// the request's content. `wallet` is never `not_required`: every request
+/// needs the payer's wallet attestation before it has an address, and it is
+/// a fact about the request (one wallet is bound to it), not the session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationRequirementsResponse {
     pub email: VerificationFactStatus,
+    pub wallet: VerificationFactStatus,
     /// The merchant's own application opened this checkout for the payer it
     /// authenticated, by exchanging a single-use client secret.
     pub merchant_session: VerificationFactStatus,
     pub complete: bool,
 }
 
-/// Which facts one payer session has established; the policy mode decides
-/// which ones matter.
+/// Which facts have been established: the session's identity fact and the
+/// request's wallet binding.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VerificationFacts {
     pub email: bool,
+    pub wallet: bool,
     pub merchant_session: bool,
 }
 
 impl VerificationFacts {
-    /// Every fact at once: what an invoice-level completion implies.
+    /// Every fact at once.
     pub const ALL: Self = Self {
         email: true,
+        wallet: true,
         merchant_session: true,
     };
 
-    /// Whether these facts satisfy `mode`.
+    /// Whether these facts satisfy `mode`'s identity policy (the gate on the
+    /// request's content). The wallet binding is a separate step.
     pub fn satisfy(self, mode: PayerPolicyMode) -> bool {
         VerificationRequirementsResponse::from_facts(mode, self).complete
     }
 }
 
 impl VerificationRequirementsResponse {
-    /// The requirements a mode imposes, all at one status. `completed` is
-    /// whether the invoice's verification has finished; a payer session that
-    /// satisfies only part of the policy refines individual facts.
-    pub fn for_mode(mode: PayerPolicyMode, completed: bool) -> Self {
+    /// The requirements a mode imposes at the invoice level: `completed` is
+    /// whether the policy's verification has finished, `wallet_bound`
+    /// whether a payer wallet is bound. A payer session that satisfies only
+    /// part of the policy refines individual facts through `from_facts`.
+    pub fn for_mode(mode: PayerPolicyMode, completed: bool, wallet_bound: bool) -> Self {
         Self::from_facts(
             mode,
-            if completed {
-                VerificationFacts::ALL
-            } else {
-                VerificationFacts::default()
+            VerificationFacts {
+                email: completed,
+                wallet: wallet_bound,
+                merchant_session: completed,
             },
         )
     }
 
-    /// The requirements a mode imposes, each reported against the facts one
-    /// payer session has established. `complete` is true exactly when every
-    /// fact the mode needs is present.
+    /// The requirements a mode imposes, each reported against the facts
+    /// established. `complete` is true exactly when every identity fact the
+    /// mode needs is present; the wallet is reported alongside.
     pub fn from_facts(mode: PayerPolicyMode, facts: VerificationFacts) -> Self {
         let status = |needed: bool, established: bool| match (needed, established) {
             (false, _) => VerificationFactStatus::NotRequired,
@@ -257,6 +276,7 @@ impl VerificationRequirementsResponse {
             (!needs_email || facts.email) && (!needs_merchant_session || facts.merchant_session);
         Self {
             email: status(needs_email, facts.email),
+            wallet: status(true, facts.wallet),
             merchant_session: status(needs_merchant_session, facts.merchant_session),
             complete,
         }
@@ -330,6 +350,11 @@ pub struct PayerPaymentResponse {
     pub received_base_units: Option<String>,
     pub remaining: Option<String>,
     pub remaining_base_units: Option<String>,
+    /// The wallet bound to this request, once a payer has attested one.
+    /// Only transfers from it count; anything Payday returns goes to it.
+    pub payer_wallet: Option<String>,
+    /// Present once unlocked and a wallet is bound; the address does not
+    /// exist before the attestation it commits to.
     pub address: Option<String>,
     pub address_explorer_url: Option<String>,
     /// EIP-681 request for the amount still due, absent after the deadline or
@@ -474,13 +499,16 @@ impl PaymentResponse {
         let status = payment_status(&inv);
         let attention = inv.blocked_reason.as_deref().map(attention);
         let snapshot = inv.issuance_snapshot;
+        let binding = inv.binding.as_ref();
         Self {
             id: inv.id.to_string(),
             payment_url: String::new(),
-            address: inv.payment_address.0.to_checksum(None),
+            address: binding.map(|b| b.payment_address.0.to_checksum(None)),
             address_explorer_url: None,
             payout_address: inv.beneficiary.0.to_checksum(None),
-            recovery_address: inv.recovery.0.to_checksum(None),
+            payer_wallet: binding.map(|b| b.payer_wallet.to_checksum(None)),
+            recovery_address: binding.map(|b| b.recovery.0.to_checksum(None)),
+            wallet_bound_at: binding.map(|b| b.bound_at.clone()),
             expires_at: DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
                 .expect("validated timestamp")
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -513,10 +541,10 @@ impl PaymentResponse {
                     .map(|d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
             }),
             settled_block: inv.resolved_at_block.map(|b| b.to_string()),
-            self_settlement: SelfSettlementDto {
+            self_settlement: binding.map(|b| SelfSettlementDto {
                 factory: inv.factory.0.to_checksum(None),
-                salt: inv.salt.0.to_string(),
-            },
+                salt: b.salt.0.to_string(),
+            }),
             attention,
             issuer: snapshot.issuer,
             bill_to: snapshot.bill_to,
@@ -583,8 +611,8 @@ fn attention(code: &str) -> AttentionDto {
             "Contact support to provide a compliant payout address.",
         ),
         "recovery_blacklisted" => (
-            "The Payday recovery wallet is restricted by the USDC issuer.",
-            "Payday is resolving it; no merchant action is needed. Contact Payday support only if the payment stays paused.",
+            "The payer's wallet, where excess funds return, is restricted by the USDC issuer.",
+            "Contact Payday support with the payment ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
             "Circle has blacklisted the payment address.",
@@ -611,9 +639,11 @@ mod tests {
     use super::*;
     use crate::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress,
-        RecoveryAddress, TokenAddress,
+        PayerAttestation, TokenAddress, sign_payer_attestation, wallet_of,
     };
-    use alloy_primitives::{U256, address};
+    use alloy_primitives::{B256, U256, address};
+
+    const PAYER_KEY: [u8; 32] = [7u8; 32];
 
     fn party(name: &str) -> Party {
         Party {
@@ -629,7 +659,6 @@ mod tests {
         let token = TokenAddress(address!("754704Bc059F8C67012fEd69BC8A327a5aafb603"));
         let beneficiary = BeneficiaryAddress(address!("70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(1_000_000));
-        let recovery = RecoveryAddress(address!("3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"));
         let mut snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
@@ -640,7 +669,6 @@ mod tests {
             beneficiary,
             amount,
             1_900_000_000,
-            recovery,
         );
         snapshot.heading = Some("March retainer".into());
         snapshot.reference = Some("INV-7".into());
@@ -651,14 +679,29 @@ mod tests {
             beneficiary,
             amount,
             1_900_000_000,
-            recovery,
             snapshot,
         )
         .unwrap()
     }
 
+    fn bound(mut invoice: Invoice) -> Invoice {
+        let message = PayerAttestation::new(
+            invoice.attribution_hash,
+            wallet_of(&PAYER_KEY),
+            B256::repeat_byte(0x11),
+            invoice.expiration_timestamp,
+        );
+        let attestation =
+            sign_payer_attestation(&PAYER_KEY, &message, invoice.chain_id.0, invoice.factory.0);
+        let binding = invoice
+            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .unwrap();
+        invoice.binding = Some(binding);
+        invoice
+    }
+
     fn payment(status: InvoiceStatus, received: u64, blocked: Option<&str>) -> PaymentResponse {
-        let mut invoice = invoice(PayerPolicy::Permissionless);
+        let mut invoice = bound(invoice(PayerPolicy::Permissionless));
         invoice.status = status;
         invoice.received = Amount(U256::from(received));
         invoice.blocked_reason = blocked.map(str::to_owned);
@@ -703,17 +746,31 @@ mod tests {
         assert_eq!(json["currency"], "USDC");
         assert!(json.get("beneficiary_address").is_none());
         assert!(json.get("memo").is_none());
+        // The payer's attested wallet is where anything comes back to.
         assert_eq!(
-            json["recovery_address"],
-            "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+            json["payer_wallet"],
+            wallet_of(&PAYER_KEY).to_checksum(None)
         );
+        assert_eq!(json["recovery_address"], json["payer_wallet"]);
+        assert_eq!(json["wallet_bound_at"], "2026-09-06T00:00:00Z");
+        assert!(json["address"].is_string());
+        assert!(json["self_settlement"]["salt"].is_string());
         assert!(json.get("refund_address").is_none());
+
+        // Before a wallet is bound there is no address and nothing to settle.
+        let unbound = PaymentResponse::from_invoice(invoice(PayerPolicy::Permissionless), None);
+        let json = serde_json::to_value(&unbound).unwrap();
+        assert!(json["address"].is_null());
+        assert!(json["payer_wallet"].is_null());
+        assert!(json["recovery_address"].is_null());
+        assert!(json["self_settlement"].is_null());
+        assert_eq!(json["status"], "awaiting_payment");
         assert_eq!(json["issuer"]["name"], "Acme");
         assert_eq!(json["bill_to"]["name"], "Globex");
         assert_eq!(json["heading"], "March retainer");
         assert_eq!(json["reference"], "INV-7");
         assert_eq!(json["payer_policy"]["mode"], "permissionless");
-        assert_eq!(json["attribution"]["version"], 1);
+        assert_eq!(json["attribution"]["version"], 2);
         assert!(
             json["attribution"]["hash"]
                 .as_str()
@@ -802,39 +859,55 @@ mod tests {
 
     #[test]
     fn requirements_follow_the_mode_and_completion() {
-        let open =
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::Permissionless, false);
+        let open = VerificationRequirementsResponse::for_mode(
+            PayerPolicyMode::Permissionless,
+            false,
+            false,
+        );
         assert!(open.complete);
         assert_eq!(open.email, VerificationFactStatus::NotRequired);
+        // The wallet is always required, and is a fact about the request.
+        assert_eq!(open.wallet, VerificationFactStatus::Pending);
 
-        let email =
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, false);
+        let email = VerificationRequirementsResponse::for_mode(
+            PayerPolicyMode::VerifiedEmail,
+            false,
+            false,
+        );
         assert!(!email.complete);
         assert_eq!(email.email, VerificationFactStatus::Pending);
         assert_eq!(serde_json::to_value(email.email).unwrap(), "pending");
 
         let verified =
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true);
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true, true);
         assert!(verified.complete);
         assert_eq!(verified.email, VerificationFactStatus::Approved);
+        assert_eq!(verified.wallet, VerificationFactStatus::Approved);
         assert_eq!(
             verified.merchant_session,
             VerificationFactStatus::NotRequired
         );
 
-        let merchant =
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::MerchantSession, false);
+        let merchant = VerificationRequirementsResponse::for_mode(
+            PayerPolicyMode::MerchantSession,
+            false,
+            false,
+        );
         assert!(!merchant.complete);
         assert_eq!(merchant.email, VerificationFactStatus::NotRequired);
         assert_eq!(merchant.merchant_session, VerificationFactStatus::Pending);
-        let opened =
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::MerchantSession, true);
+        let opened = VerificationRequirementsResponse::for_mode(
+            PayerPolicyMode::MerchantSession,
+            true,
+            true,
+        );
         assert!(opened.complete);
         assert_eq!(opened.merchant_session, VerificationFactStatus::Approved);
         assert_eq!(
             serde_json::to_value(&opened).unwrap(),
             serde_json::json!({
                 "email": "not_required",
+                "wallet": "approved",
                 "merchant_session": "approved",
                 "complete": true
             })
@@ -845,10 +918,12 @@ mod tests {
     fn session_facts_refine_each_requirement_and_complete_only_when_the_mode_is_met() {
         let email_only = VerificationFacts {
             email: true,
+            wallet: false,
             merchant_session: false,
         };
         let merchant_only = VerificationFacts {
             email: false,
+            wallet: false,
             merchant_session: true,
         };
         // One mode's fact never satisfies the other's.
@@ -871,7 +946,11 @@ mod tests {
             email_only,
         );
         assert_eq!(by_email.email, VerificationFactStatus::Approved);
-        assert!(by_email.complete);
+        assert_eq!(by_email.wallet, VerificationFactStatus::Pending);
+        assert!(
+            by_email.complete,
+            "the wallet step does not gate the content"
+        );
 
         let nothing = VerificationRequirementsResponse::from_facts(
             PayerPolicyMode::VerifiedEmail,
@@ -883,7 +962,7 @@ mod tests {
         assert!(!VerificationFacts::default().satisfy(PayerPolicyMode::VerifiedEmail));
         assert!(VerificationFacts::default().satisfy(PayerPolicyMode::Permissionless));
         assert_eq!(
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true),
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true, true),
             VerificationRequirementsResponse::from_facts(
                 PayerPolicyMode::VerifiedEmail,
                 VerificationFacts::ALL

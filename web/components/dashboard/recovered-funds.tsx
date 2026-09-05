@@ -4,10 +4,10 @@ import { formatBaseUnits, formatDisplayAmount, truncateHash } from "@/lib/format
 import { formatDate } from "./labels";
 
 /**
- * Balances that went to the Payday recovery wallet rather than to the payout
- * address, read from the payment itself: the overpayment remainder on a
- * settled invoice, the whole balance of a returned one, and every transfer the
- * indexer classified as late. Renders nothing when there is nothing.
+ * Balances that went back to the payer's attested wallet rather than to the
+ * payout address, read from the payment itself: the overpayment remainder on
+ * a settled invoice, the whole balance of a returned one, and every transfer
+ * the indexer classified as late. Renders nothing when there is nothing.
  */
 export function RecoveredFunds({ payment }: { payment: Payment }) {
   const received = BigInt(payment.received_base_units);
@@ -26,11 +26,17 @@ export function RecoveredFunds({ payment }: { payment: Payment }) {
       className="min-w-0 rounded-[16px] border border-line bg-surface p-5"
     >
       <h2 id="recovered-funds" className="text-[13px] font-semibold tracking-tight">
-        Recovered funds
+        Returned to the payer
       </h2>
       <p className="mt-1 text-[12px] leading-relaxed text-muted">
-        Held in the Payday recovery wallet and returned after review; the sender is not refunded
-        automatically. Quote the transaction hash to support.
+        Sent back on-chain to the wallet the payer signed with
+        {payment.payer_wallet ? (
+          <>
+            {" "}
+            (<span className="font-mono">{payment.payer_wallet}</span>)
+          </>
+        ) : null}
+        , not to the payout address. Nothing is held by Payday.
       </p>
       <ul className="mt-4 divide-y divide-line text-[13px]">
         {remainder > 0n ? (

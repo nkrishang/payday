@@ -12,16 +12,21 @@ import { formatDisplayAmount } from "./format";
  *    deadline was reached and waits for the server to confirm, rather than
  *    claiming the payment is over.
  * 2. Payment instructions disappear the moment the payment stops being payable.
- *    Funds sent after the deadline route to the Payday recovery wallet, not
- *    back to the payer, so continuing to show an address would cause real loss.
+ *    Funds sent after the deadline route back to the payer's attested wallet
+ *    rather than to the merchant, so continuing to show an address would only
+ *    invite a transfer that has to come back.
  * 3. A gated invoice discloses nothing but the issuer and heading until the
  *    gateway says the content is unlocked. The API withholds the fields; this
  *    module turns their absence into a phase so no component ever reaches for
  *    a null amount or address.
+ * 4. An unlocked request has no address until its payer attests the wallet
+ *    they will pay from. That is a phase of its own (`wallet_required`), and
+ *    the address, QR, and wallet button exist only past it.
  */
 export type CheckoutPhase =
   | "verification_required"
   | "email_pending"
+  | "wallet_required"
   /** A merchant-session invoice: only the merchant's app can open it. */
   | "app_required"
   /** The client secret from the fragment is being exchanged. */
@@ -59,14 +64,17 @@ export interface CheckoutView {
   detail: string;
   /** Whether the address, QR, and wallet button may be shown. */
   showInstructions: boolean;
+  /** Whether the wallet attestation step is what the payer does next. */
+  showWalletStep: boolean;
   /** Whether the payment can no longer change. */
   isTerminal: boolean;
 }
 
 /**
- * A payer payment whose mechanics are present. The API nulls every one of
+ * A payer payment whose content is present. The API nulls every one of
  * these together while a gated invoice is locked, so components that render
- * an amount or an address take this type and never see a null.
+ * an amount take this type and never see a null. The address is separate:
+ * it exists only once a wallet is bound (see `ReadyPayerPayment`).
  */
 export type UnlockedPayerPayment = PayerPayment & {
   chain: Chain;
@@ -77,7 +85,15 @@ export type UnlockedPayerPayment = PayerPayment & {
   received_base_units: string;
   remaining: string;
   remaining_base_units: string;
+};
+
+/**
+ * An unlocked payment whose payer wallet is bound, so the one-time address
+ * exists. Everything that shows or uses the address takes this type.
+ */
+export type ReadyPayerPayment = UnlockedPayerPayment & {
   address: string;
+  payer_wallet: string;
 };
 
 /**
@@ -97,7 +113,6 @@ export function unlockedPayment(payment: PayerPayment): UnlockedPayerPayment | n
     received_base_units,
     remaining,
     remaining_base_units,
-    address,
   } = payment;
   if (
     chain === null ||
@@ -107,8 +122,7 @@ export function unlockedPayment(payment: PayerPayment): UnlockedPayerPayment | n
     received === null ||
     received_base_units === null ||
     remaining === null ||
-    remaining_base_units === null ||
-    address === null
+    remaining_base_units === null
   ) {
     return null;
   }
@@ -122,8 +136,18 @@ export function unlockedPayment(payment: PayerPayment): UnlockedPayerPayment | n
     received_base_units,
     remaining,
     remaining_base_units,
-    address,
   };
+}
+
+/**
+ * Narrows further to a payment with an address. The API sets `address` and
+ * `payer_wallet` together when the binding exists; one without the other is
+ * treated as unbound rather than rendered with a hole.
+ */
+export function readyPayment(payment: UnlockedPayerPayment): ReadyPayerPayment | null {
+  const { address, payer_wallet } = payment;
+  if (address === null || payer_wallet === null) return null;
+  return { ...payment, address, payer_wallet };
 }
 
 const TERMINAL: ReadonlySet<PaymentStatus> = new Set<PaymentStatus>([
@@ -137,7 +161,7 @@ export function isTerminalStatus(status: PaymentStatus): boolean {
 }
 
 const RECOVERY_NOTE =
-  "The full balance goes to the Payday recovery wallet, which is not automatically the payer. Contact the merchant and Payday support for return handling.";
+  "The full balance goes back to the wallet you signed with, not to the merchant. Nothing else is needed from you.";
 
 export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
   const unlocked = unlockedPayment(payment);
@@ -170,6 +194,7 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
           title: "Opening your payment",
           detail: `${payment.issuer_name} is opening this payment for you.`,
           showInstructions: false,
+          showWalletStep: false,
           isTerminal: false,
         }
       : {
@@ -180,6 +205,7 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
           detail:
             "The amount and payment details are shown once the app that issued this payment opens it for you.",
           showInstructions: false,
+          showWalletStep: false,
           isTerminal: false,
         };
   }
@@ -194,6 +220,7 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
       title: "Verify to view this invoice",
       detail: "The amount, payment details, and attachment are shown once you verify.",
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: false,
     };
   }
@@ -206,6 +233,7 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
       title: "Enter the code we sent",
       detail: `A one-time code was sent to ${payer_policy.expected_email_hint ?? "the expected mailbox"}. Enter it here to continue.`,
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: false,
     };
   }
@@ -218,6 +246,7 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
     detail:
       "The amount, payment details, and attachment are shown once the expected payer has verified.",
     showInstructions: false,
+    showWalletStep: false,
     isTerminal: false,
   };
 }
@@ -235,14 +264,16 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
         payment.payer_message ??
         "Payday has paused this payment and an operator is resolving it. Do not send another payment.",
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: true,
     };
   }
 
   if (payment.status === "settled") {
     // Settlement is exact: the merchant receives the invoice amount and any
-    // remainder goes to the recovery wallet, so an overpaid payer is told where
-    // the rest went rather than left to assume the merchant is holding it.
+    // remainder goes back to the payer's attested wallet, so an overpaid payer
+    // is told where the rest went rather than left to assume the merchant is
+    // holding it.
     const overpaid = received > BigInt(payment.amount_base_units);
     return {
       phase: "settled",
@@ -252,9 +283,10 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       detail:
         "Exactly the invoice amount reached the merchant. You can close this page." +
         (overpaid
-          ? " Anything above the invoice amount went to the Payday recovery wallet; contact the merchant and Payday support for return handling."
+          ? " Anything above the invoice amount went back to the wallet you signed with."
           : ""),
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: true,
     };
   }
@@ -267,6 +299,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       title: "This payment was not completed in time",
       detail: RECOVERY_NOTE,
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: true,
     };
   }
@@ -281,6 +314,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
           detail:
             "Nothing was sent to it. Ask the merchant for a new payment link — this address must not be used.",
           showInstructions: false,
+          showWalletStep: false,
           isTerminal: true,
         }
       : {
@@ -290,6 +324,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
           title: "The deadline passed before this payment completed",
           detail: RECOVERY_NOTE,
           showInstructions: false,
+          showWalletStep: false,
           isTerminal: true,
         };
   }
@@ -303,6 +338,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       detail:
         "Payday is settling the invoice amount to the merchant. Nothing more is needed from you.",
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: false,
     };
   }
@@ -319,6 +355,24 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       detail:
         "Do not send funds now. Payday is confirming the final on-chain state; the chain's clock, not this page, decides the outcome.",
       showInstructions: false,
+      showWalletStep: false,
+      isTerminal: false,
+    };
+  }
+
+  // No address yet: the payer signs from the wallet they will pay from, and
+  // the address is derived from that signature. This comes before anything
+  // this browser may have sent, because nothing can have been sent.
+  if (readyPayment(payment) === null) {
+    return {
+      phase: "wallet_required",
+      tone: "neutral",
+      label: "Wallet required",
+      title: "Sign from the wallet you will pay from",
+      detail:
+        "The one-time address is created for your wallet once you sign. Only transfers from that wallet count toward this request, and anything returned goes back to it.",
+      showInstructions: false,
+      showWalletStep: true,
       isTerminal: false,
     };
   }
@@ -332,6 +386,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       detail:
         "Payday credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
       showInstructions: false,
+      showWalletStep: false,
       isTerminal: false,
     };
   }
@@ -343,8 +398,9 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       label: "Partially paid",
       title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${payment.token.symbol}`,
       detail:
-        "Transfers accumulate. If the total is still short at the deadline, the balance goes to the Payday recovery wallet.",
+        "Transfers accumulate. If the total is still short at the deadline, the balance goes back to the wallet you signed with.",
       showInstructions: true,
+      showWalletStep: false,
       isTerminal: false,
     };
   }
@@ -354,8 +410,9 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
     tone: "neutral",
     label: "Awaiting payment",
     title: "Amount due",
-    detail: `Send exactly this amount of ${payment.token.symbol} on ${payment.chain.name}.`,
+    detail: `Send exactly this amount of ${payment.token.symbol} on ${payment.chain.name}, from the wallet you signed with.`,
     showInstructions: true,
+    showWalletStep: false,
     isTerminal: false,
   };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { lockedPayment, merchantSessionPayment, payment } from "@/test/fixtures";
-import { checkoutView, isTerminalStatus, unlockedPayment } from "./checkout-state";
+import { lockedPayment, merchantSessionPayment, payment, unboundPayment } from "@/test/fixtures";
+import { checkoutView, isTerminalStatus, readyPayment, unlockedPayment } from "./checkout-state";
 
 const open = { secondsRemaining: 3_600, pendingTxHash: null };
 
@@ -75,7 +75,7 @@ describe("checkoutView", () => {
     );
     expect(view.phase).toBe("settled");
     expect(view.detail).toMatch(/Exactly the invoice amount reached the merchant/);
-    expect(view.detail).not.toMatch(/recovery wallet/);
+    expect(view.detail).not.toMatch(/wallet you signed with/);
   });
 
   it("tells an overpaid payer where the remainder went once settled", () => {
@@ -92,9 +92,21 @@ describe("checkoutView", () => {
     );
     expect(view.phase).toBe("settled");
     expect(view.detail).toMatch(/Exactly the invoice amount reached the merchant/);
-    expect(view.detail).toMatch(/above the invoice amount went to the Payday recovery wallet/);
-    expect(view.detail).toMatch(/Payday support/);
-    expect(view.detail).not.toMatch(/refund/i);
+    expect(view.detail).toMatch(/above the invoice amount went back to the wallet you signed with/);
+    expect(view.detail).not.toMatch(/recovery wallet|Payday support|refund/i);
+  });
+
+  it("asks for the wallet signature before offering any address", () => {
+    const view = checkoutView(unboundPayment(), open);
+    expect(view.phase).toBe("wallet_required");
+    expect(view.showWalletStep).toBe(true);
+    expect(view.showInstructions).toBe(false);
+    expect(view.isTerminal).toBe(false);
+    expect(view.detail).toMatch(/Only transfers from that wallet count/);
+    // The deadline still comes first: an unbound request that closed is closed.
+    expect(checkoutView(unboundPayment(), { ...open, secondsRemaining: 0 }).phase).toBe("closing");
+    // A bound request never shows the step.
+    expect(checkoutView(payment(), open).showWalletStep).toBe(false);
   });
 
   it("treats paid as in-progress, because settlement has not happened yet", () => {
@@ -119,15 +131,14 @@ describe("checkoutView", () => {
       open,
     );
     expect(funded.phase).toBe("expired_funded");
-    expect(funded.detail).toMatch(/Payday recovery wallet/);
-    expect(funded.detail).toMatch(/not automatically the payer/i);
-    expect(funded.detail).toMatch(/Payday support/);
+    expect(funded.detail).toMatch(/back to the wallet you signed with/);
+    expect(funded.detail).not.toMatch(/Payday support|recovery wallet/);
   });
 
   it("says plainly where returned funds went", () => {
     const view = checkoutView(payment({ status: "returned", payable: false }), open);
     expect(view.phase).toBe("returned");
-    expect(view.detail).toMatch(/Payday recovery wallet/);
+    expect(view.detail).toMatch(/back to the wallet you signed with/);
   });
 
   it("never calls the recovery wallet a refund address", () => {
@@ -235,7 +246,12 @@ describe("checkoutView for a gated invoice", () => {
     expect(
       checkoutView(
         merchantSessionPayment({
-          requirements: { email: "not_required", merchant_session: "approved", complete: true },
+          requirements: {
+            email: "not_required",
+            wallet: "pending",
+            merchant_session: "approved",
+            complete: true,
+          },
         }),
         open,
       ).phase,
@@ -247,7 +263,7 @@ describe("checkoutView for a gated invoice", () => {
     // tab has no session, so it must verify itself.
     const view = checkoutView(
       lockedPayment({
-        requirements: { email: "approved", merchant_session: "not_required", complete: true },
+        requirements: { email: "approved", wallet: "pending", merchant_session: "not_required", complete: true },
       }),
       open,
     );
@@ -269,8 +285,19 @@ describe("unlockedPayment", () => {
   it("treats a response that claims to be unlocked but lacks a mechanic as locked", () => {
     // The API nulls every gated field together; a response that disagrees with
     // its own flag must not be rendered with holes.
-    expect(unlockedPayment(payment({ address: null } as never))).toBeNull();
     expect(unlockedPayment(payment({ token: null } as never))).toBeNull();
+    expect(unlockedPayment(payment({ amount: null } as never))).toBeNull();
+  });
+
+  it("keeps an unbound request unlocked but not ready", () => {
+    // The address is a second gate: content without an address is the
+    // wallet step, not a hole.
+    const unlocked = unlockedPayment(unboundPayment());
+    expect(unlocked).not.toBeNull();
+    expect(readyPayment(unlocked!)).toBeNull();
+    expect(readyPayment(payment())?.address).toBe("0x9a3f0000000000000000000000000000000000c2");
+    // The two arrive together or not at all.
+    expect(readyPayment(payment({ payer_wallet: null } as never))).toBeNull();
   });
 });
 

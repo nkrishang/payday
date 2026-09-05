@@ -116,22 +116,28 @@ breaks and tabs. The check runs before anything is stored, so a bad document
 never leaves a half-issued invoice or a retagged attachment behind.
 
 Unknown fields are rejected; `memo` and `refund_address` are not fields.
-Recovery is not a request field: Payday stamps its own recovery wallet on every
-payment. Expiry defaults to 24 hours and must be 10 minutes to 366 days ahead.
-A first request returns `201`; an identical retry returns the original payment
-with `200` and `Idempotency-Replayed: true`. Reuse with any changed immutable
-field — parties, amount, notes, heading, reference, metadata, customer,
-policy mode or assertions, expiry intent, chain parameters (chain, token, and
-factory), the attachment's ID, length, or SHA-256, or the Payday recovery
-wallet — returns
+Recovery is not a request field: it is the payer's attested wallet, bound
+after issuance. Expiry defaults to 24 hours and must be 10 minutes to 366 days
+ahead. A first request returns `201`; an identical retry returns the original
+payment with `200` and `Idempotency-Replayed: true`. Reuse with any changed
+immutable field — parties, amount, notes, heading, reference, metadata,
+customer, policy mode or assertions, expiry intent, chain parameters (chain,
+token, and factory), or the attachment's ID, length, or SHA-256 — returns
 `409 idempotency_conflict`; the original must then be fetched with `GET`.
 Relative-expiry retries retain the original resolved deadline. Payment creation
 also requires the account to have a verified support email from a recent login.
 
-At issuance Payday canonicalizes the invoice (RFC 8785 JCS), hashes it with a
-random nonce into the salt, and derives the payment address from that salt, so
-the address commits to the exact document. The response's
-`attribution {version, hash}` reports the commitment.
+At issuance Payday canonicalizes the invoice (RFC 8785 JCS) and hashes it; the
+response's `attribution {version, hash}` (version 2) reports the commitment.
+The payment address does not exist yet: `address`, `payer_wallet`,
+`recovery_address`, `wallet_bound_at`, and `self_settlement` are `null` until
+the payer, on the hosted page and once the policy is satisfied, signs the
+request's EIP-712 attestation from the wallet they will pay from. The salt is
+then derived from the attribution hash and that signature's digest, the wallet
+becomes the address's recovery term, and the address follows. A
+`payment.ready` webhook reports the binding; integrations that quote an
+address wait for it (or poll until `address` is set). Only transfers from the
+attested wallet are the payer's, and excess or late funds return to it.
 
 ### `GET /v1/payments`
 
@@ -197,12 +203,14 @@ the same invoice always produces byte-identical output.
 
 The merchant's verification view of one invoice: `payer_policy_mode`,
 `verification_completed_at`, `likely_unsolicited_at`, `facts` (`email` and
-`merchant_session`, each `not_required`, `pending`, or `approved`, plus
-`complete`), and every `attempts[]` entry (`kind` `email` or
-`merchant_session`, `status` pending, approved, or abandoned, `verified_at`,
-`created_at`). A `merchant_session` attempt is the exchange of a client
-secret, recorded approved. The payer's session, the client secret, and the
-code they typed are never in this response.
+`merchant_session`, each `not_required`, `pending`, or `approved`; `wallet`
+as `pending` or `approved`, never `not_required`; plus `complete`, the
+identity policy alone), and every `attempts[]` entry (`kind` `email`,
+`wallet`, or `merchant_session`, `status` pending, approved, or abandoned,
+`verified_at`, `created_at`). A `merchant_session` attempt is the exchange of
+a client secret, recorded approved; a `wallet` attempt is the accepted
+attestation. The payer's session, the client secret, and the code they typed
+are never in this response.
 
 ### `POST /v1/payments/{reference}/client-secret`
 
@@ -218,26 +226,34 @@ verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/payments/{reference}/proof`
 
-Returns the Proof of Payment JSON for a settled invoice; `409
-payment_not_settled` before then. The proof carries the canonical issuance
-snapshot, canonicalization version, attribution nonce and hash, salt, chain,
-factory, token and payment addresses, every credited USDC transfer into the
-payment address, and `settlement_transaction_hash`: the fulfilment
+Returns the Proof of Payment JSON (`payday.proof.v2`) for a settled invoice;
+`409 payment_not_settled` before then, and `409 payment_sender_mismatch` when
+any credited transfer came from a wallet other than the attested one, since
+no proof can then claim the attested wallet paid. The proof carries the
+canonical issuance snapshot, canonicalization version, attribution hash,
+`payer_wallet {address, typed_data, digest, signature, method}` (the exact
+EIP-712 document the payer's wallet signed, its signing digest, and the
+signature), salt, chain, factory, token, payment, and recovery addresses
+(the recovery address is the attested wallet), every credited USDC transfer
+into the payment address, and `settlement_transaction_hash`: the fulfilment
 transaction that executed the `Payment` contract — the same hash the
 `Payment` object reports as `settlement_tx_hash`, whether Payday's batch or a
 third party submitted it — which is distinct from the transfers that funded
 the address. It ends with a Payday-signed verification attestation
 (`{payload: {version, payment_id, attribution_hash, chain_id,
-payment_address, payer_policy_mode, result, verified_at}, signer,
-signature}`). The payload names the invoice's attribution hash, chain, and
-payment address, so an attestation is bound to the document it was issued for
-and cannot be transplanted onto a proof for another invoice. Anyone holding
-the proof (and, if attached, the PDF) can recompute hash → salt → CREATE3
-address offline — `gateway_core::verify_proof` is the reference — which also
-requires the listed transfers to sum to at least the invoice amount; whether the settlement
-transaction really executed is provable only against the chain
-(`--rpc-url`). It is merchant-accessible and shared at the merchant's
-discretion; it is not a public link.
+payment_address, payer_wallet, wallet_nonce, payer_policy_mode, result,
+verified_at, wallet_bound_at, facts[{kind, provider, at}]}, signer,
+signature}`). The payload names the invoice's attribution hash, chain,
+payment address, payer wallet, and the nonce inside the wallet's attestation,
+so an attestation is bound to the document and the payer it was issued for
+and cannot be transplanted onto a proof for another invoice or another
+wallet. Anyone holding the proof (and, if attached, the PDF) can recompute
+hash → attestation → salt → CREATE3 address offline — `gateway_core::verify_proof`
+is the reference — which also requires every listed transfer to come from the
+attested wallet and the transfers to sum to at least the invoice amount;
+whether the transfers and the settlement transaction really executed is
+provable only against the chain (`--rpc-url`). It is merchant-accessible and
+shared at the merchant's discretion; it is not a public link.
 
 ## Payment object
 
@@ -245,10 +261,11 @@ The full payment response contains:
 
 - identity and instructions: `id`, `payment_url`, `address`, optional
   `address_explorer_url`, `chain`, `token`, `currency`, `payout_address`,
-  `recovery_address`, and `expires_at`. `recovery_address` is the Payday
-  recovery wallet the payment is committed to; overpayment remainders, expired
-  balances, and late transfers land there and are returned by the operator
-  after manual review;
+  `payer_wallet`, `recovery_address`, `wallet_bound_at`, and `expires_at`.
+  `address`, `payer_wallet`, `recovery_address`, and `wallet_bound_at` are
+  `null` until the payer's wallet is bound; `recovery_address` then always
+  equals `payer_wallet`, the wallet overpayment remainders, expired balances,
+  and late transfers return to;
 - accounting: `amount`, `received`, `remaining`, `fee_amount`, and `net_amount`,
   each with a corresponding `_base_units` field; current fees are zero;
 - state: `status`, `paid_at`, `paid_at_block`, `settled_at`, `settled_block`,
@@ -259,10 +276,10 @@ The full payment response contains:
   (merchant-only), optional `attachment` descriptor, `created_at`,
   `updated_at`;
 - verification: `verification_completed_at`, and `likely_unsolicited_at` when
-  finalized funds arrived before a gated invoice's verification completed;
+  finalized funds first arrived from a wallet other than the attested one;
 - audit/freshness: `transfers`, optional `as_of {block,at}`,
-  `indexer_freshness`, `self_settlement {factory,salt}`, and
-  `attribution {version,hash}`.
+  `indexer_freshness`, `self_settlement {factory,salt}` (null until bound),
+  and `attribution {version,hash}`.
 
 Public status values are `awaiting_payment`, `partially_paid`, `paid`,
 `settled`, `expired`, `returned`, and `needs_attention`. Clients must tolerate
@@ -450,22 +467,25 @@ integrations are unaffected, and no other route allows cross-origin reads.
 
 The payer response discloses progressively. It always carries `id`,
 `issuer_name`, `heading`, `payer_policy {mode, expected_email_hint}`,
-`requirements {email, merchant_session, complete}` (each fact is
-`not_required`, `pending`, or `approved`), `status`, `payable`,
-`expires_at`, `server_timestamp`, `settlement_tx_hash`,
-`settlement_explorer_url`, `payer_message`, and `content_unlocked`. For a
-`permissionless` invoice `content_unlocked` is true and the response includes
-`chain`, `token`, `amount`, `received`, `remaining` (each with base units),
-`address`, `address_explorer_url`, `payment_uri`, and
+`requirements {email, wallet, merchant_session, complete}` (`email` and
+`merchant_session` are each `not_required`, `pending`, or `approved`;
+`wallet` is `pending` or `approved`; `complete` is the identity policy
+alone), `status`, `payable`, `expires_at`, `server_timestamp`,
+`settlement_tx_hash`, `settlement_explorer_url`, `payer_message`, and
+`content_unlocked`. For a `permissionless` invoice `content_unlocked` is true
+and the response includes `chain`, `token`, `amount`, `received`, `remaining`
+(each with base units), and
 `invoice {amount, amount_base_units, bill_to, notes, reference, attachment}`.
-For the gated modes those fields — and `settlement_tx_hash` and
-`settlement_explorer_url`, since a settlement transaction would reveal the
-amount and payout address the gate withholds — are `null` until the payer's
-session satisfies the policy; the hint masks the expected mailbox as
-`a****@e***.com`, and is `null` for `merchant_session`, whose payer
-reference is never shown to the payer.
+`payer_wallet`, `address`, `address_explorer_url`, and `payment_uri` are
+present only once the payer's wallet is bound: until then the request has no
+address to show. For the gated modes every one of those fields — and
+`settlement_tx_hash` and `settlement_explorer_url`, since a settlement
+transaction would reveal the amount and payout address the gate withholds —
+is `null` until the payer's session satisfies the policy; the hint masks the
+expected mailbox as `a****@e***.com`, and is `null` for `merchant_session`,
+whose payer reference is never shown to the payer.
 The attachment and QR routes answer `401 verification_required` while content
-is locked. A payer session token, obtained by completing verification on the
+is locked, and the QR route `409 wallet_required` while no wallet is bound. A payer session token, obtained by completing verification on the
 hosted checkout, travels in the `Payday-Payer-Session` header on every payer
 read; the reads' `Access-Control-Allow-Headers` admits it. A session unlocks
 exactly the invoice it was created for. When a session is presented,
@@ -502,6 +522,34 @@ cannot revive settlement. The exception is a terminal invoice that previously
 completed verification: `start` and `confirm` explicitly re-prove its expected
 mailbox and mint a new 24-hour receipt session. Expired sessions never unlock
 terminal content, and receipt re-authentication never makes the invoice payable.
+
+### Wallet attestation
+
+```text
+POST /v1/payer/payments/{id}/wallet/challenge   {"wallet": "0x…"}
+POST /v1/payer/payments/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
+```
+
+Every request, gated or not, takes this step before it has an address.
+`challenge` mints a one-time nonce on the payer's session (a permissionless
+request without a session gets one here, returned as `payer_session`; a gated
+request needs the session that satisfied its policy, else
+`401 payer_session_invalid` or `401 verification_required`) and answers
+`{payer_session, expires_at, typed_data}`, where `typed_data` is the EIP-712
+document to hand to `eth_signTypedData_v4` verbatim: domain
+`{name: "Payday", version: "1", chainId, verifyingContract: factory}`,
+primary type `PayerAttestation`, message `{statement, attributionHash,
+wallet, nonce, expiresAt}`. The challenge is void after ten minutes. `attest`
+takes the wallet and its 65-byte signature; the API rebuilds the document
+from its own record, requires the signature to recover to `wallet`
+(externally owned accounts only for now; `401 wallet_signature_invalid`
+otherwise), and binds: the salt, the recovery term (the wallet), and the
+payment address are written together, once, and the unlocked payer payment
+is returned with `address` and `payer_wallet` set. A request already bound
+to another wallet answers `409 wallet_already_bound` naming it; attesting
+without an outstanding challenge answers `409 wallet_challenge_required`;
+a request past `created` or past its deadline answers
+`410 payment_not_payable`.
 
 Email routes on a `merchant_session` payment answer
 `409 verification_method_not_applicable`: that mode sends no codes.
@@ -578,7 +626,7 @@ limited to 8 KiB.
 | `authentication_event_already_used` | 409 | Identity event already mutated key state |
 | `api_key_generation_conflict` | 409 | Key generation changed or was omitted incorrectly |
 | `missing_idempotency_key` | 400 | Create header absent |
-| `idempotency_conflict` | 409 | Key reused with any different immutable invoice field, including the attachment hash and the Payday recovery wallet; fetch the original with `GET` |
+| `idempotency_conflict` | 409 | Key reused with any different immutable invoice field, including the attachment hash; fetch the original with `GET` |
 | `invalid_request` | 400 | Invalid field, query, JSON, or request shape, including control characters in a text field |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
 | `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
@@ -595,6 +643,11 @@ limited to 8 KiB.
 | `attachment_not_ready` | 409 | `attachment_id` refers to an upload that is not finalized, was rejected, or expired unused before issuance (upload the PDF again); also returned by finalize before anything reached `upload_url` |
 | `attachment_already_attached` | 409 | `attachment_id` already belongs to an issued invoice; one PDF per invoice |
 | `payment_not_settled` | 409 | Proof requested before settlement |
+| `payment_sender_mismatch` | 409 | Proof requested for a payment credited from a wallet other than the attested one |
+| `wallet_required` | 409 | QR requested before the payer bound a wallet; the address does not exist yet |
+| `wallet_already_bound` | 409 | A wallet challenge or attestation for a request already bound to another wallet; the message names it |
+| `wallet_challenge_required` | 409 | Attest called without an outstanding, unexpired challenge on the session |
+| `wallet_signature_invalid` | 401 | The signature does not recover to the stated wallet (smart-contract wallets are not supported yet) |
 | `verification_required` | 401 | Payer content is gated until the session completes verification |
 | `invalid_payment_link` | 401 | Payment link does not resolve to a payment |
 | `payment_not_payable` | 410 | QR/payment request is no longer available |

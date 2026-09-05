@@ -1,6 +1,6 @@
 "use client";
 
-import type { UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { ReadyPayerPayment } from "@/lib/checkout-state";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
 import { payerClient } from "@/lib/payday";
@@ -26,7 +26,7 @@ export function QrPanel({
   payment,
   payerSession = null,
 }: {
-  payment: UnlockedPayerPayment;
+  payment: ReadyPayerPayment;
   payerSession?: string | null;
 }) {
   const { id, remaining_base_units: remaining } = payment;

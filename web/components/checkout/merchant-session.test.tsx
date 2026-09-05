@@ -34,7 +34,12 @@ describe("ClientSecretExchange", () => {
     const exchange = vi.spyOn(payerClient.verification, "exchangeClientSecret").mockResolvedValue({
       payer_session: "pps_opened",
       expires_at: "2026-09-03T00:00:00Z",
-      requirements: { email: "not_required", merchant_session: "approved", complete: true },
+      requirements: {
+        email: "not_required",
+        wallet: "pending",
+        merchant_session: "approved",
+        complete: true,
+      },
     });
     const { onStatus, onSession } = renderExchange();
 
