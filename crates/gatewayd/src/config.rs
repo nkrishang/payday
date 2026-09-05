@@ -97,8 +97,6 @@ impl Config {
             |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
         let settlement = (!status_only).then(|| SettlementConfig {
             rpc_url: required("PAYDAY_RPC_URL"),
-            recovery_address: parse_recovery_address(&required("PAYDAY_RECOVERY_ADDRESS"))
-                .unwrap_or_else(|message| panic!("{message}")),
             batch_sweeper_address: Address::from_str(&required("PAYDAY_BATCH_SWEEPER_ADDRESS"))
                 .unwrap_or_else(|e| panic!("invalid PAYDAY_BATCH_SWEEPER_ADDRESS: {e}")),
             factory_code_hash: parse_code_hash(
@@ -220,7 +218,7 @@ impl Config {
         self.usdc_address
     }
 
-    /// The chain deployment and recovery wallet; absent in status-only mode.
+    /// The chain deployment; absent in status-only mode.
     pub fn settlement(&self) -> Option<&SettlementConfig> {
         self.settlement.as_ref()
     }
@@ -272,17 +270,6 @@ impl Config {
     pub fn notification_from_address(&self) -> Option<&str> {
         self.notification_from_address.as_deref()
     }
-}
-
-/// Payday's custodial recovery wallet. It is committed into every payment
-/// address, so a zero address would burn every overpayment and expired balance.
-fn parse_recovery_address(value: &str) -> Result<Address, String> {
-    let address = Address::from_str(value)
-        .map_err(|e| format!("invalid PAYDAY_RECOVERY_ADDRESS '{value}': {e}"))?;
-    if address.is_zero() {
-        return Err("PAYDAY_RECOVERY_ADDRESS must not be the zero address".into());
-    }
-    Ok(address)
 }
 
 /// keccak256 of the runtime bytecode `eth_getCode` returns for a contract,
@@ -402,11 +389,9 @@ pub enum OnboardingPayerSignerConfig {
     AwsKms(String),
 }
 
-/// The contracts this build must find on the chain and the platform recovery
-/// wallet it stamps on every invoice.
+/// The contracts this build must find on the chain.
 pub struct SettlementConfig {
     pub rpc_url: String,
-    pub recovery_address: Address,
     pub batch_sweeper_address: Address,
     pub factory_code_hash: B256,
     pub batch_sweeper_code_hash: B256,
@@ -415,21 +400,6 @@ pub struct SettlementConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn recovery_address_must_be_a_nonzero_evm_address() {
-        assert_eq!(
-            parse_recovery_address("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc").unwrap(),
-            Address::from_str("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc").unwrap()
-        );
-        assert!(
-            parse_recovery_address("0x0000000000000000000000000000000000000000")
-                .unwrap_err()
-                .contains("zero address")
-        );
-        assert!(parse_recovery_address("not-an-address").is_err());
-        assert!(parse_recovery_address("").is_err());
-    }
 
     #[test]
     fn code_hashes_are_0x_prefixed_32_byte_hex() {

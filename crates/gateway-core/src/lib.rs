@@ -28,5 +28,8 @@ pub use expiration::*;
 mod proof;
 pub use proof::*;
 
+mod payer_attestation;
+pub use payer_attestation::*;
+
 mod deployment;
 pub use deployment::*;

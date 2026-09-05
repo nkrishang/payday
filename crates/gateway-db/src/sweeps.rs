@@ -826,7 +826,7 @@ mod tests {
     use alloy_primitives::{U256, address};
     use gateway_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        Party, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
+        Party, PayerPolicy, TokenAddress, USDC_DECIMALS,
     };
     use sqlx::PgPool;
 
@@ -861,7 +861,6 @@ mod tests {
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(amount));
-        let recovery = RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"));
         let party = |name: &str| Party {
             name: name.into(),
             email: None,
@@ -877,7 +876,6 @@ mod tests {
             beneficiary,
             amount,
             1_900_000_000,
-            recovery,
         );
         let invoice = Invoice::issue(
             factory,
@@ -886,7 +884,6 @@ mod tests {
             beneficiary,
             amount,
             1_900_000_000,
-            recovery,
             snapshot,
         )
         .unwrap();
@@ -902,7 +899,13 @@ mod tests {
             .insert_issued(&input, None)
             .await
             .expect("row should be inserted");
-        invoice
+        let bound = crate::invoices::tests::bind_for_test(
+            pool,
+            invoice.id.0,
+            &crate::invoices::tests::TEST_PAYER_KEY,
+        )
+        .await;
+        Invoice::try_from(&bound).unwrap()
     }
 
     async fn open_batch(repo: &InvoiceRepository, ids: &[Uuid]) -> Uuid {
@@ -1295,7 +1298,7 @@ mod tests {
         .bind((EXPIRATION - 120) as i64)
         .bind([0x22u8; 32].as_slice())
         .bind([0x33u8; 20].as_slice())
-        .bind(invoice.payment_address.0.as_slice())
+        .bind(invoice.payment_address().unwrap().0.as_slice())
         .bind(invoice.id.0)
         .execute(&pool)
         .await

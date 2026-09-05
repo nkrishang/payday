@@ -16,9 +16,9 @@ use uuid::Uuid;
 use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, CanonicalIssuanceSnapshot, ChainId,
     CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto, Invoice, OnboardingPaymentResponse,
-    PDF_MIME_TYPE, Party, PayerPolicy, PaymentListResponse, PaymentResponse, PaymentStatus,
-    PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto, USDC_DECIMALS,
-    parse_expiration, validate_expiration_window,
+    PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy, PaymentListResponse, PaymentResponse,
+    PaymentStatus, PaymentSummaryResponse, TokenAddress, TransferDto, USDC_DECIMALS,
+    parse_expiration, payer_wallet_attestation, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -27,10 +27,12 @@ use crate::attachments::{AttachmentError, StorageError, content_disposition};
 use crate::invoice_pdf::render_invoice_pdf;
 use crate::state::AppState;
 use gateway_db::{
-    AccountId, AttachmentStatus, CreateInvoiceInput, DbAttachment, DbInvoice,
+    AccountId, AttachmentStatus, BindPayerWallet, CreateInvoiceInput, DbAttachment, DbInvoice,
     InsertIssuedInvoiceError, IssuanceRequest, OnboardingClaim, PAYER_SESSION_TTL,
     StartEmailVerificationError, same_issuance,
 };
+
+use crate::api::payer_wallet::WALLET_CHALLENGE_TTL;
 
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
 const MAX_PARTY_NAME_BYTES: usize = 255;
@@ -78,7 +80,10 @@ fn enrich_response(
     let invoice = Invoice::try_from(&row)?;
     let mut response = PaymentResponse::from_invoice(invoice.clone(), expires_in);
     response.payment_url = state.payer.payment_url(&invoice)?;
-    response.address_explorer_url = state.payer.address_url(&response.address);
+    response.address_explorer_url = response
+        .address
+        .as_deref()
+        .and_then(|address| state.payer.address_url(address));
     response.metadata = row.metadata.0.clone();
     response.customer_id = row.customer_id.map(|id| id.to_string());
     response.issuer_id = row.issuer_id.map(|id| id.to_string());
@@ -269,10 +274,8 @@ pub async fn create_payment(
         None => None,
     };
 
-    // Recovery is the platform wallet, never a request field. It is part of
-    // the replay comparison because it is committed into the payment address:
-    // a replay after the platform wallet changed cannot return the old address
-    // as if it were equivalent.
+    // Recovery is not a request field: it is the payer's attested wallet,
+    // known only when the payer binds it, so it is no part of issuance.
     let attachment_commitment = attachment.as_ref().and_then(DbAttachment::commitment);
     let requested = IssuanceRequest {
         chain_id,
@@ -282,7 +285,6 @@ pub async fn create_payment(
         beneficiary: beneficiary_addr.as_slice(),
         amount: amount.0,
         expiration_intent: &expiration.intent,
-        recovery: state.recovery_address.as_slice(),
         issuer: &req.issuer,
         bill_to: &req.bill_to,
         notes: req.notes.as_deref(),
@@ -343,10 +345,10 @@ pub async fn create_payment(
         }
     }
 
-    // 7. Commit to the document and derive the address from that commitment.
+    // 7. Commit to the document. The address is derived later, when the
+    // payer binds the wallet they will pay from.
     let factory = FactoryAddress(state.factory_address);
     let beneficiary = BeneficiaryAddress(beneficiary_addr);
-    let recovery = RecoveryAddress(state.recovery_address);
     let mut snapshot = CanonicalIssuanceSnapshot::new(
         req.issuer.clone(),
         req.bill_to.clone(),
@@ -357,7 +359,6 @@ pub async fn create_payment(
         beneficiary,
         amount,
         expiration_timestamp,
-        recovery,
     );
     snapshot.notes = req.notes.clone();
     snapshot.heading = req.heading.clone();
@@ -370,7 +371,6 @@ pub async fn create_payment(
         beneficiary,
         amount,
         expiration_timestamp,
-        recovery,
         snapshot,
     )
     .map_err(|error| {
@@ -682,7 +682,9 @@ pub async fn cancel_payment(
 /// does after a real Auth0 code checks out — minting a session, then
 /// approving its email fact — except there is no code to check: Payday
 /// owns `onboarding@payday.sh`, so proving control of it here would only
-/// ever be proving Payday's own address to Payday.
+/// ever be proving Payday's own address to Payday. The wallet step is real:
+/// the demo payer signs the same attestation a payer's wallet would, which
+/// is what gives the request its address.
 pub async fn onboarding_payment(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
@@ -746,15 +748,62 @@ pub async fn onboarding_payment(
         )
         .await?;
 
+    // The demo payer attests its wallet exactly as a payer's would: a
+    // challenge on the session, the EIP-712 signature, the binding. A retry
+    // finds the binding already in place.
+    let payment_address = match &invoice.binding {
+        Some(binding) => binding.payment_address,
+        None => {
+            let challenge = state
+                .payer_sessions
+                .issue_wallet_challenge(session.id, WALLET_CHALLENGE_TTL)
+                .await?;
+            let message = PayerAttestation::new(
+                invoice.attribution_hash,
+                signer.address(),
+                challenge.nonce,
+                challenge.expires_at.timestamp().max(0) as u64,
+            );
+            let digest = message.digest(invoice.chain_id.0, invoice.factory.0);
+            let signature = signer.sign_hash(&digest).await.map_err(|error| {
+                tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation failed");
+                ApiError::internal("failed to sign the onboarding payer attestation")
+            })?;
+            let attestation = payer_wallet_attestation(
+                &message,
+                invoice.chain_id.0,
+                invoice.factory.0,
+                &signature,
+            );
+            let now = Utc::now();
+            let binding = invoice
+                .bind_payer_wallet(
+                    attestation,
+                    now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                )
+                .map_err(|error| {
+                    tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation did not verify");
+                    ApiError::internal("failed to verify the onboarding payer attestation")
+                })?;
+            match state
+                .repo
+                .bind_payer_wallet(row.id, session.id, &binding, now)
+                .await?
+            {
+                BindPayerWallet::Bound(_) => binding.payment_address,
+                BindPayerWallet::AlreadyBound(bound) => Invoice::try_from(&bound)?
+                    .payment_address()
+                    .ok_or_else(|| ApiError::internal("bound invoice has no address"))?,
+                BindPayerWallet::NotBindable(_) => return Err(ApiError::payment_not_payable()),
+            }
+        }
+    };
+
     let tx_hash = match claim {
         OnboardingClaim::AlreadySubmitted(tx_hash) => tx_hash,
         OnboardingClaim::Claimed | OnboardingClaim::PendingRetry => {
             let tx_hash = signer
-                .send_usdc(
-                    state.usdc_address,
-                    invoice.payment_address.0,
-                    invoice.amount.0,
-                )
+                .send_usdc(state.usdc_address, payment_address.0, invoice.amount.0)
                 .await
                 .map_err(|error| {
                     tracing::error!(%error, payment_id = %row.id, "onboarding demo transfer failed");

@@ -11,6 +11,7 @@ mod middleware;
 mod openapi;
 pub mod payer;
 pub mod payer_verification;
+pub mod payer_wallet;
 mod proof;
 mod routes;
 mod status;

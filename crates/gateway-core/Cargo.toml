@@ -15,6 +15,11 @@ uuid = { workspace = true }
 rand = { workspace = true }
 chrono = { workspace = true }
 humantime = { workspace = true }
+k256 = { workspace = true, optional = true }
+
+[features]
+## Raw-key signing of payer attestations, for tests and local tooling.
+test-helpers = ["dep:k256"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

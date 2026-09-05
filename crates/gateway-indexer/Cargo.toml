@@ -27,3 +27,7 @@ sqlx = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+gateway-core = { path = "../gateway-core", features = ["test-helpers"] }
+chrono = { workspace = true }

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use futures::stream::{self, StreamExt, TryStreamExt};
-use gateway_core::{ChainId, Invoice, InvoiceStatus};
+use gateway_core::{ChainId, Invoice, InvoiceStatus, PaymentBinding};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
     MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
@@ -498,12 +498,13 @@ impl Indexer {
         let mut outcomes = Vec::with_capacity(rows.len());
         for row in &rows {
             let invoice = decode(row)?;
+            let payment = bound(&invoice)?.payment_address.0;
             let outcome = self
                 .classify(
                     &invoice,
                     row,
                     tx_hash,
-                    receipt.outcomes.get(&invoice.payment_address.0),
+                    receipt.outcomes.get(&payment),
                     &header,
                 )
                 .await?;
@@ -549,7 +550,8 @@ impl Indexer {
         outcome: Option<&SweepOutcome>,
         header: &BlockHeader,
     ) -> Result<InvoiceOutcome, IndexerError> {
-        let payment = invoice.payment_address.0;
+        let binding = bound(invoice)?;
+        let payment = binding.payment_address.0;
         // Only a nonzero amount is a recovery worth a ledger row.
         let recovered = |amount: U256, reason: RecoveryReason| {
             (!amount.is_zero()).then_some(RecoveredFundsInput { amount, reason })
@@ -633,7 +635,7 @@ impl Indexer {
                         invoice.token.0,
                         payment,
                         invoice.beneficiary.0,
-                        invoice.recovery.0,
+                        binding.recovery.0,
                         header.number,
                     )
                     .await?;
@@ -716,7 +718,7 @@ impl Indexer {
         let rows = self.repo.batch_invoices(batch.id).await?;
         let requests = rows
             .iter()
-            .map(|row| decode(row).map(|invoice| sweep_request(&invoice)))
+            .map(|row| decode(row).and_then(|invoice| sweep_request(&invoice)))
             .collect::<Result<Vec<_>, _>>()?;
         let transaction = self
             .chain
@@ -787,7 +789,7 @@ impl Indexer {
                 continue;
             }
             ids.push(row.id);
-            requests.push(sweep_request(&invoice));
+            requests.push(sweep_request(&invoice)?);
         }
         if ids.is_empty() {
             return Ok(());
@@ -858,15 +860,27 @@ fn decode(row: &DbInvoice) -> Result<Invoice, IndexerError> {
     })
 }
 
-fn sweep_request(invoice: &Invoice) -> SweepRequest {
-    SweepRequest {
+/// The binding a queued invoice must have: funds only reach a bound
+/// address, so a queued row without one is corrupt.
+fn bound(invoice: &Invoice) -> Result<&PaymentBinding, IndexerError> {
+    invoice.binding.as_ref().ok_or_else(|| {
+        IndexerError::Configuration(format!(
+            "invoice {} is queued without a payer wallet binding",
+            invoice.id.0
+        ))
+    })
+}
+
+fn sweep_request(invoice: &Invoice) -> Result<SweepRequest, IndexerError> {
+    let binding = bound(invoice)?;
+    Ok(SweepRequest {
         token: invoice.token.0,
         amount: invoice.amount.0,
         receiver: invoice.beneficiary.0,
         expiration_timestamp: invoice.expiration_timestamp,
-        recovery: invoice.recovery.0,
-        salt: invoice.salt.0,
-    }
+        recovery: binding.recovery.0,
+        salt: binding.salt.0,
+    })
 }
 
 #[cfg(test)]
@@ -880,12 +894,16 @@ pub(crate) mod tests {
     use async_trait::async_trait;
     use gateway_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        Party, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
+        Party, PayerAttestation, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
+        sign_payer_attestation, wallet_of,
     };
     use sqlx::PgPool;
 
     use crate::chain::{FailureProbe, SettlementEvent, UsdcTransfer};
-    use gateway_db::{CreateInvoiceInput, InvoiceRepository};
+    use gateway_db::{
+        BindPayerWallet, CreateInvoiceInput, InvoiceRepository, PAYER_SESSION_TTL,
+        PayerSessionRepository,
+    };
 
     const CHAIN_ID: u64 = 31337;
     /// Block timestamps in the mock advance ten seconds per block from here.
@@ -1299,14 +1317,25 @@ pub(crate) mod tests {
         issue(ChainId(CHAIN_ID), amount, expiration)
     }
 
-    /// Issue with a minimal permissionless snapshot; the document is not what
-    /// the indexer is exercising.
+    /// The wallet every test payer attests and pays from.
+    const PAYER_KEY: [u8; 32] = [7u8; 32];
+
+    fn payer_wallet() -> Address {
+        wallet_of(&PAYER_KEY)
+    }
+
+    fn payment_address(invoice: &Invoice) -> Address {
+        invoice.payment_address().expect("test invoice is bound").0
+    }
+
+    /// Issue with a minimal permissionless snapshot and bind the test payer's
+    /// wallet in memory; the document is not what the indexer is exercising.
+    /// `insert` writes the same binding to the row.
     fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
         let token = TokenAddress(usdc());
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(amount));
-        let recovery = RecoveryAddress(address!("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"));
         let party = |name: &str| Party {
             name: name.into(),
             email: None,
@@ -1322,19 +1351,28 @@ pub(crate) mod tests {
             beneficiary,
             amount,
             expiration,
-            recovery,
         );
-        Invoice::issue(
+        let mut invoice = Invoice::issue(
             factory(),
             chain_id,
             token,
             beneficiary,
             amount,
             expiration,
-            recovery,
             snapshot,
         )
-        .unwrap()
+        .unwrap();
+        // A fresh nonce per invoice keeps identical requests at distinct
+        // addresses, as a session's challenge would.
+        let nonce = keccak256(invoice.id.0.as_bytes());
+        let message =
+            PayerAttestation::new(invoice.attribution_hash, payer_wallet(), nonce, expiration);
+        let attestation = sign_payer_attestation(&PAYER_KEY, &message, chain_id.0, factory().0);
+        let binding = invoice
+            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .unwrap();
+        invoice.binding = Some(binding);
+        invoice
     }
 
     fn transfer(recipient: Address, amount: u64, block: u64, log_index: u64) -> UsdcTransfer {
@@ -1356,7 +1394,7 @@ pub(crate) mod tests {
             )),
             transaction_index,
             log_index,
-            sender: address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+            sender: payer_wallet(),
             recipient,
             amount: U256::from(amount),
         }
@@ -1385,6 +1423,21 @@ pub(crate) mod tests {
         repo.insert_issued(&input, None)
             .await
             .expect("insert should succeed");
+        // The row takes the same binding the in-memory invoice carries.
+        let session = PayerSessionRepository::new(pool.clone())
+            .create(invoice.id.0, PAYER_SESSION_TTL)
+            .await
+            .unwrap();
+        let bound = repo
+            .bind_payer_wallet(
+                invoice.id.0,
+                session.id,
+                invoice.binding.as_ref().expect("test invoice is bound"),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(bound, BindPayerWallet::Bound(_)));
     }
 
     /// Insert an invoice and credit it through the block indexer at `block`,
@@ -1398,7 +1451,7 @@ pub(crate) mod tests {
             .map_or(block, |cursor| block.max(cursor.block + 1));
         let chain = Arc::new(MockChain::new(block).with(|state| {
             state.transfers = vec![transfer(
-                invoice.payment_address.0,
+                payment_address(invoice),
                 invoice.amount.0.to::<u64>(),
                 block,
                 0,
@@ -1463,7 +1516,7 @@ pub(crate) mod tests {
 
         let chain =
             Arc::new(MockChain::new(1).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 100, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 100, 1, 0)]
             }));
         indexer(&pool, chain)
             .tick()
@@ -1488,7 +1541,7 @@ pub(crate) mod tests {
         insert(&pool, &invoice, "key-1").await;
         let chain = Arc::new(MockChain::new(5).with(|state| {
             state.finalized = 2;
-            state.transfers = vec![transfer(invoice.payment_address.0, 100, 3, 0)];
+            state.transfers = vec![transfer(payment_address(&invoice), 100, 3, 0)];
         }));
         let worker = indexer(&pool, chain.clone());
 
@@ -1514,7 +1567,7 @@ pub(crate) mod tests {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
         let chain = Arc::new(MockChain::new(4).with(|state| {
-            state.transfers = vec![transfer(invoice.payment_address.0, 100, 3, 0)];
+            state.transfers = vec![transfer(payment_address(&invoice), 100, 3, 0)];
         }));
         let mut cfg = config();
         cfg.finality_source = FinalitySource::Latest;
@@ -1573,7 +1626,7 @@ pub(crate) mod tests {
 
         let chain =
             Arc::new(MockChain::new(1).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 150, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 150, 1, 0)]
             }));
         indexer(&pool, chain).tick().await.unwrap();
 
@@ -1589,8 +1642,8 @@ pub(crate) mod tests {
 
         let chain = Arc::new(MockChain::new(2).with(|state| {
             state.transfers = vec![
-                transfer(invoice.payment_address.0, 40, 1, 0),
-                transfer(invoice.payment_address.0, 60, 2, 1),
+                transfer(payment_address(&invoice), 40, 1, 0),
+                transfer(payment_address(&invoice), 60, 2, 1),
             ]
         }));
         indexer(&pool, chain).tick().await.unwrap();
@@ -1607,7 +1660,7 @@ pub(crate) mod tests {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
 
-        let logs = vec![transfer(invoice.payment_address.0, 100, 1, 0)];
+        let logs = vec![transfer(payment_address(&invoice), 100, 1, 0)];
         let chain = Arc::new(MockChain::new(1).with(|state| state.transfers = logs.clone()));
         indexer(&pool, chain).tick().await.expect("first tick");
 
@@ -1628,7 +1681,7 @@ pub(crate) mod tests {
 
         let chain =
             Arc::new(MockChain::new(1).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 0, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 0, 1, 0)]
             }));
         indexer(&pool, chain).tick().await.unwrap();
 
@@ -1661,7 +1714,7 @@ pub(crate) mod tests {
 
         let chain =
             Arc::new(MockChain::new(1).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 1, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 1, 1, 0)]
             }));
         let error = indexer(&pool, chain).tick().await.unwrap_err();
         assert!(error.to_string().contains("overflowed uint256"));
@@ -1726,7 +1779,7 @@ pub(crate) mod tests {
 
         let chain =
             Arc::new(MockChain::new(1).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 100, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 100, 1, 0)]
             }));
         indexer(&pool, chain).tick().await.unwrap();
 
@@ -1753,8 +1806,8 @@ pub(crate) mod tests {
         }
         let chain = Arc::new(MockChain::new(2).with(|state| {
             state.transfers = vec![
-                transfer(partial.payment_address.0, 40, 1, 0),
-                transfer(funded.payment_address.0, 100, 1, 1),
+                transfer(payment_address(&partial), 40, 1, 0),
+                transfer(payment_address(&funded), 100, 1, 1),
             ]
         }));
         let worker = indexer(&pool, chain.clone());
@@ -1784,7 +1837,7 @@ pub(crate) mod tests {
         insert(&pool, &invoice, "key-1").await;
         let chain =
             Arc::new(MockChain::new(2).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 100, 2, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 100, 2, 0)]
             }));
         let worker = indexer(&pool, chain.clone());
         // The first transfer is already after the deadline even though the
@@ -1797,7 +1850,7 @@ pub(crate) mod tests {
             state.finalized = 3;
             state
                 .transfers
-                .push(transfer(invoice.payment_address.0, 5, 3, 0));
+                .push(transfer(payment_address(&invoice), 5, 3, 0));
         });
         worker.tick().await.unwrap();
         let dispositions: Vec<(String, Option<String>)> = sqlx::query_as(
@@ -1833,7 +1886,10 @@ pub(crate) mod tests {
         assert_eq!(submissions.len(), 1);
         assert_eq!(submissions[0].nonce, 0);
         assert_eq!(submissions[0].gas_limit, sweep_batch_gas_limit(1));
-        assert_eq!(submissions[0].sweeps, vec![sweep_request(&invoice)]);
+        assert_eq!(
+            submissions[0].sweeps,
+            vec![sweep_request(&invoice).unwrap()]
+        );
         assert_eq!(fetch(&pool, &invoice).await.status, "deploying");
         assert_eq!(open_batches(&pool).await, 1);
 
@@ -1975,7 +2031,7 @@ pub(crate) mod tests {
         let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
         insert(&pool, &invoice, "key-1").await;
         let chain = Arc::new(MockChain::new(2).with(|state| {
-            state.transfers = vec![transfer(invoice.payment_address.0, 40, 1, 0)];
+            state.transfers = vec![transfer(payment_address(&invoice), 40, 1, 0)];
         }));
         let worker = indexer(&pool, chain.clone());
         worker.tick().await.unwrap();
@@ -1983,7 +2039,7 @@ pub(crate) mod tests {
 
         chain.set(|state| {
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Recovered {
                     amount: U256::from(40),
                 },
@@ -2010,7 +2066,7 @@ pub(crate) mod tests {
         insert(&pool, &invoice, "key-1").await;
         let chain =
             Arc::new(MockChain::new(7).with(|state| {
-                state.transfers = vec![transfer(invoice.payment_address.0, 150, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&invoice), 150, 1, 0)]
             }));
         let worker = indexer(&pool, chain.clone());
         worker.tick().await.unwrap();
@@ -2020,7 +2076,7 @@ pub(crate) mod tests {
         // the remainder to the platform recovery wallet.
         chain.set(|state| {
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Settled {
                     amount: U256::from(100),
                     recovered_amount: U256::from(50),
@@ -2050,7 +2106,7 @@ pub(crate) mod tests {
         let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
         insert(&pool, &invoice, "key-1").await;
         let chain = Arc::new(MockChain::new(2).with(|state| {
-            state.transfers = vec![transfer(invoice.payment_address.0, 40, 1, 0)];
+            state.transfers = vec![transfer(payment_address(&invoice), 40, 1, 0)];
         }));
         let worker = indexer(&pool, chain.clone());
         worker.tick().await.unwrap();
@@ -2058,7 +2114,7 @@ pub(crate) mod tests {
 
         chain.set(|state| {
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Recovered {
                     amount: U256::from(40),
                 },
@@ -2102,9 +2158,9 @@ pub(crate) mod tests {
             state.mine_at = Some(9);
             state
                 .transfers
-                .push(transfer(invoice.payment_address.0, 30, 8, 0));
+                .push(transfer(payment_address(&invoice), 30, 8, 0));
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Collected {
                     amount: U256::from(30),
                 },
@@ -2137,7 +2193,7 @@ pub(crate) mod tests {
         insert_funded(&pool, &invoice, "key-1", 1).await;
         let chain = Arc::new(MockChain::new(7).with(|state| {
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Recovered {
                     amount: U256::from(100),
                 },
@@ -2157,7 +2213,7 @@ pub(crate) mod tests {
         insert_funded(&pool, &recovered, "key-2", 1).await;
         let chain = Arc::new(MockChain::new(7).with(|state| {
             state.settlement_events.insert(
-                settled.payment_address.0,
+                payment_address(&settled),
                 SettlementEvent {
                     transaction_hash: B256::repeat_byte(0xA1),
                     block_number: 3,
@@ -2167,7 +2223,7 @@ pub(crate) mod tests {
                 },
             );
             state.settlement_events.insert(
-                recovered.payment_address.0,
+                payment_address(&recovered),
                 SettlementEvent {
                     transaction_hash: B256::repeat_byte(0xA2),
                     block_number: 4,
@@ -2178,11 +2234,11 @@ pub(crate) mod tests {
             );
             for invoice in [&settled, &recovered] {
                 state.next_outcomes.insert(
-                    invoice.payment_address.0,
+                    payment_address(invoice),
                     SweepOutcome::Collected { amount: U256::ZERO },
                 );
             }
-            state.settled.insert(recovered.payment_address.0, false);
+            state.settled.insert(payment_address(&recovered), false);
         }));
         let worker = indexer(&pool, chain);
         worker.sweep_tick().await.unwrap();
@@ -2232,7 +2288,7 @@ pub(crate) mod tests {
         // recovery wallet in that same transaction, before our item ran.
         let chain = Arc::new(MockChain::new(7).with(|state| {
             state.settlement_events.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SettlementEvent {
                     transaction_hash: B256::repeat_byte(0xA3),
                     block_number: 3,
@@ -2242,7 +2298,7 @@ pub(crate) mod tests {
                 },
             );
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Collected { amount: U256::ZERO },
             );
         }));
@@ -2271,7 +2327,7 @@ pub(crate) mod tests {
         let invoice = make_invoice_expiring(100, block_timestamp(1) + 5);
         insert(&pool, &invoice, "key-1").await;
         let chain = Arc::new(MockChain::new(7).with(|state| {
-            state.transfers = vec![transfer(invoice.payment_address.0, 40, 1, 0)];
+            state.transfers = vec![transfer(payment_address(&invoice), 40, 1, 0)];
         }));
         let worker = indexer(&pool, chain.clone());
         worker.tick().await.unwrap();
@@ -2281,7 +2337,7 @@ pub(crate) mod tests {
         // balance to the recovery wallet.
         chain.set(|state| {
             state.settlement_events.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SettlementEvent {
                     transaction_hash: B256::repeat_byte(0xA4),
                     block_number: 4,
@@ -2290,9 +2346,9 @@ pub(crate) mod tests {
                     recovered: U256::from(40),
                 },
             );
-            state.settled.insert(invoice.payment_address.0, false);
+            state.settled.insert(payment_address(&invoice), false);
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Collected { amount: U256::ZERO },
             );
         });
@@ -2333,9 +2389,9 @@ pub(crate) mod tests {
             state.mine_at = Some(9);
             state
                 .transfers
-                .push(transfer(invoice.payment_address.0, 30, 8, 0));
+                .push(transfer(payment_address(&invoice), 30, 8, 0));
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Collected {
                     amount: U256::from(30),
                 },
@@ -2379,7 +2435,7 @@ pub(crate) mod tests {
         chain.set(|state| {
             state
                 .transfers
-                .push(transfer(invoice.payment_address.0, 20, 3, 0));
+                .push(transfer(payment_address(&invoice), 20, 3, 0));
         });
         worker.tick().await.unwrap();
         let row = fetch(&pool, &invoice).await;
@@ -2418,8 +2474,8 @@ pub(crate) mod tests {
         // arrived too late and must remain queued for another recovery.
         chain.set(|state| {
             state.transfers = vec![
-                transfer_at(before.payment_address.0, 11, 7, 0, 0),
-                transfer_at(after.payment_address.0, 22, 7, 2, 0),
+                transfer_at(payment_address(&before), 11, 7, 0, 0),
+                transfer_at(payment_address(&after), 22, 7, 2, 0),
             ];
         });
         worker.tick().await.unwrap();
@@ -2457,17 +2513,17 @@ pub(crate) mod tests {
             for invoice in [&paused, &blacklisted, &underfunded, &unknown] {
                 state
                     .next_outcomes
-                    .insert(invoice.payment_address.0, failed.clone());
+                    .insert(payment_address(invoice), failed.clone());
             }
             state.probes.insert(
-                paused.payment_address.0,
+                payment_address(&paused),
                 FailureProbe {
                     paused: Some(true),
                     ..FailureProbe::default()
                 },
             );
             state.probes.insert(
-                blacklisted.payment_address.0,
+                payment_address(&blacklisted),
                 FailureProbe {
                     paused: Some(false),
                     receiver_blacklisted: Some(true),
@@ -2475,7 +2531,7 @@ pub(crate) mod tests {
                 },
             );
             state.probes.insert(
-                underfunded.payment_address.0,
+                payment_address(&underfunded),
                 FailureProbe {
                     paused: Some(false),
                     balance: Some(U256::from(299)),
@@ -2528,9 +2584,9 @@ pub(crate) mod tests {
             for (invoice, balance) in [(&overpaid, 110), (&exact, 200)] {
                 state
                     .next_outcomes
-                    .insert(invoice.payment_address.0, failed.clone());
+                    .insert(payment_address(invoice), failed.clone());
                 state.probes.insert(
-                    invoice.payment_address.0,
+                    payment_address(invoice),
                     FailureProbe {
                         code_present: false,
                         recovery_blacklisted: Some(true),
@@ -2569,7 +2625,7 @@ pub(crate) mod tests {
         let worker = indexer(&pool, chain.clone());
         let fail = |state: &mut MockState| {
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Failed {
                     revert_data: Bytes::new(),
                 },
@@ -2612,15 +2668,15 @@ pub(crate) mod tests {
             state.mine_at = Some(9);
             state
                 .transfers
-                .push(transfer(invoice.payment_address.0, 30, 8, 0));
+                .push(transfer(payment_address(&invoice), 30, 8, 0));
             state.next_outcomes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 SweepOutcome::Failed {
                     revert_data: Bytes::new(),
                 },
             );
             state.probes.insert(
-                invoice.payment_address.0,
+                payment_address(&invoice),
                 FailureProbe {
                     code_present: true,
                     recovery_blacklisted: Some(true),
@@ -2684,7 +2740,7 @@ pub(crate) mod tests {
                     block_hash: block_hash(7),
                     transaction_index: 1,
                     outcomes: HashMap::from([(
-                        invoice.payment_address.0,
+                        payment_address(&invoice),
                         SweepOutcome::Settled {
                             amount: U256::from(100),
                             recovered_amount: U256::ZERO,
@@ -2723,7 +2779,7 @@ pub(crate) mod tests {
                     block_hash: block_hash(7),
                     transaction_index: 1,
                     outcomes: HashMap::from([(
-                        invoice.payment_address.0,
+                        payment_address(&invoice),
                         SweepOutcome::Settled {
                             amount: U256::from(100),
                             recovered_amount: U256::ZERO,
@@ -2791,7 +2847,7 @@ pub(crate) mod tests {
             state.finalized = 8;
             state
                 .transfers
-                .push(transfer(later.payment_address.0, 200, 8, 0));
+                .push(transfer(payment_address(&later), 200, 8, 0));
         });
         worker.tick().await.unwrap();
         assert_eq!(fetch(&pool, &later).await.status, "funded");
@@ -2808,7 +2864,7 @@ pub(crate) mod tests {
                     block_hash: block_hash(8),
                     transaction_index: 1,
                     outcomes: HashMap::from([(
-                        invoice.payment_address.0,
+                        payment_address(&invoice),
                         SweepOutcome::Settled {
                             amount: U256::from(100),
                             recovered_amount: U256::ZERO,
@@ -2847,7 +2903,7 @@ pub(crate) mod tests {
             state.finalized = 8;
             state
                 .transfers
-                .push(transfer(later.payment_address.0, 200, 8, 0));
+                .push(transfer(payment_address(&later), 200, 8, 0));
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -2976,7 +3032,7 @@ pub(crate) mod tests {
             .unwrap();
         let chain =
             Arc::new(MockChain::new(2).with(|state| {
-                state.transfers = vec![transfer(partial.payment_address.0, 40, 1, 0)]
+                state.transfers = vec![transfer(payment_address(&partial), 40, 1, 0)]
             }));
         let worker = indexer(&pool, chain.clone());
         worker.tick().await.unwrap();
@@ -2998,7 +3054,7 @@ pub(crate) mod tests {
             insert(&pool, invoice, &format!("key-{index}")).await;
             chain.set(|state| {
                 state.transfers.push(transfer(
-                    invoice.payment_address.0,
+                    payment_address(invoice),
                     invoice.amount.0.to::<u64>(),
                     1,
                     index as u64,

@@ -2,33 +2,34 @@
 //! CREATE3 salt derived from it (product plan §5.2).
 //!
 //! ```text
-//! canonical_bytes  = JCS(canonical_issuance_snapshot)          (RFC 8785)
-//! attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V1" || canonical_bytes)
-//! salt             = keccak256("PAYDAY_SALT_V1" || nonce || attribution_hash)
+//! canonical_bytes    = JCS(canonical_issuance_snapshot)          (RFC 8785)
+//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V2" || canonical_bytes)
+//! attestation_digest = EIP-712 signing hash of the payer's PayerAttestation
+//! salt               = keccak256("PAYDAY_SALT_V2" || attribution_hash || attestation_digest)
 //! ```
 //!
-//! The random nonce keeps identical invoices at distinct addresses and stops
-//! anyone enumerating addresses from guessable invoice contents. The API never
-//! accepts a client-supplied nonce or salt: [`derive_attribution`] is the only
-//! way an issuance salt comes into existence.
+//! The salt exists only once a payer has attested a wallet for the request
+//! (see [`crate::PayerAttestation`]). The attestation carries a one-time
+//! nonce issued to the payer's session, so identical requests land at
+//! distinct addresses and nobody can enumerate addresses from guessable
+//! request contents. The API never accepts a client-supplied salt:
+//! [`recompute_salt`] over a verified attestation is the only way one comes
+//! into existence.
 
 use std::fmt;
 use std::str::FromStr;
 
 use alloy_primitives::{B256, keccak256};
-use rand::Rng;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{
-    Amount, BeneficiaryAddress, ChainId, FactoryAddress, RecoveryAddress, Salt, TokenAddress,
-};
+use crate::{Amount, BeneficiaryAddress, ChainId, FactoryAddress, Salt, TokenAddress};
 
-pub const ATTRIBUTION_VERSION: u16 = 1;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V1";
-pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V1";
+pub const ATTRIBUTION_VERSION: u16 = 2;
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V2";
+pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V2";
 /// `CanonicalIssuanceSnapshot::schema`; a new schema means a new version.
 pub const SNAPSHOT_SCHEMA: &str = "payday.invoice";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
@@ -203,6 +204,11 @@ pub struct AttachmentCommitment {
 
 /// Everything an issued invoice commits to. Numbers are decimal strings and
 /// addresses are EIP-55 checksummed so the canonical form is unambiguous.
+///
+/// The recovery address is deliberately absent: it is the payer's attested
+/// wallet, known only after issuance, and it enters the payment address
+/// through the attestation the salt is derived from rather than through
+/// this document.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalIssuanceSnapshot {
@@ -220,7 +226,6 @@ pub struct CanonicalIssuanceSnapshot {
     pub chain_id: String,
     pub token_address: String,
     pub receiver_address: String,
-    pub recovery_address: String,
     pub factory_address: String,
 }
 
@@ -240,7 +245,6 @@ impl CanonicalIssuanceSnapshot {
         receiver: BeneficiaryAddress,
         amount: Amount,
         expiration_timestamp: u64,
-        recovery: RecoveryAddress,
     ) -> Self {
         Self {
             schema: SNAPSHOT_SCHEMA.into(),
@@ -257,7 +261,6 @@ impl CanonicalIssuanceSnapshot {
             chain_id: chain_id.0.to_string(),
             token_address: token.0.to_checksum(None),
             receiver_address: receiver.0.to_checksum(None),
-            recovery_address: recovery.0.to_checksum(None),
             factory_address: factory.0.to_checksum(None),
         }
     }
@@ -266,9 +269,7 @@ impl CanonicalIssuanceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributionMaterial {
     pub canonical_bytes: Vec<u8>,
-    pub nonce: B256,
     pub attribution_hash: B256,
-    pub salt: Salt,
 }
 
 #[derive(Debug, Error)]
@@ -289,37 +290,42 @@ pub fn attribution_hash(canonical_bytes: &[u8]) -> B256 {
     keccak256([ATTRIBUTION_DOMAIN, canonical_bytes].concat())
 }
 
-/// `keccak256(SALT_DOMAIN || nonce || attribution_hash)`: what a verifier
-/// recomputes from a proof, and what issuance stores as the invoice salt.
-pub fn recompute_salt(nonce: B256, attribution_hash: B256) -> Salt {
+/// `keccak256(SALT_DOMAIN || attribution_hash || attestation_digest)`: what a
+/// verifier recomputes from a proof, and what binding stores as the salt.
+/// `attestation_digest` is the EIP-712 signing hash of the payer's verified
+/// wallet attestation, so the address commits to the request text and to the
+/// exact statement the payer signed.
+pub fn recompute_salt(attribution_hash: B256, attestation_digest: B256) -> Salt {
     Salt(keccak256(
-        [SALT_DOMAIN, nonce.as_slice(), attribution_hash.as_slice()].concat(),
+        [
+            SALT_DOMAIN,
+            attribution_hash.as_slice(),
+            attestation_digest.as_slice(),
+        ]
+        .concat(),
     ))
 }
 
-/// Canonicalize and hash a snapshot, draw a fresh 32-byte OS-CSPRNG nonce,
-/// and derive the issuance salt from both.
+/// Canonicalize and hash a snapshot.
 pub fn derive_attribution(
     snapshot: &CanonicalIssuanceSnapshot,
 ) -> Result<AttributionMaterial, AttributionError> {
     let canonical_bytes = canonical_bytes(snapshot)?;
     let attribution_hash = attribution_hash(&canonical_bytes);
-    let nonce = B256::from(rand::rng().random::<[u8; 32]>());
-    let salt = recompute_salt(nonce, attribution_hash);
     Ok(AttributionMaterial {
         canonical_bytes,
-        nonce,
         attribution_hash,
-        salt,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{U256, address};
+    use alloy_primitives::{Address, U256, address};
 
     use super::*;
-    use crate::predict_payment_address;
+    use crate::{RecoveryAddress, predict_payment_address};
+
+    const WALLET: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
 
     pub(crate) fn party(name: &str) -> Party {
         Party {
@@ -350,7 +356,6 @@ mod tests {
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")),
             Amount(U256::from(1_000_000)),
             1_900_000_000,
-            RecoveryAddress(address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc")),
         );
         snapshot.notes = Some("Thanks".into());
         snapshot.reference = Some("INV-1".into());
@@ -369,7 +374,7 @@ mod tests {
             Amount(U256::from_str_radix(&snapshot.amount_base_units, 10).unwrap()),
             BeneficiaryAddress(snapshot.receiver_address.parse().unwrap()),
             snapshot.expiration_timestamp.parse().unwrap(),
-            RecoveryAddress(snapshot.recovery_address.parse().unwrap()),
+            RecoveryAddress(WALLET),
             salt,
         )
         .0
@@ -392,11 +397,9 @@ mod tests {
             "chain_id": "143",
             "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
             "receiver_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-            "recovery_address": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
             "factory_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
         }"#;
         let reversed = r#"{"factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            "recovery_address":"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
             "receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
             "token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603","chain_id":"143",
             "attachment":{"sha256":"0xabababababababababababababababababababababababababababababababab",
@@ -431,7 +434,6 @@ mod tests {
             r#""issuer":{"email":"billing@acme.example","name":"Acme Corp"},"notes":"Thanks","#,
             r#""payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},"#,
             r#""receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","#,
-            r#""recovery_address":"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc","#,
             r#""reference":"INV-1","schema":"payday.invoice","#,
             r#""token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"}"#,
         );
@@ -439,14 +441,14 @@ mod tests {
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
         assert_eq!(
             attribution_hash(&bytes).to_string(),
-            "0x8ae09bb2907133efa348bc0d4b62b04546232597b040a78f01c7761fc6ce8d73"
+            "0x14ccb1b38fe0ad72420000e663ab9038998cae46a1b44a726c8ac7fc2f40dfcc"
         );
-        let nonce = B256::repeat_byte(0x11);
+        let attestation_digest = B256::repeat_byte(0x11);
         assert_eq!(
-            recompute_salt(nonce, attribution_hash(&bytes))
+            recompute_salt(attribution_hash(&bytes), attestation_digest)
                 .0
                 .to_string(),
-            "0xdd594e4e792bf8c6e893153d819d6c668dc9591ea753d649019443776c97951b"
+            "0x2868120e96002317dfa45a845647a21e2acfa98f5b044c0b525834a9cb9b5092"
         );
     }
 
@@ -458,25 +460,30 @@ mod tests {
         let a = derive_attribution(&original).unwrap();
         let b = derive_attribution(&edited).unwrap();
         assert_ne!(a.attribution_hash, b.attribution_hash);
-        // Same nonce, different content: the salt and address still move.
-        let salt = recompute_salt(a.nonce, b.attribution_hash);
-        assert_ne!(salt, a.salt);
-        assert_ne!(address_for(&original, a.salt), address_for(&edited, salt));
+        // Same attestation digest, different content: the salt and address
+        // still move.
+        let digest = B256::repeat_byte(0x11);
+        let salt_a = recompute_salt(a.attribution_hash, digest);
+        let salt_b = recompute_salt(b.attribution_hash, digest);
+        assert_ne!(salt_a, salt_b);
+        assert_ne!(address_for(&original, salt_a), address_for(&edited, salt_b));
     }
 
     #[test]
-    fn identical_snapshots_receive_distinct_nonce_salt_and_address() {
+    fn identical_snapshots_differ_by_attestation_digest_only() {
+        // Two requests with identical text hash identically; what separates
+        // their addresses is the attestation each payer signs, whose nonce is
+        // fresh per session.
         let snapshot = snapshot();
         let a = derive_attribution(&snapshot).unwrap();
         let b = derive_attribution(&snapshot).unwrap();
-        assert_eq!(a.attribution_hash, b.attribution_hash);
-        assert_eq!(a.canonical_bytes, b.canonical_bytes);
-        assert_ne!(a.nonce, b.nonce);
-        assert_ne!(a.salt, b.salt);
-        assert_eq!(a.salt, recompute_salt(a.nonce, a.attribution_hash));
+        assert_eq!(a, b);
+        let salt_a = recompute_salt(a.attribution_hash, B256::repeat_byte(0x11));
+        let salt_b = recompute_salt(a.attribution_hash, B256::repeat_byte(0x12));
+        assert_ne!(salt_a, salt_b);
         assert_ne!(
-            address_for(&snapshot, a.salt),
-            address_for(&snapshot, b.salt)
+            address_for(&snapshot, salt_a),
+            address_for(&snapshot, salt_b)
         );
     }
 

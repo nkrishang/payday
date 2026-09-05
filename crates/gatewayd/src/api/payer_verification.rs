@@ -17,7 +17,9 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
-use gateway_core::{Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse};
+use gateway_core::{
+    Invoice, InvoiceStatus, PayerPolicyMode, VerificationFacts, VerificationRequirementsResponse,
+};
 use gateway_db::{DbInvoice, DbPayerSession, PAYER_SESSION_TTL, StartEmailVerificationError};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -66,9 +68,19 @@ pub fn session_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty() && token.len() <= MAX_SESSION_TOKEN_LEN)
 }
 
-fn status_response(mode: PayerPolicyMode, session: &DbPayerSession) -> VerificationStatusResponse {
+fn status_response(
+    mode: PayerPolicyMode,
+    session: &DbPayerSession,
+    wallet_bound: bool,
+) -> VerificationStatusResponse {
     VerificationStatusResponse {
-        requirements: VerificationRequirementsResponse::from_facts(mode, session.facts()),
+        requirements: VerificationRequirementsResponse::from_facts(
+            mode,
+            VerificationFacts {
+                email: session.facts().email,
+                wallet: wallet_bound,
+            },
+        ),
     }
 }
 
@@ -287,7 +299,15 @@ pub async fn confirm_email(
         tracing::info!(invoice_id = %row.id, "payer verification completed");
     }
     let mode = invoice.issuance_snapshot.payer_policy.mode();
-    Ok((no_store(), Json(status_response(mode, &completion.session))).into_response())
+    Ok((
+        no_store(),
+        Json(status_response(
+            mode,
+            &completion.session,
+            invoice.binding.is_some(),
+        )),
+    )
+        .into_response())
 }
 
 /// What the caller's session has established, or, without a session, what
@@ -314,12 +334,13 @@ pub async fn status(
                 .find_active(token, row.id)
                 .await?
                 .ok_or_else(ApiError::payer_session_invalid)?;
-            status_response(mode, &session)
+            status_response(mode, &session, row.payment_address.is_some())
         }
         None => VerificationStatusResponse {
             requirements: VerificationRequirementsResponse::for_mode(
                 mode,
                 row.verification_completed_at.is_some(),
+                row.payment_address.is_some(),
             ),
         },
     };
