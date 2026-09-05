@@ -35,12 +35,13 @@ secrets, signer, load balancer, alarms, and DNS record. `api_key_prefix =
 "payday_test_"` makes this service issue sandbox keys; production explicitly
 uses `payday_live_`.
 
-## CLI
+## Calling it
 
-`--sandbox` selects the hosted sandbox:
+Point the SDK or `curl` at the sandbox origin with a `payday_test_` key:
 
 ```bash
-PAYDAY_API_KEY=payday_test_... payday --sandbox get <PAYMENT_ID>
+curl -fsS "https://api.sandbox.payday.sh/v1/payments/<PAYMENT_ID>" \
+  -H "Authorization: Bearer payday_test_..."
 ```
 
-An explicit `--api-url` (or `PAYDAY_API_URL`) wins over `--sandbox`.
+In the SDK, pass `baseUrl: "https://api.sandbox.payday.sh"` to `PaydayClient`.

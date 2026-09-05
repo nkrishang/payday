@@ -70,9 +70,9 @@
 }
 
 /*
- * The hero terminal is a dark panel in both themes — it is a picture of a
- * program, and the CLI's colours only make sense on a terminal ground. Tokens
- * are fixed rather than theme-swapped for that reason.
+ * The hero's code panels are dark in both themes — they are pictures of a
+ * program, and their colours only make sense on a terminal ground. Tokens are
+ * fixed rather than theme-swapped for that reason.
  */
 :root {
   --term-bg: #0b0b0b;

@@ -4,7 +4,7 @@ import { config } from "./config";
 /**
  * Merchant dashboard identity.
  *
- * The dashboard signs in with the same passwordless email OTP as the CLI,
+ * The dashboard signs in with a passwordless email OTP,
  * exchanged straight against the issuer's passwordless endpoints (Auth0 in
  * production, `payday-dev-identity` locally) with the dashboard's own client
  * ID. The resulting access token for the API audience is the session: the API

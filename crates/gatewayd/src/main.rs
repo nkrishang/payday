@@ -46,7 +46,6 @@ async fn main() {
             auth0.issuer.clone(),
             auth0.audience.clone(),
             auth0.client_id.clone(),
-            auth0.dashboard_client_id.clone(),
         )
     });
     let dev_identity = config.dev_identity();
@@ -54,16 +53,10 @@ async fn main() {
     let (identity_verifier, aws) = tokio::join!(
         async move {
             match auth0 {
-                Some((issuer, audience, client_id, dashboard_client_id)) => Some(
-                    api::Auth0Verifier::new(
-                        issuer,
-                        audience,
-                        client_id,
-                        dashboard_client_id,
-                        dev_identity,
-                    )
-                    .await
-                    .expect("failed to initialize Auth0 JWT verification"),
+                Some((issuer, audience, client_id)) => Some(
+                    api::Auth0Verifier::new(issuer, audience, client_id, dev_identity)
+                        .await
+                        .expect("failed to initialize Auth0 JWT verification"),
                 ),
                 None => None,
             }
@@ -135,7 +128,6 @@ async fn main() {
                 payer_auth.issuer.clone(),
                 payer_auth.audience.clone(),
                 payer_auth.client_id.clone(),
-                None,
                 config.dev_identity(),
             )
             .await

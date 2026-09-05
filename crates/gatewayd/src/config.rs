@@ -50,17 +50,11 @@ impl Config {
         let auth0_issuer = std::env::var("PAYDAY_AUTH0_ISSUER").ok();
         let auth0_audience = std::env::var("PAYDAY_AUTH0_AUDIENCE").ok();
         let auth0_client_id = std::env::var("PAYDAY_AUTH0_CLIENT_ID").ok();
-        // Absent (or empty, as the ECS task sets it while unconfigured) means
-        // dashboard tokens are not accepted at all.
-        let dashboard_client_id = std::env::var("PAYDAY_DASHBOARD_AUTH0_CLIENT_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
         let auth0 = match (auth0_issuer, auth0_audience, auth0_client_id) {
             (Some(issuer), Some(audience), Some(client_id)) => Some(Auth0Config {
                 issuer,
                 audience,
                 client_id,
-                dashboard_client_id,
             }),
             (None, None, None) => None,
             _ => panic!(
@@ -387,11 +381,9 @@ pub struct PayerVerificationConfig {
 pub struct Auth0Config {
     pub issuer: String,
     pub audience: String,
-    /// The CLI application: its tokens may issue API keys.
-    pub client_id: String,
     /// The dashboard application: its tokens authenticate API calls as a
-    /// session, never issue keys. `None` disables dashboard sessions.
-    pub dashboard_client_id: Option<String>,
+    /// session and, while fresh, issue or revoke the account's API key.
+    pub client_id: String,
 }
 
 /// The S3 bucket (or MinIO, through the endpoint override) holding PDFs.

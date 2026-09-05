@@ -1,9 +1,9 @@
 # The merchant dashboard is a browser application, so it holds no secret and
-# authenticates with the same passwordless email OTP as the CLI, exchanged
-# directly against Auth0's passwordless endpoints (no redirect flow). Its
-# access tokens are accepted by the API as a session credential; the Post-Login
-# Action admits them only when this client's ID is configured as the
-# PAYDAY_DASHBOARD_CLIENT_ID secret.
+# authenticates with a passwordless email OTP exchanged directly against
+# Auth0's passwordless endpoints (no redirect flow). It is the only merchant
+# application: its access tokens are the API's session credential and, while
+# fresh, the credential that issues an API key. The Post-Login Action admits
+# them only when this client's ID is configured as the PAYDAY_CLIENT_ID secret.
 resource "auth0_client" "dashboard" {
   name            = "Payday Dashboard"
   app_type        = "spa"

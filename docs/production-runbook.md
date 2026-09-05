@@ -26,7 +26,7 @@ Required:
    needs standard `eth_blockNumber`, `eth_getLogs`, block lookup, call,
    transaction submission, and receipt methods.
 4. **GitHub account/repository.** This repository already satisfies that
-   requirement. GitHub Actions runs CI and creates CLI releases from `v*` tags.
+   requirement. GitHub Actions runs CI.
 5. **A Monad deployment wallet with MON.** Prefer a hardware wallet. A separate
    encrypted Foundry keystore is acceptable for the ownerless factory's one-time
    deployment. The AWS KMS sweep address also needs a deliberately small MON gas
@@ -51,7 +51,7 @@ third-party key-management account is required.
 ## Production hostnames
 
 - `https://api.payday.sh` is the public API behind AWS WAF and the Application
-  Load Balancer. The CLI uses this as `PAYDAY_API_URL`.
+  Load Balancer. Merchant servers and the SDK call it with an API key.
 - `https://pay.payday.sh` serves scoped payer checkout links through the same
   load balancer.
 - The indexer/sweeper and PostgreSQL database have no public hostname or inbound
@@ -208,9 +208,8 @@ Replace every placeholder in `terraform.tfvars`, including:
   leave it unset until then. There is no safe placeholder, and the full apply
   in step 7 refuses until it is set
 - current `usdc_start_block`
-- Auth0 issuer, API audience, and Native application client ID
-- `dashboard_auth0_client_id`, once the dashboard's Auth0 Single Page
-  Application exists; leave it out until then
+- Auth0 issuer, API audience, and the dashboard's Single Page Application
+  client ID (`auth0_client_id`)
 
 Supply the RPC URL without writing it to the tfvars file:
 
@@ -336,7 +335,7 @@ aws s3api get-bucket-notification-configuration \
 
 `status` must be `ACTIVE`, `tagging` `ENABLED`, and the notification
 configuration must contain `EventBridgeConfiguration`. Then upload a small PDF
-through the CLI (`payday create --attachment`) or the dashboard and watch
+through the dashboard (or the SDK's `attachments.upload`) and watch
 finalization move from `409 attachment_scan_pending` to an attachment
 descriptor within a few minutes; `aws s3api get-object-tagging` on
 `uploads/<account_id>/<attachment_id>.pdf` then shows
@@ -357,34 +356,34 @@ cast wallet address --aws
 ```
 
 Publish that address as Payday's trusted attestor, in the API documentation
-and wherever proofs are downloaded, so merchants and auditors can pass it to
-`payday proof verify proof.json --trusted-attestor <address>`; an attestation
-signed by anything else must fail verification. The address changes only if
+and wherever proofs are downloaded, so merchants and auditors can hand it to
+whatever runs `gateway_core::verify_proof` as the trusted attestor; an
+attestation signed by anything else must fail verification. The address changes only if
 the key is replaced, which changes the trust anchor of every earlier proof,
 so treat replacement as an announced cut-over, never as routine rotation.
 
-## 11. Configure and test the CLI
+## 11. Sign in and test the API
 
-Authenticate through Auth0. Production API and Auth0 defaults are compiled into
-the CLI, and the key is saved securely in its XDG-aware credentials file:
+Sign in at `https://payday.sh` with an emailed code and mint an API key in the
+dashboard's API key section (`docs/authentication.md` § 5). Then, with that key:
 
 ```bash
-cargo run --release -p gateway-cli --bin payday -- login
-
+export PAYDAY_API_KEY="<the key, from your secret store>"
 curl --fail "https://api.payday.sh/health"
-cargo run --release -p gateway-cli --bin payday -- create \
-  --chain-id 143 \
-  --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  --payout <YOUR_PAYOUT_ADDRESS> \
-  --expires-in 3600 \
-  --amount 0.01
+curl --fail -sS "https://api.payday.sh/v1/payments" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: launch-check-$(date +%s)" \
+  -d '{"amount":"0.01","payout_address":"<YOUR_PAYOUT_ADDRESS>",
+       "issuer":{"name":"Payday"},"bill_to":{"name":"Launch check"},
+       "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
 The response's `recovery_address` must be the Payday recovery wallet from
 step 6. Pay exactly 0.01 native USDC to the returned payment address. Confirm
 that:
 
-1. CLI status progresses `awaiting_payment → paid → settled`, with
+1. `GET /v1/payments/{id}` progresses `awaiting_payment → paid → settled`, with
    `received_base_units`, `settlement_tx_hash`, `settled_at`, and `settled_block` set.
 2. The beneficiary receives exactly the USDC amount.
 3. `balanceOf(payment_address)` becomes zero.
@@ -396,9 +395,9 @@ that:
    Return it by hand from the recovery key afterwards.
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
-8. `payday proof download <id> --output proof.json` followed by
-   `payday proof verify proof.json --trusted-attestor <address from step 10>`
-   succeeds.
+8. `GET /v1/payments/{id}/proof` returns a proof whose attestation `signer`
+   is the address from step 10, and `gateway_core::verify_proof` accepts it
+   with that address as the trusted attestor.
 
 Do not advertise or depend on the service until this succeeds.
 
@@ -407,7 +406,7 @@ Do not advertise or depend on the service until this succeeds.
 ### Notification contact rollout gate
 
 Migration `0010` adds the verified-email contact and notification outbox.
-Existing accounts begin without an email and must run `payday login` again;
+Existing accounts begin without an email and must sign in again;
 payment creation refuses to create additional unnotifiable payments until a
 verified email has been captured. During this
 rollout, query the production database through the procedure in
@@ -444,10 +443,6 @@ update `factory_address`, `batch_sweeper_address`, `factory_code_hash`, and
 generation refuses to start against another, so a half-updated configuration
 fails closed rather than settling against the wrong contracts.
 
-To publish CLI binaries after CI is green, create and push a signed `v*` tag.
-The release workflow builds Linux, macOS Intel/Apple Silicon, and Windows assets
-and creates the GitHub Release.
-
 ## Backups and recurring operations
 
 - Keep RDS deletion protection enabled and periodically test point-in-time
@@ -458,9 +453,9 @@ and creates the GitHub Release.
   indexer and loss of the retained database advisory-lock connection
   terminate the worker instead of appearing healthy; a stuck helper
   transaction only pauses the sweep worker.
-- Rotate account API keys with `payday keys rotate` as described in the
-  secrets-rotation runbook. The previous key has a 24-hour grace period;
-  `payday keys revoke` invalidates current and grace-period keys immediately.
+- Rotate account API keys from the dashboard's API key section as described
+  in the secrets-rotation runbook. The previous key has a 24-hour grace period;
+  revoking invalidates current and grace-period keys immediately.
 - Review the `recovered_funds` ledger and return held amounts by hand from the
   recovery key; see "Reconciling recovered funds" in
   `docs/runbooks/stuck-invoice.md`. Nothing automates a return.

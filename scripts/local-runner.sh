@@ -150,7 +150,7 @@ load_local_env() {
   export PAYDAY_API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
   export PAYDAY_DEV_IDENTITY=1
   export PAYDAY_AUTH0_ISSUER="${PAYDAY_AUTH0_ISSUER:-http://127.0.0.1:3001}"
-  export PAYDAY_AUTH0_CLIENT_ID="${PAYDAY_AUTH0_CLIENT_ID:-payday-cli-local}"
+  export PAYDAY_AUTH0_CLIENT_ID="${PAYDAY_AUTH0_CLIENT_ID:-payday-dashboard-local}"
   export PAYDAY_AUTH0_AUDIENCE="${PAYDAY_AUTH0_AUDIENCE:-payday-api-local}"
   export PAYDAY_DEV_IDENTITY_ISSUER="$PAYDAY_AUTH0_ISSUER"
   export PAYDAY_FACTORY_ADDRESS="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
@@ -181,7 +181,6 @@ load_local_env() {
   # locally — a different account than PAYDAY_SIGNER_KEY so the two never
   # contend for a nonce.
   export PAYDAY_ONBOARDING_PAYER_KEY="${PAYDAY_ONBOARDING_PAYER_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
-  export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="${PAYDAY_DASHBOARD_AUTH0_CLIENT_ID:-payday-dashboard-local}"
   # Payer email verification against the same development provider, which
   # serves the payer client and audience next to the merchant ones.
   export PAYDAY_PAYER_AUTH0_ISSUER="${PAYDAY_PAYER_AUTH0_ISSUER:-$PAYDAY_AUTH0_ISSUER}"
@@ -216,20 +215,16 @@ pin_deployment_code_hashes() {
   echo "[bootstrap] batch sweeper code hash $PAYDAY_BATCH_SWEEPER_CODE_HASH"
 }
 
+# Create a local account and print its API key once, through the same
+# email-OTP exchange the dashboard makes; the code is in the [identity] log.
 seed() {
-  [[ -x target/debug/payday ]] || cargo build --locked -p gateway-cli
-  # The local profile is the public identity/bootstrap boundary. Keep this
-  # wrapper independent of its implementation (and permit early overrides).
-  if [[ -n "${PAYDAY_LOCAL_SEED_COMMAND:-}" ]]; then
-    bash -c "$PAYDAY_LOCAL_SEED_COMMAND"
-  else
-    target/debug/payday --profile local login --yes
-  fi
+  ./scripts/local-api-key.sh "$@"
 }
 
 if [[ "$mode" == seed ]]; then
+  shift
   load_local_env
-  seed
+  seed "$@"
   exit
 fi
 
@@ -278,7 +273,7 @@ for _ in {1..100}; do
 done
 curl -fsS "$PAYDAY_API_URL/health" >/dev/null || { echo "gatewayd did not become ready" >&2; exit 1; }
 prefix indexer ./target/debug/gateway-indexer
-echo "[runner] ready: API $PAYDAY_API_URL; run 'just seed' in another shell"
+echo "[runner] ready: API $PAYDAY_API_URL; sign in at the dashboard, or run 'just seed' in another shell for an API key"
 echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do
   for pid in "${pids[@]}"; do

@@ -8,9 +8,9 @@ dev:
 e2e:
     ./scripts/local-runner.sh e2e
 
-# Create/refresh the local development identity through gateway-cli.
-seed:
-    ./scripts/local-runner.sh seed
+# Create a local account through the email-OTP flow and print its API key once.
+seed *ARGS:
+    ./scripts/local-runner.sh seed {{ARGS}}
 
 # Serve payday.sh — the landing page and hosted checkout — on port 3002.
 # Port 3001 belongs to the local development identity provider.

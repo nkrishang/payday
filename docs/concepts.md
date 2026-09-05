@@ -7,8 +7,8 @@ An **invoice** is the document a merchant issues: an issuer and a bill-to party
 directly, optional notes, heading, reference, and metadata, a payer policy,
 and at most one PDF attachment. A **payment** is the on-chain fulfilment of
 that invoice — the virtual account, the transfers that reach it, and its
-settlement. The API keeps `/v1/payments` as the path; the dashboard, CLI, and
-this documentation say invoice for the document and payment for the funds.
+settlement. The API keeps `/v1/payments` as the path; the dashboard and this
+documentation say invoice for the document and payment for the funds.
 
 Payday models no line items, quantities, subtotals, discounts, tax, or fiat.
 The amount is authoritative; an attached PDF is stored, presented, and hashed
@@ -138,8 +138,8 @@ outcomes happen after issuance, so they are Payday-attested rather than
 address-committed; the attestation names the invoice's attribution hash and
 payment address, so it belongs to that invoice alone. The proof does not claim
 that the verified person owned the sending wallet. It is available to the merchant
-(`payday proof download`, `GET /v1/payments/{id}/proof`) and shared at the
-merchant's discretion; `payday proof verify` checks it offline.
+(`GET /v1/payments/{id}/proof`) and shared at the merchant's discretion;
+`gateway_core::verify_proof` checks it offline.
 
 ## Safety boundaries
 

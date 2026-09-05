@@ -557,7 +557,7 @@ fn transfers() {}
 fn payment_attachment() {}
 #[utoipa::path(get, path="/v1/payments/{id}/invoice.pdf", operation_id="getInvoicePdf", tag="payments", params(("id"=String, Path)), responses((status=200,description="Deterministic invoice summary as application/pdf, served as an attachment"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn invoice_pdf() {}
-#[utoipa::path(get, path="/v1/payments/{id}/proof", operation_id="getProofOfPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Verifiable offline with payday proof verify",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="payment_not_settled",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/payments/{id}/proof", operation_id="getProofOfPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Verifiable offline; gateway_core::verify_proof holds the checks",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="payment_not_settled",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn proof() {}
 #[utoipa::path(get, path="/v1/payments/{id}/verification", operation_id="getPaymentVerification", tag="payments", params(("id"=String, Path)), responses((status=200,description="Every verification attempt on the invoice with each fact reported separately",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn payment_verification() {}
@@ -630,7 +630,7 @@ impl utoipa::Modify for Security {
         use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
         let c = api.components.as_mut().unwrap();
         // Merchant routes take either an API key or an Auth0 access token
-        // from the dashboard or CLI application under the same scheme.
+        // from the dashboard application under the same scheme.
         c.add_security_scheme(
             "apiKey",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),

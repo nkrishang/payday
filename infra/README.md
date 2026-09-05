@@ -15,10 +15,9 @@ leave it unset until the key exists, and the API task definition's
 precondition fails the plan until it is set.
 
 The API task also requires an externally configured Auth0 tenant issuer, API
-audience, and Native application client ID, plus the merchant dashboard's
-Single Page Application client ID once it exists (`dashboard_auth0_client_id`;
-while empty, the variable is not passed to the task at all), and the payer
-verification API and Native application once they exist
+audience, and the merchant dashboard's Single Page Application client ID
+(`auth0_client_id`), and the payer verification API and Native application
+once they exist
 (`payer_auth0_audience` and `payer_auth0_client_id`, set together; while
 empty, the payer settings and the generated `PAYDAY_PAYER_REF_MASTER_KEY`
 secret are not passed to the task and verification is unavailable). Terraform
@@ -149,7 +148,7 @@ rotation is not observed by running ECS tasks. Force a new API deployment after
 rotating the webhook key, and retain prior application key material until
 ciphertext associated with its key ID has been re-encrypted.
 
-KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can pass it to `payday proof verify --trusted-attestor`.
+KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gateway_core::verify_proof`).
 
 WAF request sampling is disabled because samples can contain the bearer `Authorization` header. Fatal indexer safety errors and loss of its database lock exit the process and publish a log-derived CloudWatch alarm. RDS Multi-AZ, ALB, WAF, public IPv4 addresses, Container Insights, logs, Secrets Manager, and KMS incur ongoing charges. Public IPv4 and cross-AZ traffic are billed. This stack has no autoscaling, VPC endpoints, bastion, or automatic finality-reorg recovery.
 

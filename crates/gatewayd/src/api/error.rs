@@ -79,7 +79,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "account_contact_required",
-            message: "A verified merchant email is required before creating a payment; run `payday login` to authenticate again".into(),
+            message: "A verified merchant email is required before creating a payment; sign in to the dashboard again".into(),
         }
     }
 

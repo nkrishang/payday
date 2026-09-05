@@ -27,7 +27,7 @@ export const metadata: Metadata = {
     template: "%s · Payday",
   },
   description:
-    "Create a USDC payment through a small API or CLI, share one link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically.",
+    "Create a USDC payment through a small API, share one link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically.",
   openGraph: {
     type: "website",
     siteName: "Payday",

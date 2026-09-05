@@ -57,9 +57,8 @@ export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
 export PAYDAY_DEV_IDENTITY_BIND="127.0.0.1:3001"
 export PAYDAY_DEV_IDENTITY_ISSUER="http://127.0.0.1:3001"
 export PAYDAY_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
-export PAYDAY_AUTH0_CLIENT_ID="payday-cli-local"
+export PAYDAY_AUTH0_CLIENT_ID="payday-dashboard-local"
 export PAYDAY_AUTH0_AUDIENCE="payday-api-local"
-export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="payday-dashboard-local"
 export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
 export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
 export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
@@ -211,7 +210,9 @@ create_invoice() {
 }
 
 get_invoice() {
-  ./target/debug/payday --json get "$1"
+  curl --fail --silent \
+    --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    "$API_URL/v1/payments/$1"
 }
 
 # Poll at the documented per-account rate until a jq expression is true. A
@@ -413,13 +414,10 @@ curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.j
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
-echo "Creating accounts through the real local email-OTP CLI flow"
-export PAYDAY_CONFIG_DIR="$logs/payday-config"
-primary_login="$(printf 'primary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
-PAYDAY_API_KEY="$(jq -er .api_key <<<"$primary_login")"
+echo "Creating accounts through the real local email-OTP flow"
+PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test | jq -er .api_key)"
 export PAYDAY_API_KEY
-second_login="$(printf 'secondary@example.test\n%s\n' "$PAYDAY_DEV_IDENTITY_OTP" | ./target/debug/payday --profile local --json login --yes --show)"
-SECOND_API_KEY="$(jq -er .api_key <<<"$second_login")"
+SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test | jq -er .api_key)"
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")
@@ -613,7 +611,9 @@ assert_eq beneficiary_blacklisted "$(get_invoice "$blacklisted_id" | jq -r .atte
 assert_eq 250000 "$(token_balance "$blacklisted_address")" "funds must stay at the address while blocked"
 set_blacklisted "$BENEFICIARY_BLACKLISTED" false
 # Audited operator procedure from docs/runbooks/stuck-invoice.md.
-./target/debug/payday --json ops release "$blacklisted_id" >/dev/null
+curl --fail --silent --output /dev/null --request POST \
+  --header "Authorization: Bearer $PAYDAY_ADMIN_SECRET" \
+  "$API_URL/v1/admin/payments/$blacklisted_id/release"
 wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
 

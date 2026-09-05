@@ -27,8 +27,8 @@ import { useMerchant, useResource } from "./session";
  * The dashboard signs in with an emailed code and never simply holds this
  * credential — reading the account here proves nothing about permission to
  * mint a live key for it — so generating, rolling, or revoking steps up with
- * its own fresh code first, the same email-OTP authentication `payday login`
- * and `payday keys` use from the CLI. Only that action needs it; reading the
+ * its own fresh code first: the API accepts only a fresh, single-use
+ * email-OTP authentication there. Only that action needs it; reading the
  * current key's metadata below does not.
  */
 export function ApiKeySection() {
