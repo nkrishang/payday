@@ -96,23 +96,15 @@ variable "auth0_audience" {
 }
 
 variable "auth0_client_id" {
-  description = "Public client ID of the Auth0 Native application used by payday."
+  description = <<-EOT
+    Public client ID of the Auth0 Single Page Application the merchant
+    dashboard signs in with (auth0/dashboard.tf); see docs/authentication.md.
+  EOT
   type        = string
   validation {
     condition     = length(trimspace(var.auth0_client_id)) > 0
     error_message = "auth0_client_id must not be empty."
   }
-}
-
-variable "dashboard_auth0_client_id" {
-  description = <<-EOT
-    Public client ID of the Auth0 Single Page Application the merchant
-    dashboard signs in with; see docs/authentication.md. Leave empty until it
-    exists: gatewayd then accepts only API keys and the CLI's Native
-    application, and the variable is not passed to the task at all.
-  EOT
-  type        = string
-  default     = ""
 }
 
 variable "payer_auth0_audience" {

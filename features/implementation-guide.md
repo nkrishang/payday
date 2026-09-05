@@ -7,7 +7,7 @@ Line references describe the repository before these changes.
 ## Cross-slice decisions
 
 1. Add one consolidated migration: `crates/gateway-db/migrations/0011_verified_customer_funds.sql`. Keep editing that migration while Slices 1–4 are under development. Because Payday has no production data, reset development databases as needed and squash `0011` into the baseline before the first production release.
-2. Keep `/v1/payments` as the compatibility API path, but use **invoice** for new domain, dashboard, CLI, and documentation terminology.
+2. Keep `/v1/payments` as the compatibility API path, but use **invoice** for new domain, dashboard, and documentation terminology.
 3. Use S3 presigned PUTs and GuardDuty Malware Protection for S3. Only the managed tag `GuardDutyMalwareScanStatus=NO_THREATS_FOUND` permits finalization.
 4. Payer sessions use opaque bearer tokens in the `Payday-Payer-Session` header. Do not use query-string tokens or third-party cookies.
 5. The current Didit V3 API accepts `expected_details.first_name` and `expected_details.last_name`; it does not document `legal_name` or `expected_details_mismatch_action`. Therefore the implementation uses:
@@ -521,8 +521,6 @@ Modify:
 - `gateway-core/src/dto.rs`: remove `CreatePaymentRequest.refund_address`.
 - Rename merchant response `refund_address` to `recovery_address`; it remains visible to merchants but not payers.
 - `sdk/typescript/src/index.ts`: remove `CreatePayment.refund_address`; rename the response field.
-- `gateway-cli/src/cli.rs`: remove `--refund-to`.
-- `gateway-cli/src/main.rs`: stop validating or sending recovery.
 - Change checkout copy in `checkout-state.ts` from "merchant refund address" to "Payday recovery wallet; contact the merchant and Payday support for return handling."
 
 ## 6. Validate deployed contract generations
@@ -586,7 +584,6 @@ Add or modify:
   - `create_rejects_unknown_refund_address`
   - `create_uses_configured_recovery_address`
 - SDK tests: assert `refund_address` is absent from create payloads.
-- CLI tests: assert `--refund-to` is rejected.
 - Startup tests: wrong factory hash, sweeper hash, or bound factory fails startup.
 
 ## Slice 1 verification
@@ -597,7 +594,7 @@ forge build --sizes
 forge test --match-contract PaymentTest -vvv
 forge test --match-contract BatchSweeperTest -vvv
 cargo fmt --all -- --check
-cargo test -p gateway-core -p gateway-db -p gateway-indexer -p gatewayd -p gateway-cli
+cargo test -p gateway-core -p gateway-db -p gateway-indexer -p gatewayd
 cargo clippy --workspace --all-targets --no-deps
 npm test --workspace @payday/sdk
 npm run typecheck --workspace @payday/web
@@ -1066,29 +1063,18 @@ keccak256(
 
 with a dedicated AWS KMS secp256k1 key. Include the recovered signer address. Do not reuse the sweep signer or recovery-wallet key.
 
-Create CLI verification:
-
-```rust
-pub struct VerifyProofArgs {
-    pub proof: PathBuf,
-    #[arg(long)]
-    pub attachment: Option<PathBuf>,
-    #[arg(long)]
-    pub trusted_attestor: Vec<String>,
-    #[arg(long)]
-    pub rpc_url: Option<String>,
-}
-```
-
-`payday proof download <payment> --output proof.json` and `payday proof verify proof.json` must verify:
+Offline verification (`gateway_core::verify_proof`, over the JSON that
+`GET /v1/payments/{id}/proof` serves) must verify:
 
 - JCS hash;
 - nonce-derived salt;
 - CREATE3 address;
 - attachment hash when provided;
 - signed attestation;
-- included transfer recipient;
-- optional live chain receipt when `--rpc-url` is supplied.
+- included transfer recipient.
+
+Live chain receipts are provable only against an RPC and are out of scope for
+the offline verifier.
 
 ## 7. Add the dashboard
 
@@ -1116,7 +1102,7 @@ Use the same API routes as SDK users. Do not reproduce payer-policy, attachment,
 
 Add merchant Auth0 browser authentication. Refactor `Auth0Verifier` so dashboard identity tokens map to `AccountId` without issuing or storing an API key in the browser. Keep fresh-authentication and one-time-event enforcement exclusively on API-key issuance/revocation.
 
-## 8. Update SDK and CLI
+## 8. Update SDK
 
 Update SDK types to exactly mirror Rust definitions. Add:
 
@@ -1157,27 +1143,6 @@ export interface AttachmentDescriptor {
 
 Add SDK clients for customers, attachments, invoice PDF, and proof.
 
-Modify CLI `CreateArgs`:
-
-```rust
-pub struct CreateArgs {
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["amount", "to"])]
-    pub from_file: Option<PathBuf>,
-    #[arg(long, requires = "to")]
-    pub amount: Option<String>,
-    #[arg(long, requires = "amount")]
-    pub to: Option<String>,
-    #[arg(long)]
-    pub attachment: Option<PathBuf>,
-    #[arg(long)]
-    pub idempotency_key: Option<String>,
-}
-```
-
-`--from-file` deserializes `CreatePaymentRequest` with `deny_unknown_fields`. `--attachment` performs create-upload, PUT, finalize polling, then injects `attachment_id`.
-
-Update the assertion at `cli.rs` to require invoice terminology rather than forbidding it.
-
 ## Slice 2 tests
 
 - `gateway-core/src/attribution.rs`:
@@ -1199,7 +1164,6 @@ Update the assertion at `cli.rs` to require invoice terminology rather than forb
   - `proof_reconstructs_salt_and_create3_address`
   - `tampered_snapshot_attachment_or_attestation_fails`
 - `sdk/typescript/test/client.test.mjs`: customer, upload, proof request shapes.
-- `gateway-cli`: `--from-file`, PDF upload, proof verification, and invoice help.
 - Web component tests for dashboard forms and attachment progression.
 - Playwright: create customer, upload PDF, create invoice, view detail, download proof.
 
@@ -1207,7 +1171,7 @@ Update the assertion at `cli.rs` to require invoice terminology rather than forb
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p gateway-core -p gateway-db -p gatewayd -p gateway-cli
+cargo test -p gateway-core -p gateway-db -p gatewayd
 cargo clippy --workspace --all-targets --no-deps
 npm test --workspace @payday/sdk
 npm run typecheck --workspace @payday/web

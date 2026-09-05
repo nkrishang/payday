@@ -27,9 +27,9 @@ const AUTHENTICATION_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 const CLOCK_SKEW: Duration = Duration::from_secs(30);
 const EMAIL_OTP_METHOD: &str = "email_otp";
 
-/// A fresh email-OTP authentication from one of the verifier's own merchant
-/// applications — the CLI or the dashboard — the only credentials that may
-/// issue or revoke API keys; for the payer audience it is the proof that the
+/// A fresh email-OTP authentication from the verifier's own merchant
+/// application — the dashboard — the only credential that may issue or
+/// revoke API keys; for the payer audience it is the proof that the
 /// merchant-asserted mailbox was just opened.
 #[derive(Clone, Debug)]
 pub struct Identity {
@@ -57,10 +57,9 @@ pub struct Auth0Verifier {
 struct Auth0VerifierInner {
     issuer: String,
     audience: String,
-    /// The CLI application.
+    /// The dashboard application, the one merchant client whose tokens
+    /// this deployment accepts.
     client_id: String,
-    /// The dashboard application; `None` refuses its tokens entirely.
-    dashboard_client_id: Option<String>,
     jwks_url: String,
     http: reqwest::Client,
     keys: RwLock<CachedKeys>,
@@ -95,7 +94,6 @@ impl Auth0Verifier {
         issuer: String,
         audience: String,
         client_id: String,
-        dashboard_client_id: Option<String>,
         allow_dev_identity: bool,
     ) -> Result<Self, String> {
         let parsed_issuer = reqwest::Url::parse(&issuer)
@@ -113,12 +111,6 @@ impl Auth0Verifier {
                 return Err(format!("Auth0 {name} must not be empty"));
             }
         }
-        if dashboard_client_id
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty() || *value == client_id)
-        {
-            return Err("Auth0 dashboard client ID must be a distinct, non-empty client".into());
-        }
         let issuer = format!("{}/", issuer.trim_end_matches('/'));
         let jwks_url = format!("{issuer}.well-known/jwks.json");
         let http = reqwest::Client::builder()
@@ -132,7 +124,6 @@ impl Auth0Verifier {
                 issuer,
                 audience,
                 client_id,
-                dashboard_client_id,
                 jwks_url,
                 http,
                 keys: RwLock::new(CachedKeys {
@@ -151,13 +142,9 @@ impl Auth0Verifier {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| ApiError::identity_unauthorized())?
             .as_secs();
-        // Either merchant client may hold this, same as a session: the CLI
-        // proves itself the same way the dashboard's own sign-in does. What
-        // makes this stronger than a session is everything below — freshness
-        // and single use — not which application asked.
-        let accepted_client = claims.azp == self.inner.client_id
-            || self.inner.dashboard_client_id.as_deref() == Some(claims.azp.as_str());
-        if !accepted_client
+        // The same client a session comes from: what makes this stronger
+        // than a session is everything below — freshness and single use.
+        if claims.azp != self.inner.client_id
             || claims.authentication_client_id != claims.azp
             || !email_otp_subject(&claims)
             || claims.authentication_event_id.is_empty()
@@ -175,15 +162,13 @@ impl Auth0Verifier {
         })
     }
 
-    /// A dashboard or CLI token as a session: signature, issuer, audience,
-    /// and expiry as for [`Self::verify`], and the same email-OTP provenance,
-    /// but no freshness window and no event consumption — the token lives
-    /// as long as Auth0 says and never touches key state.
+    /// A dashboard token as a session: signature, issuer, audience, and
+    /// expiry as for [`Self::verify`], and the same email-OTP provenance, but
+    /// no freshness window and no event consumption — the token lives as
+    /// long as Auth0 says and never touches key state.
     pub async fn verify_session(&self, token: &str) -> Result<SessionIdentity, ApiError> {
         let claims = self.decode(token).await?;
-        let accepted_client = claims.azp == self.inner.client_id
-            || self.inner.dashboard_client_id.as_deref() == Some(claims.azp.as_str());
-        if !accepted_client
+        if claims.azp != self.inner.client_id
             || claims.authentication_client_id != claims.azp
             || !email_otp_subject(&claims)
         {
@@ -267,7 +252,6 @@ impl Auth0Verifier {
         issuer: &str,
         audience: &str,
         client_id: &str,
-        dashboard_client_id: Option<&str>,
         kid: &str,
         key: DecodingKey,
     ) -> Self {
@@ -276,7 +260,6 @@ impl Auth0Verifier {
                 issuer: format!("{}/", issuer.trim_end_matches('/')),
                 audience: audience.into(),
                 client_id: client_id.into(),
-                dashboard_client_id: dashboard_client_id.map(str::to_owned),
                 jwks_url: String::new(),
                 http: reqwest::Client::new(),
                 keys: RwLock::new(CachedKeys {
@@ -349,10 +332,9 @@ async fn fetch_keys(
 }
 
 /// Authenticate a merchant request with either an API key or an identity
-/// token (a dashboard session, or the CLI's own token). The bearer's prefix
-/// decides which: keys are always `payday_live_…`/`payday_test_…`, tokens
-/// never are. Either way the request runs as one account, rate limited as
-/// that account.
+/// token (a dashboard session). The bearer's prefix decides which: keys are
+/// always `payday_live_…`/`payday_test_…`, tokens never are. Either way the
+/// request runs as one account, rate limited as that account.
 pub async fn require_account(
     State(state): State<AppState>,
     mut request: Request,
@@ -566,7 +548,6 @@ mod tests {
                 "http://issuer.example".into(),
                 "audience".into(),
                 "client".into(),
-                None,
                 false,
             )
             .await
@@ -577,7 +558,6 @@ mod tests {
                 "https://issuer.example".into(),
                 " ".into(),
                 "client".into(),
-                None,
                 false,
             )
             .await
@@ -588,23 +568,10 @@ mod tests {
                 "https://issuer.example".into(),
                 "audience".into(),
                 " ".into(),
-                None,
                 false,
             )
             .await
             .is_err()
-        );
-        assert!(
-            Auth0Verifier::new(
-                "https://issuer.example".into(),
-                "audience".into(),
-                "client".into(),
-                Some("client".into()),
-                false,
-            )
-            .await
-            .is_err(),
-            "the dashboard client must be distinct"
         );
         assert!(issuer_transport_allowed(
             &reqwest::Url::parse("http://127.0.0.1:3001").unwrap(),
@@ -632,8 +599,7 @@ mod tests {
             inner: Arc::new(Auth0VerifierInner {
                 issuer: "https://issuer.example/".into(),
                 audience: "https://api.payday.sh".into(),
-                client_id: "payday-cli".into(),
-                dashboard_client_id: Some("payday-dashboard".into()),
+                client_id: "payday-dashboard".into(),
                 jwks_url: "https://issuer.example/.well-known/jwks.json".into(),
                 http: reqwest::Client::new(),
                 keys: RwLock::new(CachedKeys {
@@ -671,9 +637,9 @@ mod tests {
                 aud: audience,
                 exp: expires_at,
                 nbf: 1,
-                azp: "payday-cli",
+                azp: "payday-dashboard",
                 authentication_method: EMAIL_OTP_METHOD,
-                authentication_client_id: "payday-cli",
+                authentication_client_id: "payday-dashboard",
                 authenticated_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -722,9 +688,9 @@ mod tests {
         for (sub, azp, method, client_id, authenticated_at, event_id) in [
             (
                 "google-oauth2|user",
-                "payday-cli",
+                "payday-dashboard",
                 EMAIL_OTP_METHOD,
-                "payday-cli",
+                "payday-dashboard",
                 now,
                 "event",
             ),
@@ -732,13 +698,13 @@ mod tests {
                 "email|user",
                 "other-client",
                 EMAIL_OTP_METHOD,
-                "payday-cli",
+                "payday-dashboard",
                 now,
                 "event",
             ),
             (
                 "email|user",
-                "payday-cli",
+                "payday-dashboard",
                 EMAIL_OTP_METHOD,
                 "other-client",
                 now,
@@ -746,33 +712,33 @@ mod tests {
             ),
             (
                 "email|user",
-                "payday-cli",
+                "payday-dashboard",
                 "social",
-                "payday-cli",
+                "payday-dashboard",
                 now,
                 "event",
             ),
             (
                 "email|user",
-                "payday-cli",
+                "payday-dashboard",
                 EMAIL_OTP_METHOD,
-                "payday-cli",
+                "payday-dashboard",
                 now - 301,
                 "event",
             ),
             (
                 "email|user",
-                "payday-cli",
+                "payday-dashboard",
                 EMAIL_OTP_METHOD,
-                "payday-cli",
+                "payday-dashboard",
                 now + 31,
                 "event",
             ),
             (
                 "email|user",
-                "payday-cli",
+                "payday-dashboard",
                 EMAIL_OTP_METHOD,
-                "payday-cli",
+                "payday-dashboard",
                 now,
                 "",
             ),
@@ -802,7 +768,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_tokens_accept_both_applications_without_a_freshness_window() {
+    async fn session_tokens_authenticate_without_a_freshness_window() {
         let (verifier, key) = verifier_and_key();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -833,7 +799,7 @@ mod tests {
         let stale = now - 24 * 3600;
 
         // A day-old dashboard token is a fine session, but stale for a key
-        // credential regardless of which merchant client minted it.
+        // credential.
         let dashboard = token(
             "payday-dashboard",
             "payday-dashboard",
@@ -846,9 +812,9 @@ mod tests {
         assert_eq!(session.email, "merchant@example.com");
         assert!(verifier.verify(&dashboard).await.is_err());
 
-        // Freshly authenticated, that same dashboard client is just as good a
-        // key credential as the CLI: the dashboard can step up with its own
-        // sign-in to manage the key, without ever holding one day to day.
+        // Freshly authenticated, the same client is a key credential: the
+        // dashboard steps up with its own sign-in to manage the key, without
+        // ever holding one day to day.
         let fresh_dashboard = token(
             "payday-dashboard",
             "payday-dashboard",
@@ -858,25 +824,6 @@ mod tests {
         );
         let identity = verifier.verify(&fresh_dashboard).await.unwrap();
         assert_eq!(identity.subject, "email|user");
-
-        // The CLI's own token works as a session too, stale or not.
-        let cli = token(
-            "payday-cli",
-            "payday-cli",
-            EMAIL_OTP_METHOD,
-            "email|user",
-            stale,
-        );
-        assert!(verifier.verify_session(&cli).await.is_ok());
-        assert!(verifier.verify(&cli).await.is_err());
-        let fresh_cli = token(
-            "payday-cli",
-            "payday-cli",
-            EMAIL_OTP_METHOD,
-            "email|user",
-            now,
-        );
-        assert!(verifier.verify(&fresh_cli).await.is_ok());
 
         for rejected in [
             token(
@@ -888,7 +835,7 @@ mod tests {
             ),
             token(
                 "payday-dashboard",
-                "payday-cli",
+                "other-app",
                 EMAIL_OTP_METHOD,
                 "email|user",
                 now,
@@ -921,17 +868,6 @@ mod tests {
                 ))
                 .await
                 .is_ok()
-        );
-        assert!(
-            stale_verifier(
-                "http://127.0.0.1:1/jwks".into(),
-                "unused",
-                DecodingKey::from_secret(b"")
-            )
-            .verify_session(&dashboard)
-            .await
-            .is_err(),
-            "a deployment without a dashboard client refuses its tokens"
         );
     }
 
@@ -997,8 +933,7 @@ mod tests {
             inner: Arc::new(Auth0VerifierInner {
                 issuer: "https://issuer.example/".into(),
                 audience: "https://api.payday.sh".into(),
-                client_id: "payday-cli".into(),
-                dashboard_client_id: None,
+                client_id: "payday-dashboard".into(),
                 jwks_url,
                 http: reqwest::Client::new(),
                 keys: RwLock::new(CachedKeys {

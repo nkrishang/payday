@@ -13,9 +13,9 @@ export AWS_REGION=eu-north-1
 export MONAD_RPC_URL='https://your-quicknode-endpoint'
 ```
 
-Some runbooks also need an account API key and CLI. Load the key from the
-operator's approved secret store; Terraform does not create or retain user API
-keys:
+Some runbooks also need an account API key, `curl`, and `jq`. Load the key
+from the operator's approved secret store; Terraform does not create or retain
+user API keys:
 
 ```bash
 export PAYDAY_API_URL="https://api.payday.sh"

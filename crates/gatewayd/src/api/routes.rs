@@ -56,8 +56,8 @@ pub fn router(state: AppState) -> Router {
         ])
         .max_age(Duration::from_secs(86_400));
 
-    // Merchant routes: an API key or a dashboard/CLI identity token, one
-    // account either way.
+    // Merchant routes: an API key or a dashboard identity token, one account
+    // either way.
     let authenticated = Router::new()
         .route("/v1/account", get(accounts::get_account))
         .route(
@@ -146,9 +146,8 @@ pub fn router(state: AppState) -> Router {
             auth::require_identity,
         ))
         .layer(RequestBodyLimitLayer::new(16 * 1024))
-        // The CLI never needed this — a non-browser client is not subject to
-        // CORS — but the dashboard's own step-up sign-in calls this route
-        // directly now, from the same origin `authenticated` already trusts.
+        // The dashboard's own step-up sign-in calls this route directly, from
+        // the same origin `authenticated` already trusts.
         .layer(merchant_cors);
 
     let administration = Router::new()
@@ -360,7 +359,6 @@ mod tests {
             "https://payer.issuer/",
             "https://api.payday.sh/payer",
             "payday-payer",
-            None,
             "payer-key",
             DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
         );
@@ -677,8 +675,7 @@ mod tests {
         let verifier = auth::Auth0Verifier::for_test(
             "https://issuer.example/",
             "https://api.payday.sh",
-            "payday-cli",
-            Some("payday-dashboard"),
+            "payday-dashboard",
             "test-key",
             DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
         );
@@ -694,9 +691,9 @@ mod tests {
                     iss: "https://issuer.example/",
                     aud: "https://api.payday.sh",
                     exp: u64::MAX,
-                    azp: "payday-cli",
+                    azp: "payday-dashboard",
                     authentication_method: "email_otp",
-                    authentication_client_id: "payday-cli",
+                    authentication_client_id: "payday-dashboard",
                     authenticated_at,
                     authentication_event_id: event_id,
                     email: "merchant@example.com",
@@ -2148,8 +2145,7 @@ mod tests {
         let verifier = auth::Auth0Verifier::for_test(
             "https://issuer.example/",
             "https://api.payday.sh",
-            "payday-cli",
-            Some("payday-dashboard"),
+            "payday-dashboard",
             "test-key",
             DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
         );
@@ -2187,7 +2183,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn dashboard_and_cli_session_tokens_authenticate_without_an_api_key(pool: PgPool) {
+    async fn dashboard_session_tokens_authenticate_without_an_api_key(pool: PgPool) {
         let (verifier, key) = session_verifier_and_key();
         let app = build(pool.clone(), Some(verifier), Address::ZERO, RECOVERY)
             .await
@@ -2209,11 +2205,11 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         let id = json_body(created).await["id"].as_str().unwrap().to_owned();
 
-        // The CLI's token names the same identity, hence the same account.
-        let cli = session_token(&key, "payday-cli", audience, stale);
+        // A later token for the same identity names the same account.
+        let later = session_token(&key, "payday-dashboard", audience, stale + 60);
         let listed = app
             .clone()
-            .oneshot(get_request(&cli, "/v1/payments"))
+            .oneshot(get_request(&later, "/v1/payments"))
             .await
             .unwrap();
         assert_eq!(listed.status(), StatusCode::OK);
@@ -2236,11 +2232,11 @@ mod tests {
             assert_unauthorized(app.clone(), get_request(&bad, "/v1/payments")).await;
         }
 
-        // Key management keeps the fresh-OTP path: a stale token is refused
-        // regardless of which merchant client minted it, and a client this
-        // deployment does not recognize is refused even when it is fresh.
+        // Key management keeps the fresh-OTP path: a stale token is refused,
+        // and a client this deployment does not recognize is refused even
+        // when it is fresh.
         let key_route = |token: &str| get_request(token, "/v1/account/api-key");
-        for stale in [&dashboard, &cli] {
+        for stale in [&dashboard, &later] {
             let response = app.clone().oneshot(key_route(stale)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(
@@ -2259,23 +2255,15 @@ mod tests {
             "a fresh token from an unrecognized client is still refused"
         );
 
-        let fresh_cli = session_token(&key, "payday-cli", audience, unix_now());
-        let metadata = app.clone().oneshot(key_route(&fresh_cli)).await.unwrap();
+        // The dashboard's own fresh sign-in reaches key management, so it
+        // can manage the key without ever holding one for day-to-day use.
+        let fresh_dashboard = session_token(&key, "payday-dashboard", audience, unix_now());
+        let metadata = app.oneshot(key_route(&fresh_dashboard)).await.unwrap();
         assert_eq!(metadata.status(), StatusCode::OK);
         let metadata = json_body(metadata).await;
         assert_eq!(metadata["account_id"], account.0.to_string());
         assert!(metadata["key_hint"].is_null());
         assert_eq!(metadata["generation"], 1);
-
-        // The dashboard's own fresh sign-in works exactly the same way, so it
-        // can manage the key without ever holding one for day-to-day use.
-        let fresh_dashboard = session_token(&key, "payday-dashboard", audience, unix_now());
-        let metadata = app.oneshot(key_route(&fresh_dashboard)).await.unwrap();
-        assert_eq!(metadata.status(), StatusCode::OK);
-        assert_eq!(
-            json_body(metadata).await["account_id"],
-            account.0.to_string()
-        );
     }
 
     /// Reserve an upload slot; returns the attachment id and its object key.

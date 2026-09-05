@@ -9,7 +9,7 @@
 //! attestation, the transfer recipients and the transfer total are all
 //! checkable from the proof. Whether the transfers happened and whether the
 //! settlement transaction really forwarded the funds is provable only
-//! against the chain (`payday proof verify --rpc-url`).
+//! against the chain, by fetching the receipts the proof names.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -503,7 +503,7 @@ mod tests {
         let without = verify_proof(&proof, None, &[]).unwrap();
         assert!(!without.attachment_verified);
 
-        // A JSON round trip (as `payday proof download` writes it) is lossless.
+        // A JSON round trip (as `GET /v1/payments/{id}/proof` serves it) is lossless.
         let json = serde_json::to_string(&proof).unwrap();
         let parsed: ProofOfPayment = serde_json::from_str(&json).unwrap();
         assert_eq!(

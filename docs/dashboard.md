@@ -1,7 +1,7 @@
 # Merchant dashboard
 
 The dashboard at `payday.sh/dashboard` is the browser face of the same API the
-SDK and CLI use. It issues invoices, keeps customers, uploads the one PDF an
+SDK uses. It issues invoices, keeps customers, uploads the one PDF an
 invoice may carry, and shows what happened to each payment. It adds no rules
 of its own: every limit, policy check, and status comes from the API, and the
 form only gives immediate feedback (a missing name, a file that is not a PDF)
@@ -9,8 +9,8 @@ before the API has the final word.
 
 ## Signing in
 
-The dashboard signs in with the same emailed one-time code as the CLI, through
-the landing page's "Start Building", which opens the exchange in a dialog.
+The dashboard signs in with an emailed one-time code, through the landing
+page's "Start Building", which opens the exchange in a dialog.
 There is no dashboard login page and no separate registration: the API
 provisions an account the first time it sees a verified identity, so a first
 code creates the account and every later one signs into it, and the same dialog
@@ -81,9 +81,9 @@ anything has been issued the same page carries the invoice list, the identities,
 and the customer list in full, filters and cursors included.
 `/dashboard/invoices` and `/dashboard/customers` redirect here.
 
-Setting up gates issuing, never looking: an account that issued from the CLI
-still sees what it has, and only the "New deposit request" action diverts into
-setup.
+Setting up gates issuing, never looking: an account that issued through the
+API still sees what it has, and only the "New deposit request" action diverts
+into setup.
 
 ## Issuer identities
 
@@ -260,8 +260,8 @@ merchant came for:
 - *Files*: the attached PDF through a short-lived signed URL fetched on demand,
   the deterministic invoice PDF (`GET /v1/payments/{id}/invoice.pdf`), and the
   Proof of Payment as JSON (`GET /v1/payments/{id}/proof`), which becomes
-  available once the request settles and verifies offline with
-  `payday proof verify`.
+  available once the request settles and verifies offline
+  (`gateway_core::verify_proof`).
 
 
 ## Verification and recovery indicators

@@ -22,12 +22,6 @@ locals {
     { name = "PAYDAY_USDC_ADDRESS", value = var.usdc_address },
     { name = "RUST_LOG", value = "info" }
   ]
-  # The dashboard's Auth0 application is optional until it exists. Omit the
-  # variable rather than pass an empty value, so gatewayd sees the same absence
-  # as a deployment that has no dashboard.
-  dashboard_environment = var.dashboard_auth0_client_id == "" ? [] : [
-    { name = "PAYDAY_DASHBOARD_AUTH0_CLIENT_ID", value = var.dashboard_auth0_client_id }
-  ]
   # Payer email verification needs its own Auth0 API and application (see
   # docs/authentication.md). Until both identifiers exist the settings are
   # omitted as a group, and gatewayd answers verification_unavailable.
@@ -677,7 +671,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
-    ], local.dashboard_environment, local.payer_environment, local.identity_environment),
+    ], local.payer_environment, local.identity_environment),
     # The API verifies the deployed contract generation at startup, so it reads
     # the chain through the same RPC secret as the indexer.
     secrets = concat([

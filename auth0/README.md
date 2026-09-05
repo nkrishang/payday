@@ -52,9 +52,9 @@ requires an explicit reviewed code change.
 ## Dashboard application
 
 `dashboard.tf` declares the `Payday Dashboard` single-page application and
-enables the passwordless email connection for it. The dashboard signs in with
-the same email OTP as the CLI, but exchanges it directly against Auth0's
-passwordless endpoints from the browser with its own public client ID, so the
+enables the passwordless email connection for it. It is the only merchant
+application. The dashboard exchanges an email OTP directly against Auth0's
+passwordless endpoints from the browser with its public client ID, so the
 application carries no secret and needs only the passwordless OTP grant. Its
 allowed origins, callbacks, and logout URLs cover `https://payday.sh` and the
 local Next.js dev server at `http://127.0.0.1:3002`.
@@ -70,12 +70,13 @@ terraform -chdir=auth0 import auth0_connection_client.dashboard_passwordless_ema
 ```
 
 The application is not, on its own, allowed to obtain Payday API tokens. The
-Post-Login Action admits only the client IDs configured as its secrets, so
-after the apply copy the new application's Client ID into the Action secret
-`PAYDAY_DASHBOARD_CLIENT_ID` (see `docs/authentication.md`) and into
-`gatewayd`'s `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`. Until both are set, dashboard
-logins are denied at the token step. The API accepts dashboard tokens only as a
-session credential; it never issues an API key to the browser.
+Post-Login Action admits only the client ID configured as its secret, so after
+the apply copy the new application's Client ID into the Action secret
+`PAYDAY_CLIENT_ID` (see `docs/authentication.md`) and into `gatewayd`'s
+`PAYDAY_AUTH0_CLIENT_ID`. Until both are set, dashboard logins are denied at
+the token step. The API accepts dashboard tokens as a session credential and,
+while fresh, as the credential that issues the account's API key; the browser
+shows that key once and never stores it.
 
 ## Payer verification application
 
@@ -142,8 +143,8 @@ immediately and audit recipients quarterly.
    allowlisting its source.
 
 Bot Detection has a passwordless challenge policy, but availability and
-behavior depend on the Auth0 subscription and embedded flow, and the CLI does
-not currently implement a CAPTCHA exchange. Do not enable it without selecting
+behavior depend on the Auth0 subscription and embedded flow, and the dashboard
+does not currently implement a CAPTCHA exchange. Do not enable it without selecting
 a fail-closed CAPTCHA, implementing the challenge flow, and testing it in
 staging.
 
@@ -155,9 +156,8 @@ with a custom email-provider Action.
 ## Verification
 
 Auth0 pastes the Action source into a CommonJS runtime, so `payday-email-otp.js`
-uses `require` and `exports`. The Action admits exactly the client IDs in its
-`PAYDAY_CLIENT_ID` and `PAYDAY_DASHBOARD_CLIENT_ID` secrets; an unset secret
-admits nothing. The repository root is an ES module workspace, so
+uses `require` and `exports`. The Action admits exactly the client ID in its
+`PAYDAY_CLIENT_ID` secret; an unset secret admits nothing. The repository root is an ES module workspace, so
 `auth0/package.json` pins this directory back to CommonJS; without it Node reads
 these files as ES modules and the tests fail to load.
 

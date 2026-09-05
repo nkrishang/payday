@@ -325,6 +325,18 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- `PAYDAY_AUTH0_CLIENT_ID` now names the `Payday Dashboard` single-page
+  application, the one merchant client `gatewayd` accepts: its tokens are the
+  session credential and, while fresh, the credential that issues an API key.
+  `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`, the Terraform variable
+  `dashboard_auth0_client_id`, and the Auth0 Action secret
+  `PAYDAY_DASHBOARD_CLIENT_ID` are gone; the Action admits only
+  `PAYDAY_CLIENT_ID`. Deployments must point `PAYDAY_AUTH0_CLIENT_ID` and
+  `PAYDAY_CLIENT_ID` at the dashboard application and may delete the
+  `Payday CLI` Native application from the tenant.
+- `just seed` and the end-to-end suite create local accounts through
+  `scripts/local-api-key.sh`, the same three-call email-OTP exchange the
+  dashboard's API key section makes, and print the key once.
 - The dashboard wears the landing page's dark palette and type in both colour
   schemes, by redefining the theme tokens its pages already read rather than
   restyling them, so arriving from "Start Building" no longer flips the ground
@@ -383,6 +395,14 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Removed
 
+- The `payday` command-line client (`crates/gateway-cli`), its installer,
+  Homebrew formula generator, release workflow, and reference documentation.
+  Payday is API-first with the dashboard for management: every command had an
+  API route or a dashboard control behind it, and those remain. The offline
+  Proof of Payment checks the CLI itemised live on in
+  `gateway_core::verify_proof`; the CLI's optional live receipt checks over
+  JSON-RPC have no replacement yet.
+- The landing page's unused terminal demo and install components.
 - `memo` from `POST /v1/payments`, the payment responses, the TypeScript SDK,
   and the CLI (`--memo` survives only as a hidden alias of `--reference`).
   Use `reference` for the invoice number and `notes` for free text.

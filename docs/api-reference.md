@@ -225,8 +225,8 @@ signature}`). The payload names the invoice's attribution hash, chain, and
 payment address, so an attestation is bound to the document it was issued for
 and cannot be transplanted onto a proof for another invoice. Anyone holding
 the proof (and, if attached, the PDF) can recompute hash → salt → CREATE3
-address offline with `payday proof verify`, which also requires the listed
-transfers to sum to at least the invoice amount; whether the settlement
+address offline — `gateway_core::verify_proof` is the reference — which also
+requires the listed transfers to sum to at least the invoice amount; whether the settlement
 transaction really executed is provable only against the chain
 (`--rpc-url`). It is merchant-accessible and shared at the merchant's
 discretion; it is not a public link.

@@ -452,8 +452,9 @@ export interface SignedVerificationAttestation {
 
 /**
  * Offline-verifiable record tying the issued invoice to its payment address,
- * the transfers that paid it, and the transaction that settled it.
- * `payday proof verify` checks it without Payday.
+ * the transfers that paid it, and the transaction that settled it. It is
+ * checked without Payday: `gateway_core::verify_proof` holds the offline
+ * checks.
  */
 export interface ProofOfPayment {
   version: string;
@@ -815,8 +816,8 @@ export class PaydayClient {
    * The signed-in account: key metadata, never the raw key. `get` works with
    * this client's own credential; the two mutations do not, because whoever
    * can read an account is not automatically allowed to mint a live key for
-   * it. Each takes a bearer token of its own — a dashboard's fresh sign-in, or
-   * the CLI's — that must be a *fresh, single-use* email-OTP authentication,
+   * it. Each takes a bearer token of its own — the dashboard's fresh sign-in —
+   * that must be a *fresh, single-use* email-OTP authentication,
    * completed in roughly the last five minutes and not already spent on
    * another issue or revoke. Pass `expectedGeneration` from the account's
    * current `generation` (omit only when provisioning the very first key for

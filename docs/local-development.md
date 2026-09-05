@@ -80,14 +80,18 @@ defaults. Start PostgreSQL, MinIO, Anvil, the development identity provider,
 just dev
 ```
 
-In another shell, create a local account through the real email-OTP flow:
+Sign in at the dashboard (`just web`, below) with any email address, or, for
+an API key, create a local account through the real email-OTP flow in another
+shell:
 
 ```bash
-just seed
+just seed you@example.test
 ```
 
-The one-time code is printed in the `[identity]` log and the CLI saves the
-issued key in its local profile. Each run starts from a clean database,
+The one-time code is printed in the `[identity]` log (or fixed by
+`PAYDAY_DEV_IDENTITY_OTP`); the script prompts for it, mints a key through
+`POST /v1/account/api-key`, and prints the key once as JSON. Export it as
+`PAYDAY_API_KEY` for `curl` or the SDK. Each run starts from a clean database,
 attachment store, and Anvil chain so their indexed histories cannot drift.
 After the bootstrap deploys the contracts, the runner reads their runtime
 bytecode from the chain and exports `PAYDAY_FACTORY_CODE_HASH` and
@@ -104,7 +108,7 @@ just web
 ```
 
 It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
-points at, so the `payment_url` the CLI prints opens the real checkout and the
+points at, so the `payment_url` the API returns opens the real checkout and the
 gateway accepts the dashboard's cross-origin requests (the merchant routes
 answer only that origin). Port 3002 rather than 3001, which belongs to the
 development identity provider. See [web/README.md](../web/README.md).
@@ -216,9 +220,9 @@ set -a; source .env; set +a
 ./target/debug/gatewayd
 ```
 
-Then run `payday --profile local login` and enter the code from the identity
-provider log. Production uses the same flow against Auth0; see
-`docs/authentication.md`.
+Then run `scripts/local-api-key.sh you@example.test` and enter the code from
+the identity provider log to mint an API key. Production uses the same flow
+against Auth0, from the dashboard; see `docs/authentication.md`.
 
 In another terminal:
 
@@ -255,7 +259,8 @@ cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --rpc-url http://127.0.0.1:8545
 
-./target/debug/payday get <id>
+curl -fsS "http://127.0.0.1:3000/v1/payments/<id>" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
 ```
 
 The status should reach `settled` with `settlement_tx_hash` set. Verify the
@@ -319,9 +324,13 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 ## Configuration
 
 - `DATABASE_URL`
-- `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
+- `PAYDAY_API_KEY` — the per-account bearer key scripts and the SDK call the
+  API with; the services never read it
 - `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
-  Auth0 account-management settings (see `docs/authentication.md`)
+  the merchant identity issuer, audience, and the dashboard's client ID, the
+  one application whose tokens `gatewayd` accepts (see
+  `docs/authentication.md`); `payday-dashboard-local` with the development
+  identity provider
 - `PAYDAY_PAYER_AUTH0_ISSUER`, `PAYDAY_PAYER_AUTH0_AUDIENCE`,
   `PAYDAY_PAYER_AUTH0_CLIENT_ID`, `PAYDAY_PAYER_REF_MASTER_KEY` — the payer
   email-verification audience and the payer-reference key, set together or not
@@ -408,9 +417,6 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   exclusive with `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
   key. Unlike attestation, both may be unset in any environment, including
   production — that simply disables `POST /v1/payments/{id}/onboarding-payment`
-- `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` — optional client ID of the dashboard's
-  Auth0 Single Page Application, whose access tokens `gatewayd` accepts next
-  to the CLI's; `payday-dashboard-local` with the development identity provider
 
 The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
 Terraform source is under `infra/`.

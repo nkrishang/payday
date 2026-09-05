@@ -245,7 +245,8 @@ impl AccountRepository {
 
     /// The account behind a verified identity, created on first sight. A
     /// dashboard session never holds an API key, so the account starts with
-    /// none; `payday login` can add one later through the usual rotation.
+    /// none; the dashboard's key management can add one later through the
+    /// usual rotation.
     pub async fn find_or_provision_by_identity(
         &self,
         issuer: &str,
@@ -637,7 +638,7 @@ mod tests {
             .unwrap();
         assert_eq!(email, "one@example.com", "the first verified email sticks");
 
-        // The CLI's login issues from the current generation, as for any
+        // A first issue runs from the current generation, as for any
         // existing identity — but this is a first key, not a rotation, since
         // a dashboard-provisioned identity starts keyless.
         let issued = repo
@@ -646,10 +647,7 @@ mod tests {
             .unwrap();
         assert_eq!(issued.account_id, first);
         assert_eq!(issued.generation, 2);
-        assert!(
-            !issued.replaced_previous_key,
-            "nothing existed to replace"
-        );
+        assert!(!issued.replaced_previous_key, "nothing existed to replace");
         assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), Some(first));
         let metadata = repo.metadata(first).await.unwrap();
         assert!(

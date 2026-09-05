@@ -71,7 +71,8 @@ impl VerificationAttestor {
         }
     }
 
-    /// The address verifiers must trust (`payday proof verify --trusted-attestor`).
+    /// The address verifiers must trust as the attestor (`verify_proof`'s
+    /// `trusted_attestors`).
     pub fn address(&self) -> Address {
         match &*self.backend {
             Backend::Local(signer) => signer.address(),
