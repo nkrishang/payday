@@ -5,7 +5,12 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: { "@": fileURLToPath(new URL("./", import.meta.url)) },
+    alias: {
+      "@": fileURLToPath(new URL("./", import.meta.url)),
+      // Component tests never sign in for real; the stub keeps the same
+      // hooks and the same shapes without loading Privy's SDK into jsdom.
+      "@privy-io/react-auth": fileURLToPath(new URL("./test/privy-stub.tsx", import.meta.url)),
+    },
   },
   test: {
     environment: "jsdom",
@@ -21,9 +26,7 @@ export default defineConfig({
       NEXT_PUBLIC_RPC_URL: "https://rpc.example.test",
       NEXT_PUBLIC_USDC_ADDRESS: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
       NEXT_PUBLIC_EXPLORER_BASE_URL: "https://explorer.example.test",
-      NEXT_PUBLIC_AUTH0_DOMAIN: "http://127.0.0.1:3001",
-      NEXT_PUBLIC_AUTH0_CLIENT_ID: "payday-dashboard-local",
-      NEXT_PUBLIC_AUTH0_AUDIENCE: "payday-api-local",
+      NEXT_PUBLIC_PRIVY_APP_ID: "privy-test-app",
     },
   },
 });

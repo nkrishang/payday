@@ -10,8 +10,7 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 const OTP = "123456";
-const PAYOUT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
-const SECOND_PAYOUT = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+const SAVED_WALLET = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
 async function signIn(page: Page, email: string) {
   await page.goto("/");
@@ -22,6 +21,17 @@ async function signIn(page: Page, email: string) {
   await dialog.getByLabel("One-time code").fill(OTP);
   await dialog.getByRole("button", { name: "Continue" }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
+}
+
+/** The account's own wallet, as the Privy stub minted it at sign-in. */
+async function accountWallet(page: Page): Promise<string> {
+  return page.evaluate(
+    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+  );
+}
+
+function truncate(address: string): string {
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
 /** Answers the payments probe as an empty account, so setup is the whole page. */
@@ -41,7 +51,9 @@ async function withoutHistory(page: Page) {
 
 /**
  * The identity every request is issued under. Reached from the dashboard,
- * because an account that has issued before still sees its requests first.
+ * because an account that has issued before still sees its requests first —
+ * and it ends in the composer, since a proven mailbox is all an identity
+ * needs: deposits settle to the account's own wallet.
  */
 async function setUpIdentity(page: Page, name: string) {
   await page.getByRole("button", { name: "New deposit request" }).click();
@@ -50,24 +62,23 @@ async function setUpIdentity(page: Page, name: string) {
   await page.getByRole("button", { name: "Send code" }).click();
   await page.getByLabel("One-time code").fill(OTP);
   await page.getByRole("button", { name: "Confirm code" }).click();
-  await page.getByLabel("Payout address").fill(PAYOUT);
-  await page.getByLabel("Label").fill("Treasury");
-  await page.getByRole("button", { name: "Save identity" }).click();
+  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
 }
 
-test("a new merchant is put straight to work: identity, contact, wallet, first request", async ({
+test("a new merchant is put straight to work: identity, contact, first request", async ({
   page,
 }) => {
   await withoutHistory(page);
   await signIn(page, "firstrun@example.com");
+  const wallet = await accountWallet(page);
 
-  // The whole form is on the page: no section is hidden behind the one before.
+  // The whole form is on the page: no section is hidden behind the one before,
+  // and there is no wallet to type — the account already has one.
   const identity = page.getByRole("region", { name: "Identity" });
   const verify = page.getByRole("region", { name: "Verify email" });
-  const wallet = page.getByRole("region", { name: "Wallet" });
   await expect(identity.getByLabel("Issued by")).toBeEnabled();
   await expect(verify.getByLabel("One-time code")).toBeDisabled();
-  await expect(wallet.getByLabel("Payout address")).toBeDisabled();
+  await expect(page.getByLabel("Payout address")).toHaveCount(0);
 
   // Nothing advances until the section is answerable, and a field says why as
   // soon as it holds something that will not do.
@@ -89,29 +100,16 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
   await verify.getByLabel("One-time code").fill(OTP);
   await page.getByRole("button", { name: "Confirm code" }).click();
 
-  const save = page.getByRole("button", { name: "Save identity" });
-  await expect(save).toBeDisabled();
-  await wallet.getByLabel("Payout address").fill("0xnope");
-  await expect(wallet.getByText(/Not a valid address/)).toBeVisible();
-  await expect(save).toBeDisabled();
-  await wallet.getByLabel("Payout address").fill(PAYOUT);
-
-  // A label is a short handle, not free text.
-  await wallet.getByLabel("Label").fill("-nope;");
-  await expect(wallet.getByText("Not a valid label.")).toBeVisible();
-  await expect(save).toBeDisabled();
-  await wallet.getByLabel("Label").fill("Treasury");
-  await expect(save).toBeEnabled();
-  await save.click();
-
   // Setting up leads into a guided tour, not the blank composer — and there
   // is no way to skip it.
   await expect(page.getByRole("heading", { name: "Welcome to Payday." })).toBeVisible();
   await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 
   // Every field is fixed and inert: this is Payday billing itself, so the
-  // merchant can watch the whole product work before using it for real.
+  // merchant can watch the whole product work before using it for real. It
+  // settles to the account's own wallet.
   await expect(page.getByLabel("Amount")).toHaveValue("0.000001");
+  await expect(page.getByText(truncate(wallet))).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Billed to")).toHaveValue("Payday");
   await expect(page.getByLabel("Email")).toHaveValue("onboarding@payday.sh");
@@ -125,6 +123,7 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
   await expect(summary).toContainText("Acme Inc.");
   await expect(summary).toContainText("Payday");
   await expect(summary).toContainText("Verified email");
+  await expect(summary).toContainText(truncate(wallet));
 
   // Billed to a party typed fresh, exactly like the real composer: Payday
   // becomes a saved customer, not just a name on this one invoice.
@@ -141,6 +140,7 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
   });
   const body = (await created).postDataJSON();
   expect(body.customer_id).toBeTruthy();
+  expect(body.payout_address).toBe(wallet);
   expect(body.bill_to).toMatchObject({ name: "Payday", email: "onboarding@payday.sh" });
   expect(body.payer_policy).toEqual({
     mode: "verified_email",
@@ -177,12 +177,15 @@ test("a new merchant is put straight to work: identity, contact, wallet, first r
 test("the composer keeps a running preview and can be stepped back through", async ({ page }) => {
   await signIn(page, "preview@example.com");
   await setUpIdentity(page, "Acme Inc.");
+  const wallet = await accountWallet(page);
 
   const preview = page.getByRole("complementary");
   await expect(preview).toContainText("0.00");
-  // The identity and its wallet are already on the request, unasked.
+  // The identity and the account's wallet are already on the request, unasked.
   await expect(preview).toContainText("Acme Inc.");
-  await expect(preview).toContainText("0x7099…79C8");
+  await expect(preview).toContainText(truncate(wallet));
+  // One destination means no question about it.
+  await expect(page.getByRole("radiogroup", { name: "Settles to" })).toHaveCount(0);
 
   await page.getByLabel("Amount").fill("40.5");
   await expect(preview).toContainText("40.50");
@@ -213,19 +216,19 @@ test("a set-up merchant sees their requests, identities, and customers on one pa
   await expect(page.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
   await expect(page.getByRole("button", { name: /Consulting — August/ })).toBeVisible();
 
-  // The identity, with its proof and its wallet, is managed here too.
-  // A line each: the name, whether it can be issued under, and how many
-  // wallets. The wallets themselves are a detail of the opened row.
+  // The identity, with its proof, is managed here too. A line each: the name,
+  // whether it can be issued under, and where it settles — the account's own
+  // wallet, with no saved wallet of its own.
   const identities = page.getByRole("region", { name: "Issuer identities" });
   const row = identities.getByRole("button", { expanded: false });
   await expect(row).toContainText("Acme Inc.");
   await expect(row).toContainText("Verified");
-  await expect(row).toContainText("1 wallet");
+  await expect(row).toContainText("Payday wallet");
   await row.click();
   // Opening a row opens its form: the fields are there, not behind an Edit.
-  await expect(identities.getByText("Treasury")).toBeVisible();
+  await expect(identities.getByText(/Settles to your Payday wallet/)).toBeVisible();
   await expect(identities.getByLabel("Issued by")).toHaveValue("Acme Inc.");
-  await expect(identities.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(identities.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
 
   await expect(page.getByRole("heading", { name: "Customers." })).toBeVisible();
   await expect(page.getByRole("link", { name: "Globex Corporation" })).toBeVisible();
@@ -262,61 +265,50 @@ test("a billed party becomes a customer, and the next request can pick them", as
   await expect(page.getByLabel("Email")).toHaveValue("ap@initech.example");
 });
 
-test("adding a wallet saves, and the row settles rather than staying dirty", async ({ page }) => {
+test("a saved wallet can be added, chosen on a request, and removed again", async ({ page }) => {
   await signIn(page, "wallets@example.com");
   await setUpIdentity(page, "Acme Inc.");
   await page.getByRole("button", { name: "Cancel" }).click();
+  const wallet = await accountWallet(page);
 
   const identities = page.getByRole("region", { name: "Issuer identities" });
   const row = identities.getByRole("button", { expanded: false });
-  await expect(row).toContainText("1 wallet");
+  await expect(row).toContainText("Payday wallet");
   await row.click();
 
   await identities.getByRole("button", { name: "Add wallet" }).click();
-  await identities.getByLabel("Payout address").fill(SECOND_PAYOUT);
-  await identities.getByLabel("Label").fill("Secondary");
+  await identities.getByLabel("Payout address").fill(SAVED_WALLET);
+  await identities.getByLabel("Label").fill("Treasury");
   await identities.getByRole("button", { name: "Add", exact: true }).click();
 
-  const save = identities.getByRole("button", { name: "Save" });
+  const save = identities.getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeEnabled();
   await save.click();
 
   // Wait for the write to land before judging the button, so this cannot pass
   // on the moment it is disabled merely because a request is in flight.
-  await expect(identities.getByRole("button", { expanded: true })).toContainText("2 wallets");
-  await expect(identities.getByText("Secondary")).toBeVisible();
+  await expect(identities.getByRole("button", { expanded: true })).toContainText("1 saved wallet");
+  await expect(identities.getByText("Treasury")).toBeVisible();
   // The API's own answer became the new baseline: nothing is left unsaved.
   await expect(save).toBeDisabled();
-});
 
-test("removing the only wallet asks for its replacement instead of stranding the identity", async ({
-  page,
-}) => {
-  await signIn(page, "lastwallet@example.com");
-  await setUpIdentity(page, "Acme Inc.");
+  // With two destinations the composer asks, defaulting to the account's own.
+  await page.getByRole("button", { name: "New deposit request" }).click();
+  const settles = page.getByRole("radiogroup", { name: "Settles to" });
+  await expect(settles.getByRole("radio", { name: "Payday wallet" })).toBeChecked();
+  const preview = page.getByRole("complementary");
+  await expect(preview).toContainText(truncate(wallet));
+  await settles.getByRole("radio", { name: "Treasury" }).click();
+  await expect(preview).toContainText(truncate(SAVED_WALLET));
   await page.getByRole("button", { name: "Cancel" }).click();
 
-  const identities = page.getByRole("region", { name: "Issuer identities" });
+  // Dropping the saved wallet leaves the identity on the account's own again.
   await identities.getByRole("button", { expanded: false }).click();
-
-  // The only wallet is replaced, never simply removed.
-  await identities.getByRole("button", { name: "Replace Treasury" }).click();
-  await expect(identities.getByText(/replaced rather than removed/)).toBeVisible();
-  const save = identities.getByRole("button", { name: "Save" });
-  await expect(save).toBeDisabled();
-
-  await identities.getByLabel("Payout address").fill(SECOND_PAYOUT);
-  await identities.getByLabel("Label").fill("Replacement");
-  await identities.getByRole("button", { name: "Add", exact: true }).click();
+  await identities.getByRole("button", { name: "Remove Treasury" }).click();
   await expect(save).toBeEnabled();
   await save.click();
-
-  // One wallet still, the new one, and the dashboard never lost the identity.
-  await expect(identities.getByRole("button", { expanded: true })).toContainText("1 wallet");
-  await expect(identities.getByText("Replacement")).toBeVisible();
+  await expect(identities.getByRole("button", { expanded: true })).toContainText("Payday wallet");
   await expect(identities.getByText("Treasury")).toBeHidden();
-  await page.getByRole("button", { name: "New deposit request" }).click();
-  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
 });
 
 test("two identities cannot share a name", async ({ page }) => {
@@ -336,14 +328,13 @@ test("two identities cannot share a name", async ({ page }) => {
   await expect(setup.getByText("Another identity already uses this name.")).toBeVisible();
   await expect(send).toBeDisabled();
 
-  // A free name goes through, wallet and all.
+  // A free name goes through.
   await setup.getByLabel("Issued by").fill("Acme EU");
   await expect(send).toBeEnabled();
   await send.click();
   await page.getByLabel("One-time code").fill(OTP);
   await page.getByRole("button", { name: "Confirm code" }).click();
-  await page.getByLabel("Payout address").fill(SECOND_PAYOUT);
-  await page.getByRole("button", { name: "Save identity" }).click();
+  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   // And a rename onto the other identity's name is refused the same way.
@@ -353,7 +344,7 @@ test("two identities cannot share a name", async ({ page }) => {
   const row = identities.getByRole("button", { expanded: true }).locator("..");
   await row.getByLabel("Issued by").fill("acme inc.");
   await expect(row.getByText("Another identity already uses this name.")).toBeVisible();
-  await expect(row.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(row.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
 });
 
 test("a request row opens in place, showing an abbreviated link to the payer's view", async ({
@@ -384,7 +375,7 @@ test("an identity can be renamed, and moving its contact address unproves it", a
   await identities.getByRole("button", { expanded: false }).click();
 
   // Save lights up only once something actually differs from what is stored.
-  const save = identities.getByRole("button", { name: "Save" });
+  const save = identities.getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeDisabled();
   await identities.getByLabel("Contact address").fill("support@acme.example");
   await expect(save).toBeEnabled();

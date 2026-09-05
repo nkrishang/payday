@@ -10,23 +10,25 @@ allowed to fulfil the payment. For a gated invoice the API withholds the
 amount, parties, attachment, and address until the payer verifies, and the
 page renders only what it was sent — nothing withheld enters the React tree.
 
-The landing page's "Start Building" opens that same sign-in as a dialog, which
-is all a sign-up is here: the API provisions an account on first sight of a
-verified identity. Either way it ends on `/dashboard`, whose empty state issues
-a merchant's first deposit request in the page — four steps and a running
-preview, no modal and no second route.
+The landing page's "Start Building" opens the sign-in as a dialog, which is all
+a sign-up is here: an emailed code through [Privy](https://privy.io), and the
+API provisions an account on first sight of the identity — with the embedded
+EVM wallet Privy creates for it, where deposits settle by default. Either way
+it ends on `/dashboard`, whose empty state issues a merchant's first deposit
+request in the page — four steps and a running preview, no modal and no second
+route.
 
-The dashboard uses the merchant API with a short-lived identity token obtained
-from an emailed code, held in memory and this tab's `sessionStorage` only; no
-API key exists in the browser. Its pages render per request as empty shells
-and fetch everything client-side. See [docs/dashboard.md](../docs/dashboard.md).
+The dashboard uses the merchant API with the identity token Privy holds for
+the signed-in merchant; no API key exists in the browser. Its pages render per
+request as empty shells and fetch everything client-side. See
+[docs/dashboard.md](../docs/dashboard.md).
 
 ## Running it locally
 
 The gateway must be running (`just dev` from the repository root, which also
-starts Anvil, the indexer, and the local identity provider), and
-`PAYDAY_PUBLIC_BASE_URL` must point here so created payments link somewhere that
-can render them.
+starts Anvil, the indexer, and the local identity provider for payer codes),
+and `PAYDAY_PUBLIC_BASE_URL` must point here so created payments link somewhere
+that can render them.
 
 ```bash
 npm ci                          # from the repository root
@@ -35,6 +37,9 @@ just web                        # http://127.0.0.1:3002
 ```
 
 Port 3002, because 3001 belongs to the local development identity provider.
+Merchant sign-in is the real Privy app even locally (there is no stand-in), so
+`http://127.0.0.1:3002` must be among the app's allowed domains in the Privy
+dashboard, and the code arrives in a real mailbox.
 
 ```bash
 npm run typecheck --workspace @payday/web
@@ -50,15 +55,17 @@ API. For the checkout the scenario is chosen by the payment id —
 `/pay/pay_settled`, `/pay/pay_gated-email`, and so on. Because the checkout
 renders on the server, intercepting in the browser would miss the first paint
 entirely, so the app itself is pointed at the stub. For the dashboard the same
-stub plays the merchant API behind a fake bearer check, the presigned upload
-target, and the OTP issuer (code `123456`). It covers what unit tests cannot:
-that the page hydrates, that polling moves the DOM on its own, that states
-which must not offer an address really do not, that a gated invoice's withheld
-fields are absent from both the HTML and the DOM, that a merchant can sign in —
-from the landing page as well as the login page — upload a PDF, issue an
-invoice, and download its proof, and that the CSP each route is served can
-actually be satisfied. The sign-up dialog's five-minute resend window is driven
-by Playwright's clock rather than waited out.
+stub plays the merchant API behind a fake bearer check and the presigned upload
+target, and Privy itself is replaced at bundle time by `test/privy-stub.tsx`
+(`PAYDAY_PRIVY_STUB=1`): the same hooks, a session kept in the tab, one
+accepted code (`123456`, which the stub's payer and issuer-mailbox
+verifications accept too). It covers what unit tests cannot: that the page
+hydrates, that polling moves the DOM on its own, that states which must not
+offer an address really do not, that a gated invoice's withheld fields are
+absent from both the HTML and the DOM, that a merchant can sign in from the
+landing page, upload a PDF, issue an invoice, and download its proof, and that
+the CSP each route is served can actually be satisfied. The sign-up dialog's
+resend cooldown is driven by Playwright's clock rather than waited out.
 
 ## Configuration
 
@@ -68,12 +75,14 @@ public endpoint, never the operator RPC the gateway reads from Secrets Manager.
 See [`.env.example`](.env.example). Missing values fail loudly at startup rather
 than degrading silently, matching the gateway's own configuration convention.
 
-The dashboard adds the issuer it signs in against (`NEXT_PUBLIC_AUTH0_DOMAIN`,
-`NEXT_PUBLIC_AUTH0_CLIENT_ID`, `NEXT_PUBLIC_AUTH0_AUDIENCE`) and, because the
-browser PUTs attachment bytes straight to object storage, the origin of the
-presigned upload URL (`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN`) so the page's
-Content-Security-Policy admits it — the local MinIO in development, the
-attachment bucket's virtual-hosted URL in production.
+The dashboard adds the Privy app it signs in to (`NEXT_PUBLIC_PRIVY_APP_ID`,
+the same id `gatewayd` verifies sessions against as `PAYDAY_PRIVY_APP_ID`)
+and, because the browser PUTs attachment bytes straight to object storage, the
+origin of the presigned upload URL (`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN`) so
+the page's Content-Security-Policy admits it — the local MinIO in development,
+the attachment bucket's virtual-hosted URL in production. The policy also
+admits Privy's own origins (`auth.privy.io`, its RPC proxy, and the Cloudflare
+challenge it may present), per Privy's CSP guidance.
 
 ## How it holds together
 

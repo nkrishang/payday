@@ -42,9 +42,18 @@ const GUIDANCE = [
 
 export function OnboardingWalkthrough({
   issuer,
+  payoutAddress,
+  onWalletChanged,
   onIssued,
 }: {
   issuer: Issuer;
+  /**
+   * Where the demo request settles: the account's own wallet. Null only
+   * while Privy is still creating it, in which case the walkthrough waits.
+   */
+  payoutAddress: string | null;
+  /** Re-reads the account, in case the wallet has arrived. */
+  onWalletChanged: () => void;
   onIssued: (payment: Payment) => void;
 }) {
   const { client, signOut } = useMerchant();
@@ -59,11 +68,11 @@ export function OnboardingWalkthrough({
   const savedCustomer = useRef<string | null>(null);
   const [reference] = useState(() => `ONBOARD-${issuer.id.slice(0, 8).toUpperCase()}`);
 
-  const payout = issuer.payout_addresses[0];
   const last = step === STEPS.length - 1;
   const guidance = GUIDANCE[step] ?? GUIDANCE[0];
 
   const issue = async () => {
+    if (!payoutAddress) return;
     setBusy(true);
     setFailure(null);
     try {
@@ -78,7 +87,7 @@ export function OnboardingWalkthrough({
             issuerId: issuer.id,
             issuerName: issuer.name,
             issuerEmail: issuer.contact_email,
-            payoutAddress: payout?.address ?? "",
+            payoutAddress,
             expiresInHours: "168",
             customerId: savedCustomer.current,
             billName: BILL_NAME,
@@ -168,19 +177,19 @@ export function OnboardingWalkthrough({
                 </span>
               </Labeled>
               <div className="grid gap-5 sm:grid-cols-2">
-                <Labeled label="Destination">
+                <Labeled label="Destination" hint="Your Payday wallet, unless you choose another.">
                   <div className="flex h-11 flex-col justify-center gap-0.5 rounded-[10px] border border-line-strong bg-surface px-3.5">
                     <span className="truncate text-[13px] font-medium leading-tight">
                       {issuer.name}
                     </span>
                     <span className="truncate text-[11.5px] leading-tight text-faint">
                       {issuer.contact_email}
-                      {payout ? (
-                        <>
-                          <span aria-hidden="true"> · </span>
-                          <span className="font-mono">{truncateAddress(payout.address)}</span>
-                        </>
-                      ) : null}
+                      <span aria-hidden="true"> · </span>
+                      {payoutAddress ? (
+                        <span className="font-mono">{truncateAddress(payoutAddress)}</span>
+                      ) : (
+                        <span>wallet being created…</span>
+                      )}
                     </span>
                   </div>
                 </Labeled>
@@ -289,8 +298,9 @@ export function OnboardingWalkthrough({
                 <Row label="Issued by">{issuer.name}</Row>
                 <Row label="Settles to">
                   <span className="font-mono text-[12.5px]">
-                    {payout ? truncateAddress(payout.address) : ""}
+                    {payoutAddress ? truncateAddress(payoutAddress) : "—"}
                   </span>
+                  <span className="text-muted"> · Payday wallet</span>
                 </Row>
                 <Row label="Billed to">
                   {BILL_NAME} <span className="text-muted">· {BILL_EMAIL}</span>
@@ -303,6 +313,14 @@ export function OnboardingWalkthrough({
               {failure ? (
                 <p role="alert" className="text-[13px] text-danger">
                   {failure}
+                </p>
+              ) : null}
+              {!payoutAddress ? (
+                <p className="flex flex-wrap items-center gap-3 text-[13px] text-muted">
+                  Your Payday wallet is still being created; it is where this settles.
+                  <Button type="button" variant="secondary" size="sm" onClick={onWalletChanged}>
+                    Check again
+                  </Button>
                 </p>
               ) : null}
             </div>
@@ -319,7 +337,7 @@ export function OnboardingWalkthrough({
         ) : null}
         <div className="flex-1" />
         {last ? (
-          <Button type="button" onClick={issue} disabled={busy}>
+          <Button type="button" onClick={issue} disabled={busy || !payoutAddress}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : null}
             Issue deposit request
           </Button>

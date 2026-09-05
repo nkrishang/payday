@@ -6,34 +6,30 @@ import { Check, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
-import { controlStyles, Problem } from "@/components/ui/field";
+import { Problem } from "@/components/ui/field";
 import { StatusDot } from "@/components/ui/status-dot";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
-import {
-  confirmEmailOtp,
-  EMAIL_OTP_LIFETIME_MS,
-  EmailOtpError,
-  sessionEmail,
-  startEmailOtp,
-} from "@/lib/merchant-payday";
-import { Labeled } from "./labeled";
 import { formatDate } from "./labels";
-import { useMerchant, useResource } from "./session";
+import { useMerchant } from "./session";
 
 /**
  * The API key a merchant's own server calls the API with.
  *
- * The dashboard signs in with an emailed code and never simply holds this
- * credential — reading the account here proves nothing about permission to
- * mint a live key for it — so generating, rolling, or revoking steps up with
- * its own fresh code first: the API accepts only a fresh, single-use
- * email-OTP authentication there. Only that action needs it; reading the
- * current key's metadata below does not.
+ * The dashboard session is the credential here: generating, rolling, or
+ * revoking asks for a plain confirmation, not a second sign-in. What the API
+ * still refuses is the reverse — a key can read this account but can never
+ * mint or revoke a key — so the only way to this control is to have signed
+ * in.
  */
-export function ApiKeySection() {
-  const account = useResource("account", (client) => client.account.get());
-
+export function ApiKeySection({
+  account,
+  onChanged,
+}: {
+  account: AccountMetadata;
+  /** Reloads the account after any change lands. */
+  onChanged: () => void;
+}) {
   return (
     <section aria-label="API key">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -49,20 +45,7 @@ export function ApiKeySection() {
       </div>
 
       <div className="mt-6">
-        {account.data ? (
-          <ApiKeyCard metadata={account.data} onChanged={account.reload} />
-        ) : account.error ? (
-          <div className="grid gap-3">
-            <Problem>{account.error}</Problem>
-            <div>
-              <Button type="button" variant="secondary" size="sm" onClick={account.reload}>
-                Try again
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="h-[68px] animate-pulse rounded-[12px] border border-line bg-surface" />
-        )}
+        <ApiKeyCard metadata={account} onChanged={onChanged} />
       </div>
     </section>
   );
@@ -72,7 +55,7 @@ type Action = "issue" | "revoke";
 
 type Stage =
   | { kind: "idle" }
-  | { kind: "stepup"; action: Action; sent: boolean }
+  | { kind: "confirm"; action: Action }
   | { kind: "revealed"; apiKey: string; replacedPreviousKey: boolean }
   | { kind: "revoked" };
 
@@ -81,17 +64,14 @@ function ApiKeyCard({
   onChanged,
 }: {
   metadata: AccountMetadata;
-  /** Reloads the account after any change lands. */
   onChanged: () => void;
 }) {
-  const { client, accessToken, signOut } = useMerchant();
+  const { client, signOut } = useMerchant();
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
-  const [otp, setOtp] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [now] = useState(() => Date.now());
 
-  const email = sessionEmail(accessToken);
   const hasKey = metadata.key_hint !== null;
   const graceActive =
     metadata.previous_key_expires_at !== null &&
@@ -99,13 +79,11 @@ function ApiKeyCard({
 
   const begin = (action: Action) => {
     setFailure(null);
-    setOtp("");
-    setStage({ kind: "stepup", action, sent: false });
+    setStage({ kind: "confirm", action });
   };
 
   const cancel = () => {
     setFailure(null);
-    setOtp("");
     setStage({ kind: "idle" });
   };
 
@@ -115,60 +93,40 @@ function ApiKeyCard({
   };
 
   const failed = (cause: unknown) => {
-    if (cause instanceof PaydayError && cause.status === 401 && cause.code === "unauthorized") {
+    if (cause instanceof PaydayError && cause.status === 401) {
       signOut();
       return;
     }
     if (cause instanceof PaydayError && cause.code === "api_key_generation_conflict") {
       onChanged();
       setStage({ kind: "idle" });
-      setOtp("");
       setBusy(false);
       setFailure(
         "This key changed elsewhere just now — reloaded the latest state below. Try again if you still want to.",
       );
       return;
     }
-    setFailure(
-      cause instanceof EmailOtpError && cause.code === "invalid_grant"
-        ? "That code is not valid. Check the email and try again."
-        : describeError(cause),
-    );
+    setFailure(describeError(cause));
     setBusy(false);
   };
 
-  const sendCode = async () => {
-    if (stage.kind !== "stepup" || !email) return;
-    setBusy(true);
-    setFailure(null);
-    try {
-      await startEmailOtp(email);
-      setStage({ ...stage, sent: true });
-      setBusy(false);
-    } catch (cause) {
-      failed(cause);
-    }
-  };
-
   const confirm = async () => {
-    if (stage.kind !== "stepup" || !email) return;
+    if (stage.kind !== "confirm") return;
     const action = stage.action;
     setBusy(true);
     setFailure(null);
     try {
-      const fresh = await confirmEmailOtp(email, otp.trim());
       if (action === "issue") {
-        const issued = await client.account.issueApiKey(fresh.accessToken, metadata.generation);
+        const issued = await client.account.issueApiKey(metadata.generation);
         setStage({
           kind: "revealed",
           apiKey: issued.api_key,
           replacedPreviousKey: issued.replaced_previous_key,
         });
       } else {
-        await client.account.revokeApiKey(fresh.accessToken, metadata.generation);
+        await client.account.revokeApiKey(metadata.generation);
         setStage({ kind: "revoked" });
       }
-      setOtp("");
       setBusy(false);
     } catch (cause) {
       failed(cause);
@@ -225,7 +183,7 @@ function ApiKeyCard({
         </p>
       ) : null}
 
-      {stage.kind === "stepup" ? (
+      {stage.kind === "confirm" ? (
         <div className="dash-step border-t border-line px-4 pt-4 pb-5">
           {stage.action === "revoke" ? (
             <p className="mb-3 text-[12.5px] text-danger">
@@ -238,71 +196,24 @@ function ApiKeyCard({
               Issues a new key. The current one keeps working for 24 hours, so nothing breaks
               while you switch over.
             </p>
-          ) : null}
-
-          {!email ? (
-            <Problem>
-              Your session doesn&apos;t carry a mailbox to confirm. Sign out and back in, then try
-              again.
-            </Problem>
-          ) : !stage.sent ? (
-            <div className="flex flex-wrap items-end gap-3">
-              <Labeled
-                label="Confirm it's you"
-                hint={`We'll email a one-time code to ${email}, valid for ${Math.round(
-                  EMAIL_OTP_LIFETIME_MS / 60_000,
-                )} minutes.`}
-              >
-                <div className={cn(controlStyles, "flex h-11 items-center text-muted")}>
-                  {email}
-                </div>
-              </Labeled>
-              <Button type="button" onClick={sendCode} disabled={busy}>
-                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-                Send code
-              </Button>
-              <Button type="button" variant="ghost" onClick={cancel} disabled={busy}>
-                Cancel
-              </Button>
-            </div>
           ) : (
-            <div className="flex flex-wrap items-end gap-3">
-              <Labeled label="One-time code" hint={`Sent to ${email}.`}>
-                <input
-                  autoFocus
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  placeholder="000000"
-                  value={otp}
-                  onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className={cn(
-                    controlStyles,
-                    "h-11 w-[180px] text-center font-mono text-[16px] tracking-[0.35em] [text-indent:0.35em]",
-                  )}
-                />
-              </Labeled>
-              <Button type="button" onClick={confirm} disabled={busy || otp.length < 6}>
-                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-                {stage.action === "revoke"
-                  ? "Confirm & revoke"
-                  : hasKey
-                    ? "Confirm & roll key"
-                    : "Confirm & generate"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => setStage({ ...stage, sent: false })}
-                disabled={busy}
-              >
-                Resend
-              </Button>
-              <Button type="button" variant="ghost" onClick={cancel} disabled={busy}>
-                Cancel
-              </Button>
-            </div>
+            <p className="mb-3 text-[12.5px] text-muted">
+              Generates a key for your own server. It is shown once, here, and never again.
+            </p>
           )}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="button" onClick={confirm} disabled={busy}>
+              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+              {stage.action === "revoke"
+                ? "Confirm & revoke"
+                : hasKey
+                  ? "Confirm & roll key"
+                  : "Confirm & generate"}
+            </Button>
+            <Button type="button" variant="ghost" onClick={cancel} disabled={busy}>
+              Cancel
+            </Button>
+          </div>
         </div>
       ) : null}
 

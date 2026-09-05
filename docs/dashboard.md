@@ -9,48 +9,37 @@ before the API has the final word.
 
 ## Signing in
 
-The dashboard signs in with an emailed one-time code, through the landing
-page's "Start Building", which opens the exchange in a dialog.
-There is no dashboard login page and no separate registration: the API
-provisions an account the first time it sees a verified identity, so a first
-code creates the account and every later one signs into it, and the same dialog
-does both.
+The dashboard signs in through [Privy](https://privy.io) with an emailed
+one-time code, from the landing page's "Start Building", which opens the
+exchange in a dialog of Payday's own. There is no dashboard login page and no
+separate registration: the API provisions an account the first time it sees
+a Privy identity, so a first code creates the account and every later one
+signs into it, and the same dialog does both. Every account gets an embedded
+EVM wallet from Privy at that first sign-in; it is the merchant's own, and it
+is where their deposit requests settle unless they choose otherwise.
 
 Anyone reaching a dashboard route without a live session — signed out, or
-holding a token that has expired — is sent to the landing page, which is where
-the way back in is. Signing out does the same.
+holding tokens Privy will no longer refresh — is sent to the landing page,
+which is where the way back in is. Signing out does the same.
 
-The page asks the identity issuer for a code, exchanges it for a short-lived
-access token for the Payday API audience, and that token is the session
-([Authentication § 7](authentication.md#7-dashboard-sessions)). It is kept in
-memory and mirrored to the tab's `sessionStorage` so a reload does not demand a
-new code; it is never written to `localStorage`, never placed in a URL, and
-ends with the tab. **No API key exists in the browser** — the API accepts the
-identity token directly on the payment, customer, and attachment routes, and
-maps it to the merchant account. Signing out clears the token.
+The session is Privy's identity token
+([Authentication § 7](authentication.md#7-dashboard-sessions)). Privy's SDK
+keeps it, and its refresh token, in the browser and refreshes it while the
+merchant stays signed in; the dashboard reads the current token from the SDK
+and sends it on every call. Nothing of Payday's stores a credential: **no API
+key exists in the browser** — the API accepts the identity token directly on
+the payment, customer, attachment, and account routes, and maps it to the
+merchant account. Signing out asks Privy to end the session.
 
-The session lasts exactly as long as that token, because nothing refreshes it:
-the API accepts it until its `exp`, and the dashboard stops sending it at the
-same moment. The lifetime is the issuer's — Auth0's for the API audience in
-production, and `ACCESS_TOKEN_TTL` in `payday-dev-identity` locally, which
-matches Auth0's 24-hour default for exactly this reason. It is not the same
-window as the freshness the account routes demand (`AUTHENTICATION_MAX_AGE`,
-five minutes from the token's `authenticated_at`), which is why a merchant can
-keep issuing invoices long after they could mint an API key without signing in
-again.
+Another code is offered a minute after the last one (`RESEND_COOLDOWN_MS`),
+so a merchant is not sent into Privy's rate limit or left holding two live
+codes wondering which one the page wants.
 
-A code is good for five minutes, which the issuer enforces and does not
-publish, so the page counts the same window down from
-`EMAIL_OTP_LIFETIME_MS` and only offers to send another once it closes —
-a merchant is never holding two live codes at once. Changing the window means
-changing `auth0/passwordless.tf`, `payday-dev-identity`, and that constant
-together.
-
-Locally the issuer is `payday-dev-identity` (the code is printed in its log)
-and the client ID is `payday-dashboard-local`; in production it is the
-`Payday Dashboard` Auth0 application. The web app is configured through
-`NEXT_PUBLIC_AUTH0_DOMAIN`, `NEXT_PUBLIC_AUTH0_CLIENT_ID`, and
-`NEXT_PUBLIC_AUTH0_AUDIENCE` (see `web/.env.example`).
+The web app is configured with the app it signs in to as
+`NEXT_PUBLIC_PRIVY_APP_ID` (see `web/.env.example`), the same id `gatewayd`
+verifies sessions against. Locally that is the real development Privy app —
+there is no stand-in — so the code arrives in a real mailbox, and
+`http://127.0.0.1:3002` must be among the app's allowed domains.
 
 Dashboard pages are rendered per request as empty shells: no invoice, customer,
 or token is in server-rendered HTML or any build artifact, and every page is
@@ -85,41 +74,53 @@ Setting up gates issuing, never looking: an account that issued through the
 API still sees what it has, and only the "New deposit request" action diverts
 into setup.
 
+## Account and wallet
+
+The foot of `/dashboard` is the account itself. The **Account** section shows
+the mailbox the merchant signed in with and their Payday wallet — the
+embedded EVM wallet Privy created for the account — in full, ready to copy or
+open in the explorer, with its USDC and gas balance on the deployment's chain
+read straight from the public RPC (`NEXT_PUBLIC_RPC_URL`), and a Sign out. A
+wallet that Privy is still creating shows as such with a *Check again*; the
+API records it as soon as a session carries it. The **API key** section
+below it generates, rolls, and revokes the key the merchant's own server uses,
+with one confirmation and no second sign-in: the session is the credential,
+and the API refuses these routes to an API key on its own.
+
 ## Issuer identities
 
 An identity is the merchant's own side of an invoice — the party it is issued
-under, the address payers write to, and the wallets it settles to — saved once
-instead of retyped. It answers what the composer used to ask as free text.
+under and the address payers write to — saved once instead of retyped. It
+answers what the composer used to ask as free text. Where a request settles
+is not part of it: that is the account's Payday wallet by default, and an
+identity may keep saved wallets as alternatives.
 
-**Setting one up** takes three steps, in place on `/dashboard`: the name, then
-the contact address, then a wallet. The whole form is on the page, with one action
-in a footer that belongs to the form rather than to any section card — *Send
-code*, *Confirm code*, *Save identity*. The footer sticks to the bottom of the
-viewport while the form runs past the fold and settles at its end, so the action
-is always to hand without ever appearing to belong to the card beside it; it
+**Setting one up** takes two steps, in place on `/dashboard`: the name and
+contact address, then the code. The whole form is on the page, with one
+action in a footer that belongs to the form rather than to any section card —
+*Send code*, *Confirm code*. The footer sticks to the bottom of the viewport
+while the form runs past the fold and settles at its end, so the action is
+always to hand without ever appearing to belong to the card beside it; it
 names the section it is acting on, and finishing one scrolls the next into
-view. The contact address is **proven with an
-emailed code** before any invoice can carry it: payers are told to write there,
-so Payday does not take a merchant's word for the mailbox any more than it takes
-a payer's. The flow resumes from whatever the account already holds, so an
-abandoned tab reopens at the step that is unfinished rather than the beginning.
-An identity counts as usable once its mailbox is proven *and* it has at least
-one wallet.
+view. The contact address is **proven with an emailed code** (through Auth0,
+the same exchange payers use) before any invoice can carry it: payers are
+told to write there, so Payday does not take a merchant's word for the mailbox
+any more than it takes a payer's. The flow resumes from whatever the account
+already holds, so an abandoned tab reopens at the step that is unfinished
+rather than the beginning. An identity counts as usable once its mailbox is
+proven.
 
 **Managing them** is a section of the same page: a line per identity — the
-name, whether it can be issued under, its contact address, and how many wallets
-it settles to — that opens onto the rest. An open row *is* its form, with no
-Edit step, and one Save commits the whole row: rename it, move its contact
-address (which drops the proof, because a different mailbox is a different
-claim), and attach or drop wallets. Save lights up only once something differs
-from what is stored, takes the API's own answer as the new baseline when it
-lands, and Cancel puts it all back.
-
-Removing the only wallet asks for its replacement rather than leaving the
-identity with nowhere to settle: the badge greys out, the wallet form opens, and
-the swap lands as one edit that can still be cancelled. A wallet is saved once
-per account and may serve several identities; an identity may settle to several
-wallets.
+name, whether it can be issued under, its contact address, and whether it
+settles to the Payday wallet or has saved wallets of its own — that opens onto
+the rest. An open row *is* its form, with no Edit step, and one Save commits
+the whole row: rename it, move its contact address (which drops the proof,
+because a different mailbox is a different claim), and attach or drop saved
+wallets. Save lights up only once something differs from what is stored, takes
+the API's own answer as the new baseline when it lands, and Cancel puts it all
+back. Dropping the last saved wallet simply leaves the identity on the Payday
+wallet. A wallet is saved once per account and may serve several identities;
+an identity may keep several.
 
 An identity's name is unique within the account, case and surrounding space
 included, because two identities called the same thing are the same row to
@@ -139,7 +140,8 @@ different wallets. An identity that requests were issued under cannot be
 deleted.
 
 The header is the landing page's, unchanged: the same wordmark at the same
-size, the same Docs and Pricing links on the same 76px rule, plus Sign out.
+size, the same Docs and Pricing links on the same 76px rule, plus Sign out
+(which the Account section repeats).
 
 **Creating one, in the page.** The action does not navigate and does not open a
 modal: the empty state gives way to a four-step composer — the amount and
@@ -177,14 +179,16 @@ controls are the API's own `status` and `starting_after` parameters.
 
 **New deposit request** (in place on `/dashboard`). The only way to issue one,
 in four steps with a running preview beside them that doubles as the review.
-The identity and its wallet are chosen from what the merchant set up, and are
-preselected when there is one of each, so the common case is no clicks at all.
-A customer's own page links here with `?customer=`, which opens the composer on
+The identity is chosen from what the merchant set up and preselected when
+there is one; the request settles to the account's Payday wallet unless the
+identity has saved wallets, in which case they are offered beside it with the
+Payday wallet still the default — so the common case is no clicks at all. A
+customer's own page links here with `?customer=`, which opens the composer on
 that customer.
 
 1. *Amount*: the amount in USDC, used directly (there are no line items), the
-   identity and the wallet it settles to when there is more than one of either,
-   and the deadline — 24 hours, 7 days, 30 days, or a moment picked from a date
+   identity when there is more than one and the destination when the identity
+   offers more than one, and the deadline — 24 hours, 7 days, 30 days, or a moment picked from a date
    and time control. A preset is sent as `expires_in`; a picked moment is sent
    as `expires_at`, because converting it to a duration would re-anchor it to
    whenever the request arrived. The window the API accepts — at least ten

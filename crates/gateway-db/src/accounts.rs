@@ -19,6 +19,11 @@ pub struct ApiKeyMetadata {
     pub rotated_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     pub previous_key_expires_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     pub revoked_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    /// The mailbox the account signs in with, once one has been proven.
+    pub email: Option<String>,
+    /// The account's own EVM wallet — the embedded wallet its identity
+    /// provider created — checksummed; `None` until a session has carried one.
+    pub wallet_address: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -245,16 +250,23 @@ impl AccountRepository {
 
     /// The account behind a verified identity, created on first sight. A
     /// dashboard session never holds an API key, so the account starts with
-    /// none; the dashboard's key management can add one later through the
-    /// usual rotation.
+    /// none; the key routes can add one later through the usual rotation.
+    ///
+    /// `wallet_address` is the wallet the identity provider currently reports
+    /// for this identity. It is recorded on creation and kept current on every
+    /// later sight, so an embedded wallet that was still being created at the
+    /// very first sign-in is picked up as soon as a session carries it.
     pub async fn find_or_provision_by_identity(
         &self,
         issuer: &str,
         subject: &str,
         verified_email: &str,
+        wallet_address: Option<&str>,
     ) -> Result<AccountId, ProvisionAccountError> {
         if let Some(existing) = self.identity_account(issuer, subject, &self.pool).await? {
-            return existing;
+            let account = existing?;
+            self.adopt_wallet(account, wallet_address).await?;
+            return Ok(account);
         }
         // Two first sign-ins for one identity race here; the same lock the
         // key issuance takes serializes them so exactly one account appears.
@@ -265,12 +277,16 @@ impl AccountRepository {
             .execute(&mut *tx)
             .await?;
         if let Some(existing) = self.identity_account(issuer, subject, &mut *tx).await? {
-            return existing;
+            let account = existing?;
+            tx.commit().await?;
+            self.adopt_wallet(account, wallet_address).await?;
+            return Ok(account);
         }
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO accounts (id, email) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO accounts (id, email, wallet_address) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(verified_email)
+            .bind(wallet_address)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -283,6 +299,28 @@ impl AccountRepository {
         .await?;
         tx.commit().await?;
         Ok(AccountId(id))
+    }
+
+    /// Records the wallet a session reports when it differs from what is
+    /// stored. A session that carries none leaves the stored one alone: the
+    /// provider not mentioning a wallet is not the same as the wallet going
+    /// away, and the row must never lose the address deposits settle to.
+    async fn adopt_wallet(
+        &self,
+        account: AccountId,
+        wallet_address: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let Some(wallet_address) = wallet_address else {
+            return Ok(());
+        };
+        sqlx::query(
+            "UPDATE accounts SET wallet_address = $1 WHERE id = $2 AND wallet_address IS DISTINCT FROM $1",
+        )
+        .bind(wallet_address)
+        .bind(account.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn identity_account<'e, E: sqlx::PgExecutor<'e>>(
@@ -312,7 +350,7 @@ impl AccountRepository {
 
     pub async fn metadata(&self, account: AccountId) -> Result<ApiKeyMetadata, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id AS account_id, api_key_hint AS hint, api_key_generation AS generation, key_created_at AS created_at, key_rotated_at AS rotated_at, previous_api_key_expires_at AS previous_key_expires_at, key_revoked_at AS revoked_at FROM accounts WHERE id = $1",
+            "SELECT id AS account_id, api_key_hint AS hint, api_key_generation AS generation, key_created_at AS created_at, key_rotated_at AS rotated_at, previous_api_key_expires_at AS previous_key_expires_at, key_revoked_at AS revoked_at, email, wallet_address FROM accounts WHERE id = $1",
         )
         .bind(account.0)
         .fetch_one(&self.pool)
@@ -608,15 +646,26 @@ mod tests {
         assert!(metadata.previous_key_expires_at.is_none());
     }
 
+    const WALLET: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    const OTHER_WALLET: &str = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn identity_is_provisioned_once_without_a_key_and_can_take_one_later(pool: PgPool) {
         let repo = AccountRepository::new(pool.clone());
+        // The very first sign-in may arrive before the provider has finished
+        // creating the wallet; the account exists without one.
         let first = repo
-            .find_or_provision_by_identity("issuer", "email|one", "one@example.com")
+            .find_or_provision_by_identity("issuer", "email|one", "one@example.com", None)
             .await
             .unwrap();
+        assert!(repo.metadata(first).await.unwrap().wallet_address.is_none());
         let again = repo
-            .find_or_provision_by_identity("issuer", "email|one", "changed@example.com")
+            .find_or_provision_by_identity(
+                "issuer",
+                "email|one",
+                "changed@example.com",
+                Some(WALLET),
+            )
             .await
             .unwrap();
         assert_eq!(first, again, "the identity maps to one account");
@@ -630,13 +679,47 @@ mod tests {
             "a dashboard account starts keyless"
         );
         assert_eq!(metadata.generation, 1);
+        assert_eq!(
+            metadata.wallet_address.as_deref(),
+            Some(WALLET),
+            "the wallet is adopted as soon as a session carries it"
+        );
         assert!(repo.has_verified_email(first).await.unwrap());
-        let email: String = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
-            .bind(first.0)
-            .fetch_one(&pool)
+        assert_eq!(
+            metadata.email.as_deref(),
+            Some("one@example.com"),
+            "the first verified email sticks"
+        );
+
+        // A later session naming no wallet does not forget the one stored; a
+        // later session naming another one moves it.
+        repo.find_or_provision_by_identity("issuer", "email|one", "one@example.com", None)
             .await
             .unwrap();
-        assert_eq!(email, "one@example.com", "the first verified email sticks");
+        assert_eq!(
+            repo.metadata(first)
+                .await
+                .unwrap()
+                .wallet_address
+                .as_deref(),
+            Some(WALLET)
+        );
+        repo.find_or_provision_by_identity(
+            "issuer",
+            "email|one",
+            "one@example.com",
+            Some(OTHER_WALLET),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.metadata(first)
+                .await
+                .unwrap()
+                .wallet_address
+                .as_deref(),
+            Some(OTHER_WALLET)
+        );
 
         // A first issue runs from the current generation, as for any
         // existing identity — but this is a first key, not a rotation, since
@@ -662,7 +745,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            repo.find_or_provision_by_identity("issuer", "email|two", "two@example.com")
+            repo.find_or_provision_by_identity("issuer", "email|two", "two@example.com", None)
                 .await
                 .unwrap(),
             keyed.account_id
@@ -674,8 +757,13 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            repo.find_or_provision_by_identity("issuer", "email|one", "one@example.com")
-                .await,
+            repo.find_or_provision_by_identity(
+                "issuer",
+                "email|one",
+                "one@example.com",
+                Some(WALLET)
+            )
+            .await,
             Err(ProvisionAccountError::AccountDisabled)
         ));
     }

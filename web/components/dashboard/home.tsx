@@ -1,6 +1,6 @@
 "use client";
 
-import type { Customer, Issuer, Payment } from "@payday/sdk";
+import type { AccountMetadata, Customer, Issuer, Payment } from "@payday/sdk";
 import { ArrowUpRight } from "lucide-react";
 import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -10,6 +10,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Problem } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { formatDisplayAmount } from "@/lib/format";
+import { AccountSection } from "./account-section";
 import { ApiKeySection } from "./api-key-manager";
 import { CustomerTable } from "./customer-table";
 import { InvoiceTable } from "./invoice-table";
@@ -32,19 +33,23 @@ import { useResource } from "./session";
  * on the first thing the product needs from it. An identity must exist, and
  * its contact mailbox must be proven, before a request can carry it; so with
  * nothing set up the page *is* that flow, and issuing follows straight out of
- * it.
+ * it. Where a request settles needs no setting up: every account has its own
+ * wallet from the moment it signs in, and that is the default.
  */
 
 type View = "overview" | "setup" | "compose" | "issued" | "onboarding";
 
-/** Usable on an invoice once its mailbox is proven and it can be paid to. */
+/** Usable on an invoice once its mailbox is proven. */
 function usable(issuer: Issuer): boolean {
-  return issuer.email_verified && issuer.payout_addresses.length > 0;
+  return issuer.email_verified;
 }
 
 export function DashboardHome() {
   const router = useRouter();
   const search = useSearchParams();
+  // The account itself: the wallet a request settles to by default, and the
+  // key state the sections at the foot of the page manage.
+  const account = useResource("account", (client) => client.account.get());
   const issuers = useResource("issuers", (client) => client.issuers.list({ limit: 50 }));
   // Only ever asks whether anything exists: the table below loads its own page
   // with its own filter and cursor.
@@ -91,7 +96,7 @@ export function DashboardHome() {
     if (billed !== null && asked !== null) router.replace("/dashboard", { scroll: false });
   }, [billed, asked, router]);
 
-  const failure = issuers.error ?? anything.error ?? customers.error;
+  const failure = account.error ?? issuers.error ?? anything.error ?? customers.error;
   if (failure) {
     return (
       <div className="grid gap-3">
@@ -101,6 +106,7 @@ export function DashboardHome() {
             variant="secondary"
             size="sm"
             onClick={() => {
+              account.reload();
               issuers.reload();
               anything.reload();
               customers.reload();
@@ -113,10 +119,16 @@ export function DashboardHome() {
     );
   }
 
-  if (issuers.data === null || anything.data === null || customers.data === null) {
+  if (
+    account.data === null ||
+    issuers.data === null ||
+    anything.data === null ||
+    customers.data === null
+  ) {
     return <HomeSkeleton />;
   }
 
+  const accountWallet = account.data.wallet_address;
   const identities = issuers.data.issuers;
   const ready = identities.filter(usable);
   const started = anything.data.payments.length > 0;
@@ -150,7 +162,12 @@ export function DashboardHome() {
           }}
         />
       ) : onboardingIssuer ? (
-        <OnboardingWalkthrough issuer={onboardingIssuer} onIssued={setOnboardingPayment} />
+        <OnboardingWalkthrough
+          issuer={onboardingIssuer}
+          payoutAddress={accountWallet ?? onboardingIssuer.payout_addresses[0]?.address ?? null}
+          onWalletChanged={account.reload}
+          onIssued={setOnboardingPayment}
+        />
       ) : view === "setup" || forcedSetup ? (
         <IssuerSetup
           issuers={identities}
@@ -178,6 +195,7 @@ export function DashboardHome() {
       ) : view === "compose" ? (
         <RequestComposer
           issuers={ready}
+          accountWallet={accountWallet}
           customers={customers.data.customers}
           billed={billed ?? undefined}
           onCancel={() => show("overview")}
@@ -199,12 +217,14 @@ export function DashboardHome() {
         />
       ) : (
         <Overview
+          account={account.data}
           identities={identities}
           customers={customers.data.customers}
           openRequest={tracking ?? undefined}
           onCompose={compose}
           onAddIdentity={() => show("setup")}
           onIdentitiesChanged={issuers.reload}
+          onAccountChanged={account.reload}
         />
       )}
     </div>
@@ -213,16 +233,20 @@ export function DashboardHome() {
 
 /**
  * Set up but with nothing issued yet, or issuing already: the same page either
- * way, leading with the requests and carrying the identities behind them.
+ * way, leading with the requests and carrying the identities behind them, and
+ * ending on the account itself — its wallet and its API key.
  */
 function Overview({
+  account,
   identities,
   customers,
   openRequest,
   onCompose,
   onAddIdentity,
   onIdentitiesChanged,
+  onAccountChanged,
 }: {
+  account: AccountMetadata;
   identities: Issuer[];
   customers: Customer[];
   /** A request whose row opens on arrival. */
@@ -230,6 +254,7 @@ function Overview({
   onCompose: () => void;
   onAddIdentity: () => void;
   onIdentitiesChanged: () => void;
+  onAccountChanged: () => void;
 }) {
   const router = useRouter();
   return (
@@ -258,7 +283,11 @@ function Overview({
       </div>
 
       <div className="dash-rise dash-delay-5 mt-14">
-        <ApiKeySection />
+        <AccountSection account={account} onChanged={onAccountChanged} />
+      </div>
+
+      <div className="dash-rise dash-delay-5 mt-14">
+        <ApiKeySection account={account} onChanged={onAccountChanged} />
       </div>
     </div>
   );

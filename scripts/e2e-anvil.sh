@@ -56,9 +56,8 @@ export PAYDAY_DEV_IDENTITY=1
 export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
 export PAYDAY_DEV_IDENTITY_BIND="127.0.0.1:3001"
 export PAYDAY_DEV_IDENTITY_ISSUER="http://127.0.0.1:3001"
-export PAYDAY_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
-export PAYDAY_AUTH0_CLIENT_ID="payday-dashboard-local"
-export PAYDAY_AUTH0_AUDIENCE="payday-api-local"
+# No PAYDAY_PRIVY_APP_ID: this suite runs offline on API keys minted straight
+# into its database, and gatewayd simply refuses dashboard sessions.
 export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
 export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
 export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
@@ -403,10 +402,10 @@ echo "Starting gateway services"
 identity_pid=$!
 pids+=("$identity_pid")
 for _ in {1..100}; do
-  curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" && break
+  curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" && break
   sleep 0.1
 done
-curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" || {
+curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" || {
   echo "development identity provider did not become ready" >&2
   exit 1
 }
@@ -414,10 +413,10 @@ curl --fail --silent --output /dev/null "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.j
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
-echo "Creating accounts through the real local email-OTP flow"
-PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test | jq -er .api_key)"
+echo "Creating two accounts with keys minted straight into the database"
+PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test)"
 export PAYDAY_API_KEY
-SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test | jq -er .api_key)"
+SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test)"
 ./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")

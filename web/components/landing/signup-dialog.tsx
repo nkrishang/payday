@@ -1,5 +1,6 @@
 "use client";
 
+import { useLoginWithEmail, usePrivy } from "@privy-io/react-auth";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Loader2, X } from "lucide-react";
 import Image from "next/image";
@@ -7,24 +8,17 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { HOME_PATH } from "@/components/dashboard/session";
 import { cn } from "@/lib/cn";
-import { describeError } from "@/lib/attachment-upload";
-import {
-  confirmEmailOtp,
-  EMAIL_OTP_LIFETIME_MS,
-  EmailOtpError,
-  merchantSession,
-  startEmailOtp,
-} from "@/lib/merchant-payday";
+import { describeLoginError, RESEND_COOLDOWN_MS } from "@/lib/merchant-payday";
 
 /**
  * Signing up from the landing page.
  *
- * There is nothing to fill in beyond a mailbox. The API provisions an account
- * the first time it sees a verified identity, so the emailed code that signs a
- * returning merchant in is the same code that creates a new one — this is the
- * dashboard's own exchange in the landing page's clothes, and it ends in the
- * same session: a short-lived token in memory and this tab's `sessionStorage`,
- * never an API key.
+ * There is nothing to fill in beyond a mailbox. Privy emails a code, the code
+ * signs the merchant in, and the API provisions an account the first time it
+ * sees that identity — so the code that signs a returning merchant in is the
+ * same code that creates a new one. The dialog is Payday's own; only the code
+ * exchange underneath is Privy's, and it ends in the same session the
+ * dashboard runs on.
  *
  * Like the landing page around it, the dialog is dark in both colour schemes,
  * so it names its colours rather than reading the theme tokens. Its ground is
@@ -53,6 +47,8 @@ function countdown(ms: number): string {
 
 export function StartBuilding() {
   const router = useRouter();
+  const { authenticated } = usePrivy();
+  const { sendCode, loginWithCode } = useLoginWithEmail();
   const [open, setOpen] = useState(false);
   const [wasOpen, setWasOpen] = useState(false);
   const [email, setEmail] = useState("");
@@ -65,15 +61,15 @@ export function StartBuilding() {
   const emailField = useRef<HTMLInputElement>(null);
   const otpField = useRef<HTMLInputElement>(null);
 
-  // The code outlives nothing but its window, so the page holds a clock only
-  // while one is outstanding and stops it the moment the window closes.
-  const remaining = sentAt === 0 ? 0 : Math.max(0, sentAt + EMAIL_OTP_LIFETIME_MS - now);
-  const expired = sentAt !== 0 && remaining === 0;
+  // Another code is offered only once the cooldown has run, so the page holds
+  // a clock only while one is counting and stops it the moment it ends.
+  const remaining = sentAt === 0 ? 0 : Math.max(0, sentAt + RESEND_COOLDOWN_MS - now);
+  const canResend = sentAt !== 0 && remaining === 0;
   useEffect(() => {
-    if (sentAt === 0) return;
+    if (sentAt === 0 || remaining === 0) return;
     const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(tick);
-  }, [sentAt]);
+  }, [sentAt, remaining]);
 
   // Both stamps move together, so the first frame of a countdown is a whole
   // window rather than a leftover from the last one.
@@ -97,40 +93,38 @@ export function StartBuilding() {
 
   // Someone still holding a session has nothing to sign up for.
   const openChange = (next: boolean) => {
-    if (next && merchantSession.get()) {
+    if (next && authenticated) {
       router.push(HOME_PATH);
       return;
     }
     setOpen(next);
   };
 
-  const sendCode = async (event: FormEvent) => {
+  const send = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await startEmailOtp(email.trim());
+      await sendCode({ email: email.trim() });
       markSent(Date.now());
       setStep("code");
     } catch (cause) {
-      setError(describeError(cause));
+      setError(describeLoginError(cause));
     } finally {
       setBusy(false);
     }
   };
 
-  // Offered only once the code on its way has expired, so a merchant is never
-  // holding two live codes and wondering which one the page wants.
   const resend = async () => {
     setBusy(true);
     setError(null);
     setOtp("");
     try {
-      await startEmailOtp(email.trim());
+      await sendCode({ email: email.trim() });
       markSent(Date.now());
       otpField.current?.focus();
     } catch (cause) {
-      setError(describeError(cause));
+      setError(describeLoginError(cause));
     } finally {
       setBusy(false);
     }
@@ -141,16 +135,12 @@ export function StartBuilding() {
     setBusy(true);
     setError(null);
     try {
-      await confirmEmailOtp(email.trim(), otp.trim());
+      await loginWithCode({ code: otp.trim() });
       // Stays busy through the navigation: the dialog is done, and a second
       // submit would spend a code that no longer exists.
       router.push(HOME_PATH);
     } catch (cause) {
-      setError(
-        cause instanceof EmailOtpError && cause.code === "invalid_grant"
-          ? "That code is not valid. Check the email and try again."
-          : describeError(cause),
-      );
+      setError(describeLoginError(cause));
       setBusy(false);
       // Selected, not cleared: the next attempt is usually a correction.
       otpField.current?.select();
@@ -197,13 +187,11 @@ export function StartBuilding() {
           <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-[#b0afa9]">
             {step === "email"
               ? "Enter your email and we'll send a one-time code. No passwords or cards."
-              : expired
-                ? `The code we sent to ${email.trim()} has expired. Send yourself a new one.`
-                : `We sent a six-digit code to ${email.trim()}.`}
+              : `We sent a six-digit code to ${email.trim()}.`}
           </Dialog.Description>
 
           {step === "email" ? (
-            <form onSubmit={sendCode} className="mt-6">
+            <form onSubmit={send} className="mt-6">
               <label className="block">
                 <span className={labelStyles}>Email</span>
                 <input
@@ -268,19 +256,19 @@ export function StartBuilding() {
                 </button>
                 <button
                   type="button"
-                  disabled={busy || !expired}
+                  disabled={busy || !canResend}
                   onClick={resend}
                   className="text-brand-green transition-colors hover:text-brand-green/80 disabled:cursor-default disabled:text-brand-grey disabled:hover:text-brand-grey"
                 >
-                  {expired ? "Resend code" : `Resend in ${countdown(remaining)}`}
+                  {canResend ? "Resend code" : `Resend in ${countdown(remaining)}`}
                 </button>
               </div>
             </form>
           )}
 
           <p className="mt-6 border-t border-brand-grey/20 pt-4 text-[12px] leading-relaxed text-brand-grey">
-            Already have an account? The same code signs you in. Payday stores no password, and your
-            session ends when this tab closes.
+            Already have an account? The same code signs you in. Payday stores no password; your
+            session is kept by Privy in this browser until you sign out.
           </p>
         </Dialog.Content>
       </Dialog.Portal>

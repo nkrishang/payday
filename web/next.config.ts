@@ -19,8 +19,20 @@ const securityHeaders = [
   },
 ];
 
+/**
+ * The browser suite cannot sign in through the real Privy — a real mailbox
+ * and a real code are not things a test has — so, when it asks, the SDK is
+ * swapped for `test/privy-stub.tsx` at bundle time: the same hooks, backed
+ * by a session kept in the tab. Nothing else in the app knows the
+ * difference, which is the point. Never set outside the suite.
+ */
+const privyStub = process.env.PAYDAY_PRIVY_STUB === "1";
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  ...(privyStub
+    ? { turbopack: { resolveAlias: { "@privy-io/react-auth": "./test/privy-stub.tsx" } } }
+    : {}),
   // Next emits `crossorigin` on its own script tags, so the browser sends an
   // Origin header even same-origin, and the dev server answers 403 for any
   // origin it does not trust. It trusts localhost but not the literal loopback

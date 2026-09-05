@@ -14,15 +14,15 @@ of that key; see `docs/production-runbook.md`. It has no safe placeholder:
 leave it unset until the key exists, and the API task definition's
 precondition fails the plan until it is set.
 
-The API task also requires an externally configured Auth0 tenant issuer, API
-audience, and the merchant dashboard's Single Page Application client ID
-(`auth0_client_id`), and the payer verification API and Native application
-once they exist
+The API task also requires the Privy app merchants sign in to
+(`privy_app_id`, public; gatewayd verifies dashboard sessions against that
+app's published keys), an externally configured Auth0 tenant issuer, and the
+payer verification API and Native application once they exist
 (`payer_auth0_audience` and `payer_auth0_client_id`, set together; while
 empty, the payer settings and the generated `PAYDAY_PAYER_REF_MASTER_KEY`
 secret are not passed to the task and verification is unavailable). Terraform
-passes these non-secret identifiers to ECS; embedded email OTP, connection,
-dashboard, and payer application setup are documented in
+passes these non-secret identifiers to ECS; Privy, the embedded email OTP
+connection, and the payer application setup are documented in
 `docs/authentication.md`. `admin_reviewer_id` names who is recorded on
 operator decisions.
 

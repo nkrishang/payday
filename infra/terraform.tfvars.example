@@ -5,11 +5,11 @@ payment_domain_name = "pay.payday.sh"
 # Origin serving /pay/{id}. Links on payment_domain_name 301 here.
 checkout_base_url   = "https://payday.sh"
 payment_route53_zone_id = "Z0987654321EXAMPLE"
+# The Privy app merchants sign in to (see docs/authentication.md); the web app
+# is built with the same id as NEXT_PUBLIC_PRIVY_APP_ID.
+privy_app_id     = "your-privy-app-id"
+# Auth0 tenant payers and issuer mailboxes prove themselves against.
 auth0_issuer     = "https://your-tenant.us.auth0.com/"
-auth0_audience   = "https://api.payday.sh"
-# Auth0 Single Page Application the merchant dashboard signs in with (see
-# docs/authentication.md and auth0/dashboard.tf).
-auth0_client_id  = "your-dashboard-spa-application-client-id"
 # Auth0 API and Native application payers verify their mailbox against (see
 # docs/authentication.md and auth0/payer.tf). Leave both out until they exist.
 payer_auth0_audience  = "https://api.payday.sh/payer"

@@ -632,9 +632,7 @@ resource "aws_ecs_task_definition" "api" {
     portMappings           = [{ containerPort = var.api_port, protocol = "tcp" }],
     environment = concat(local.common_environment, [
       { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
-      { name = "PAYDAY_AUTH0_ISSUER", value = var.auth0_issuer },
-      { name = "PAYDAY_AUTH0_AUDIENCE", value = var.auth0_audience },
-      { name = "PAYDAY_AUTH0_CLIENT_ID", value = var.auth0_client_id },
+      { name = "PAYDAY_PRIVY_APP_ID", value = var.privy_app_id },
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
       { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },

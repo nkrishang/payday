@@ -39,11 +39,17 @@ function origin(url: string | undefined): string[] {
   }
 }
 
-/** The OTP issuer is configured as a bare Auth0 tenant domain or a full origin. */
-function issuerOrigin(domain: string | undefined): string[] {
-  if (!domain) return [];
-  return origin(domain.includes("://") ? domain : `https://${domain}`);
-}
+/**
+ * Merchant sign-in and the embedded wallet are Privy's. Its SDK talks to
+ * `auth.privy.io`, hosts the wallet's key material in an iframe from the
+ * same origin, reads chains through its own RPC proxy, and may present a
+ * Cloudflare Turnstile challenge — all of which the policy names, per
+ * Privy's published CSP guidance. A deployment with a Privy base domain
+ * would add that origin here too.
+ */
+const PRIVY_CONNECT = ["https://auth.privy.io", "https://*.rpc.privy.systems"];
+const PRIVY_FRAMES = ["https://auth.privy.io", "https://challenges.cloudflare.com"];
+const PRIVY_SCRIPTS = ["https://challenges.cloudflare.com"];
 
 function policy(nonce: string | null, isDev: boolean): string {
   const api = origin(process.env.NEXT_PUBLIC_PAYDAY_API_URL);
@@ -52,9 +58,9 @@ function policy(nonce: string | null, isDev: boolean): string {
     ...api,
     ...origin(process.env.NEXT_PUBLIC_RPC_URL),
     ...WALLETCONNECT,
-    // The dashboard signs in against the issuer and PUTs attachment bytes to
-    // the presigned upload origin directly from the browser.
-    ...issuerOrigin(process.env.NEXT_PUBLIC_AUTH0_DOMAIN),
+    ...PRIVY_CONNECT,
+    // The dashboard PUTs attachment bytes to the presigned upload origin
+    // directly from the browser.
     ...origin(process.env.NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN),
   ];
 
@@ -66,7 +72,7 @@ function policy(nonce: string | null, isDev: boolean): string {
 
   return [
     "default-src 'self'",
-    `script-src ${script}`,
+    `script-src ${script} ${PRIVY_SCRIPTS.join(" ")}`,
     // React writes style attributes (the received-amount bar), and those are
     // covered by style-src in browsers without style-src-attr support.
     "style-src 'self' 'unsafe-inline'",
@@ -76,7 +82,8 @@ function policy(nonce: string | null, isDev: boolean): string {
     `img-src 'self' data: blob: https: ${api.join(" ")}`.trimEnd(),
     "font-src 'self'",
     `connect-src ${connect.join(" ")}`,
-    "frame-src 'self'",
+    `frame-src 'self' ${PRIVY_FRAMES.join(" ")}`,
+    `child-src 'self' ${PRIVY_FRAMES.join(" ")}`,
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'self'",

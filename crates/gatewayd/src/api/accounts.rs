@@ -1,3 +1,10 @@
+//! The account behind a credential, and the API key it hands its own server.
+//!
+//! Reading the account works with either credential. Issuing and revoking a
+//! key take a dashboard session and nothing else: whoever holds a key must
+//! not be able to mint another from it, so those two routes extract
+//! [`Session`], which an API-key request does not carry.
+
 use axum::Extension;
 use axum::Json;
 use axum::extract::State;
@@ -7,8 +14,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use gateway_db::{AccountId, IssueApiKeyError};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use crate::api::auth::Identity;
+use crate::api::auth::Session;
 use crate::api::error::ApiError;
 use crate::state::AppState;
 
@@ -20,8 +28,13 @@ pub struct IssuedApiKey {
 }
 
 #[derive(Serialize)]
-pub struct ApiKeyMetadataResponse {
+pub struct AccountResponse {
     account_id: String,
+    /// The mailbox the account signs in with.
+    email: Option<String>,
+    /// The account's own wallet, where deposits settle by default; `null`
+    /// until the first session that carried one.
+    wallet_address: Option<String>,
     key_hint: Option<String>,
     generation: i64,
     created_at: String,
@@ -42,7 +55,7 @@ pub struct RevokeApiKeyRequest {
 
 pub async fn issue(
     State(state): State<AppState>,
-    Extension(identity): Extension<Identity>,
+    Session(identity): Session,
     Json(request): Json<IssueApiKeyRequest>,
 ) -> Result<(StatusCode, Json<IssuedApiKey>), ApiError> {
     if request.expected_generation.is_some_and(|value| value < 1) {
@@ -57,19 +70,15 @@ pub async fn issue(
             &identity.issuer,
             &identity.subject,
             request.expected_generation,
-            &identity.authentication_event_id,
+            // Each request is its own event: the session is the credential,
+            // and the generation check below is what stops two rotations
+            // from racing each other.
+            &Uuid::now_v7().to_string(),
             &key,
             &identity.email,
         )
         .await
-        .map_err(|error| match error {
-            IssueApiKeyError::AuthenticationEventAlreadyUsed => {
-                ApiError::authentication_event_already_used()
-            }
-            IssueApiKeyError::GenerationConflict => ApiError::api_key_generation_conflict(),
-            IssueApiKeyError::AccountDisabled => ApiError::account_disabled(),
-            IssueApiKeyError::Database(error) => ApiError::from(error),
-        })?;
+        .map_err(issue_error)?;
     let status = if issued.replaced_previous_key {
         StatusCode::OK
     } else {
@@ -87,25 +96,26 @@ pub async fn issue(
 
 pub async fn metadata(
     State(state): State<AppState>,
-    Extension(identity): Extension<Identity>,
-) -> Result<Json<ApiKeyMetadataResponse>, ApiError> {
-    let account = account_for_identity(&state, &identity).await?;
-    let metadata = state.accounts.metadata(account).await?;
-    Ok(Json(metadata_response(metadata)))
+    Session(_): Session,
+    Extension(account): Extension<AccountId>,
+) -> Result<Json<AccountResponse>, ApiError> {
+    Ok(Json(account_response(
+        state.accounts.metadata(account).await?,
+    )))
 }
 
 pub async fn get_account(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
-) -> Result<Json<ApiKeyMetadataResponse>, ApiError> {
-    Ok(Json(metadata_response(
+) -> Result<Json<AccountResponse>, ApiError> {
+    Ok(Json(account_response(
         state.accounts.metadata(account).await?,
     )))
 }
 
 pub async fn revoke(
     State(state): State<AppState>,
-    Extension(identity): Extension<Identity>,
+    Session(identity): Session,
     Json(request): Json<RevokeApiKeyRequest>,
 ) -> Result<StatusCode, ApiError> {
     if request.expected_generation < 1 {
@@ -119,23 +129,29 @@ pub async fn revoke(
             &identity.issuer,
             &identity.subject,
             request.expected_generation,
-            &identity.authentication_event_id,
+            &Uuid::now_v7().to_string(),
         )
         .await
-        .map_err(|error| match error {
-            IssueApiKeyError::AuthenticationEventAlreadyUsed => {
-                ApiError::authentication_event_already_used()
-            }
-            IssueApiKeyError::GenerationConflict => ApiError::api_key_generation_conflict(),
-            IssueApiKeyError::AccountDisabled => ApiError::account_disabled(),
-            IssueApiKeyError::Database(error) => ApiError::from(error),
-        })?;
+        .map_err(issue_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn metadata_response(metadata: gateway_db::ApiKeyMetadata) -> ApiKeyMetadataResponse {
-    ApiKeyMetadataResponse {
+fn issue_error(error: IssueApiKeyError) -> ApiError {
+    match error {
+        IssueApiKeyError::AuthenticationEventAlreadyUsed => {
+            ApiError::authentication_event_already_used()
+        }
+        IssueApiKeyError::GenerationConflict => ApiError::api_key_generation_conflict(),
+        IssueApiKeyError::AccountDisabled => ApiError::account_disabled(),
+        IssueApiKeyError::Database(error) => ApiError::from(error),
+    }
+}
+
+fn account_response(metadata: gateway_db::ApiKeyMetadata) -> AccountResponse {
+    AccountResponse {
         account_id: metadata.account_id.to_string(),
+        email: metadata.email,
+        wallet_address: metadata.wallet_address,
         key_hint: metadata.hint,
         generation: metadata.generation,
         created_at: metadata.created_at.to_rfc3339(),
@@ -145,17 +161,6 @@ fn metadata_response(metadata: gateway_db::ApiKeyMetadata) -> ApiKeyMetadataResp
             .map(|value| value.to_rfc3339()),
         revoked_at: metadata.revoked_at.map(|value| value.to_rfc3339()),
     }
-}
-
-async fn account_for_identity(
-    state: &AppState,
-    identity: &Identity,
-) -> Result<AccountId, ApiError> {
-    state
-        .accounts
-        .find_by_identity(&identity.issuer, &identity.subject)
-        .await?
-        .ok_or_else(ApiError::account_not_provisioned)
 }
 
 fn generate_api_key(prefix: &str) -> String {

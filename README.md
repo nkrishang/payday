@@ -14,17 +14,18 @@ For a live local stack with multiplexed logs, run `just dev`, then sign in at th
 
 ## API
 
-`https://api.payday.sh/v1` is the product: create invoices, read and list payments, manage customers and attachments, download proofs, and register webhooks with one bearer API key ([HTTP API reference](docs/api-reference.md)). TypeScript applications can use the zero-dependency client in [`sdk/typescript`](sdk/typescript/README.md). The key is minted in the dashboard after an emailed one-time code; see [Authentication and API keys](docs/authentication.md).
+`https://api.payday.sh/v1` is the product: create invoices, read and list payments, manage customers and attachments, download proofs, and register webhooks with one bearer API key ([HTTP API reference](docs/api-reference.md)). TypeScript applications can use the zero-dependency client in [`sdk/typescript`](sdk/typescript/README.md). The key is minted in the dashboard, which signs in through Privy with an emailed one-time code and gives every account its own embedded wallet; see [Authentication and API keys](docs/authentication.md).
 
 ## Web
 
 `payday.sh` — the landing page, the hosted checkout at `/pay/{id}`, and the
 merchant dashboard at `/dashboard` — lives in [`web/`](web/). It is a Next.js
 app built on `@payday/sdk`: the checkout consumes the public payer API and is
-where every `payment_url` points; the dashboard signs in with an emailed code
-and uses the same merchant API as the SDK with that identity token, so no API
-key ever reaches the browser (see [docs/dashboard.md](docs/dashboard.md)). Run
-it beside the local stack:
+where every `payment_url` points; the dashboard signs in through Privy with an
+emailed code — every account gets its own embedded wallet, where deposits
+settle by default — and uses the same merchant API as the SDK with Privy's
+identity token, so no API key ever reaches the browser (see
+[docs/dashboard.md](docs/dashboard.md)). Run it beside the local stack:
 
 ```bash
 npm ci

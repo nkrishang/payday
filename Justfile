@@ -8,9 +8,10 @@ dev:
 e2e:
     ./scripts/local-runner.sh e2e
 
-# Create a local account through the email-OTP flow and print its API key once.
-seed *ARGS:
-    ./scripts/local-runner.sh seed {{ARGS}}
+# Mint a local account and API key straight into the running dev database
+# (merchant sign-in itself is Privy, which has no local stand-in).
+seed EMAIL="dev@example.test":
+    SEED_EMAIL="{{EMAIL}}" ./scripts/local-runner.sh seed
 
 # Serve payday.sh — the landing page and hosted checkout — on port 3002.
 # Port 3001 belongs to the local development identity provider.

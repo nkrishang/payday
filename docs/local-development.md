@@ -80,18 +80,18 @@ defaults. Start PostgreSQL, MinIO, Anvil, the development identity provider,
 just dev
 ```
 
-Sign in at the dashboard (`just web`, below) with any email address, or, for
-an API key, create a local account through the real email-OTP flow in another
-shell:
+In another shell, mint a local account with an API key:
 
 ```bash
-just seed you@example.test
+just seed                      # or: just seed you@example.test
 ```
 
-The one-time code is printed in the `[identity]` log (or fixed by
-`PAYDAY_DEV_IDENTITY_OTP`); the script prompts for it, mints a key through
-`POST /v1/account/api-key`, and prints the key once as JSON. Export it as
-`PAYDAY_API_KEY` for `curl` or the SDK. Each run starts from a clean database,
+Merchant sign-in is Privy's, which has no local stand-in, so the seed writes
+an account and a key straight into the runner's database
+(`scripts/local-api-key.sh`) and prints the key; export it as
+`PAYDAY_API_KEY`. To sign in through the browser instead, run the web app
+below: it signs in against the real development Privy app and the code
+arrives in your mailbox. Each run starts from a clean database,
 attachment store, and Anvil chain so their indexed histories cannot drift.
 After the bootstrap deploys the contracts, the runner reads their runtime
 bytecode from the chain and exports `PAYDAY_FACTORY_CODE_HASH` and
@@ -113,12 +113,13 @@ gateway accepts the dashboard's cross-origin requests (the merchant routes
 answer only that origin). Port 3002 rather than 3001, which belongs to the
 development identity provider. See [web/README.md](../web/README.md).
 
-For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_AUTH0_DOMAIN`,
-`NEXT_PUBLIC_AUTH0_CLIENT_ID`, and `NEXT_PUBLIC_AUTH0_AUDIENCE` (sign-in
-against the development identity provider, code printed in its log) and
-`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
+For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_PRIVY_APP_ID`
+(the development Privy app, the same id the runner gives `gatewayd` as
+`PAYDAY_PRIVY_APP_ID`; `http://127.0.0.1:3002` must be among that app's
+allowed domains) and `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
 `http://127.0.0.1:9000`, so the page may PUT PDFs there). The example file
-carries working local values.
+carries working local values. Payer and issuer-mailbox codes still come from
+the development identity provider, printed in its log.
 
 ## Local Anvil end-to-end run
 
@@ -220,9 +221,9 @@ set -a; source .env; set +a
 ./target/debug/gatewayd
 ```
 
-Then run `scripts/local-api-key.sh you@example.test` and enter the code from
-the identity provider log to mint an API key. Production uses the same flow
-against Auth0, from the dashboard; see `docs/authentication.md`.
+Then mint an account and key with `scripts/local-api-key.sh` (it reads
+`DATABASE_URL`), or sign in through the web app against the development Privy
+app. Production merchant sign-in is Privy too; see `docs/authentication.md`.
 
 In another terminal:
 
@@ -324,13 +325,11 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 ## Configuration
 
 - `DATABASE_URL`
-- `PAYDAY_API_KEY` — the per-account bearer key scripts and the SDK call the
-  API with; the services never read it
-- `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID` —
-  the merchant identity issuer, audience, and the dashboard's client ID, the
-  one application whose tokens `gatewayd` accepts (see
-  `docs/authentication.md`); `payday-dashboard-local` with the development
-  identity provider
+- `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
+- `PAYDAY_PRIVY_APP_ID` — the Privy app merchants sign in to; `gatewayd`
+  verifies dashboard sessions against its published keys, fetched at startup
+  (see `docs/authentication.md`). `just dev` sets the development app; unset,
+  only API keys authenticate, which is how `just e2e` runs
 - `PAYDAY_PAYER_AUTH0_ISSUER`, `PAYDAY_PAYER_AUTH0_AUDIENCE`,
   `PAYDAY_PAYER_AUTH0_CLIENT_ID`, `PAYDAY_PAYER_REF_MASTER_KEY` — the payer
   email-verification audience and the payer-reference key, set together or not
@@ -344,11 +343,12 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   issuer; non-loopback HTTP issuers remain rejected
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
 - `PAYDAY_DEV_IDENTITY_ISSUER` — token issuer; must exactly match
-  `PAYDAY_AUTH0_ISSUER`
+  `PAYDAY_PAYER_AUTH0_ISSUER`
 - `PAYDAY_DEV_IDENTITY_OTP` — the code the development provider emails for
-  every sign-in, instead of a random one it only prints to its log
-  (`DEV IDENTITY OTP <email> <code>`). Local convenience only; the provider
-  refuses to bind anything but loopback, and Auth0 issues the real codes
+  every payer or issuer-mailbox verification, instead of a random one it only
+  prints to its log (`DEV IDENTITY OTP <email> <code>`). Local convenience
+  only; the provider refuses to bind anything but loopback, and Auth0 issues
+  the real codes
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`

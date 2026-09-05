@@ -1,11 +1,15 @@
 # Auth0 configuration
 
 Terraform owns Payday's passwordless email connection, branded OTP template,
-the dashboard's browser application, the payer verification application, and
-tenant attack protection. It
+the payer verification application, and tenant attack protection. It
 deliberately does not own the Resend credential: keep that key only in Auth0's
 email-provider settings as described in
 [`docs/authentication.md`](../docs/authentication.md).
+
+Auth0 is not how merchants sign in. Merchants use Privy; Auth0's job is the
+cheap, account-free proof that a mailbox was just opened — a payer's on a
+gated invoice, or an issuer identity's contact address — which happens many
+times more often than a merchant signs up and never needs a user of its own.
 
 ## Bootstrap or update
 
@@ -51,32 +55,13 @@ requires an explicit reviewed code change.
 
 ## Dashboard application
 
-`dashboard.tf` declares the `Payday Dashboard` single-page application and
-enables the passwordless email connection for it. It is the only merchant
-application. The dashboard exchanges an email OTP directly against Auth0's
-passwordless endpoints from the browser with its public client ID, so the
-application carries no secret and needs only the passwordless OTP grant. Its
-allowed origins, callbacks, and logout URLs cover `https://payday.sh` and the
-local Next.js dev server at `http://127.0.0.1:3002`.
-
-Let Terraform create the application on the first apply. If one was created in
-the dashboard beforehand, import it instead so the plan does not create a
-duplicate:
-
-```bash
-terraform -chdir=auth0 import auth0_client.dashboard 'CLIENT_ID_REPLACE_ME'
-terraform -chdir=auth0 import auth0_connection_client.dashboard_passwordless_email \
-  'con_REPLACE_ME::CLIENT_ID_REPLACE_ME'
-```
-
-The application is not, on its own, allowed to obtain Payday API tokens. The
-Post-Login Action admits only the client ID configured as its secret, so after
-the apply copy the new application's Client ID into the Action secret
-`PAYDAY_CLIENT_ID` (see `docs/authentication.md`) and into `gatewayd`'s
-`PAYDAY_AUTH0_CLIENT_ID`. Until both are set, dashboard logins are denied at
-the token step. The API accepts dashboard tokens as a session credential and,
-while fresh, as the credential that issues the account's API key; the browser
-shows that key once and never stores it.
+There is none: the merchant dashboard signs in through Privy, not Auth0 (see
+`docs/authentication.md`). A tenant that still carries a `Payday Dashboard`
+single-page application, the `Payday API` resource server, or the `Payday
+email OTP claims` Action from the dashboard's earlier Auth0 login can delete
+them; the API no longer accepts those tokens and nothing reads that client
+ID. The tracked `payday-email-otp.js` Action source is kept only until that
+cleanup lands.
 
 ## Payer verification application
 

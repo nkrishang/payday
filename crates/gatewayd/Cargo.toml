@@ -45,4 +45,6 @@ pdf-writer = { workspace = true }
 [dev-dependencies]
 tower = { workspace = true }
 rsa = { version = "0.9", features = ["pem"] }
+# Privy signs with ES256; tests mint their own P-256 key to stand in for it.
+p256 = { version = "0.13", features = ["pem", "pkcs8"] }
 rand_08 = { package = "rand", version = "0.8" }

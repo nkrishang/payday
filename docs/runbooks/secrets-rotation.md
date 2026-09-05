@@ -4,13 +4,13 @@ How to rotate an account API key and infrastructure secrets.
 
 ## Rotate the API key
 
-API-key rotation requires a fresh email OTP. Sign in at `https://payday.sh`
-as the account owner, open the dashboard's **API key** section, and choose
-**Roll**; it asks for a fresh code, then shows the replacement exactly once.
-Copy it directly into the approved secret manager. The previous key remains
-valid for 24 hours. The same step is `POST /v1/account/api-key` with
-`{"expected_generation": <current generation>}` and a fresh identity token as
-the bearer (`docs/authentication.md` § 5).
+Sign in at `https://payday.sh` as the account owner, open the dashboard's
+**API key** section, and choose **Roll key**; it confirms, then shows the
+replacement exactly once. Copy it directly into the approved secret manager.
+The previous key remains valid for 24 hours. The same step is
+`POST /v1/account/api-key` with `{"expected_generation": <current generation>}`
+and the dashboard session (the Privy identity token) as the bearer — an API
+key cannot roll itself (`docs/authentication.md` § 6).
 
 Store and distribute the new key through the account owner's approved secret
 management process. The service does not retain recoverable plaintext and does

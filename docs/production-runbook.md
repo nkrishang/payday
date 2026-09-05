@@ -34,16 +34,16 @@ Required:
 6. **A wallet with a small amount of native Monad USDC** for the production
    smoke payment. Circle Mint is not required; USDC can come from a supported
    exchange or bridge.
-7. **Auth0 tenant and Resend account** configured for embedded passwordless
-   email OTP as described in
+7. **A Privy app** for merchant sign-in — email login only, embedded wallets
+   created on login, identity tokens enabled, and the dashboard's origin
+   among its allowed domains — and an **Auth0 tenant and Resend account**
+   configured for the embedded passwordless email OTP that payers and issuer
+   mailboxes prove themselves with, both as described in
    [authentication.md](authentication.md). Resend must verify a Payday-owned
-   sending domain before real users authenticate. Apply the reviewable Auth0
+   sending domain before real payers verify. Apply the reviewable Auth0
    attack-protection root and complete its launch checks in
    [`auth0/README.md`](../auth0/README.md); enabled tenant
-   defaults alone are not deployment evidence. The merchant dashboard signs
-   in through a separate Single Page Application in the same tenant; its
-   setup is described in the dashboard section of
-   [authentication.md](authentication.md).
+   defaults alone are not deployment evidence.
 
 No Docker Hub, Terraform Cloud, separate PostgreSQL vendor, Circle account, or
 third-party key-management account is required.
@@ -208,8 +208,9 @@ Replace every placeholder in `terraform.tfvars`, including:
   leave it unset until then. There is no safe placeholder, and the full apply
   in step 7 refuses until it is set
 - current `usdc_start_block`
-- Auth0 issuer, API audience, and the dashboard's Single Page Application
-  client ID (`auth0_client_id`)
+- `privy_app_id`, the Privy app merchants sign in to (the web app is built
+  with the same id)
+- the Auth0 issuer, and the payer audience and application once they exist
 
 Supply the RPC URL without writing it to the tfvars file:
 
