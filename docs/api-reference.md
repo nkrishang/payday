@@ -74,7 +74,7 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `amount` | Required positive USDC decimal; at most six fractional digits. Used directly; nothing is summed or reconciled |
 | `payout_address` | Required nonzero EVM address; receives exactly `amount` |
 | `issuer`, `bill_to` | Required parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim |
-| `payer_policy` | Required; one of the two modes below |
+| `payer_policy` | Required; one of the three modes below |
 | `customer_id` | Optional customer UUID owned by the account; the invoice still stores its own `bill_to` snapshot |
 | `notes` | Optional, up to 4,000 bytes |
 | `heading` | Optional short description, up to 200 bytes; shown to the payer before verification on gated invoices |
@@ -90,12 +90,24 @@ Payer policy shapes:
 ```json
 {"mode": "permissionless"}
 {"mode": "verified_email", "expected_email": "alice@example.com"}
+{"mode": "merchant_session", "payer_reference": "user_123"}
 ```
 
-`expected_email` is required for `verified_email`, forbidden for
-`permissionless`, and is trimmed and lowercased. The assertion is
-merchant-supplied and cannot be edited by the payer; the payer route shows
-only a masked hint.
+`expected_email` is required for `verified_email` and is trimmed and
+lowercased; `payer_reference` is required for `merchant_session` and is
+trimmed, case preserved: 1–128 bytes of printable text with no whitespace,
+your own identifier for the user your application has signed in. Each
+assertion is forbidden on the other modes. Assertions are merchant-supplied
+and cannot be edited by the payer; the payer route shows only a masked email
+hint, and never the payer reference.
+
+For `merchant_session` the `201` response additionally carries
+`client_secret` and `client_secret_expires_at`: a single-use secret, valid
+for fifteen minutes, that opens the hosted checkout for that payer. It is
+returned exactly once — never on an idempotent replay or a later `GET`; the
+API stores only its hash — so a server that loses it mints another with
+`POST /v1/payments/{id}/client-secret`. See
+[Merchant sessions](#merchant-sessions) for the flow.
 
 Text fields — party names, emails, and details, `heading`, `reference`,
 `notes`, and customer fields — reject control characters (a NUL or any other
@@ -184,11 +196,25 @@ the same invoice always produces byte-identical output.
 ### `GET /v1/payments/{reference}/verification`
 
 The merchant's verification view of one invoice: `payer_policy_mode`,
-`verification_completed_at`, `likely_unsolicited_at`, `facts` (`email` as
-`not_required`, `pending`, or `approved`, plus `complete`), and every
-`attempts[]` entry (`kind` email, `status` pending, approved, or abandoned,
-`verified_at`, `created_at`). The payer's session and the code they typed
-are never in this response.
+`verification_completed_at`, `likely_unsolicited_at`, `facts` (`email` and
+`merchant_session`, each `not_required`, `pending`, or `approved`, plus
+`complete`), and every `attempts[]` entry (`kind` `email` or
+`merchant_session`, `status` pending, approved, or abandoned, `verified_at`,
+`created_at`). A `merchant_session` attempt is the exchange of a client
+secret, recorded approved. The payer's session, the client secret, and the
+code they typed are never in this response.
+
+### `POST /v1/payments/{reference}/client-secret`
+
+Mints a fresh single-use client secret for a `merchant_session` payment:
+`201 {client_secret, expires_at}`, `no-store`. Use it when the payer your
+application signed in comes back after the first secret was spent or
+expired; earlier unspent secrets stay valid until they expire, so retrying a
+redirect never breaks a link already sent. Permissionless payments answer
+`409 verification_not_required`, `verified_email` payments
+`409 verification_method_not_applicable`, and a payment that closed without
+completing verification `410 payment_not_payable`. A settled payment that did
+verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/payments/{reference}/proof`
 
@@ -419,19 +445,20 @@ integrations are unaffected, and no other route allows cross-origin reads.
 
 The payer response discloses progressively. It always carries `id`,
 `issuer_name`, `heading`, `payer_policy {mode, expected_email_hint}`,
-`requirements {email, complete}` (`email` is `not_required`, `pending`, or
-`approved`), `status`, `payable`,
+`requirements {email, merchant_session, complete}` (each fact is
+`not_required`, `pending`, or `approved`), `status`, `payable`,
 `expires_at`, `server_timestamp`, `settlement_tx_hash`,
 `settlement_explorer_url`, `payer_message`, and `content_unlocked`. For a
 `permissionless` invoice `content_unlocked` is true and the response includes
 `chain`, `token`, `amount`, `received`, `remaining` (each with base units),
 `address`, `address_explorer_url`, `payment_uri`, and
 `invoice {amount, amount_base_units, bill_to, notes, reference, attachment}`.
-For the verified modes those fields — and `settlement_tx_hash` and
+For the gated modes those fields — and `settlement_tx_hash` and
 `settlement_explorer_url`, since a settlement transaction would reveal the
 amount and payout address the gate withholds — are `null` until the payer's
 session satisfies the policy; the hint masks the expected mailbox as
-`a****@e***.com`.
+`a****@e***.com`, and is `null` for `merchant_session`, whose payer
+reference is never shown to the payer.
 The attachment and QR routes answer `401 verification_required` while content
 is locked. A payer session token, obtained by completing verification on the
 hosted checkout, travels in the `Payday-Payer-Session` header on every payer
@@ -471,6 +498,52 @@ completed verification: `start` and `confirm` explicitly re-prove its expected
 mailbox and mint a new 24-hour receipt session. Expired sessions never unlock
 terminal content, and receipt re-authentication never makes the invoice payable.
 
+Email routes on a `merchant_session` payment answer
+`409 verification_method_not_applicable`: that mode sends no codes.
+
+### Merchant sessions
+
+```text
+POST /v1/payer/payments/{id}/session   {"client_secret": "cs_…"}
+```
+
+The `merchant_session` mode is for applications that have already signed
+their user in. The flow, end to end:
+
+1. Your server creates the payment with
+   `{"mode": "merchant_session", "payer_reference": "<your user id>"}` and
+   receives `client_secret` in the `201`.
+2. Your server sends the signed-in user to
+   `payment_url + "#cs=" + client_secret`. The secret rides in the URL
+   fragment, which the browser never sends to any server, so it reaches no
+   log, Referer header, or analytics beacon. Never put it in the path or
+   query.
+3. The hosted checkout reads the fragment, removes it from the address bar,
+   and exchanges it here: `200 {payer_session, expires_at, requirements}`,
+   `no-store`. The exchange is the verification. It mints a 24-hour payer
+   session that already satisfies the policy, records an approved
+   `merchant_session` attempt, and, while the payment is live, sets
+   `verification_completed_at`, which raises `verification.approved`. The
+   page renders unlocked; the payer types nothing.
+4. The payer pays. `payment.paid` and `payment.settled` follow as usual,
+   each carrying `payer_reference`, so your handler credits the right
+   ledger without a lookup.
+
+A secret is spent by its first exchange: the same link pasted into another
+window answers `409 client_secret_used`, and the checkout says so. An
+unknown, malformed, expired, or wrong-payment secret answers
+`401 client_secret_invalid` — one answer for all four, so a guess learns
+nothing. A payment that closed without verifying answers
+`410 payment_not_payable`; a settled payment that did verify still accepts a
+fresh secret, minting a receipt session that never makes it payable again.
+Exchanging needs no Auth0 audience: merchant sessions never touch the email
+provider.
+
+What Payday attests here is narrow and stated plainly: your server released
+this secret, and it was exchanged before this session saw the payment. Who
+the payer is remains your assertion — `payer_reference` — carried in the
+policy, the issuance snapshot the address commits to, and every webhook.
+
 The write routes answer cross-origin requests only from the hosted
 checkout origin (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
 `Content-Type` and `Payday-Payer-Session`; they never allow `*`. Bodies are
@@ -484,7 +557,10 @@ limited to 8 KiB.
 | `payer_session_invalid` | 401 | `Payday-Payer-Session` missing, unknown, expired, or for another invoice |
 | `otp_invalid` | 401 | The verification code was not accepted |
 | `verification_required` | 401 | Content or QR requested for a gated invoice without an unlocked session |
-| `verification_not_required` | 409 | Verification started on a permissionless invoice |
+| `verification_not_required` | 409 | Verification started, or a client secret requested, on a permissionless invoice |
+| `verification_method_not_applicable` | 409 | Email codes on a `merchant_session` invoice, or a client secret on a `verified_email` one |
+| `client_secret_invalid` | 401 | The client secret is unknown, malformed, expired, or for another payment |
+| `client_secret_used` | 409 | The client secret was already exchanged; the link was opened once |
 | `verification_not_started` | 409 | Confirm called before a code was sent, or after it was spent |
 | `verification_persistence_unavailable` | 503 | Auth0 accepted the OTP but persistence failed; retry confirm with the returned short-lived continuation |
 | `otp_resend_cooldown` | 429 | A code was sent for this invoice within the last minute; see `Retry-After` |

@@ -33,6 +33,28 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
+- The `merchant_session` payer mode, for applications that have already
+  signed their user in. The policy names the payer by the merchant's own
+  `payer_reference`; the `201` that issues the payment carries a single-use
+  `client_secret` (fifteen minutes, returned once, stored hashed), and
+  `POST /v1/payments/{id}/client-secret` mints another for a returning user.
+  The merchant's server sends the user to `payment_url#cs=<secret>`; the
+  hosted checkout reads the fragment, removes it from the address bar, and
+  exchanges it at `POST /v1/payer/payments/{id}/session` for a payer session
+  that already satisfies the policy. The exchange completes the payment's
+  verification (raising `verification.approved`), records an approved
+  `merchant_session` attempt, and needs no email provider. A second exchange
+  answers `409 client_secret_used`; an unknown, expired, or foreign secret
+  `401 client_secret_invalid`; email codes on such a payment, or a client
+  secret on a `verified_email` one, `409 verification_method_not_applicable`.
+  Webhook payment objects gain `payer_reference`, so `payment.paid` and
+  `payment.settled` credit the right ledger without a lookup;
+  `requirements` and the merchant's `facts` gain `merchant_session`.
+  Dashboard: the mode is shown on requests that have it (payer reference,
+  "Opened by your app" activity) but is not offered by the composer, since
+  only an application with a signed-in user can hand over the secret. SDK:
+  `payments.createClientSecret`, `verification.exchangeClientSecret`, and
+  `checkoutUrl`. Migration `0018`.
 - `GET /v1/payments/{id}/verification`: the merchant's verification view of
   an invoice — each fact the policy needs, and every attempt made against it
   with its status and times. Dashboard: verification activity on the request

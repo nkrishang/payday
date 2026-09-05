@@ -35,7 +35,7 @@ Treat the address as single-use. Share the `payment_url` or all returned
 payment instructions, and stop presenting the address after it is no longer
 payable. Never recycle it for another order.
 
-## Payer policy: two modes
+## Payer policy: three modes
 
 Every invoice names who may pay and what they must prove first:
 
@@ -43,16 +43,27 @@ Every invoice names who may pay and what they must prove first:
 |---|---|---|
 | `permissionless` | Nothing | Nothing |
 | `verified_email` | Expected email | Mailbox ownership |
+| `merchant_session` | Its own user id (`payer_reference`) | Nothing: the merchant's app opens the page with a single-use client secret |
 
 The merchant asserts; Payday confirms. Payday returns whether the check
-passed, never the payer's own data. For `verified_email` the hosted page
+passed, never the payer's own data. For the gated modes the hosted page
 withholds the amount,
 bill-to, notes, reference, PDF, address, URI, and QR until the payer's session
 satisfies the policy — only the issuer name and heading show, with a masked
-hint of the expected mailbox. Funds that arrive before verification completes
-are recorded and flagged as likely unsolicited rather than credited as a
-verified payment. Verification proves who completed the checks; it does not
-prove who controls the sending wallet.
+hint of the expected mailbox for `verified_email`. Funds that arrive before
+verification completes are recorded and flagged as likely unsolicited rather
+than credited as a verified payment. Verification proves who completed the
+checks; it does not prove who controls the sending wallet.
+
+`merchant_session` is the mode for applications with their own sign-in: a
+fund crediting an onboarded investor, an exchange or a prediction market
+crediting a logged-in customer. The application creates the request
+server-side, receives a client secret, and hands it only to the user it named.
+Exchanging that secret is the verification; Payday's added claim is only that
+the merchant's server released the secret before the session opened, and the
+webhooks carry `payer_reference` back so the application credits the right
+ledger. It is created through the API; the dashboard shows these requests but
+cannot compose one, because it has no signed-in user to hand the secret to.
 
 ## Public lifecycle
 

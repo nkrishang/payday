@@ -12,16 +12,20 @@ export interface Party {
   details?: string;
 }
 
-export type PayerPolicyMode = "permissionless" | "verified_email";
+export type PayerPolicyMode = "permissionless" | "verified_email" | "merchant_session";
 
 /**
  * Who may pay, and what they must prove first. The verified mode names the
- * expected mailbox. The assertion is merchant-supplied and immutable once
- * the invoice is issued.
+ * expected mailbox. The merchant-session mode names the payer your own
+ * application has already signed in, by your own identifier; your server then
+ * hands that payer the single-use `client_secret` the create response
+ * carries, and no code or vendor is involved. Every assertion is
+ * merchant-supplied and immutable once the invoice is issued.
  */
 export type PayerPolicy =
   | { mode: "permissionless" }
-  | { mode: "verified_email"; expected_email: string };
+  | { mode: "verified_email"; expected_email: string }
+  | { mode: "merchant_session"; payer_reference: string };
 
 export interface AttachmentDescriptor {
   id: string;
@@ -103,6 +107,15 @@ export interface Payment {
   /** Full policy including assertions; merchant-only, never on the payer route. */
   payer_policy: PayerPolicy;
   attachment: AttachmentDescriptor | null;
+  /**
+   * `merchant_session` only, and only on the `201` that issued the payment:
+   * the first single-use client secret, valid for fifteen minutes. Absent on
+   * every later read and on idempotent replays; the API stores only its hash.
+   * Send the payer to `checkoutUrl(payment, client_secret)`; mint another with
+   * `payments.createClientSecret` when they come back.
+   */
+  client_secret?: string;
+  client_secret_expires_at?: string;
   verification_completed_at: string | null;
   /** Set when finalized funds arrived before the policy's verification completed. */
   likely_unsolicited_at: string | null;
@@ -131,7 +144,33 @@ export type VerificationFactStatus = "not_required" | "pending" | "approved" | "
 /** Each fact the policy needs, on its own. */
 export interface VerificationRequirements {
   email: VerificationFactStatus;
+  /** Your application opened the checkout by exchanging a client secret. */
+  merchant_session: VerificationFactStatus;
   complete: boolean;
+}
+
+/** A fresh single-use client secret for a `merchant_session` payment. Returned once; stored hashed. */
+export interface ClientSecret { client_secret: string; expires_at: string }
+
+/** A payer session minted by exchanging a client secret on the hosted checkout. */
+export interface ExchangeClientSecret {
+  payer_session: string;
+  expires_at: string;
+  requirements: VerificationRequirements;
+}
+
+/** The fragment key the hosted checkout reads a client secret from. */
+export const CLIENT_SECRET_FRAGMENT_KEY = "cs";
+
+/**
+ * The URL to send an authenticated payer to for a `merchant_session` payment:
+ * the payment page with the client secret in the fragment, which never reaches
+ * a server log, a Referer header, or an analytics beacon. Redirect to it or
+ * open it in a frame; never write it to a log.
+ */
+export function checkoutUrl(payment: Pick<Payment, "payment_url">, clientSecret: string): string {
+  if (!clientSecret) throw new TypeError("clientSecret is required");
+  return `${payment.payment_url}#${CLIENT_SECRET_FRAGMENT_KEY}=${encodeURIComponent(clientSecret)}`;
 }
 
 /** The policy as the payer may see it: the mode and a masked mailbox hint such as `a****@e***.com`. */
@@ -151,7 +190,8 @@ export interface VerificationStatus {
  */
 export interface VerificationAttempt {
   id: string;
-  kind: "email";
+  /** A `merchant_session` attempt is the exchange itself, recorded approved. */
+  kind: "email" | "merchant_session";
   status: "pending" | "approved" | "abandoned";
   verified_at: string | null;
   created_at: string;
@@ -625,6 +665,16 @@ export class PaydayClient {
     /** Every verification attempt on the invoice, each fact reported separately. */
     verification: (id: string): Promise<VerificationDetail> =>
       this.request(`/v1/payments/${encodeURIComponent(id)}/verification`),
+    /**
+     * A fresh single-use client secret for a `merchant_session` payment, for a
+     * payer your application signs in again after the first secret was spent
+     * or expired. Earlier unspent secrets stay valid until they expire.
+     * `409 verification_not_required` for a permissionless payment,
+     * `409 verification_method_not_applicable` for a `verified_email` one, and
+     * `410 payment_not_payable` once the payment is closed without having verified.
+     */
+    createClientSecret: (id: string): Promise<ClientSecret> =>
+      this.request(`/v1/payments/${encodeURIComponent(id)}/client-secret`, { method: "POST" }),
   };
 
   readonly customers = {
@@ -880,6 +930,17 @@ export class PaydayPayerClient {
       request<VerificationStatus>(
         this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/verify`,
         payerOptions(options),
+      ),
+    /**
+     * Exchange a `merchant_session` client secret for the payer session it
+     * opens. Exactly once: a second exchange answers `409 client_secret_used`;
+     * an unknown, expired, or foreign secret `401 client_secret_invalid`. The
+     * session satisfies the policy on its own, so the next read is unlocked.
+     */
+    exchangeClientSecret: (id: string, clientSecret: string, options: { signal?: AbortSignal } = {}): Promise<ExchangeClientSecret> =>
+      request<ExchangeClientSecret>(
+        this.fetcher, this.baseUrl, `/v1/payer/payments/${encodeURIComponent(id)}/session`,
+        { method: "POST", body: { client_secret: clientSecret }, ...payerOptions(options) },
       ),
   };
 }

@@ -1,6 +1,14 @@
 import type { CreatePayment, Party, PayerPolicy, PayerPolicyMode } from "@payday/sdk";
 
 /**
+ * The modes the composer can produce. `merchant_session` is not one of them:
+ * it needs the merchant's application to sign the payer in and hand over the
+ * client secret, which a request composed by hand has no way to do. It is
+ * created through the API only.
+ */
+export type ComposerMode = Exclude<PayerPolicyMode, "merchant_session">;
+
+/**
  * The `POST /v1/payments` body, built from what the composer collected.
  *
  * The composer asks its questions over four steps and keeps a draft of
@@ -28,7 +36,7 @@ export interface PaymentValues {
   heading: string;
   reference: string;
   notes: string;
-  mode: PayerPolicyMode;
+  mode: ComposerMode;
   expectedEmail: string;
 }
 

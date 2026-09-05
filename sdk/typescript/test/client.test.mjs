@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PaydayClient, PaydayError } from "../dist/index.js";
+import { PaydayClient, PaydayError, checkoutUrl } from "../dist/index.js";
 
 function mockFetch(handler) {
   const calls = [];
@@ -302,7 +302,7 @@ test("verification detail uses the payment sub-route", async () => {
     payer_policy_mode: "verified_email",
     verification_completed_at: "2026-09-01T00:01:00Z",
     likely_unsolicited_at: null,
-    facts: { email: "approved", complete: true },
+    facts: { email: "approved", merchant_session: "not_required", complete: true },
     attempts: [{
       id: "v1", kind: "email", status: "approved",
       verified_at: "2026-09-01T00:01:00Z", created_at: "2026-09-01T00:00:00Z",
@@ -318,6 +318,58 @@ test("verification detail uses the payment sub-route", async () => {
     ["GET", "https://example.test/v1/payments/pay_a%2Fb/verification"],
   ]);
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, "Bearer k");
+});
+
+test("a merchant-session payment returns its client secret once and mints more on request", async () => {
+  const issued = {
+    id: "pay_1",
+    payment_url: "https://payday.sh/pay/pay_1",
+    payer_policy: { mode: "merchant_session", payer_reference: "user_123" },
+    client_secret: "cs_first",
+    client_secret_expires_at: "2026-09-01T00:15:00Z",
+  };
+  const mock = mockFetch((url, init) => {
+    if (url.endsWith("/client-secret")) return json({ client_secret: "cs_second", expires_at: "2026-09-01T01:15:00Z" }, 201);
+    // The replay carries no secret; only the first response does.
+    return json(init.headers["Idempotency-Key"] === "replay" ? { ...issued, client_secret: undefined, client_secret_expires_at: undefined } : issued, 201);
+  });
+  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const created = await client.payments.create(
+    { ...invoice, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
+    "first",
+  );
+  assert.equal(created.client_secret, "cs_first");
+  assert.equal(checkoutUrl(created, created.client_secret), "https://payday.sh/pay/pay_1#cs=cs_first");
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body).payer_policy, { mode: "merchant_session", payer_reference: "user_123" });
+
+  const replayed = await client.payments.create(
+    { ...invoice, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
+    "replay",
+  );
+  assert.equal(replayed.client_secret, undefined);
+
+  const minted = await client.payments.createClientSecret("pay_a/b");
+  assert.equal(minted.client_secret, "cs_second");
+  assert.deepEqual(mock.calls.slice(2).map((call) => [call.init.method, call.url]), [
+    ["POST", "https://example.test/v1/payments/pay_a%2Fb/client-secret"],
+  ]);
+  assert.equal(mock.calls[2].init.body, undefined);
+  assert.equal(mock.calls[2].init.headers.Authorization, "Bearer k");
+  // The secret rides in the fragment, encoded, and never without a secret.
+  assert.equal(checkoutUrl({ payment_url: "https://payday.sh/pay/pay_1" }, "cs_a+b"), "https://payday.sh/pay/pay_1#cs=cs_a%2Bb");
+  assert.throws(() => checkoutUrl(created, ""), TypeError);
+});
+
+test("minting a client secret for the wrong mode surfaces the API's code", async () => {
+  const mock = mockFetch(() => apiError("verification_method_not_applicable", 409));
+  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  await assert.rejects(client.payments.createClientSecret("pay_1"), (error) => {
+    assert.ok(error instanceof PaydayError);
+    assert.equal(error.code, "verification_method_not_applicable");
+    assert.equal(error.status, 409);
+    return true;
+  });
 });
 
 test("account.get reads with the client's own credential", async () => {

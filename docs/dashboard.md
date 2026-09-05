@@ -206,10 +206,15 @@ The whole document, exactly as `POST /v1/payments` takes it:
   shows the attachment's own stages: *uploading*, *scanning* (the malware scan
   has not reported), then *ready* with its size and SHA-256 — or *rejected*
   with the API's reason;
-- the payer policy: one of the two modes, with the expected email for
-  `verified_email`. The expected email is required for that mode,
+- the payer policy: `permissionless` or `verified_email`, with the expected
+  email for `verified_email`. The expected email is required for that mode,
   says so on its label, and arrives pre-filled from the billed party's address
   — following it until the merchant types their own, after which it is theirs.
+  The third mode, `merchant_session`, is not offered here: it needs an
+  application that has signed the payer in and can hand them the client
+  secret, so it is created through the API. Requests issued that way still
+  appear in the dashboard, with the app's payer reference and an "Opened by
+  your app" entry in the verification activity.
 
 Issued invoices are immutable; a different amount, party, policy, or
 attachment means a new invoice.

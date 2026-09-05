@@ -64,10 +64,19 @@ export function VerificationStatus({
         <dt className="text-faint">Policy</dt>
         <dd className="font-medium">{modeLabel(policy.mode)}</dd>
 
-        {policy.mode !== "permissionless" ? (
+        {policy.mode === "verified_email" ? (
           <>
             <dt className="text-faint">Expected email</dt>
             <dd className="font-mono break-all">{policy.expected_email}</dd>
+          </>
+        ) : null}
+
+        {policy.mode === "merchant_session" ? (
+          <>
+            {/* The merchant's own user id, as their app sent it: the payer
+                this request was opened for. */}
+            <dt className="text-faint">Payer reference</dt>
+            <dd className="font-mono break-all">{policy.payer_reference}</dd>
           </>
         ) : null}
 

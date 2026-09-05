@@ -16,9 +16,9 @@ use uuid::Uuid;
 use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CancelPaymentResponse, CanonicalIssuanceSnapshot, ChainId,
     CreatePaymentRequest, FactoryAddress, IndexerFreshnessDto, Invoice, OnboardingPaymentResponse,
-    PDF_MIME_TYPE, Party, PayerPolicy, PaymentListResponse, PaymentResponse, PaymentStatus,
-    PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto, USDC_DECIMALS,
-    parse_expiration, validate_expiration_window,
+    PDF_MIME_TYPE, Party, PayerPolicy, PayerPolicyMode, PaymentListResponse, PaymentResponse,
+    PaymentStatus, PaymentSummaryResponse, RecoveryAddress, TokenAddress, TransferDto,
+    USDC_DECIMALS, parse_expiration, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -27,7 +27,7 @@ use crate::attachments::{AttachmentError, StorageError, content_disposition};
 use crate::invoice_pdf::render_invoice_pdf;
 use crate::state::AppState;
 use gateway_db::{
-    AccountId, AttachmentStatus, CreateInvoiceInput, DbAttachment, DbInvoice,
+    AccountId, AttachmentStatus, CLIENT_SECRET_TTL, CreateInvoiceInput, DbAttachment, DbInvoice,
     InsertIssuedInvoiceError, IssuanceRequest, OnboardingClaim, PAYER_SESSION_TTL,
     StartEmailVerificationError, same_issuance,
 };
@@ -443,12 +443,29 @@ pub async fn create_payment(
         .repo
         .response_metadata_for_account(account, &[issued.row.id])
         .await?;
-    let response = enrich_response(&state, issued.row, issued.attachment, transfers, freshness)?;
+    let invoice_id = issued.row.id;
+    let mut response =
+        enrich_response(&state, issued.row, issued.attachment, transfers, freshness)?;
     if issued.replayed {
-        Ok(replayed(response))
-    } else {
-        Ok((StatusCode::CREATED, HeaderMap::new(), Json(response)))
+        return Ok(replayed(response));
     }
+    // A merchant-session invoice is useless without the secret that opens it,
+    // so the first response carries one. A replay does not: the secret exists
+    // only in the response that minted it, and a merchant that lost it mints
+    // another through the client-secret route.
+    if payer_policy.mode() == PayerPolicyMode::MerchantSession {
+        let minted = state
+            .payer_sessions
+            .create_client_secret(invoice_id, account.0, CLIENT_SECRET_TTL)
+            .await?;
+        response.client_secret = Some(minted.secret);
+        response.client_secret_expires_at = Some(
+            minted
+                .expires_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+    }
+    Ok((StatusCode::CREATED, HeaderMap::new(), Json(response)))
 }
 
 fn replayed(response: PaymentResponse) -> (StatusCode, HeaderMap, Json<PaymentResponse>) {

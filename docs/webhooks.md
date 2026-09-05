@@ -41,7 +41,7 @@ that updates the lifecycle row.
 |---|---|
 | `payment.paid`, `payment.settled`, `payment.expired`, `payment.refunded`, `payment.needs_attention` | The lifecycle transitions above |
 | `payment.recovered_funds` | Payday's recovery wallet received funds on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per recovered amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
-| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied |
+| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied — a proven mailbox, or a merchant-session client secret exchanged by the hosted checkout |
 | `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: funds were first observed before the payer policy was satisfied, so the payment is flagged as likely unsolicited |
 
 `verification.approved` and `payment.likely_unsolicited` are inserted by the
@@ -53,10 +53,13 @@ those columns until the payer-policy features are enabled for an account.
 
 Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
 `occurred_at`, and `data`. Every payment event carries `data.payment` with the
-public status, `amount`, `received`, `reference`, `metadata`, and three policy
-fields: `payer_policy_mode`, `verification_completed_at`, and
-`likely_unsolicited_at`. The payload never includes the expected email or
-any payer assertion. `payment.needs_attention` adds
+public status, `amount`, `received`, `reference`, `metadata`, and four policy
+fields: `payer_policy_mode`, `payer_reference`, `verification_completed_at`,
+and `likely_unsolicited_at`. `payer_reference` is your own identifier for the
+payer on a `merchant_session` payment (`null` otherwise), so a `payment.paid`
+or `payment.settled` handler can credit that user's ledger directly. The
+payload never includes the expected email or the payer's own data.
+`payment.needs_attention` adds
 `data.payment.attention`. Lifecycle payloads carry no recovery flag by design:
 a `payment.settled` for an overpaid payment is indistinguishable from one for
 an exact payment, and `payment.recovered_funds` is the recovery signal.

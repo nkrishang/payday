@@ -4,7 +4,6 @@ import {
   type AttachmentDescriptor,
   type Customer,
   type Issuer,
-  type PayerPolicyMode,
   type Payment,
   PaydayError,
 } from "@payday/sdk";
@@ -18,7 +17,7 @@ import { cn } from "@/lib/cn";
 import { clampWords, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { AttachmentUpload } from "./attachment-upload";
-import { buildCreatePayment, EMPTY_VALUES } from "./create-payment";
+import { buildCreatePayment, EMPTY_VALUES, type ComposerMode } from "./create-payment";
 import { AMOUNT, EMAIL } from "./field-rules";
 import { Labeled } from "./labeled";
 import { formatDate, MODES, modeLabel } from "./labels";
@@ -55,7 +54,7 @@ interface Draft {
   heading: string;
   reference: string;
   notes: string;
-  mode: PayerPolicyMode;
+  mode: ComposerMode;
   expectedEmail: string;
 }
 

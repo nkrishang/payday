@@ -12,8 +12,11 @@ additionally require `Idempotency-Key`. A replay returns
 
 Create requests contain `amount`, `payout_address`, an `issuer` and a `bill_to`
 party (`name`, optional `email` and `details`), and a `payer_policy`
-(`permissionless` or `verified_email`; the verified mode names the expected
-email). Optional
+(`permissionless`, `verified_email`, or `merchant_session`; the verified mode
+names the expected email, and the merchant-session mode names the user your
+own application has signed in, by your `payer_reference`, and returns a
+single-use `client_secret` your server hands that user — see
+[Merchant sessions](api-reference.md#merchant-sessions)). Optional
 fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 `customer_id`, and one finalized `attachment_id` for a scanned PDF. The amount
 is used directly; there are no line items. Exactly `amount` settles to
@@ -50,11 +53,14 @@ The link is unauthenticated by design — anyone holding it may read the payment
 and pay it. `GET /v1/payer/payments/{id}`, its `/qr`, and its `/attachment`
 accept no API key, return no merchant data, and send
 `Access-Control-Allow-Origin: *`, so a merchant can build a checkout of their
-own against them. For the verified payer modes the page shows only the issuer
+own against them. For the gated payer modes the page shows only the issuer
 name and heading until the payer's session satisfies the policy; the amount,
 bill-to, notes, reference, PDF, address, and QR are withheld
-(`content_unlocked: false`). Reproduce the guidance in
-[Payment safety](payment-safety.md) if you build your own.
+(`content_unlocked: false`). A `merchant_session` page unlocks the moment your
+application opens it with the client secret in the URL fragment
+(`payment_url#cs=…`); the bare link tells the payer to open it from your app.
+Reproduce the guidance in [Payment safety](payment-safety.md) if you build
+your own.
 
 `GET /v1/payments` accepts `status`, `reference`, `starting_after`, and `limit`.
 `GET /v1/payments/{id}/transfers` returns finalized transfer provenance.

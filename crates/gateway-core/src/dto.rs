@@ -144,6 +144,14 @@ pub struct PaymentResponse {
     pub attachment: Option<AttachmentDescriptor>,
     pub verification_completed_at: Option<String>,
     pub likely_unsolicited_at: Option<String>,
+    /// Merchant-session mode only, and only in the response that minted it:
+    /// the single-use secret that opens the hosted checkout for the payer the
+    /// merchant authenticated. Stored hashed, so no later read returns it;
+    /// `POST /v1/payments/{id}/client-secret` mints another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_expires_at: Option<String>,
     pub attribution: AttributionDto,
     pub metadata: serde_json::Value,
     pub created_at: String,
@@ -158,7 +166,9 @@ pub struct PaymentResponse {
 }
 
 /// What the payer learns about the policy: the mode and a hint at whose
-/// mailbox is expected, never the assertion itself.
+/// mailbox is expected, never the assertion itself. A merchant-session
+/// policy's `payer_reference` is the merchant's own identifier and is never
+/// shown to the payer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayerPolicyResponse {
     pub mode: PayerPolicyMode,
@@ -190,6 +200,9 @@ impl VerificationFactStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationRequirementsResponse {
     pub email: VerificationFactStatus,
+    /// The merchant's own application opened this checkout for the payer it
+    /// authenticated, by exchanging a single-use client secret.
+    pub merchant_session: VerificationFactStatus,
     pub complete: bool,
 }
 
@@ -198,11 +211,15 @@ pub struct VerificationRequirementsResponse {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VerificationFacts {
     pub email: bool,
+    pub merchant_session: bool,
 }
 
 impl VerificationFacts {
     /// Every fact at once: what an invoice-level completion implies.
-    pub const ALL: Self = Self { email: true };
+    pub const ALL: Self = Self {
+        email: true,
+        merchant_session: true,
+    };
 
     /// Whether these facts satisfy `mode`.
     pub fn satisfy(self, mode: PayerPolicyMode) -> bool {
@@ -234,9 +251,13 @@ impl VerificationRequirementsResponse {
             (true, true) => VerificationFactStatus::Approved,
             (true, false) => VerificationFactStatus::Pending,
         };
-        let complete = !mode.is_gated() || facts.email;
+        let needs_email = mode == PayerPolicyMode::VerifiedEmail;
+        let needs_merchant_session = mode == PayerPolicyMode::MerchantSession;
+        let complete =
+            (!needs_email || facts.email) && (!needs_merchant_session || facts.merchant_session);
         Self {
-            email: status(mode.is_gated(), facts.email),
+            email: status(needs_email, facts.email),
+            merchant_session: status(needs_merchant_session, facts.merchant_session),
             complete,
         }
     }
@@ -505,6 +526,8 @@ impl PaymentResponse {
             customer_id: None,
             issuer_id: None,
             payer_policy: snapshot.payer_policy,
+            client_secret: None,
+            client_secret_expires_at: None,
             attachment: None,
             verification_completed_at: None,
             likely_unsolicited_at: None,
@@ -794,11 +817,54 @@ mod tests {
             VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true);
         assert!(verified.complete);
         assert_eq!(verified.email, VerificationFactStatus::Approved);
+        assert_eq!(
+            verified.merchant_session,
+            VerificationFactStatus::NotRequired
+        );
+
+        let merchant =
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::MerchantSession, false);
+        assert!(!merchant.complete);
+        assert_eq!(merchant.email, VerificationFactStatus::NotRequired);
+        assert_eq!(merchant.merchant_session, VerificationFactStatus::Pending);
+        let opened =
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::MerchantSession, true);
+        assert!(opened.complete);
+        assert_eq!(opened.merchant_session, VerificationFactStatus::Approved);
+        assert_eq!(
+            serde_json::to_value(&opened).unwrap(),
+            serde_json::json!({
+                "email": "not_required",
+                "merchant_session": "approved",
+                "complete": true
+            })
+        );
     }
 
     #[test]
     fn session_facts_refine_each_requirement_and_complete_only_when_the_mode_is_met() {
-        let email_only = VerificationFacts { email: true };
+        let email_only = VerificationFacts {
+            email: true,
+            merchant_session: false,
+        };
+        let merchant_only = VerificationFacts {
+            email: false,
+            merchant_session: true,
+        };
+        // One mode's fact never satisfies the other's.
+        assert!(!merchant_only.satisfy(PayerPolicyMode::VerifiedEmail));
+        assert!(!email_only.satisfy(PayerPolicyMode::MerchantSession));
+        assert!(merchant_only.satisfy(PayerPolicyMode::MerchantSession));
+        let by_merchant = VerificationRequirementsResponse::from_facts(
+            PayerPolicyMode::MerchantSession,
+            merchant_only,
+        );
+        assert_eq!(
+            by_merchant.merchant_session,
+            VerificationFactStatus::Approved
+        );
+        assert_eq!(by_merchant.email, VerificationFactStatus::NotRequired);
+        assert!(by_merchant.complete);
 
         let by_email = VerificationRequirementsResponse::from_facts(
             PayerPolicyMode::VerifiedEmail,
@@ -837,5 +903,28 @@ mod tests {
         assert_eq!(json["payer_policy"]["mode"], "verified_email");
         assert_eq!(json["payer_policy"]["expected_email"], "alice@example.com");
         assert!(json["payer_policy"].get("expected_identity").is_none());
+    }
+
+    #[test]
+    fn merchant_response_carries_the_payer_reference_and_no_secret_unless_minted() {
+        let mut response = PaymentResponse::from_invoice(
+            invoice(PayerPolicy::MerchantSession {
+                payer_reference: "user_123".into(),
+            }),
+            None,
+        );
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["payer_policy"]["mode"], "merchant_session");
+        assert_eq!(json["payer_policy"]["payer_reference"], "user_123");
+        assert!(json["payer_policy"].get("expected_email").is_none());
+        // Absent, not null: the secret exists only in the response that minted it.
+        assert!(json.get("client_secret").is_none());
+        assert!(json.get("client_secret_expires_at").is_none());
+
+        response.client_secret = Some("cs_secret".into());
+        response.client_secret_expires_at = Some("2026-01-01T00:00:00Z".into());
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["client_secret"], "cs_secret");
+        assert_eq!(json["client_secret_expires_at"], "2026-01-01T00:00:00Z");
     }
 }

@@ -11,6 +11,7 @@ import { AssetNotice } from "./asset-notice";
 import { Countdown } from "./countdown";
 import { CheckoutFrame } from "./frame";
 import { InvoiceDetails } from "./invoice-details";
+import { ClientSecretExchange, type ClientSecretStatus } from "./merchant-session";
 import { WalletProviders } from "./providers";
 import { QrPanel } from "./qr-panel";
 import { Resolved } from "./resolved";
@@ -56,8 +57,20 @@ function CheckoutBody({
     },
     [setPayerSession],
   );
+  // A merchant-session invoice arrives with its client secret in the URL
+  // fragment. The exchange below reads it once, on the client only, and the
+  // session it mints takes the same path the email flow's session does.
+  const merchantSession = payment.payer_policy.mode === "merchant_session";
+  const [clientSecretStatus, setClientSecretStatus] = useState<ClientSecretStatus>(() =>
+    merchantSession ? "exchanging" : "none",
+  );
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
-  const view = checkoutView(payment, { secondsRemaining, pendingTxHash, emailCodeSent });
+  const view = checkoutView(payment, {
+    secondsRemaining,
+    pendingTxHash,
+    emailCodeSent,
+    exchangingClientSecret: clientSecretStatus === "exchanging",
+  });
   // Null exactly when the phase is one of the locked ones: the same narrowing
   // decides the phase and what may enter the tree.
   const unlocked = unlockedPayment(payment);
@@ -81,11 +94,21 @@ function CheckoutBody({
         {view.showInstructions ? <Countdown seconds={secondsRemaining} /> : null}
       </div>
 
+      {merchantSession ? (
+        <ClientSecretExchange
+          paymentId={payment.id}
+          payerSession={payerSession}
+          onStatus={setClientSecretStatus}
+          onSession={updateSession}
+        />
+      ) : null}
+
       {unlocked === null ? (
         <VerificationGate
           payment={payment}
           view={view}
           payerSession={payerSession}
+          clientSecretStatus={clientSecretStatus}
           onSession={updateSession}
           onCodeSent={() => setEmailCodeSent(true)}
           onVerified={refresh}
