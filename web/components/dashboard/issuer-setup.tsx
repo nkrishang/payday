@@ -7,33 +7,36 @@ import { Button } from "@/components/ui/button";
 import { controlStyles } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
-import { duplicateName, EMAIL, LABEL, PAYOUT_ADDRESS } from "./field-rules";
+import { duplicateName, EMAIL } from "./field-rules";
 import { Labeled } from "./labeled";
 import { useMerchant } from "./session";
 
 /**
- * Setting up an issuer identity.
+ * Setting up an issuer identity: the party a deposit request is issued
+ * under, and the contact mailbox payers are told to write to.
  *
- * The whole form is on the page at once. Only the section being answered is
- * enabled; the ones after it are visible but inert, and the ones before it keep
- * their answers on screen with a control to go back and change them. Nothing is
- * hidden, so nothing has to be remembered, and the step that looks
- * irreversible — the emailed code — is not a door that closes behind you.
+ * Two sections, both on the page at once. Only the one being answered is
+ * enabled; the one after it is visible but inert, and the one before keeps
+ * its answers on screen with a control to go back and change them. The step
+ * that looks irreversible — the emailed code — is not a door that closes
+ * behind you.
  *
- * The form resumes from whatever the account already holds, so an abandoned tab
- * reopens at the section that is unfinished rather than at the start.
+ * Nothing here asks where deposits settle: every account has its own wallet
+ * from its first sign-in, and that is the default. Saved wallets are an
+ * option an identity can add later, from the identities section.
+ *
+ * The form resumes from whatever the account already holds, so an abandoned
+ * tab reopens at the section that is unfinished rather than at the start.
  */
 
-type Step = 0 | 1 | 2;
+type Step = 0 | 1;
 
-const SECTIONS = ["Identity", "Verify email", "Wallet"] as const;
+const SECTIONS = ["Identity", "Verify email"] as const;
 
 /** Where an account is, given what it already holds. */
 export function resumeAt(issuers: Issuer[]): { step: Step; issuer: Issuer | null } {
   const unverified = issuers.find((issuer) => !issuer.email_verified);
   if (unverified) return { step: 1, issuer: unverified };
-  const unpaid = issuers.find((issuer) => issuer.payout_addresses.length === 0);
-  if (unpaid) return { step: 2, issuer: unpaid };
   return { step: 0, issuer: null };
 }
 
@@ -62,8 +65,6 @@ export function IssuerSetup({
   const [name, setName] = useState(resumed.issuer?.name ?? "");
   const [contactEmail, setContactEmail] = useState(resumed.issuer?.contact_email ?? "");
   const [otp, setOtp] = useState("");
-  const [address, setAddress] = useState("");
-  const [label, setLabel] = useState("");
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The API allows another code a minute after the last one; the page counts
@@ -107,12 +108,6 @@ export function IssuerSetup({
     : EMAIL.test(contactEmail.trim())
       ? null
       : "Not a valid email address.";
-  const addressError = !address.trim()
-    ? "Required."
-    : PAYOUT_ADDRESS.test(address.trim())
-      ? null
-      : "Not a valid address: 0x and 40 hex characters.";
-  const labelError = !label.trim() || LABEL.test(label.trim()) ? null : "Not a valid label.";
 
   const failed = (cause: unknown) => {
     if (cause instanceof PaydayError && cause.status === 401 && cause.code === "unauthorized") {
@@ -143,8 +138,7 @@ export function IssuerSetup({
       if (saved.email_verified) {
         // The address did not move, so the proof stands and there is nothing
         // to send: going back to fix a typo in the name costs no code.
-        setStep(2);
-        setBusy(false);
+        onDone(saved);
         return;
       }
       const started = await client.issuers.startEmailVerification(saved.id);
@@ -177,9 +171,7 @@ export function IssuerSetup({
     setFailure(null);
     try {
       const verified = await client.issuers.confirmEmailVerification(issuer.id, otp.trim());
-      setIssuer(verified);
-      setStep(2);
-      setBusy(false);
+      onDone(verified);
     } catch (cause) {
       if (cause instanceof PaydayError && cause.code === "otp_invalid") {
         setFailure("That code is not valid. Check the email, or send a new one.");
@@ -190,41 +182,17 @@ export function IssuerSetup({
     }
   };
 
-  const submitAddress = async () => {
-    if (!issuer || addressError || labelError) return;
-    setBusy(true);
-    setFailure(null);
-    try {
-      const saved = await client.payoutAddresses.create({
-        address: address.trim(),
-        ...(label.trim() ? { label: label.trim() } : {}),
-      });
-      const attached = await client.issuers.setPayoutAddresses(issuer.id, [
-        ...issuer.payout_addresses.map((entry) => entry.id),
-        saved.id,
-      ]);
-      onDone(attached);
-    } catch (cause) {
-      failed(cause);
-    }
-  };
-
   // The form has one action at a time, in a footer that belongs to the form
   // rather than to any card — and that sticks to the bottom of the viewport, so
   // reaching it never means scrolling past the section being answered. It names
   // the section it is acting on, so its scope is stated rather than implied.
-  const actionLabel = (["Send code", "Confirm code", "Save identity"] as const)[step];
-  const ready = [
-    nameError === null && emailError === null,
-    otp.length === 6,
-    addressError === null && labelError === null,
-  ][step];
+  const actionLabel = (["Send code", "Confirm code"] as const)[step];
+  const ready = [nameError === null && emailError === null, otp.length === 6][step];
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (step === 0) void submitIdentity();
-    else if (step === 1) void submitOtp();
-    else void submitAddress();
+    else void submitOtp();
   };
 
   return (
@@ -314,12 +282,11 @@ export function IssuerSetup({
                 autoFocus={step === 1}
                 placeholder="000000"
                 disabled={step !== 1 || busy}
-                value={step > 1 ? "••••••" : otp}
+                value={otp}
                 onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
                 className={cn(
                   controlStyles,
                   "h-12 max-w-[240px] text-center font-mono text-[18px] tracking-[0.4em] [text-indent:0.4em]",
-                  step > 1 && "disabled:opacity-100",
                 )}
               />
             </Labeled>
@@ -335,40 +302,6 @@ export function IssuerSetup({
                 </button>
               </div>
             ) : null}
-          </div>
-        </Section>
-
-        <Section id={`${formId}-2`} index={2} title="Wallet" step={step}>
-          <div className="grid gap-5">
-            <Labeled
-              label="Payout address"
-              error={step === 2 && address ? (addressError ?? undefined) : undefined}
-              hint="Deposits settle here once they finalize. More can be added later."
-            >
-              <input
-                autoFocus={step === 2}
-                spellCheck={false}
-                placeholder="0x…"
-                disabled={step !== 2 || busy}
-                value={address}
-                onChange={(event) => setAddress(event.target.value)}
-                className={cn(controlStyles, "h-11 font-mono text-[13px]")}
-              />
-            </Labeled>
-            <Labeled
-              label="Label"
-              error={step === 2 ? (labelError ?? undefined) : undefined}
-              hint="Optional. Up to 20 letters, digits, spaces, and . _ ' &amp; ( ) -"
-            >
-              <input
-                maxLength={20}
-                placeholder="Treasury"
-                disabled={step !== 2 || busy}
-                value={label}
-                onChange={(event) => setLabel(event.target.value)}
-                className={cn(controlStyles, "h-11")}
-              />
-            </Labeled>
           </div>
         </Section>
       </div>

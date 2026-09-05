@@ -1,9 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * The dashboard against e2e/stub-api.mjs, which plays the merchant API, the
- * presigned upload target, and the OTP issuer. Each test signs in on its own:
- * the session lives in the tab, and the stub issuer accepts one code.
+ * The dashboard against e2e/stub-api.mjs, which plays the merchant API and
+ * the presigned upload target, with `test/privy-stub.tsx` standing in for
+ * Privy. Each test signs in on its own: the session lives in the tab, and the
+ * stub accepts one code.
  *
  * Signing in is the landing page's dialog — there is no dashboard login page —
  * and it is covered on its own in signup.spec.ts.
@@ -11,7 +12,6 @@ import { expect, test, type Page } from "@playwright/test";
 
 const STUB = "http://127.0.0.1:4010";
 const OTP = "123456";
-const PAYOUT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const PDF = Buffer.from(
   "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n",
 );
@@ -89,16 +89,15 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await signIn(page);
 
   // An identity first: nothing is issued without one, and the composer is the
-  // only way in — there is no separate invoice form.
+  // only way in — there is no separate invoice form. Where it settles needs
+  // no setting up: the account's own wallet is the default.
   await page.getByRole("button", { name: "New deposit request" }).click();
   await page.getByLabel("Issued by").fill("Acme Corp");
   await page.getByLabel("Contact address").fill("billing@acme.example");
   await page.getByRole("button", { name: "Send code" }).click();
   await page.getByLabel("One-time code").fill(OTP);
   await page.getByRole("button", { name: "Confirm code" }).click();
-  await page.getByLabel("Payout address").fill(PAYOUT);
-  await page.getByLabel("Label").fill("Treasury");
-  await page.getByRole("button", { name: "Save identity" }).click();
+  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   // Customer, from the dashboard's own customers section.
@@ -173,6 +172,11 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   expect(body).not.toHaveProperty("expires_in");
   expect(body.notes).toBe("Net 15.");
   expect(body.attachment_id).toBeTruthy();
+  // Settles to the account's own wallet, never typed by anyone.
+  const wallet = await page.evaluate(
+    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+  );
+  expect(body.payout_address).toBe(wallet);
 
   await expect(page.getByRole("heading", { name: "Deposit request issued." })).toBeVisible();
   // Tracking it lands back on the list with that request's row already open;
@@ -280,7 +284,25 @@ test("a declined identity check shows its facts, reference, and risk categories,
   await expect(activity).not.toContainText(/may try the identity check once more/);
 });
 
-test("a merchant can generate, roll, and revoke their API key with a step-up code", async ({
+test("the account section shows the signed-in mailbox and the Payday wallet", async ({
+  page,
+}) => {
+  await signIn(page, "account-view@example.com");
+
+  const section = page.getByRole("region", { name: "Account" });
+  await expect(section).toContainText("account-view@example.com");
+  // The wallet is the account's own, shown in full and ready to copy; there
+  // is no chain behind the stub, so the balance says so rather than spinning.
+  const wallet = await page.evaluate(
+    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+  );
+  expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
+  await expect(section).toContainText(wallet);
+  await expect(section.getByRole("button", { name: /Copy wallet address/ })).toBeVisible();
+  await expect(section.getByText(/Balance unavailable/)).toBeVisible({ timeout: 20_000 });
+});
+
+test("a merchant can generate, roll, and revoke their API key from the session", async ({
   page,
 }) => {
   await signIn(page, "api-key-flow@example.com");
@@ -288,11 +310,9 @@ test("a merchant can generate, roll, and revoke their API key with a step-up cod
   const section = page.getByRole("region", { name: "API key" });
   await expect(section).toContainText("No key yet");
 
-  // A first key needs no warning, just the step-up code.
+  // A first key: one confirmation, no second sign-in.
   await section.getByRole("button", { name: "Generate key" }).click();
-  await expect(section.getByText(/We'll email a one-time code/)).toBeVisible();
-  await section.getByRole("button", { name: "Send code" }).click();
-  await section.getByLabel("One-time code").fill(OTP);
+  await expect(section.getByText(/shown once, here, and never again/)).toBeVisible();
   await section.getByRole("button", { name: "Confirm & generate" }).click();
 
   await expect(section.getByText("Key generated")).toBeVisible();
@@ -305,8 +325,6 @@ test("a merchant can generate, roll, and revoke their API key with a step-up cod
   // Rolling warns about the grace period up front, then reveals a new key.
   await section.getByRole("button", { name: "Roll key" }).click();
   await expect(section.getByText(/current one keeps working for 24 hours/)).toBeVisible();
-  await section.getByRole("button", { name: "Send code" }).click();
-  await section.getByLabel("One-time code").fill(OTP);
   await section.getByRole("button", { name: "Confirm & roll key" }).click();
 
   await expect(section.getByText("Key rolled")).toBeVisible();
@@ -318,11 +336,9 @@ test("a merchant can generate, roll, and revoke their API key with a step-up cod
   await section.getByRole("button", { name: "Done" }).click();
   await expect(section.getByText(/previous key still works until/)).toBeVisible();
 
-  // Revoking warns that it is immediate and irreversible before the code step.
+  // Revoking warns that it is immediate and irreversible before confirming.
   await section.getByRole("button", { name: "Revoke" }).click();
   await expect(section.getByText(/can't be undone/)).toBeVisible();
-  await section.getByRole("button", { name: "Send code" }).click();
-  await section.getByLabel("One-time code").fill(OTP);
   await section.getByRole("button", { name: "Confirm & revoke" }).click();
 
   await expect(section.getByText("Key revoked.")).toBeVisible();
@@ -333,9 +349,12 @@ test("a merchant can generate, roll, and revoke their API key with a step-up cod
 
 test("signing out ends the session", async ({ page }) => {
   await signIn(page);
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("button", { name: "Sign out" }).first().click();
   await expect(page).toHaveURL("/");
-  expect(await page.evaluate(() => sessionStorage.getItem("payday.dashboard.session"))).toBeNull();
+  expect(await page.evaluate(() => sessionStorage.getItem("payday.privy-stub.session"))).toBeNull();
+  // And the dashboard is closed again.
+  await page.goto("/dashboard");
+  await expect(page).toHaveURL("/");
 });
 
 async function streamToString(download: {

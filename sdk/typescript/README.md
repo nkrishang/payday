@@ -90,10 +90,11 @@ immutable `bill_to` snapshot.
 
 ## Dashboard sessions
 
-`new PaydayClient({ accessToken })` takes a short-lived Auth0 access token in
-place of an API key — exactly one of the two. This is how the Payday dashboard
-talks to the API from a browser without ever holding a key; the same bearer
-header carries either credential.
+`new PaydayClient({ accessToken })` takes a dashboard session token — the
+Privy identity token a signed-in dashboard holds — in place of an API key,
+exactly one of the two. This is how the Payday dashboard talks to the API from
+a browser without ever holding a key; the same bearer header carries either
+credential.
 
 The client also provides long polling through `payments.get(id, { waitForChange: true })`, `payments.cancel`, `payments.transfers`, `status`, and `webhooks.add/list/remove/test/deliveries`. API failures throw `PaydayError`, exposing `code`, `status`, and `requestId`.
 
@@ -101,9 +102,9 @@ Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never
 
 ## Managing the API key
 
-`account.get()` returns key metadata for the signed-in account — `key_hint`, `generation`, `created_at`, `rotated_at`, `previous_key_expires_at`, `revoked_at` — using the client's own credential. It never returns the raw key.
+`account.get()` returns the signed-in account — `email`, `wallet_address` (the account's own EVM wallet, where deposits settle by default), and key metadata: `key_hint`, `generation`, `created_at`, `rotated_at`, `previous_key_expires_at`, `revoked_at` — using the client's own credential. It never returns the raw key.
 
-`account.issueApiKey(token, expectedGeneration)` and `account.revokeApiKey(token, expectedGeneration)` mint or revoke a key, but they do not use the client's own credential: `token` must be a *fresh, single-use* email-OTP authentication — completed in roughly the last five minutes and not already spent on another issue or revoke — from either the dashboard's own sign-in or the CLI's. A plain session or API key, however valid for everything else, is refused here on purpose: reading an account does not imply permission to mint a live key for it. Pass `expectedGeneration` from the account's current `generation` (omit it only to provision a first key for an identity that has never held one); a mismatch throws `PaydayError` with code `api_key_generation_conflict`, meaning something else changed the key first. `issueApiKey`'s result carries the raw key exactly once — nothing later, including `account.get()`, can return it again — and, when it replaced an earlier key, that key keeps authenticating for 24 hours.
+`account.issueApiKey(expectedGeneration)` and `account.revokeApiKey(expectedGeneration)` mint or revoke a key. They work only from a dashboard session: an API key, however valid for everything else, is refused here (`identity_unauthorized`) on purpose — whoever holds a key must not be able to mint another from it. Pass `expectedGeneration` from the account's current `generation`; a mismatch throws `PaydayError` with code `api_key_generation_conflict`, meaning something else changed the key first. `issueApiKey`'s result carries the raw key exactly once — nothing later, including `account.get()`, can return it again — and, when it replaced an earlier key, that key keeps authenticating for 24 hours.
 
 ## Building your own checkout
 

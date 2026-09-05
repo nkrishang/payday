@@ -17,7 +17,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "unauthorized",
-            message: "A valid bearer API key or dashboard access token is required".into(),
+            message: "A valid bearer API key or dashboard session token is required".into(),
         }
     }
 
@@ -25,7 +25,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "identity_unauthorized",
-            message: "A valid Auth0 access token is required".into(),
+            message: "A valid dashboard session (Privy identity token) is required".into(),
         }
     }
     pub fn admin_unauthorized() -> Self {
@@ -64,14 +64,6 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "authentication_event_already_used",
             message: "This authentication event was already used; authenticate again".into(),
-        }
-    }
-
-    pub fn account_not_provisioned() -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: "account_not_provisioned",
-            message: "This identity does not have an account".into(),
         }
     }
 

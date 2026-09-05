@@ -77,42 +77,28 @@ variable "status_indexer_stale_seconds" {
   }
 }
 
+variable "privy_app_id" {
+  description = <<-EOT
+    Public id of the Privy app merchants sign in to (see
+    docs/authentication.md). gatewayd verifies dashboard sessions — Privy
+    identity tokens — against this app's published keys; the web app is built
+    with the same id as NEXT_PUBLIC_PRIVY_APP_ID. Public, like every value in
+    this file; there is no Privy secret anywhere in Payday.
+  EOT
+  type        = string
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.privy_app_id))
+    error_message = "privy_app_id must be a Privy app id (letters, digits, - and _)."
+  }
+}
+
 variable "auth0_issuer" {
-  description = "Auth0 tenant issuer URL, including https://."
+  description = "Auth0 tenant issuer URL, including https://; the tenant payers and issuer mailboxes prove themselves against."
   type        = string
   validation {
     condition     = can(regex("^https://[^[:space:]]+/?$", var.auth0_issuer))
     error_message = "auth0_issuer must be an HTTPS URL."
   }
-}
-
-variable "auth0_audience" {
-  description = "Identifier of the Auth0 API configured for api.payday.sh."
-  type        = string
-  validation {
-    condition     = length(trimspace(var.auth0_audience)) > 0
-    error_message = "auth0_audience must not be empty."
-  }
-}
-
-variable "auth0_client_id" {
-  description = "Public client ID of the Auth0 Native application used by payday."
-  type        = string
-  validation {
-    condition     = length(trimspace(var.auth0_client_id)) > 0
-    error_message = "auth0_client_id must not be empty."
-  }
-}
-
-variable "dashboard_auth0_client_id" {
-  description = <<-EOT
-    Public client ID of the Auth0 Single Page Application the merchant
-    dashboard signs in with; see docs/authentication.md. Leave empty until it
-    exists: gatewayd then accepts only API keys and the CLI's Native
-    application, and the variable is not passed to the task at all.
-  EOT
-  type        = string
-  default     = ""
 }
 
 variable "payer_auth0_audience" {

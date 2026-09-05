@@ -20,17 +20,18 @@ Install the repository's `payday` binary with Cargo:
 cargo install --path crates/gateway-cli --locked
 ```
 
-The CLI provides polished login, payment creation and tracking, payer links, account-key management, and webhook operations. Local credentials are saved under a separate profile; production login uses Auth0. See [Install](docs/install.md) and [Authentication and API keys](docs/authentication.md).
+The CLI provides payment creation and tracking, payer links, and webhook operations against an API key. Its Auth0 login is no longer accepted by the API — merchants sign in through Privy on the dashboard, which is where API keys are managed — and the CLI is on its way out. See [Authentication and API keys](docs/authentication.md).
 
 ## Web
 
 `payday.sh` — the landing page, the hosted checkout at `/pay/{id}`, and the
 merchant dashboard at `/dashboard` — lives in [`web/`](web/). It is a Next.js
 app built on `@payday/sdk`: the checkout consumes the public payer API and is
-where every `payment_url` points; the dashboard signs in with an emailed code
-and uses the same merchant API as the SDK with that identity token, so no API
-key ever reaches the browser (see [docs/dashboard.md](docs/dashboard.md)). Run
-it beside the local stack:
+where every `payment_url` points; the dashboard signs in through Privy with an
+emailed code — every account gets its own embedded wallet, where deposits
+settle by default — and uses the same merchant API as the SDK with Privy's
+identity token, so no API key ever reaches the browser (see
+[docs/dashboard.md](docs/dashboard.md)). Run it beside the local stack:
 
 ```bash
 npm ci

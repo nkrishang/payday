@@ -7,13 +7,13 @@ const APP_PORT = 3003;
  * The checkout renders on the server, so intercepting requests in the browser
  * would miss the first paint entirely. Instead both the app and the browser
  * talk to a stub payer API, and the payment id selects the scenario. The same
- * stub plays the merchant API and the OTP issuer for the dashboard specs.
+ * stub plays the merchant API for the dashboard specs, and Privy itself is
+ * replaced at bundle time by `test/privy-stub.tsx` (`PAYDAY_PRIVY_STUB`).
  */
 const publicEnv = {
   NEXT_PUBLIC_PAYDAY_API_URL: `http://127.0.0.1:${STUB_PORT}`,
-  NEXT_PUBLIC_AUTH0_DOMAIN: `http://127.0.0.1:${STUB_PORT}`,
-  NEXT_PUBLIC_AUTH0_CLIENT_ID: "payday-dashboard-local",
-  NEXT_PUBLIC_AUTH0_AUDIENCE: "payday-api-local",
+  NEXT_PUBLIC_PRIVY_APP_ID: "privy-stub-app",
+  PAYDAY_PRIVY_STUB: "1",
   NEXT_PUBLIC_CHAIN_ID: "143",
   NEXT_PUBLIC_CHAIN_NAME: "Monad",
   NEXT_PUBLIC_RPC_URL: "http://127.0.0.1:8545",

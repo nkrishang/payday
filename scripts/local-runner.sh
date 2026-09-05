@@ -148,11 +148,13 @@ load_local_env() {
   export PAYDAY_CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
   export PAYDAY_RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
   export PAYDAY_API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
+  # Merchants sign in through Privy, for real, even locally: the dashboard
+  # (`just web`) uses the same app id, and gatewayd verifies its identity
+  # tokens against Privy's published keys. Payer and issuer-mailbox codes
+  # come from the loopback development identity provider instead.
+  export PAYDAY_PRIVY_APP_ID="${PAYDAY_PRIVY_APP_ID:-cmt9wxn7h011h0cjsma7fzytr}"
   export PAYDAY_DEV_IDENTITY=1
-  export PAYDAY_AUTH0_ISSUER="${PAYDAY_AUTH0_ISSUER:-http://127.0.0.1:3001}"
-  export PAYDAY_AUTH0_CLIENT_ID="${PAYDAY_AUTH0_CLIENT_ID:-payday-cli-local}"
-  export PAYDAY_AUTH0_AUDIENCE="${PAYDAY_AUTH0_AUDIENCE:-payday-api-local}"
-  export PAYDAY_DEV_IDENTITY_ISSUER="$PAYDAY_AUTH0_ISSUER"
+  export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://127.0.0.1:3001}"
   export PAYDAY_FACTORY_ADDRESS="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
   export PAYDAY_USDC_ADDRESS="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
   export PAYDAY_BATCH_SWEEPER_ADDRESS="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
@@ -181,10 +183,9 @@ load_local_env() {
   # locally — a different account than PAYDAY_SIGNER_KEY so the two never
   # contend for a nonce.
   export PAYDAY_ONBOARDING_PAYER_KEY="${PAYDAY_ONBOARDING_PAYER_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
-  export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="${PAYDAY_DASHBOARD_AUTH0_CLIENT_ID:-payday-dashboard-local}"
-  # Payer email verification against the same development provider, which
-  # serves the payer client and audience next to the merchant ones.
-  export PAYDAY_PAYER_AUTH0_ISSUER="${PAYDAY_PAYER_AUTH0_ISSUER:-$PAYDAY_AUTH0_ISSUER}"
+  # Payer email verification against the development provider's payer client
+  # and audience.
+  export PAYDAY_PAYER_AUTH0_ISSUER="${PAYDAY_PAYER_AUTH0_ISSUER:-$PAYDAY_DEV_IDENTITY_ISSUER}"
   export PAYDAY_PAYER_AUTH0_AUDIENCE="${PAYDAY_PAYER_AUTH0_AUDIENCE:-payday-payer-local}"
   export PAYDAY_PAYER_AUTH0_CLIENT_ID="${PAYDAY_PAYER_AUTH0_CLIENT_ID:-payday-payer-local}"
   # A fixed local key: payer references derived here never leave the developer's database.
@@ -216,15 +217,13 @@ pin_deployment_code_hashes() {
   echo "[bootstrap] batch sweeper code hash $PAYDAY_BATCH_SWEEPER_CODE_HASH"
 }
 
+# A local account with a key, written straight into the runner's database:
+# there is no local Privy to sign in through from a script.
 seed() {
-  [[ -x target/debug/payday ]] || cargo build --locked -p gateway-cli
-  # The local profile is the public identity/bootstrap boundary. Keep this
-  # wrapper independent of its implementation (and permit early overrides).
-  if [[ -n "${PAYDAY_LOCAL_SEED_COMMAND:-}" ]]; then
-    bash -c "$PAYDAY_LOCAL_SEED_COMMAND"
-  else
-    target/debug/payday --profile local login --yes
-  fi
+  local key
+  key="$(./scripts/local-api-key.sh "${SEED_EMAIL:-dev@example.test}")"
+  echo "[seed] account ${SEED_EMAIL:-dev@example.test}"
+  echo "[seed] PAYDAY_API_KEY=$key"
 }
 
 if [[ "$mode" == seed ]]; then
@@ -264,10 +263,10 @@ forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
 pin_deployment_code_hashes
 prefix identity ./target/debug/payday-dev-identity
 for _ in {1..100}; do
-  curl -fsS "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break
+  curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break
   sleep .1
 done
-curl -fsS "$PAYDAY_AUTH0_ISSUER/.well-known/jwks.json" >/dev/null || {
+curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null || {
   echo "development identity provider did not become ready" >&2
   exit 1
 }
@@ -278,7 +277,7 @@ for _ in {1..100}; do
 done
 curl -fsS "$PAYDAY_API_URL/health" >/dev/null || { echo "gatewayd did not become ready" >&2; exit 1; }
 prefix indexer ./target/debug/gateway-indexer
-echo "[runner] ready: API $PAYDAY_API_URL; run 'just seed' in another shell"
+echo "[runner] ready: API $PAYDAY_API_URL; 'just web' serves the dashboard, 'just seed' mints an API key"
 echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do
   for pid in "${pids[@]}"; do

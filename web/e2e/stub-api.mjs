@@ -8,9 +8,11 @@
  * crates/gateway-core/src/dto.rs exactly.
  *
  * For the dashboard the same process plays the merchant API behind a fake
- * bearer check, the presigned upload target, and the OTP issuer
- * (`/passwordless/start`, `/oauth/token`). Merchant state is in memory and
- * seeded once; specs create their own records and never depend on each other's.
+ * bearer check and the presigned upload target. Sign-in itself is Privy's,
+ * stood in for at bundle time by `test/privy-stub.tsx`, whose identity
+ * tokens this stub accepts: the fixed prefix, then the claims (mailbox, DID,
+ * wallet) as base64url JSON. Merchant state is in memory and seeded once;
+ * specs create their own records and never depend on each other's.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -27,8 +29,9 @@ const PAYOUT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const SETTLEMENT_TX = "0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190";
 const ATTESTOR = "0x976EA74026E726554dB657fA54763abd0C3a0aa9";
 
-/** What the fake issuer hands out, and what the merchant routes accept. */
+/** The prefix of every stub session token, and what the merchant routes accept. */
 const DASHBOARD_TOKEN = "stub-dashboard-token";
+/** The one code the payer and issuer-mailbox verifications accept. */
 const OTP = "123456";
 
 const PDF_BYTES = Buffer.from(
@@ -808,6 +811,25 @@ function accountKey(req) {
   return String(req.headers.authorization ?? "").slice(`Bearer ${DASHBOARD_TOKEN}`.length);
 }
 
+/**
+ * The session's claims, as the Privy stub minted them: who signed in and the
+ * wallet that is theirs. A bare token (no claims segment) is a session with
+ * no mailbox and no wallet, which the account shape allows.
+ */
+function sessionClaims(req) {
+  const claims = accountKey(req).replace(/^\./, "");
+  if (!claims) return { email: null, wallet: null };
+  try {
+    const parsed = JSON.parse(Buffer.from(claims, "base64url").toString("utf8"));
+    return {
+      email: typeof parsed.email === "string" ? parsed.email : null,
+      wallet: typeof parsed.wallet === "string" ? parsed.wallet : null,
+    };
+  } catch {
+    return { email: null, wallet: null };
+  }
+}
+
 /** That account's issuer world, created on first sight. */
 function issuerWorld(req) {
   const key = accountKey(req);
@@ -838,9 +860,12 @@ function accountRecord(req) {
   return record;
 }
 
-function accountMetadata(record) {
+function accountMetadata(record, req) {
+  const session = sessionClaims(req);
   return {
     account_id: record.id,
+    email: session.email,
+    wallet_address: session.wallet,
     key_hint: record.keyHint,
     generation: record.generation,
     created_at: record.createdAt,
@@ -851,11 +876,10 @@ function accountMetadata(record) {
 }
 
 /**
- * `/v1/account` and `/v1/account/api-key`. The real API gates the latter on a
- * fresh, single-use identity token rather than a plain session or key; the
- * stub does not model that distinction; it only plays back the shapes the
- * dashboard's step-up flow drives, so the same bearer check as everything
- * else here is enough to exercise the UI end to end.
+ * `/v1/account` and `/v1/account/api-key`. The real API refuses the latter to
+ * an API key and takes only a dashboard session; every credential here is a
+ * session, so the same bearer check as everything else is enough to exercise
+ * the UI end to end.
  */
 async function account(req, res, url) {
   if (url.pathname !== "/v1/account" && url.pathname !== "/v1/account/api-key") return false;
@@ -863,10 +887,10 @@ async function account(req, res, url) {
 
   if (url.pathname === "/v1/account") {
     if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
-    return send(res, 200, accountMetadata(record));
+    return send(res, 200, accountMetadata(record, req));
   }
 
-  if (req.method === "GET") return send(res, 200, accountMetadata(record));
+  if (req.method === "GET") return send(res, 200, accountMetadata(record, req));
 
   if (req.method === "POST") {
     const body = await readJson(req);
@@ -1048,47 +1072,6 @@ async function payer(req, res, url) {
   }
 
   return send(res, 200, payment);
-}
-
-async function issuer(req, res, url) {
-  if (url.pathname === "/passwordless/start") {
-    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const body = await readJson(req);
-    if (body.client_id !== "payday-dashboard-local" || !body.email) {
-      return send(res, 400, {
-        error: "bad.request",
-        error_description: "client_id and email are required",
-      });
-    }
-    return send(res, 200, { _id: "stub", email: body.email, email_verified: false });
-  }
-  if (url.pathname === "/oauth/token") {
-    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const body = await readJson(req);
-    if (body.otp !== OTP || body.client_id !== "payday-dashboard-local") {
-      return send(res, 403, {
-        error: "invalid_grant",
-        error_description: "Wrong email or verification code.",
-      });
-    }
-    // The token carries the mailbox it was minted for, so issuer identities
-    // are per-merchant here as they are in the API: specs that need an empty
-    // account and specs that need a set-up one can run side by side. The
-    // second segment is shaped like a real access token's claims, base64url
-    // JSON and all, so `sessionEmail` reads the mailbox back out of it exactly
-    // as it would from Auth0's — the stub never checks a signature either way.
-    const email = String(body.username ?? "");
-    const claims = Buffer.from(
-      JSON.stringify({ sub: `email|${email}`, "https://api.payday.sh/auth/email": email }),
-    ).toString("base64url");
-    return send(res, 200, {
-      access_token: `${DASHBOARD_TOKEN}.${claims}`,
-      token_type: "Bearer",
-      expires_in: 300,
-      scope: "openid",
-    });
-  }
-  return false;
 }
 
 /**
@@ -1617,7 +1600,6 @@ createServer(async (req, res) => {
 
     if ((await payer(req, res, url)) !== false) return;
     if (identityProvider(req, res, url) !== false) return;
-    if ((await issuer(req, res, url)) !== false) return;
     if ((await objectStore(req, res, url)) !== false) return;
 
     if (url.pathname.startsWith("/v1/")) {

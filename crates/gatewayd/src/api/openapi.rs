@@ -301,6 +301,11 @@ struct CancelPayment {
 #[derive(Serialize, ToSchema)]
 struct Account {
     account_id: String,
+    /// The mailbox the account signs in with.
+    email: Option<String>,
+    /// The account's own EVM wallet (EIP-55), where deposits settle by
+    /// default; null until the first dashboard session that carried one.
+    wallet_address: Option<String>,
     key_hint: Option<String>,
     generation: i64,
     created_at: String,
@@ -626,11 +631,11 @@ fn test_webhook() {}
 #[utoipa::path(get, path="/v1/webhook-deliveries", operation_id="listWebhookDeliveries", tag="webhooks", responses((status=200,body=[Delivery]),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn deliveries() {}
 
-#[utoipa::path(get, path="/v1/account/api-key", operation_id="getApiKeyMetadata", tag="account", responses((status=200,description="Key metadata"),(status=401,body=ErrorResponse)), security(("auth0"=[])))]
+#[utoipa::path(get, path="/v1/account/api-key", operation_id="getApiKeyMetadata", tag="account", responses((status=200,description="Key metadata",body=Account),(status=401,body=ErrorResponse)), security(("dashboardSession"=[])))]
 fn key_metadata() {}
-#[utoipa::path(post, path="/v1/account/api-key", operation_id="issueApiKey", tag="account", responses((status=200,description="Rotated key"),(status=201,description="First key"),(status=401,body=ErrorResponse),(status=409,body=ErrorResponse)), security(("auth0"=[])))]
+#[utoipa::path(post, path="/v1/account/api-key", operation_id="issueApiKey", tag="account", responses((status=200,description="Rotated key"),(status=201,description="First key"),(status=401,description="identity_unauthorized: an API key cannot mint a key; sign in to the dashboard",body=ErrorResponse),(status=409,body=ErrorResponse)), security(("dashboardSession"=[])))]
 fn issue_key() {}
-#[utoipa::path(delete, path="/v1/account/api-key", operation_id="revokeApiKey", tag="account", responses((status=204,description="Revoked"),(status=401,body=ErrorResponse),(status=409,body=ErrorResponse)), security(("auth0"=[])))]
+#[utoipa::path(delete, path="/v1/account/api-key", operation_id="revokeApiKey", tag="account", responses((status=204,description="Revoked"),(status=401,body=ErrorResponse),(status=409,body=ErrorResponse)), security(("dashboardSession"=[])))]
 fn revoke_key() {}
 
 #[utoipa::path(post, path="/v1/issuers", operation_id="createIssuer", tag="issuers", request_body=IssuerRequest, responses((status=201,description="Created unverified; send a code to prove the contact address",body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=409,description="issuer_name_taken",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
@@ -667,14 +672,15 @@ impl utoipa::Modify for Security {
     fn modify(&self, api: &mut utoipa::openapi::OpenApi) {
         use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
         let c = api.components.as_mut().unwrap();
-        // Merchant routes take either an API key or an Auth0 access token
-        // from the dashboard or CLI application under the same scheme.
+        // Merchant routes take either an API key or a dashboard session (the
+        // Privy identity token) under the same bearer header; the key
+        // management routes take only the session.
         c.add_security_scheme(
             "apiKey",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
         );
         c.add_security_scheme(
-            "auth0",
+            "dashboardSession",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
         );
         api.info.title = "Payday API".into();

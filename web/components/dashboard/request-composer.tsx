@@ -33,10 +33,13 @@ import { useMerchant } from "./session";
  * preview beside the questions, because an issued request is immutable and the
  * review is the last moment anything can change.
  *
- * The merchant's own side is chosen, never retyped: the issuer identity and
- * the wallet come from what they set up, and the invoice still carries its own
- * snapshot of both.
+ * The merchant's own side is chosen, never retyped: the issuer identity comes
+ * from what they set up, the wallet is the account's own unless a saved one
+ * is picked, and the invoice still carries its own snapshot of both.
  */
+
+/** The `payoutAddressId` that means the account's own wallet. */
+const ACCOUNT_WALLET = "account";
 
 interface Draft {
   amount: string;
@@ -44,7 +47,7 @@ interface Draft {
   customerId: string;
   /** The chosen issuer identity, whose party the invoice snapshots. */
   issuerId: string;
-  /** One of that identity's saved wallets. */
+  /** `ACCOUNT_WALLET`, or one of the identity's saved wallets. */
   payoutAddressId: string;
   /** One of the presets, in hours, or `CUSTOM` for a chosen moment. */
   expiry: string;
@@ -102,18 +105,29 @@ function expiryLabel(draft: Draft): string {
   return moment ? formatDate(moment) : "";
 }
 
+/** Where an identity settles by default: the account's wallet, else its first saved one. */
+function defaultPayout(issuer: Issuer | undefined, accountWallet: string | null): string {
+  if (accountWallet) return ACCOUNT_WALLET;
+  return issuer?.payout_addresses[0]?.id ?? "";
+}
+
 /**
- * Opens on the only sensible defaults: the first identity and its first
+ * Opens on the only sensible defaults: the first identity, the account's own
  * wallet, and the customer the dashboard was asked to bill, when it was.
  */
-function emptyDraft(issuers: Issuer[], customers: Customer[], billed?: string | undefined): Draft {
+function emptyDraft(
+  issuers: Issuer[],
+  accountWallet: string | null,
+  customers: Customer[],
+  billed?: string | undefined,
+): Draft {
   const first = issuers[0];
   const customer = billed ? customers.find((entry) => entry.id === billed) : undefined;
   return {
     amount: "",
     customerId: customer?.id ?? "",
     issuerId: first?.id ?? "",
-    payoutAddressId: first?.payout_addresses[0]?.id ?? "",
+    payoutAddressId: defaultPayout(first, accountWallet),
     expiry: "168",
     expiresAt: "",
     billName: customer?.name ?? "",
@@ -143,7 +157,9 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
     // which is a test we can make without going through a float.
     else if (!/[1-9]/.test(amount)) errors.amount = "Must be more than zero.";
     if (!draft.issuerId) errors.issuerId = "Required.";
-    if (!draft.payoutAddressId) errors.payoutAddressId = "Required.";
+    if (!draft.payoutAddressId)
+      errors.payoutAddressId =
+        "Your Payday wallet is still being created. Try again in a moment, or add a saved wallet to this identity.";
     if (draft.expiry === CUSTOM) {
       const at = draft.expiresAt ? new Date(draft.expiresAt).getTime() : Number.NaN;
       if (!Number.isFinite(at)) errors.expiresAt = "Pick a date and time.";
@@ -171,13 +187,16 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
 
 export function RequestComposer({
   issuers,
+  accountWallet,
   customers,
   billed,
   onIssued,
   onCancel,
 }: {
-  /** Identities with a proven mailbox and at least one wallet; never empty. */
+  /** Identities with a proven mailbox; never empty. */
   issuers: Issuer[];
+  /** The account's own wallet, the default destination; null only while Privy is still creating it. */
+  accountWallet: string | null;
   /** Saved counterparties, so a repeat customer is chosen rather than retyped. */
   customers: Customer[];
   /** A customer to open on, when a customer's own page sent us here. */
@@ -186,7 +205,9 @@ export function RequestComposer({
   onCancel: () => void;
 }) {
   const { client, signOut } = useMerchant();
-  const [draft, setDraft] = useState<Draft>(() => emptyDraft(issuers, customers, billed));
+  const [draft, setDraft] = useState<Draft>(() =>
+    emptyDraft(issuers, accountWallet, customers, billed),
+  );
   const [step, setStep] = useState(0);
   const [direction, setDirection] = useState<"forward" | "back">("forward");
   const [busy, setBusy] = useState(false);
@@ -235,7 +256,24 @@ export function RequestComposer({
   const expectedProblem = expectedEdited || draft.expectedEmail ? errors.expectedEmail : undefined;
 
   const issuer = issuers.find((entry) => entry.id === draft.issuerId) ?? issuers[0];
-  const payout = issuer?.payout_addresses.find((entry) => entry.id === draft.payoutAddressId);
+  // Where this request settles: the account's own wallet, or one the identity
+  // saved. Offered as a choice only when there is actually more than one.
+  const settleOptions = [
+    ...(accountWallet
+      ? [{ id: ACCOUNT_WALLET, title: "Payday wallet", detail: truncateAddress(accountWallet) }]
+      : []),
+    ...(issuer?.payout_addresses ?? []).map((entry) => ({
+      id: entry.id,
+      title: entry.label ?? truncateAddress(entry.address),
+      detail: entry.label ? truncateAddress(entry.address) : "",
+      mono: true,
+    })),
+  ];
+  const payoutAddress =
+    draft.payoutAddressId === ACCOUNT_WALLET
+      ? (accountWallet ?? "")
+      : (issuer?.payout_addresses.find((entry) => entry.id === draft.payoutAddressId)?.address ??
+        "");
 
   /** Choosing a saved customer fills the billed party from it. */
   const chooseCustomer = (id: string) => {
@@ -264,14 +302,20 @@ export function RequestComposer({
     }));
   };
 
-  /** Switching identity carries the wallet choice to that identity's own. */
+  /**
+   * Switching identity keeps the account wallet when that is the choice, and
+   * otherwise moves to the new identity's own first saved wallet.
+   */
   const chooseIssuer = (next: Issuer) => {
     idempotencyKey.current = null;
     setFailure(null);
     setDraft((current) => ({
       ...current,
       issuerId: next.id,
-      payoutAddressId: next.payout_addresses[0]?.id ?? "",
+      payoutAddressId:
+        current.payoutAddressId === ACCOUNT_WALLET && accountWallet
+          ? ACCOUNT_WALLET
+          : defaultPayout(next, accountWallet),
     }));
   };
 
@@ -314,7 +358,7 @@ export function RequestComposer({
             customerId,
             // The invoice keeps its own snapshot of the identity, so a later
             // edit to it cannot reach an invoice already issued.
-            payoutAddress: payout?.address ?? "",
+            payoutAddress,
             expiresInHours: draft.expiry === CUSTOM ? "" : draft.expiry,
             expiresAt: chosenMoment(draft),
             issuerName: issuer?.name ?? "",
@@ -441,20 +485,19 @@ export function RequestComposer({
                   />
                 ) : null}
 
-                {issuer && issuer.payout_addresses.length > 1 ? (
+                {settleOptions.length > 1 ? (
                   <Choice
                     label="Settles to"
                     required
                     error={shown("payoutAddressId")}
-                    options={issuer.payout_addresses.map((entry) => ({
-                      id: entry.id,
-                      title: entry.label ?? truncateAddress(entry.address),
-                      detail: entry.label ? truncateAddress(entry.address) : "",
-                      mono: true,
-                    }))}
+                    options={settleOptions}
                     selected={draft.payoutAddressId}
                     onSelect={(id) => set("payoutAddressId", id)}
                   />
+                ) : errors.payoutAddressId ? (
+                  <p role="alert" className="text-[12px] text-danger">
+                    {errors.payoutAddressId}
+                  </p>
                 ) : null}
 
                 <div>
@@ -680,8 +723,11 @@ export function RequestComposer({
                   <Row label="Issued by">{issuer?.name}</Row>
                   <Row label="Settles to">
                     <span className="font-mono text-[12.5px]">
-                      {payout ? truncateAddress(payout.address) : ""}
+                      {payoutAddress ? truncateAddress(payoutAddress) : ""}
                     </span>
+                    {draft.payoutAddressId === ACCOUNT_WALLET ? (
+                      <span className="text-muted"> · Payday wallet</span>
+                    ) : null}
                   </Row>
                   <Row label="Billed to">
                     {draft.billName.trim()}
@@ -740,7 +786,7 @@ export function RequestComposer({
         <Preview
           draft={draft}
           issuerName={issuer?.name ?? ""}
-          payoutAddress={payout?.address ?? ""}
+          payoutAddress={payoutAddress}
           step={step}
           onEdit={(index) => go(index, "back")}
         />

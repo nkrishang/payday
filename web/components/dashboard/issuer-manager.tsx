@@ -17,12 +17,14 @@ import { useMerchant } from "./session";
  * Managing issuer identities, on the dashboard beside everything else.
  *
  * A line each, so a merchant with several reads the list rather than scrolls
- * it: the name, whether it can be issued under, its contact address, and how
- * many wallets it settles to. Opening a line gives the rest and the actions —
- * rename it, move its contact address (which unproves it, because a different
- * mailbox is a different claim), prove the one it has, and attach or drop
- * wallets. Nothing here can reach an invoice already issued; those carry their
- * own snapshot.
+ * it: the name, whether it can be issued under, its contact address, and
+ * whether it has saved wallets of its own. Opening a line gives the rest and
+ * the actions — rename it, move its contact address (which unproves it,
+ * because a different mailbox is a different claim), prove the one it has,
+ * and attach or drop saved wallets. Deposits settle to the account's own
+ * Payday wallet unless a saved one is chosen on the request, so an identity
+ * needs none to be issued under. Nothing here can reach an invoice already
+ * issued; those carry their own snapshot.
  */
 
 export function IssuerManager({
@@ -45,8 +47,8 @@ export function IssuerManager({
             Issuer identities<span className="text-brand-yellow">.</span>
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            The identity a deposit-request is issued under, and the wallets where it settles
-            payments.
+            The identity a deposit request is issued under. Deposits settle to your Payday wallet
+            unless an identity&apos;s saved wallet is chosen instead.
           </p>
         </div>
         <AddButton label="New issuer identity" onClick={onAdd} />
@@ -129,10 +131,6 @@ function IssuerRow({
   // The wallet being added, held here until Save so one button commits the
   // whole row rather than each edit landing on its own.
   const [adding, setAdding] = useState(false);
-  // The wallet being swapped out, when it is the only one. An identity with
-  // nowhere to settle cannot be issued under, so the last wallet is never
-  // simply removed — it is replaced, and only the finished swap can be saved.
-  const [replacing, setReplacing] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [label, setLabel] = useState("");
   const [verifying, setVerifying] = useState(false);
@@ -162,8 +160,7 @@ function IssuerRow({
     name.trim() !== baseline.name ||
     contactEmail.trim() !== baseline.contactEmail ||
     walletKey(wallets) !== walletKey(baseline.wallets);
-  const valid =
-    nameError === null && emailError === null && wallets.length > 0 && replacing === null;
+  const valid = nameError === null && emailError === null;
 
   /** Takes the server's answer as the new truth, editing state included. */
   const adopt = (next: Issuer) => {
@@ -183,7 +180,6 @@ function IssuerRow({
   const reset = () => {
     adopt(issuer);
     setAdding(false);
-    setReplacing(null);
     setAddress("");
     setLabel("");
     setVerifying(false);
@@ -232,7 +228,6 @@ function IssuerRow({
       adopt(latest);
       setBusy(false);
       setAdding(false);
-      setReplacing(null);
       setAddress("");
       setLabel("");
       onChanged();
@@ -280,30 +275,16 @@ function IssuerRow({
       address: address.trim(),
       label: label.trim() || null,
     };
-    setWallets((current) =>
-      replacing === null
-        ? [...current, entry]
-        : current.map((other) => (keyOf(other) === replacing ? entry : other)),
-    );
-    setReplacing(null);
+    setWallets((current) => [...current, entry]);
     setAdding(false);
     setAddress("");
     setLabel("");
   };
 
-  /**
-   * Removing the only wallet asks for its replacement rather than leaving the
-   * identity with nowhere to settle: the badge greys out, the form opens, and
-   * the swap lands as one edit that can still be cancelled.
-   */
+  /** Dropping a saved wallet leaves the identity on the account's own. */
   const dropWallet = (entry: StagedWallet) => {
     setFailure(null);
-    if (wallets.length > 1) {
-      setWallets((current) => current.filter((other) => other !== entry));
-      return;
-    }
-    setReplacing(keyOf(entry));
-    setAdding(true);
+    setWallets((current) => current.filter((other) => other !== entry));
   };
 
   const count = issuer.payout_addresses.length;
@@ -346,7 +327,7 @@ function IssuerRow({
           {issuer.contact_email}
         </span>
         <span className="tabular shrink-0 text-[12px] text-faint">
-          {count} wallet{count === 1 ? "" : "s"}
+          {count === 0 ? "Payday wallet" : `${count} saved wallet${count === 1 ? "" : "s"}`}
         </span>
       </button>
 
@@ -356,20 +337,21 @@ function IssuerRow({
         <div inert={!open}>
           <form onSubmit={save} className="border-t border-line px-4 pt-4 pb-5">
             <div className="flex flex-wrap items-center gap-2">
+              {wallets.length === 0 && !adding ? (
+                <span className="text-[12px] text-muted">
+                  Settles to your Payday wallet. Add a saved wallet to offer another destination.
+                </span>
+              ) : null}
               {wallets.map((entry) => {
                 const name = entry.label ?? truncateAddress(entry.address);
-                const swapping = keyOf(entry) === replacing;
-                const last = wallets.length === 1;
                 return (
                   <span
                     key={keyOf(entry)}
                     className={cn(
                       "inline-flex items-center gap-2 rounded-[8px] border py-1.5 pr-1.5 pl-3 text-[12px] transition-opacity",
-                      swapping
-                        ? "border-line bg-raised line-through opacity-45"
-                        : entry.kind === "new"
-                          ? "border-brand-green/40 bg-brand-green/[0.07]"
-                          : "border-line bg-raised",
+                      entry.kind === "new"
+                        ? "border-brand-green/40 bg-brand-green/[0.07]"
+                        : "border-line bg-raised",
                     )}
                   >
                     {entry.label ? <span className="text-ink">{entry.label}</span> : null}
@@ -377,8 +359,8 @@ function IssuerRow({
                     <button
                       type="button"
                       onClick={() => dropWallet(entry)}
-                      disabled={busy || swapping}
-                      aria-label={last ? `Replace ${name}` : `Remove ${name}`}
+                      disabled={busy}
+                      aria-label={`Remove ${name}`}
                       className="rounded p-0.5 text-faint transition-colors hover:text-ink disabled:opacity-40"
                     >
                       <X className="size-3" />
@@ -400,12 +382,6 @@ function IssuerRow({
 
             {adding ? (
               <div className="dash-step mt-4">
-                {replacing ? (
-                  <p className="mb-3 text-[12.5px] text-muted">
-                    An identity needs somewhere to settle, so this one is replaced rather than
-                    removed. Add the wallet that takes its place.
-                  </p>
-                ) : null}
                 <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_180px_auto]">
                   <Labeled
                     label="Payout address"
@@ -443,7 +419,6 @@ function IssuerRow({
                       variant="ghost"
                       onClick={() => {
                         setAdding(false);
-                        setReplacing(null);
                         setAddress("");
                         setLabel("");
                       }}

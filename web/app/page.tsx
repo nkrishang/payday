@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import { PaymentScene } from "@/components/landing/payment-scene";
 import { StartBuilding } from "@/components/landing/signup-dialog";
+import { MerchantAuth } from "@/components/merchant-auth";
 
 export const metadata: Metadata = {
   title: "Payday — Make every stablecoin accountable",
@@ -49,7 +50,9 @@ export default function Home() {
             <br className="hidden sm:block" /> ready for your application to credit.
           </p>
           <div className="landing-reveal landing-delay-3 mt-9 flex w-full max-w-[410px] flex-col justify-center gap-3.5 min-[440px]:flex-row">
-            <StartBuilding />
+            <MerchantAuth>
+              <StartBuilding />
+            </MerchantAuth>
             <a
               href="mailto:contact@payday.sh?subject=Payday%20demo"
               className="flex h-14 items-center justify-center rounded-[8px] border border-brand-green px-5 text-[16px] font-medium text-brand-green transition-colors hover:bg-brand-green/10"

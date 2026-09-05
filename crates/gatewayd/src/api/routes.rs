@@ -56,10 +56,18 @@ pub fn router(state: AppState) -> Router {
         ])
         .max_age(Duration::from_secs(86_400));
 
-    // Merchant routes: an API key or a dashboard/CLI identity token, one
-    // account either way.
+    // Merchant routes: an API key or a dashboard session, one account either
+    // way. The key routes sit here too, under the same authentication; they
+    // refuse the API-key form of it themselves (`auth::Session`), so a key
+    // can never mint or revoke another.
     let authenticated = Router::new()
         .route("/v1/account", get(accounts::get_account))
+        .route(
+            "/v1/account/api-key",
+            post(accounts::issue)
+                .get(accounts::metadata)
+                .delete(accounts::revoke),
+        )
         .route(
             "/v1/payments",
             post(invoices::create_payment).get(invoices::list_payments),
@@ -132,23 +140,6 @@ pub fn router(state: AppState) -> Router {
             auth::require_account,
         ))
         .layer(RequestBodyLimitLayer::new(64 * 1024))
-        .layer(merchant_cors.clone());
-
-    let account_management = Router::new()
-        .route(
-            "/v1/account/api-key",
-            post(accounts::issue)
-                .get(accounts::metadata)
-                .delete(accounts::revoke),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_identity,
-        ))
-        .layer(RequestBodyLimitLayer::new(16 * 1024))
-        // The CLI never needed this — a non-browser client is not subject to
-        // CORS — but the dashboard's own step-up sign-in calls this route
-        // directly now, from the same origin `authenticated` already trusts.
         .layer(merchant_cors);
 
     let administration = Router::new()
@@ -224,7 +215,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api", get(openapi::reference))
         .route("/api/openapi.json", get(openapi::spec))
         .merge(authenticated)
-        .merge(account_management)
         .merge(administration)
         .with_state(state)
         .layer(
@@ -273,9 +263,8 @@ mod tests {
     use axum::http::{Request, StatusCode, header};
     use gateway_core::{ChainId, Invoice, ProofError, ProofOfPayment, verify_proof};
     use gateway_db::{AccountId, AccountRepository, InvoiceRepository};
-    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
+    use jsonwebtoken::{DecodingKey, EncodingKey};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
-    use serde::Serialize;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use sqlx::PgPool;
@@ -283,6 +272,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::api::auth::testing::PrivyApp;
     use crate::attachments::memory::MemoryObjectStorage;
     use crate::attachments::{AttachmentStore, CLEAN_SCAN, SCAN_STATUS_TAG};
     use crate::attestation::VerificationAttestor;
@@ -309,7 +299,7 @@ mod tests {
     fn test_state(
         pool: PgPool,
         accounts: AccountRepository,
-        identity_verifier: Option<auth::Auth0Verifier>,
+        merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
         recovery: Address,
         payer_verification: Option<PayerVerification>,
@@ -320,7 +310,7 @@ mod tests {
         let state = AppState::new(
             InvoiceRepository::new(pool),
             accounts,
-            identity_verifier,
+            merchant_verifier,
             ChainId(1),
             factory,
             Address::ZERO,
@@ -360,7 +350,6 @@ mod tests {
             "https://payer.issuer/",
             "https://api.payday.sh/payer",
             "payday-payer",
-            None,
             "payer-key",
             DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
         );
@@ -385,24 +374,10 @@ mod tests {
         (app, tenant)
     }
 
-    #[derive(Serialize)]
-    struct IdentityClaims<'a> {
-        sub: &'a str,
-        iss: &'a str,
-        aud: &'a str,
-        exp: u64,
-        azp: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/method")]
-        authentication_method: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/client_id")]
-        authentication_client_id: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/authenticated_at")]
-        authenticated_at: u64,
-        #[serde(rename = "https://api.payday.sh/auth/event_id")]
-        authentication_event_id: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/email")]
-        email: &'a str,
-    }
+    /// The Privy DID and the embedded wallet of the merchant the session
+    /// tests sign in as.
+    const MERCHANT_DID: &str = "did:privy:clmerchant000000000000001";
+    const MERCHANT_WALLET: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     async fn app(pool: PgPool) -> Router {
         app_with_recovery(pool, RECOVERY).await
@@ -423,16 +398,16 @@ mod tests {
 
     async fn build(
         pool: PgPool,
-        identity_verifier: Option<auth::Auth0Verifier>,
+        merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
         recovery: Address,
     ) -> TestApp {
-        build_with(pool, identity_verifier, factory, recovery, None, None).await
+        build_with(pool, merchant_verifier, factory, recovery, None, None).await
     }
 
     async fn build_with(
         pool: PgPool,
-        identity_verifier: Option<auth::Auth0Verifier>,
+        merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
         recovery: Address,
         payer_verification: Option<PayerVerification>,
@@ -460,7 +435,7 @@ mod tests {
         let (state, storage) = test_state(
             pool,
             accounts,
-            identity_verifier,
+            merchant_verifier,
             factory,
             recovery,
             payer_verification,
@@ -667,50 +642,12 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    fn identity_verifier_and_tokens() -> (auth::Auth0Verifier, String, String, String) {
-        let private = rsa::RsaPrivateKey::new(&mut rand_08::thread_rng(), 2048).unwrap();
-        let private_pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
-        let public_pem = private
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap();
-        let verifier = auth::Auth0Verifier::for_test(
-            "https://issuer.example/",
-            "https://api.payday.sh",
-            "payday-cli",
-            Some("payday-dashboard"),
-            "test-key",
-            DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
-        );
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("test-key".into());
-        let key = EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap();
-        let authenticated_at = unix_now();
-        let token = |event_id| {
-            encode(
-                &header,
-                &IdentityClaims {
-                    sub: "email|user",
-                    iss: "https://issuer.example/",
-                    aud: "https://api.payday.sh",
-                    exp: u64::MAX,
-                    azp: "payday-cli",
-                    authentication_method: "email_otp",
-                    authentication_client_id: "payday-cli",
-                    authenticated_at,
-                    authentication_event_id: event_id,
-                    email: "merchant@example.com",
-                },
-                &key,
-            )
-            .unwrap()
-        };
-        (
-            verifier,
-            token("event-1"),
-            token("event-2"),
-            token("event-3"),
-        )
+    /// A Privy app and a dashboard session for the test merchant, embedded
+    /// wallet included.
+    fn merchant_session() -> (PrivyApp, String) {
+        let app = PrivyApp::new();
+        let token = app.token(MERCHANT_DID, "merchant@example.com", Some(MERCHANT_WALLET));
+        (app, token)
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -745,7 +682,7 @@ mod tests {
             serde_json::json!({
                 "error": {
                     "code": "unauthorized",
-                    "message": "A valid bearer API key or dashboard access token is required"
+                    "message": "A valid bearer API key or dashboard session token is required"
                 }
             })
         );
@@ -2005,50 +1942,60 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn authenticated_user_can_rotate_inspect_and_revoke_keys(pool: PgPool) {
-        let (verifier, token, replacement_token, revocation_token) = identity_verifier_and_tokens();
-        let accounts = AccountRepository::new(pool.clone());
-        let (state, _) = test_state(
-            pool,
-            accounts,
-            Some(verifier),
-            Address::ZERO,
-            RECOVERY,
-            None,
-            None,
-        );
-        let app = router(state);
-        let identity_request = |method: &str, path: &str, body: Body| {
+    async fn a_dashboard_session_can_issue_inspect_rotate_and_revoke_keys(pool: PgPool) {
+        let (privy, session) = merchant_session();
+        let app = build(pool, Some(privy.verifier), Address::ZERO, RECOVERY)
+            .await
+            .router;
+        let with_session = |method: &str, path: &str, body: &str| {
             Request::builder()
                 .method(method)
                 .uri(path)
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::AUTHORIZATION, format!("Bearer {session}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(body)
+                .body(Body::from(body.to_owned()))
                 .unwrap()
         };
 
+        // Signing in provisions the account keyless, at generation 1, with
+        // the mailbox and the wallet the session carried.
+        let account = app
+            .clone()
+            .oneshot(with_session("GET", "/v1/account", ""))
+            .await
+            .unwrap();
+        assert_eq!(account.status(), StatusCode::OK);
+        let account = json_body(account).await;
+        assert_eq!(account["generation"], 1);
+        assert!(account["key_hint"].is_null());
+        assert_eq!(account["email"], "merchant@example.com");
+        assert_eq!(account["wallet_address"], MERCHANT_WALLET);
+        let account_id = account["account_id"].as_str().unwrap().to_owned();
+
+        // A first key: issued against the generation the account reports.
         let provisioned = app
             .clone()
-            .oneshot(identity_request(
+            .oneshot(with_session(
                 "POST",
                 "/v1/account/api-key",
-                Body::from("{}"),
+                r#"{"expected_generation":1}"#,
             ))
             .await
             .unwrap();
         assert_eq!(provisioned.status(), StatusCode::CREATED);
         let provisioned_json = json_body(provisioned).await;
-        assert_eq!(provisioned_json["generation"], 1);
+        assert_eq!(provisioned_json["generation"], 2);
         assert_eq!(provisioned_json["replaced_previous_key"], false);
         let first_key = provisioned_json["api_key"].as_str().unwrap().to_string();
 
+        // Replaying the same intent against the generation it already moved
+        // past is a conflict, not a second key.
         let duplicate = app
             .clone()
-            .oneshot(identity_request(
+            .oneshot(with_session(
                 "POST",
                 "/v1/account/api-key",
-                Body::from("{}"),
+                r#"{"expected_generation":1}"#,
             ))
             .await
             .unwrap();
@@ -2058,41 +2005,68 @@ mod tests {
             "api_key_generation_conflict"
         );
 
+        // The same session rolls the key; no second sign-in is asked for.
         let replaced = app
             .clone()
-            .oneshot(
-                Request::post("/v1/account/api-key")
-                    .header(header::AUTHORIZATION, format!("Bearer {replacement_token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"expected_generation":1}"#))
-                    .unwrap(),
-            )
+            .oneshot(with_session(
+                "POST",
+                "/v1/account/api-key",
+                r#"{"expected_generation":2}"#,
+            ))
             .await
             .unwrap();
         assert_eq!(replaced.status(), StatusCode::OK);
         let replaced_json = json_body(replaced).await;
-        assert_eq!(replaced_json["generation"], 2);
+        assert_eq!(replaced_json["generation"], 3);
         assert_eq!(replaced_json["replaced_previous_key"], true);
         let second_key = replaced_json["api_key"].as_str().unwrap().to_string();
         assert_ne!(first_key, second_key);
 
+        // The key reads the same account, wallet and all — but cannot manage
+        // itself: only a session may mint or revoke.
         let metadata = app
             .clone()
-            .oneshot(
-                Request::get("/v1/account")
-                    .header(header::AUTHORIZATION, format!("Bearer {second_key}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(get_request(&second_key, "/v1/account"))
             .await
             .unwrap();
         assert_eq!(metadata.status(), StatusCode::OK);
         let metadata = json_body(metadata).await;
-        assert_eq!(metadata["generation"], 2);
-        assert!(metadata["account_id"].is_string());
+        assert_eq!(metadata["account_id"], account_id);
+        assert_eq!(metadata["generation"], 3);
+        assert_eq!(metadata["wallet_address"], MERCHANT_WALLET);
         assert!(metadata["key_hint"].is_string());
         assert!(metadata["previous_key_expires_at"].is_string());
         assert!(metadata["revoked_at"].is_null());
+        for (method, body) in [
+            ("GET", ""),
+            ("POST", r#"{"expected_generation":3}"#),
+            ("DELETE", r#"{"expected_generation":3}"#),
+        ] {
+            let refused = app
+                .clone()
+                .oneshot(json_request(
+                    method,
+                    &second_key,
+                    "/v1/account/api-key",
+                    &serde_json::from_str::<Value>(if body.is_empty() { "null" } else { body })
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{method}");
+            assert_eq!(
+                json_body(refused).await["error"]["code"],
+                "identity_unauthorized",
+                "{method}"
+            );
+        }
+        let key_metadata = app
+            .clone()
+            .oneshot(with_session("GET", "/v1/account/api-key", ""))
+            .await
+            .unwrap();
+        assert_eq!(key_metadata.status(), StatusCode::OK);
+        assert_eq!(json_body(key_metadata).await["generation"], 3);
 
         let invoice_request = |key: &str| {
             Request::get("/v1/payments/not-an-id")
@@ -2106,7 +2080,8 @@ mod tests {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::BAD_REQUEST,
+            "the replaced key keeps working through its grace window"
         );
         assert_eq!(
             app.clone()
@@ -2119,13 +2094,11 @@ mod tests {
 
         let revoked = app
             .clone()
-            .oneshot(
-                Request::delete("/v1/account/api-key")
-                    .header(header::AUTHORIZATION, format!("Bearer {revocation_token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"expected_generation":2}"#))
-                    .unwrap(),
-            )
+            .oneshot(with_session(
+                "DELETE",
+                "/v1/account/api-key",
+                r#"{"expected_generation":3}"#,
+            ))
             .await
             .unwrap();
         assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
@@ -2138,144 +2111,93 @@ mod tests {
         );
     }
 
-    fn session_verifier_and_key() -> (auth::Auth0Verifier, EncodingKey) {
-        let private = rsa::RsaPrivateKey::new(&mut rand_08::thread_rng(), 2048).unwrap();
-        let private_pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
-        let public_pem = private
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap();
-        let verifier = auth::Auth0Verifier::for_test(
-            "https://issuer.example/",
-            "https://api.payday.sh",
-            "payday-cli",
-            Some("payday-dashboard"),
-            "test-key",
-            DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
-        );
-        (
-            verifier,
-            EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap(),
-        )
-    }
-
-    fn session_token(
-        key: &EncodingKey,
-        azp: &str,
-        audience: &str,
-        authenticated_at: u64,
-    ) -> String {
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("test-key".into());
-        encode(
-            &header,
-            &IdentityClaims {
-                sub: "email|dashboard-user",
-                iss: "https://issuer.example/",
-                aud: audience,
-                exp: u64::MAX,
-                azp,
-                authentication_method: "email_otp",
-                authentication_client_id: azp,
-                authenticated_at,
-                authentication_event_id: "session-event",
-                email: "dashboard@example.com",
-            },
-            key,
-        )
-        .unwrap()
-    }
-
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn dashboard_and_cli_session_tokens_authenticate_without_an_api_key(pool: PgPool) {
-        let (verifier, key) = session_verifier_and_key();
-        let app = build(pool.clone(), Some(verifier), Address::ZERO, RECOVERY)
+    async fn privy_sessions_authenticate_without_a_key_and_carry_the_wallet(pool: PgPool) {
+        let privy = PrivyApp::new();
+        // The very first session, before Privy has finished making the wallet.
+        let early = privy.token(MERCHANT_DID, "Dashboard@Example.com", None);
+        let app = build(pool.clone(), Some(privy.verifier.clone()), Address::ZERO, RECOVERY)
             .await
             .router;
-        let audience = "https://api.payday.sh";
-        // An hour-old token: fine for a session, far too old to issue a key.
-        let stale = unix_now() - 3600;
-        let dashboard = session_token(&key, "payday-dashboard", audience, stale);
 
         let created = app
             .clone()
-            .oneshot(create_request(
-                &dashboard,
-                "dashboard-session",
-                &valid_body(),
-            ))
+            .oneshot(create_request(&early, "dashboard-session", &valid_body()))
             .await
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let id = json_body(created).await["id"].as_str().unwrap().to_owned();
 
-        // The CLI's token names the same identity, hence the same account.
-        let cli = session_token(&key, "payday-cli", audience, stale);
-        let listed = app
-            .clone()
-            .oneshot(get_request(&cli, "/v1/payments"))
-            .await
-            .unwrap();
-        assert_eq!(listed.status(), StatusCode::OK);
-        assert_eq!(json_body(listed).await["payments"][0]["id"], id);
-
         let accounts = AccountRepository::new(pool.clone());
         let account = accounts
-            .find_by_identity("https://issuer.example/", "email|dashboard-user")
+            .find_by_identity(auth::PRIVY_ISSUER, MERCHANT_DID)
             .await
             .unwrap()
             .expect("the first session provisions the account");
         let metadata = accounts.metadata(account).await.unwrap();
         assert!(metadata.hint.is_none(), "no key was issued");
-        assert!(accounts.has_verified_email(account).await.unwrap());
+        assert_eq!(metadata.email.as_deref(), Some("dashboard@example.com"));
+        assert!(metadata.wallet_address.is_none());
 
+        // The next session names the wallet, so the account learns it, and
+        // it is the same account: the payment issued a moment ago is there.
+        let later = privy.token(MERCHANT_DID, "dashboard@example.com", Some(MERCHANT_WALLET));
+        let listed = app
+            .clone()
+            .oneshot(get_request(&later, "/v1/payments"))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(json_body(listed).await["payments"][0]["id"], id);
+        assert_eq!(
+            accounts
+                .metadata(account)
+                .await
+                .unwrap()
+                .wallet_address
+                .as_deref(),
+            Some(MERCHANT_WALLET)
+        );
+
+        // Another Privy user is another account, with none of this one's data.
+        let stranger = privy.token("did:privy:someoneelse", "other@example.com", None);
+        let listed = app
+            .clone()
+            .oneshot(get_request(&stranger, "/v1/payments"))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert!(json_body(listed).await["payments"].as_array().unwrap().is_empty());
+
+        // Tokens for another app, from another issuer, or signed by someone
+        // else are invalid credentials, exactly like a wrong key.
+        let accounts_json = Some(
+            serde_json::json!([{"type": "email", "address": "dashboard@example.com"}]).to_string(),
+        );
+        let other = PrivyApp::new();
         for bad in [
-            session_token(&key, "other-client", audience, stale),
-            session_token(&key, "payday-dashboard", "wrong-audience", stale),
+            privy.token_with(
+                MERCHANT_DID,
+                auth::PRIVY_ISSUER,
+                "other-app",
+                u64::MAX,
+                accounts_json.clone(),
+            ),
+            privy.token_with(
+                MERCHANT_DID,
+                "https://issuer.example/",
+                auth::testing::APP_ID,
+                u64::MAX,
+                accounts_json.clone(),
+            ),
+            other.token(MERCHANT_DID, "dashboard@example.com", None),
         ] {
             assert_unauthorized(app.clone(), get_request(&bad, "/v1/payments")).await;
         }
 
-        // Key management keeps the fresh-OTP path: a stale token is refused
-        // regardless of which merchant client minted it, and a client this
-        // deployment does not recognize is refused even when it is fresh.
-        let key_route = |token: &str| get_request(token, "/v1/account/api-key");
-        for stale in [&dashboard, &cli] {
-            let response = app.clone().oneshot(key_route(stale)).await.unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(
-                json_body(response).await["error"]["code"],
-                "identity_unauthorized"
-            );
-        }
-        let fresh_other = session_token(&key, "other-client", audience, unix_now());
-        assert_eq!(
-            app.clone()
-                .oneshot(key_route(&fresh_other))
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED,
-            "a fresh token from an unrecognized client is still refused"
-        );
-
-        let fresh_cli = session_token(&key, "payday-cli", audience, unix_now());
-        let metadata = app.clone().oneshot(key_route(&fresh_cli)).await.unwrap();
-        assert_eq!(metadata.status(), StatusCode::OK);
-        let metadata = json_body(metadata).await;
-        assert_eq!(metadata["account_id"], account.0.to_string());
-        assert!(metadata["key_hint"].is_null());
-        assert_eq!(metadata["generation"], 1);
-
-        // The dashboard's own fresh sign-in works exactly the same way, so it
-        // can manage the key without ever holding one for day-to-day use.
-        let fresh_dashboard = session_token(&key, "payday-dashboard", audience, unix_now());
-        let metadata = app.oneshot(key_route(&fresh_dashboard)).await.unwrap();
-        assert_eq!(metadata.status(), StatusCode::OK);
-        assert_eq!(
-            json_body(metadata).await["account_id"],
-            account.0.to_string()
-        );
+        // A deployment without a Privy app refuses every session outright.
+        let keys_only = build(pool, None, Address::ZERO, RECOVERY).await.router;
+        assert_unauthorized(keys_only, get_request(&later, "/v1/payments")).await;
     }
 
     /// Reserve an upload slot; returns the attachment id and its object key.

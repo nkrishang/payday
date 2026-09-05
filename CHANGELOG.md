@@ -8,6 +8,48 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed
+
+- Merchants sign in through Privy instead of Auth0. The landing page's
+  "Start Building" dialog runs Privy's email code exchange; what the browser
+  holds is Privy's identity token, and that token is the dashboard session
+  the API accepts on every merchant route. Every account gets an embedded EVM
+  wallet from Privy at its first sign-in (`accounts.wallet_address`, kept
+  current from each session's identity token), and `GET /v1/account` now
+  returns `email` and `wallet_address`. Auth0 stays for the flows that prove
+  a mailbox without creating an account — payers on gated invoices and
+  issuer contact addresses — which outnumber merchant sign-ups many times
+  over. `gatewayd` takes `PAYDAY_PRIVY_APP_ID` (the app's public id; it
+  verifies ES256 identity tokens against Privy's published JWKS, `iss`
+  `privy.io`, `aud` the app) and no longer reads `PAYDAY_AUTH0_ISSUER`,
+  `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID`, or
+  `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`; the payer `PAYDAY_PAYER_AUTH0_*`
+  settings are unchanged. Terraform takes `privy_app_id` and drops
+  `auth0_audience`, `auth0_client_id`, and `dashboard_auth0_client_id`; the
+  Auth0 `Payday Dashboard` application (`auth0/dashboard.tf`) is gone.
+- API keys are managed from the dashboard session alone. `POST` and `DELETE
+  /v1/account/api-key` take the same bearer the session reads with and refuse
+  an API key (`identity_unauthorized`); the five-minute fresh-OTP step-up and
+  the single-use authentication event are gone with the Auth0 merchant
+  tokens. `expected_generation` is the generation `GET /v1/account` reports —
+  a signed-in account exists at generation 1 before it holds a key — and the
+  SDK's `account.issueApiKey(expectedGeneration)` and
+  `account.revokeApiKey(expectedGeneration)` no longer take a separate token.
+  The CLI's `payday login` is no longer accepted by the API.
+- Deposit requests settle to the account's Payday wallet by default. The
+  composer and the onboarding walkthrough preselect it; an identity's saved
+  wallets are offered as alternatives when it has any, and setting up an
+  identity no longer asks for one — a proven contact mailbox is all it needs.
+  The dashboard gained an **Account** section: the signed-in mailbox, the
+  wallet in full with copy and explorer links, and its USDC and gas balance
+  on the deployment's chain read from the public RPC.
+- Local development: `just seed` mints an account and API key straight into
+  the runner's database (`scripts/local-api-key.sh`), since Privy has no local
+  stand-in — the dashboard signs in against the real development app even
+  locally — and `scripts/e2e-anvil.sh` does the same instead of driving the
+  CLI's login. The browser suite swaps the Privy SDK for `web/test/privy-stub.tsx`
+  at bundle time (`PAYDAY_PRIVY_STUB=1`).
+
 ### Added
 
 - Payer identity verification for `verified_identity` and

@@ -18,10 +18,11 @@ payday [GLOBAL OPTIONS] <COMMAND> [OPTIONS]
 | `PAYDAY_API_KEY` | Bearer-key override for scripts; wins over saved credentials |
 | `PAYDAY_CONFIG_DIR` | Override the credentials directory |
 
-The production CLI includes its public Auth0 configuration. Custom APIs need
-the deployment's `PAYDAY_AUTH0_ISSUER`, `PAYDAY_AUTH0_CLIENT_ID`, and
-`PAYDAY_AUTH0_AUDIENCE` for interactive account commands. HTTP is accepted only
-for localhost/loopback; redirects are not followed.
+The CLI's interactive account commands (`login`, `keys`) exchange an Auth0
+email code that the API no longer accepts: merchants sign in through Privy on
+the dashboard, which is where API keys are generated and rolled. Give the CLI
+a key from there as `PAYDAY_API_KEY`. HTTP is accepted only for
+localhost/loopback; redirects are not followed.
 
 Credentials are stored in an XDG-aware private file, normally
 `~/.config/payday/credentials` (`%APPDATA%\payday\credentials` on Windows).

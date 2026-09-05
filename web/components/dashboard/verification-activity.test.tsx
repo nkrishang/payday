@@ -63,7 +63,9 @@ function renderActivity(detail: VerificationDetail, after: VerificationDetail = 
     payments: { verification, requestVerificationReview },
   } as unknown as PaydayClient;
   render(
-    <MerchantProvider value={{ client, accessToken: "eyJ.dash.token", signOut: vi.fn() }}>
+    <MerchantProvider
+      value={{ client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut: vi.fn() }}
+    >
       <VerificationActivity paymentId="pay_1" />
     </MerchantProvider>,
   );

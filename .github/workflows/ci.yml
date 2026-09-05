@@ -65,6 +65,10 @@ jobs:
       NEXT_PUBLIC_RPC_URL: https://rpc.monad.xyz
       NEXT_PUBLIC_USDC_ADDRESS: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
       NEXT_PUBLIC_EXPLORER_BASE_URL: https://monadvision.com
+      # The landing page prerenders the sign-in dialog, which needs an app id
+      # at build time; Privy app ids are public, and this is the development
+      # app. The browser suite swaps Privy for its stub regardless.
+      NEXT_PUBLIC_PRIVY_APP_ID: cmt9wxn7h011h0cjsma7fzytr
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4

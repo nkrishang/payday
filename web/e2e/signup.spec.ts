@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Signing up from the landing page, against e2e/stub-api.mjs playing the OTP
- * issuer. There is no separate registration: the API provisions an account the
- * first time it sees a verified identity, so this is the same exchange the
- * dashboard's own login page runs, reached from the hero instead.
+ * Signing up from the landing page, with `test/privy-stub.tsx` standing in
+ * for Privy. There is no separate registration: the API provisions an account
+ * the first time it sees a verified identity, so this is the same exchange the
+ * dashboard runs on, reached from the hero.
  */
 
 const OTP = "123456";
@@ -24,7 +24,7 @@ test("the hero opens a sign-up dialog that signs a new merchant in", async ({ pa
 
   await expect(dialog.getByRole("heading", { name: "Check your email." })).toBeVisible();
   await expect(dialog.getByText(`We sent a six-digit code to ${EMAIL}`)).toBeVisible();
-  // Another code is not on offer while the first one still works.
+  // Another code is not on offer straight away.
   await expect(dialog.getByRole("button", { name: /Resend in \d:\d\d/ })).toBeDisabled();
 
   // Nothing to submit until the code is whole.
@@ -35,13 +35,16 @@ test("the hero opens a sign-up dialog that signs a new merchant in", async ({ pa
   await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByRole("heading", { name: "Deposit requests." })).toBeVisible();
 
-  // The token is the session: this tab only, never localStorage.
+  // The session is Privy's to keep (the stub keeps it in this tab); the page
+  // itself stores no credential of its own anywhere.
   const storage = await page.evaluate(() => ({
-    session: sessionStorage.getItem("payday.dashboard.session"),
-    local: localStorage.length,
+    stub: sessionStorage.getItem("payday.privy-stub.session"),
+    keys: [...Object.keys(sessionStorage), ...Object.keys(localStorage)],
   }));
-  expect(storage.session).toContain("stub-dashboard-token");
-  expect(storage.local).toBe(0);
+  expect(storage.stub).toContain("stub-dashboard-token");
+  expect(storage.keys.filter((key) => key.startsWith("payday.") && !key.includes("privy"))).toEqual(
+    [],
+  );
 });
 
 test("a wrong code is refused without losing the dialog, and the digits stay selected", async ({
@@ -66,9 +69,9 @@ test("a wrong code is refused without losing the dialog, and the digits stay sel
   await expect(page).toHaveURL(/\/dashboard$/);
 });
 
-test("a new code is offered only once the one in flight has expired", async ({ page }) => {
-  // The window is five minutes of real time; the page is given a clock it can
-  // be moved through instead.
+test("a new code is offered only once the cooldown has run", async ({ page }) => {
+  // The window is a minute of real time; the page is given a clock it can be
+  // moved through instead.
   await page.clock.install();
   await page.goto("/");
   await page.getByRole("button", { name: "Start Building" }).click();
@@ -76,19 +79,19 @@ test("a new code is offered only once the one in flight has expired", async ({ p
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(EMAIL);
   await dialog.getByRole("button", { name: "Send code" }).click();
-  await expect(dialog.getByRole("button", { name: "Resend in 5:00" })).toBeDisabled();
-
-  await page.clock.fastForward("04:00");
   await expect(dialog.getByRole("button", { name: "Resend in 1:00" })).toBeDisabled();
 
-  await page.clock.fastForward("01:00");
+  await page.clock.fastForward("00:30");
+  await expect(dialog.getByRole("button", { name: "Resend in 0:30" })).toBeDisabled();
+
+  await page.clock.fastForward("00:30");
   const resend = dialog.getByRole("button", { name: "Resend code" });
   await expect(resend).toBeEnabled();
-  await expect(dialog.getByText(`The code we sent to ${EMAIL} has expired`)).toBeVisible();
 
-  // Resending restarts the window rather than leaving two codes alive.
+  // Resending restarts the window and clears whatever was half-typed.
+  await dialog.getByLabel("One-time code").fill("12");
   await resend.click();
-  await expect(dialog.getByRole("button", { name: "Resend in 5:00" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Resend in 1:00" })).toBeDisabled();
   await expect(dialog.getByText(`We sent a six-digit code to ${EMAIL}`)).toBeVisible();
   await expect(dialog.getByLabel("One-time code")).toHaveValue("");
 
@@ -117,13 +120,16 @@ test("closing the dialog abandons the attempt", async ({ page }) => {
 
 test("a visitor who still holds a session goes straight to the dashboard", async ({ page }) => {
   await page.goto("/");
-  await page.evaluate(() => {
-    sessionStorage.setItem(
-      "payday.dashboard.session",
-      JSON.stringify({ accessToken: "stub-dashboard-token", expiresAt: Date.now() + 300_000 }),
-    );
-  });
+  await page.getByRole("button", { name: "Start Building" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Email").fill(EMAIL);
+  await dialog.getByRole("button", { name: "Send code" }).click();
+  await dialog.getByLabel("One-time code").fill(OTP);
+  await dialog.getByRole("button", { name: "Continue" }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
 
+  // Back on the landing page, "Start Building" has nothing to ask.
+  await page.goto("/");
   await page.getByRole("button", { name: "Start Building" }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByRole("dialog")).toHaveCount(0);

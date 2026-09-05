@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
-use crate::api::{Auth0Verifier, payer::PayerAccess};
+use crate::api::{PrivyVerifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
 use crate::identity::PayerIdentityProvider;
@@ -31,7 +31,8 @@ pub struct AppState {
     pub payer_sessions: PayerSessionRepository,
     pub verifications: VerificationRepository,
     pub onboarding_demo_payments: OnboardingDemoPaymentRepository,
-    pub identity_verifier: Option<Auth0Verifier>,
+    /// Verifies dashboard sessions; `None` means only API keys authenticate.
+    pub merchant_verifier: Option<PrivyVerifier>,
     /// The document-and-liveness provider; `None` leaves identity start
     /// answering `verification_unavailable`.
     pub identity: Option<Arc<dyn PayerIdentityProvider>>,
@@ -66,7 +67,7 @@ impl AppState {
     pub fn new(
         repo: InvoiceRepository,
         accounts: AccountRepository,
-        identity_verifier: Option<Auth0Verifier>,
+        merchant_verifier: Option<PrivyVerifier>,
         chain_id: ChainId,
         factory_address: Address,
         usdc_address: Address,
@@ -95,7 +96,7 @@ impl AppState {
             identity,
             repo,
             accounts,
-            identity_verifier,
+            merchant_verifier,
             payer_verification,
             chain_id,
             factory_address,

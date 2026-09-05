@@ -4,12 +4,10 @@ How to rotate an account API key and infrastructure secrets.
 
 ## Rotate the API key
 
-API-key rotation requires a fresh email OTP. Production API and Auth0 defaults
-are compiled into the CLI. Run:
-
-```bash
-./target/release/payday keys rotate
-```
+API keys are rolled from the dashboard: sign in at `payday.sh`, open the
+**API key** section, and choose **Roll key**. The session is the credential —
+an API key cannot roll itself, and the CLI's Auth0 login is no longer accepted
+by the API.
 
 The CLI asks for confirmation (`-y` skips it), saves the replacement securely,
 and masks it by default. Use `--show` only to transfer it directly to an approved

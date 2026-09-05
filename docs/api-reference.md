@@ -15,12 +15,12 @@ Authorization: Bearer payday_live_...
 Content-Type: application/json
 ```
 
-Sandbox keys use `payday_test_…`. The same header also accepts the short-lived
-Auth0 access token a signed-in dashboard holds; the API tells the two apart and
-maps the token's identity to the account without issuing a key. Account-key
-issuance routes instead require a fresh Auth0 email-OTP access token. A
-credential grants full read/write access to its account; keys are not
-currently scoped.
+Sandbox keys use `payday_test_…`. The same header also accepts the dashboard
+session a signed-in merchant holds — the Privy identity token — and the API
+tells the two apart and maps the token's identity to the account without
+issuing a key. The account-key routes take only that session: an API key
+cannot mint or revoke a key. A credential grants full read/write access to its
+account; keys are not currently scoped.
 
 An **invoice** is the document — issuer, bill-to, one directly specified
 amount, optional notes, heading, reference, and metadata, a payer policy, and
@@ -378,9 +378,12 @@ The SDK's `attachments.upload` performs the whole exchange.
 
 ## Account and service status
 
-- `GET /v1/account` uses an API key and returns account ID, key hint,
-  generation, creation/rotation timestamps, previous-key grace expiry, and
-  revocation timestamp.
+- `GET /v1/account` takes either credential and returns the account ID, the
+  mailbox it signs in with (`email`), its own wallet (`wallet_address`, the
+  embedded EVM wallet Privy created for it, where deposits settle by default;
+  `null` until the first session that carried one), key hint, generation,
+  creation/rotation timestamps, previous-key grace expiry, and revocation
+  timestamp.
 - `GET /v1/status` uses an API key and returns chain finalized position,
   indexer cursor/lag, and sweeper state/queue. It may return 503 when status
   data cannot be read.
@@ -389,17 +392,19 @@ The SDK's `attachments.upload` performs the whole exchange.
 
 ## Account-key API
 
-These routes use a fresh Auth0 identity token, not a Payday API key:
+These routes take a dashboard session (the Privy identity token), never a
+Payday API key — a key presenting itself here gets `401 identity_unauthorized`:
 
-- `GET /v1/account/api-key` — non-secret metadata;
-- `POST /v1/account/api-key` with `{ "expected_generation": null | N }` —
-  first issuance (`201`) or safe rotation (`200`), returning the plaintext key
-  once; the previous key remains valid for 24 hours;
+- `GET /v1/account/api-key` — the same non-secret account as `GET /v1/account`;
+- `POST /v1/account/api-key` with `{ "expected_generation": N }` — first
+  issuance (`201`) or safe rotation (`200`), returning the plaintext key once;
+  the previous key remains valid for 24 hours. A signed-in account already
+  exists at generation 1 before it holds any key, so pass the generation
+  `GET /v1/account` reports;
 - `DELETE /v1/account/api-key` with `{ "expected_generation": N }` — revoke
   current and grace-period keys (`204`).
 
-Generation checks prevent racing an unexpected rotation. Each signed
-authentication event can mutate key state once.
+Generation checks prevent racing an unexpected rotation.
 
 ## Webhooks
 
@@ -555,7 +560,7 @@ binds the same expected-identity hash an automated approval would.
 
 | Code | Typical status | Meaning |
 |---|---:|---|
-| `unauthorized` | 401 | Missing or invalid API key or dashboard access token |
+| `unauthorized` | 401 | Missing or invalid API key or dashboard session token |
 | `payer_session_invalid` | 401 | `Payday-Payer-Session` missing, unknown, expired, or for another invoice |
 | `otp_invalid` | 401 | The verification code was not accepted |
 | `verification_required` | 401 | Content or QR requested for a gated invoice without an unlocked session |
@@ -571,10 +576,9 @@ binds the same expected-identity hash an automated approval would.
 | `otp_resend_cooldown` | 429 | A code was sent for this invoice within the last minute; see `Retry-After` |
 | `identity_provider_unavailable` | 502 | Auth0 did not answer the passwordless exchange, or Didit could not open a session |
 | `verification_unavailable` | 503 | The deployment has no payer audience (email) or identity provider (identity start, callback) configured |
-| `identity_unauthorized` | 401 | Invalid Auth0 identity token |
-| `identity_unavailable` | 503 | Identity verification unavailable |
+| `identity_unauthorized` | 401 | An account-key route was called without a dashboard session (an API key, or an invalid Privy identity token) |
+| `identity_unavailable` | 503 | The identity provider's keys could not be fetched; sessions cannot be verified |
 | `account_disabled` | 403 | Account disabled |
-| `account_not_provisioned` | 404 | Identity has no Payday account |
 | `account_contact_required` | 409 | Login again to attach a verified merchant email |
 | `authentication_event_already_used` | 409 | Identity event already mutated key state |
 | `api_key_generation_conflict` | 409 | Key generation changed or was omitted incorrectly |

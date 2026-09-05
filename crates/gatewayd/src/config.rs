@@ -13,7 +13,9 @@ pub struct Config {
     bind_addr: String,
     database_url: String,
     status_only: bool,
-    auth0: Option<Auth0Config>,
+    /// The Privy app merchants sign in to; `None` leaves dashboard sessions
+    /// unaccepted and only API keys authenticate.
+    privy: Option<PrivyConfig>,
     dev_identity: bool,
     chain_id: ChainId,
     factory_address: Address,
@@ -49,26 +51,13 @@ impl Config {
     pub fn from_env() -> Self {
         let status_only = std::env::var("PAYDAY_STATUS_ONLY").as_deref() == Ok("true");
         let dev_identity = std::env::var("PAYDAY_DEV_IDENTITY").as_deref() == Ok("1");
-        let auth0_issuer = std::env::var("PAYDAY_AUTH0_ISSUER").ok();
-        let auth0_audience = std::env::var("PAYDAY_AUTH0_AUDIENCE").ok();
-        let auth0_client_id = std::env::var("PAYDAY_AUTH0_CLIENT_ID").ok();
-        // Absent (or empty, as the ECS task sets it while unconfigured) means
-        // dashboard tokens are not accepted at all.
-        let dashboard_client_id = std::env::var("PAYDAY_DASHBOARD_AUTH0_CLIENT_ID")
+        // Absent (or empty, as an unconfigured task might set it) means
+        // dashboard sessions are not accepted at all.
+        let privy = std::env::var("PAYDAY_PRIVY_APP_ID")
             .ok()
-            .filter(|value| !value.trim().is_empty());
-        let auth0 = match (auth0_issuer, auth0_audience, auth0_client_id) {
-            (Some(issuer), Some(audience), Some(client_id)) => Some(Auth0Config {
-                issuer,
-                audience,
-                client_id,
-                dashboard_client_id,
-            }),
-            (None, None, None) => None,
-            _ => panic!(
-                "PAYDAY_AUTH0_ISSUER, PAYDAY_AUTH0_AUDIENCE, and PAYDAY_AUTH0_CLIENT_ID must be set together"
-            ),
-        };
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(|app_id| PrivyConfig { app_id });
 
         let payer_verification = match (
             std::env::var("PAYDAY_PAYER_AUTH0_ISSUER").ok(),
@@ -190,7 +179,7 @@ impl Config {
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             status_only,
-            auth0,
+            privy,
             dev_identity,
             chain_id: ChainId(chain_id),
             factory_address,
@@ -232,8 +221,10 @@ impl Config {
         self.status_stale_seconds
     }
 
-    pub fn auth0(&self) -> Option<&Auth0Config> {
-        self.auth0.as_ref()
+    /// The Privy app whose identity tokens are dashboard sessions; absent
+    /// when the deployment accepts API keys only.
+    pub fn privy(&self) -> Option<&PrivyConfig> {
+        self.privy.as_ref()
     }
 
     pub fn dev_identity(&self) -> bool {
@@ -423,14 +414,11 @@ pub struct DiditConfig {
     pub base_url: String,
 }
 
-pub struct Auth0Config {
-    pub issuer: String,
-    pub audience: String,
-    /// The CLI application: its tokens may issue API keys.
-    pub client_id: String,
-    /// The dashboard application: its tokens authenticate API calls as a
-    /// session, never issue keys. `None` disables dashboard sessions.
-    pub dashboard_client_id: Option<String>,
+/// The Privy app merchants sign in to. Its public app id is all the API
+/// needs: it names the JWKS the identity tokens are verified against and is
+/// the audience they must carry. There is no app secret anywhere in Payday.
+pub struct PrivyConfig {
+    pub app_id: String,
 }
 
 /// The S3 bucket (or MinIO, through the endpoint override) holding PDFs.

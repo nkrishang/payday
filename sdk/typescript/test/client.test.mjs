@@ -345,7 +345,9 @@ test("a review request with nothing declined surfaces review_not_available", asy
 
 test("account.get reads with the client's own credential", async () => {
   const metadata = {
-    account_id: "acc_1", key_hint: "…aB3f9Q", generation: 2, created_at: "2026-09-01T00:00:00Z",
+    account_id: "acc_1", email: "merchant@example.com",
+    wallet_address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    key_hint: "…aB3f9Q", generation: 2, created_at: "2026-09-01T00:00:00Z",
     rotated_at: "2026-09-02T00:00:00Z", previous_key_expires_at: "2026-09-03T00:00:00Z", revoked_at: null,
   };
   const mock = mockFetch(() => json(metadata));
@@ -358,50 +360,52 @@ test("account.get reads with the client's own credential", async () => {
   assert.equal(mock.calls[0].init.headers.Authorization, "Bearer session-token");
 });
 
-test("account.issueApiKey sends the given token, not the client's own credential", async () => {
-  const issued = { api_key: "payday_live_abc", generation: 1, replaced_previous_key: false };
-  const mock = mockFetch(() => json(issued, 201));
-  // The client's own credential is a plain session; issuing needs a separate,
-  // freshly completed sign-in, which is why the method takes its own token.
+test("account.issueApiKey issues against the account's generation with the session", async () => {
+  const issued = { api_key: "payday_live_abc", generation: 3, replaced_previous_key: true };
+  const mock = mockFetch(() => json(issued, 200));
+  // The session is the credential: the same token the client reads with is
+  // what mints the key. (The API refuses an API key here on its own.)
   const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const result = await client.account.issueApiKey("fresh-otp-token", 3);
+  const result = await client.account.issueApiKey(2);
 
   assert.deepEqual(result, issued);
   assert.equal(mock.calls[0].url, "https://example.test/v1/account/api-key");
   assert.equal(mock.calls[0].init.method, "POST");
-  assert.equal(mock.calls[0].init.headers.Authorization, "Bearer fresh-otp-token");
-  assert.deepEqual(JSON.parse(mock.calls[0].init.body), { expected_generation: 3 });
+  assert.equal(mock.calls[0].init.headers.Authorization, "Bearer session-token");
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body), { expected_generation: 2 });
 });
 
-test("account.issueApiKey omits a generation as null, for a first key", async () => {
-  const issued = { api_key: "payday_live_abc", generation: 1, replaced_previous_key: false };
-  const mock = mockFetch(() => json(issued, 201));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
-
-  await client.account.issueApiKey("fresh-otp-token");
-
-  assert.deepEqual(JSON.parse(mock.calls[0].init.body), { expected_generation: null });
-});
-
-test("account.revokeApiKey sends the given token and resolves on 204 No Content", async () => {
+test("account.revokeApiKey sends the session and resolves on 204 No Content", async () => {
   const mock = mockFetch(() => new Response(null, { status: 204 }));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const result = await client.account.revokeApiKey("fresh-otp-token", 2);
+  const result = await client.account.revokeApiKey(2);
 
   assert.equal(result, undefined);
   assert.equal(mock.calls[0].url, "https://example.test/v1/account/api-key");
   assert.equal(mock.calls[0].init.method, "DELETE");
-  assert.equal(mock.calls[0].init.headers.Authorization, "Bearer fresh-otp-token");
+  assert.equal(mock.calls[0].init.headers.Authorization, "Bearer session-token");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), { expected_generation: 2 });
+});
+
+test("account.issueApiKey surfaces an API key's refusal as identity_unauthorized", async () => {
+  const mock = mockFetch(() => apiError("identity_unauthorized", 401));
+  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+
+  await assert.rejects(client.account.issueApiKey(1), (error) => {
+    assert.ok(error instanceof PaydayError);
+    assert.equal(error.code, "identity_unauthorized");
+    assert.equal(error.status, 401);
+    return true;
+  });
 });
 
 test("account.issueApiKey surfaces a generation conflict as a typed PaydayError", async () => {
   const mock = mockFetch(() => apiError("api_key_generation_conflict", 409));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await assert.rejects(client.account.issueApiKey("fresh-otp-token", 1), (error) => {
+  await assert.rejects(client.account.issueApiKey(1), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "api_key_generation_conflict");
     assert.equal(error.status, 409);

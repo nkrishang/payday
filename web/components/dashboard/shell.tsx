@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { MerchantAuth } from "@/components/merchant-auth";
 import { HOME_PATH, MerchantGate, useMerchant } from "./session";
 
 /**
@@ -22,21 +23,23 @@ export function DashboardShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="dash min-h-dvh bg-canvas">
-      <MerchantGate>
-        <Header />
-        <main className="mx-auto max-w-[1120px] px-5 py-8 sm:px-8">
-          {pathname === HOME_PATH ? null : (
-            <Link
-              href={HOME_PATH}
-              className="mb-6 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted transition-colors hover:text-ink"
-            >
-              <ArrowLeft className="size-3.5" />
-              Dashboard
-            </Link>
-          )}
-          {children}
-        </main>
-      </MerchantGate>
+      <MerchantAuth>
+        <MerchantGate>
+          <Header />
+          <main className="mx-auto max-w-[1120px] px-5 py-8 sm:px-8">
+            {pathname === HOME_PATH ? null : (
+              <Link
+                href={HOME_PATH}
+                className="mb-6 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted transition-colors hover:text-ink"
+              >
+                <ArrowLeft className="size-3.5" />
+                Dashboard
+              </Link>
+            )}
+            {children}
+          </main>
+        </MerchantGate>
+      </MerchantAuth>
     </div>
   );
 }

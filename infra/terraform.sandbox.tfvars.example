@@ -8,11 +8,10 @@ payment_domain_name = "pay.sandbox.payday.sh"
 # Origin serving /pay/{id}. Links on payment_domain_name 301 here.
 checkout_base_url   = "https://sandbox.payday.sh"
 payment_route53_zone_id = "Z0987654321EXAMPLE"
+# A separate Privy app for the sandbox, so sandbox accounts and wallets never
+# mix with production ones.
+privy_app_id     = "your-sandbox-privy-app-id"
 auth0_issuer     = "https://your-sandbox-tenant.us.auth0.com/"
-auth0_audience   = "https://api.sandbox.payday.sh"
-auth0_client_id  = "your-sandbox-native-application-client-id"
-# Sandbox tenant's dashboard Single Page Application; omit until it exists.
-dashboard_auth0_client_id = "your-sandbox-dashboard-spa-application-client-id"
 route53_zone_id  = "Z0123456789EXAMPLE"
 explorer_base_url = "https://monadvision.com"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
