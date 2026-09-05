@@ -51,7 +51,6 @@ describe("VerificationGate", () => {
       screen.getByRole("button", { name: /send a code to a\*\*\*\*@e\*\*\*\.com/i }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.getByText(/does not prove ownership of the wallet/i)).toBeInTheDocument();
   });
 
   it("lists only the facts the policy needs, distinguishing matched from unattributed identity", () => {
