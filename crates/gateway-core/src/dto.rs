@@ -185,35 +185,24 @@ impl VerificationFactStatus {
     }
 }
 
-/// The independent facts behind the four modes (product plan §3.2), each
-/// reported on its own so the checkout can show what is still outstanding.
+/// The facts behind the modes (product plan §3.2), each reported on its own
+/// so the checkout can show what is still outstanding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationRequirementsResponse {
     pub email: VerificationFactStatus,
-    pub document: VerificationFactStatus,
-    pub liveness: VerificationFactStatus,
-    pub identity_match: VerificationFactStatus,
     pub complete: bool,
 }
 
-/// Which facts one payer session has established. Each is independent
-/// (product plan §3.2); the policy mode decides which ones matter.
+/// Which facts one payer session has established; the policy mode decides
+/// which ones matter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VerificationFacts {
     pub email: bool,
-    pub document: bool,
-    pub liveness: bool,
-    pub identity_match: bool,
 }
 
 impl VerificationFacts {
     /// Every fact at once: what an invoice-level completion implies.
-    pub const ALL: Self = Self {
-        email: true,
-        document: true,
-        liveness: true,
-        identity_match: true,
-    };
+    pub const ALL: Self = Self { email: true };
 
     /// Whether these facts satisfy `mode`.
     pub fn satisfy(self, mode: PayerPolicyMode) -> bool {
@@ -245,63 +234,29 @@ impl VerificationRequirementsResponse {
             (true, true) => VerificationFactStatus::Approved,
             (true, false) => VerificationFactStatus::Pending,
         };
-        let identity = matches!(
-            mode,
-            PayerPolicyMode::VerifiedIdentity | PayerPolicyMode::VerifiedIdentityUnattributed
-        );
-        let matched = mode == PayerPolicyMode::VerifiedIdentity;
-        let complete = (!mode.is_gated() || facts.email)
-            && (!identity || (facts.document && facts.liveness))
-            && (!matched || facts.identity_match);
+        let complete = !mode.is_gated() || facts.email;
         Self {
             email: status(mode.is_gated(), facts.email),
-            document: status(identity, facts.document),
-            liveness: status(identity, facts.liveness),
-            identity_match: status(matched, facts.identity_match),
             complete,
         }
     }
 }
 
-/// One verification attempt as the merchant sees it: statuses, the
-/// provider's reference, and allowlisted risk categories. Never anything the
-/// provider extracted (product plan §3.6).
+/// One verification attempt as the merchant sees it: what was attempted and
+/// where it stands, never the code or the payer's session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationAttemptResponse {
     pub id: String,
-    /// `email` or `identity`.
+    /// `email`.
     pub kind: String,
-    /// `pending`, `approved`, `declined`, `in_review`, `expired`,
-    /// `abandoned`, or `review_required`.
+    /// `pending`, `approved`, or `abandoned`.
     pub status: String,
-    /// `auth0`, `didit`, or `manual`.
-    pub provider: String,
-    pub provider_reference: Option<String>,
-    pub attempt_number: u16,
-    pub document: VerificationFactStatus,
-    pub liveness: VerificationFactStatus,
-    pub identity_match: VerificationFactStatus,
-    pub risk_codes: Vec<String>,
-    pub country_code: Option<String>,
     pub verified_at: Option<String>,
-    pub expires_at: Option<String>,
     pub created_at: String,
-    pub review: Option<VerificationReviewResponse>,
 }
 
-/// A human review of one attempt: who decided what, and when.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VerificationReviewResponse {
-    pub requested_at: String,
-    /// `approved` or `declined` once decided.
-    pub decision: Option<String>,
-    pub reviewer: Option<String>,
-    pub note: Option<String>,
-    pub decided_at: Option<String>,
-}
-
-/// The merchant's verification view of one invoice: each fact on its own,
-/// every attempt, and what may happen next (product plan §7.2).
+/// The merchant's verification view of one invoice: each fact on its own
+/// and every attempt (product plan §7.2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationDetailResponse {
     pub payer_policy_mode: PayerPolicyMode,
@@ -309,10 +264,6 @@ pub struct VerificationDetailResponse {
     pub likely_unsolicited_at: Option<String>,
     pub facts: VerificationRequirementsResponse,
     pub attempts: Vec<VerificationAttemptResponse>,
-    /// The latest identity attempt was declined and a human may be asked.
-    pub review_available: bool,
-    /// The payer may resubmit from the checkout on their own.
-    pub retry_available: bool,
 }
 
 /// Invoice content revealed only once the payer may see it (product plan §4.3).
@@ -636,8 +587,8 @@ fn attention(code: &str) -> AttentionDto {
 mod tests {
     use super::*;
     use crate::{
-        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, ExpectedIdentity,
-        FactoryAddress, RecoveryAddress, TokenAddress,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress,
+        RecoveryAddress, TokenAddress,
     };
     use alloy_primitives::{U256, address};
 
@@ -837,88 +788,54 @@ mod tests {
             VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, false);
         assert!(!email.complete);
         assert_eq!(email.email, VerificationFactStatus::Pending);
-        assert_eq!(email.document, VerificationFactStatus::NotRequired);
+        assert_eq!(serde_json::to_value(email.email).unwrap(), "pending");
 
-        let unattributed = VerificationRequirementsResponse::for_mode(
-            PayerPolicyMode::VerifiedIdentityUnattributed,
-            true,
-        );
-        assert!(unattributed.complete);
-        assert_eq!(unattributed.document, VerificationFactStatus::Approved);
-        assert_eq!(unattributed.liveness, VerificationFactStatus::Approved);
-        assert_eq!(
-            unattributed.identity_match,
-            VerificationFactStatus::NotRequired
-        );
-
-        let matched =
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedIdentity, false);
-        assert_eq!(matched.identity_match, VerificationFactStatus::Pending);
-        assert_eq!(
-            serde_json::to_value(matched.identity_match).unwrap(),
-            "pending"
-        );
+        let verified =
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true);
+        assert!(verified.complete);
+        assert_eq!(verified.email, VerificationFactStatus::Approved);
     }
 
     #[test]
     fn session_facts_refine_each_requirement_and_complete_only_when_the_mode_is_met() {
-        let email_only = VerificationFacts {
-            email: true,
-            ..VerificationFacts::default()
-        };
-        let unattributed = VerificationFacts {
-            email: true,
-            document: true,
-            liveness: true,
-            identity_match: false,
-        };
+        let email_only = VerificationFacts { email: true };
 
         let by_email = VerificationRequirementsResponse::from_facts(
             PayerPolicyMode::VerifiedEmail,
             email_only,
         );
         assert_eq!(by_email.email, VerificationFactStatus::Approved);
-        assert_eq!(by_email.document, VerificationFactStatus::NotRequired);
         assert!(by_email.complete);
 
-        let matched = VerificationRequirementsResponse::from_facts(
-            PayerPolicyMode::VerifiedIdentity,
-            unattributed,
+        let nothing = VerificationRequirementsResponse::from_facts(
+            PayerPolicyMode::VerifiedEmail,
+            VerificationFacts::default(),
         );
-        assert_eq!(matched.email, VerificationFactStatus::Approved);
-        assert_eq!(matched.document, VerificationFactStatus::Approved);
-        assert_eq!(matched.identity_match, VerificationFactStatus::Pending);
-        assert!(!matched.complete);
-        assert!(unattributed.satisfy(PayerPolicyMode::VerifiedIdentityUnattributed));
-        assert!(!unattributed.satisfy(PayerPolicyMode::VerifiedIdentity));
-        assert!(!email_only.satisfy(PayerPolicyMode::VerifiedIdentityUnattributed));
+        assert_eq!(nothing.email, VerificationFactStatus::Pending);
+        assert!(!nothing.complete);
+        assert!(email_only.satisfy(PayerPolicyMode::VerifiedEmail));
+        assert!(!VerificationFacts::default().satisfy(PayerPolicyMode::VerifiedEmail));
         assert!(VerificationFacts::default().satisfy(PayerPolicyMode::Permissionless));
         assert_eq!(
-            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedIdentity, true),
+            VerificationRequirementsResponse::for_mode(PayerPolicyMode::VerifiedEmail, true),
             VerificationRequirementsResponse::from_facts(
-                PayerPolicyMode::VerifiedIdentity,
+                PayerPolicyMode::VerifiedEmail,
                 VerificationFacts::ALL
             )
         );
     }
 
     #[test]
-    fn merchant_response_carries_the_full_policy_for_identity_modes() {
+    fn merchant_response_carries_the_full_policy_for_the_verified_mode() {
         let response = PaymentResponse::from_invoice(
-            invoice(PayerPolicy::VerifiedIdentity {
+            invoice(PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
-                expected_identity: ExpectedIdentity {
-                    first_name: "Alice".into(),
-                    last_name: "Smith".into(),
-                },
             }),
             None,
         );
         let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["payer_policy"]["mode"], "verified_identity");
-        assert_eq!(
-            json["payer_policy"]["expected_identity"]["last_name"],
-            "Smith"
-        );
+        assert_eq!(json["payer_policy"]["mode"], "verified_email");
+        assert_eq!(json["payer_policy"]["expected_email"], "alice@example.com");
+        assert!(json["payer_policy"].get("expected_identity").is_none());
     }
 }

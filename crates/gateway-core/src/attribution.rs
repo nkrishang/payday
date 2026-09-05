@@ -33,9 +33,6 @@ pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V1";
 pub const SNAPSHOT_SCHEMA: &str = "payday.invoice";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
-/// Domain of [`expected_identity_hash`].
-pub const EXPECTED_IDENTITY_DOMAIN: &[u8] = b"PAYDAY_EXPECTED_IDENTITY_V1";
-
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -47,33 +44,15 @@ pub struct Party {
     pub details: Option<String>,
 }
 
-/// The merchant's asserted legal identity for `verified_identity`: exactly
-/// the fields the identity vendor matches against (cross-slice decision 5).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectedIdentity {
-    pub first_name: String,
-    pub last_name: String,
-}
-
-/// The four public payer modes (product plan §3.2). Deserialization enforces
-/// the mode rules of §4.5 (an assertion is required exactly where its mode
-/// needs it and forbidden elsewhere), so an unrepresentable policy can never
-/// reach validation.
+/// The two public payer modes (product plan §3.2). Deserialization enforces
+/// the mode rules of §4.5 (the expected email is required exactly where its
+/// mode needs it and forbidden elsewhere), so an unrepresentable policy can
+/// never reach validation.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum PayerPolicy {
     Permissionless,
-    VerifiedEmail {
-        expected_email: String,
-    },
-    VerifiedIdentity {
-        expected_email: String,
-        expected_identity: ExpectedIdentity,
-    },
-    VerifiedIdentityUnattributed {
-        expected_email: String,
-    },
+    VerifiedEmail { expected_email: String },
 }
 
 /// The wire shape of every mode. A derived internally tagged enum would let a
@@ -84,38 +63,21 @@ struct PayerPolicyWire {
     mode: PayerPolicyMode,
     #[serde(default)]
     expected_email: Option<String>,
-    #[serde(default)]
-    expected_identity: Option<ExpectedIdentity>,
 }
 
 impl<'de> Deserialize<'de> for PayerPolicy {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = PayerPolicyWire::deserialize(deserializer)?;
-        match (wire.mode, wire.expected_email, wire.expected_identity) {
-            (PayerPolicyMode::Permissionless, None, None) => Ok(PayerPolicy::Permissionless),
-            (PayerPolicyMode::VerifiedEmail, Some(expected_email), None) => {
+        match (wire.mode, wire.expected_email) {
+            (PayerPolicyMode::Permissionless, None) => Ok(PayerPolicy::Permissionless),
+            (PayerPolicyMode::VerifiedEmail, Some(expected_email)) => {
                 Ok(PayerPolicy::VerifiedEmail { expected_email })
             }
-            (PayerPolicyMode::VerifiedIdentity, Some(expected_email), Some(expected_identity)) => {
-                Ok(PayerPolicy::VerifiedIdentity {
-                    expected_email,
-                    expected_identity,
-                })
-            }
-            (PayerPolicyMode::VerifiedIdentityUnattributed, Some(expected_email), None) => {
-                Ok(PayerPolicy::VerifiedIdentityUnattributed { expected_email })
-            }
-            (PayerPolicyMode::Permissionless, Some(_), _) => Err(D::Error::custom(
+            (PayerPolicyMode::Permissionless, Some(_)) => Err(D::Error::custom(
                 "expected_email is not allowed for permissionless",
             )),
-            (mode, None, _) => Err(D::Error::custom(format!(
+            (mode, None) => Err(D::Error::custom(format!(
                 "expected_email is required for {mode}"
-            ))),
-            (PayerPolicyMode::VerifiedIdentity, _, None) => Err(D::Error::custom(
-                "expected_identity is required for verified_identity",
-            )),
-            (mode, _, Some(_)) => Err(D::Error::custom(format!(
-                "expected_identity is not allowed for {mode}"
             ))),
         }
     }
@@ -126,8 +88,6 @@ impl<'de> Deserialize<'de> for PayerPolicy {
 pub enum PayerPolicyMode {
     Permissionless,
     VerifiedEmail,
-    VerifiedIdentity,
-    VerifiedIdentityUnattributed,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -135,11 +95,9 @@ pub enum PayerPolicyMode {
 pub struct PayerPolicyModeParseError(pub String);
 
 impl PayerPolicyMode {
-    pub const ALL: [PayerPolicyMode; 4] = [
+    pub const ALL: [PayerPolicyMode; 2] = [
         PayerPolicyMode::Permissionless,
         PayerPolicyMode::VerifiedEmail,
-        PayerPolicyMode::VerifiedIdentity,
-        PayerPolicyMode::VerifiedIdentityUnattributed,
     ];
 
     /// The canonical string used on the wire and in `invoices.payer_policy_mode`.
@@ -148,8 +106,6 @@ impl PayerPolicyMode {
         match self {
             PayerPolicyMode::Permissionless => "permissionless",
             PayerPolicyMode::VerifiedEmail => "verified_email",
-            PayerPolicyMode::VerifiedIdentity => "verified_identity",
-            PayerPolicyMode::VerifiedIdentityUnattributed => "verified_identity_unattributed",
         }
     }
 
@@ -181,8 +137,6 @@ impl FromStr for PayerPolicyMode {
 pub enum PayerPolicyError {
     #[error("expected_email must be a valid email address of at most 254 bytes")]
     InvalidExpectedEmail,
-    #[error("expected_identity.{0} must be 1 to 255 bytes and not blank")]
-    InvalidIdentityName(&'static str),
 }
 
 /// The email syntax rule shared with merchant sign-in: bounded, no whitespace,
@@ -203,28 +157,13 @@ impl PayerPolicy {
         match self {
             PayerPolicy::Permissionless => PayerPolicyMode::Permissionless,
             PayerPolicy::VerifiedEmail { .. } => PayerPolicyMode::VerifiedEmail,
-            PayerPolicy::VerifiedIdentity { .. } => PayerPolicyMode::VerifiedIdentity,
-            PayerPolicy::VerifiedIdentityUnattributed { .. } => {
-                PayerPolicyMode::VerifiedIdentityUnattributed
-            }
         }
     }
 
     pub fn expected_email(&self) -> Option<&str> {
         match self {
             PayerPolicy::Permissionless => None,
-            PayerPolicy::VerifiedEmail { expected_email }
-            | PayerPolicy::VerifiedIdentity { expected_email, .. }
-            | PayerPolicy::VerifiedIdentityUnattributed { expected_email } => Some(expected_email),
-        }
-    }
-
-    pub fn expected_identity(&self) -> Option<&ExpectedIdentity> {
-        match self {
-            PayerPolicy::VerifiedIdentity {
-                expected_identity, ..
-            } => Some(expected_identity),
-            _ => None,
+            PayerPolicy::VerifiedEmail { expected_email } => Some(expected_email),
         }
     }
 
@@ -235,41 +174,17 @@ impl PayerPolicy {
         {
             return Err(PayerPolicyError::InvalidExpectedEmail);
         }
-        if let Some(identity) = self.expected_identity() {
-            for (field, value) in [
-                ("first_name", &identity.first_name),
-                ("last_name", &identity.last_name),
-            ] {
-                if value.trim().is_empty() || value.len() > 255 {
-                    return Err(PayerPolicyError::InvalidIdentityName(field));
-                }
-            }
-        }
         Ok(())
     }
 
     /// The form that is stored and committed: the expected email trimmed and
     /// lowercased so a retry that only differs in case is the same request.
-    /// Names are left exactly as asserted (product plan §13).
     pub fn normalized(&self) -> Self {
-        let email = |value: &String| value.trim().to_lowercase();
         match self {
             PayerPolicy::Permissionless => PayerPolicy::Permissionless,
             PayerPolicy::VerifiedEmail { expected_email } => PayerPolicy::VerifiedEmail {
-                expected_email: email(expected_email),
+                expected_email: expected_email.trim().to_lowercase(),
             },
-            PayerPolicy::VerifiedIdentity {
-                expected_email,
-                expected_identity,
-            } => PayerPolicy::VerifiedIdentity {
-                expected_email: email(expected_email),
-                expected_identity: expected_identity.clone(),
-            },
-            PayerPolicy::VerifiedIdentityUnattributed { expected_email } => {
-                PayerPolicy::VerifiedIdentityUnattributed {
-                    expected_email: email(expected_email),
-                }
-            }
         }
     }
 }
@@ -372,15 +287,6 @@ pub fn canonical_bytes(snapshot: &CanonicalIssuanceSnapshot) -> Result<Vec<u8>, 
 /// `keccak256(ATTRIBUTION_DOMAIN || canonical_bytes)`.
 pub fn attribution_hash(canonical_bytes: &[u8]) -> B256 {
     keccak256([ATTRIBUTION_DOMAIN, canonical_bytes].concat())
-}
-
-/// `keccak256(EXPECTED_IDENTITY_DOMAIN || JCS(identity))`: what a matched
-/// identity credential is bound to (product plan §4.6). A credential earned
-/// against one asserted name never satisfies another, because the hash of
-/// the assertion, not the assertion itself, is what the ledger stores.
-pub fn expected_identity_hash(identity: &ExpectedIdentity) -> B256 {
-    let canonical = serde_jcs::to_vec(identity).expect("two strings always canonicalize");
-    keccak256([EXPECTED_IDENTITY_DOMAIN, canonical.as_slice()].concat())
 }
 
 /// `keccak256(SALT_DOMAIN || nonce || attribution_hash)`: what a verifier
@@ -589,28 +495,6 @@ mod tests {
                 },
                 PayerPolicyMode::VerifiedEmail,
             ),
-            (
-                serde_json::json!({
-                    "mode": "verified_identity",
-                    "expected_email": "alice@example.com",
-                    "expected_identity": {"first_name": "Alice", "last_name": "Smith"}
-                }),
-                PayerPolicy::VerifiedIdentity {
-                    expected_email: "alice@example.com".into(),
-                    expected_identity: ExpectedIdentity {
-                        first_name: "Alice".into(),
-                        last_name: "Smith".into(),
-                    },
-                },
-                PayerPolicyMode::VerifiedIdentity,
-            ),
-            (
-                serde_json::json!({"mode": "verified_identity_unattributed", "expected_email": "alice@example.com"}),
-                PayerPolicy::VerifiedIdentityUnattributed {
-                    expected_email: "alice@example.com".into(),
-                },
-                PayerPolicyMode::VerifiedIdentityUnattributed,
-            ),
         ];
         for (json, policy, mode) in cases {
             let parsed: PayerPolicy = serde_json::from_value(json.clone()).unwrap();
@@ -623,10 +507,6 @@ mod tests {
                 parsed.expected_email().is_some(),
                 mode != PayerPolicyMode::Permissionless
             );
-            assert_eq!(
-                parsed.expected_identity().is_some(),
-                mode == PayerPolicyMode::VerifiedIdentity
-            );
             parsed.validate().unwrap();
         }
     }
@@ -635,10 +515,10 @@ mod tests {
     fn assertions_are_only_accepted_where_the_mode_allows_them() {
         let identity = serde_json::json!({"first_name": "Alice", "last_name": "Smith"});
         for rejected in [
-            serde_json::json!({"mode": "verified_identity_unattributed", "expected_email": "a@b.co", "expected_identity": identity}),
             serde_json::json!({"mode": "verified_email", "expected_email": "a@b.co", "expected_identity": identity}),
             serde_json::json!({"mode": "permissionless", "expected_email": "a@b.co"}),
-            serde_json::json!({"mode": "verified_identity", "expected_email": "a@b.co"}),
+            serde_json::json!({"mode": "verified_identity", "expected_email": "a@b.co", "expected_identity": identity}),
+            serde_json::json!({"mode": "verified_identity_unattributed", "expected_email": "a@b.co"}),
             serde_json::json!({"mode": "verified_email"}),
             serde_json::json!({"mode": "kyc"}),
             serde_json::json!({}),
@@ -651,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_bad_emails_and_blank_or_oversized_names() {
+    fn validation_rejects_bad_emails() {
         for email in ["not-an-email", "a@b", " alice@example.com", "a@.com", ""] {
             let policy = PayerPolicy::VerifiedEmail {
                 expected_email: email.into(),
@@ -664,41 +544,18 @@ mod tests {
         }
         let long = "x".repeat(250) + "@e.com";
         assert!(
-            PayerPolicy::VerifiedIdentityUnattributed {
+            PayerPolicy::VerifiedEmail {
                 expected_email: long
             }
             .validate()
             .is_err()
         );
-        for (first, last, field) in [
-            ("", "Smith", "first_name"),
-            ("  ", "Smith", "first_name"),
-            ("Alice", "\t", "last_name"),
-            ("Alice", &"S".repeat(256), "last_name"),
-        ] {
-            let policy = PayerPolicy::VerifiedIdentity {
-                expected_email: "alice@example.com".into(),
-                expected_identity: ExpectedIdentity {
-                    first_name: first.into(),
-                    last_name: last.into(),
-                },
-            };
-            assert_eq!(
-                policy.validate(),
-                Err(PayerPolicyError::InvalidIdentityName(field)),
-                "{first:?} {last:?}"
-            );
-        }
     }
 
     #[test]
-    fn normalization_trims_and_lowercases_the_expected_email_only() {
-        let policy = PayerPolicy::VerifiedIdentity {
+    fn normalization_trims_and_lowercases_the_expected_email() {
+        let policy = PayerPolicy::VerifiedEmail {
             expected_email: "  Alice@Example.COM ".into(),
-            expected_identity: ExpectedIdentity {
-                first_name: "Alice".into(),
-                last_name: "van Smith".into(),
-            },
         };
         assert_eq!(
             policy.validate(),
@@ -706,10 +563,6 @@ mod tests {
         );
         let normalized = policy.normalized();
         assert_eq!(normalized.expected_email(), Some("alice@example.com"));
-        assert_eq!(
-            normalized.expected_identity().unwrap().last_name,
-            "van Smith"
-        );
         normalized.validate().unwrap();
         assert_eq!(
             PayerPolicy::Permissionless.normalized(),
@@ -726,36 +579,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(party("Acme")).unwrap(),
             serde_json::json!({"name": "Acme"})
-        );
-    }
-
-    #[test]
-    fn expected_identity_hash_is_pinned_and_binds_the_exact_assertion() {
-        let alice = ExpectedIdentity {
-            first_name: "Alice".into(),
-            last_name: "Smith".into(),
-        };
-        let pinned = keccak256(
-            [
-                EXPECTED_IDENTITY_DOMAIN,
-                br#"{"first_name":"Alice","last_name":"Smith"}"#,
-            ]
-            .concat(),
-        );
-        assert_eq!(expected_identity_hash(&alice), pinned);
-        assert_ne!(
-            expected_identity_hash(&alice),
-            expected_identity_hash(&ExpectedIdentity {
-                first_name: "alice".into(),
-                last_name: "Smith".into(),
-            })
-        );
-        assert_ne!(
-            expected_identity_hash(&alice),
-            expected_identity_hash(&ExpectedIdentity {
-                first_name: "Smith".into(),
-                last_name: "Alice".into(),
-            })
         );
     }
 }

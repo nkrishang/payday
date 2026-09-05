@@ -11,7 +11,7 @@ function mockFetch(handler) {
   return { fetch, calls };
 }
 
-const requirementsNone = { email: "not_required", document: "not_required", liveness: "not_required", identity_match: "not_required", complete: true };
+const requirementsNone = { email: "not_required", complete: true };
 
 const payerPayment = {
   id: "pay_0198f80c-8d2f-7dc1-a369-90556a64f700",
@@ -164,7 +164,7 @@ test("payer client defaults to the production API origin", async () => {
 });
 
 test("email verification starts without naming a mailbox and confirms with the session", async () => {
-  const status = { requirements: { ...requirementsNone, email: "approved" }, identity_start_available: false };
+  const status = { requirements: { ...requirementsNone, email: "approved" } };
   const mock = mockFetch((url) => new Response(JSON.stringify(
     url.endsWith("/start") ? { payer_session: "pps_new", expires_at: "2026-09-02T00:00:00Z" } : status,
   )));
@@ -178,7 +178,7 @@ test("email verification starts without naming a mailbox and confirms with the s
   assert.equal(started.payer_session, "pps_new");
   assert.equal(resent.payer_session, "pps_new");
   assert.equal(confirmed.requirements.email, "approved");
-  assert.equal(current.identity_start_available, false);
+  assert.equal(current.requirements.complete, true);
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify/email/start");
   assert.equal(mock.calls[0].init.method, "POST");
   assert.equal(mock.calls[0].init.body, undefined);
@@ -202,7 +202,7 @@ test("email persistence continuation is exposed and can be retried without an OT
         error: { code: "verification_persistence_unavailable", message: "retry" },
         continuation: "signed-proof",
       }), { status: 503 });
-      return new Response(JSON.stringify({ requirements: {}, identity_start_available: false, identity: null }));
+      return new Response(JSON.stringify({ requirements: { email: "approved", complete: true } }));
     },
   });
   let proof;
@@ -249,41 +249,3 @@ test("an unknown or malformed link surfaces invalid_payment_link", async () => {
   });
 });
 
-test("identity start sends the session and reports reuse or the hosted redirect", async () => {
-  const mock = mockFetch((url) => {
-    if (url.endsWith("/verify/identity/start")) {
-      return new Response(JSON.stringify({ outcome: { type: "redirect", url: "https://verify.example/s/1" } }), { status: 200 });
-    }
-    return new Response(JSON.stringify({
-      requirements: { ...requirementsNone, email: "approved", document: "pending", liveness: "pending", complete: false },
-      identity_start_available: true,
-      identity: { status: "pending", attempt_number: 1, retry_available: true },
-    }), { status: 200 });
-  });
-  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
-
-  const started = await client.verification.startIdentity("pay_a/b", "pps_1");
-  assert.deepEqual(started.outcome, { type: "redirect", url: "https://verify.example/s/1" });
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/verify/identity/start");
-  assert.equal(mock.calls[0].init.method, "POST");
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_1");
-  assert.equal(mock.calls[0].init.body, undefined);
-
-  const status = await client.verification.status("pay_a/b", { payerSession: "pps_1" });
-  assert.equal(status.identity.status, "pending");
-  assert.equal(status.identity_start_available, true);
-  for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
-});
-
-test("identity start refusals surface their codes", async () => {
-  const mock = mockFetch(() => new Response(JSON.stringify({
-    error: { code: "review_required", message: "A human review is required" },
-  }), { status: 409 }));
-  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
-  await assert.rejects(client.verification.startIdentity("pay_1", "pps"), (error) => {
-    assert.ok(error instanceof PaydayError);
-    assert.equal(error.code, "review_required");
-    assert.equal(error.status, 409);
-    return true;
-  });
-});

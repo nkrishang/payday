@@ -40,15 +40,12 @@ carrying `refund_address` is rejected.
 
 ## Payer policy
 
-`payer_policy` is one of four presets. Verified modes name the expected mailbox
-and, for `verified_identity`, the legal name a document check must match:
+`payer_policy` is one of two presets. The verified mode names the expected
+mailbox:
 
 ```ts
 { mode: "permissionless" }
 { mode: "verified_email", expected_email: "alice@example.com" }
-{ mode: "verified_identity", expected_email: "alice@example.com",
-  expected_identity: { first_name: "Alice", last_name: "Smith" } }
-{ mode: "verified_identity_unattributed", expected_email: "alice@example.com" }
 ```
 
 Gated invoices withhold their content and payment address from the payer page
@@ -77,8 +74,7 @@ also exposed separately as `attachments.create({ filename })` and
 
 - `payments.attachment(id)` — the attached PDF's descriptor with a short-lived `download_url`.
 - `payments.invoicePdf(id)` — Payday's deterministic invoice summary as a `Blob`; the same invoice always renders byte-identical.
-- `payments.verification(id)` — every verification attempt on the invoice with each fact (`email`, `document`, `liveness`, `identity_match`) reported separately, the provider's reference and allowlisted risk categories, any human review, and whether `review_available` / `retry_available`. Never the provider's extracted identity.
-- `payments.requestVerificationReview(id)` — asks a person to review the latest declined identity attempt; automated resubmission stops for that payer (`409 review_not_available` when nothing is declined).
+- `payments.verification(id)` — the invoice's verification facts (`email` and `complete`) and every attempt made against it, with its status and times. Never the code or the payer's session.
 - `payments.proof(id)` — the `ProofOfPayment` for a settled invoice (`409 payment_not_settled` before). It ties the canonical issuance snapshot, nonce, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the payment's `settlement_tx_hash`), carries a Payday attestation bound to that invoice, and can be verified offline with `payday proof verify` without contacting Payday.
 
 ## Customers
@@ -117,7 +113,7 @@ const payer = new PaydayPayerClient();
 const payment = await payer.payments.get("pay_0198f80c-8d2f-7dc1-a369-90556a64f700");
 payment.issuer_name;          // always shown, with `heading`
 payment.content_unlocked;     // false while a gated invoice awaits verification
-payment.requirements;         // email / document / liveness / identity_match status
+payment.requirements;         // email status and whether the policy is complete
 payment.remaining_base_units; // exact integer string — the only value to do arithmetic on
 payment.payment_uri;          // EIP-681 request for the amount still due, or null
 payment.invoice;              // amount, bill_to, notes, reference, attachment — or null while locked
@@ -132,17 +128,11 @@ payer.payments.attachment(payment.id, payerSession); // PDF descriptor; 401 veri
 // cross-origin for the hosted checkout only.
 const { payer_session } = await payer.verification.startEmail(payment.id);
 await payer.verification.confirmEmail(payment.id, "123456", payer_session);
-
-// Identity modes then need the hosted document and liveness check. The
-// outcome is `reused` (an earlier credential of the same merchant applied)
-// or `redirect` (send the payer to `url`; poll `verification.status` after
-// they return, ignoring anything the provider appended to the URL).
-const { outcome } = await payer.verification.startIdentity(payment.id, payer_session);
-const { identity, identity_start_available } = await payer.verification.status(payment.id, { payerSession: payer_session });
+const { requirements } = await payer.verification.status(payment.id, { payerSession: payer_session });
 ```
 
-For `permissionless` invoices everything is unlocked immediately. For the
-verified modes, `chain`, `token`, the amounts, `address`, `payment_uri`, and
+For `permissionless` invoices everything is unlocked immediately. For
+`verified_email`, `chain`, `token`, the amounts, `address`, `payment_uri`, and
 `invoice` are `null` until the payer's session satisfies the policy; pass the
 session token from verification as `payerSession` and it travels in the
 `Payday-Payer-Session` header. The response deliberately carries no merchant

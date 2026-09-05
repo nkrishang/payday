@@ -151,17 +151,15 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await page.getByRole("button", { name: "Continue" }).click();
 
   // A gated policy with its assertion; the expected mailbox arrives filled in.
-  await page.getByRole("radio", { name: /^Verified identity$/ }).check();
+  await page.getByRole("radio", { name: /^Verified email$/ }).check();
   await expect(page.getByLabel("Expected payer email")).toHaveValue("ap@initrode.example");
   await page.getByLabel("Expected payer email").fill("peter@initrode.example");
-  await page.getByLabel("Expected first name").fill("Peter");
-  await page.getByLabel("Expected last name").fill("Gibbons");
   await page.getByRole("button", { name: "Continue" }).click();
 
   // The review carries the whole request, attachment included.
   const summary = page.getByLabel("Request summary");
   await expect(summary).toContainText("retainer.pdf");
-  await expect(summary).toContainText("Verified identity");
+  await expect(summary).toContainText("Verified email");
 
   const created = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/v1/payments"),
@@ -187,11 +185,11 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await expect(page.getByText("INV-2001").first()).toBeVisible();
   await expect(page.getByText("Net 15.")).toBeVisible();
   await expect(page.getByText("retainer.pdf")).toBeVisible();
-  await expect(page.getByText("Verified identity").first()).toBeVisible();
+  await expect(page.getByText("Verified email").first()).toBeVisible();
   await expect(page.getByText("peter@initrode.example")).toBeVisible();
-  await expect(page.getByText("Peter Gibbons")).toBeVisible();
   await expect(page.getByText("Pending").first()).toBeVisible();
-  await expect(page.getByText(/has not started verifying yet/)).toBeVisible();
+  // No attempt yet, so nothing is broken out under the verdict.
+  await expect(page.getByLabel("Verification activity")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Proof of Payment" })).toBeDisabled();
   await expect(page.getByText(/generated once the request settles/)).toBeVisible();
   await expect(page.getByText("Recovered funds")).toHaveCount(0);
@@ -215,7 +213,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   // The summary row, not the detail row under it that repeats the title.
   const row = page.getByRole("row").filter({ hasText: "Design retainer" }).first();
   await expect(row).toContainText(customerName);
-  await expect(row).toContainText("Verified identity");
+  await expect(row).toContainText("Verified email");
   await expect(row.getByLabel("Has attachment")).toBeVisible();
 });
 
@@ -253,31 +251,21 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   expect((await streamToString(pdf))?.startsWith("%PDF-")).toBe(true);
 });
 
-test("a declined identity check shows its facts, reference, and risk categories, and can be sent to review", async ({
+test("a likely unsolicited payment shows its flag and every verification attempt", async ({
   page,
 }) => {
   await signIn(page);
   await page.getByRole("button", { name: /Retainer — September/ }).click();
 
+  await expect(page.getByText("Likely unsolicited").first()).toBeVisible();
+  await expect(page.getByText("bob@initech.example")).toBeVisible();
   const activity = page.getByLabel("Verification activity");
   await expect(activity).toBeVisible();
-  const facts = page.getByLabel("Verification facts");
-  await expect(facts).toContainText("Email ownership");
-  await expect(facts).toContainText("Identity document");
-  await expect(facts).toContainText("Name matches the invoice");
-  await expect(facts).toContainText("Declined");
-  await expect(activity).toContainText("9f1c0f6e-1111-4c1a-9c1e-000000000003");
-  await expect(activity).toContainText("EXPECTED_DETAILS_MISMATCH");
-  await expect(activity).toContainText("ESP");
-  await expect(activity).toContainText(/may try the identity check once more/);
-  await expect(page.getByText("Likely unsolicited").first()).toBeVisible();
+  await expect(activity.getByText("Email verification")).toHaveCount(2);
+  await expect(activity).toContainText("Abandoned");
+  await expect(activity).toContainText("Code sent");
   const text = await page.locator("body").innerText();
-  expect(text).not.toMatch(/SENTINEL|1900-01-01/);
-
-  await page.getByRole("button", { name: "Request review" }).click();
-  await expect(activity).toContainText(/awaiting a reviewer/);
-  await expect(activity).toContainText("Review required");
-  await expect(activity).not.toContainText(/may try the identity check once more/);
+  expect(text).not.toMatch(/SENTINEL|1900-01-01|identity check|identity document|risk/i);
 });
 
 test("a merchant can generate, roll, and revoke their API key with a step-up code", async ({

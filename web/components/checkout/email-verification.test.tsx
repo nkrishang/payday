@@ -5,15 +5,7 @@ import { payerClient } from "@/lib/payday";
 import { EmailVerification } from "./email-verification";
 
 const APPROVED = {
-  requirements: {
-    email: "approved",
-    document: "not_required",
-    liveness: "not_required",
-    identity_match: "not_required",
-    complete: true,
-  },
-  identity_start_available: false,
-  identity: null,
+  requirements: { email: "approved", complete: true },
 } as const;
 
 function renderForm(overrides: Partial<Parameters<typeof EmailVerification>[0]> = {}) {

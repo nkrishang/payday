@@ -33,8 +33,6 @@ pub struct Config {
     /// The payer audience and the payer-reference key; both `None` leaves
     /// the email verification routes unavailable.
     payer_verification: Option<PayerVerificationConfig>,
-    /// The identity provider; `None` leaves identity start unavailable.
-    didit: Option<DiditConfig>,
     public_base_url: String,
     /// The one browser origin that may call the verification write routes.
     hosted_checkout_origin: Option<String>,
@@ -88,26 +86,6 @@ impl Config {
             (None, None, None, None) => None,
             _ => panic!(
                 "PAYDAY_PAYER_AUTH0_ISSUER, PAYDAY_PAYER_AUTH0_AUDIENCE, PAYDAY_PAYER_AUTH0_CLIENT_ID, and PAYDAY_PAYER_REF_MASTER_KEY must be set together"
-            ),
-        };
-
-        let didit = match (
-            std::env::var("PAYDAY_DIDIT_API_KEY").ok(),
-            std::env::var("PAYDAY_DIDIT_WORKFLOW_ID").ok(),
-            std::env::var("PAYDAY_DIDIT_WEBHOOK_SECRET").ok(),
-        ) {
-            (Some(api_key), Some(workflow_id), Some(webhook_secret)) => Some(DiditConfig {
-                api_key,
-                workflow_id,
-                webhook_secret,
-                base_url: std::env::var("PAYDAY_DIDIT_BASE_URL")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| crate::identity::didit::DEFAULT_BASE_URL.into()),
-            }),
-            (None, None, None) => None,
-            _ => panic!(
-                "PAYDAY_DIDIT_API_KEY, PAYDAY_DIDIT_WORKFLOW_ID, and PAYDAY_DIDIT_WEBHOOK_SECRET must be set together"
             ),
         };
 
@@ -200,7 +178,6 @@ impl Config {
             attestation,
             onboarding_payer,
             payer_verification,
-            didit,
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
             hosted_checkout_origin: std::env::var("PAYDAY_HOSTED_CHECKOUT_ORIGIN")
@@ -277,12 +254,6 @@ impl Config {
     /// verification is not configured.
     pub fn payer_verification(&self) -> Option<&PayerVerificationConfig> {
         self.payer_verification.as_ref()
-    }
-
-    /// The Didit credentials; absent when identity verification is not
-    /// configured, in which case identity start answers unavailable.
-    pub fn didit(&self) -> Option<&DiditConfig> {
-        self.didit.as_ref()
     }
 
     pub fn public_base_url(&self) -> &str {
@@ -411,16 +382,6 @@ pub struct PayerVerificationConfig {
     pub audience: String,
     pub client_id: String,
     pub payer_ref_master_key: [u8; 32],
-}
-
-/// Didit V3 (product plan §6.2): one API key, one pinned workflow that
-/// requires document, liveness, and face match and declines expected-name
-/// mismatches, and the shared secret its callbacks are signed with.
-pub struct DiditConfig {
-    pub api_key: String,
-    pub workflow_id: String,
-    pub webhook_secret: String,
-    pub base_url: String,
 }
 
 pub struct Auth0Config {

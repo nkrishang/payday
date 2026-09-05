@@ -12,9 +12,8 @@ additionally require `Idempotency-Key`. A replay returns
 
 Create requests contain `amount`, `payout_address`, an `issuer` and a `bill_to`
 party (`name`, optional `email` and `details`), and a `payer_policy`
-(`permissionless`, `verified_email`, `verified_identity`, or
-`verified_identity_unattributed`; the verified modes name the expected email
-and, for `verified_identity`, the expected first and last name). Optional
+(`permissionless` or `verified_email`; the verified mode names the expected
+email). Optional
 fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 `customer_id`, and one finalized `attachment_id` for a scanned PDF. The amount
 is used directly; there are no line items. Exactly `amount` settles to

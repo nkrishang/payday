@@ -706,7 +706,10 @@ pub async fn onboarding_payment(
         return Err(ApiError::onboarding_payment_not_eligible());
     }
 
-    let claim = state.onboarding_demo_payments.claim(account, row.id).await?;
+    let claim = state
+        .onboarding_demo_payments
+        .claim(account, row.id)
+        .await?;
     if claim == OnboardingClaim::Conflict {
         return Err(ApiError::onboarding_payment_already_claimed());
     }
@@ -715,7 +718,10 @@ pub async fn onboarding_payment(
     // (it only ever adds harmless extra rows for this one demo invoice); the
     // on-chain transfer below is the part that must never happen twice, and
     // that is what `claim` above actually guards.
-    let session = state.payer_sessions.create(row.id, PAYER_SESSION_TTL).await?;
+    let session = state
+        .payer_sessions
+        .create(row.id, PAYER_SESSION_TTL)
+        .await?;
     state
         .payer_sessions
         .begin_email_verification(session.id, Duration::ZERO)
@@ -732,7 +738,12 @@ pub async fn onboarding_payment(
     // on retry is harmless, so nothing needs deduplicating here.
     state
         .payer_sessions
-        .approve_email(session.id, payer_ref, Utc::now(), &Uuid::now_v7().to_string())
+        .approve_email(
+            session.id,
+            payer_ref,
+            Utc::now(),
+            &Uuid::now_v7().to_string(),
+        )
         .await?;
 
     let tx_hash = match claim {

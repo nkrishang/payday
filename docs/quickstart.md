@@ -46,7 +46,7 @@ payday create \
 - `--to` is the wallet that receives exactly the invoice amount from an on-time
   successful payment.
 - The quick path issues a `permissionless` invoice. To require the payer to
-  verify an email address or identity first, or to add party details, notes,
+  verify an email address first, or to add party details, notes,
   a customer, or metadata, write the API body to a file and use
   `payday create --from-file invoice.json`; see the
   [CLI reference](cli-reference.md).

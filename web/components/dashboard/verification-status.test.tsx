@@ -27,7 +27,7 @@ describe("VerificationBadge", () => {
   it("flags funds that arrived before verification without changing the verification verdict", () => {
     render(
       <VerificationBadge
-        mode="verified_identity"
+        mode="verified_email"
         completedAt={null}
         unsolicitedAt="2026-08-26T11:00:00Z"
       />,
@@ -38,34 +38,28 @@ describe("VerificationBadge", () => {
 });
 
 describe("VerificationStatus", () => {
-  it("shows the merchant's own assertions for a matched identity policy", () => {
+  it("shows the merchant's own assertion for a verified email policy", () => {
     render(
       <VerificationStatus
-        policy={{
-          mode: "verified_identity",
-          expected_email: "alice@example.com",
-          expected_identity: { first_name: "Alice", last_name: "Smith" },
-        }}
+        policy={{ mode: "verified_email", expected_email: "alice@example.com" }}
         completedAt="2026-08-19T08:30:00Z"
         unsolicitedAt={null}
       />,
     );
-    expect(screen.getByText("Verified identity")).toBeInTheDocument();
+    expect(screen.getByText("Verified email")).toBeInTheDocument();
     expect(screen.getByText("alice@example.com")).toBeInTheDocument();
-    expect(screen.getByText("Alice Smith")).toBeInTheDocument();
     expect(screen.getByText("Verified")).toBeInTheDocument();
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
-  it("explains an unattributed policy and a likely unsolicited payment", () => {
+  it("explains a likely unsolicited payment", () => {
     render(
       <VerificationStatus
-        policy={{ mode: "verified_identity_unattributed", expected_email: "bob@example.com" }}
+        policy={{ mode: "verified_email", expected_email: "bob@example.com" }}
         completedAt={null}
         unsolicitedAt="2026-08-26T11:00:00Z"
       />,
     );
-    expect(screen.getByText(/confirms a real person, not who they are/)).toBeInTheDocument();
     expect(screen.getByRole("note")).toHaveTextContent(/Likely unsolicited/);
     expect(screen.getByRole("note")).toHaveTextContent(/not quarantined/);
     expect(screen.queryByText("Expected identity")).not.toBeInTheDocument();

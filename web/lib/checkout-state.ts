@@ -22,7 +22,6 @@ import { formatDisplayAmount } from "./format";
 export type CheckoutPhase =
   | "verification_required"
   | "email_pending"
-  | "identity_required"
   | "awaiting"
   | "partial"
   | "confirming"
@@ -147,7 +146,7 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
 }
 
 /**
- * The three locked phases, in the order a payer moves through them. The
+ * The two locked phases, in the order a payer moves through them. The
  * facts come from the API for this tab's session; only "a code is on its
  * way" is local, because the API cannot know which tab asked.
  */
@@ -163,21 +162,6 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
       label: "Verification required",
       title: "Verify to view this invoice",
       detail: "The amount, payment details, and attachment are shown once you verify.",
-      showInstructions: false,
-      isTerminal: false,
-    };
-  }
-
-  if (requirements.email === "approved" && !requirements.complete) {
-    const matched = payer_policy.mode === "verified_identity";
-    return {
-      phase: "identity_required",
-      tone: "progress",
-      label: "Identity check required",
-      title: "Verify your identity to view this invoice",
-      detail: matched
-        ? "Your email is verified. The invoice opens once an identity document and liveness check confirm you are the person it names."
-        : "Your email is verified. The invoice opens once an identity document and liveness check are complete.",
       showInstructions: false,
       isTerminal: false,
     };

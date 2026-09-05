@@ -1,5 +1,14 @@
 # Payday implementation guide
 
+> **Superseded on 2026-09-05.** Identity verification is no longer part of
+> the product. Everything below about `verified_identity`,
+> `verified_identity_unattributed`, `expected_identity`, KYC, Didit, the
+> `PayerIdentityProvider` boundary, credential reuse, the reconciler, manual
+> review, and the identity step of the checkout describes a design that was
+> built and then removed. The payer policy has two modes, `permissionless`
+> and `verified_email`. Those sections are kept for the record; treat them
+> as history, not as the current specification.
+
 This guide implements Slices 1–4 from `features/product-plan.md`. Slices 0, 5, and 6 are prerequisites or future work and are not expanded here.
 
 Line references describe the repository before these changes.

@@ -286,8 +286,8 @@ impl Presentation {
         let mut out = Vec::new();
 
         // Column widths — full payment IDs are 39 chars (pay_ + UUID). The
-        // bill-to and policy columns size to their content so the rare long
-        // mode (`verified_identity_unattributed`) never breaks alignment.
+        // bill-to and policy columns size to their content so a long mode
+        // name never breaks alignment.
         let id_w = 39;
         let status_w = 20;
         let amount_w = 12;
@@ -1103,7 +1103,7 @@ mod tests {
             ),
             summary(
                 "Initech International Holdings Ltd",
-                PayerPolicyMode::VerifiedIdentityUnattributed,
+                PayerPolicyMode::VerifiedEmail,
                 None,
             ),
         ];
@@ -1124,7 +1124,7 @@ mod tests {
         assert!(lines[2].contains("permissionless"));
         assert!(lines[2].ends_with("March retainer"));
         assert!(lines[3].contains("Initech International H…"));
-        assert!(lines[3].contains("verified_identity_unattributed"));
+        assert!(lines[3].contains("verified_email"));
         assert!(lines[3].ends_with("—"));
         // Both rows place each column at the same character offset even
         // though the elided name carries a multi-byte ellipsis.
@@ -1132,7 +1132,7 @@ mod tests {
         assert_eq!(column(lines[2], "March retainer"), column(lines[3], "—"));
         assert_eq!(
             column(lines[2], "permissionless"),
-            column(lines[3], "verified_identity_unattributed")
+            column(lines[3], "verified_email")
         );
     }
 
