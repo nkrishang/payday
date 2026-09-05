@@ -51,7 +51,7 @@ function Header() {
         <Link href={HOME_PATH} className="rounded-md">
           <Image
             src="/payday-logo-full.svg"
-            width={3600}
+            width={3200}
             height={1000}
             priority
             alt="Payday"
