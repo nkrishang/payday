@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReadyPayerPayment } from "@/lib/checkout-state";
+import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
 import { payerClient } from "@/lib/payday";
@@ -12,21 +12,21 @@ type QrOutcome = { key: string; status: "ready"; src: string } | { key: string; 
  * The QR comes from the API rather than being drawn here: it encodes the same
  * EIP-681 request the wallet button uses, for the amount still due, and it is
  * the gateway that decides when an address must stop being shown — it answers
- * 410 the moment a payment is no longer payable, which arrives here as a
+ * 410 the moment a deposit request is no longer payable, which arrives here as a
  * failed fetch.
  *
- * It is fetched, not linked: a gated invoice's code needs this tab's session,
+ * It is fetched, not linked: a gated deposit request's code needs this tab's session,
  * which travels as a header and must never be part of an image URL. The SVG
  * is shown from an object URL that lives only in this page.
  *
- * A partial payment lowers the remaining amount and therefore changes the code,
+ * A partial deposit lowers the remaining amount and therefore changes the code,
  * so the fetch re-runs when the remaining base units move.
  */
 export function QrPanel({
   payment,
   payerSession = null,
 }: {
-  payment: ReadyPayerPayment;
+  payment: ReadyPayerDepositRequest;
   payerSession?: string | null;
 }) {
   const { id, remaining_base_units: remaining } = payment;
@@ -39,7 +39,7 @@ export function QrPanel({
   useEffect(() => {
     const controller = new AbortController();
     let objectUrl: string | null = null;
-    payerClient.payments
+    payerClient.depositRequests
       .qr(id, payerSession ?? undefined, { signal: controller.signal })
       .then((svg) => {
         if (controller.signal.aborted) return;

@@ -172,7 +172,7 @@ pub enum ProofError {
     ChainParametersMismatch,
     #[error("recovery address is not the payer's attested wallet")]
     RecoveryAddressMismatch,
-    #[error("payment address is not the CREATE3 address of the request and attestation")]
+    #[error("deposit address is not the CREATE3 address of the request and attestation")]
     PaymentAddressMismatch,
     #[error("the request commits to no attachment")]
     AttachmentNotCommitted,
@@ -186,19 +186,19 @@ pub enum ProofError {
     AttestationSignerMismatch,
     #[error("verification attestation signer is not a trusted attestor")]
     UntrustedAttestor,
-    #[error("verification attestation is for a different payment")]
+    #[error("verification attestation is for a different deposit request")]
     AttestationPaymentIdMismatch,
     #[error("verification attestation is for a different payer policy mode")]
     AttestationModeMismatch,
     #[error("verification attestation does not record a passed outcome")]
     AttestationNotPassed,
     #[error(
-        "verification attestation commits to a different request (attribution hash, chain, payment address, wallet, or nonce)"
+        "verification attestation commits to a different request (attribution hash, chain, deposit address, wallet, or nonce)"
     )]
     AttestationCommitmentMismatch,
     #[error("verification attestation does not record the wallet fact")]
     AttestationWalletFactMissing,
-    #[error("a transfer in the proof was not sent to the payment address")]
+    #[error("a transfer in the proof was not sent to the deposit address")]
     TransferRecipientMismatch,
     #[error("a transfer in the proof was not sent from the payer's attested wallet")]
     TransferSenderMismatch,
@@ -639,7 +639,7 @@ mod tests {
         let without = verify_proof(&proof, None, &[]).unwrap();
         assert!(!without.attachment_verified);
 
-        // A JSON round trip (as `GET /v1/payments/{id}/proof` serves it) is lossless.
+        // A JSON round trip (as `GET /v1/deposit-requests/{id}/proof` serves it) is lossless.
         let json = serde_json::to_string(&proof).unwrap();
         let parsed: ProofOfPayment = serde_json::from_str(&json).unwrap();
         assert_eq!(

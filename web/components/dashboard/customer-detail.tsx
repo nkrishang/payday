@@ -6,11 +6,11 @@ import { Problem } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { formatBaseUnits } from "@/lib/format";
 import { CustomerForm } from "./customer-form";
-import { InvoiceTable } from "./invoice-table";
+import { DepositTable } from "./deposit-table";
 import { formatDate } from "./labels";
 import { useResource } from "./session";
 
-/** The product's only currency; stats span every invoice, so no one row's own token names it. */
+/** The product's only currency; stats span every deposit request, so no one row's own token names it. */
 const USDC_DECIMALS = 6;
 
 export function CustomerDetail({ id }: { id: string }) {
@@ -72,7 +72,7 @@ export function CustomerDetail({ id }: { id: string }) {
           {/* Remount on each save so the form reflects what the API stored. */}
           <CustomerForm key={record.updated_at} customer={record} onSaved={customer.reload} />
         </div>
-        <InvoiceTable
+        <DepositTable
           identities={issuers.data.issuers}
           customers={[]}
           lockedCustomerId={record.id}

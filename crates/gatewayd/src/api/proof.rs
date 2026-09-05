@@ -16,8 +16,8 @@ use gateway_core::{
 };
 use gateway_db::AccountId;
 
+use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
-use crate::api::invoices::resolve_payment;
 use crate::state::AppState;
 
 pub async fn get_proof(
@@ -25,7 +25,7 @@ pub async fn get_proof(
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
 ) -> Result<Json<ProofOfPayment>, ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     let invoice = Invoice::try_from(&row)?;
     // Only a fulfilled invoice, whose funds have reached the beneficiary,
     // has anything to prove. The row's settlement_tx_hash is the fulfilment
@@ -36,7 +36,7 @@ pub async fn get_proof(
             (Ok(InvoiceStatus::Fulfilled), Some(hash)) => B256::try_from(hash.as_slice())
                 .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
                 .to_string(),
-            _ => return Err(ApiError::payment_not_settled()),
+            _ => return Err(ApiError::deposit_request_not_settled()),
         };
     // A fulfilled invoice was funded, and funds only reach a bound address.
     let binding = invoice
@@ -78,7 +78,7 @@ pub async fn get_proof(
         .iter()
         .any(|transfer| transfer.sender != binding.payer_wallet.to_checksum(None))
     {
-        return Err(ApiError::payment_sender_mismatch());
+        return Err(ApiError::deposit_sender_mismatch());
     }
 
     // Permissionless invoices verify no identity. Gated modes report whether

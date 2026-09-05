@@ -1,6 +1,6 @@
 "use client";
 
-import { type Payment, PaydayError } from "@payday/sdk";
+import { type DepositRequest, PaydayError } from "@payday/sdk";
 import {
   ArrowUpRight,
   Download,
@@ -42,29 +42,29 @@ import { VerificationStatus } from "./verification-status";
  * is grouped by what a merchant came for next — the money, the payer's proof,
  * and the files — with nothing repeated from the row.
  */
-export function InvoiceRowDetail({ id }: { id: string }) {
-  const invoice = useResource(id, (client) => client.payments.get(id));
+export function DepositRowDetail({ id }: { id: string }) {
+  const request = useResource(id, (client) => client.depositRequests.get(id));
 
-  if (invoice.error) {
+  if (request.error) {
     return (
       <div className="grid gap-3 px-4 py-5">
-        <Problem>{invoice.error}</Problem>
+        <Problem>{request.error}</Problem>
         <div>
-          <Button variant="secondary" size="sm" onClick={invoice.reload}>
+          <Button variant="secondary" size="sm" onClick={request.reload}>
             Try again
           </Button>
         </div>
       </div>
     );
   }
-  if (!invoice.data) {
+  if (!request.data) {
     return (
       <p role="status" className="px-4 py-6 text-[13px] text-faint">
         Loading…
       </p>
     );
   }
-  return <Loaded payment={invoice.data} />;
+  return <Loaded payment={request.data} />;
 }
 
 const MONO = "font-mono text-[12.5px] break-all";
@@ -72,7 +72,7 @@ const MONO = "font-mono text-[12.5px] break-all";
 const LINK =
   "text-brand-green underline decoration-brand-green/40 underline-offset-2 transition-colors hover:decoration-brand-green";
 
-function Loaded({ payment }: { payment: Payment }) {
+function Loaded({ payment }: { payment: DepositRequest }) {
   // One reading of the clock for the whole row, so its relative times agree
   // with each other and do not shift between renders.
   const [now] = useState(() => Date.now());
@@ -104,7 +104,7 @@ function Loaded({ payment }: { payment: Payment }) {
               </span>
             </span>
           </span>
-          {/* Only while it can still be paid: once a request has settled or
+          {/* Only while it can still be funded: once a request has settled or
               closed, its deadline is history the line below tells. */}
           {live ? (
             <span className={cn("text-[12px]", overdue ? "text-warning/80" : "text-faint")}>
@@ -139,25 +139,25 @@ function Loaded({ payment }: { payment: Payment }) {
       <p className="flex min-w-0 items-center gap-1.5 text-[12.5px]">
         <span className="shrink-0 text-faint">Payer&apos;s view</span>
         <a
-          href={payment.payment_url}
+          href={payment.deposit_url}
           target="_blank"
           rel="noreferrer noopener"
           className={cn(MONO, LINK, "min-w-0 truncate")}
         >
-          {payment.payment_url.replace(/^https?:\/\//, "")}
+          {payment.deposit_url.replace(/^https?:\/\//, "")}
         </a>
         <ExternalLink aria-hidden="true" className="size-3 shrink-0 text-faint" />
       </p>
 
-      {payment.notes || payment.bill_to.details || payment.customer_id ? (
+      {payment.notes || payment.payer.details || payment.customer_id ? (
         <Panel label="Document">
           <Facts>
-            {payment.bill_to.email ? (
-              <Fact label="Billed to">{payment.bill_to.email}</Fact>
+            {payment.payer.email ? (
+              <Fact label="Payer email">{payment.payer.email}</Fact>
             ) : null}
-            {payment.bill_to.details ? (
+            {payment.payer.details ? (
               <Fact label="Their details">
-                <span className="whitespace-pre-wrap">{payment.bill_to.details}</span>
+                <span className="whitespace-pre-wrap">{payment.payer.details}</span>
               </Fact>
             ) : null}
             {payment.notes ? (
@@ -192,7 +192,7 @@ function Loaded({ payment }: { payment: Payment }) {
         </Panel>
       ) : null}
 
-      <Panel label="Payment">
+      <Panel label="DepositRequest">
         <Facts>
           <Fact label="Address">
             {payment.address ? (
@@ -232,7 +232,7 @@ function Loaded({ payment }: { payment: Payment }) {
           <Fact label="Network">
             {payment.chain.name} · {payment.token.symbol}
           </Fact>
-          {payment.paid_at ? <Fact label="Funded">{formatDate(payment.paid_at)}</Fact> : null}
+          {payment.deposited_at ? <Fact label="Deposited">{formatDate(payment.deposited_at)}</Fact> : null}
           {payment.settlement_tx_hash ? (
             <Fact label="Settlement">
               {payment.settlement_explorer_url ? (
@@ -269,7 +269,7 @@ function Loaded({ payment }: { payment: Payment }) {
 }
 
 /** The attached PDF and the two documents the API generates from the request. */
-function Files({ payment }: { payment: Payment }) {
+function Files({ payment }: { payment: DepositRequest }) {
   const { client } = useMerchant();
   const [busy, setBusy] = useState<"attachment" | "pdf" | "proof" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -283,7 +283,7 @@ function Files({ payment }: { payment: Payment }) {
       await action();
     } catch (cause) {
       setError(
-        cause instanceof PaydayError && cause.code === "payment_not_settled"
+        cause instanceof PaydayError && cause.code === "deposit_request_not_settled"
           ? "The Proof of Payment is available once the request settles."
           : describeError(cause),
       );
@@ -330,7 +330,7 @@ function Files({ payment }: { payment: Payment }) {
             disabled={busy !== null}
             onClick={() =>
               run("attachment", async () => {
-                const descriptor = await client.payments.attachment(payment.id);
+                const descriptor = await client.depositRequests.attachment(payment.id);
                 if (!descriptor.download_url) throw new Error("The API returned no download link");
                 window.open(descriptor.download_url, "_blank", "noopener,noreferrer");
               })
@@ -346,12 +346,12 @@ function Files({ payment }: { payment: Payment }) {
           disabled={busy !== null}
           onClick={() =>
             run("pdf", async () =>
-              saveBlob(await client.payments.invoicePdf(payment.id), `${stem}.pdf`),
+              saveBlob(await client.depositRequests.requestPdf(payment.id), `${stem}.pdf`),
             )
           }
         >
           {spinner("pdf", <FileText className="size-4" />)}
-          Invoice PDF
+          Deposit request PDF
         </Button>
         <Button
           variant="secondary"
@@ -359,7 +359,7 @@ function Files({ payment }: { payment: Payment }) {
           disabled={busy !== null || payment.status !== "settled"}
           onClick={() =>
             run("proof", async () =>
-              saveJson(await client.payments.proof(payment.id), `${stem}-proof.json`),
+              saveJson(await client.depositRequests.proof(payment.id), `${stem}-proof.json`),
             )
           }
         >

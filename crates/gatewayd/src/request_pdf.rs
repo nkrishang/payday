@@ -7,7 +7,7 @@
 //! already formats it (decimal amount strings, RFC 3339 timestamps). Only
 //! issuance-time fields appear; nothing that changes as the payment progresses.
 
-use gateway_core::{PayerPolicyMode, PaymentResponse};
+use gateway_core::{DepositRequestResponse, PayerPolicyMode};
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
 use thiserror::Error;
 
@@ -23,7 +23,7 @@ const MAX_PAGES: usize = 32;
 
 #[derive(Debug, Error)]
 pub enum InvoicePdfError {
-    #[error("the invoice needs more than {MAX_PAGES} pages")]
+    #[error("the deposit request needs more than {MAX_PAGES} pages")]
     TooManyPages,
 }
 
@@ -57,7 +57,7 @@ struct Line {
 }
 
 /// Lay the invoice out as lines, then paginate and write them.
-pub fn render_invoice_pdf(invoice: &PaymentResponse) -> Result<Vec<u8>, InvoicePdfError> {
+pub fn render_request_pdf(invoice: &DepositRequestResponse) -> Result<Vec<u8>, InvoicePdfError> {
     let lines = layout(invoice);
     let pages = paginate(&lines);
     if pages.len() > MAX_PAGES {
@@ -115,19 +115,19 @@ pub fn render_invoice_pdf(invoice: &PaymentResponse) -> Result<Vec<u8>, InvoiceP
     Ok(pdf.finish())
 }
 
-fn layout(invoice: &PaymentResponse) -> Vec<Line> {
+fn layout(invoice: &DepositRequestResponse) -> Vec<Line> {
     let mut lines = Lines::default();
-    lines.text(Font::Bold, 18.0, "Invoice");
+    lines.text(Font::Bold, 18.0, "Deposit request");
     if let Some(heading) = &invoice.heading {
         lines.text(Font::Regular, 12.0, heading);
     }
     lines.gap(8.0);
-    lines.field("Payment ID", &invoice.id);
+    lines.field("Deposit request ID", &invoice.id);
     if let Some(reference) = &invoice.reference {
         lines.field("Reference", reference);
     }
     lines.field("Issued", &invoice.created_at);
-    lines.field("Payment due by", &invoice.expires_at);
+    lines.field("Deposit due by", &invoice.expires_at);
     lines.field(
         "Amount",
         &format!("{} {}", invoice.amount, invoice.currency),
@@ -136,15 +136,15 @@ fn layout(invoice: &PaymentResponse) -> Vec<Line> {
 
     lines.section("From");
     lines.party(&invoice.issuer);
-    lines.section("Bill to");
-    lines.party(&invoice.bill_to);
+    lines.section("Payer");
+    lines.party(&invoice.payer);
 
     if let Some(notes) = &invoice.notes {
         lines.section("Notes");
         lines.text(Font::Regular, 10.0, notes);
     }
 
-    lines.section("Payment");
+    lines.section("Deposit");
     lines.field(
         "Chain",
         &format!("{} ({})", invoice.chain.name, invoice.chain.id),
@@ -154,7 +154,7 @@ fn layout(invoice: &PaymentResponse) -> Vec<Line> {
         &format!("{} {}", invoice.token.symbol, invoice.token.address),
     );
     lines.field(
-        "Payment address",
+        "Deposit address",
         invoice
             .address
             .as_deref()
@@ -187,10 +187,12 @@ fn layout(invoice: &PaymentResponse) -> Vec<Line> {
 /// The mode in words; the assertions behind it stay out of the document.
 fn policy_words(mode: PayerPolicyMode) -> &'static str {
     match mode {
-        PayerPolicyMode::Permissionless => "Anyone holding the payment link may pay",
-        PayerPolicyMode::VerifiedEmail => "The payer must verify their email address before paying",
+        PayerPolicyMode::Permissionless => "Anyone holding the deposit link may pay",
+        PayerPolicyMode::VerifiedEmail => {
+            "The payer must verify their email address before depositing"
+        }
         PayerPolicyMode::MerchantSession => {
-            "The issuer's application opens this payment for its signed-in customer"
+            "The issuer's application opens this deposit request for its signed-in customer"
         }
     }
 }
@@ -399,7 +401,7 @@ mod tests {
 
     use super::*;
 
-    fn invoice(notes: Option<&str>) -> PaymentResponse {
+    fn invoice(notes: Option<&str>) -> DepositRequestResponse {
         let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
         let token = TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603"));
         let beneficiary =
@@ -451,7 +453,7 @@ mod tests {
             .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
             .unwrap();
         invoice.binding = Some(binding);
-        let mut response = PaymentResponse::from_invoice(invoice, None);
+        let mut response = DepositRequestResponse::from_invoice(invoice, None);
         response.created_at = "2026-09-01T12:00:00+00:00".into();
         response.attachment = Some(AttachmentDescriptor {
             id: Uuid::from_u128(9),
@@ -467,8 +469,8 @@ mod tests {
     #[test]
     fn same_invoice_produces_identical_pdf_bytes() {
         let sample = invoice(Some("Net 30. Thank you."));
-        let first = render_invoice_pdf(&sample).unwrap();
-        let second = render_invoice_pdf(&sample).unwrap();
+        let first = render_request_pdf(&sample).unwrap();
+        let second = render_request_pdf(&sample).unwrap();
         assert_eq!(first, second);
         assert!(first.starts_with(b"%PDF-"));
         assert!(first.trim_ascii_end().ends_with(b"%%EOF"));
@@ -495,9 +497,9 @@ mod tests {
         assert!(!text.contains("signed.example"));
 
         // Different content renders differently, and long text paginates.
-        let other = render_invoice_pdf(&invoice(Some("Net 60."))).unwrap();
+        let other = render_request_pdf(&invoice(Some("Net 60."))).unwrap();
         assert_ne!(first, other);
-        let long = render_invoice_pdf(&invoice(Some(&"word ".repeat(1_500)))).unwrap();
+        let long = render_request_pdf(&invoice(Some(&"word ".repeat(1_500)))).unwrap();
         assert!(String::from_utf8_lossy(&long).contains("/Count 3"));
     }
 

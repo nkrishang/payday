@@ -8,8 +8,8 @@ export default function NewCustomerPage() {
     <>
       <h1 className="text-[22px] font-semibold tracking-tight">New customer</h1>
       <p className="mt-1.5 text-[13px] text-muted">
-        A reusable counterparty record. Each invoice keeps its own snapshot, so editing a customer
-        later never changes an issued invoice.
+        A reusable counterparty record. Each deposit request keeps its own snapshot, so editing a customer
+        later never changes an issued request.
       </p>
       <div className="mt-6 max-w-[560px]">
         <CustomerForm />

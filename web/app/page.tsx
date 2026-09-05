@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { PaymentScene } from "@/components/landing/payment-scene";
+import { DepositScene } from "@/components/landing/deposit-scene";
 import { StartBuilding } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
 
@@ -63,10 +63,10 @@ export default function Home() {
         </section>
 
         <section
-          aria-label="Recent payments"
-          className="landing-reveal landing-delay-4 payment-stage"
+          aria-label="Recent deposits"
+          className="landing-reveal landing-delay-4 deposit-stage"
         >
-          <PaymentScene />
+          <DepositScene />
         </section>
       </main>
 

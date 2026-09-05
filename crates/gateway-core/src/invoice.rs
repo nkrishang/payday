@@ -19,16 +19,16 @@ pub struct InvoiceId(pub Uuid);
 
 impl fmt::Display for InvoiceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pay_{}", self.0)
+        write!(f, "dr_{}", self.0)
     }
 }
 
-/// Validate a complete customer-facing `pay_…` ID and return the UUID used by
+/// Validate a complete merchant-facing `dr_…` deposit request ID and return the UUID used by
 /// the account-scoped database lookup. Only the canonical form the API emits is
 /// accepted: partial IDs and other UUID spellings are rejected so a lookup can
-/// never resolve to more than one payment.
-pub fn payment_id(value: &str) -> Option<Uuid> {
-    let suffix = value.strip_prefix("pay_")?;
+/// never resolve to more than one deposit request.
+pub fn deposit_request_id(value: &str) -> Option<Uuid> {
+    let suffix = value.strip_prefix("dr_")?;
     let uuid = Uuid::try_parse(suffix).ok()?;
     let mut canonical = [0u8; uuid::fmt::Hyphenated::LENGTH];
     (uuid.hyphenated().encode_lower(&mut canonical) == suffix).then_some(uuid)
@@ -341,20 +341,20 @@ mod tests {
     fn public_payment_ids_round_trip_only_in_canonical_complete_form() {
         let uuid = Uuid::parse_str("0198f80c-8d2f-7dc1-a369-90556a64f700").unwrap();
         let id = InvoiceId(uuid);
-        assert_eq!(id.to_string(), "pay_0198f80c-8d2f-7dc1-a369-90556a64f700");
-        assert_eq!(payment_id(&id.to_string()), Some(uuid));
+        assert_eq!(id.to_string(), "dr_0198f80c-8d2f-7dc1-a369-90556a64f700");
+        assert_eq!(deposit_request_id(&id.to_string()), Some(uuid));
         for invalid in [
             "",
-            "pay_",
+            "dr_",
             "0198f80c-8d2f-7dc1-a369-90556a64f700",
-            "pay_0198f80c",
-            "pay_0198f80c-8d2f",
-            "pay_0198F80C-8D2F-7DC1-A369-90556A64F700",
-            "pay_0198f80c8d2f7dc1a36990556a64f700",
-            "pay_{0198f80c-8d2f-7dc1-a369-90556a64f700}",
-            "pay_%",
+            "dr_0198f80c",
+            "dr_0198f80c-8d2f",
+            "dr_0198F80C-8D2F-7DC1-A369-90556A64F700",
+            "dr_0198f80c8d2f7dc1a36990556a64f700",
+            "dr_{0198f80c-8d2f-7dc1-a369-90556a64f700}",
+            "dr_%",
         ] {
-            assert_eq!(payment_id(invalid), None, "{invalid}");
+            assert_eq!(deposit_request_id(invalid), None, "{invalid}");
         }
     }
     use uuid::Version;

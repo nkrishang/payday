@@ -1,7 +1,7 @@
 import Image from "next/image";
 import { ArrowRight, Check, LockKeyhole, LoaderCircle } from "lucide-react";
 
-const PAYMENTS = [
+const DEPOSITS = [
   {
     initials: "OA",
     email: "omar@finsystems.com",
@@ -62,11 +62,11 @@ const PAYMENTS = [
 const TOKEN_LABELS = { usdc: "USDC", usdt: "USDT", ausd: "AUSD" } as const;
 type ScenePhase = "a" | "b";
 
-export function PaymentScene() {
+export function DepositScene() {
   return (
-    <div className="payment-scene">
-      <div className="payment-window scene-payment-window">
-        <PaymentTrack />
+    <div className="deposit-scene">
+      <div className="deposit-window scene-deposit-window">
+        <DepositTrack />
       </div>
 
       <CheckoutPanel />
@@ -74,15 +74,15 @@ export function PaymentScene() {
   );
 }
 
-function PaymentTrack() {
+function DepositTrack() {
   return (
-    <div className="payment-track scene-payment-track">
+    <div className="deposit-track scene-deposit-track">
       {Array.from({ length: 4 }, (_, set) =>
-        PAYMENTS.map((payment, index) => {
+        DEPOSITS.map((payment, index) => {
           const phase = index === 5 ? "a" : index === 2 ? "b" : undefined;
 
           return (
-            <PaymentRow
+            <DepositRow
               key={`${set}-${payment.reference}`}
               payment={payment}
               phase={phase}
@@ -95,12 +95,12 @@ function PaymentTrack() {
   );
 }
 
-function PaymentRow({
+function DepositRow({
   payment,
   phase,
   ariaHidden,
 }: {
-  payment: (typeof PAYMENTS)[number];
+  payment: (typeof DEPOSITS)[number];
   phase: ScenePhase | undefined;
   ariaHidden: boolean;
 }) {
@@ -110,7 +110,7 @@ function PaymentRow({
   return (
     <article
       aria-hidden={ariaHidden || undefined}
-      className={`payment-row scene-payment-row ${phase ? `scene-target scene-target-${phase}` : ""}`}
+      className={`deposit-row scene-deposit-row ${phase ? `scene-target scene-target-${phase}` : ""}`}
     >
       <div className="flex min-w-0 items-center gap-2.5">
         <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#292a28] text-[13px] text-brand-grey">
@@ -121,7 +121,7 @@ function PaymentRow({
         </span>
       </div>
 
-      <div className="payment-reference flex items-center gap-2 text-[13px] text-[#c8c8c3]">
+      <div className="deposit-reference flex items-center gap-2 text-[13px] text-[#c8c8c3]">
         <Image src="/payment-icons/pdf.svg" alt="" width={22} height={22} className="size-[21px]" />
         <span className="whitespace-nowrap">{payment.reference}</span>
       </div>
@@ -138,7 +138,7 @@ function PaymentRow({
       </div>
 
       <div
-        className={`payment-checks flex items-center gap-2 ${isVerified ? "text-[#31ae58]" : "text-brand-grey"} ${phase ? "scene-selected-checks" : ""}`}
+        className={`deposit-checks flex items-center gap-2 ${isVerified ? "text-[#31ae58]" : "text-brand-grey"} ${phase ? "scene-selected-checks" : ""}`}
       >
         {isSelected ? (
           <span className="relative size-7 shrink-0">
@@ -177,7 +177,7 @@ function PaymentRow({
       </div>
 
       {isSelected ? (
-        <span className="payment-status-wrap relative h-10 min-w-[118px] justify-self-end">
+        <span className="deposit-status-wrap relative h-10 min-w-[118px] justify-self-end">
           <span className="status-badge status-unverified scene-unverified-status absolute inset-0">
             <span className="size-2.5 rounded-full bg-current" />
             Unverified
@@ -199,18 +199,18 @@ function PaymentRow({
 
 function CheckoutPanel() {
   return (
-    <aside className="checkout-panel" aria-label="Payment verification preview">
+    <aside className="checkout-panel" aria-label="Deposit verification preview">
       <div className="checkout-variant checkout-variant-a" aria-hidden="true">
-        <CheckoutPanelContent payment={PAYMENTS[5]} />
+        <CheckoutPanelContent payment={DEPOSITS[5]} />
       </div>
       <div className="checkout-variant checkout-variant-b" aria-hidden="true">
-        <CheckoutPanelContent payment={PAYMENTS[2]} />
+        <CheckoutPanelContent payment={DEPOSITS[2]} />
       </div>
     </aside>
   );
 }
 
-function CheckoutPanelContent({ payment }: { payment: (typeof PAYMENTS)[number] }) {
+function CheckoutPanelContent({ payment }: { payment: (typeof DEPOSITS)[number] }) {
   return (
     <>
       <div className="checkout-upper">
@@ -242,7 +242,7 @@ function CheckoutPanelContent({ payment }: { payment: (typeof PAYMENTS)[number] 
         type="button"
         tabIndex={-1}
         className="checkout-pay"
-        aria-label="Animated payment button preview"
+        aria-label="Animated deposit button preview"
       >
         <span className="checkout-amount">
           <span className="checkout-amount-concealed" aria-hidden="true">
@@ -270,7 +270,7 @@ function CheckoutPanelContent({ payment }: { payment: (typeof PAYMENTS)[number] 
             <LoaderCircle className="animate-spin" /> Processing
           </span>
           <span className="pay-state pay-complete">
-            <Check /> Paid
+            <Check /> Deposited
           </span>
         </span>
       </button>

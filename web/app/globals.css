@@ -255,7 +255,7 @@
   animation-delay: 300ms;
 }
 
-.payment-stage {
+.deposit-stage {
   position: relative;
   height: clamp(330px, calc(100svh - 516px), 510px);
   overflow: hidden;
@@ -263,8 +263,8 @@
   padding-inline: 16px;
 }
 
-.payment-stage::before,
-.payment-stage::after {
+.deposit-stage::before,
+.deposit-stage::after {
   position: absolute;
   z-index: 10;
   right: -2px;
@@ -282,7 +282,7 @@
   content: "";
 }
 
-.payment-stage::before {
+.deposit-stage::before {
   top: -1px;
   clip-path: polygon(
     0 0,
@@ -318,7 +318,7 @@
   filter: drop-shadow(0 2px 0 rgb(246 242 234 / 18%)) drop-shadow(0 4px 3px rgb(15 16 14 / 24%));
 }
 
-.payment-stage::after {
+.deposit-stage::after {
   bottom: -1px;
   background-image:
     linear-gradient(to top, #0f100e 0%, rgb(15 16 14 / 96%) 24%, rgb(15 16 14 / 30%) 100%),
@@ -357,14 +357,14 @@
   filter: drop-shadow(0 -2px 0 rgb(246 242 234 / 16%)) drop-shadow(0 -4px 3px rgb(15 16 14 / 22%));
 }
 
-.payment-scene {
+.deposit-scene {
   position: relative;
   width: min(1408px, 100%);
   height: 100%;
   margin-inline: auto;
 }
 
-.payment-window {
+.deposit-window {
   width: min(1000px, 100%);
   height: calc(100% + 18px);
   margin-inline: auto;
@@ -380,28 +380,28 @@
   mask-image: linear-gradient(to bottom, transparent 0, black 11%, black 98%, transparent 100%);
 }
 
-.payment-track {
+.deposit-track {
   display: flex;
   flex-direction: column;
   gap: 7px;
   will-change: transform;
 }
 
-.scene-payment-window {
+.scene-deposit-window {
   position: relative;
   z-index: 3;
   animation: scene-window 18s ease-in-out infinite;
   will-change: transform;
 }
 
-.scene-payment-track {
+.scene-deposit-track {
   position: relative;
   z-index: 1;
   transform: translateY(-426px);
   animation: scene-track 36s cubic-bezier(0.25, 0.8, 0.25, 1) infinite;
 }
 
-.payment-row {
+.deposit-row {
   display: grid;
   grid-template-columns:
     minmax(195px, 1.7fr) minmax(120px, 0.9fr) minmax(100px, 0.75fr) minmax(190px, 1.5fr)
@@ -443,7 +443,7 @@
   color: #f5b800;
 }
 
-.scene-payment-row {
+.scene-deposit-row {
   animation: scene-row-dim 18s ease-in-out infinite;
 }
 
@@ -1194,25 +1194,25 @@
     opacity: 0.8;
   }
 
-  .payment-stage {
+  .deposit-stage {
     height: 330px;
     padding-inline: 12px;
   }
 
-  .payment-stage::before,
-  .payment-stage::after {
+  .deposit-stage::before,
+  .deposit-stage::after {
     height: 22px;
   }
 
-  .payment-stage::before {
+  .deposit-stage::before {
     filter: drop-shadow(0 1px 0 rgb(246 242 234 / 14%)) drop-shadow(0 2px 2px rgb(15 16 14 / 18%));
   }
 
-  .payment-stage::after {
+  .deposit-stage::after {
     filter: drop-shadow(0 -1px 0 rgb(246 242 234 / 12%)) drop-shadow(0 -2px 2px rgb(15 16 14 / 17%));
   }
 
-  .scene-payment-window {
+  .scene-deposit-window {
     animation-name: scene-window-mobile;
   }
 
@@ -1257,15 +1257,15 @@
     height: 52px;
   }
 
-  .payment-row {
+  .deposit-row {
     grid-template-columns: minmax(0, 1fr) 92px auto;
     gap: 10px;
     padding-inline: 12px;
     border-radius: 13px;
   }
 
-  .payment-reference,
-  .payment-checks {
+  .deposit-reference,
+  .deposit-checks {
     display: none;
   }
 
@@ -1276,7 +1276,7 @@
     font-size: 0;
   }
 
-  .payment-status-wrap {
+  .deposit-status-wrap {
     width: 40px;
     min-width: 40px;
     height: 35px;
@@ -1305,9 +1305,9 @@
     transition-duration: 0.01ms !important;
   }
 
-  .scene-payment-window,
-  .scene-payment-track,
-  .scene-payment-row,
+  .scene-deposit-window,
+  .scene-deposit-track,
+  .scene-deposit-row,
   .scene-target,
   .scene-complete-status,
   .scene-unverified-status,
@@ -1341,7 +1341,7 @@
  *
  * Payday is a dark product on either colour scheme — the marketing page says
  * so, and a merchant arriving from "Start Building" (or a payer arriving from
- * a payment link) should not watch the ground flip to white. Rather than
+ * a deposit link) should not watch the ground flip to white. Rather than
  * restyle every page by hand, `.dash`/`.brand-dark` redefine the theme tokens
  * the pages already read, so a table, a form control, and a status badge all
  * follow. Both halves of each token are restated: Tailwind's `--color-*`

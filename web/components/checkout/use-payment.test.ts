@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { payment } from "@/test/fixtures";
-import { useSecondsRemaining } from "./use-payment";
+import { useSecondsRemaining } from "./use-deposit-request";
 
 /** The gateway said it was this time when it answered. */
 const SERVER_NOW = 1_788_000_000;

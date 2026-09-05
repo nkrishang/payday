@@ -1,6 +1,6 @@
 "use client";
 
-import type { Customer, Issuer, PaymentStatus } from "@payday/sdk";
+import type { Customer, Issuer, DepositRequestStatus } from "@payday/sdk";
 import { ChevronRight, Paperclip, Plus } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
@@ -11,7 +11,7 @@ import { Problem } from "@/components/ui/field";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { StatusDot } from "@/components/ui/status-dot";
 import { cn } from "@/lib/cn";
-import { InvoiceRowDetail } from "./invoice-row-detail";
+import { DepositRowDetail } from "./deposit-row-detail";
 import { formatShortDate, modeLabel, STATUSES } from "./labels";
 import { useResource } from "./session";
 import { StatusBadge } from "./status-badge";
@@ -19,9 +19,9 @@ import { VerificationBadge } from "./verification-status";
 
 /**
  * Every deposit request, with the three facts worth filtering on: where the
- * payment stands, where its verification stands (a separate fact — a gated
- * request can be funded before its payer has verified), and who it is billed
- * to. All three are the API's own parameters, so a filter narrows the query
+ * deposit stands, where its verification stands (a separate fact — a gated
+ * request can be funded before its payer has verified), and which customer
+ * it is addressed to. All three are the API's own parameters, so a filter narrows the query
  * rather than the page.
  *
  * A row opens in place rather than navigating: the list is where a merchant
@@ -43,7 +43,7 @@ const VERIFICATIONS: ReadonlyArray<{ value: VerificationFilter; label: string }>
   { value: "likely_unsolicited", label: "Likely unsolicited" },
 ];
 
-export function InvoiceTable({
+export function DepositTable({
   identities,
   customers,
   initialOpen,
@@ -58,11 +58,11 @@ export function InvoiceTable({
   initialOpen?: string | undefined;
   /** Opens the composer in place, on the dashboard's own table. */
   onCompose?: (() => void) | undefined;
-  /** Issues pre-billed to this customer instead, on a customer's own page. */
+  /** Issues pre-addressed to this customer instead, on a customer's own page. */
   composeHref?: string | undefined;
   /**
    * Scopes the table to one customer's own requests, the way a customer's page
-   * embeds this table. The Bill-to filter would only ever narrow to the one
+   * embeds this table. The Customer filter would only ever narrow to the one
    * customer it is already narrowed to, so it is dropped rather than shown
    * disabled.
    */
@@ -74,7 +74,7 @@ export function InvoiceTable({
   const [fetched, setFetched] = useState<ReadonlySet<string>>(
     () => new Set(initialOpen ? [initialOpen] : []),
   );
-  const [status, setStatus] = useState<PaymentStatus | "">("");
+  const [status, setStatus] = useState<DepositRequestStatus | "">("");
   const [verification, setVerification] = useState<VerificationFilter | "">("");
   const [customer, setCustomer] = useState(lockedCustomerId ?? "");
   // Cursors of the pages visited, so "Previous" is a pop rather than a re-walk.
@@ -82,7 +82,7 @@ export function InvoiceTable({
   const after = cursors[cursors.length - 1];
 
   const page = useResource(`${status}|${verification}|${customer}|${after ?? ""}`, (client) =>
-    client.payments.list({
+    client.depositRequests.list({
       limit: PAGE_SIZE,
       ...(status ? { status } : {}),
       ...(verification ? { verification } : {}),
@@ -91,7 +91,7 @@ export function InvoiceTable({
     }),
   );
 
-  const invoices = page.data?.payments ?? [];
+  const requests = page.data?.deposit_requests ?? [];
   const issuerName = (id: string | null) =>
     identities.find((identity) => identity.id === id)?.name ?? null;
 
@@ -114,14 +114,14 @@ export function InvoiceTable({
   const filtered = Boolean(status || verification || (!lockedCustomerId && customer));
 
   return (
-    <section aria-label="Deposit requests">
+    <section aria-label="Deposits">
       {lockedCustomerId ? null : (
         <div>
           <h1 className="font-heading text-[30px] leading-tight font-medium tracking-[-0.045em]">
-            Deposit requests<span className="text-brand-yellow">.</span>
+            Deposits<span className="text-brand-yellow">.</span>
           </h1>
           <p className="mt-1.5 text-[13px] text-muted">
-            Every request issued, where its payment stands, and where its verification stands.
+            Every deposit request issued, where its deposit stands, and where its verification stands.
           </p>
         </div>
       )}
@@ -139,7 +139,7 @@ export function InvoiceTable({
             label="Status"
             className="w-[190px]"
             value={status}
-            onChange={(next) => narrow(() => setStatus(next as PaymentStatus | ""))}
+            onChange={(next) => narrow(() => setStatus(next as DepositRequestStatus | ""))}
             options={[
               { value: "", label: "Any status" },
               ...STATUSES.map((entry): MenuOption => ({
@@ -175,7 +175,7 @@ export function InvoiceTable({
           />
           {lockedCustomerId ? null : (
             <MenuSelect
-              label="Bill to"
+              label="Customer"
               className="w-[190px]"
               value={customer}
               onChange={(next) => narrow(() => setCustomer(next))}
@@ -246,7 +246,7 @@ export function InvoiceTable({
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Request</th>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Issued by</th>
               {lockedCustomerId ? null : (
-                <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Bill to</th>
+                <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Payer</th>
               )}
               <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Amount</th>
               {lockedCustomerId ? null : (
@@ -261,16 +261,16 @@ export function InvoiceTable({
               )}
             </tr>
           </thead>
-          {invoices.map((invoice) => {
-            const issuer = issuerName(invoice.issuer_id);
-            const open = openId === invoice.id;
-            const title = invoice.heading ?? invoice.reference ?? "Untitled request";
+          {requests.map((request) => {
+            const issuer = issuerName(request.issuer_id);
+            const open = openId === request.id;
+            const title = request.heading ?? request.reference ?? "Untitled request";
             return (
               // One body per request, so the summary and its detail are one
               // group and the rule between requests falls in the right place.
-              <tbody key={invoice.id} className="border-b border-line last:border-b-0">
+              <tbody key={request.id} className="border-b border-line last:border-b-0">
                 <tr
-                  onClick={() => toggle(invoice.id)}
+                  onClick={() => toggle(request.id)}
                   className={cn(
                     "cursor-pointer align-middle transition-colors hover:bg-raised",
                     open && "bg-raised",
@@ -284,7 +284,7 @@ export function InvoiceTable({
                       // keyboard and gives the row an accessible name.
                       onClick={(event) => {
                         event.stopPropagation();
-                        toggle(invoice.id);
+                        toggle(request.id);
                       }}
                       className="flex w-full items-center gap-2 text-left font-medium"
                     >
@@ -296,16 +296,16 @@ export function InvoiceTable({
                         )}
                       />
                       <span className="truncate">{title}</span>
-                      {invoice.has_attachment ? (
+                      {request.has_attachment ? (
                         <Paperclip
                           className="size-3.5 shrink-0 text-faint"
                           aria-label="Has attachment"
                         />
                       ) : null}
                     </button>
-                    {invoice.heading && invoice.reference ? (
+                    {request.heading && request.reference ? (
                       <span className="mt-0.5 block pl-6 font-mono text-[12px] text-faint">
-                        {invoice.reference}
+                        {request.reference}
                       </span>
                     ) : null}
                   </td>
@@ -319,28 +319,28 @@ export function InvoiceTable({
                     )}
                   </td>
                   {lockedCustomerId ? null : (
-                    <td className="truncate px-4 py-3 text-left">{invoice.bill_to_name}</td>
+                    <td className="truncate px-4 py-3 text-left">{request.payer_name}</td>
                   )}
                   <td className="px-4 py-3 text-right">
-                    <Amount value={invoice.amount} />
+                    <Amount value={request.amount} />
                   </td>
                   {lockedCustomerId ? null : (
                     <>
                       <td className="px-4 py-3 text-left">
-                        <StatusBadge status={invoice.status} />
+                        <StatusBadge status={request.status} />
                       </td>
                       <td className="truncate px-4 py-3 text-left">
-                        {modeLabel(invoice.payer_policy_mode)}
+                        {modeLabel(request.payer_policy_mode)}
                       </td>
                       <td className="px-4 py-3 text-left">
                         <VerificationBadge
-                          mode={invoice.payer_policy_mode}
-                          completedAt={invoice.verification_completed_at}
-                          unsolicitedAt={invoice.likely_unsolicited_at}
+                          mode={request.payer_policy_mode}
+                          completedAt={request.verification_completed_at}
+                          unsolicitedAt={request.likely_unsolicited_at}
                         />
                       </td>
                       <td className="px-4 py-3 text-right whitespace-nowrap text-muted">
-                        {formatShortDate(invoice.created_at)}
+                        {formatShortDate(request.created_at)}
                       </td>
                     </>
                   )}
@@ -353,7 +353,7 @@ export function InvoiceTable({
                   <td colSpan={lockedCustomerId ? 3 : 8} className="p-0">
                     <div className="dash-expand" data-open={open}>
                       <div inert={!open} className="border-t border-line">
-                        {fetched.has(invoice.id) ? <InvoiceRowDetail id={invoice.id} /> : null}
+                        {fetched.has(request.id) ? <DepositRowDetail id={request.id} /> : null}
                       </div>
                     </div>
                   </td>
@@ -361,11 +361,11 @@ export function InvoiceTable({
               </tbody>
             );
           })}
-          {!page.loading && invoices.length === 0 ? (
+          {!page.loading && requests.length === 0 ? (
             <tbody>
               <tr>
                 <td colSpan={lockedCustomerId ? 3 : 8} className="px-4 py-10 text-center text-muted">
-                  {filtered ? "No requests match these filters." : "No deposit requests yet."}
+                  {filtered ? "No deposit requests match these filters." : "No deposit requests yet."}
                 </td>
               </tr>
             </tbody>

@@ -1,6 +1,6 @@
 "use client";
 
-import { type Issuer, PaydayError, type Payment } from "@payday/sdk";
+import { type Issuer, PaydayError, type DepositRequest } from "@payday/sdk";
 import { ArrowLeft, ArrowRight, Loader2, Sparkles } from "lucide-react";
 import Image from "next/image";
 import { useRef, useState, type ReactNode } from "react";
@@ -9,7 +9,7 @@ import { controlStyles } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
 import { formatDisplayAmount, truncateAddress } from "@/lib/format";
-import { buildCreatePayment, EMPTY_VALUES } from "./create-payment";
+import { buildCreateDepositRequest, EMPTY_VALUES } from "./create-deposit-request";
 import { Labeled } from "./labeled";
 import { useMerchant } from "./session";
 
@@ -35,9 +35,9 @@ const HEADING = "Onboarding";
 
 const GUIDANCE = [
   "This is how much you're requesting — Payday will pay this one for real, so you can see the whole flow.",
-  "Every deposit request is billed to someone.",
-  "Verification policies control what a payer must prove before they can see and pay an invoice.",
-  "Once you submit this request, you'll create a real on-chain payment request that's gated by your verification policy.",
+  "Every deposit request names a payer.",
+  "Verification policies control what a payer must prove before they can see and fund a deposit request.",
+  "Once you submit this request, you'll create a real on-chain deposit request that's gated by your verification policy.",
 ] as const;
 
 export function OnboardingWalkthrough({
@@ -54,7 +54,7 @@ export function OnboardingWalkthrough({
   payoutAddress: string | null;
   /** Re-reads the account, in case the wallet has arrived. */
   onWalletChanged: () => void;
-  onIssued: (payment: Payment) => void;
+  onIssued: (payment: DepositRequest) => void;
 }) {
   const { client, signOut } = useMerchant();
   const [step, setStep] = useState(0);
@@ -62,8 +62,8 @@ export function OnboardingWalkthrough({
   const [failure, setFailure] = useState<string | null>(null);
   const idempotencyKey = useRef(crypto.randomUUID());
   // A customer created for this request, exactly as the real composer does
-  // for a freshly-typed billed party — so "Payday" shows up in the account's
-  // customers table, not just on this one invoice. Guarded the same way: a
+  // for a freshly-typed payer — so "Payday" shows up in the account's
+  // customers table, not just on this one deposit request. Guarded the same way: a
   // retry after a failed create reuses the customer rather than duplicating it.
   const savedCustomer = useRef<string | null>(null);
   const [reference] = useState(() => `ONBOARD-${issuer.id.slice(0, 8).toUpperCase()}`);
@@ -79,8 +79,8 @@ export function OnboardingWalkthrough({
       savedCustomer.current ??= (
         await client.customers.create({ name: BILL_NAME, email: BILL_EMAIL })
       ).id;
-      const payment = await client.payments.create(
-        buildCreatePayment(
+      const payment = await client.depositRequests.create(
+        buildCreateDepositRequest(
           {
             ...EMPTY_VALUES,
             amount: AMOUNT,
@@ -118,7 +118,7 @@ export function OnboardingWalkthrough({
         Welcome to Payday<span className="text-brand-yellow">.</span>
       </h1>
       <p className="mt-2 text-[14px] leading-relaxed text-muted">
-        Payday lets you create deposit requests for your customers. You specify payment details and
+        Payday lets you create deposit requests for your customers. You specify the deposit details and
         a verification policy, and Payday handles the rest. Here&apos;s a quick walkthrough.
       </p>
 
@@ -208,7 +208,7 @@ export function OnboardingWalkthrough({
           {step === 1 ? (
             <div className="grid gap-5">
               <div className="grid gap-5 sm:grid-cols-2">
-                <Labeled label="Billed to">
+                <Labeled label="Payer">
                   <input
                     disabled
                     readOnly
@@ -302,7 +302,7 @@ export function OnboardingWalkthrough({
                   </span>
                   <span className="text-muted"> · Payday wallet</span>
                 </Row>
-                <Row label="Billed to">
+                <Row label="Payer">
                   {BILL_NAME} <span className="text-muted">· {BILL_EMAIL}</span>
                 </Row>
                 <Row label="Verification">

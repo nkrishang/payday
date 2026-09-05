@@ -1,6 +1,6 @@
 # AWS deployment
 
-Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, a private versioned S3 bucket for invoice attachments scanned by GuardDuty Malware Protection, and four KMS keys: three secp256k1 keys (the sweep signer, the Proof of Payment attestation signer, and a legacy recovery wallet kept only until its balance is returned) and one symmetric key encrypting attachments. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
+Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, a private versioned S3 bucket for deposit request attachments scanned by GuardDuty Malware Protection, and four KMS keys: three secp256k1 keys (the sweep signer, the Proof of Payment attestation signer, and a legacy recovery wallet kept only until its balance is returned) and one symmetric key encrypting attachments. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
 
 The contract generation is pinned: `factory_code_hash` and
 `batch_sweeper_code_hash` are the keccak256 of the runtime bytecode at
@@ -8,7 +8,7 @@ The contract generation is pinned: `factory_code_hash` and
 (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`), deployed together
 as one generation. Both services compare them with the chain at startup and
 refuse to start on a mismatch, which is why the API task now also reads the RPC
-secret. The `recovery` KMS key is legacy: payments now return excess and late
+secret. The `recovery` KMS key is legacy: deposits now return excess and late
 funds to the payer's own attested wallet, so gatewayd no longer reads its
 address; keep it only until any balance it holds has been returned by hand
 (see `docs/production-runbook.md`). The API task definition's
@@ -31,7 +31,7 @@ The same ALB and certificate serve `payment_domain_name` and
 and target group whose `/live` check reports process health without requiring
 the database; the public status response checks database-backed state lazily.
 Gatewayd embeds the
-cacheable payment page, signs each scoped payer URL with a generated Secrets
+cacheable deposit page, signs each scoped payer URL with a generated Secrets
 Manager value, and links Monad addresses and settlement transactions through
 the configured explorer origin.
 
@@ -81,9 +81,9 @@ See `terraform.sandbox.tfvars.example` and `../docs/sandbox.md`. Use a separate
 backend state key and `name`; never plan sandbox variables against production
 state. The examples document planning only and do not change external state.
 
-## Invoice attachments
+## Deposit request attachments
 
-`<name>-invoice-attachments` holds one PDF per invoice (S3 bucket names are
+`<name>-deposit request-attachments` holds one PDF per deposit request (S3 bucket names are
 global; change `name` if it is taken). It is private, versioned, encrypted
 with `aws_kms_key.attachments`, and answers browser preflights only from
 `checkout_base_url`, where the dashboard lives. gatewayd never proxies upload
@@ -112,7 +112,7 @@ Cleanup is tag-based so the gateway never has to move objects. The presigned
 PUT carries `x-amz-tagging: payday-upload=pending` and `If-None-Match: *` as
 signed headers, so no upload can omit the tag and no key can be written twice
 (a replayed PUT fails with 412); gatewayd pins the version it hashed at
-finalization and refers to it on every later read. Issuing an invoice
+finalization and refers to it on every later read. Issuing a deposit request
 rewrites the tag to `payday-upload=attached` (keeping the GuardDuty tag); an
 issuance that fails leaves the tag `pending`, so the object still expires.
 Finalize deletes an object it rejects. The lifecycle rule expires objects
@@ -150,4 +150,4 @@ WAF request sampling is disabled because samples can contain the bearer `Authori
 
 ## Destroy protection
 
-RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. All four KMS keys (sweep signer, recovery, attestation, attachments) have Terraform `prevent_destroy`; the legacy recovery key may still hold USDC recovered before payments returned funds to the payer's own wallet, so confirm it is empty before removing that guard and the resource, and the attachment key is the only way to read stored PDFs. The attachment bucket is not force-destroyed: empty it deliberately, after confirming no invoice still references its objects, before a teardown. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.
+RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. All four KMS keys (sweep signer, recovery, attestation, attachments) have Terraform `prevent_destroy`; the legacy recovery key may still hold USDC recovered before deposits returned funds to the payer's own wallet, so confirm it is empty before removing that guard and the resource, and the attachment key is the only way to read stored PDFs. The attachment bucket is not force-destroyed: empty it deliberately, after confirming no deposit request still references its objects, before a teardown. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.

@@ -1,7 +1,7 @@
 //! The merchant's view of a payer's verification (product plan §7.2).
 //!
 //! ```text
-//! GET /v1/payments/{id}/verification
+//! GET /v1/deposit-requests/{id}/verification
 //! ```
 //!
 //! Each fact the policy needs on its own, and every attempt made against the
@@ -16,8 +16,8 @@ use gateway_core::{
 };
 use gateway_db::{AccountId, DbInvoice};
 
+use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
-use crate::api::invoices::resolve_payment;
 use crate::state::AppState;
 
 fn rfc3339(value: DateTime<Utc>) -> String {
@@ -78,6 +78,6 @@ pub async fn merchant_detail(
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
 ) -> Result<Json<VerificationDetailResponse>, ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     Ok(Json(detail(&state, account, &row).await?))
 }

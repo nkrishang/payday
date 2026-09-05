@@ -7,7 +7,7 @@ export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 /**
  * Where one file is in the exchange. `pending_upload` and `scanning` are the
  * attachment's own statuses at the API; `ready` carries the descriptor whose
- * id goes on the invoice; `rejected` is the API's verdict and `failed` is
+ * id goes on the deposit request; `rejected` is the API's verdict and `failed` is
  * anything else (network, expired slot, scan timeout).
  */
 export type UploadState =

@@ -1,4 +1,4 @@
-# USDC payment indexer architecture
+# USDC deposit indexer architecture
 
 ## Decision
 
@@ -33,11 +33,11 @@ internal calls. USDC has a standard event emitted by the token contract:
 event Transfer(address indexed from, address indexed to, uint256 value);
 ```
 
-The event provides exactly the payment facts needed:
+The event provides exactly the deposit request facts needed:
 
 - `log.address`: token identity;
 - `topic1`: sender;
-- `topic2`: recipient payment address;
+- `topic2`: recipient deposit address;
 - `data`: raw atomic amount;
 - block hash/number, transaction hash/index, and log index: ordering and
   idempotency.
@@ -45,11 +45,11 @@ The event provides exactly the payment facts needed:
 Consequences:
 
 - no full block downloads;
-- no traces for contract-wallet payments;
+- no traces for contract-wallet deposits;
 - no transaction receipt calls;
 - no recurring `balanceOf` Multicalls;
-- no scans over all open invoices;
-- multiple partial payments and overpayment are naturally represented as
+- no scans over all open deposit requests;
+- multiple partial deposits and overpayment are naturally represented as
   separate immutable observations.
 
 ## Asset identity and configuration
@@ -75,7 +75,7 @@ the stable proxy address, so implementation upgrades do not require changing the
 log filter. Monitor the proxy's `Upgraded` event and halt at an unreviewed upgrade
 until its transfer/log invariants have been checked.
 
-The API should either remove `token_address` from invoice creation or require it
+The API should either remove `token_address` from deposit request creation or require it
 to equal the configured native-USDC proxy exactly. Parse and display six decimal
 places while storing and comparing only integer atomic units.
 
@@ -91,20 +91,20 @@ Credit an observation only when:
 1. The log belongs to the configured chain.
 2. `log.address` exactly equals the allowlisted USDC proxy.
 3. `topic0` equals `keccak256("Transfer(address,address,uint256)")`.
-4. The recipient is a known payment address for that chain and token.
+4. The recipient is a known deposit address for that chain and token.
 5. The value is valid `uint256` data.
 6. The containing block is at the configured finalized boundary.
-7. The containing block's timestamp is no later than the invoice deadline.
+7. The containing block's timestamp is no later than the deposit request deadline.
 8. The observation has not already been recorded.
 
-Any genuine nonzero inbound USDC credit to a `created` or `funded` invoice,
+Any genuine nonzero inbound USDC credit to a `created` or `funded` deposit request,
 including a mint with `from == address(0)`, is credited because the resulting
-USDC is spendable by the payment contract. A zero-value transfer is retained
-with an `error` disposition. A transfer to an invoice in any other status is
+USDC is spendable by the deposit contract. A zero-value transfer is retained
+with an `error` disposition. A transfer to a deposit request in any other status is
 retained with a `late` disposition: it never counts toward the amount, but it
 sits at the address and is queued for return to the payer through
-`Payment.recover`. A nonzero transfer from any wallet but the invoice's
-attested payer wallet is credited too, but flags the invoice
+`Deposit.recover`. A nonzero transfer from any wallet but the deposit request's
+attested payer wallet is credited too, but flags the deposit request
 `likely_unsolicited_at` once, at its chain time.
 Every nonzero observation also records the block and transaction index of the
 sweep that collected it, so the ledger always says which funds are still at the
@@ -118,11 +118,11 @@ unique.
 ## Acquisition loop
 
 Block acquisition and sweeping run as independently scheduled workers. The
-invoice table is their durable queue: the acquisition worker atomically commits
+deposit request table is their durable queue: the acquisition worker atomically commits
 finalized observations, `funded` transitions, and `expired` transitions by
 block timestamp, while the sweep worker claims eligible rows without delaying
 the next log poll. It sends one BatchSweeper transaction for each claimed group
-of up to 20 invoices; the finalized receipt's events determine each invoice's
+of up to 20 deposit requests; the finalized receipt's events determine each deposit request's
 outcome (see "Sweep architecture under USDC").
 
 The finality boundary is the node's `finalized` tag minus a small margin; each
@@ -142,7 +142,7 @@ For each enabled chain/asset:
 7. Fetch and verify the header of every distinct transfer-bearing block. These
    bounded lookups run concurrently and provide the timestamp used for expiry.
 8. Decode and validate every log strictly.
-9. Intersect unique recipients with known invoice addresses in one indexed DB
+9. Intersect unique recipients with known deposit request addresses in one indexed DB
    query; status controls projection transitions, not ledger retention.
 10. Commit observations, projections, status changes, and cursor advancement in
    one database transaction per range.
@@ -152,7 +152,7 @@ blocks by default). It grows the range by 25% after success and halves it for
 QuickNode HTTP 413, block-range, response-size, or result-count errors. It never
 treats a provider limit, timeout, malformed response, or suspicious response as
 an empty range. A failure at one block is retried and alerted rather than skipped:
-availability degradation is safer than silently losing a payment.
+availability degradation is safer than silently losing a deposit request.
 
 RPC errors retain method, JSON-RPC code, message, and retryability. QuickNode
 429, `-32007`, `-32012`, limit, unavailable, network, and internal failures are
@@ -168,7 +168,7 @@ Error references:
 A fallback provider improves availability by default, not correctness. Compare
 finalized boundary hashes between independent providers. For higher assurance,
 verify matched logs against the second provider before funding high-value
-invoices.
+deposit requests.
 
 ### RPC filter
 
@@ -184,7 +184,7 @@ watchlist with the provider.
 If USDC log volume becomes a measured bottleneck, maintain the active address set
 locally and split it across OR filters for indexed `topic2`. The database remains
 authoritative, and the indexer must refresh registrations after fetching a range
-but before committing it so an address disclosed after its invoice commit cannot
+but before committing it so an address disclosed after its deposit request commit cannot
 be missed.
 
 ## Database model
@@ -212,16 +212,16 @@ be missed.
 - transaction hash/index;
 - log index;
 - sender and recipient;
-- invoice ID;
+- deposit request ID;
 - amount `NUMERIC(78, 0)`;
 - disposition (`credited`, `error`, or `blocked`) and reason;
 - observed timestamp.
 
 Enforce uniqueness on
-`(chain_id, token_address, tx_hash, log_index)`. Add an invoice foreign key and
-indexes for ledger replay by invoice and block.
+`(chain_id, token_address, tx_hash, log_index)`. Add a deposit request foreign key and
+indexes for ledger replay by deposit request and block.
 
-### Invoice projection
+### Deposit request projection
 
 Add:
 
@@ -230,10 +230,10 @@ Add:
 - optionally the observation identity that crossed the funding threshold.
 
 Use a unique `(chain_id, token_address, payment_address)` index and a partial
-index over active invoice payment addresses.
+index over active deposit request addresses.
 
-`payment_observations` is the audit source of truth. Invoice totals and status are
-rebuildable projections. Every log addressed to a known invoice is retained:
+`payment_observations` is the audit source of truth. Deposit request totals and status are
+rebuildable projections. Every log addressed to a known deposit request is retained:
 only `credited` observations affect automatic funding, while `error` and
 `blocked` observations form an indexed manual-review queue.
 
@@ -244,18 +244,18 @@ and validated, one transaction must:
 
 1. lock and revalidate the cursor;
 2. insert observations idempotently;
-3. increment affected invoice totals in event order;
+3. increment affected deposit request totals in event order;
 4. transition `created -> funded` at the earliest observation where confirmed
-   cumulative credit reaches the invoice amount;
+   cumulative credit reaches the requested amount;
 5. record the crossing block hash/number and observed cumulative amount;
 6. advance the cursor to a verified range-end block hash.
 
 The cursor advances if and only if all range effects commit. A crash before
 commit replays safely; a crash after commit resumes at the next block.
 
-Invoice creation must continue to commit before the payment address is disclosed
-in the API response. This guarantees the invoice can be found before any client
-could include a payment in a later block.
+Deposit request creation must continue to commit before the deposit address is disclosed
+in the API response. This guarantees the deposit request can be found before any client
+could include a deposit request in a later block.
 
 ## Finality and reorg policy
 
@@ -278,50 +278,50 @@ Finality is chain-specific:
 Before each advancement, compare the stored finalized cursor hash with the
 canonical provider response. A mismatch at or below the finalized cursor is an
 exceptional finalized reorg or provider inconsistency: halt the chain and page an
-operator. Do not automatically reverse a finalized invoice because its funds may
+operator. Do not automatically reverse a finalized deposit request because its funds may
 already have been swept irreversibly.
 
 Finalized-only processing avoids canonical/orphan block tables and rollback
 machinery. Add those only if provisional states become a product requirement.
 
-## Partial payments and overpayment
+## Partial deposits and overpayment
 
-Sum all finalized observations for an invoice in canonical order. Partial
-payments across transactions or blocks accumulate. Multiple transfers in one
+Sum all finalized observations for a deposit request in canonical order. Partial
+deposits across transactions or blocks accumulate. Multiple transfers in one
 transaction remain distinct by log index. Fund at the first observation where
 the cumulative amount reaches the requested amount.
 
-Before expiration, the Payment constructor requires a balance of at least the
-invoice amount, transfers exactly that amount to the beneficiary, and sends any
+Before expiration, the deposit request constructor requires a balance of at least the
+requested amount, transfers exactly that amount to the beneficiary, and sends any
 remainder back to the payer's attested wallet, so an overpayment present
 before execution is neither stranded nor forwarded to the merchant. After
 expiration, execution instead transfers the complete balance to that wallet
-without requiring the invoice amount. Both the expiration timestamp and the
+without requiring the requested amount. Both the expiration timestamp and the
 recovery wallet are committed into the deterministic address; the wallet is
 the one the payer attested when the address was derived, not a merchant or
-platform choice. An invoice without a bound wallet has no address and nothing
+platform choice. A deposit request without a bound wallet has no address and nothing
 to sweep.
 
 Factory execution is permissionless, so anyone can recover an expired partial
-payment; the indexer also does it automatically once the invoice is `expired`,
+deposit; the indexer also does it automatically once the deposit request is `expired`,
 reporting the outcome as `recovered`.
 
-Transfers sent after the Payment contract has executed are forwarded to the
-payer's wallet by `Payment.recover`, which anyone may call and which the
-sweep worker calls automatically; they are never credited to the invoice. The
+Transfers sent after the Deposit contract has executed are forwarded to the
+payer's wallet by `Deposit.recover`, which anyone may call and which the
+sweep worker calls automatically; they are never credited to the deposit request. The
 API still describes the address as single-use so merchants do not present it
 after settlement.
 
 Every nonzero amount the payer's wallet receives back — an overpayment remainder,
 an expired balance, or a late transfer — is a `recovered_funds` row keyed by
-invoice, transaction, and reason, inserted in the transaction that finalizes
+deposit request, transaction, and reason, inserted in the transaction that finalizes
 the batch, so a replayed receipt cannot double-count and the ledger is never
-ahead of or behind the invoice state. A trigger raises one
-`payment.recovered_funds` webhook per row.
+ahead of or behind the deposit request state. A trigger raises one
+`deposit_request.recovered_funds` webhook per row.
 
 ## Sweep architecture under USDC
 
-Every invoice with uncollected funds at its payment address is queued,
+Every deposit request with uncollected funds at its deposit address is queued,
 whatever its status: `funded` (settle), `expired` (recover the balance), and
 `fulfilled`/`recovered` (forward a late transfer). One helper transaction is in
 flight per signer. Each exact signed transaction is persisted in its
@@ -334,57 +334,57 @@ fees bumped by 12.5%, and after the configured number of submissions the sweep
 worker pauses and alarms while block indexing continues. A mined nonce ahead of
 the batch's nonce without a visible receipt means nothing it sent can mine any
 more (Monad returns no receipt for an in-flight transaction and forgets dropped
-ones), so the batch is abandoned and its invoices re-queued.
+ones), so the batch is abandoned and its deposit requests re-queued.
 
 The finalized receipt is the single source of truth, including for reverted
 transactions; no batch is released from a merely unfinalized revert. The worker
 checks the receipt block's canonical hash before and after its pinned
-classification reads. `BatchSweeper` deploys `Payment` through the factory for
+classification reads. `BatchSweeper` deploys `DepositRequest` through the factory for
 an address without code and calls
-`Payment.recover` for one that already has code; it never attempts the CREATE2
+`Deposit.recover` for one that already has code; it never attempts the CREATE2
 collision that a second `execute` would hit, which burns every unit of gas
 forwarded to it. Per item the receipt carries one of:
 
-- `Settled` from the payment address: the deployment paid the beneficiary
-  exactly the invoice amount (`fulfilled`). An overpaid deployment also emits
+- `Settled` from the deposit address: the deployment paid the beneficiary
+  exactly the requested amount (`fulfilled`). An overpaid deployment also emits
   `Recovered` for the remainder in the same receipt; the parser combines the
   two regardless of event order and rejects a duplicate or conflicting pair as
   a malformed receipt;
-- `Recovered` alone from the payment address: the deployment paid the whole
+- `Recovered` alone from the deposit address: the deployment paid the whole
   balance back to the payer's wallet after expiry (`recovered`);
 - `SweepRecovered` from the helper: the contract pre-existed and `recover`
-  forwarded the reported amount; an open invoice in this position was executed
-  by someone else and `Payment.settled()` at the receipt block says how;
+  forwarded the reported amount; an open deposit request in this position was executed
+  by someone else and `Deposit.settled()` at the receipt block says how;
 - `SweepFailed` from the helper: `execute` or `recover` reverted. Solady's
   CREATE3 reduces every constructor failure to `DeploymentFailed()`, so the
   revert bytes cannot classify the cause; the worker reads `paused()`,
-  `isBlacklisted()` for the payment address and its destination, `balanceOf`,
+  `isBlacklisted()` for the deposit address and its destination, `balanceOf`,
   and code presence at the receipt block instead. A paused token or an
   unclassified revert is retried behind exponential backoff up to a ceiling; a
   blacklisted destination, a balance below the credited amount, or an
-  exhausted ceiling blocks the invoice with a reason an operator can act on.
+  exhausted ceiling blocks the deposit request with a reason an operator can act on.
 
 Finalization marks every nonzero observation before the receipt's exact
 `(block number, transaction index)` position as collected and recomputes the
-invoice's uncollected count from the ledger. A transfer indexed later from a
+deposit request's uncollected count from the ledger. A transfer indexed later from a
 position the drain already covered is recorded as collected on insert, while a
 later transaction in the same block remains queued. The lag between the two
 loops therefore cannot re-queue funds a finalized sweep already moved. A
-drained invoice's status changes only when it was open; late collections leave
+drained deposit request's status changes only when it was open; late collections leave
 `fulfilled`/`recovered` untouched.
 
 Expiry is decided by chain time: each observation is classified against its
-own block timestamp, independent of range boundaries. An open invoice whose
+own block timestamp, independent of range boundaries. An open deposit request whose
 deadline precedes the timestamp of a committed range's end block becomes
 `expired` in the same commit, and its balance is recovered through the same
 batch path. The API
-refuses deadlines closer than ten minutes so a payment always has room to
+refuses deadlines closer than ten minutes so a deposit request always has room to
 settle before the contract starts routing to recovery.
 
 Use a separate per-chain/per-signer leader lock. Persist nonce ownership and the
 exact signed bytes before broadcast so replicas cannot race retries and a crash
 cannot lose the only copy of an already-submitted transaction. Prefer a direct
-safe ERC-20 transfer from the Payment contract over self-approval followed by
+safe ERC-20 transfer from the Deposit contract over self-approval followed by
 `transferFrom`.
 
 ## Build versus QuickNode
@@ -429,7 +429,7 @@ However:
 - QuickNode recommends independent hash-continuity verification;
 - webhook failures retry and eventually pause the stream, requiring alerts and
   operational resume;
-- a QuickNode-side dynamic payment-address watchlist creates a consistency race,
+- a QuickNode-side dynamic deposit-address watchlist creates a consistency race,
   so filter only by USDC and match recipients in our database.
 
 QuickNode documentation:
@@ -446,7 +446,7 @@ QuickNode Webhooks may be economical for low-volume contract-event alerts becaus
 it bills per delivered payload. It advertises retries and automatic reorg
 handling, but lacks Streams' explicit historical backfill, batching, ordered
 correction protocol, and detailed reorg controls. It is appropriate for
-notifications, not the authoritative payment ledger.
+notifications, not the authoritative deposit ledger.
 
 ### When to switch to Streams
 
@@ -469,25 +469,25 @@ Required tests:
 - `transfer`, `transferFrom`, relayed/internal-call transfer detection;
 - reverted and zero-value transfers ignored;
 - multiple USDC logs in one transaction;
-- same-block and cross-block partial payment, exact payment, and overpayment;
+- same-block and cross-block partial deposit, exact deposit, and overpayment;
 - wrong token, bridged USDC, wrong chain, and fake `Transfer` emitter ignored;
 - duplicate range replay and crashes around every cursor transaction boundary;
 - adaptive range shrinking, provider failover, and provider disagreement;
-- invoice creation concurrent with range ingestion;
+- deposit request creation concurrent with range ingestion;
 - unreviewed USDC proxy upgrade halts ingestion;
 - finalized cursor hash mismatch halts ingestion;
 - USDC pause, source/beneficiary blacklist, and underfunded sweep classification;
 - sweep submission crash, replacement, third-party execution, and finalization;
-- full projection rebuild equals materialized invoice totals.
+- full projection rebuild equals materialized deposit request totals.
 
 Monitor:
 
 - finalized-head and cursor lag;
 - logs and ranges processed, range size, response bytes, and provider errors;
 - provider hash disagreement;
-- observations, funded invoices, partial-payment age, and unmatched USDC logs;
+- observations, funded deposit requests, partial-deposit age, and unmatched USDC logs;
 - chain halted state and proxy upgrades;
-- oldest funded-unswept invoice;
+- oldest funded-unswept deposit request;
 - sweep nonce, receipt, and finality lag.
 
 Hard invariants:
@@ -495,8 +495,8 @@ Hard invariants:
 - only exact allowlisted native-USDC logs are credited;
 - every observation is durable at most once;
 - cursor and range effects commit atomically;
-- only finalized cumulative credit funds an invoice;
+- only finalized cumulative credit funds a deposit request;
 - only finalized funding can authorize a sweep;
-- payment addresses are disclosed only after invoice commit;
+- deposit addresses are disclosed only after deposit request commit;
 - unreviewed asset upgrades and finalized hash mismatches halt processing;
 - projections can be rebuilt from the observation ledger.

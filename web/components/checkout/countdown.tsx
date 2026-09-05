@@ -1,7 +1,7 @@
 import { cn } from "@/lib/cn";
 import { formatCountdown } from "@/lib/format";
 
-/** Under ten minutes we stop encouraging a payment that may not settle in time. */
+/** Under ten minutes we stop encouraging a transfer that may not settle in time. */
 const URGENT_SECONDS = 600;
 
 export function Countdown({ seconds }: { seconds: number }) {

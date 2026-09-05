@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end run of the payment gateway against a local Anvil node.
+# End-to-end run of the deposit gateway against a local Anvil node.
 #
 # Anvil is started with one-slot epochs and interval mining so the node's
 # `finalized` tag advances on its own (finalized = latest - 2, one block per
@@ -220,7 +220,7 @@ issue_invoice() {
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: $idempotency_key" \
     --data "$(invoice_body "$amount" "$beneficiary" "$expires_in")" \
-    "$API_URL/v1/payments"
+    "$API_URL/v1/deposit-requests"
 }
 
 # The payer's wallet step, as the hosted checkout performs it: a challenge
@@ -238,23 +238,23 @@ bind_payer_wallet() {
     --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
     ${session_header[@]+"${session_header[@]}"} \
     --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet}')" \
-    "$API_URL/v1/payer/payments/$id/wallet/challenge")"
+    "$API_URL/v1/payer/deposit-requests/$id/wallet/challenge")"
   session="$(jq -er .payer_session <<<"$challenge")"
-  typed="$logs/typed-${id#pay_}.json"
+  typed="$logs/typed-${id#dr_}.json"
   jq -c .typed_data <<<"$challenge" >"$typed"
   signature="$(cast wallet sign --private-key "$PAYER_KEY" --data --from-file "$typed")"
   curl --fail --silent --output /dev/null --request POST \
     --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
     --header "Payday-Payer-Session: $session" \
     --data "$(jq -cn --arg wallet "$PAYER" --arg signature "$signature" '{wallet: $wallet, signature: $signature}')" \
-    "$API_URL/v1/payer/payments/$id/wallet/attest"
+    "$API_URL/v1/payer/deposit-requests/$id/wallet/attest"
   echo "$session"
 }
 
 get_invoice() {
   curl --fail --silent \
     --header "Authorization: Bearer $PAYDAY_API_KEY" \
-    "$API_URL/v1/payments/$1"
+    "$API_URL/v1/deposit-requests/$1"
 }
 
 # Poll at the documented per-account rate until a jq expression is true. A
@@ -308,10 +308,10 @@ set_blacklisted() {
     --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
 }
 
-# Raw request body for POST /v1/payments; built with jq so no shell quoting
+# Raw request body for POST /v1/deposit-requests; built with jq so no shell quoting
 # is involved (bash 3.2 brace-expands nested quotes inside "$(...)"). Recovery
-# is not a request field: the platform stamps its own wallet on every invoice.
-# The document fields are the minimum an invoice carries: two parties and an
+# is not a request field: the platform stamps its own wallet on every deposit request.
+# The document fields are the minimum a deposit request carries: two parties and an
 # open payer policy.
 invoice_body() {
   local amount=$1 beneficiary=$2 expires_in=$3
@@ -319,7 +319,7 @@ invoice_body() {
     --arg amount "$amount" --argjson expires_in "$expires_in" \
     '{chain_id: $chain, token_address: $token, payout_address: $beneficiary,
       amount: $amount, expires_in: $expires_in,
-      issuer: {name: "Payday E2E Issuer"}, bill_to: {name: "Payday E2E Customer"},
+      issuer: {name: "Payday E2E Issuer"}, payer: {name: "Payday E2E Customer"},
       payer_policy: {mode: "permissionless"}}'
 }
 
@@ -390,7 +390,7 @@ lowercase() {
 recovery_ledger_query() {
   local invoice_id=$1 reason=$2 amount=$3
   echo "SELECT count(*) FROM recovered_funds
-    WHERE invoice_id = '${invoice_id#pay_}'::uuid AND reason = '$reason' AND amount = '$amount'"
+    WHERE invoice_id = '${invoice_id#dr_}'::uuid AND reason = '$reason' AND amount = '$amount'"
 }
 
 api_status_code() {
@@ -399,7 +399,7 @@ api_status_code() {
     --header "Authorization: Bearer $PAYDAY_API_KEY" \
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: validation-$RANDOM-$RANDOM" \
-    --data "$body" "$API_URL/v1/payments"
+    --data "$body" "$API_URL/v1/deposit-requests"
 }
 
 assert_eq() {
@@ -485,7 +485,7 @@ refund_status="$(api_status_code "$with_refund_address")"
   exit 1
 }
 
-echo "Testing exact payment, the payer's wallet binding, and API idempotency"
+echo "Testing an exact deposit, the payer's wallet binding, and API idempotency"
 exact_issued="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 exact_id="$(jq -er .id <<<"$exact_issued")"
 assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request already has an address"
@@ -507,16 +507,16 @@ assert_eq "$(lowercase "$PAYER")" "$(jq -r '.recovery_address | ascii_downcase' 
   exit 1
 }
 wait_for_sql 1 "SELECT count(*) FROM webhook_events
-  WHERE invoice_id = '${exact_id#pay_}'::uuid AND event_type = 'payment.ready'" \
-  "binding the wallet did not raise payment.ready"
+  WHERE invoice_id = '${exact_id#dr_}'::uuid AND event_type = 'deposit_request.ready'" \
+  "binding the wallet did not raise deposit_request.ready"
 # The address is final: another wallet cannot take the request.
 assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$STRANGER" '{wallet: $wallet}')" \
-  "$API_URL/v1/payer/payments/$exact_id/wallet/challenge")" \
+  "$API_URL/v1/payer/deposit-requests/$exact_id/wallet/challenge")" \
   "a second wallet was offered a challenge on a bound request"
 # The payer page shows the address to anyone with the link, with the wallet it is for.
-exact_payer="$(curl --fail --silent "$API_URL/v1/payer/payments/$exact_id")"
+exact_payer="$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$exact_id")"
 assert_eq "$(jq -r .address <<<"$exact")" "$(jq -r .address <<<"$exact_payer")" "the payer page shows a different address"
 assert_eq "$(lowercase "$PAYER")" "$(jq -r '.payer_wallet | ascii_downcase' <<<"$exact_payer")" \
   "the payer page does not name the attested wallet"
@@ -531,7 +531,7 @@ second_account_invoice="$(PAYDAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$
   exit 1
 }
 cross_account_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "Authorization: Bearer $SECOND_API_KEY" "$API_URL/v1/payments/$exact_id")"
+  --header "Authorization: Bearer $SECOND_API_KEY" "$API_URL/v1/deposit-requests/$exact_id")"
 assert_eq 404 "$cross_account_status" "cross-account invoice lookup leaked an invoice"
 exact_address="$(jq -r .address <<<"$exact")"
 exact_before="$(token_balance "$BENEFICIARY_EXACT")"
@@ -553,14 +553,14 @@ assert_eq 1500000 "$(jq -r .received_base_units <<<"$exact_final")" "received am
 assert_eq true "$(cast call "$exact_address" 'settled()(bool)' --rpc-url "$RPC_URL")" \
   "deployed Payment must record settlement"
 
-echo "Testing cumulative partial payments"
+echo "Testing cumulative partial deposits"
 partial="$(create_invoice 1 "$BENEFICIARY_PARTIAL" 3600 "partial-payment-$run_id")"
 partial_id="$(jq -r .id <<<"$partial")"
 partial_address="$(jq -r .address <<<"$partial")"
 partial_before="$(token_balance "$BENEFICIARY_PARTIAL")"
 send_usdc "$partial_address" 400000
 assert_eq 400000 "$(token_balance "$partial_address")" "first partial payment was not retained"
-wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "partially_paid"' "partial credit visible while still open"
+wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "partially_deposited"' "partial credit visible while still open"
 send_usdc "$partial_address" 600000
 wait_for_status "$partial_id" settled
 assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL")" \
@@ -630,21 +630,21 @@ payer_before="$(token_balance "$PAYER")"
 send_usdc "$batch_one_address" 7
 send_usdc "$batch_one_address" 0
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
-  WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
+  WHERE invoice_id = '${batch_one_id#dr_}'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late transfer was not collected"
 assert_eq "$payer_before" "$(token_balance "$PAYER")" "late transfer did not come back to the payer's wallet"
 wait_for_sql 1 "$(recovery_ledger_query "$batch_one_id" late_transfer 7)" \
   "late transfer was not recorded in the recovery ledger"
 assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM payment_observations
-  WHERE invoice_id = '${batch_one_id#pay_}'::uuid AND disposition = 'error' AND disposition_reason = 'zero_amount'
+  WHERE invoice_id = '${batch_one_id#dr_}'::uuid AND disposition = 'error' AND disposition_reason = 'zero_amount'
 ")" "zero-value transfer was not marked erroneous"
 batch_one_final="$(get_invoice "$batch_one_id")"
 assert_eq settled "$(jq -r .status <<<"$batch_one_final")" "late collection changed the payment status"
 assert_eq 100000 "$(jq -r .received_base_units <<<"$batch_one_final")" "late transfer was credited to the invoice"
 assert_eq 0 "$(token_balance "$batch_one_address")" "late transfer stranded at the payment address"
 
-echo "Testing an invoice executed by a third party before the worker"
+echo "Testing a deposit request executed by a third party before the worker"
 third="$(create_invoice 2 "$BENEFICIARY_THIRD_PARTY" 3600 "third-party-$run_id")"
 third_id="$(jq -r .id <<<"$third")"
 third_address="$(jq -r .address <<<"$third")"
@@ -666,7 +666,7 @@ paused_id="$(jq -r .id <<<"$paused")"
 paused_address="$(jq -r .address <<<"$paused")"
 send_usdc "$paused_address" 500000
 set_paused true
-wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#pay_}'::uuid AND sweep_attempts >= 1 AND status = 'deploying'" \
+wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#dr_}'::uuid AND sweep_attempts >= 1 AND status = 'deploying'" \
   "paused token did not produce a retryable failure"
 assert_eq null "$(get_invoice "$paused_id" | jq -r .attention)" "a paused token must not block the payment"
 set_paused false
@@ -683,20 +683,20 @@ wait_for_status "$blacklisted_id" needs_attention
 assert_eq beneficiary_blacklisted "$(get_invoice "$blacklisted_id" | jq -r .attention.code)" "wrong attention code"
 assert_eq 250000 "$(token_balance "$blacklisted_address")" "funds must stay at the address while blocked"
 set_blacklisted "$BENEFICIARY_BLACKLISTED" false
-# Audited operator procedure from docs/runbooks/stuck-invoice.md.
+# Audited operator procedure from docs/runbooks/stuck-deposit-request.md.
 curl --fail --silent --output /dev/null --request POST \
   --header "Authorization: Bearer $PAYDAY_ADMIN_SECRET" \
-  "$API_URL/v1/admin/payments/$blacklisted_id/release"
+  "$API_URL/v1/admin/deposit-requests/$blacklisted_id/release"
 wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
 
-echo "Testing automatic return of an expired partial payment and its late completion"
+echo "Testing automatic return of an expired partial deposit and its late completion"
 expired="$(create_invoice 1 "$BENEFICIARY_EXPIRED" 660 "expired-recovery-$run_id")"
 expired_id="$(jq -r .id <<<"$expired")"
 expired_address="$(jq -r .address <<<"$expired")"
 payer_before="$(token_balance "$PAYER")"
 send_usdc "$expired_address" 400000
-wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == "partially_paid"' "partial payment credited"
+wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == "partially_deposited"' "partial payment credited"
 # Chain time passes the deadline; wall-clock stays where it is.
 cast rpc --rpc-url "$RPC_URL" evm_increaseTime 700 >/dev/null
 wait_for_status "$expired_id" returned
@@ -709,7 +709,7 @@ wait_for_sql 1 "$(recovery_ledger_query "$expired_id" expired 400000)" \
   "expired balance was not recorded in the recovery ledger"
 send_usdc "$expired_address" 600000
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
-  WHERE invoice_id = '${expired_id#pay_}'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
+  WHERE invoice_id = '${expired_id#dr_}'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late completion was not collected"
 assert_eq "$payer_before" "$(token_balance "$PAYER")" \
   "late completion was not returned to the payer's wallet"
@@ -726,7 +726,7 @@ assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND blocked_reason IS NULL
 ")" "collectable funds remain queued"
 
-echo "Checking that every recovery ledger row raised a payment.recovered_funds event"
+echo "Checking that every recovery ledger row raised a deposit_request.recovered_funds event"
 ledger_rows="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM recovered_funds
 ")"
@@ -735,10 +735,10 @@ ledger_rows="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   exit 1
 }
 assert_eq "$ledger_rows" "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(*) FROM webhook_events WHERE event_type = 'payment.recovered_funds'
-")" "recovery ledger rows and payment.recovered_funds events differ"
+  SELECT count(*) FROM webhook_events WHERE event_type = 'deposit_request.recovered_funds'
+")" "recovery ledger rows and deposit_request.recovered_funds events differ"
 
-echo "Testing customers, PDF attachments, invoice documents, and Proof of Payment"
+echo "Testing customers, PDF attachments, deposit request documents, and Proof of Payment"
 account_id="$(api_json GET /v1/account | jq -er .account_id)"
 customer="$(api_json POST /v1/customers '{"name":"Globex Corporation","email":"ap@globex.example"}')"
 customer_id="$(jq -er .id <<<"$customer")"
@@ -767,22 +767,22 @@ assert_eq "$(wc -c <"$pdf_file" | tr -d ' ')" "$(jq -r .byte_length <<<"$finaliz
 document_body="$(jq -c --arg customer "$customer_id" --arg attachment "$attachment_id" \
   '. + {customer_id: $customer, attachment_id: $attachment, heading: "March retainer",
         reference: "INV-2026-03", notes: "Net 30", issuer: {name: "Acme Corp", email: "billing@acme.example"},
-        bill_to: {name: "Globex Corporation"}}' <<<"$(invoice_body 3 "$BENEFICIARY_EXACT" 3600)")"
+        payer: {name: "Globex Corporation"}}' <<<"$(invoice_body 3 "$BENEFICIARY_EXACT" 3600)")"
 documented="$(curl --fail --silent \
   --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
-  --header "Idempotency-Key: document-$run_id" --data "$document_body" "$API_URL/v1/payments")"
+  --header "Idempotency-Key: document-$run_id" --data "$document_body" "$API_URL/v1/deposit-requests")"
 documented_id="$(jq -er .id <<<"$documented")"
 assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
   "issued invoice does not carry the attachment commitment"
 assert_eq "$customer_id" "$(jq -r .customer_id <<<"$documented")" "issued invoice lost its customer"
 assert_eq 2 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
-descriptor="$(api_json GET "/v1/payments/$documented_id/attachment")"
+descriptor="$(api_json GET "/v1/deposit-requests/$documented_id/attachment")"
 downloaded="$logs/downloaded.pdf"
 curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"
 assert_eq "$pdf_sha256" "$(sha256_of "$downloaded")" "downloaded attachment bytes differ from the upload"
 reuse_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
   --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
-  --header "Idempotency-Key: document-reuse-$run_id" --data "$document_body" "$API_URL/v1/payments")"
+  --header "Idempotency-Key: document-reuse-$run_id" --data "$document_body" "$API_URL/v1/deposit-requests")"
 assert_eq 409 "$reuse_status" "an attached PDF was attached to a second invoice"
 
 gated_body="$(jq -c '. + {heading: "Gated retainer",
@@ -790,15 +790,15 @@ gated_body="$(jq -c '. + {heading: "Gated retainer",
   <<<"$(invoice_body 2 "$BENEFICIARY_EXACT" 3600)")"
 gated="$(curl --fail --silent \
   --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
-  --header "Idempotency-Key: gated-$run_id" --data "$gated_body" "$API_URL/v1/payments")"
+  --header "Idempotency-Key: gated-$run_id" --data "$gated_body" "$API_URL/v1/deposit-requests")"
 gated_id="$(jq -er .id <<<"$gated")"
-gated_payer="$(curl --fail --silent "$API_URL/v1/payer/payments/$gated_id")"
+gated_payer="$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$gated_id")"
 assert_eq false "$(jq -r .content_unlocked <<<"$gated_payer")" "gated invoice unlocked its content"
 assert_eq null "$(jq -r .amount <<<"$gated_payer")" "gated invoice revealed its amount"
 assert_eq null "$(jq -r .address <<<"$gated_payer")" "gated invoice revealed its payment address"
 assert_eq "Gated retainer" "$(jq -r .heading <<<"$gated_payer")" "gated invoice hides its heading"
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  "$API_URL/v1/payer/payments/$gated_id/attachment")" "gated invoice served its attachment"
+  "$API_URL/v1/payer/deposit-requests/$gated_id/attachment")" "gated invoice served its attachment"
 
 # Payer email verification against the development identity provider: the
 # gateway sends the code to the merchant-asserted mailbox and exchanges it on
@@ -806,16 +806,16 @@ assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 verify_payer_email() {
   local id=$1 started session
   started="$(curl --fail --silent --request POST --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" \
-    "$API_URL/v1/payer/payments/$id/verify/email/start")"
+    "$API_URL/v1/payer/deposit-requests/$id/verify/email/start")"
   session="$(jq -er .payer_session <<<"$started")"
   assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
     --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
-    --data '{"otp":"000000"}' "$API_URL/v1/payer/payments/$id/verify/email/confirm")" \
+    --data '{"otp":"000000"}' "$API_URL/v1/payer/deposit-requests/$id/verify/email/confirm")" \
     "a wrong code was accepted"
   assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
     --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
     --data "$(jq -cn --arg otp "$PAYDAY_DEV_IDENTITY_OTP" '{otp: $otp}')" \
-    "$API_URL/v1/payer/payments/$id/verify/email/confirm")" \
+    "$API_URL/v1/payer/deposit-requests/$id/verify/email/confirm")" \
     "the right code was not accepted"
   echo "$session"
 }
@@ -826,13 +826,13 @@ gated_before="$(token_balance "$BENEFICIARY_EXACT")"
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet}')" \
-  "$API_URL/v1/payer/payments/$gated_id/wallet/challenge")" \
+  "$API_URL/v1/payer/deposit-requests/$gated_id/wallet/challenge")" \
   "a gated request offered a wallet challenge without a verified session"
 gated_session="$(verify_payer_email "$gated_id")"
 gated_unlocked="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
-  "$API_URL/v1/payer/payments/$gated_id")"
+  "$API_URL/v1/payer/deposit-requests/$gated_id")"
 assert_eq true "$(jq -r .content_unlocked <<<"$gated_unlocked")" "verified session did not unlock the invoice"
-assert_eq "Payday E2E Customer" "$(jq -r .invoice.bill_to.name <<<"$gated_unlocked")" "verified session did not see the document"
+assert_eq "Payday E2E Customer" "$(jq -r .details.payer.name <<<"$gated_unlocked")" "verified session did not see the document"
 assert_eq null "$(jq -r .address <<<"$gated_unlocked")" "an unlocked request had an address before the wallet step"
 assert_eq pending "$(jq -r .requirements.wallet <<<"$gated_unlocked")" "the wallet fact is not pending before the wallet step"
 [[ "$(get_invoice "$gated_id" | jq -r .verification_completed_at)" != null ]] || {
@@ -842,22 +842,22 @@ assert_eq pending "$(jq -r .requirements.wallet <<<"$gated_unlocked")" "the wall
 # The verified session signs; the request now has its address.
 bind_payer_wallet "$gated_id" "$gated_session" >/dev/null
 gated_bound="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
-  "$API_URL/v1/payer/payments/$gated_id")"
+  "$API_URL/v1/payer/deposit-requests/$gated_id")"
 gated_address="$(jq -er .address <<<"$gated_bound")"
 assert_eq "$gated_address" "$(get_invoice "$gated_id" | jq -r .address)" "merchant and payer disagree on the address"
-assert_eq null "$(curl --fail --silent "$API_URL/v1/payer/payments/$gated_id" | jq -r .address)" \
+assert_eq null "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$gated_id" | jq -r .address)" \
   "the bare link unlocked after another session verified"
 send_usdc "$gated_address" 2000000
-wait_for_invoice "$gated_id" '.received_base_units == "2000000" and .status == "paid"' \
+wait_for_invoice "$gated_id" '.received_base_units == "2000000" and .status == "deposited"' \
   "verified payment credited"
 # The invoice is fully funded, so even the verified session gets no QR: the
 # address must not be offered for a second payment. The bare link is refused
 # earlier, for want of a session.
 assert_eq 410 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "Payday-Payer-Session: $gated_session" "$API_URL/v1/payer/payments/$gated_id/qr")" \
+  --header "Payday-Payer-Session: $gated_session" "$API_URL/v1/payer/deposit-requests/$gated_id/qr")" \
   "a funded invoice offered its QR to the verified session"
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  "$API_URL/v1/payer/payments/$gated_id/qr")" "the bare link fetched the QR"
+  "$API_URL/v1/payer/deposit-requests/$gated_id/qr")" "the bare link fetched the QR"
 wait_for_status "$gated_id" settled
 assert_eq "$((gated_before + 2000000))" "$(token_balance "$BENEFICIARY_EXACT")" \
   "verified invoice did not settle to the beneficiary"
@@ -882,18 +882,18 @@ stranger_final="$(get_invoice "$stranger_id")"
 assert_eq "$(lowercase "$STRANGER")" "$(jq -r '.transfers[0].sender | ascii_downcase' <<<"$stranger_final")" \
   "the transfer's sender is not the stranger"
 wait_for_sql 1 "SELECT count(*) FROM webhook_events
-  WHERE invoice_id = '${stranger_id#pay_}'::uuid AND event_type = 'payment.likely_unsolicited'" \
-  "the stranger's transfer did not raise payment.likely_unsolicited"
-assert_eq 409 "$(api_status GET "/v1/payments/$stranger_id/proof")" \
+  WHERE invoice_id = '${stranger_id#dr_}'::uuid AND event_type = 'deposit_request.likely_unsolicited'" \
+  "the stranger's transfer did not raise deposit_request.likely_unsolicited"
+assert_eq 409 "$(api_status GET "/v1/deposit-requests/$stranger_id/proof")" \
   "a proof was served for a request paid by another wallet"
-assert_eq payment_sender_mismatch "$(api_error_code GET "/v1/payments/$stranger_id/proof")" \
+assert_eq deposit_sender_mismatch "$(api_error_code GET "/v1/deposit-requests/$stranger_id/proof")" \
   "the refused proof reported the wrong error"
 
-invoice_pdf="$logs/invoice.pdf"
-api_json GET "/v1/payments/$documented_id/invoice.pdf" "" --output "$invoice_pdf"
+invoice_pdf="$logs/request.pdf"
+api_json GET "/v1/deposit-requests/$documented_id/request.pdf" "" --output "$invoice_pdf"
 assert_eq "%PDF-" "$(head -c 5 "$invoice_pdf")" "invoice document is not a PDF"
 
-proof="$(api_json GET "/v1/payments/$exact_id/proof")"
+proof="$(api_json GET "/v1/deposit-requests/$exact_id/proof")"
 jq -e '.version == "payday.proof.v2" and .payment_address != null and .salt != null
   and .attribution_hash != null and .payer_wallet.signature != null
   and .payer_wallet.typed_data.primaryType == "PayerAttestation"
@@ -919,7 +919,7 @@ assert_eq "$(jq -r .attribution_hash <<<"$proof")" \
 assert_eq "$(jq -r .payment_address <<<"$proof")" \
   "$(jq -r .verification.payload.payment_address <<<"$proof")" \
   "attestation is not bound to the proof's payment address"
-assert_eq 409 "$(api_status GET "/v1/payments/$documented_id/proof")" \
+assert_eq 409 "$(api_status GET "/v1/deposit-requests/$documented_id/proof")" \
   "a proof was served for an unsettled invoice"
 
 not_pdf="$logs/not-a-pdf.pdf"

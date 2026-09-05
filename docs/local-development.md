@@ -2,29 +2,29 @@
 
 ## System overview
 
-The API creates an invoice; its counterfactual CREATE3 payment address is
+The API creates a deposit request; its counterfactual CREATE3 deposit address is
 derived once the payer attests, from the hosted page, the wallet they will
-pay from (`POST /v1/payer/payments/{id}/wallet/challenge` and `/attest`),
+pay from (`POST /v1/payer/deposit-requests/{id}/wallet/challenge` and `/attest`),
 because the address commits to that wallet as its recovery term and to the
 signature through the salt. The payer transfers USDC to that address. The indexer reads finalized ranges of
 `Transfer(address,address,uint256)` logs from the configured USDC contract,
-attributes matching recipients in one database query, and advances invoices
+attributes matching recipients in one database query, and advances deposit requests
 from `created` to `funded` when cumulative transfers reach the requested
 amount, or to `expired` when the finalized block timestamp passes the deadline.
 
 The sweep worker submits batches to `BatchSweeper`. For an address without
-code it calls `PaymentFactory.execute`, which deploys `Payment` at the
+code it calls `PaymentFactory.execute`, which deploys `DepositRequest` at the
 counterfactual address; before expiry the constructor pays the beneficiary
-exactly the invoice amount and sends any remainder back to the payer's
+exactly the requested amount and sends any remainder back to the payer's
 wallet, and after expiry it sends the whole balance to that wallet. For an
-address that already has code it calls `Payment.recover`, which forwards
+address that already has code it calls `Deposit.recover`, which forwards
 anything that arrived later to the payer's wallet. The finalized receipt
 decides the outcome: `Settled` → `fulfilled` (with a `Recovered` remainder
 when overpaid), standalone `Recovered` → `recovered`, `SweepRecovered` → late
 funds collected, and `SweepFailed` → retried or `blocked` after reading
 `paused()`, `isBlacklisted()`, and `balanceOf()` on the token. Every nonzero
 recovery is written to the `recovered_funds` ledger in the transaction that
-resolves the batch, and each ledger row raises a `payment.recovered_funds`
+resolves the batch, and each ledger row raises a `deposit_request.recovered_funds`
 webhook.
 
 The recovery wallet is the payer's attested wallet, never a configured or
@@ -53,16 +53,16 @@ The acquisition path uses standard EVM JSON-RPC:
   `Transfer` topic, draining up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges
   per pass so a backlog clears independently of the poll interval;
 - header lookups to verify and persist canonical cursor hashes, plus one lookup
-  for each distinct transfer-bearing block to classify payments by that
+  for each distinct transfer-bearing block to classify deposits by that
   block's timestamp. These lookups run concurrently within each bounded range.
 
-Observations, invoice projections, and the hash-bearing cursor commit
-atomically. Every transfer to a known invoice address is retained: `credited`
+Observations, deposit request projections, and the hash-bearing cursor commit
+atomically. Every transfer to a known deposit request address is retained: `credited`
 transfers count toward the amount, `late` transfers (after settlement, expiry,
 or a block) are queued for recovery, and zero-value transfers are `error`.
 Each observation records the block and transaction index of the sweep that
 collected it, so a lagging cursor can never re-queue funds a finalized sweep
-already moved, including when payment and sweep transactions share a block.
+already moved, including when deposit and sweep transactions share a block.
 
 Log ranges start at `PAYDAY_LOG_RANGE_SIZE` (100 by default, QuickNode's cap
 on Monad), halve when the provider reports a range/result-size error, and grow
@@ -102,7 +102,7 @@ bytecode from the chain and exports `PAYDAY_FACTORY_CODE_HASH` and
 because both services verify the deployed contract generation at startup and
 refuse to start on a mismatch.
 
-To open a created payment, run the hosted checkout in a third shell:
+To open a created deposit, run the hosted checkout in a third shell:
 
 ```bash
 npm ci
@@ -111,7 +111,7 @@ just web
 ```
 
 It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
-points at, so the `payment_url` the API returns opens the real checkout and the
+points at, so the `deposit_url` the API returns opens the real checkout and the
 gateway accepts the dashboard's cross-origin requests (the merchant routes
 answer only that origin). Port 3002 rather than 3001, which belongs to the
 development identity provider. See [web/README.md](../web/README.md).
@@ -128,10 +128,10 @@ the development identity provider, printed in its log.
 
 `scripts/e2e-anvil.sh` runs the complete flow (the payer's wallet binding,
 signed with `cast` exactly as a wallet signs EIP-712 typed data; exact,
-partial, and batched payments; an overpayment split between the beneficiary
+partial, and batched deposits; an overpayment split between the beneficiary
 and the payer's wallet; late transfers; third-party execution; a paused
 token; a blacklisted beneficiary and its operator release; an expired partial
-payment returned automatically and completed late; a gated request whose
+deposit returned automatically and completed late; a gated request whose
 wallet step follows its email verification; funds from a stranger's wallet
 flagged and refused a proof; the `recovered_funds` ledger and its webhook
 events) against a fresh Anvil started with
@@ -238,7 +238,7 @@ set -a; source .env; set +a
 PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
 ```
 
-### 5. Create a payment
+### 5. Create a deposit request
 
 Expirations must be at least ten minutes and at most a year ahead.
 
@@ -257,11 +257,11 @@ hosted checkout does (challenge, sign the typed data with `cast wallet sign
 is the reference). `recovery_address` is then that wallet; there is no flag
 to choose it.
 
-Copy `id` and, after the binding, `address` from `GET /v1/payments/{id}`,
+Copy `id` and, after the binding, `address` from `GET /v1/deposit-requests/{id}`,
 then transfer 1.5 USDC (`1500000` atomic units) from the bound wallet:
 
 The `self_settlement` object contains the factory and salt needed for anyone
-to settle the payment on-chain if Payday is unavailable.
+to settle the deposit request on-chain if Payday is unavailable.
 
 ```bash
 cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
@@ -269,12 +269,12 @@ cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --rpc-url http://127.0.0.1:8545
 
-curl -fsS "http://127.0.0.1:3000/v1/payments/<id>" \
+curl -fsS "http://127.0.0.1:3000/v1/deposit-requests/<id>" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
 ```
 
 The status should reach `settled` with `settlement_tx_hash` set. Verify the
-payment address was emptied and the Payment contract was deployed:
+deposit address was emptied and the Deposit contract was deployed:
 
 ```bash
 cast call 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
@@ -336,7 +336,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 ## Configuration
 
 - `DATABASE_URL`
-- `PAYDAY_API_KEY` — CLI-only per-account bearer key for payment requests
+- `PAYDAY_API_KEY` — CLI-only per-account bearer key for deposit requests
 - `PAYDAY_PRIVY_APP_ID` — the Privy app merchants sign in to; `gatewayd`
   verifies dashboard sessions against its published keys, fetched at startup
   (see `docs/authentication.md`). `just dev` sets the development app; unset,
@@ -349,7 +349,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
   verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
 - `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the operator on
-  `POST /v1/admin/payments/{id}/release`; defaults to `operator`
+  `POST /v1/admin/deposit-requests/{id}/release`; defaults to `operator`
 - `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
   issuer; non-loopback HTTP issuers remain rejected
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
@@ -371,7 +371,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   a mismatch. `just dev` and `just e2e` compute them from the running chain
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
-  payment links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
+  deposit links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
   locally, `https://payday.sh` in production. Must be a bare origin, and HTTPS
   unless it is loopback
 - `PAYDAY_EXPLORER_BASE_URL` — optional HTTPS explorer origin; production
@@ -392,14 +392,14 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   helper transaction is replaced on the same nonce, default 60
 - `PAYDAY_SWEEP_MAX_SUBMISSIONS` — replacements before the sweep worker
   pauses and alarms, default 5
-- `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified item failures before an invoice
+- `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified item failures before a deposit request
   is `blocked`, default 8
 - `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
   default 0.05 native tokens
 - `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
 - `PAYDAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
   uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
-- `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding invoice PDFs;
+- `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding deposit request PDFs;
   `payday-attachments-local` on the runner's MinIO
 - `PAYDAY_ATTACHMENT_S3_ENDPOINT`, `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE` —
   optional endpoint override and path-style addressing, set locally to reach
@@ -418,7 +418,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   walkthrough's one self-issued deposit request (Anvil account #1); mutually
   exclusive with `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
   key. Unlike attestation, both may be unset in any environment, including
-  production — that simply disables `POST /v1/payments/{id}/onboarding-payment`
+  production — that simply disables `POST /v1/deposit-requests/{id}/onboarding-deposit`
 
 The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
 Terraform source is under `infra/`.
@@ -431,6 +431,6 @@ Terraform source is under `infra/`.
 - One helper transaction is in flight at a time; replacements share its nonce.
   After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed submissions the sweep
   worker pauses and alarms while block indexing continues.
-- `blocked` invoices are released by an operator (`docs/runbooks/stuck-invoice.md`);
+- `blocked` deposit requests are released by an operator (`docs/runbooks/stuck-deposit-request.md`);
   the worker never retries them on its own.
-- Payment listing is cursor-paginated and bounded to 100 records per request.
+- Deposit listing is cursor-paginated and bounded to 100 records per request.

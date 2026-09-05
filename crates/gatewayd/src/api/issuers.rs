@@ -13,7 +13,7 @@
 //! ```
 //!
 //! An identity is a saved party plus the addresses it may settle to. Issuance
-//! is unchanged: `POST /v1/payments` still takes the party and the address
+//! is unchanged: `POST /v1/deposit-requests` still takes the party and the address
 //! inline and snapshots them, so what these rows do is stop a merchant
 //! retyping — and, for the contact mailbox, prove it. Payers are told to write
 //! to that address, so it is established with the same emailed code the rest
@@ -36,8 +36,8 @@ use gateway_db::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::deposit_requests::validate_party_fields;
 use crate::api::error::ApiError;
-use crate::api::invoices::validate_party_fields;
 use crate::state::AppState;
 
 /// One code per identity per minute, matching the payer flow's window. An

@@ -39,7 +39,7 @@ variable "payment_route53_zone_id" {
 variable "checkout_base_url" {
   description = <<-EOT
     Origin serving the hosted checkout at /pay/{id}, which is where every
-    payment_url points. In production this is the Vercel-hosted site at
+    deposit_url points. In production this is the Vercel-hosted site at
     https://payday.sh. Leave empty to keep links on payment_domain_name, which
     this service answers with a 301 to this origin.
   EOT
@@ -68,7 +68,7 @@ variable "status_domain_name" {
 }
 
 variable "status_indexer_stale_seconds" {
-  description = "Age at which an unchanged payment cursor makes public status degraded."
+  description = "Age at which an unchanged deposit cursor makes public status degraded."
   type        = number
   default     = 120
   validation {

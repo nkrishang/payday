@@ -11,8 +11,8 @@ use gateway_db::{AccountId, CreateCustomerInput, DbCustomer};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::deposit_requests::validate_party_fields;
 use crate::api::error::ApiError;
-use crate::api::invoices::validate_party_fields;
 use crate::state::AppState;
 
 /// Create and update share one body; update replaces every editable field,

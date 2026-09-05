@@ -1,7 +1,7 @@
 import { CLIENT_SECRET_FRAGMENT_KEY } from "@payday/sdk";
 
 /**
- * A merchant-session payment arrives with its single-use client secret in the
+ * A merchant-session deposit request arrives with its single-use client secret in the
  * URL fragment: `/pay/{id}#cs=cs_…`. The fragment is the one part of a URL a
  * browser never sends anywhere — not to this app's server, not in a Referer,
  * not to an analytics beacon — which is exactly why the merchant put it

@@ -3,12 +3,12 @@ import { describe, expect, it } from "vitest";
 import { VerificationBadge, VerificationStatus } from "./verification-status";
 
 describe("VerificationBadge", () => {
-  it("says a permissionless invoice needs nothing", () => {
+  it("says a permissionless deposit request needs nothing", () => {
     render(<VerificationBadge mode="permissionless" completedAt={null} unsolicitedAt={null} />);
     expect(screen.getByText("Not required")).toBeInTheDocument();
   });
 
-  it("keeps a gated invoice pending until the gateway records completion", () => {
+  it("keeps a gated deposit request pending until the gateway records completion", () => {
     const { rerender } = render(
       <VerificationBadge mode="verified_email" completedAt={null} unsolicitedAt={null} />,
     );
@@ -72,7 +72,7 @@ describe("VerificationStatus", () => {
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
-  it("explains a likely unsolicited payment", () => {
+  it("explains a likely unsolicited deposit", () => {
     render(
       <VerificationStatus
         policy={{ mode: "verified_email", expected_email: "bob@example.com" }}

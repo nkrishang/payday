@@ -30,12 +30,12 @@ const VERIFIED: VerificationDetail = {
 
 function renderActivity(detail: VerificationDetail) {
   const verification = vi.fn().mockResolvedValue(detail);
-  const client = { payments: { verification } } as unknown as PaydayClient;
+  const client = { depositRequests: { verification } } as unknown as PaydayClient;
   render(
     <MerchantProvider
       value={{ client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut: vi.fn() }}
     >
-      <VerificationActivity paymentId="pay_1" />
+      <VerificationActivity paymentId="dr_1" />
     </MerchantProvider>,
   );
   return { verification };
@@ -46,7 +46,7 @@ describe("VerificationActivity", () => {
     const { verification } = renderActivity(VERIFIED);
 
     expect(await screen.findByLabelText("Verification activity")).toBeInTheDocument();
-    expect(verification).toHaveBeenCalledWith("pay_1");
+    expect(verification).toHaveBeenCalledWith("dr_1");
     expect(screen.getAllByText("Email verification")).toHaveLength(2);
     expect(screen.getByText("Abandoned")).toBeInTheDocument();
     expect(screen.getByText("Approved")).toBeInTheDocument();

@@ -50,7 +50,7 @@ struct IndexerFreshness {
     last_finalized_block: Option<String>,
     cursor_updated_at: Option<String>,
 }
-/// One side of the invoice: bounded free text rendered verbatim.
+/// One side of the deposit request: bounded free text rendered verbatim.
 #[derive(Serialize, Deserialize, ToSchema)]
 struct Party {
     /// 1–255 bytes.
@@ -77,7 +77,7 @@ struct PayerPolicy {
     expected_email: Option<String>,
     /// The merchant application's own identifier for the payer it
     /// authenticated: 1–128 bytes, one printable token, case preserved.
-    /// Returned on every webhook for the payment; never shown to the payer.
+    /// Returned on every webhook for the deposit; never shown to the payer.
     payer_reference: Option<String>,
 }
 /// A single-use secret that opens the hosted checkout for the payer the
@@ -102,19 +102,19 @@ struct AttachmentDescriptor {
     /// Short-lived signed link, present on attachment routes only.
     download_url: Option<String>,
 }
-/// The commitment the payment address was derived from (product plan §5).
+/// The commitment the deposit address was derived from (product plan §5).
 #[derive(Serialize, ToSchema)]
 struct Attribution {
     version: u16,
     hash: String,
 }
 #[derive(Deserialize, ToSchema)]
-#[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"bill_to":{"name":"Globex"},"payer_policy":{"mode":"permissionless"},"expires_in":3600,"reference":"INV-42","metadata":{"customer":"cus_123"}}))]
-struct CreatePayment {
+#[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"payer":{"name":"Globex"},"payer_policy":{"mode":"permissionless"},"expires_in":3600,"reference":"INV-42","metadata":{"customer":"cus_123"}}))]
+struct CreateDepositRequest {
     amount: String,
     payout_address: String,
     issuer: Party,
-    bill_to: Party,
+    payer: Party,
     payer_policy: PayerPolicy,
     chain_id: Option<String>,
     token_address: Option<String>,
@@ -130,20 +130,20 @@ struct CreatePayment {
     reference: Option<String>,
     #[schema(value_type = Object)]
     metadata: Option<serde_json::Value>,
-    /// A finalized PDF upload; at most one per invoice.
+    /// A finalized PDF upload; at most one per deposit request.
     attachment_id: Option<uuid::Uuid>,
     expires_in: Option<u64>,
     expires_at: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
-struct Payment {
+struct DepositRequest {
     id: String,
-    payment_url: String,
-    status: PaymentStatus,
+    deposit_url: String,
+    status: DepositRequestStatus,
     chain: Chain,
     currency: String,
     token: Token,
-    /// The one-time payment address; null until the payer attests the
+    /// The one-time deposit address; null until the payer attests the
     /// wallet they will pay from, which the address commits to.
     address: Option<String>,
     address_explorer_url: Option<String>,
@@ -168,7 +168,7 @@ struct Payment {
     net_amount: String,
     net_amount_base_units: String,
     issuer: Party,
-    bill_to: Party,
+    payer: Party,
     notes: Option<String>,
     heading: Option<String>,
     reference: Option<String>,
@@ -180,7 +180,7 @@ struct Payment {
     verification_completed_at: Option<String>,
     likely_unsolicited_at: Option<String>,
     /// `merchant_session` only, and only in the `201` that issued the
-    /// payment: the first client secret. Absent on every later read and
+    /// deposit: the first client secret. Absent on every later read and
     /// on idempotent replays; mint another with `POST …/client-secret`.
     client_secret: Option<String>,
     client_secret_expires_at: Option<String>,
@@ -190,8 +190,8 @@ struct Payment {
     created_at: String,
     updated_at: String,
     expires_at: String,
-    paid_at: Option<String>,
-    paid_at_block: Option<String>,
+    deposited_at: Option<String>,
+    deposited_at_block: Option<String>,
     settled_at: Option<String>,
     settled_block: Option<String>,
     expired_at: Option<String>,
@@ -207,30 +207,30 @@ struct Payment {
 }
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-enum PaymentStatus {
-    AwaitingPayment,
-    PartiallyPaid,
-    Paid,
+enum DepositRequestStatus {
+    AwaitingDeposit,
+    PartiallyDeposited,
+    Deposited,
     Settled,
     Expired,
     Returned,
     NeedsAttention,
 }
 #[derive(Serialize, ToSchema)]
-struct PaymentPage {
-    payments: Vec<PaymentSummary>,
+struct DepositRequestPage {
+    deposit_requests: Vec<DepositRequestSummary>,
     next_cursor: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
-struct PaymentSummary {
+struct DepositRequestSummary {
     id: String,
     heading: Option<String>,
-    bill_to_name: String,
+    payer_name: String,
     reference: Option<String>,
     #[schema(value_type = Object)]
     metadata: serde_json::Value,
     created_at: String,
-    status: PaymentStatus,
+    status: DepositRequestStatus,
     amount: String,
     received: String,
     payer_policy_mode: PayerPolicyMode,
@@ -294,8 +294,8 @@ struct Transfer {
     collected: bool,
 }
 #[derive(Serialize, ToSchema)]
-struct CancelPayment {
-    payment: Payment,
+struct CancelDepositRequest {
+    deposit_request: DepositRequest,
     advisory: String,
 }
 #[derive(Serialize, ToSchema)]
@@ -398,12 +398,12 @@ struct CustomerPage {
 }
 #[derive(Serialize, ToSchema)]
 struct CustomerStats {
-    /// Deposit requests billed to this customer, of any status.
+    /// Deposit requests addressed to this customer, of any status.
     request_count: i64,
-    /// Confirmed on chain across all of this customer's invoices. Base units,
-    /// like an invoice's own `amount_base_units` — scale for display.
+    /// Confirmed on chain across all of this customer's deposit requests. Base units,
+    /// like a deposit request's own `amount_base_units` — scale for display.
     collected_base_units: String,
-    /// Outstanding on the ones still open — awaiting payment or partially paid. Base units.
+    /// Outstanding on the ones still open — awaiting deposit or partially paid. Base units.
     pending_base_units: String,
 }
 /// `getCustomer` only: a list of many customers would mean one aggregate
@@ -509,13 +509,13 @@ struct AttachmentCommitment {
     byte_length: String,
     sha256: String,
 }
-/// The document the payment address was derived from (product plan §5.2).
+/// The document the deposit address was derived from (product plan §5.2).
 #[derive(Serialize, ToSchema)]
 struct CanonicalIssuanceSnapshot {
     schema: String,
     canonicalization: String,
     issuer: Party,
-    bill_to: Party,
+    payer: Party,
     amount_base_units: String,
     notes: Option<String>,
     heading: Option<String>,
@@ -576,7 +576,7 @@ struct VerificationAttestationPayload {
     version: String,
     payment_id: String,
     /// The issuance commitment the attestation is bound to, so a genuine
-    /// attestation cannot be transplanted onto another invoice's package.
+    /// attestation cannot be transplanted onto another deposit request's package.
     attribution_hash: String,
     chain_id: String,
     payment_address: String,
@@ -620,31 +620,31 @@ struct ProofOfPayment {
     verification: SignedVerificationAttestation,
 }
 
-#[utoipa::path(post, path="/v1/payments", operation_id="createPayment", tag="payments",
- request_body(content=CreatePayment, description="Issue an invoice. expires_in and expires_at are mutually exclusive; the default lifetime is 24 hours. Every field except the deadline is immutable once issued: a reused Idempotency-Key with any difference is a 409 idempotency_conflict."),
+#[utoipa::path(post, path="/v1/deposit-requests", operation_id="createDepositRequest", tag="deposit-requests",
+ request_body(content=CreateDepositRequest, description="Issue a deposit request. expires_in and expires_at are mutually exclusive; the default lifetime is 24 hours. Every field except the deadline is immutable once issued: a reused Idempotency-Key with any difference is a 409 idempotency_conflict."),
  params(("Idempotency-Key"=String, Header, description="Required, 1-255 bytes")),
- responses((status=201, description="Created", body=Payment), (status=200, description="Idempotent replay", body=Payment, headers(("Idempotency-Replayed"=String, description="true"))), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=409, description="idempotency_conflict, attachment_not_ready (also when a finalized upload expired from storage before it was attached: 'The upload expired before it was attached; upload the PDF again'), or attachment_already_attached", body=ErrorResponse), (status=422, body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
-fn create_payment() {}
-#[utoipa::path(get, path="/v1/payments", operation_id="listPayments", tag="payments",
- params(("starting_after"=Option<String>, Query, description="pay_ cursor returned as next_cursor"), ("status"=Option<PaymentStatus>, Query), ("reference"=Option<String>, Query), ("customer_id"=Option<uuid::Uuid>, Query, description="Only requests billed to this customer"), ("issuer_id"=Option<uuid::Uuid>, Query, description="Only requests issued under this identity"), ("verification"=Option<String>, Query, description="not_required, pending, verified, or likely_unsolicited"), ("limit"=Option<u32>, Query, minimum=1, maximum=100)),
- responses((status=200, body=PaymentPage), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
-fn list_payments() {}
-#[utoipa::path(get, path="/v1/payments/{id}", operation_id="getPayment", tag="payments", params(("id"=String, Path, description="Complete payment ID or payment address"),("wait_for"=Option<String>,Query,description="Set to change for long polling"),("timeout"=Option<u64>,Query,minimum=1,maximum=30)), responses((status=200, body=Payment),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn get_payment() {}
-#[utoipa::path(post, path="/v1/payments/{id}/cancel", operation_id="cancelPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Presentation-only cancellation; on-chain rules are unchanged",body=CancelPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn cancel_payment() {}
-#[utoipa::path(get, path="/v1/payments/{id}/transfers", operation_id="listPaymentTransfers", tag="payments", params(("id"=String, Path)), responses((status=200,body=[Transfer]),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+ responses((status=201, description="Created", body=DepositRequest), (status=200, description="Idempotent replay", body=DepositRequest, headers(("Idempotency-Replayed"=String, description="true"))), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=409, description="idempotency_conflict, attachment_not_ready (also when a finalized upload expired from storage before it was attached: 'The upload expired before it was attached; upload the PDF again'), or attachment_already_attached", body=ErrorResponse), (status=422, body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
+fn create_deposit_request() {}
+#[utoipa::path(get, path="/v1/deposit-requests", operation_id="listDepositRequests", tag="deposit-requests",
+ params(("starting_after"=Option<String>, Query, description="dr_ cursor returned as next_cursor"), ("status"=Option<DepositRequestStatus>, Query), ("reference"=Option<String>, Query), ("customer_id"=Option<uuid::Uuid>, Query, description="Only requests addressed to this customer"), ("issuer_id"=Option<uuid::Uuid>, Query, description="Only requests issued under this identity"), ("verification"=Option<String>, Query, description="not_required, pending, verified, or likely_unsolicited"), ("limit"=Option<u32>, Query, minimum=1, maximum=100)),
+ responses((status=200, body=DepositRequestPage), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
+fn list_deposit_requests() {}
+#[utoipa::path(get, path="/v1/deposit-requests/{id}", operation_id="getDepositRequest", tag="deposit-requests", params(("id"=String, Path, description="Complete deposit request ID or deposit address"),("wait_for"=Option<String>,Query,description="Set to change for long polling"),("timeout"=Option<u64>,Query,minimum=1,maximum=30)), responses((status=200, body=DepositRequest),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn get_deposit_request() {}
+#[utoipa::path(post, path="/v1/deposit-requests/{id}/cancel", operation_id="cancelDepositRequest", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Presentation-only cancellation; on-chain rules are unchanged",body=CancelDepositRequest),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn cancel_deposit_request() {}
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/transfers", operation_id="listDepositRequestTransfers", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,body=[Transfer]),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn transfers() {}
-#[utoipa::path(get, path="/v1/payments/{id}/attachment", operation_id="getPaymentAttachment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Descriptor with a signed download_url valid for PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,description="payment_not_found or attachment_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn payment_attachment() {}
-#[utoipa::path(get, path="/v1/payments/{id}/invoice.pdf", operation_id="getInvoicePdf", tag="payments", params(("id"=String, Path)), responses((status=200,description="Deterministic invoice summary as application/pdf, served as an attachment"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn invoice_pdf() {}
-#[utoipa::path(get, path="/v1/payments/{id}/proof", operation_id="getProofOfPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Verifiable offline; gateway_core::verify_proof holds the checks",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="payment_not_settled, or payment_sender_mismatch when credited funds came from a wallet other than the attested one",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/attachment", operation_id="getDepositRequestAttachment", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Descriptor with a signed download_url valid for PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,description="deposit_request_not_found or attachment_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn deposit_request_attachment() {}
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/request.pdf", operation_id="getDepositRequestPdf", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Deterministic deposit request summary as application/pdf, served as an attachment"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn request_pdf() {}
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/proof", operation_id="getProofOfPayment", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Verifiable offline; gateway_core::verify_proof holds the checks",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="deposit_request_not_settled, or deposit_sender_mismatch when credited funds came from a wallet other than the attested one",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn proof() {}
-#[utoipa::path(get, path="/v1/payments/{id}/verification", operation_id="getPaymentVerification", tag="payments", params(("id"=String, Path)), responses((status=200,description="Every verification attempt on the invoice with each fact reported separately",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn payment_verification() {}
-#[utoipa::path(post, path="/v1/payments/{id}/client-secret", operation_id="createPaymentClientSecret", tag="payments", params(("id"=String, Path)), responses((status=201,description="A fresh single-use client secret for a merchant_session payment; earlier unspent secrets stay valid until they expire",body=ClientSecret),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="verification_not_required for permissionless payments; verification_method_not_applicable for verified_email payments",body=ErrorResponse),(status=410,description="payment_not_payable: expired, or terminal without a completed verification",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn payment_client_secret() {}
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/verification", operation_id="getDepositRequestVerification", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Every verification attempt on the deposit request with each fact reported separately",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn deposit_request_verification() {}
+#[utoipa::path(post, path="/v1/deposit-requests/{id}/client-secret", operation_id="createDepositRequestClientSecret", tag="deposit-requests", params(("id"=String, Path)), responses((status=201,description="A fresh single-use client secret for a merchant_session deposit; earlier unspent secrets stay valid until they expire",body=ClientSecret),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="verification_not_required for permissionless deposits; verification_method_not_applicable for verified_email deposits",body=ErrorResponse),(status=410,description="deposit_request_not_payable: expired, or terminal without a completed verification",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn deposit_request_client_secret() {}
 #[utoipa::path(post, path="/v1/customers", operation_id="createCustomer", tag="customers", request_body=CustomerRequest, responses((status=201,body=Customer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_customer() {}
 #[utoipa::path(get, path="/v1/customers", operation_id="listCustomers", tag="customers", params(("starting_after"=Option<uuid::Uuid>, Query, description="Customer id returned as next_cursor"),("limit"=Option<u32>, Query, minimum=1, maximum=100)), responses((status=200,body=CustomerPage),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
@@ -655,7 +655,7 @@ fn get_customer() {}
 fn update_customer() {}
 #[utoipa::path(post, path="/v1/attachments", operation_id="createAttachment", tag="attachments", request_body=AttachmentRequest, responses((status=201,description="PUT the PDF (at most 5 MiB) to upload_url with exactly the returned headers, If-None-Match: * included; the key is write-once and a repeated PUT gets 412",body=AttachmentUpload),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_attachment() {}
-#[utoipa::path(post, path="/v1/attachments/{id}/finalize", operation_id="finalizeAttachment", tag="attachments", params(("id"=uuid::Uuid, Path)), responses((status=200,description="The object is a clean PDF; idempotent once decided",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="attachment_scan_pending while the scan has not reported; attachment_not_ready before anything was uploaded, or once a finalized upload expired from storage before an invoice was issued with it ('The upload expired before it was attached; upload the PDF again')",body=ErrorResponse),(status=422,description="attachment_rejected: not application/pdf, outside 1–5,242,880 bytes, no %PDF- magic, or flagged; the object is deleted from storage",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(post, path="/v1/attachments/{id}/finalize", operation_id="finalizeAttachment", tag="attachments", params(("id"=uuid::Uuid, Path)), responses((status=200,description="The object is a clean PDF; idempotent once decided",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="attachment_scan_pending while the scan has not reported; attachment_not_ready before anything was uploaded, or once a finalized upload expired from storage before a deposit request was issued with it ('The upload expired before it was attached; upload the PDF again')",body=ErrorResponse),(status=422,description="attachment_rejected: not application/pdf, outside 1–5,242,880 bytes, no %PDF- magic, or flagged; the object is deleted from storage",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn finalize_attachment() {}
 #[utoipa::path(get, path="/v1/account", operation_id="getAccount", tag="account", responses((status=200,body=Account),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn account() {}
@@ -703,9 +703,9 @@ fn list_payout_addresses() {}
 fn delete_payout_address() {}
 
 #[derive(OpenApi)]
-#[openapi(paths(create_payment,list_payments,get_payment,cancel_payment,transfers,payment_attachment,invoice_pdf,proof,payment_verification,payment_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
- modifiers(&Security), tags((name="payments",description="Invoice issuance, documents, and payment tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
+#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CancelDepositRequest,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
+ modifiers(&Security), tags((name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
 struct Security;
@@ -745,16 +745,16 @@ pub async fn reference() -> Html<&'static str> {
 mod tests {
     use super::*;
     const ROUTES: &[(&str, &str)] = &[
-        ("/v1/payments", "get"),
-        ("/v1/payments", "post"),
-        ("/v1/payments/{id}", "get"),
-        ("/v1/payments/{id}/cancel", "post"),
-        ("/v1/payments/{id}/transfers", "get"),
-        ("/v1/payments/{id}/attachment", "get"),
-        ("/v1/payments/{id}/invoice.pdf", "get"),
-        ("/v1/payments/{id}/proof", "get"),
-        ("/v1/payments/{id}/verification", "get"),
-        ("/v1/payments/{id}/client-secret", "post"),
+        ("/v1/deposit-requests", "get"),
+        ("/v1/deposit-requests", "post"),
+        ("/v1/deposit-requests/{id}", "get"),
+        ("/v1/deposit-requests/{id}/cancel", "post"),
+        ("/v1/deposit-requests/{id}/transfers", "get"),
+        ("/v1/deposit-requests/{id}/attachment", "get"),
+        ("/v1/deposit-requests/{id}/request.pdf", "get"),
+        ("/v1/deposit-requests/{id}/proof", "get"),
+        ("/v1/deposit-requests/{id}/verification", "get"),
+        ("/v1/deposit-requests/{id}/client-secret", "post"),
         ("/v1/customers", "get"),
         ("/v1/customers", "post"),
         ("/v1/customers/{id}", "get"),
@@ -807,21 +807,21 @@ mod tests {
                 .sum::<usize>(),
             ROUTES.len()
         );
-        let payment = &d["components"]["schemas"]["Payment"]["properties"];
-        assert!(payment["as_of"].is_object());
-        assert!(payment["recovery_address"].is_object());
-        assert!(payment["refund_address"].is_null());
-        assert!(payment["memo"].is_null());
+        let deposit = &d["components"]["schemas"]["DepositRequest"]["properties"];
+        assert!(deposit["as_of"].is_object());
+        assert!(deposit["recovery_address"].is_object());
+        assert!(deposit["refund_address"].is_null());
+        assert!(deposit["memo"].is_null());
         for documented in [
             "issuer",
-            "bill_to",
+            "payer",
             "payer_policy",
             "attachment",
             "attribution",
         ] {
-            assert!(payment[documented].is_object(), "{documented}");
+            assert!(deposit[documented].is_object(), "{documented}");
         }
-        let create = &d["components"]["schemas"]["CreatePayment"];
+        let create = &d["components"]["schemas"]["CreateDepositRequest"];
         assert!(create["properties"]["refund_address"].is_null());
         assert!(create["properties"]["memo"].is_null());
         let required: Vec<&str> = create["required"]
@@ -834,7 +834,7 @@ mod tests {
             "amount",
             "payout_address",
             "issuer",
-            "bill_to",
+            "payer",
             "payer_policy",
         ] {
             assert!(required.contains(&field), "{field} must be required");
@@ -846,7 +846,7 @@ mod tests {
                 .len(),
             3
         );
-        assert!(payment["client_secret"].is_object());
+        assert!(deposit["client_secret"].is_object());
         assert!(
             d["components"]["schemas"]["PayerPolicy"]["properties"]["payer_reference"].is_object()
         );
@@ -868,9 +868,9 @@ mod tests {
             assert!(proof[documented].is_object(), "{documented}");
         }
         assert!(proof["attribution_nonce"].is_null());
-        let payment = &d["components"]["schemas"]["Payment"]["properties"];
-        assert!(payment["payer_wallet"].is_object());
-        assert!(payment["wallet_bound_at"].is_object());
+        let deposit = &d["components"]["schemas"]["DepositRequest"]["properties"];
+        assert!(deposit["payer_wallet"].is_object());
+        assert!(deposit["wallet_bound_at"].is_object());
         let requirements = &d["components"]["schemas"]["VerificationRequirements"]["properties"];
         assert!(requirements["wallet"].is_object());
         let attempt = &d["components"]["schemas"]["VerificationAttempt"]["properties"];
@@ -897,7 +897,7 @@ mod tests {
             ["chain", "indexer", "sweeper"]
         );
         assert_eq!(
-            d["paths"]["/v1/payments"]["post"]["responses"]["200"]["headers"]["Idempotency-Replayed"]
+            d["paths"]["/v1/deposit-requests"]["post"]["responses"]["200"]["headers"]["Idempotency-Replayed"]
                 ["schema"]["type"],
             "string"
         );

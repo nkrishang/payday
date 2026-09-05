@@ -4,7 +4,7 @@ const CLAIM_NAMESPACE = "https://api.payday.sh/auth";
 const MAX_AUTHENTICATION_AGE_SECONDS = 5 * 60;
 
 /**
- * A payer proves mailbox ownership for one invoice, and gatewayd exchanges the
+ * A payer proves mailbox ownership for one deposit request, and gatewayd exchanges the
  * OTP on the payer's behalf against a dedicated audience. This Action guards
  * only that audience: the merchant Action (`payday-email-otp.js`) never sees
  * it, and this one never sees the merchant API, so neither client can pick up

@@ -1,13 +1,13 @@
 # Indexer fatal halt
 
 The block indexer intentionally halts when it detects a condition that could
-cause incorrect payment processing. This triggers the `payday-indexer-fatal`
+cause incorrect deposit processing. This triggers the `payday-indexer-fatal`
 CloudWatch alarm via a log metric filter and ECS restarts the task, which
 halts again until the cause is fixed.
 
 A stuck *sweep* is not fatal: the sweep worker pauses on its own and raises
 `payday-indexer-sweep-paused` while block indexing continues. See
-[stuck-invoice.md](stuck-invoice.md#sweep-worker-paused) for that case.
+[stuck-deposit-request.md](stuck-deposit-request.md#sweep-worker-paused) for that case.
 
 ## Common causes
 
@@ -50,8 +50,8 @@ different environment is the likelier explanation.
 2. If the hash differs, you need to reset the cursor to a recent finalized
    block. Follow [indexer-cursor-reset.md](indexer-cursor-reset.md).
 
-3. Before resetting, verify no invoices were funded by transfers in the
-   reverted blocks. If any were, those payments may need manual review.
+3. Before resetting, verify no deposit requests were funded by transfers in the
+   reverted blocks. If any were, those deposit requests may need manual review.
 
 ## Step 2a: Deployment verification refused
 

@@ -1,4 +1,4 @@
-import type { Chain, PayerPayment, PaymentStatus, Token } from "@payday/sdk";
+import type { Chain, PayerDepositRequest, DepositRequestStatus, Token } from "@payday/sdk";
 import { formatDisplayAmount } from "./format";
 
 /**
@@ -7,15 +7,15 @@ import { formatDisplayAmount } from "./format";
  *
  * Three rules this module exists to enforce:
  *
- * 1. The payer's device clock never decides that a payment expired — chain time
+ * 1. The payer's device clock never decides that a deposit request expired — chain time
  *    does. When the countdown reaches zero we move to `closing`, which says the
  *    deadline was reached and waits for the server to confirm, rather than
- *    claiming the payment is over.
- * 2. Payment instructions disappear the moment the payment stops being payable.
+ *    claiming the request is over.
+ * 2. Deposit instructions disappear the moment the request stops being payable.
  *    Funds sent after the deadline route back to the payer's attested wallet
  *    rather than to the merchant, so continuing to show an address would only
  *    invite a transfer that has to come back.
- * 3. A gated invoice discloses nothing but the issuer and heading until the
+ * 3. A gated deposit request discloses nothing but the issuer and heading until the
  *    gateway says the content is unlocked. The API withholds the fields; this
  *    module turns their absence into a phase so no component ever reaches for
  *    a null amount or address.
@@ -27,7 +27,7 @@ export type CheckoutPhase =
   | "verification_required"
   | "email_pending"
   | "wallet_required"
-  /** A merchant-session invoice: only the merchant's app can open it. */
+  /** A merchant-session deposit request: only the merchant's app can open it. */
   | "app_required"
   /** The client secret from the fragment is being exchanged. */
   | "app_opening"
@@ -35,7 +35,7 @@ export type CheckoutPhase =
   | "partial"
   | "confirming"
   | "closing"
-  | "paid"
+  | "deposited"
   | "settled"
   | "expired_empty"
   | "expired_funded"
@@ -66,17 +66,17 @@ export interface CheckoutView {
   showInstructions: boolean;
   /** Whether the wallet attestation step is what the payer does next. */
   showWalletStep: boolean;
-  /** Whether the payment can no longer change. */
+  /** Whether the deposit request can no longer change. */
   isTerminal: boolean;
 }
 
 /**
- * A payer payment whose content is present. The API nulls every one of
- * these together while a gated invoice is locked, so components that render
+ * A payer-facing deposit request whose content is present. The API nulls every one of
+ * these together while a gated request is locked, so components that render
  * an amount take this type and never see a null. The address is separate:
- * it exists only once a wallet is bound (see `ReadyPayerPayment`).
+ * it exists only once a wallet is bound (see `ReadyPayerDepositRequest`).
  */
-export type UnlockedPayerPayment = PayerPayment & {
+export type UnlockedPayerDepositRequest = PayerDepositRequest & {
   chain: Chain;
   token: Token;
   amount: string;
@@ -88,10 +88,10 @@ export type UnlockedPayerPayment = PayerPayment & {
 };
 
 /**
- * An unlocked payment whose payer wallet is bound, so the one-time address
+ * An unlocked deposit request whose payer wallet is bound, so the one-time address
  * exists. Everything that shows or uses the address takes this type.
  */
-export type ReadyPayerPayment = UnlockedPayerPayment & {
+export type ReadyPayerDepositRequest = UnlockedPayerDepositRequest & {
   address: string;
   payer_wallet: string;
 };
@@ -102,7 +102,7 @@ export type ReadyPayerPayment = UnlockedPayerPayment & {
  * a response that disagrees with its own flag is treated as locked rather than
  * rendered with holes.
  */
-export function unlockedPayment(payment: PayerPayment): UnlockedPayerPayment | null {
+export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPayerDepositRequest | null {
   if (!payment.content_unlocked) return null;
   const {
     chain,
@@ -140,35 +140,35 @@ export function unlockedPayment(payment: PayerPayment): UnlockedPayerPayment | n
 }
 
 /**
- * Narrows further to a payment with an address. The API sets `address` and
+ * Narrows further to a deposit request with an address. The API sets `address` and
  * `payer_wallet` together when the binding exists; one without the other is
  * treated as unbound rather than rendered with a hole.
  */
-export function readyPayment(payment: UnlockedPayerPayment): ReadyPayerPayment | null {
+export function readyDepositRequest(payment: UnlockedPayerDepositRequest): ReadyPayerDepositRequest | null {
   const { address, payer_wallet } = payment;
   if (address === null || payer_wallet === null) return null;
   return { ...payment, address, payer_wallet };
 }
 
-const TERMINAL: ReadonlySet<PaymentStatus> = new Set<PaymentStatus>([
+const TERMINAL: ReadonlySet<DepositRequestStatus> = new Set<DepositRequestStatus>([
   "settled",
   "returned",
   "needs_attention",
 ]);
 
-export function isTerminalStatus(status: PaymentStatus): boolean {
+export function isTerminalStatus(status: DepositRequestStatus): boolean {
   return TERMINAL.has(status);
 }
 
 const RECOVERY_NOTE =
   "The full balance goes back to the wallet you signed with, not to the merchant. Nothing else is needed from you.";
 
-export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
-  const unlocked = unlockedPayment(payment);
+export function checkoutView(payment: PayerDepositRequest, local: CheckoutLocalState): CheckoutView {
+  const unlocked = unlockedDepositRequest(payment);
 
   if (unlocked === null) {
     // Locked content comes before every lifecycle state: a payer who has not
-    // verified is told nothing about the amount, not even that it was paid.
+    // verified is told nothing about the amount, not even that it was funded.
     return lockedView(payment, local);
   }
 
@@ -180,10 +180,10 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
  * facts come from the API for this tab's session; only "a code is on its
  * way" is local, because the API cannot know which tab asked.
  */
-function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
+function lockedView(payment: PayerDepositRequest, local: CheckoutLocalState): CheckoutView {
   const { requirements, payer_policy } = payment;
 
-  // A merchant-session invoice has no step for the payer to take here: the
+  // A merchant-session deposit request has no step for the payer to take here: the
   // merchant's app opened it, or nothing will.
   if (payer_policy.mode === "merchant_session") {
     return local.exchangingClientSecret
@@ -191,8 +191,8 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
           phase: "app_opening",
           tone: "progress",
           label: "Opening",
-          title: "Opening your payment",
-          detail: `${payment.issuer_name} is opening this payment for you.`,
+          title: "Opening your deposit request",
+          detail: `${payment.issuer_name} is opening this deposit request for you.`,
           showInstructions: false,
           showWalletStep: false,
           isTerminal: false,
@@ -201,24 +201,24 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
           phase: "app_required",
           tone: "neutral",
           label: "Open from the app",
-          title: `Open this payment from ${payment.issuer_name}`,
+          title: `Open this deposit request from ${payment.issuer_name}`,
           detail:
-            "The amount and payment details are shown once the app that issued this payment opens it for you.",
+            "The amount and deposit details are shown once the app that issued this deposit request opens it for you.",
           showInstructions: false,
           showWalletStep: false,
           isTerminal: false,
         };
   }
 
-  // Invoice-level completion from another payer is not evidence for this tab.
+  // Request-level completion from another payer is not evidence for this tab.
   // Treat the internally inconsistent locked/complete response as a fresh gate.
   if (requirements.complete) {
     return {
       phase: "verification_required",
       tone: "neutral",
       label: "Verification required",
-      title: "Verify to view this invoice",
-      detail: "The amount, payment details, and attachment are shown once you verify.",
+      title: "Verify to view this deposit request",
+      detail: "The amount, deposit details, and attachment are shown once you verify.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,
@@ -242,16 +242,16 @@ function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutV
     phase: "verification_required",
     tone: "neutral",
     label: "Verification required",
-    title: "Verify to view this invoice",
+    title: "Verify to view this deposit request",
     detail:
-      "The amount, payment details, and attachment are shown once the expected payer has verified.",
+      "The amount, deposit details, and attachment are shown once the expected payer has verified.",
     showInstructions: false,
     showWalletStep: false,
     isTerminal: false,
   };
 }
 
-function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState): CheckoutView {
+function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocalState): CheckoutView {
   const received = BigInt(payment.received_base_units);
 
   if (payment.status === "needs_attention") {
@@ -262,7 +262,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       title: "Settlement is paused",
       detail:
         payment.payer_message ??
-        "Payday has paused this payment and an operator is resolving it. Do not send another payment.",
+        "Payday has paused this deposit and an operator is resolving it. Do not send another transfer.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: true,
@@ -270,7 +270,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
   }
 
   if (payment.status === "settled") {
-    // Settlement is exact: the merchant receives the invoice amount and any
+    // Settlement is exact: the merchant receives the requested amount and any
     // remainder goes back to the payer's attested wallet, so an overpaid payer
     // is told where the rest went rather than left to assume the merchant is
     // holding it.
@@ -278,12 +278,12 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
     return {
       phase: "settled",
       tone: "success",
-      label: "Paid",
-      title: "Payment complete",
+      label: "Settled",
+      title: "Deposit complete",
       detail:
-        "Exactly the invoice amount reached the merchant. You can close this page." +
+        "Exactly the requested amount reached the merchant. You can close this page." +
         (overpaid
-          ? " Anything above the invoice amount went back to the wallet you signed with."
+          ? " Anything above the requested amount went back to the wallet you signed with."
           : ""),
       showInstructions: false,
       showWalletStep: false,
@@ -296,7 +296,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
       phase: "returned",
       tone: "warning",
       label: "Returned",
-      title: "This payment was not completed in time",
+      title: "This deposit was not completed in time",
       detail: RECOVERY_NOTE,
       showInstructions: false,
       showWalletStep: false,
@@ -310,9 +310,9 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
           phase: "expired_empty",
           tone: "neutral",
           label: "Expired",
-          title: "This payment link has expired",
+          title: "This deposit link has expired",
           detail:
-            "Nothing was sent to it. Ask the merchant for a new payment link — this address must not be used.",
+            "Nothing was sent to it. Ask the merchant for a new deposit link — this address must not be used.",
           showInstructions: false,
           showWalletStep: false,
           isTerminal: true,
@@ -321,7 +321,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
           phase: "expired_funded",
           tone: "warning",
           label: "Expired",
-          title: "The deadline passed before this payment completed",
+          title: "The deadline passed before this deposit completed",
           detail: RECOVERY_NOTE,
           showInstructions: false,
           showWalletStep: false,
@@ -329,21 +329,21 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
         };
   }
 
-  if (payment.status === "paid") {
+  if (payment.status === "deposited") {
     return {
-      phase: "paid",
+      phase: "deposited",
       tone: "progress",
-      label: "Received",
-      title: "Payment received",
+      label: "Deposited",
+      title: "Deposit received",
       detail:
-        "Payday is settling the invoice amount to the merchant. Nothing more is needed from you.",
+        "Payday is settling the requested amount to the merchant. Nothing more is needed from you.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,
     };
   }
 
-  // Remaining: awaiting_payment and partially_paid, which are the payable states.
+  // Remaining: awaiting_deposit and partially_deposited, which are the payable states.
   const deadlineReached = !payment.payable || local.secondsRemaining <= 0;
 
   if (deadlineReached) {
@@ -363,7 +363,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
   // No address yet: the payer signs from the wallet they will pay from, and
   // the address is derived from that signature. This comes before anything
   // this browser may have sent, because nothing can have been sent.
-  if (readyPayment(payment) === null) {
+  if (readyDepositRequest(payment) === null) {
     return {
       phase: "wallet_required",
       tone: "neutral",
@@ -391,11 +391,11 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
     };
   }
 
-  if (payment.status === "partially_paid") {
+  if (payment.status === "partially_deposited") {
     return {
       phase: "partial",
       tone: "progress",
-      label: "Partially paid",
+      label: "Partially deposited",
       title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${payment.token.symbol}`,
       detail:
         "Transfers accumulate. If the total is still short at the deadline, the balance goes back to the wallet you signed with.",
@@ -408,7 +408,7 @@ function unlockedView(payment: UnlockedPayerPayment, local: CheckoutLocalState):
   return {
     phase: "awaiting",
     tone: "neutral",
-    label: "Awaiting payment",
+    label: "Awaiting deposit",
     title: "Amount due",
     detail: `Send exactly this amount of ${payment.token.symbol} on ${payment.chain.name}, from the wallet you signed with.`,
     showInstructions: true,

@@ -9,7 +9,7 @@ import { formatBytes } from "@/lib/format";
 import { useMerchant } from "./session";
 
 /**
- * One PDF for the invoice. The file goes straight to object storage with the
+ * One PDF for the deposit request. The file goes straight to object storage with the
  * API's presigned headers and is admitted only after the malware scan; the
  * form learns the finalized descriptor's id and nothing else.
  */

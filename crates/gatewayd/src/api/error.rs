@@ -35,19 +35,19 @@ impl ApiError {
             message: "A valid operator bearer credential is required".into(),
         }
     }
-    pub fn invoice_not_blocked() -> Self {
+    pub fn deposit_request_not_blocked() -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "invoice_not_blocked",
-            message: "Invoice is not blocked".into(),
+            code: "deposit_request_not_blocked",
+            message: "Deposit request is not blocked".into(),
         }
     }
 
     pub fn payer_unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code: "invalid_payment_link",
-            message: "This payment link is invalid or expired".into(),
+            code: "invalid_deposit_link",
+            message: "This deposit link is invalid or expired".into(),
         }
     }
 
@@ -71,7 +71,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "account_contact_required",
-            message: "A verified merchant email is required before creating a payment; sign in to the dashboard again".into(),
+            message: "A verified merchant email is required before creating a deposit request; sign in to the dashboard again".into(),
         }
     }
 
@@ -139,25 +139,25 @@ impl ApiError {
         }
     }
 
-    pub fn payment_not_found() -> Self {
+    pub fn deposit_request_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "payment_not_found",
-            message: "Payment not found".into(),
+            code: "deposit_request_not_found",
+            message: "Deposit request not found".into(),
         }
     }
 
-    pub fn invalid_payment_reference() -> Self {
+    pub fn invalid_deposit_reference() -> Self {
         Self::invalid_request(
-            "reference must be a complete payment ID (pay_…) or payment address (0x…)",
+            "reference must be a complete deposit request ID (dr_…) or deposit address (0x…)",
         )
     }
 
-    pub fn payment_not_payable() -> Self {
+    pub fn deposit_request_not_payable() -> Self {
         Self {
             status: StatusCode::GONE,
-            code: "payment_not_payable",
-            message: "This payment is no longer accepting funds".into(),
+            code: "deposit_request_not_payable",
+            message: "This deposit request is no longer accepting funds".into(),
         }
     }
 
@@ -255,7 +255,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "attachment_not_ready",
-            message: "Finalize the upload before attaching it to an invoice".into(),
+            message: "Finalize the upload before attaching it to a deposit request".into(),
         }
     }
 
@@ -282,24 +282,24 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "attachment_already_attached",
-            message: "This attachment already belongs to an issued invoice".into(),
+            message: "This attachment already belongs to an issued deposit request".into(),
         }
     }
 
-    pub fn payment_not_settled() -> Self {
+    pub fn deposit_request_not_settled() -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "payment_not_settled",
-            message: "Proof of Payment is available once the payment has settled".into(),
+            code: "deposit_request_not_settled",
+            message: "Proof of Payment is available once the deposit has settled".into(),
         }
     }
 
     /// Funds credited to the payment came from a wallet other than the one
     /// the payer attested, so no proof can claim the attested wallet paid.
-    pub fn payment_sender_mismatch() -> Self {
+    pub fn deposit_sender_mismatch() -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "payment_sender_mismatch",
+            code: "deposit_sender_mismatch",
             message: "Credited transfers came from a wallet other than the payer's attested wallet; no Proof of Payment can be issued".into(),
         }
     }
@@ -310,7 +310,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "wallet_required",
-            message: "The payment address exists once the payer has attested their wallet".into(),
+            message: "The deposit address exists once the payer has attested their wallet".into(),
         }
     }
 
@@ -346,7 +346,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "verification_required",
-            message: "Complete verification to view this invoice's payment details".into(),
+            message: "Complete verification to view this deposit request's details".into(),
         }
     }
 
@@ -372,7 +372,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "verification_not_required",
-            message: "This invoice does not require verification".into(),
+            message: "This deposit request does not require verification".into(),
         }
     }
 
@@ -393,7 +393,7 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             code: "client_secret_invalid",
             message:
-                "The client secret is not valid for this payment; return to the app that opened it"
+                "The client secret is not valid for this deposit request; return to the app that opened it"
                     .into(),
         }
     }
@@ -404,8 +404,9 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "client_secret_used",
-            message: "This link was already opened; return to the app and open the payment again"
-                .into(),
+            message:
+                "This link was already opened; return to the app and open the deposit request again"
+                    .into(),
         }
     }
 
@@ -445,30 +446,30 @@ impl ApiError {
     }
 
     /// The deployment has no onboarding payer wallet configured.
-    pub fn onboarding_payment_unavailable() -> Self {
+    pub fn onboarding_deposit_unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "onboarding_payment_unavailable",
-            message: "The onboarding demo payment is not available on this deployment".into(),
+            code: "onboarding_deposit_unavailable",
+            message: "The onboarding demo deposit is not available on this deployment".into(),
         }
     }
 
     /// Bounds the endpoint to the one reserved, self-issued deposit request
     /// shape — never a general "settle any invoice" affordance.
-    pub fn onboarding_payment_not_eligible() -> Self {
+    pub fn onboarding_deposit_not_eligible() -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "onboarding_payment_not_eligible",
-            message: "This payment is not the onboarding walkthrough's demo request".into(),
+            code: "onboarding_deposit_not_eligible",
+            message: "This deposit request is not the onboarding walkthrough's demo request".into(),
         }
     }
 
     /// At most one onboarding demo payment per account, ever.
-    pub fn onboarding_payment_already_claimed() -> Self {
+    pub fn onboarding_deposit_already_claimed() -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "onboarding_payment_already_claimed",
-            message: "This account has already completed its onboarding demo payment".into(),
+            code: "onboarding_deposit_already_claimed",
+            message: "This account has already completed its onboarding demo deposit".into(),
         }
     }
 

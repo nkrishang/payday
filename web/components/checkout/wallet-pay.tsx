@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReadyPayerPayment } from "@/lib/checkout-state";
+import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, Wallet } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { erc20Abi, type Hex } from "viem";
@@ -23,12 +23,12 @@ import { walletErrorMessage } from "./wallet-errors";
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
 /**
- * Paying in the page is a plain ERC-20 transfer to the payment's one-time
+ * Paying in the page is a plain ERC-20 transfer to the deposit request's one-time
  * address — no approval, no contract call, nothing that can redirect funds.
  *
  * Two invariants are enforced here rather than trusted:
  *
- * 1. The amount is `remaining_base_units` read straight off the newest payment
+ * 1. The amount is `remaining_base_units` read straight off the newest deposit request
  *    at the moment of signing. It is never re-derived from the display string
  *    and never taken from a stale render.
  * 2. The chain and token contract are checked against this deployment's
@@ -43,7 +43,7 @@ export function WalletPay({
   payment,
   onSent,
 }: {
-  payment: ReadyPayerPayment;
+  payment: ReadyPayerDepositRequest;
   onSent: (hash: string) => void;
 }) {
   const { address, isConnected, chainId } = useAccount();
@@ -114,7 +114,7 @@ export function WalletPay({
         await switchChainAsync({ chainId: paydayChain.id });
       }
 
-      // Re-read the outstanding amount at signing time: a partial payment may
+      // Re-read the outstanding amount at signing time: a partial deposit may
       // have landed while this page was open.
       const amount = BigInt(payment.remaining_base_units);
       if (amount <= 0n) return;
@@ -144,7 +144,7 @@ export function WalletPay({
   if (!supported) {
     return (
       <p className="rounded-[10px] border border-line px-3.5 py-3 text-[13px] leading-relaxed text-muted">
-        This checkout is configured for {config.chainName}, but the payment asks for{" "}
+        This checkout is configured for {config.chainName}, but the deposit request asks for{" "}
         {payment.chain.name} and {truncateAddress(payment.token.address)}. Pay by scanning the code
         or copying the address instead.
       </p>

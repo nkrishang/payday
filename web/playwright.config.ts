@@ -6,7 +6,7 @@ const APP_PORT = 3003;
 /**
  * The checkout renders on the server, so intercepting requests in the browser
  * would miss the first paint entirely. Instead both the app and the browser
- * talk to a stub payer API, and the payment id selects the scenario. The same
+ * talk to a stub payer API, and the deposit request id selects the scenario. The same
  * stub plays the merchant API for the dashboard specs, and Privy itself is
  * replaced at bundle time by `test/privy-stub.tsx` (`PAYDAY_PRIVY_STUB`).
  */

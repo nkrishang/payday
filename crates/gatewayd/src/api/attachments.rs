@@ -14,8 +14,8 @@ use gateway_db::{AccountId, AttachmentStatus, CreateAttachmentUpload, DbAttachme
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
-use crate::api::invoices::resolve_payment;
 use crate::attachments::{AttachmentError, AttachmentStore, CLEAN_SCAN};
 use crate::state::AppState;
 
@@ -174,12 +174,12 @@ pub(crate) async fn expire(
 }
 
 /// The merchant's view of an issued invoice's PDF, with a fresh signed link.
-pub async fn payment_attachment(
+pub async fn deposit_request_attachment(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
 ) -> Result<(HeaderMap, Json<AttachmentDescriptor>), ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     let attachment = state
         .attachments
         .find_by_invoice(row.id)

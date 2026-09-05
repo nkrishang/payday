@@ -18,9 +18,9 @@ export type ClientSecretStatus =
   | "exchanging"
   /** The exchange said the secret was already spent. */
   | "used"
-  /** The exchange refused the secret: unknown, expired, or for another payment. */
+  /** The exchange refused the secret: unknown, expired, or for another deposit request. */
   | "invalid"
-  /** The payment is closed; nothing can open it now. */
+  /** The deposit request is closed; nothing can open it now. */
   | "closed"
   /** The API could not be reached; the secret may still be good. */
   | "unavailable";
@@ -100,7 +100,7 @@ function describe(cause: unknown): ClientSecretStatus {
     case "verification_method_not_applicable":
     case "verification_not_required":
       return "invalid";
-    case "payment_not_payable":
+    case "deposit_request_not_payable":
       return "closed";
     default:
       return cause.status >= 500 ? "unavailable" : "invalid";
@@ -108,7 +108,7 @@ function describe(cause: unknown): ClientSecretStatus {
 }
 
 /**
- * What the payer sees while a merchant-session invoice is locked. There is
+ * What the payer sees while a merchant-session deposit request is locked. There is
  * nothing to type and nothing to click: the app that signed them in is the
  * only way in, so the copy says which way to turn.
  */
@@ -123,7 +123,7 @@ export function MerchantSessionGate({
     return (
       <p role="status" className="flex items-center gap-2 text-[13px] text-muted">
         <Loader2 className="size-4 animate-spin" aria-hidden />
-        Opening your payment…
+        Opening your deposit request…
       </p>
     );
   }
@@ -133,15 +133,15 @@ export function MerchantSessionGate({
 function explain(issuerName: string, status: ClientSecretStatus): string {
   switch (status) {
     case "used":
-      return `This link was already opened. If that was you, use the tab it opened in; otherwise go back to ${issuerName} and open the payment again.`;
+      return `This link was already opened. If that was you, use the tab it opened in; otherwise go back to ${issuerName} and open the deposit request again.`;
     case "invalid":
-      return `This link has expired or is not valid. Go back to ${issuerName} and open the payment again.`;
+      return `This link has expired or is not valid. Go back to ${issuerName} and open the deposit request again.`;
     case "closed":
-      return "This payment is closed and can no longer be opened.";
+      return "This deposit request is closed and can no longer be opened.";
     case "unavailable":
-      return "Payday could not be reached. Reload to try again, or go back to the app and open the payment again.";
+      return "Payday could not be reached. Reload to try again, or go back to the app and open the deposit request again.";
     case "none":
     case "exchanging":
-      return `This payment opens from ${issuerName}. Sign in there and open it again; this page cannot show it on its own.`;
+      return `This deposit request opens from ${issuerName}. Sign in there and open it again; this page cannot show it on its own.`;
   }
 }

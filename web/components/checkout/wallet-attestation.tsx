@@ -1,7 +1,7 @@
 "use client";
 
 import { PaydayError } from "@payday/sdk";
-import type { UnlockedPayerPayment } from "@/lib/checkout-state";
+import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, PenLine, Wallet } from "lucide-react";
 import { useCallback, useState } from "react";
 import { useAccount, useDisconnect, useSignTypedData, useSwitchChain } from "wagmi";
@@ -34,7 +34,7 @@ export function WalletAttestation({
   onSession,
   onBound,
 }: {
-  payment: UnlockedPayerPayment;
+  payment: UnlockedPayerDepositRequest;
   payerSession: string | null;
   onSession: (token: string | null) => void;
   onBound: () => void;
@@ -91,7 +91,7 @@ export function WalletAttestation({
   if (!chainMatches) {
     return (
       <p className="rounded-[10px] border border-line px-3.5 py-3 text-[13px] leading-relaxed text-muted">
-        This checkout is configured for {config.chainName}, but the payment asks for{" "}
+        This checkout is configured for {config.chainName}, but the deposit request asks for{" "}
         {payment.chain.name}. It cannot take the wallet signature here; ask the merchant for a
         link on the right network.
       </p>
@@ -137,7 +137,7 @@ export function WalletAttestation({
       ) : null}
 
       <p className="mt-4 text-[12.5px] leading-relaxed text-faint">
-        Signing costs no gas and moves no funds. It tells the merchant which wallet this payment
+        Signing costs no gas and moves no funds. It tells the merchant which wallet this deposit
         will come from; pay from that wallet only.
       </p>
 
@@ -158,7 +158,7 @@ function describe(cause: unknown): string {
       case "payer_session_invalid":
       case "verification_required":
         return "This tab's verification session expired. Reload the page and verify again.";
-      case "payment_not_payable":
+      case "deposit_request_not_payable":
         return "This request is no longer open.";
       default:
         return "The signature could not be submitted. Try again in a moment.";

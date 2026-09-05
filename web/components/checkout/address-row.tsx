@@ -1,9 +1,9 @@
-import type { ReadyPayerPayment } from "@/lib/checkout-state";
+import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { ArrowUpRight } from "lucide-react";
 import { CopyButton } from "@/components/ui/copy-button";
 import { truncateAddress } from "@/lib/format";
 
-export function AddressRow({ payment }: { payment: ReadyPayerPayment }) {
+export function AddressRow({ payment }: { payment: ReadyPayerDepositRequest }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
@@ -26,7 +26,7 @@ export function AddressRow({ payment }: { payment: ReadyPayerPayment }) {
         <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
           {payment.address}
         </span>
-        <CopyButton value={payment.address} label="payment address" className="bg-surface" />
+        <CopyButton value={payment.address} label="deposit address" className="bg-surface" />
       </div>
       <p className="mt-2 text-[12px] leading-relaxed text-faint">
         Send from{" "}

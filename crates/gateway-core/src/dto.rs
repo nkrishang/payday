@@ -1,4 +1,5 @@
-//! Customer-facing HTTP types. Internal invoice terminology stops at this seam.
+//! Merchant- and payer-facing HTTP types. The API speaks of deposit requests
+//! and deposits; the internal invoice terminology stops at this seam.
 
 use alloy_primitives::utils::format_units;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -12,7 +13,7 @@ pub const PDF_MIME_TYPE: &str = "application/pdf";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreatePaymentRequest {
+pub struct CreateDepositRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -20,7 +21,7 @@ pub struct CreatePaymentRequest {
     pub payout_address: String,
     pub amount: String,
     pub issuer: Party,
-    pub bill_to: Party,
+    pub payer: Party,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customer_id: Option<Uuid>,
     /// The issuer identity this is issued under. The `issuer` party above is
@@ -98,10 +99,10 @@ pub struct AttributionDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentResponse {
+pub struct DepositRequestResponse {
     pub id: String,
-    /// Shareable, payment-scoped page for the payer.
-    pub payment_url: String,
+    /// Shareable, request-scoped page for the payer: the hosted deposit checkout.
+    pub deposit_url: String,
     /// The one-time payment address. `None` until the payer attests the
     /// wallet they will pay from: the address commits to that wallet, so it
     /// cannot exist before.
@@ -129,7 +130,7 @@ pub struct PaymentResponse {
     pub fee_amount_base_units: String,
     pub net_amount: String,
     pub net_amount_base_units: String,
-    pub status: PaymentStatus,
+    pub status: DepositRequestStatus,
     pub token: TokenDto,
     pub chain: ChainDto,
     pub settlement_tx_hash: Option<String>,
@@ -141,7 +142,7 @@ pub struct PaymentResponse {
     pub self_settlement: Option<SelfSettlementDto>,
     pub attention: Option<AttentionDto>,
     pub issuer: Party,
-    pub bill_to: Party,
+    pub payer: Party,
     pub notes: Option<String>,
     pub heading: Option<String>,
     pub reference: Option<String>,
@@ -155,7 +156,7 @@ pub struct PaymentResponse {
     /// Merchant-session mode only, and only in the response that minted it:
     /// the single-use secret that opens the hosted checkout for the payer the
     /// merchant authenticated. Stored hashed, so no later read returns it;
-    /// `POST /v1/payments/{id}/client-secret` mints another.
+    /// `POST /v1/deposit-requests/{id}/client-secret` mints another.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,8 +165,8 @@ pub struct PaymentResponse {
     pub metadata: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
-    pub paid_at: Option<String>,
-    pub paid_at_block: Option<String>,
+    pub deposited_at: Option<String>,
+    pub deposited_at_block: Option<String>,
     pub expired_at: Option<String>,
     pub cancellation_requested_at: Option<String>,
     pub transfers: Vec<TransferDto>,
@@ -307,30 +308,30 @@ pub struct VerificationDetailResponse {
     pub attempts: Vec<VerificationAttemptResponse>,
 }
 
-/// Invoice content revealed only once the payer may see it (product plan §4.3).
+/// Deposit request content revealed only once the payer may see it (product plan §4.3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PayerInvoiceDetails {
+pub struct PayerDepositRequestDetails {
     pub amount: String,
     pub amount_base_units: String,
-    pub bill_to: Party,
+    pub payer: Party,
     pub notes: Option<String>,
     pub reference: Option<String>,
     pub attachment: Option<AttachmentDescriptor>,
 }
 
-/// Progressive disclosure for one payer. Every payment mechanic and invoice
+/// Progressive disclosure for one payer. Every deposit mechanic and request
 /// detail — including the settlement transaction, which would reveal the
 /// address and amount on chain — is present only when `content_unlocked` is
-/// true; a gated invoice shows the issuer, the heading, the policy, the
+/// true; a gated deposit request shows the issuer, the heading, the policy, the
 /// lifecycle status, and what verification remains.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PayerPaymentResponse {
+pub struct PayerDepositRequestResponse {
     pub id: String,
     pub issuer_name: String,
     pub heading: Option<String>,
     pub payer_policy: PayerPolicyResponse,
     pub requirements: VerificationRequirementsResponse,
-    pub status: PaymentStatus,
+    pub status: DepositRequestStatus,
     /// Whether the gateway still considers this address payable.
     pub payable: bool,
     pub expires_at: String,
@@ -359,19 +360,19 @@ pub struct PayerPaymentResponse {
     pub address_explorer_url: Option<String>,
     /// EIP-681 request for the amount still due, absent after the deadline or
     /// after the payment has left the payable state.
-    pub payment_uri: Option<String>,
-    pub invoice: Option<PayerInvoiceDetails>,
+    pub deposit_uri: Option<String>,
+    pub details: Option<PayerDepositRequestDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentSummaryResponse {
+pub struct DepositRequestSummaryResponse {
     pub id: String,
     pub heading: Option<String>,
-    pub bill_to_name: String,
+    pub payer_name: String,
     pub reference: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: String,
-    pub status: PaymentStatus,
+    pub status: DepositRequestStatus,
     pub amount: String,
     pub received: String,
     pub payer_policy_mode: PayerPolicyMode,
@@ -384,14 +385,14 @@ pub struct PaymentSummaryResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentListResponse {
-    pub payments: Vec<PaymentSummaryResponse>,
+pub struct DepositRequestListResponse {
+    pub deposit_requests: Vec<DepositRequestSummaryResponse>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelPaymentResponse {
-    pub payment: PaymentResponse,
+pub struct CancelDepositRequestResponse {
+    pub deposit_request: DepositRequestResponse,
     pub advisory: String,
 }
 
@@ -400,28 +401,28 @@ pub struct CancelPaymentResponse {
 /// dashboard can unlock the embedded payer view immediately), and the hash
 /// of the transfer that was just broadcast.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OnboardingPaymentResponse {
+pub struct OnboardingDepositResponse {
     pub payer_session: String,
     pub tx_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PaymentStatus {
-    AwaitingPayment,
-    PartiallyPaid,
-    Paid,
+pub enum DepositRequestStatus {
+    AwaitingDeposit,
+    PartiallyDeposited,
+    Deposited,
     Settled,
     Expired,
     Returned,
     NeedsAttention,
 }
-impl PaymentStatus {
+impl DepositRequestStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AwaitingPayment => "awaiting_payment",
-            Self::PartiallyPaid => "partially_paid",
-            Self::Paid => "paid",
+            Self::AwaitingDeposit => "awaiting_deposit",
+            Self::PartiallyDeposited => "partially_deposited",
+            Self::Deposited => "deposited",
             Self::Settled => "settled",
             Self::Expired => "expired",
             Self::Returned => "returned",
@@ -430,13 +431,13 @@ impl PaymentStatus {
     }
 }
 
-impl std::str::FromStr for PaymentStatus {
+impl std::str::FromStr for DepositRequestStatus {
     type Err = ();
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         [
-            Self::AwaitingPayment,
-            Self::PartiallyPaid,
-            Self::Paid,
+            Self::AwaitingDeposit,
+            Self::PartiallyDeposited,
+            Self::Deposited,
             Self::Settled,
             Self::Expired,
             Self::Returned,
@@ -489,7 +490,7 @@ pub fn masked_email(value: &str) -> String {
     masked
 }
 
-impl PaymentResponse {
+impl DepositRequestResponse {
     /// Project the domain model. Fields that live only in the database row
     /// (timestamps, transfers, the customer link, the attachment's filename)
     /// are filled in by the handler.
@@ -502,7 +503,7 @@ impl PaymentResponse {
         let binding = inv.binding.as_ref();
         Self {
             id: inv.id.to_string(),
-            payment_url: String::new(),
+            deposit_url: String::new(),
             address: binding.map(|b| b.payment_address.0.to_checksum(None)),
             address_explorer_url: None,
             payout_address: inv.beneficiary.0.to_checksum(None),
@@ -547,7 +548,7 @@ impl PaymentResponse {
             }),
             attention,
             issuer: snapshot.issuer,
-            bill_to: snapshot.bill_to,
+            payer: snapshot.bill_to,
             notes: snapshot.notes,
             heading: snapshot.heading,
             reference: snapshot.reference,
@@ -566,8 +567,8 @@ impl PaymentResponse {
             metadata: serde_json::json!({}),
             created_at: String::new(),
             updated_at: String::new(),
-            paid_at: None,
-            paid_at_block: None,
+            deposited_at: None,
+            deposited_at_block: None,
             expired_at: None,
             cancellation_requested_at: inv.cancellation_requested_at,
             transfers: Vec::new(),
@@ -581,18 +582,18 @@ impl PaymentResponse {
     }
 }
 
-fn payment_status(inv: &Invoice) -> PaymentStatus {
+fn payment_status(inv: &Invoice) -> DepositRequestStatus {
     if inv.blocked_reason.is_some() || inv.status == InvoiceStatus::Blocked {
-        return PaymentStatus::NeedsAttention;
+        return DepositRequestStatus::NeedsAttention;
     }
     match inv.status {
-        InvoiceStatus::Created if inv.received.0.is_zero() => PaymentStatus::AwaitingPayment,
-        InvoiceStatus::Created => PaymentStatus::PartiallyPaid,
-        InvoiceStatus::Funded | InvoiceStatus::Deploying => PaymentStatus::Paid,
-        InvoiceStatus::Fulfilled => PaymentStatus::Settled,
-        InvoiceStatus::Expired => PaymentStatus::Expired,
-        InvoiceStatus::Recovered => PaymentStatus::Returned,
-        InvoiceStatus::Blocked => PaymentStatus::NeedsAttention,
+        InvoiceStatus::Created if inv.received.0.is_zero() => DepositRequestStatus::AwaitingDeposit,
+        InvoiceStatus::Created => DepositRequestStatus::PartiallyDeposited,
+        InvoiceStatus::Funded | InvoiceStatus::Deploying => DepositRequestStatus::Deposited,
+        InvoiceStatus::Fulfilled => DepositRequestStatus::Settled,
+        InvoiceStatus::Expired => DepositRequestStatus::Expired,
+        InvoiceStatus::Recovered => DepositRequestStatus::Returned,
+        InvoiceStatus::Blocked => DepositRequestStatus::NeedsAttention,
     }
 }
 fn chain_name(id: u64) -> &'static str {
@@ -612,19 +613,19 @@ fn attention(code: &str) -> AttentionDto {
         ),
         "recovery_blacklisted" => (
             "The payer's wallet, where excess funds return, is restricted by the USDC issuer.",
-            "Contact Payday support with the payment ID; the payer may need to be contacted.",
+            "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
-            "Circle has blacklisted the payment address.",
+            "Circle has blacklisted the deposit address.",
             "Contact support; do not send additional funds.",
         ),
         "balance_below_amount" => (
-            "The payment address balance is lower than the confirmed amount.",
+            "The deposit address balance is lower than the confirmed amount.",
             "Contact support so Payday can investigate safely.",
         ),
         _ => (
             "Automatic settlement has paused.",
-            "Funds remain safe at the payment address; contact support.",
+            "Funds remain safe at the deposit address; contact support.",
         ),
     };
     AttentionDto {
@@ -700,25 +701,61 @@ mod tests {
         invoice
     }
 
-    fn payment(status: InvoiceStatus, received: u64, blocked: Option<&str>) -> PaymentResponse {
+    fn payment(
+        status: InvoiceStatus,
+        received: u64,
+        blocked: Option<&str>,
+    ) -> DepositRequestResponse {
         let mut invoice = bound(invoice(PayerPolicy::Permissionless));
         invoice.status = status;
         invoice.received = Amount(U256::from(received));
         invoice.blocked_reason = blocked.map(str::to_owned);
-        PaymentResponse::from_invoice(invoice, None)
+        DepositRequestResponse::from_invoice(invoice, None)
     }
 
     #[test]
     fn projects_every_customer_status_and_blocking_takes_precedence() {
         for (internal, received, expected) in [
-            (InvoiceStatus::Created, 0, PaymentStatus::AwaitingPayment),
-            (InvoiceStatus::Created, 1, PaymentStatus::PartiallyPaid),
-            (InvoiceStatus::Funded, 1_000_000, PaymentStatus::Paid),
-            (InvoiceStatus::Deploying, 1_000_000, PaymentStatus::Paid),
-            (InvoiceStatus::Fulfilled, 1_000_000, PaymentStatus::Settled),
-            (InvoiceStatus::Expired, 400_000, PaymentStatus::Expired),
-            (InvoiceStatus::Recovered, 400_000, PaymentStatus::Returned),
-            (InvoiceStatus::Blocked, 1, PaymentStatus::NeedsAttention),
+            (
+                InvoiceStatus::Created,
+                0,
+                DepositRequestStatus::AwaitingDeposit,
+            ),
+            (
+                InvoiceStatus::Created,
+                1,
+                DepositRequestStatus::PartiallyDeposited,
+            ),
+            (
+                InvoiceStatus::Funded,
+                1_000_000,
+                DepositRequestStatus::Deposited,
+            ),
+            (
+                InvoiceStatus::Deploying,
+                1_000_000,
+                DepositRequestStatus::Deposited,
+            ),
+            (
+                InvoiceStatus::Fulfilled,
+                1_000_000,
+                DepositRequestStatus::Settled,
+            ),
+            (
+                InvoiceStatus::Expired,
+                400_000,
+                DepositRequestStatus::Expired,
+            ),
+            (
+                InvoiceStatus::Recovered,
+                400_000,
+                DepositRequestStatus::Returned,
+            ),
+            (
+                InvoiceStatus::Blocked,
+                1,
+                DepositRequestStatus::NeedsAttention,
+            ),
         ] {
             assert_eq!(payment(internal, received, None).status, expected);
         }
@@ -727,7 +764,7 @@ mod tests {
             1_000_000,
             Some("beneficiary_blacklisted"),
         );
-        assert_eq!(blocked.status, PaymentStatus::NeedsAttention);
+        assert_eq!(blocked.status, DepositRequestStatus::NeedsAttention);
         assert!(
             blocked
                 .attention
@@ -741,8 +778,8 @@ mod tests {
     fn wire_shape_keeps_customer_vocabulary_and_list_summaries_bounded() {
         let payment = payment(InvoiceStatus::Created, 0, None);
         let json = serde_json::to_value(&payment).unwrap();
-        assert!(json["id"].as_str().unwrap().starts_with("pay_"));
-        assert_eq!(json["status"], "awaiting_payment");
+        assert!(json["id"].as_str().unwrap().starts_with("dr_"));
+        assert_eq!(json["status"], "awaiting_deposit");
         assert_eq!(json["currency"], "USDC");
         assert!(json.get("beneficiary_address").is_none());
         assert!(json.get("memo").is_none());
@@ -758,15 +795,17 @@ mod tests {
         assert!(json.get("refund_address").is_none());
 
         // Before a wallet is bound there is no address and nothing to settle.
-        let unbound = PaymentResponse::from_invoice(invoice(PayerPolicy::Permissionless), None);
+        let unbound =
+            DepositRequestResponse::from_invoice(invoice(PayerPolicy::Permissionless), None);
         let json = serde_json::to_value(&unbound).unwrap();
         assert!(json["address"].is_null());
         assert!(json["payer_wallet"].is_null());
         assert!(json["recovery_address"].is_null());
         assert!(json["self_settlement"].is_null());
-        assert_eq!(json["status"], "awaiting_payment");
+        assert_eq!(json["status"], "awaiting_deposit");
         assert_eq!(json["issuer"]["name"], "Acme");
-        assert_eq!(json["bill_to"]["name"], "Globex");
+        assert_eq!(json["payer"]["name"], "Globex");
+        assert!(json.get("bill_to").is_none());
         assert_eq!(json["heading"], "March retainer");
         assert_eq!(json["reference"], "INV-7");
         assert_eq!(json["payer_policy"]["mode"], "permissionless");
@@ -778,10 +817,10 @@ mod tests {
                 .starts_with("0x")
         );
 
-        let summary = PaymentSummaryResponse {
+        let summary = DepositRequestSummaryResponse {
             id: payment.id,
             heading: payment.heading,
-            bill_to_name: payment.bill_to.name,
+            payer_name: payment.payer.name,
             issuer_id: None,
             reference: None,
             metadata: serde_json::json!({}),
@@ -809,10 +848,10 @@ mod tests {
             "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
             "amount": "1",
             "issuer": {"name": "Acme"},
-            "bill_to": {"name": "Globex"},
+            "payer": {"name": "Globex"},
             "payer_policy": {"mode": "permissionless"}
         });
-        let request: CreatePaymentRequest = serde_json::from_value(accepted.clone()).unwrap();
+        let request: CreateDepositRequest = serde_json::from_value(accepted.clone()).unwrap();
         assert_eq!(request.metadata, serde_json::json!({}));
         assert!(request.attachment_id.is_none());
 
@@ -823,17 +862,18 @@ mod tests {
             ),
             ("memo", serde_json::json!("Order 1234")),
             ("line_items", serde_json::json!([])),
+            ("bill_to", serde_json::json!({"name": "Globex"})),
         ] {
             let mut rejected = accepted.clone();
             rejected[field] = value;
-            let error = serde_json::from_value::<CreatePaymentRequest>(rejected).unwrap_err();
+            let error = serde_json::from_value::<CreateDepositRequest>(rejected).unwrap_err();
             assert!(error.to_string().contains(field), "{field}: {error}");
         }
-        for required in ["issuer", "bill_to", "payer_policy"] {
+        for required in ["issuer", "payer", "payer_policy"] {
             let mut missing = accepted.clone();
             missing.as_object_mut().unwrap().remove(required);
             assert!(
-                serde_json::from_value::<CreatePaymentRequest>(missing).is_err(),
+                serde_json::from_value::<CreateDepositRequest>(missing).is_err(),
                 "{required} must be required"
             );
         }
@@ -972,7 +1012,7 @@ mod tests {
 
     #[test]
     fn merchant_response_carries_the_full_policy_for_the_verified_mode() {
-        let response = PaymentResponse::from_invoice(
+        let response = DepositRequestResponse::from_invoice(
             invoice(PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
             }),
@@ -986,7 +1026,7 @@ mod tests {
 
     #[test]
     fn merchant_response_carries_the_payer_reference_and_no_secret_unless_minted() {
-        let mut response = PaymentResponse::from_invoice(
+        let mut response = DepositRequestResponse::from_invoice(
             invoice(PayerPolicy::MerchantSession {
                 payer_reference: "user_123".into(),
             }),

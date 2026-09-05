@@ -1,6 +1,6 @@
-# Stuck invoice triage
+# Stuck deposit request triage
 
-An invoice is not progressing through its lifecycle. The normal flow is:
+A deposit request is not progressing through its lifecycle. The normal flow is:
 
 ```
 created → funded → deploying → fulfilled
@@ -12,51 +12,51 @@ created → funded → deploying → fulfilled
 - `funded`: finalized credit reached the amount; queued for a helper transaction.
 - `deploying`: claimed by the sweep worker; a helper transaction is in flight
   or being retried.
-- `fulfilled`: the `Payment` contract paid the beneficiary exactly the invoice
+- `fulfilled`: the `Payment` contract paid the beneficiary exactly the deposit request
   amount; any overpayment remainder went back to the payer's attested wallet.
 - `recovered`: the `Payment` contract paid the whole balance back to the
-  payer's attested wallet (the invoice expired before it could be settled).
-- `expired`: chain time passed the deadline while the invoice was open. Any
+  payer's attested wallet (the deposit request expired before it could be settled).
+- `expired`: chain time passed the deadline while the deposit request was open. Any
   balance at the address is recovered automatically; the status becomes
   `recovered` when that finalizes.
-- `blocked`: the worker gave up on the invoice; `blocked_reason` says why.
+- `blocked`: the worker gave up on the deposit request; `blocked_reason` says why.
 
 Funds that arrive after the contract exists are forwarded to the payer's
 attested wallet automatically and never change the status. Every nonzero
 return — overpayment remainder, expired balance, or late transfer — is a row
-in `recovered_funds` (see "Reconciling returned funds" below). An invoice
+in `recovered_funds` (see "Reconciling returned funds" below). A deposit request
 that never had its wallet bound has no address and can only wait or expire. The API reports
 `received_base_units`, `execute_tx_hash`, `resolved_at_block`, and
-`blocked_reason` for every invoice.
+`blocked_reason` for every deposit request.
 
-## Step 1: Check the invoice status
+## Step 1: Check the deposit request status
 
 ```bash
 export PAYDAY_API_URL="https://api.payday.sh"
-export PAYDAY_API_KEY="<API-key-for-the-account-that-created-the-invoice>"
+export PAYDAY_API_KEY="<API-key-for-the-account-that-created-the-deposit request>"
 ```
 
 Then:
 
 ```bash
 curl -s -H "Authorization: Bearer $PAYDAY_API_KEY" \
-  "$PAYDAY_API_URL/v1/payments/<PAYMENT_ID>" | python3 -m json.tool
+  "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" | python3 -m json.tool
 ```
 
 Note the customer-facing `status`, `received_base_units`, `attention`, and
 `address` from the response. Database queries below use the UUID portion after
-the `pay_` prefix and expose internal lifecycle names intentionally.
+the `dr_` prefix and expose internal lifecycle names intentionally.
 
 ## Step 2: Verify the USDC transfer landed on-chain
 
 ```bash
 cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  'balanceOf(address)(uint256)' <PAYMENT_ADDRESS> \
+  'balanceOf(address)(uint256)' <DEPOSIT_ADDRESS> \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
 If the balance is 0 and `received_base_units` is 0, the payer has not sent
-USDC yet (or sent to the wrong address). The invoice will remain in `created`
+USDC yet (or sent to the wrong address). The deposit request will remain in `created`
 until a transfer is detected by the indexer.
 
 ## Step 3: Stuck in `created` (USDC was sent)
@@ -79,10 +79,10 @@ The indexer hasn't processed the block containing the transfer yet.
 
 4. If the indexer is running, caught up, and still not detecting the transfer,
    verify the transfer actually exists by searching for USDC Transfer logs to
-   the payment address:
+   the deposit address:
 
    ```bash
-   RECIPIENT_TOPIC=$(python3 -c "print('0x' + '<PAYMENT_ADDRESS>'.lower()[2:].zfill(64))")
+   RECIPIENT_TOPIC=$(python3 -c "print('0x' + '<DEPOSIT_ADDRESS>'.lower()[2:].zfill(64))")
    FROM=$((CURRENT_BLOCK - 100))
    curl -s -X POST "$MONAD_RPC_URL" \
      -H "Content-Type: application/json" \
@@ -91,7 +91,7 @@ The indexer hasn't processed the block containing the transfer yet.
 
 ## Step 4: Stuck in `funded`, `expired`, or `deploying`
 
-The invoice is in the sweep queue. The worker submits one helper transaction
+The deposit request is in the sweep queue. The worker submits one helper transaction
 at a time, so check whether that pipeline is moving:
 
 ```bash
@@ -108,7 +108,7 @@ Possible causes:
   with fees bumped by 12.5% every `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS`, up to
   `PAYDAY_SWEEP_MAX_SUBMISSIONS` times, then pauses and raises
   `payday-indexer-sweep-paused`. See "Sweep worker paused" below.
-- **Transient item failure** (USDC paused, unknown revert): the invoice stays
+- **Transient item failure** (USDC paused, unknown revert): the deposit request stays
   `deploying` with `sweep_attempts` incrementing behind exponential backoff
   (2 s doubling, capped at 5 minutes). After `PAYDAY_SWEEP_MAX_ATTEMPTS` it
   becomes `blocked` with reason `retries_exhausted`.
@@ -123,35 +123,35 @@ The worker stopped trying. `blocked_reason` is one of:
 | Reason | Meaning | Action |
 |--------|---------|--------|
 | `beneficiary_blacklisted` | Circle blacklisted the beneficiary | Agree a new destination with the merchant; after expiry the balance returns to the payer's wallet instead |
-| `recovery_blacklisted` | Circle blacklisted the payer's attested wallet, the address's recovery term | Only the payer can resolve this with Circle. The wallet is committed into the address, so nothing can redirect the return; contact the merchant so they can reach the payer. An exact, on-time balance never touches the recovery term, so an exact payment still settles |
-| `payment_address_blacklisted` | Circle blacklisted the payment address itself | Compliance escalation; nothing can move the funds |
+| `recovery_blacklisted` | Circle blacklisted the payer's attested wallet, the address's recovery term | Only the payer can resolve this with Circle. The wallet is committed into the address, so nothing can redirect the return; contact the merchant so they can reach the payer. An exact, on-time balance never touches the recovery term, so an exact deposit still settles |
+| `payment_address_blacklisted` | Circle blacklisted the deposit address itself | Compliance escalation; nothing can move the funds |
 | `balance_below_amount` | The chain balance is below the credited amount | Finalized history disagreed with the ledger; investigate the RPC provider before anything else |
-| `retries_exhausted` | Repeated unclassified failures | Read the receipts of the batches in `sweep_batches` for this invoice |
-| `parameters_mismatch` | The row no longer derives its own payment address | Database corruption or tampering; do not touch the funds until understood |
+| `retries_exhausted` | Repeated unclassified failures | Read the receipts of the batches in `sweep_batches` for this deposit request |
+| `parameters_mismatch` | The row no longer derives its own deposit address | Database corruption or tampering; do not touch the funds until understood |
 | `corrupt_row` | The row failed to decode | As above |
 
-Once the cause is resolved, release the invoice through the audited operator
+Once the cause is resolved, release the deposit request through the audited operator
 API. The operator credential is distinct from merchant API keys; retrieve it
 from Secrets Manager into an environment variable without printing it:
 
 ```bash
 export PAYDAY_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
   --secret-id payday/admin-bearer --query SecretString --output text)"
-curl -fsS -X POST "$PAYDAY_API_URL/v1/admin/payments/<PAYMENT_ID>/release" \
+curl -fsS -X POST "$PAYDAY_API_URL/v1/admin/deposit-requests/<DEPOSIT_REQUEST_ID>/release" \
   -H "Authorization: Bearer $PAYDAY_ADMIN_SECRET" | jq
 unset PAYDAY_ADMIN_SECRET
 ```
 
-A terminal (`fulfilled`/`recovered`) invoice can also carry a `blocked_reason`
+A terminal (`fulfilled`/`recovered`) deposit request can also carry a `blocked_reason`
 when a *late* transfer could not be forwarded to the payer's wallet; clear
 only the reason in that case.
 
-The API atomically rejects unknown or already-released invoices, uses database
+The API atomically rejects unknown or already-released deposit requests, uses database
 time to choose `expired` or `deploying`, and only clears the reason on terminal
 late-transfer blocks. Do not use direct SQL for normal recovery.
 
-The payment page tells payers that payout is paused and their funds remain
-safe, and asks them not to send a second payment.
+The deposit page tells payers that payout is paused and their funds remain
+safe, and asks them not to send a second deposit.
 
 Configure merchant webhooks with `POST /v1/webhooks`; see
 [`webhooks.md`](../webhooks.md) for signing and retry semantics. Gatewayd
@@ -162,7 +162,7 @@ snapshots verified email into a separate outbox and sends through SES. Set
 
 Overpayment remainders, expired balances, and late transfers go back on-chain
 to the payer's attested wallet, the recovery term committed into every
-payment address. Payday holds nothing and returns nothing by hand. The ledger
+deposit address. Payday holds nothing and returns nothing by hand. The ledger
 is the record of what went back, where, and why:
 
 ```sql
@@ -176,7 +176,7 @@ ORDER BY r.recovered_at DESC;
 
 One row per nonzero return, unique on `(invoice_id, transaction_hash,
 reason)`, written in the same transaction that finalized the sweep; each row
-also raised a `payment.recovered_funds` webhook for the merchant. The
+also raised a `deposit_request.recovered_funds` webhook for the merchant. The
 transaction named by the row is the return itself, into
 `invoices.payer_wallet`. The one case needing a human is a payer who paid
 from a wallet other than the one they attested (`likely_unsolicited_at` set):
@@ -193,7 +193,7 @@ log line carries the reason:
   nonce failed to mine. Check the signer balance and the fee market. To
   resolve manually, send any transaction from the KMS key with that nonce and
   a higher fee (for example a zero-value self-transfer) — the worker then sees
-  the nonce consumed, abandons the batch, and re-queues its invoices:
+  the nonce consumed, abandons the batch, and re-queues its deposit requests:
 
   ```bash
   export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw kms_key_arn)"
@@ -201,8 +201,8 @@ log line carries the reason:
     --gas-price <HIGHER_FEE> --aws --rpc-url "$MONAD_RPC_URL"
   ```
 
-- **No outcome for invoice**: the finalized receipt of the helper transaction
-  carries no event for an invoice it should contain. This is an invariant
+- **No outcome for deposit request**: the finalized receipt of the helper transaction
+  carries no event for a deposit request it should contain. This is an invariant
   violation; capture the transaction hash from the log and escalate.
 
 The worker retries on the next pass, so once the condition clears the alarm

@@ -5,6 +5,6 @@ import { redirect } from "next/navigation";
  * own. Links already sent out — from an integration, from a colleague — still
  * land somewhere useful.
  */
-export default function InvoiceDetailPage() {
+export default function DepositDetailPage() {
   redirect("/dashboard");
 }

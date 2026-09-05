@@ -17,35 +17,35 @@ const json = (body, status = 200) =>
 const apiError = (code, status, message = code) =>
   json({ error: { code, message }, request_id: `req-${code}` }, status);
 
-const invoice = {
+const request = {
   amount: "10.00",
   payout_address: "0x1111111111111111111111111111111111111111",
   issuer: { name: "Acme LLC", email: "billing@acme.example" },
-  bill_to: { name: "Customer Inc", details: "12 Main St" },
+  payer: { name: "Customer Inc", details: "12 Main St" },
   payer_policy: { mode: "verified_email", expected_email: "alice@example.com" },
   heading: "March retainer",
   expires_in: 3600,
 };
 
 test("create sends bearer auth, JSON, and the caller's idempotency key", async () => {
-  const mock = mockFetch(() => json({ id: "pay_1", status: "awaiting_payment" }, 201));
+  const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test/", fetch: mock.fetch });
 
-  const payment = await client.payments.create(invoice, "order-123");
+  const payment = await client.depositRequests.create(request, "order-123");
 
-  assert.equal(payment.id, "pay_1");
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payments");
+  assert.equal(payment.id, "dr_1");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/deposit-requests");
   assert.equal(mock.calls[0].init.method, "POST");
   assert.equal(mock.calls[0].init.headers.Authorization, "Bearer secret");
   assert.equal(mock.calls[0].init.headers["Idempotency-Key"], "order-123");
-  assert.deepEqual(JSON.parse(mock.calls[0].init.body), invoice);
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body), request);
 });
 
 test("create sends exactly the invoice fields, never a refund address or memo", async () => {
-  const mock = mockFetch(() => json({ id: "pay_1", status: "awaiting_payment" }, 201));
+  const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await client.payments.create(invoice, "order-123");
+  await client.depositRequests.create(request, "order-123");
 
   // The API rejects unknown fields outright, so the exact payload on the wire
   // is what matters — not the type the caller was offered.
@@ -53,14 +53,14 @@ test("create sends exactly the invoice fields, never a refund address or memo", 
   assert.equal("refund_address" in sent, false);
   assert.equal("memo" in sent, false);
   assert.deepEqual(Object.keys(sent).sort(), [
-    "amount", "bill_to", "expires_in", "heading", "issuer", "payer_policy", "payout_address",
+    "amount", "expires_in", "heading", "issuer", "payer", "payer_policy", "payout_address",
   ]);
 });
 
 test("create rejects a missing idempotency key before fetch", () => {
   const mock = mockFetch(() => { throw new Error("must not fetch"); });
   const client = new PaydayClient({ apiKey: "secret", fetch: mock.fetch });
-  assert.throws(() => client.payments.create(invoice, ""), /idempotencyKey is required/);
+  assert.throws(() => client.depositRequests.create(request, ""), /idempotencyKey is required/);
   assert.equal(mock.calls.length, 0);
 });
 
@@ -71,53 +71,53 @@ test("the client takes exactly one credential and sends either as the bearer", a
     /exactly one of apiKey or accessToken/,
   );
 
-  const mock = mockFetch(() => json({ payments: [], next_cursor: null }));
+  const mock = mockFetch(() => json({ deposit_requests: [], next_cursor: null }));
   const dashboard = new PaydayClient({ accessToken: "eyJ.access.token", baseUrl: "https://example.test", fetch: mock.fetch });
-  await dashboard.payments.list();
+  await dashboard.depositRequests.list();
   assert.equal(mock.calls[0].init.headers.Authorization, "Bearer eyJ.access.token");
 });
 
-test("list and long polling encode payment query parameters", async () => {
-  const mock = mockFetch(() => new Response('{"payments":[],"next_cursor":null}'));
+test("list and long polling encode deposit request query parameters", async () => {
+  const mock = mockFetch(() => new Response('{"deposit_requests":[],"next_cursor":null}'));
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
-  const page = await client.payments.list({ starting_after: "pay_cursor/id", status: "paid", reference: "a & b", limit: 25 });
-  assert.deepEqual(page, { payments: [], next_cursor: null });
-  assert.equal(mock.calls[0].url, "https://example.test/v1/payments?starting_after=pay_cursor%2Fid&status=paid&reference=a+%26+b&limit=25");
-  await client.payments.get("payment/id", { waitForChange: true, timeout: 30 });
-  assert.equal(mock.calls[1].url, "https://example.test/v1/payments/payment%2Fid?wait_for=change&timeout=30");
+  const page = await client.depositRequests.list({ starting_after: "dr_cursor/id", status: "deposited", reference: "a & b", limit: 25 });
+  assert.deepEqual(page, { deposit_requests: [], next_cursor: null });
+  assert.equal(mock.calls[0].url, "https://example.test/v1/deposit-requests?starting_after=dr_cursor%2Fid&status=deposited&reference=a+%26+b&limit=25");
+  await client.depositRequests.get("payment/id", { waitForChange: true, timeout: 30 });
+  assert.equal(mock.calls[1].url, "https://example.test/v1/deposit-requests/payment%2Fid?wait_for=change&timeout=30");
 });
 
-test("attachment, invoice PDF, and proof reads use the payment sub-routes", async () => {
+test("attachment, request PDF, and proof reads use the deposit request sub-routes", async () => {
   const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
   const mock = mockFetch((url) => {
-    if (url.endsWith("/invoice.pdf")) return new Response(pdf, { headers: { "content-type": "application/pdf" } });
-    if (url.endsWith("/proof")) return json({ version: "1", payment_id: "pay_a/b", transfers: [] });
-    return json({ id: "att_1", filename: "invoice.pdf", mime_type: "application/pdf", download_url: "https://signed.example" });
+    if (url.endsWith("/request.pdf")) return new Response(pdf, { headers: { "content-type": "application/pdf" } });
+    if (url.endsWith("/proof")) return json({ version: "1", payment_id: "dr_a/b", transfers: [] });
+    return json({ id: "att_1", filename: "request.pdf", mime_type: "application/pdf", download_url: "https://signed.example" });
   });
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const attachment = await client.payments.attachment("pay_a/b");
-  const blob = await client.payments.invoicePdf("pay_a/b");
-  const proof = await client.payments.proof("pay_a/b");
+  const attachment = await client.depositRequests.attachment("dr_a/b");
+  const blob = await client.depositRequests.requestPdf("dr_a/b");
+  const proof = await client.depositRequests.proof("dr_a/b");
 
   assert.equal(attachment.download_url, "https://signed.example");
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), pdf);
-  assert.equal(proof.payment_id, "pay_a/b");
+  assert.equal(proof.payment_id, "dr_a/b");
   assert.deepEqual(mock.calls.map((call) => [call.init.method, call.url, call.init.headers.Accept]), [
-    ["GET", "https://example.test/v1/payments/pay_a%2Fb/attachment", "application/json"],
-    ["GET", "https://example.test/v1/payments/pay_a%2Fb/invoice.pdf", "application/pdf"],
-    ["GET", "https://example.test/v1/payments/pay_a%2Fb/proof", "application/json"],
+    ["GET", "https://example.test/v1/deposit-requests/dr_a%2Fb/attachment", "application/json"],
+    ["GET", "https://example.test/v1/deposit-requests/dr_a%2Fb/request.pdf", "application/pdf"],
+    ["GET", "https://example.test/v1/deposit-requests/dr_a%2Fb/proof", "application/json"],
   ]);
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, "Bearer secret");
 });
 
-test("proof before settlement surfaces payment_not_settled", async () => {
-  const mock = mockFetch(() => apiError("payment_not_settled", 409, "Payment has not settled"));
+test("proof before settlement surfaces deposit_request_not_settled", async () => {
+  const mock = mockFetch(() => apiError("deposit_request_not_settled", 409, "DepositRequest has not settled"));
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await assert.rejects(client.payments.proof("pay_1"), (error) => {
+  await assert.rejects(client.depositRequests.proof("dr_1"), (error) => {
     assert.ok(error instanceof PaydayError);
-    assert.equal(error.code, "payment_not_settled");
+    assert.equal(error.code, "deposit_request_not_settled");
     assert.equal(error.status, 409);
     return true;
   });
@@ -150,7 +150,7 @@ const slot = {
   headers: { "Content-Type": "application/pdf", "x-amz-server-side-encryption": "aws:kms" },
   expires_at: "2026-09-01T00:05:00Z",
 };
-const ready = { id: "att_1", filename: "invoice.pdf", mime_type: "application/pdf", byte_length: "5", sha256: "0xabc" };
+const ready = { id: "att_1", filename: "request.pdf", mime_type: "application/pdf", byte_length: "5", sha256: "0xabc" };
 
 test("upload reserves a slot, PUTs the bytes with the presigned headers verbatim, then finalizes", async () => {
   const mock = mockFetch((url, init) => {
@@ -162,13 +162,13 @@ test("upload reserves a slot, PUTs the bytes with the presigned headers verbatim
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
 
-  const descriptor = await client.attachments.upload(bytes, "invoice.pdf");
+  const descriptor = await client.attachments.upload(bytes, "request.pdf");
 
   assert.deepEqual(descriptor, ready);
   assert.equal(mock.calls.length, 3);
   const [create, put, finalize] = mock.calls;
   assert.equal(create.init.method, "POST");
-  assert.deepEqual(JSON.parse(create.init.body), { filename: "invoice.pdf" });
+  assert.deepEqual(JSON.parse(create.init.body), { filename: "request.pdf" });
   assert.equal(put.init.method, "PUT");
   // The presigned URL only admits a request whose headers match what was signed,
   // and it is a bucket URL: no Payday bearer may leak to it.
@@ -189,7 +189,7 @@ test("upload retries finalize while the scan is pending and returns once admitte
   });
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const descriptor = await client.attachments.upload(new Blob(["%PDF-"]), "invoice.pdf");
+  const descriptor = await client.attachments.upload(new Blob(["%PDF-"]), "request.pdf");
 
   assert.deepEqual(descriptor, ready);
   assert.equal(finalizeCalls, 2);
@@ -205,7 +205,7 @@ test("upload gives up with attachment_scan_timeout when the scan outlasts the bo
   });
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  await assert.rejects(client.attachments.upload(new Blob(["%PDF-"]), "invoice.pdf", { scanTimeout: 0 }), (error) => {
+  await assert.rejects(client.attachments.upload(new Blob(["%PDF-"]), "request.pdf", { scanTimeout: 0 }), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "attachment_scan_timeout");
     assert.equal(error.requestId, "req-attachment_scan_pending");
@@ -223,7 +223,7 @@ test("upload surfaces a rejection or a failed PUT as the API error, without retr
     return apiError("attachment_rejected", 422, "Not a PDF");
   });
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: rejecting.fetch });
-  await assert.rejects(client.attachments.upload(new Blob(["nope"]), "invoice.pdf"), (error) => {
+  await assert.rejects(client.attachments.upload(new Blob(["nope"]), "request.pdf"), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "attachment_rejected");
     assert.equal(error.status, 422);
@@ -238,7 +238,7 @@ test("upload surfaces a rejection or a failed PUT as the API error, without retr
     throw new Error("finalize must not run after a failed PUT");
   });
   const other = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: failingPut.fetch });
-  await assert.rejects(other.attachments.upload(new Blob(["%PDF-"]), "invoice.pdf"), (error) => {
+  await assert.rejects(other.attachments.upload(new Blob(["%PDF-"]), "request.pdf"), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "attachment_upload_failed");
     assert.equal(error.status, 403);
@@ -258,7 +258,7 @@ test("upload forwards an abort signal to every request and to the scan wait", as
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await assert.rejects(
-    client.attachments.upload(new Blob(["%PDF-"]), "invoice.pdf", { signal: controller.signal }),
+    client.attachments.upload(new Blob(["%PDF-"]), "request.pdf", { signal: controller.signal }),
     /cancelled by the caller/,
   );
   for (const call of mock.calls) assert.equal(call.init.signal, controller.signal);
@@ -283,14 +283,14 @@ test("webhook and status methods use canonical routes", async () => {
 
 test("API errors expose stable code, requestId, and HTTP status", async () => {
   const mock = mockFetch(() => new Response(JSON.stringify({
-    error: { code: "invoice_not_found", message: "Invoice not found" }, request_id: "req-123",
+    error: { code: "deposit_request_not_found", message: "Deposit request not found" }, request_id: "req-123",
   }), { status: 404 }));
   const client = new PaydayClient({ apiKey: "secret", fetch: mock.fetch });
 
-  await assert.rejects(client.payments.get("missing"), (error) => {
+  await assert.rejects(client.depositRequests.get("missing"), (error) => {
     assert.ok(error instanceof PaydayError);
-    assert.equal(error.message, "Invoice not found");
-    assert.equal(error.code, "invoice_not_found");
+    assert.equal(error.message, "Deposit request not found");
+    assert.equal(error.code, "deposit_request_not_found");
     assert.equal(error.requestId, "req-123");
     assert.equal(error.status, 404);
     return true;
@@ -311,19 +311,19 @@ test("verification detail uses the payment sub-route", async () => {
   const mock = mockFetch(() => json(detail));
   const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const read = await client.payments.verification("pay_a/b");
+  const read = await client.depositRequests.verification("dr_a/b");
   assert.equal(read.attempts[0].status, "approved");
   assert.equal(read.facts.email, "approved");
   assert.deepEqual(mock.calls.map((call) => [call.init.method ?? "GET", call.url]), [
-    ["GET", "https://example.test/v1/payments/pay_a%2Fb/verification"],
+    ["GET", "https://example.test/v1/deposit-requests/dr_a%2Fb/verification"],
   ]);
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, "Bearer k");
 });
 
-test("a merchant-session payment returns its client secret once and mints more on request", async () => {
+test("a merchant-session deposit request returns its client secret once and mints more on request", async () => {
   const issued = {
-    id: "pay_1",
-    payment_url: "https://payday.sh/pay/pay_1",
+    id: "dr_1",
+    deposit_url: "https://payday.sh/pay/dr_1",
     payer_policy: { mode: "merchant_session", payer_reference: "user_123" },
     client_secret: "cs_first",
     client_secret_expires_at: "2026-09-01T00:15:00Z",
@@ -335,36 +335,36 @@ test("a merchant-session payment returns its client secret once and mints more o
   });
   const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
-  const created = await client.payments.create(
-    { ...invoice, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
+  const created = await client.depositRequests.create(
+    { ...request, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
     "first",
   );
   assert.equal(created.client_secret, "cs_first");
-  assert.equal(checkoutUrl(created, created.client_secret), "https://payday.sh/pay/pay_1#cs=cs_first");
+  assert.equal(checkoutUrl(created, created.client_secret), "https://payday.sh/pay/dr_1#cs=cs_first");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body).payer_policy, { mode: "merchant_session", payer_reference: "user_123" });
 
-  const replayed = await client.payments.create(
-    { ...invoice, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
+  const replayed = await client.depositRequests.create(
+    { ...request, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
     "replay",
   );
   assert.equal(replayed.client_secret, undefined);
 
-  const minted = await client.payments.createClientSecret("pay_a/b");
+  const minted = await client.depositRequests.createClientSecret("dr_a/b");
   assert.equal(minted.client_secret, "cs_second");
   assert.deepEqual(mock.calls.slice(2).map((call) => [call.init.method, call.url]), [
-    ["POST", "https://example.test/v1/payments/pay_a%2Fb/client-secret"],
+    ["POST", "https://example.test/v1/deposit-requests/dr_a%2Fb/client-secret"],
   ]);
   assert.equal(mock.calls[2].init.body, undefined);
   assert.equal(mock.calls[2].init.headers.Authorization, "Bearer k");
   // The secret rides in the fragment, encoded, and never without a secret.
-  assert.equal(checkoutUrl({ payment_url: "https://payday.sh/pay/pay_1" }, "cs_a+b"), "https://payday.sh/pay/pay_1#cs=cs_a%2Bb");
+  assert.equal(checkoutUrl({ deposit_url: "https://payday.sh/pay/dr_1" }, "cs_a+b"), "https://payday.sh/pay/dr_1#cs=cs_a%2Bb");
   assert.throws(() => checkoutUrl(created, ""), TypeError);
 });
 
 test("minting a client secret for the wrong mode surfaces the API's code", async () => {
   const mock = mockFetch(() => apiError("verification_method_not_applicable", 409));
   const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
-  await assert.rejects(client.payments.createClientSecret("pay_1"), (error) => {
+  await assert.rejects(client.depositRequests.createClientSecret("dr_1"), (error) => {
     assert.ok(error instanceof PaydayError);
     assert.equal(error.code, "verification_method_not_applicable");
     assert.equal(error.status, 409);

@@ -3,8 +3,8 @@
 //! for them with a single-use client secret.
 //!
 //! ```text
-//! POST /v1/payments/{id}/client-secret        merchant: mint a fresh secret
-//! POST /v1/payer/payments/{id}/session        checkout: exchange it for a payer session
+//! POST /v1/deposit-requests/{id}/client-secret        merchant: mint a fresh secret
+//! POST /v1/payer/deposit-requests/{id}/session        checkout: exchange it for a payer session
 //! ```
 //!
 //! The secret is returned once and stored hashed. Exchanging it is the whole
@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use chrono::{SecondsFormat, Utc};
 use gateway_core::{
-    Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse, payment_id,
+    Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse, deposit_request_id,
 };
 use gateway_db::{
     AccountId, CLIENT_SECRET_PREFIX, CLIENT_SECRET_TTL, ExchangeClientSecretError,
@@ -30,8 +30,8 @@ use gateway_db::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::attachments::no_store;
+use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
-use crate::api::invoices::resolve_payment;
 use crate::state::AppState;
 
 /// `cs_` plus 43 characters of unpadded base64url; anything else is refused
@@ -80,7 +80,7 @@ fn merchant_session_only(invoice: &Invoice) -> Result<(), ApiError> {
         PayerPolicyMode::MerchantSession => Ok(()),
         PayerPolicyMode::Permissionless => Err(ApiError::verification_not_required()),
         PayerPolicyMode::VerifiedEmail => Err(ApiError::verification_method_not_applicable(
-            "This payment verifies the payer by email; client secrets apply to merchant_session payments",
+            "This deposit request verifies the payer by email; client secrets apply to merchant_session deposit requests",
         )),
     }
 }
@@ -91,11 +91,11 @@ pub async fn mint(
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
 ) -> Result<Response, ApiError> {
-    let row = resolve_payment(&state, account, &reference).await?;
+    let row = resolve_deposit_request(&state, account, &reference).await?;
     let invoice = Invoice::try_from(&row)?;
     merchant_session_only(&invoice)?;
     if !openable(&row, &invoice) {
-        return Err(ApiError::payment_not_payable());
+        return Err(ApiError::deposit_request_not_payable());
     }
     let minted = state
         .payer_sessions
@@ -129,7 +129,7 @@ pub async fn exchange(
     {
         return Err(ApiError::client_secret_invalid());
     }
-    let uuid = payment_id(&id).ok_or_else(ApiError::payer_unauthorized)?;
+    let uuid = deposit_request_id(&id).ok_or_else(ApiError::payer_unauthorized)?;
     let row = state
         .repo
         .find_by_id(uuid)
@@ -138,7 +138,7 @@ pub async fn exchange(
     let invoice = Invoice::try_from(&row)?;
     merchant_session_only(&invoice)?;
     if !openable(&row, &invoice) {
-        return Err(ApiError::payment_not_payable());
+        return Err(ApiError::deposit_request_not_payable());
     }
     let exchange = match state
         .payer_sessions

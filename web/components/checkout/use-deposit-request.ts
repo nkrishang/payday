@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerPayment } from "@payday/sdk";
+import type { PayerDepositRequest } from "@payday/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backoffMs, jitter, pollDelayMs } from "@/lib/poll";
 import { payerClient } from "@/lib/payday";
@@ -12,9 +12,9 @@ interface PendingSend {
   at: number;
 }
 
-export interface LivePayment {
-  payment: PayerPayment;
-  /** Local clock reading when this payment was received, for the countdown. */
+export interface LiveDepositRequest {
+  payment: PayerDepositRequest;
+  /** Local clock reading when this deposit request was received, for the countdown. */
   receivedAt: number;
   /** True once a read has failed and we are retrying with backoff. */
   reconnecting: boolean;
@@ -26,17 +26,17 @@ export interface LivePayment {
 }
 
 /**
- * Keeps the server-rendered payment live.
+ * Keeps the server-rendered deposit request live.
  *
  * Reads go straight to the Payday API rather than through this app's server:
  * the payer routes are public, keyless and CORS-enabled, so a proxy would add a
  * hop and a second copy of the contract without buying anything.
  *
  * `payerSession` is this tab's opaque session, sent as a header on every read
- * so a gated invoice unlocks here and nowhere else. The server-rendered
- * payment never had it; the first read with a session replaces it.
+ * so a gated deposit request unlocks here and nowhere else. The server-rendered
+ * request never had it; the first read with a session replaces it.
  */
-export function usePayment(initial: PayerPayment, payerSession: string | null = null): LivePayment {
+export function useDepositRequest(initial: PayerDepositRequest, payerSession: string | null = null): LiveDepositRequest {
   const [state, setState] = useState(() => ({
     payment: initial,
     // Captured on both server and client at first render, so the countdown
@@ -108,7 +108,7 @@ export function usePayment(initial: PayerPayment, payerSession: string | null = 
       inFlight = controller;
 
       try {
-        const next = await payerClient.payments.get(id, {
+        const next = await payerClient.depositRequests.get(id, {
           signal: controller.signal,
           ...(session === null ? {} : { payerSession: session }),
         });
@@ -127,7 +127,7 @@ export function usePayment(initial: PayerPayment, payerSession: string | null = 
         }
       } catch {
         if (disposed || controller.signal.aborted) return;
-        // Keep the last known payment on screen; a failed read must never blank
+        // Keep the last known deposit request on screen; a failed read must never blank
         // out an address the payer may be mid-way through using.
         failures += 1;
         setReconnecting(true);
@@ -155,7 +155,7 @@ export function usePayment(initial: PayerPayment, payerSession: string | null = 
 
     document.addEventListener("visibilitychange", onVisibility);
     // A session that just appeared (restored from this tab, or minted by
-    // verification) may unlock content the current payment withholds: read
+    // verification) may unlock content the current deposit request withholds: read
     // at once rather than after the next poll delay.
     if (session === null) schedule();
     else void tick();
@@ -201,7 +201,7 @@ function useNow(): number {
  * between two readings of the local clock, so a device whose clock is wrong by
  * hours still counts down correctly, and every poll re-anchors it.
  */
-export function useSecondsRemaining(payment: PayerPayment, receivedAt: number): number {
+export function useSecondsRemaining(payment: PayerDepositRequest, receivedAt: number): number {
   const now = useNow();
   const deadline = Math.floor(new Date(payment.expires_at).getTime() / 1000);
   const serverNow = Number(payment.server_timestamp);

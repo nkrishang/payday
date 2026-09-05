@@ -16,7 +16,7 @@ type LinkState =
 /**
  * The attached PDF. The signed download URL is short-lived and is fetched only
  * when the payer asks for it, straight from the browser: it never appears in
- * the server-rendered page, and a locked invoice's request is refused by the
+ * the server-rendered page, and a locked deposit request's fetch is refused by the
  * gateway with `verification_required` before any URL is minted.
  */
 export function AttachmentLink({
@@ -26,7 +26,7 @@ export function AttachmentLink({
 }: {
   paymentId: string;
   attachment: AttachmentDescriptor;
-  /** This tab's session; a gated invoice's descriptor is minted only for it. */
+  /** This tab's session; a gated deposit request's descriptor is minted only for it. */
   payerSession?: string | null;
 }) {
   const [state, setState] = useState<LinkState>({ status: "idle" });
@@ -40,8 +40,8 @@ export function AttachmentLink({
     try {
       const descriptor =
         payerSession === null
-          ? await payerClient.payments.attachment(paymentId)
-          : await payerClient.payments.attachment(paymentId, payerSession);
+          ? await payerClient.depositRequests.attachment(paymentId)
+          : await payerClient.depositRequests.attachment(paymentId, payerSession);
       if (!descriptor.download_url) {
         throw new Error("The gateway returned no download link");
       }

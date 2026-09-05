@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerPayment, Payment } from "@payday/sdk";
+import type { PayerDepositRequest, DepositRequest } from "@payday/sdk";
 import { Loader2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import Image from "next/image";
@@ -14,7 +14,7 @@ import { storePayerSession } from "@/lib/payer-session";
 import { useMerchant } from "./session";
 
 // The real checkout brings wagmi and its wallet-connector stack with it —
-// fine for the one payment page that needs them, wrong to bundle into every
+// fine for the one deposit page that needs them, wrong to bundle into every
 // dashboard load for a preview most sessions never reach. Loaded only once
 // this screen actually renders, and only in the browser: wagmi reads
 // `window` at module-init time.
@@ -27,10 +27,10 @@ const Checkout = dynamic(
  * The onboarding walkthrough's success screen: not the usual three-CTA
  * `Issued` screen, because there is nothing to track or share yet — this
  * request only exists to demonstrate the product. Instead it shows the real
- * payer's view, live, so the merchant watches their own invoice move from
+ * payer's view, live, so the merchant watches their own deposit request move from
  * locked to verified to settled before doing anything else.
  *
- * The one real backend call this makes (`onboardingPayment`) both completes
+ * The one real backend call this makes (`onboardingDeposit`) both completes
  * verification and submits the real on-chain transfer; from here on, the
  * embedded checkout and the settlement poll below are just watching the real
  * system do its own thing, exactly as a customer's browser would.
@@ -39,11 +39,11 @@ export function OnboardingSuccess({
   payment,
   onDone,
 }: {
-  payment: Payment;
+  payment: DepositRequest;
   onDone: () => void;
 }) {
   const { client } = useMerchant();
-  const [initial, setInitial] = useState<PayerPayment | null>(null);
+  const [initial, setInitial] = useState<PayerDepositRequest | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [settled, setSettled] = useState(false);
   const started = useRef(false);
@@ -51,9 +51,9 @@ export function OnboardingSuccess({
   const start = async () => {
     setFailure(null);
     try {
-      const { payer_session } = await client.payments.onboardingPayment(payment.id);
+      const { payer_session } = await client.depositRequests.onboardingDeposit(payment.id);
       storePayerSession(payment.id, payer_session);
-      const unlocked = await payerClient.payments.get(payment.id, { payerSession: payer_session });
+      const unlocked = await payerClient.depositRequests.get(payment.id, { payerSession: payer_session });
       setInitial(unlocked);
     } catch (cause) {
       setFailure(describeError(cause));
@@ -76,7 +76,7 @@ export function OnboardingSuccess({
     async function poll() {
       while (!cancelled) {
         try {
-          const current = await client.payments.get(payment.id, {
+          const current = await client.depositRequests.get(payment.id, {
             waitForChange: true,
             timeout: 30,
           });
@@ -135,7 +135,7 @@ export function OnboardingSuccess({
           />
           {payment.token.symbol}
         </span>{" "}
-        from {payment.bill_to.name}
+        from {payment.payer.name}
       </p>
 
       <div className="dash-rise dash-delay-4 mt-8 text-left">

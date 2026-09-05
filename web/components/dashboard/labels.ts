@@ -1,24 +1,24 @@
-import type { PayerPolicyMode, PaymentStatus } from "@payday/sdk";
-import type { ComposerMode } from "./create-payment";
+import type { PayerPolicyMode, DepositRequestStatus } from "@payday/sdk";
+import type { ComposerMode } from "./create-deposit-request";
 import type { CheckoutTone } from "@/lib/checkout-state";
 
 /** Merchant-facing words for the API's status values, in lifecycle order. */
-export const STATUSES: ReadonlyArray<{ value: PaymentStatus; label: string; tone: CheckoutTone }> =
+export const STATUSES: ReadonlyArray<{ value: DepositRequestStatus; label: string; tone: CheckoutTone }> =
   [
-    { value: "awaiting_payment", label: "Awaiting payment", tone: "neutral" },
-    { value: "partially_paid", label: "Partially paid", tone: "progress" },
-    { value: "paid", label: "Received", tone: "progress" },
+    { value: "awaiting_deposit", label: "Awaiting deposit", tone: "neutral" },
+    { value: "partially_deposited", label: "Partially deposited", tone: "progress" },
+    { value: "deposited", label: "Deposited", tone: "progress" },
     { value: "settled", label: "Settled", tone: "success" },
     { value: "expired", label: "Expired", tone: "neutral" },
     { value: "returned", label: "Returned", tone: "warning" },
     { value: "needs_attention", label: "Needs attention", tone: "warning" },
   ];
 
-export function statusLabel(status: PaymentStatus): string {
+export function statusLabel(status: DepositRequestStatus): string {
   return STATUSES.find((entry) => entry.value === status)?.label ?? status;
 }
 
-export function statusTone(status: PaymentStatus): CheckoutTone {
+export function statusTone(status: DepositRequestStatus): CheckoutTone {
   return STATUSES.find((entry) => entry.value === status)?.tone ?? "neutral";
 }
 
@@ -34,7 +34,7 @@ export const MODES: ReadonlyArray<{ value: ComposerMode; label: string; descript
     value: "permissionless",
     label: "Permissionless",
     description:
-      "Anyone holding a link to the deposit request can view payment details and pay it.",
+      "Anyone holding a link to the deposit request can view the deposit details and fund it.",
   },
   {
     value: "verified_email",

@@ -1,9 +1,9 @@
 //! Payer email verification (product plan §4.6, §7.1).
 //!
 //! ```text
-//! POST /v1/payer/payments/{id}/verify/email/start
-//! POST /v1/payer/payments/{id}/verify/email/confirm
-//! GET  /v1/payer/payments/{id}/verify
+//! POST /v1/payer/deposit-requests/{id}/verify/email/start
+//! POST /v1/payer/deposit-requests/{id}/verify/email/confirm
+//! GET  /v1/payer/deposit-requests/{id}/verify
 //! ```
 //!
 //! The payer never supplies an email: the gateway sends the code to the
@@ -106,7 +106,7 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
         PayerPolicyMode::Permissionless => return Err(ApiError::verification_not_required()),
         PayerPolicyMode::MerchantSession => {
             return Err(ApiError::verification_method_not_applicable(
-                "This payment is opened by the issuer's application; it does not send email codes",
+                "This deposit request is opened by the issuer's application; it does not send email codes",
             ));
         }
     }
@@ -119,7 +119,7 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
     // invoices still cannot start verification.
     let receipt_reauth = !open && row.verification_completed_at.is_some();
     if (!open && !receipt_reauth) || (open && unix_now() > invoice.expiration_timestamp) {
-        return Err(ApiError::payment_not_payable());
+        return Err(ApiError::deposit_request_not_payable());
     }
     Ok((row, invoice))
 }

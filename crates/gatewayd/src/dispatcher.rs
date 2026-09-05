@@ -51,7 +51,7 @@ async fn deliver(
     };
     let (reason, action) = guidance(&event.reason);
     let text = format!(
-        "Payout for payment {} needs attention.\n\nReason: {reason}\nAction: {action}\n\nThe funds remain safe while payout is paused.",
+        "Payout for deposit request {} needs attention.\n\nReason: {reason}\nAction: {action}\n\nThe funds remain safe while payout is paused.",
         event.invoice_id
     );
     let result = ses
@@ -101,23 +101,23 @@ pub fn guidance(code: &str) -> (&'static str, &'static str) {
     match code {
         "beneficiary_blacklisted" => (
             "The payout address is restricted by the USDC issuer.",
-            "Contact Payday support to agree on recovery after the payment expires.",
+            "Contact Payday support to agree on recovery after the deposit request expires.",
         ),
         "recovery_blacklisted" => (
             "The payer's wallet, where excess funds return, is restricted by the USDC issuer.",
-            "Contact Payday support with the payment ID; the payer may need to be contacted.",
+            "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
-            "The payment address is restricted by the USDC issuer.",
+            "The deposit address is restricted by the USDC issuer.",
             "Contact Payday support for a compliance escalation.",
         ),
         "balance_below_amount" => (
-            "The finalized payment record does not match the on-chain balance.",
+            "The finalized deposit record does not match the on-chain balance.",
             "No action is needed from the payer; Payday support is investigating.",
         ),
         "parameters_mismatch" | "corrupt_row" => (
-            "The stored payment details require manual review.",
-            "Contact Payday support to review the payment before payout resumes.",
+            "The stored deposit request details require manual review.",
+            "Contact Payday support to review the deposit request before payout resumes.",
         ),
         "retries_exhausted" => (
             "Automatic payout attempts were unsuccessful.",
@@ -125,7 +125,7 @@ pub fn guidance(code: &str) -> (&'static str, &'static str) {
         ),
         _ => (
             "Automatic payout requires a manual review.",
-            "Contact Payday support and provide the payment ID.",
+            "Contact Payday support and provide the deposit request ID.",
         ),
     }
 }

@@ -2,9 +2,9 @@
  * A stand-in for the Payday API, so the checkout's states and the dashboard's
  * flows can be driven deterministically in a browser.
  *
- * Payer scenarios are encoded in the payment id, which keeps every test
+ * Payer scenarios are encoded in the deposit request id, which keeps every test
  * independent — no shared mutable state, no ordering between specs. Shapes
- * mirror `PayerPaymentResponse` and `PaymentResponse` in
+ * mirror `PayerDepositRequestResponse` and `DepositRequestResponse` in
  * crates/gateway-core/src/dto.rs exactly.
  *
  * For the dashboard the same process plays the merchant API behind a fake
@@ -56,7 +56,7 @@ function requirements(mode, completed = false, walletBound = true) {
 }
 
 /**
- * Client secrets for merchant-session payments: secret -> { id, used }. The
+ * Client secrets for merchant-session deposit requests: secret -> { id, used }. The
  * checkout specs use fixed secrets so a URL can be written down; the
  * merchant routes mint random ones. The fixed "valid" secret is `reusable`:
  * every spec and every retry opens it afresh, since specs must not depend on
@@ -66,9 +66,9 @@ function requirements(mode, completed = false, walletBound = true) {
  */
 const CLIENT_SECRET_SHAPE = /^cs_[A-Za-z0-9_-]{43}$/;
 const clientSecrets = new Map([
-  [`cs_${"valid".padEnd(43, "0")}`, { id: "pay_gated-merchant", used: false, reusable: true }],
-  [`cs_${"used".padEnd(43, "0")}`, { id: "pay_gated-merchant", used: true }],
-  [`cs_${"other".padEnd(43, "0")}`, { id: "pay_gated-merchant-other", used: false }],
+  [`cs_${"valid".padEnd(43, "0")}`, { id: "dr_gated-merchant", used: false, reusable: true }],
+  [`cs_${"used".padEnd(43, "0")}`, { id: "dr_gated-merchant", used: true }],
+  [`cs_${"other".padEnd(43, "0")}`, { id: "dr_gated-merchant-other", used: false }],
 ]);
 
 function mintClientSecret(id) {
@@ -92,12 +92,12 @@ const ATTACHMENT = {
 function base(overrides = {}) {
   const now = Math.floor(Date.now() / 1000);
   return {
-    id: "pay_0198f80c-8d2f-7dc1-a369-90556a64f700",
+    id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
     issuer_name: "Acme Corp",
     heading: null,
     payer_policy: { mode: "permissionless", expected_email_hint: null },
     requirements: requirements("permissionless"),
-    status: "awaiting_payment",
+    status: "awaiting_deposit",
     payable: true,
     expires_at: new Date((now + 3600) * 1000).toISOString(),
     server_timestamp: String(now),
@@ -116,11 +116,11 @@ function base(overrides = {}) {
     payer_wallet: PAYER_WALLET,
     address: ADDRESS,
     address_explorer_url: null,
-    payment_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
-    invoice: {
+    deposit_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
+    details: {
       amount: "25.000000",
       amount_base_units: "25000000",
-      bill_to: { name: "Globex Corporation" },
+      payer: { name: "Globex Corporation" },
       notes: null,
       reference: null,
       attachment: null,
@@ -135,7 +135,7 @@ const UNBOUND = {
   payer_wallet: null,
   address: null,
   address_explorer_url: null,
-  payment_uri: null,
+  deposit_uri: null,
 };
 
 /**
@@ -152,7 +152,7 @@ function sessionFor(req, id) {
   return session && session.id === id ? session : null;
 }
 
-/** A gated invoice as its verifying session sees it. */
+/** A gated deposit request as its verifying session sees it. */
 function gatedFor(mode, session) {
   const opened = mode === "merchant_session" ? session?.merchantSession : session?.emailVerified;
   if (!opened) return locked(mode);
@@ -163,9 +163,9 @@ function gatedFor(mode, session) {
       expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
     },
     requirements: requirements(mode, true),
-    invoice: {
-      ...base().invoice,
-      bill_to: { name: "Globex Corporation" },
+    details: {
+      ...base().details,
+      payer: { name: "Globex Corporation" },
       reference: "INV-1042",
       notes: "Net 30",
       attachment: ATTACHMENT,
@@ -178,9 +178,9 @@ function verifyStatus(payment) {
   return { requirements: payment.requirements };
 }
 
-/** A gated invoice before verification: only the issuer, heading, and policy leave the API. */
+/** A gated deposit request before verification: only the issuer, heading, and policy leave the API. */
 /**
- * A merchant-issued payment as its payer sees it: everything withheld while
+ * A merchant-issued deposit request as its payer sees it: everything withheld while
  * the policy is gated, since this projection carries no payer session.
  */
 function projectForPayer(payment) {
@@ -196,7 +196,7 @@ function projectForPayer(payment) {
     },
     requirements: requirements(mode, Boolean(payment.verification_completed_at)),
     status: payment.status,
-    payable: payment.status === "awaiting_payment" || payment.status === "partially_paid",
+    payable: payment.status === "awaiting_deposit" || payment.status === "partially_deposited",
     expires_at: payment.expires_at,
     server_timestamp: String(Math.floor(Date.now() / 1000)),
     settlement_tx_hash: payment.settlement_tx_hash ?? null,
@@ -218,8 +218,8 @@ function projectForPayer(payment) {
       payer_wallet: null,
       address: null,
       address_explorer_url: null,
-      payment_uri: null,
-      invoice: null,
+      deposit_uri: null,
+      details: null,
     };
   }
   return {
@@ -236,11 +236,11 @@ function projectForPayer(payment) {
     remaining_base_units: payment.remaining_base_units,
     address: payment.address,
     address_explorer_url: payment.address_explorer_url ?? null,
-    payment_uri: `ethereum:${payment.token.address}@${payment.chain.id}/transfer?address=${payment.address}&uint256=${payment.remaining_base_units}`,
-    invoice: {
+    deposit_uri: `ethereum:${payment.token.address}@${payment.chain.id}/transfer?address=${payment.address}&uint256=${payment.remaining_base_units}`,
+    details: {
       amount: payment.amount,
       amount_base_units: payment.amount_base_units,
-      bill_to: payment.bill_to,
+      payer: payment.payer,
       notes: payment.notes,
       reference: payment.reference,
       attachment: payment.attachment,
@@ -268,18 +268,18 @@ function locked(mode, facts = requirements(mode)) {
     payer_wallet: null,
     address: null,
     address_explorer_url: null,
-    payment_uri: null,
-    invoice: null,
+    deposit_uri: null,
+    details: null,
   });
 }
 
 const PARTIAL = {
-  status: "partially_paid",
+  status: "partially_deposited",
   received: "10.000000",
   received_base_units: "10000000",
   remaining: "15.000000",
   remaining_base_units: "15000000",
-  payment_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=15000000`,
+  deposit_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=15000000`,
 };
 
 const FULL = {
@@ -289,7 +289,7 @@ const FULL = {
   remaining_base_units: "0",
 };
 
-const CLOSED = { payable: false, payment_uri: null };
+const CLOSED = { payable: false, deposit_uri: null };
 
 const SETTLED = {
   status: "settled",
@@ -303,12 +303,12 @@ const reads = new Map();
 const scenarios = {
   awaiting: () => base(),
   // The full document: heading, reference, notes, and an attached PDF.
-  invoice: () =>
+  document: () =>
     base({
       heading: "Consulting — August",
-      invoice: {
-        ...base().invoice,
-        bill_to: { name: "Globex Corporation", email: "ap@globex.example", details: "PO 7781" },
+      details: {
+        ...base().details,
+        payer: { name: "Globex Corporation", email: "ap@globex.example", details: "PO 7781" },
         reference: "INV-1042",
         notes: "Net 30. Thank you for your business.",
         attachment: ATTACHMENT,
@@ -323,7 +323,7 @@ const scenarios = {
   "gated-merchant": (id, session) => gatedFor("merchant_session", session),
   "gated-merchant-other": (id, session) => gatedFor("merchant_session", session),
   partial: () => base(PARTIAL),
-  paid: () => base({ ...FULL, ...CLOSED, status: "paid" }),
+  deposited: () => base({ ...FULL, ...CLOSED, status: "deposited" }),
   settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
   // More arrived than was asked for. Settlement is exact, so the merchant got
   // 25 and the remainder went to the recovery wallet; the receipt says so.
@@ -343,13 +343,13 @@ const scenarios = {
       ...CLOSED,
       status: "needs_attention",
       payer_message:
-        "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second payment.",
+        "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.",
     }),
   // Payable false while the status has not yet flipped: the deadline passed but
   // the indexer has not committed the expiry.
   closing: () => base(CLOSED),
   // Ends moments from now, to prove the page waits for the server rather than
-  // declaring the payment expired off its own countdown.
+  // declaring the deposit request expired off its own countdown.
   ending: () => {
     const now = Math.floor(Date.now() / 1000);
     return base({
@@ -357,7 +357,7 @@ const scenarios = {
       expires_at: new Date((now + 3) * 1000).toISOString(),
     });
   },
-  // First read is awaiting; every later read is partially paid.
+  // First read is awaiting; every later read is partially deposited.
   transition: (id) => {
     const seen = (reads.get(id) ?? 0) + 1;
     reads.set(id, seen);
@@ -368,7 +368,7 @@ const scenarios = {
 };
 
 function scenarioFor(id) {
-  return scenarios[id.replace(/^pay_/, "")] ?? null;
+  return scenarios[id.replace(/^dr_/, "")] ?? null;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -383,8 +383,8 @@ const store = {
   issuerWorlds: new Map(),
   /** id -> { id, filename, bytes, finalizeCalls, status, descriptor } */
   attachments: new Map(),
-  /** id -> full PaymentResponse */
-  payments: new Map(),
+  /** id -> full DepositRequestResponse */
+  depositRequests: new Map(),
   /** account key -> { id, generation, keyHint, createdAt, rotatedAt, previousExpiresAt, revokedAt } */
   accounts: new Map(),
 };
@@ -411,8 +411,8 @@ function hex32(seed) {
   return `0x${createHash("sha256").update(seed).digest("hex")}`;
 }
 
-function merchantPayment(input, extra = {}) {
-  const id = extra.id ?? `pay_${randomUUID()}`;
+function merchantDepositRequest(input, extra = {}) {
+  const id = extra.id ?? `dr_${randomUUID()}`;
   const created = extra.created_at ?? new Date().toISOString();
   const amountUnits = toBaseUnits(input.amount);
   // A chosen moment wins over a duration, as it does at the API; the response
@@ -427,7 +427,7 @@ function merchantPayment(input, extra = {}) {
   const address = `0x${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
   return {
     id,
-    payment_url: `http://127.0.0.1:3003/pay/${id}`,
+    deposit_url: `http://127.0.0.1:3003/pay/${id}`,
     address,
     address_explorer_url: null,
     payout_address: input.payout_address,
@@ -449,7 +449,7 @@ function merchantPayment(input, extra = {}) {
     fee_amount_base_units: "0",
     net_amount: fromBaseUnits(amountUnits),
     net_amount_base_units: amountUnits,
-    status: "awaiting_payment",
+    status: "awaiting_deposit",
     token: { symbol: "USDC", address: TOKEN, decimals: 6 },
     chain: { id: "143", name: "Monad" },
     settlement_tx_hash: null,
@@ -459,7 +459,7 @@ function merchantPayment(input, extra = {}) {
     self_settlement: { factory: FACTORY, salt: hex32(`salt:${id}`) },
     attention: null,
     issuer: input.issuer,
-    bill_to: input.bill_to,
+    payer: input.payer,
     notes: input.notes ?? null,
     heading: input.heading ?? null,
     issuer_id: input.issuer_id ?? null,
@@ -474,8 +474,8 @@ function merchantPayment(input, extra = {}) {
     metadata: input.metadata ?? {},
     created_at: created,
     updated_at: created,
-    paid_at: null,
-    paid_at_block: null,
+    deposited_at: null,
+    deposited_at_block: null,
     expired_at: null,
     cancellation_requested_at: null,
     transfers: [],
@@ -489,7 +489,7 @@ function merchantPayment(input, extra = {}) {
   };
 }
 
-/** The merchant's verification view; seeded invoices carry their attempts. */
+/** The merchant's verification view; seeded deposit requests carry their attempts. */
 function verificationDetail(payment) {
   const mode = payment.payer_policy.mode;
   const completed = payment.verification_completed_at !== null;
@@ -516,7 +516,7 @@ function summary(payment) {
   return {
     id: payment.id,
     heading: payment.heading,
-    bill_to_name: payment.bill_to.name,
+    payer_name: payment.payer.name,
     issuer_id: payment.issuer_id ?? null,
     reference: payment.reference,
     metadata: payment.metadata,
@@ -551,7 +551,7 @@ function proofFor(payment) {
       schema: "payday.invoice",
       canonicalization: "RFC8785",
       issuer: payment.issuer,
-      bill_to: payment.bill_to,
+      payer: payment.payer,
       amount_base_units: payment.amount_base_units,
       notes: payment.notes,
       heading: payment.heading,
@@ -651,12 +651,12 @@ function seed() {
   store.customers.set(customer.id, customer);
 
   const settledAt = "2026-08-20T12:00:00.000Z";
-  const settled = merchantPayment(
+  const settled = merchantDepositRequest(
     {
       amount: "25",
       payout_address: PAYOUT,
       issuer: { name: "Acme Corp", email: "billing@acme.example" },
-      bill_to: { name: "Globex Corporation", email: "ap@globex.example" },
+      payer: { name: "Globex Corporation", email: "ap@globex.example" },
       heading: "Consulting — August",
       reference: "INV-1042",
       notes: "Net 30. Thank you for your business.",
@@ -664,14 +664,14 @@ function seed() {
       payer_policy: { mode: "verified_email", expected_email: "alice@globex.example" },
     },
     {
-      id: "pay_seed-settled",
+      id: "dr_seed-settled",
       created_at: "2026-08-18T10:00:00.000Z",
       status: "settled",
       received_base_units: "30000000",
       attachment: ATTACHMENT,
       verification_completed_at: "2026-08-19T08:30:00.000Z",
-      paid_at: settledAt,
-      paid_at_block: "1200",
+      deposited_at: settledAt,
+      deposited_at_block: "1200",
       settled_at: settledAt,
       settled_block: "1201",
       settlement_tx_hash: SETTLEMENT_TX,
@@ -702,28 +702,28 @@ function seed() {
       ],
     },
   );
-  store.payments.set(settled.id, settled);
+  store.depositRequests.set(settled.id, settled);
 
   // Funds arrived before the expected payer verified: the row is flagged, the
   // address is not quarantined.
-  const unsolicited = merchantPayment(
+  const unsolicited = merchantDepositRequest(
     {
       amount: "40",
       payout_address: PAYOUT,
       issuer: { name: "Acme Corp" },
-      bill_to: { name: "Initech" },
+      payer: { name: "Initech" },
       heading: "Retainer — September",
       reference: "INV-1043",
       payer_policy: { mode: "verified_email", expected_email: "bob@initech.example" },
     },
     {
-      id: "pay_seed-unsolicited",
+      id: "dr_seed-unsolicited",
       created_at: "2026-08-25T10:00:00.000Z",
-      status: "paid",
+      status: "deposited",
       received_base_units: "40000000",
       likely_unsolicited_at: "2026-08-26T11:00:00.000Z",
-      paid_at: "2026-08-26T11:00:00.000Z",
-      paid_at_block: "1400",
+      deposited_at: "2026-08-26T11:00:00.000Z",
+      deposited_at_block: "1400",
       // The payer asked for a code twice and never entered one.
       verification_attempts: [
         {
@@ -756,7 +756,7 @@ function seed() {
       ],
     },
   );
-  store.payments.set(unsolicited.id, unsolicited);
+  store.depositRequests.set(unsolicited.id, unsolicited);
 }
 
 seed();
@@ -992,7 +992,7 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session)?$/,
+    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session)?$/,
   );
   if (!match) return false;
   const write =
@@ -1010,9 +1010,9 @@ async function payer(req, res, url) {
   // The scenarios drive the checkout specs; anything else the merchant side
   // issued is projected from the store, as the real payer route serves any
   // payment rather than a fixed cast.
-  const issued = scenario ? null : store.payments.get(id);
+  const issued = scenario ? null : store.depositRequests.get(id);
   if (!scenario && !issued) {
-    return fail(res, 401, "invalid_payment_link", "Payment link is not valid");
+    return fail(res, 401, "invalid_deposit_link", "Deposit link is not valid");
   }
 
   const session = sessionFor(req, id);
@@ -1021,7 +1021,7 @@ async function payer(req, res, url) {
 
   if (match[2] === "/session") {
     if (mode !== "merchant_session") {
-      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session payment");
+      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session deposit request");
     }
     const body = await readJson(req);
     const secret = typeof body.client_secret === "string" ? body.client_secret.trim() : "";
@@ -1123,17 +1123,17 @@ async function payer(req, res, url) {
 
   if (match[2] === "/qr") {
     if (!payment.content_unlocked) {
-      return fail(res, 401, "verification_required", "Verify to view this invoice");
+      return fail(res, 401, "verification_required", "Verify to view this deposit request");
     }
-    if (!payment.payable) return fail(res, 410, "payment_not_payable", "No longer payable");
+    if (!payment.payable) return fail(res, 410, "deposit_request_not_payable", "No longer payable");
     return sendBytes(res, 200, Buffer.from(QR_SVG), "image/svg+xml; charset=utf-8");
   }
 
   if (match[2] === "/attachment") {
     if (!payment.content_unlocked) {
-      return fail(res, 401, "verification_required", "Verify to view this invoice");
+      return fail(res, 401, "verification_required", "Verify to view this deposit request");
     }
-    const attachment = payment.invoice?.attachment;
+    const attachment = payment.details?.attachment;
     if (!attachment) return fail(res, 404, "attachment_not_found", "No attachment");
     return send(res, 200, {
       ...attachment,
@@ -1166,7 +1166,7 @@ async function objectStore(req, res, url) {
   if (download) {
     const stored = store.attachments.get(download[1]);
     return sendBytes(res, 200, stored?.bytes ?? PDF_BYTES, "application/pdf", {
-      "content-disposition": `attachment; filename="${stored?.filename ?? "invoice.pdf"}"`,
+      "content-disposition": `attachment; filename="${stored?.filename ?? "request.pdf"}"`,
     });
   }
   return false;
@@ -1179,12 +1179,12 @@ async function objectStore(req, res, url) {
  * display decimal strings, so scale by the token's decimals to match.
  */
 function customerStats(customerId) {
-  const own = [...store.payments.values()].filter((payment) => payment.customer_id === customerId);
+  const own = [...store.depositRequests.values()].filter((payment) => payment.customer_id === customerId);
   let collected = 0;
   let pending = 0;
   for (const payment of own) {
     collected += Number(payment.received);
-    if (payment.status === "awaiting_payment" || payment.status === "partially_paid") {
+    if (payment.status === "awaiting_deposit" || payment.status === "partially_deposited") {
       pending += Number(payment.amount) - Number(payment.received);
     }
   }
@@ -1479,7 +1479,7 @@ function validateCreate(body) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(String(body.payout_address ?? "")))
     return "payout_address must be an address";
   if (!body.issuer?.name?.trim()) return "issuer.name is required";
-  if (!body.bill_to?.name?.trim()) return "bill_to.name is required";
+  if (!body.payer?.name?.trim()) return "payer.name is required";
   const policy = body.payer_policy;
   if (!policy || !MODES.has(policy.mode)) return "payer_policy.mode is invalid";
   if (policy.mode === "verified_email" && !policy.expected_email)
@@ -1509,7 +1509,7 @@ function validateCreate(body) {
 }
 
 async function payments(req, res, url) {
-  if (url.pathname === "/v1/payments") {
+  if (url.pathname === "/v1/deposit-requests") {
     if (req.method === "POST") {
       if (!req.headers["idempotency-key"])
         return fail(res, 400, "missing_idempotency_key", "Idempotency-Key is required");
@@ -1525,8 +1525,8 @@ async function payments(req, res, url) {
         draft.status = "attached";
         attachment = draft.descriptor;
       }
-      const payment = merchantPayment(body, { attachment });
-      store.payments.set(payment.id, payment);
+      const payment = merchantDepositRequest(body, { attachment });
+      store.depositRequests.set(payment.id, payment);
       if (payment.payer_policy.mode !== "merchant_session") return send(res, 201, payment);
       // The secret is in the response that minted it and nowhere else.
       const minted = mintClientSecret(payment.id);
@@ -1560,36 +1560,36 @@ async function payments(req, res, url) {
             return true;
         }
       };
-      const all = [...store.payments.values()]
+      const all = [...store.depositRequests.values()]
         .filter((payment) => !status || payment.status === status)
         .filter((payment) => !customer || payment.customer_id === customer)
         .filter((payment) => !issuer || payment.issuer_id === issuer)
         .filter(verified)
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
       const { page, next } = paginate(all, url.searchParams);
-      return send(res, 200, { payments: page.map(summary), next_cursor: next });
+      return send(res, 200, { deposit_requests: page.map(summary), next_cursor: next });
     }
     return fail(res, 405, "method_not_allowed", "method not allowed");
   }
 
   const match = url.pathname.match(
-    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers|\/verification|\/onboarding-payment|\/client-secret)?$/,
+    /^\/v1\/deposit-requests\/([^/]+)(\/attachment|\/request\.pdf|\/proof|\/transfers|\/verification|\/onboarding-deposit|\/client-secret)?$/,
   );
   if (!match) return false;
-  const payment = store.payments.get(decodeURIComponent(match[1]));
-  if (!payment) return fail(res, 404, "payment_not_found", "No such payment");
+  const payment = store.depositRequests.get(decodeURIComponent(match[1]));
+  if (!payment) return fail(res, 404, "deposit_request_not_found", "No such deposit request");
   if (match[2] === "/client-secret") {
     if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
     const mode = payment.payer_policy.mode;
     if (mode === "permissionless")
       return fail(res, 409, "verification_not_required", "Nothing to verify");
     if (mode !== "merchant_session")
-      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session payment");
+      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session deposit request");
     return send(res, 201, mintClientSecret(payment.id));
   }
-  if (match[2] === "/onboarding-payment") {
+  if (match[2] === "/onboarding-deposit") {
     // The real endpoint verifies and pays for real; the stub has no real
-    // chain to wait on, so it settles the stored payment immediately.
+    // chain to wait on, so it settles the stored deposit request immediately.
     if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
     const txHash = hex32(`onboarding-tx:${payment.id}`);
     Object.assign(payment, {
@@ -1619,11 +1619,11 @@ async function payments(req, res, url) {
         ...payment.attachment,
         download_url: `${ORIGIN}/__download/${payment.attachment.id}.pdf`,
       });
-    case "/invoice.pdf":
+    case "/request.pdf":
       return sendBytes(res, 200, PDF_BYTES, "application/pdf");
     case "/proof":
       if (payment.status !== "settled")
-        return fail(res, 409, "payment_not_settled", "Proof is available once settled");
+        return fail(res, 409, "deposit_request_not_settled", "Proof is available once settled");
       return send(res, 200, proofFor(payment));
     case "/transfers":
       return send(res, 200, payment.transfers);

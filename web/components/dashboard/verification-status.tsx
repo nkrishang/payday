@@ -4,7 +4,7 @@ import { StatusDot } from "@/components/ui/status-dot";
 import { formatDate, modeLabel } from "./labels";
 
 /**
- * Verification is a separate fact from payment. A request can receive funds
+ * Verification is a separate fact from the deposit. A request can receive funds
  * from a wallet other than the one its payer attested — that is the "likely
  * unsolicited" case — and a verified request can still be unpaid. Both
  * components keep the two apart.

@@ -10,7 +10,7 @@ import {
 } from "./poll";
 
 const base = {
-  status: "awaiting_payment",
+  status: "awaiting_deposit",
   receivedBaseUnits: "0",
   documentHidden: false,
   msSinceSend: null,
@@ -23,11 +23,11 @@ describe("pollDelayMs", () => {
     expect(pollDelayMs({ ...base, status: "needs_attention" })).toBeNull();
   });
 
-  it("stops for an expired payment that never received anything", () => {
+  it("stops for an expired deposit request that never received anything", () => {
     expect(pollDelayMs({ ...base, status: "expired", receivedBaseUnits: "0" })).toBeNull();
   });
 
-  it("keeps watching an expired payment that holds funds, since recovery follows", () => {
+  it("keeps watching an expired deposit request that holds funds, since recovery follows", () => {
     expect(pollDelayMs({ ...base, status: "expired", receivedBaseUnits: "1" })).toBe(IDLE_POLL_MS);
   });
 
@@ -44,8 +44,8 @@ describe("pollDelayMs", () => {
 
   it("otherwise uses the default cadence", () => {
     expect(pollDelayMs(base)).toBe(DEFAULT_POLL_MS);
-    expect(pollDelayMs({ ...base, status: "partially_paid" })).toBe(DEFAULT_POLL_MS);
-    expect(pollDelayMs({ ...base, status: "paid" })).toBe(DEFAULT_POLL_MS);
+    expect(pollDelayMs({ ...base, status: "partially_deposited" })).toBe(DEFAULT_POLL_MS);
+    expect(pollDelayMs({ ...base, status: "deposited" })).toBe(DEFAULT_POLL_MS);
   });
 });
 

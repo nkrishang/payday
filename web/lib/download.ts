@@ -1,7 +1,7 @@
 /**
  * Hands the browser a file whose bytes were fetched with the session token.
  * The merchant routes need `Authorization`, which a plain link cannot carry,
- * so the invoice PDF and the proof are fetched by the SDK and saved from
+ * so the deposit request PDF and the proof are fetched by the SDK and saved from
  * memory. Nothing here touches storage.
  */
 export function saveBlob(blob: Blob, filename: string): void {

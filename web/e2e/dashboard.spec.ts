@@ -32,12 +32,12 @@ test("a signed-out visitor is sent to the landing page and the shell carries no 
   page,
   request,
 }) => {
-  const response = await request.get("/dashboard/invoices");
+  const response = await request.get("/dashboard/deposits");
   const html = await response.text();
   expect(response.status()).toBe(200);
   expect(html).toContain('name="robots"');
   expect(html).toContain("noindex");
-  // Seeded invoices exist at the API; none of them is in the HTML.
+  // Seeded deposit requests exist at the API; none of them is in the HTML.
   expect(html).not.toContain("Consulting — August");
   expect(html).not.toContain("Globex");
   expect(html).not.toContain("stub-dashboard-token");
@@ -46,11 +46,11 @@ test("a signed-out visitor is sent to the landing page and the shell carries no 
   // to the landing page, where the only way in is.
   await page.goto("/dashboard");
   await expect(page).toHaveURL("/");
-  await page.goto("/dashboard/invoices/pay_seed-settled");
+  await page.goto("/dashboard/deposits/dr_seed-settled");
   await expect(page).toHaveURL("/");
 });
 
-test("the invoice list shows verification separately from payment and flags unsolicited funds", async ({
+test("the deposit list shows verification separately from the deposit and flags unsolicited funds", async ({
   page,
 }) => {
   await signIn(page);
@@ -64,12 +64,12 @@ test("the invoice list shows verification separately from payment and flags unso
   await expect(settled.getByLabel("Has attachment")).toBeVisible();
 
   const unsolicited = page.getByRole("row").filter({ hasText: "Retainer — September" });
-  await expect(unsolicited).toContainText("Received");
+  await expect(unsolicited).toContainText("Deposited");
   await expect(unsolicited).toContainText("Pending");
   await expect(unsolicited).toContainText("Likely unsolicited");
 
   // The filters are the API's own parameters, not a client-side sieve, and
-  // verification narrows separately from payment status.
+  // verification narrows separately from deposit status.
   await page.getByLabel("Status").click();
   await page.getByRole("option", { name: "Settled" }).click();
   await expect(page.getByRole("row").filter({ hasText: "Retainer — September" })).toHaveCount(0);
@@ -89,7 +89,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await signIn(page);
 
   // An identity first: nothing is issued without one, and the composer is the
-  // only way in — there is no separate invoice form. Where it settles needs
+  // only way in — there is no separate deposit request form. Where it settles needs
   // no setting up: the account's own wallet is the default.
   await page.getByRole("button", { name: "New deposit request" }).click();
   await page.getByLabel("Issued by").fill("Acme Corp");
@@ -126,7 +126,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await page.getByRole("button", { name: "Continue" }).click();
 
   // Billing: the customer came through the link, and the PDF is asked for here.
-  await expect(page.getByLabel("Billed to")).toHaveValue(customerName);
+  await expect(page.getByLabel("Payer")).toHaveValue(customerName);
   await expect(page.getByLabel("Email")).toHaveValue("ap@initrode.example");
   await page.getByLabel("Reason").fill("Design retainer");
   await page.getByLabel("Reference").fill("INV-2001");
@@ -161,7 +161,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await expect(summary).toContainText("Verified email");
 
   const created = page.waitForRequest(
-    (request) => request.method() === "POST" && request.url().endsWith("/v1/payments"),
+    (request) => request.method() === "POST" && request.url().endsWith("/v1/deposit-requests"),
   );
   await page.getByRole("button", { name: "Issue deposit request" }).click();
   const body = (await created).postDataJSON();
@@ -182,9 +182,9 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await page.getByRole("button", { name: "Track this request" }).click();
   await expect(page).toHaveURL(/\/dashboard(\?.*)?$/);
 
-  // The open row carries the whole request: payment, verification, and files.
+  // The open row carries the whole request: deposit, verification, and files.
   await expect(page.getByRole("button", { name: /Design retainer/, expanded: true })).toBeVisible();
-  await expect(page.getByText("Awaiting payment").first()).toBeVisible();
+  await expect(page.getByText("Awaiting deposit").first()).toBeVisible();
   await expect(page.getByRole("progressbar", { name: "Received" })).toBeVisible();
   await expect(page.getByText("INV-2001").first()).toBeVisible();
   await expect(page.getByText("Net 15.")).toBeVisible();
@@ -246,18 +246,18 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   expect(body.version).toBe("payday.proof.v2");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
   expect(body.recovery_address).toBe(body.payer_wallet.address);
-  expect(body.payment_id).toBe("pay_seed-settled");
+  expect(body.payment_id).toBe("dr_seed-settled");
   expect(body.canonical_issuance_snapshot.attachment.sha256).toMatch(/^0x[0-9a-f]{64}$/);
   expect(body.verification.signer).toBe("0x976EA74026E726554dB657fA54763abd0C3a0aa9");
 
   const pdfDownload = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Invoice PDF" }).click();
+  await page.getByRole("button", { name: "Deposit request PDF" }).click();
   const pdf = await pdfDownload;
   expect(pdf.suggestedFilename()).toBe("INV-1042.pdf");
   expect((await streamToString(pdf))?.startsWith("%PDF-")).toBe(true);
 });
 
-test("a likely unsolicited payment shows its flag and every verification attempt", async ({
+test("a likely unsolicited deposit shows its flag and every verification attempt", async ({
   page,
 }) => {
   await signIn(page);

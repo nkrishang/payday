@@ -30,7 +30,7 @@ batch_sweeper_code_hash = "0x000000000000000000000000000000000000000000000000000
 usdc_address     = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
 explorer_base_url = "https://monadvision.com"
 # Set this to the current Monad block immediately before the first deployment;
-# invoices cannot predate the service, so historical USDC logs are unnecessary.
+# deposit requests cannot predate the service, so historical USDC logs are unnecessary.
 usdc_start_block      = 98700000
 finality_confirmations = 2
 # Prefer TF_VAR_rpc_url from a secure environment rather than placing this in a file.

@@ -14,10 +14,10 @@ key cannot roll itself (`docs/authentication.md` § 6).
 
 Store and distribute the new key through the account owner's approved secret
 management process. The service does not retain recoverable plaintext and does
-not need a restart. Verify the new key against a payment owned by this account:
+not need a restart. Verify the new key against a deposit request owned by this account:
 
 ```bash
-curl -fsS "$PAYDAY_API_URL/v1/payments/<PAYMENT_ID>" \
+curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
 ```
 

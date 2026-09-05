@@ -1,8 +1,8 @@
 //! The payer's wallet attestation (product plan §4.6, §5.4).
 //!
 //! ```text
-//! POST /v1/payer/payments/{id}/wallet/challenge   {"wallet": "0x…"}
-//! POST /v1/payer/payments/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
+//! POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…"}
+//! POST /v1/payer/deposit-requests/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
 //! ```
 //!
 //! Once a session satisfies the request's policy (immediately, for a
@@ -23,7 +23,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
 use gateway_core::{
     Invoice, InvoiceStatus, PayerAttestation, PayerAttestationError, PayerAttestationTypedData,
-    PayerPaymentResponse, payer_wallet_attestation,
+    PayerDepositRequestResponse, payer_wallet_attestation,
 };
 use gateway_db::{BindPayerWallet, DbInvoice, DbPayerSession, PAYER_SESSION_TTL};
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,7 @@ async fn open_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Invoice)
     if invoice.status != InvoiceStatus::Created
         || Utc::now().timestamp() > invoice.expiration_timestamp as i64
     {
-        return Err(ApiError::payment_not_payable());
+        return Err(ApiError::deposit_request_not_payable());
     }
     Ok((row, invoice))
 }
@@ -236,10 +236,10 @@ pub async fn attest(
                 return Err(ApiError::wallet_already_bound(&bound));
             }
         }
-        BindPayerWallet::NotBindable(_) => return Err(ApiError::payment_not_payable()),
+        BindPayerWallet::NotBindable(_) => return Err(ApiError::deposit_request_not_payable()),
     }
     let access = authorized_invoice(&state, &id, Some(token)).await?;
-    let response: PayerPaymentResponse = payer_response(&state, access);
+    let response: PayerDepositRequestResponse = payer_response(&state, access);
     Ok((no_store(), Json(response)).into_response())
 }
 

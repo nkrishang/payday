@@ -1,6 +1,6 @@
 # Daily monitoring
 
-Routine health checks for the payment gateway. Run these proactively or
+Routine health checks for the deposit request gateway. Run these proactively or
 when investigating a reported issue.
 
 ## 1. Check alarm states
@@ -21,13 +21,13 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 | `payday-status-unhealthy-targets` / `payday-status-task-count` | The independently deployed public status page is unavailable | [service-restart.md](service-restart.md) |
 | `payday-indexer-task-count` | Indexer container is not running | [service-restart.md](service-restart.md) |
 | `payday-indexer-fatal` | Block indexer hit a permanent halt (cursor mismatch, etc.) | [indexer-fatal-halt.md](indexer-fatal-halt.md) |
-| `payday-indexer-sweep-paused` | Sweep worker cannot resolve its in-flight helper transaction; indexing continues | [stuck-invoice.md](stuck-invoice.md#sweep-worker-paused) |
+| `payday-indexer-sweep-paused` | Sweep worker cannot resolve its in-flight helper transaction; indexing continues | [stuck-deposit-request.md](stuck-deposit-request.md#sweep-worker-paused) |
 | `payday-indexer-signer-low-balance` | KMS sweep signer below `PAYDAY_SIGNER_LOW_BALANCE_WEI` | step 7 below |
-| `payday-indexer-cursor-lagging` | Cursor trails finality by more than 1,000 blocks | [stuck-invoice.md](stuck-invoice.md) step 3 |
-| `payday-indexer-sweep-backlog-stale` | Collectable funds have waited more than 15 minutes | [stuck-invoice.md](stuck-invoice.md) step 4 |
+| `payday-indexer-cursor-lagging` | Cursor trails finality by more than 1,000 blocks | [stuck-deposit-request.md](stuck-deposit-request.md) step 3 |
+| `payday-indexer-sweep-backlog-stale` | Collectable funds have waited more than 15 minutes | [stuck-deposit-request.md](stuck-deposit-request.md) step 4 |
 | `payday-indexer-retryable-failures` | More than ten retryable RPC/database failures in five minutes | check the provider status page and indexer logs |
 | `payday-notification-delivery-failures` | Merchant email or webhook delivery repeatedly failed | inspect gatewayd logs and pending rows in `notification_outbox`; delivery retries automatically |
-| `payday-notification-missing-contact` | A blocked legacy invoice has neither an email nor webhook snapshot | recover the account contact, notify the merchant manually, and inspect `notification_outbox` |
+| `payday-notification-missing-contact` | A blocked legacy deposit request has neither an email nor webhook snapshot | recover the account contact, notify the merchant manually, and inspect `notification_outbox` |
 | `payday-db-high-cpu` | RDS CPU > 80% for 15 min | scale the instance |
 | `payday-db-low-storage` | RDS has < 5 GB free storage | raise `db_max_allocated_storage` |
 
@@ -92,7 +92,7 @@ rejecting requests — see [quicknode-rpc-limits.md](quicknode-rpc-limits.md).
 
 The sweep signer needs MON for gas. Monad bills the gas *limit* of every
 helper transaction (`100k + 400k × items`), so a full batch reserves about
-8.1M gas worth of MON. If the balance runs out, submissions fail and invoices
+8.1M gas worth of MON. If the balance runs out, submissions fail and deposit requests
 wait in the queue; the `payday-indexer-signer-low-balance` alarm fires first.
 
 ```bash
