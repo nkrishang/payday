@@ -52,8 +52,8 @@ curl -fsS "$API/v1/payments" \
 - `payout_address` is the wallet that receives exactly the invoice amount from
   an on-time successful payment.
 - `payer_policy` here is `permissionless`. To require the payer to verify an
-  email address or identity first, or to add party details, notes, a customer,
-  or metadata, see the [API reference](api-reference.md).
+  email address first, or to add party details, notes, a customer, or
+  metadata, see the [API reference](api-reference.md).
 - Overpayments, late transfers, and expired balances go to the Payday recovery
   wallet. They are reviewed manually and returned by Payday; they are not sent
   back to the payer automatically, and you cannot choose that wallet.

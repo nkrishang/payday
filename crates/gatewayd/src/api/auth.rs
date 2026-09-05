@@ -451,7 +451,7 @@ pub async fn require_identity(
 }
 
 /// Who an operator route acts as: the configured reviewer identity, recorded
-/// on every manual verification decision (product plan §6.3).
+/// on every operator decision.
 #[derive(Clone, Debug)]
 pub struct Reviewer(pub String);
 

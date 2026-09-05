@@ -297,50 +297,27 @@ test("API errors expose stable code, requestId, and HTTP status", async () => {
   });
 });
 
-test("verification detail and review request use the payment sub-routes", async () => {
+test("verification detail uses the payment sub-route", async () => {
   const detail = {
-    payer_policy_mode: "verified_identity",
-    verification_completed_at: null,
+    payer_policy_mode: "verified_email",
+    verification_completed_at: "2026-09-01T00:01:00Z",
     likely_unsolicited_at: null,
-    facts: { email: "approved", document: "declined", liveness: "approved", identity_match: "pending", complete: false },
+    facts: { email: "approved", complete: true },
     attempts: [{
-      id: "v1", kind: "identity", status: "declined", provider: "didit", provider_reference: "sess-1",
-      attempt_number: 1, document: "declined", liveness: "approved", identity_match: "pending",
-      risk_codes: ["DOCUMENT_EXPIRED"], country_code: "DEU", verified_at: null, expires_at: null,
-      created_at: "2026-09-01T00:00:00Z", review: null,
+      id: "v1", kind: "email", status: "approved",
+      verified_at: "2026-09-01T00:01:00Z", created_at: "2026-09-01T00:00:00Z",
     }],
-    review_available: true,
-    retry_available: true,
   };
-  const mock = mockFetch((url, init) => {
-    if (url.endsWith("/verification/review")) {
-      assert.equal(init.method, "POST");
-      return json({ ...detail, review_available: true, retry_available: false });
-    }
-    return json(detail);
-  });
+  const mock = mockFetch(() => json(detail));
   const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const read = await client.payments.verification("pay_a/b");
-  assert.equal(read.attempts[0].provider_reference, "sess-1");
-  assert.equal(read.facts.document, "declined");
-  const reviewed = await client.payments.requestVerificationReview("pay_a/b");
-  assert.equal(reviewed.retry_available, false);
+  assert.equal(read.attempts[0].status, "approved");
+  assert.equal(read.facts.email, "approved");
   assert.deepEqual(mock.calls.map((call) => [call.init.method ?? "GET", call.url]), [
     ["GET", "https://example.test/v1/payments/pay_a%2Fb/verification"],
-    ["POST", "https://example.test/v1/payments/pay_a%2Fb/verification/review"],
   ]);
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, "Bearer k");
-});
-
-test("a review request with nothing declined surfaces review_not_available", async () => {
-  const mock = mockFetch(() => apiError("review_not_available", 409));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
-  await assert.rejects(client.payments.requestVerificationReview("pay_1"), (error) => {
-    assert.ok(error instanceof PaydayError);
-    assert.equal(error.code, "review_not_available");
-    return true;
-  });
 });
 
 test("account.get reads with the client's own credential", async () => {

@@ -294,26 +294,9 @@ test("an email-gated invoice reveals only the issuer, heading, and masked mailbo
   await page.goto("/pay/pay_gated-email");
 
   await expectLocked(page, html);
-  await expect(page.getByText("Email ownership")).toBeVisible();
-  await expect(page.getByText("Identity document")).toHaveCount(0);
+  await expect(page.getByText(/once the payer verifies the email address/)).toBeVisible();
+  await expect(page.getByText(/identity/i)).toHaveCount(0);
   expect(errors).toEqual([]);
-});
-
-test("identity-gated invoices say which checks are needed, matched or not", async ({
-  page,
-  request,
-}) => {
-  await page.goto("/pay/pay_gated-identity");
-  await expectLocked(page, await (await request.get("/pay/pay_gated-identity")).text());
-  await expect(page.getByText("Identity document")).toBeVisible();
-  await expect(page.getByText("Name matches the invoice")).toBeVisible();
-  await expect(page.getByText(/matching the person it names/)).toBeVisible();
-
-  await page.goto("/pay/pay_gated-unattributed");
-  await expectLocked(page, await (await request.get("/pay/pay_gated-unattributed")).text());
-  await expect(page.getByText("Identity document")).toBeVisible();
-  await expect(page.getByText("Name matches the invoice")).toHaveCount(0);
-  await expect(page.getByText(/matching the person it names/)).toHaveCount(0);
 });
 
 test("an email-gated invoice unlocks for the tab that verifies, and only there", async ({
@@ -367,116 +350,6 @@ test("an email-gated invoice unlocks for the tab that verifies, and only there",
   expect(errors.filter((error) => !/401/.test(error))).toEqual([]);
 });
 
-test("identity-gated invoices ask for the identity check after the email, still locked", async ({
-  page,
-}) => {
-  await page.goto("/pay/pay_gated-identity");
-  await verifyEmail(page);
-
-  await expect(page.getByText("Identity check required")).toBeVisible();
-  await expect(page.getByText(/person it names/)).toBeVisible();
-  await expect(page.getByText("Approved")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /continue to identity verification/i }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: /send a code to/i })).toHaveCount(0);
-  await expectNoInstructions(page);
-  await expect(page.getByRole("region", { name: "Invoice", exact: true })).toHaveCount(0);
-  const text = await page.locator("body").innerText();
-  for (const withheld of WITHHELD) expect(text, withheld).not.toContain(withheld);
-
-  await page.goto("/pay/pay_gated-unattributed");
-  await verifyEmail(page);
-  await expect(page.getByText("Identity check required")).toBeVisible();
-  await expect(page.getByText(/person it names/)).toHaveCount(0);
-  await expectNoInstructions(page);
-});
-
-/** Proves the mailbox and lands on the identity step. */
-async function reachIdentityStep(page: Page, id: string) {
-  await page.goto(`/pay/${id}`);
-  await verifyEmail(page);
-  await expect(page.getByText("Identity check required")).toBeVisible();
-}
-
-test("an identity-gated invoice resumes after the hosted check and unlocks for that tab only", async ({
-  page,
-  request,
-  browser,
-}) => {
-  const sessionInUrls: string[] = [];
-  page.on("request", (sent) => {
-    if (/pps_/.test(sent.url())) sessionInUrls.push(sent.url());
-  });
-  await reachIdentityStep(page, "pay_gated-identity");
-
-  // Consent comes before any redirect, in matched-mode words, with both
-  // privacy notices and the wallet caveat.
-  await expect(page.getByText(/matches the person this invoice names/)).toBeVisible();
-  await expect(page.getByRole("link", { name: /payday privacy notice/i })).toHaveAttribute(
-    "href",
-    "https://payday.sh/privacy",
-  );
-  await expect(page.getByRole("link", { name: /didit privacy notice/i })).toHaveAttribute(
-    "href",
-    "https://didit.me/privacy-policy",
-  );
-  await expect(page.getByText(/does not prove ownership of the wallet/).first()).toBeVisible();
-  await expectNoInstructions(page);
-
-  // Off to the provider and back. The return URL carries the provider's own
-  // status, which the page ignores in favour of the gateway.
-  await page.getByRole("button", { name: /continue to identity verification/i }).click();
-  await page.waitForURL(/\/pay\/pay_gated-identity\?status=/);
-  await expect(page.getByRole("region", { name: "Invoice", exact: true })).toBeVisible();
-  await expect(page.getByText(ADDRESS)).toBeVisible();
-  await expect(page.getByRole("img", { name: /QR code/i })).toBeVisible();
-  expect(page.url()).not.toContain("pps_");
-  expect(sessionInUrls).toEqual([]);
-
-  // The session came back from this tab's storage, not the URL: another
-  // browser with the same link, query string and all, is still locked.
-  const html = await (await request.get("/pay/pay_gated-identity")).text();
-  const stranger = await browser.newContext();
-  const other = await stranger.newPage();
-  await other.goto(page.url());
-  await expectLocked(other, html);
-  await stranger.close();
-});
-
-test("an unattributed invoice reuses an earlier credential without leaving the page", async ({
-  page,
-}) => {
-  await reachIdentityStep(page, "pay_gated-unattributed");
-  await expect(page.getByText(/does not tell the merchant who you are/)).toBeVisible();
-  await expect(page.getByText(/matches the person this invoice names/)).toHaveCount(0);
-
-  await page.getByRole("button", { name: /continue to identity verification/i }).click();
-  await expect(page.getByRole("region", { name: "Invoice", exact: true })).toBeVisible();
-  await expect(page.getByText(ADDRESS)).toBeVisible();
-  expect(page.url()).toBe(new URL("/pay/pay_gated-unattributed", page.url()).toString());
-});
-
-test("a declined identity check offers one retry and then the appeal contact", async ({ page }) => {
-  await reachIdentityStep(page, "pay_gated-identity-declined");
-  await page.getByRole("button", { name: /continue to identity verification/i }).click();
-  await page.waitForURL(/\/pay\/pay_gated-identity-declined\?status=/);
-
-  await expect(page.getByText(/did not confirm that the document matches/)).toBeVisible();
-  await expect(page.getByText("Declined").first()).toBeVisible();
-  await expect(page.getByRole("link", { name: "support@payday.sh" })).toHaveAttribute(
-    "href",
-    "mailto:support@payday.sh",
-  );
-  await expectNoInstructions(page);
-
-  await page.getByRole("button", { name: /try the identity check again/i }).click();
-  await page.waitForURL(/\/pay\/pay_gated-identity-declined\?status=/);
-  await expect(page.getByText(/automated identity verification has stopped/i)).toBeVisible();
-  await expect(page.getByRole("button", { name: /try the identity check again/i })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "support@payday.sh" })).toBeVisible();
-  await expectNoInstructions(page);
-});
 
 test("the wallet button refuses a payment for another chain", async ({ page }) => {
   await page.goto("/pay/pay_other-chain");

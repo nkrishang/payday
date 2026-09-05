@@ -4,7 +4,6 @@ mod attestation;
 mod config;
 mod deployment;
 mod dispatcher;
-mod identity;
 mod invoice_pdf;
 mod onboarding_payer;
 mod payer_identity;
@@ -155,27 +154,6 @@ async fn main() {
             None
         }
     };
-    // The identity provider is optional until its credentials exist; without
-    // it the identity modes can still be issued and email-verified, and the
-    // identity step answers verification_unavailable.
-    let identity_provider: Option<Arc<dyn identity::PayerIdentityProvider>> = match config.didit() {
-        Some(didit) if !config.status_only() => Some(Arc::new(
-            identity::didit::DiditProvider::new(identity::didit::DiditConfig {
-                api_key: didit.api_key.clone(),
-                workflow_id: didit.workflow_id.clone(),
-                webhook_secret: didit.webhook_secret.clone(),
-                base_url: didit.base_url.clone(),
-            })
-            .unwrap_or_else(|error| panic!("{error}")),
-        )),
-        Some(_) => None,
-        None => {
-            if !config.status_only() {
-                tracing::warn!("PAYDAY_DIDIT_* are unset; identity verification cannot be started");
-            }
-            None
-        }
-    };
     // Every payment address this service hands out assumes the reviewed
     // contract generation, so refuse to serve against any other deployment.
     if let Some(settlement) = config.settlement() {
@@ -211,7 +189,6 @@ async fn main() {
         attachment_store,
         attestor,
         payer_verification,
-        identity_provider.clone(),
         onboarding_payer,
     );
     if !config.status_only()
@@ -224,7 +201,6 @@ async fn main() {
         );
     }
 
-    let verifications = state.verifications.clone();
     let app = if config.status_only() {
         api::status_router(state)
     } else {
@@ -249,15 +225,6 @@ async fn main() {
     } else {
         None
     };
-    // Open hosted identity sessions are polled until the provider settles
-    // them; a lost webhook never strands a payer (product plan §6.2).
-    let reconciler = identity_provider.map(|provider| {
-        tokio::spawn(identity::reconciler::run(
-            verifications.clone(),
-            provider,
-            shutdown_rx.clone(),
-        ))
-    });
     let dispatcher = if !config.status_only() {
         if let Some(from) = config.notification_from_address() {
             let aws = aws
@@ -293,9 +260,6 @@ async fn main() {
     }
     let _ = shutdown_tx.send(true);
     if let Some(worker) = dispatcher {
-        let _ = worker.await;
-    }
-    if let Some(worker) = reconciler {
         let _ = worker.await;
     }
     if let Some(worker) = api_health {

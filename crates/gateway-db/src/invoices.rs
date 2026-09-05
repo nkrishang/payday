@@ -14,9 +14,9 @@ use crate::attachments::{AttachInvoiceError, DbAttachment, attach_in_transaction
 use crate::cursor::IndexerCursor;
 use crate::{AccountId, attachments};
 use gateway_core::{
-    Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, ExpectedIdentity,
-    FactoryAddress, Invoice, InvoiceId, InvoiceStatusParseError, Party, PayerPolicy,
-    PayerPolicyMode, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
+    Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
+    InvoiceId, InvoiceStatusParseError, Party, PayerPolicy, PayerPolicyMode, PaymentAddress,
+    RecoveryAddress, Salt, TokenAddress,
 };
 
 /// Database row representing one invoice.
@@ -88,7 +88,6 @@ pub struct DbInvoice {
     pub heading: Option<String>,
     pub payer_policy_mode: String,
     pub expected_email: Option<String>,
-    pub expected_identity: Option<sqlx::types::Json<ExpectedIdentity>>,
     pub verification_completed_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     /// Proof material; nullable in the schema only until pre-release reset.
     pub issuance_snapshot: Option<sqlx::types::Json<CanonicalIssuanceSnapshot>>,
@@ -431,11 +430,6 @@ pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> boo
         && existing.heading.as_deref() == request.heading
         && existing.payer_policy_mode == request.payer_policy.mode().as_str()
         && existing.expected_email.as_deref() == request.payer_policy.expected_email()
-        && existing
-            .expected_identity
-            .as_ref()
-            .map(|identity| &identity.0)
-            == request.payer_policy.expected_identity()
         && committed.map(|attachment| attachment.id) == request.attachment_id
         && committed == request.attachment
 }
@@ -634,13 +628,13 @@ impl InvoiceRepository {
             r#"
             INSERT INTO invoices
                 (id, account_id, idempotency_key, customer_id, issuer_id, issuer, bill_to, notes, heading,
-                 reference, metadata, payer_policy_mode, expected_email, expected_identity,
+                 reference, metadata, payer_policy_mode, expected_email,
                  chain_id, factory_address, token_address, token_decimals, beneficiary_address,
                  expiration_timestamp, expires_in_secs, expiration_intent, recovery_address,
                  amount, net_amount, salt, payment_address, issuance_snapshot,
                  attribution_version, attribution_nonce, attribution_hash, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                    $18, $19, $20, $21, $22, $23, $24, $24, $25, $26, $27, $28, $29, $30, 'created')
+                    $18, $19, $20, $21, $22, $23, $23, $24, $25, $26, $27, $28, $29, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -658,12 +652,6 @@ impl InvoiceRepository {
         .bind(&input.metadata)
         .bind(input.payer_policy.mode().as_str())
         .bind(input.payer_policy.expected_email())
-        .bind(
-            input
-                .payer_policy
-                .expected_identity()
-                .map(sqlx::types::Json),
-        )
         .bind(input.chain_id as i64)
         .bind(input.factory_address)
         .bind(input.token_address)
@@ -1280,7 +1268,7 @@ async fn replay(
 pub(crate) mod tests {
     use super::*;
     use alloy_primitives::address;
-    use gateway_core::{AttachmentCommitment, ExpectedIdentity, PayerPolicyMode};
+    use gateway_core::{AttachmentCommitment, PayerPolicyMode};
     use sqlx::types::chrono::{DateTime, Utc};
 
     fn epoch() -> DateTime<Utc> {
@@ -1415,7 +1403,6 @@ pub(crate) mod tests {
             heading: None,
             payer_policy_mode: "permissionless".into(),
             expected_email: None,
-            expected_identity: None,
             verification_completed_at: None,
             issuance_snapshot: Some(sqlx::types::Json(snapshot())),
             attribution_version: Some(1),
@@ -1662,12 +1649,8 @@ pub(crate) mod tests {
         original.heading = Some("March retainer".into());
         original.reference = Some("INV-1".into());
         original.metadata = serde_json::json!({"po": "42"});
-        original.payer_policy = PayerPolicy::VerifiedIdentity {
+        original.payer_policy = PayerPolicy::VerifiedEmail {
             expected_email: "alice@example.com".into(),
-            expected_identity: ExpectedIdentity {
-                first_name: "Alice".into(),
-                last_name: "Smith".into(),
-            },
         };
         let issued = repo
             .insert_issued(&original, Some(document.id))
@@ -1675,14 +1658,10 @@ pub(crate) mod tests {
             .unwrap();
         assert!(!issued.replayed);
         assert_eq!(issued.row.customer_id, Some(customer));
-        assert_eq!(issued.row.payer_policy_mode, "verified_identity");
+        assert_eq!(issued.row.payer_policy_mode, "verified_email");
         assert_eq!(
             issued.row.expected_email.as_deref(),
             Some("alice@example.com")
-        );
-        assert_eq!(
-            issued.row.expected_identity.as_ref().unwrap().0.last_name,
-            "Smith"
         );
         assert_eq!(issued.row.attribution_version, Some(1));
         assert_eq!(
@@ -1745,22 +1724,14 @@ pub(crate) mod tests {
             ),
             (
                 "policy mode",
-                Box::new(|i| {
-                    i.payer_policy = PayerPolicy::VerifiedEmail {
-                        expected_email: "alice@example.com".into(),
-                    }
-                }),
+                Box::new(|i| i.payer_policy = PayerPolicy::Permissionless),
                 Some(document.id),
             ),
             (
-                "expected identity",
+                "expected email",
                 Box::new(|i| {
-                    i.payer_policy = PayerPolicy::VerifiedIdentity {
-                        expected_email: "alice@example.com".into(),
-                        expected_identity: ExpectedIdentity {
-                            first_name: "Alicia".into(),
-                            last_name: "Smith".into(),
-                        },
+                    i.payer_policy = PayerPolicy::VerifiedEmail {
+                        expected_email: "alicia@example.com".into(),
                     }
                 }),
                 Some(document.id),
@@ -1806,7 +1777,7 @@ pub(crate) mod tests {
                 .payer_policy_mode
                 .parse::<PayerPolicyMode>()
                 .unwrap(),
-            PayerPolicyMode::VerifiedIdentity
+            PayerPolicyMode::VerifiedEmail
         );
         assert_eq!(
             issued
@@ -1977,11 +1948,10 @@ pub(crate) mod tests {
                  (id, account_id, idempotency_key, chain_id, factory_address, token_address,
                   token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
                   expiration_intent, recovery_address, amount, net_amount, salt, payment_address,
-                  status, reference, metadata, payer_policy_mode, expected_email, expected_identity)
+                  status, reference, metadata, payer_policy_mode, expected_email)
                VALUES ($1, $2, 'allowlist', 1, $3, $3, 6, $3, 4000000000, 3600, 'at:4000000000',
                   $3, '1000000', '1000000', $4, $3, 'created', 'order-7', '{"source":"checkout"}',
-                  'verified_identity', 'alice@example.com',
-                  '{"first_name":"Alice","last_name":"Smith"}')"#,
+                  'verified_email', 'alice@example.com')"#,
         )
         .bind(id)
         .bind(account)

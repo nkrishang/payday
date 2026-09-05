@@ -19,8 +19,8 @@ use sqlx::types::chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// How long a payer session stays usable. It must outlive a hosted identity
-/// flow the payer returns from, and it never outlives the day.
+/// How long a payer session stays usable: long enough for a payer to come
+/// back to the page later that day, and it never outlives the day.
 pub const PAYER_SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
 
 const PAYER_REF_ACCOUNT_DOMAIN: &[u8] = b"PAYDAY_PAYER_REF_ACCOUNT_V1";
@@ -50,9 +50,6 @@ pub struct DbPayerSession {
     pub invoice_id: Uuid,
     pub payer_ref: Option<Vec<u8>>,
     pub email_verified_at: Option<DateTime<Utc>>,
-    pub document_verified_at: Option<DateTime<Utc>>,
-    pub liveness_verified_at: Option<DateTime<Utc>>,
-    pub identity_matched_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -61,9 +58,6 @@ impl DbPayerSession {
     pub fn facts(&self) -> VerificationFacts {
         VerificationFacts {
             email: self.email_verified_at.is_some(),
-            document: self.document_verified_at.is_some(),
-            liveness: self.liveness_verified_at.is_some(),
-            identity_match: self.identity_matched_at.is_some(),
         }
     }
 
@@ -89,6 +83,17 @@ pub struct EmailVerificationAttempt {
     pub created_at: DateTime<Utc>,
 }
 
+/// One verification attempt as the merchant may see it: what was attempted
+/// and where it stands. Never the code, the session, or the payer reference.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DbVerificationAttempt {
+    pub id: Uuid,
+    pub kind: String,
+    pub status: String,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Error)]
 pub enum StartEmailVerificationError {
     /// A code was sent for this invoice too recently; `retry_after` is how
@@ -103,9 +108,8 @@ pub enum StartEmailVerificationError {
 #[derive(Debug, Clone)]
 pub struct VerificationCompletion {
     pub session: DbPayerSession,
-    /// Set when this approval completed the invoice's verification, which
-    /// only `verified_email` allows; the identity modes complete through
-    /// `VerificationRepository` once their identity facts arrive.
+    /// Set when this approval completed the invoice's verification: the
+    /// first proof of the expected mailbox while the invoice is still live.
     pub invoice_completed_at: Option<DateTime<Utc>>,
 }
 
@@ -163,8 +167,7 @@ impl PayerSessionRepository {
     ) -> Result<Option<DbPayerSession>, sqlx::Error> {
         sqlx::query_as::<_, DbPayerSession>(
             r#"
-            SELECT id, invoice_id, payer_ref, email_verified_at, document_verified_at,
-                   liveness_verified_at, identity_matched_at, created_at, expires_at
+            SELECT id, invoice_id, payer_ref, email_verified_at, created_at, expires_at
             FROM payer_sessions
             WHERE token_hash = $1 AND invoice_id = $2 AND expires_at > now()
             "#,
@@ -261,6 +264,26 @@ impl PayerSessionRepository {
         Ok(EmailVerificationAttempt { id, created_at })
     }
 
+    /// Every attempt on a merchant's invoice, oldest first.
+    pub async fn attempts_for_invoice(
+        &self,
+        account_id: Uuid,
+        invoice_id: Uuid,
+    ) -> Result<Vec<DbVerificationAttempt>, sqlx::Error> {
+        sqlx::query_as::<_, DbVerificationAttempt>(
+            r#"
+            SELECT id, kind, status, verified_at, created_at
+            FROM payer_verifications
+            WHERE account_id = $1 AND invoice_id = $2
+            ORDER BY created_at, id
+            "#,
+        )
+        .bind(account_id)
+        .bind(invoice_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// Whether the session has a code outstanding.
     pub async fn has_pending_email_verification(
         &self,
@@ -280,9 +303,8 @@ impl PayerSessionRepository {
     }
 
     /// The mailbox is proven: bind the payer reference and the email fact to
-    /// the session, approve its pending attempt, and, for `verified_email`,
-    /// complete the invoice in the same transaction. Identity modes leave the
-    /// invoice incomplete until their identity facts arrive.
+    /// the session, approve its pending attempt, and complete the invoice in
+    /// the same transaction.
     pub async fn approve_email(
         &self,
         session_id: Uuid,
@@ -303,8 +325,7 @@ impl PayerSessionRepository {
         {
             let session = sqlx::query_as::<_, DbPayerSession>(
                 r#"
-                SELECT id, invoice_id, payer_ref, email_verified_at, document_verified_at,
-                       liveness_verified_at, identity_matched_at, created_at, expires_at
+                SELECT id, invoice_id, payer_ref, email_verified_at, created_at, expires_at
                 FROM payer_sessions WHERE id = $1
                 "#,
             )
@@ -343,8 +364,7 @@ impl PayerSessionRepository {
             UPDATE payer_sessions
             SET payer_ref = $2, email_verified_at = COALESCE(email_verified_at, $3)
             WHERE id = $1 AND expires_at > $3
-            RETURNING id, invoice_id, payer_ref, email_verified_at, document_verified_at,
-                      liveness_verified_at, identity_matched_at, created_at, expires_at
+            RETURNING id, invoice_id, payer_ref, email_verified_at, created_at, expires_at
             "#,
         )
         .bind(session_id)
@@ -353,21 +373,10 @@ impl PayerSessionRepository {
         .fetch_one(&mut *tx)
         .await?;
         // A completed terminal invoice may issue a fresh receipt capability
-        // after the expected mailbox is proven again. This never revives an
-        // invoice or extends the old bearer: it marks only this new 24h session.
-        let session = sqlx::query_as::<_, DbPayerSession>(
-            r#"
-            UPDATE payer_sessions s SET
-              document_verified_at = CASE WHEN i.payer_policy_mode IN ('verified_identity','verified_identity_unattributed') THEN COALESCE(s.document_verified_at, $2) ELSE s.document_verified_at END,
-              liveness_verified_at = CASE WHEN i.payer_policy_mode IN ('verified_identity','verified_identity_unattributed') THEN COALESCE(s.liveness_verified_at, $2) ELSE s.liveness_verified_at END,
-              identity_matched_at = CASE WHEN i.payer_policy_mode = 'verified_identity' THEN COALESCE(s.identity_matched_at, $2) ELSE s.identity_matched_at END
-            FROM invoices i WHERE s.id=$1 AND i.id=s.invoice_id
-              AND i.verification_completed_at IS NOT NULL
-              AND i.status NOT IN ('created','funded','deploying')
-            RETURNING s.id,s.invoice_id,s.payer_ref,s.email_verified_at,s.document_verified_at,
-                      s.liveness_verified_at,s.identity_matched_at,s.created_at,s.expires_at
-            "#,
-        ).bind(session_id).bind(verified_at).fetch_optional(&mut *tx).await?.unwrap_or(session);
+        // after the expected mailbox is proven again: the session above
+        // satisfies the policy on its own. This never revives an invoice or
+        // extends the old bearer, and the update below leaves terminal
+        // invoices alone.
         let invoice_completed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             r#"
             UPDATE invoices
@@ -530,16 +539,9 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
-    async fn email_attempts_cool_down_per_invoice_and_identity_modes_stay_incomplete(pool: PgPool) {
+    async fn email_attempts_cool_down_per_invoice_and_are_listed_for_the_merchant(pool: PgPool) {
         let repo = PayerSessionRepository::new(pool.clone());
-        let row = invoice(
-            &pool,
-            "identity",
-            PayerPolicy::VerifiedIdentityUnattributed {
-                expected_email: "alice@example.com".into(),
-            },
-        )
-        .await;
+        let row = invoice(&pool, "cooldown", email_policy()).await;
         let first = repo.create(row.id, PAYER_SESSION_TTL).await.unwrap();
         let second = repo.create(row.id, PAYER_SESSION_TTL).await.unwrap();
         let cooldown = Duration::from_secs(60);
@@ -590,13 +592,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(completion.invoice_completed_at.is_none());
+        assert!(completion.invoice_completed_at.is_some());
         assert!(completion.session.facts().email);
-        assert!(
-            !completion
-                .session
-                .satisfies(PayerPolicyMode::VerifiedIdentityUnattributed)
-        );
+        assert!(completion.session.satisfies(PayerPolicyMode::VerifiedEmail));
         assert!(!repo.has_pending_email_verification(first.id).await.unwrap());
         let (status, event): (String, Option<String>) = sqlx::query_as(
             "SELECT status, provider_event_id FROM payer_verifications WHERE payer_session_id = $1 AND status <> 'abandoned'",
@@ -607,5 +605,36 @@ mod tests {
         .unwrap();
         assert_eq!(status, "approved");
         assert_eq!(event.as_deref(), Some("event-2"));
+
+        // The merchant sees every attempt on the invoice, oldest first, with
+        // nothing but its kind, status, and times.
+        let attempts = repo
+            .attempts_for_invoice(row.account_id, row.id)
+            .await
+            .unwrap();
+        let listed: Vec<(&str, &str, bool)> = attempts
+            .iter()
+            .map(|attempt| {
+                (
+                    attempt.kind.as_str(),
+                    attempt.status.as_str(),
+                    attempt.verified_at.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("email", "abandoned", false),
+                ("email", "pending", false),
+                ("email", "approved", true),
+            ]
+        );
+        assert!(
+            repo.attempts_for_invoice(Uuid::from_u128(999), row.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

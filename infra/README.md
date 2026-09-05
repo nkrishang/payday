@@ -23,12 +23,8 @@ empty, the payer settings and the generated `PAYDAY_PAYER_REF_MASTER_KEY`
 secret are not passed to the task and verification is unavailable). Terraform
 passes these non-secret identifiers to ECS; embedded email OTP, connection,
 dashboard, and payer application setup are documented in
-`docs/authentication.md`. Payer identity verification is enabled the same way
-once the Didit workflow exists (`didit_workflow_id`, with the API key and
-webhook secret as `TF_VAR_didit_api_key` and `TF_VAR_didit_webhook_secret`;
-while empty, the identity settings are not passed to the task and identity
-start answers unavailable); `admin_reviewer_id` names who is recorded on
-manual verification decisions.
+`docs/authentication.md`. `admin_reviewer_id` names who is recorded on
+operator decisions.
 
 The same ALB and certificate serve `payment_domain_name` and
 `status_domain_name`. The status hostname routes to an independent ECS service

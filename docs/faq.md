@@ -19,14 +19,10 @@ the PDF are where that information goes.
 ## What are the payer modes?
 
 `permissionless` lets anyone with the link pay, as before. `verified_email`
-requires the payer to prove ownership of the mailbox you name.
-`verified_identity` additionally requires a document and liveness check that
-matches the first and last name you assert. `verified_identity_unattributed`
-requires a successful document and liveness check for any person, without
-asserting who. For the verified modes the checkout hides the amount, parties,
-PDF, and address until verification completes; funds sent before then are
-flagged as likely unsolicited. Payday reports pass or fail, not the verified
-person's data.
+requires the payer to prove ownership of the mailbox you name. For
+`verified_email` the checkout hides the amount, parties, PDF, and address
+until verification completes; funds sent before then are flagged as likely
+unsolicited. Payday reports pass or fail, not the payer's own data.
 
 ## How do PDF attachments work?
 

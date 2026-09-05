@@ -179,12 +179,6 @@ fn policy_words(mode: PayerPolicyMode) -> &'static str {
     match mode {
         PayerPolicyMode::Permissionless => "Anyone holding the payment link may pay",
         PayerPolicyMode::VerifiedEmail => "The payer must verify their email address before paying",
-        PayerPolicyMode::VerifiedIdentity => {
-            "The payer must verify their email address and identity before paying"
-        }
-        PayerPolicyMode::VerifiedIdentityUnattributed => {
-            "The payer must verify their email address and complete an identity check before paying"
-        }
     }
 }
 

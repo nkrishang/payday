@@ -8,63 +8,35 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Removed
+
+- Identity verification. The `verified_identity` and
+  `verified_identity_unattributed` payer modes, the `expected_identity`
+  assertion, the Didit provider and its `PAYDAY_DIDIT_*` settings, the
+  hosted identity step in the checkout, `POST …/verify/identity/start`,
+  `POST /v1/webhooks/identity`, the reconciler, credential reuse, manual
+  review (`POST …/verification/review`,
+  `POST /v1/admin/verifications/{id}/decision`), the `verification.declined`
+  event, and the SDK's `startIdentity` and `requestVerificationReview` are
+  gone. A payer policy is `permissionless` or `verified_email`;
+  `requirements` carries `email` and `complete`. Migration `0017` drops the
+  identity tables and columns, along with any pre-production rows only those
+  modes could have produced.
+- The `payday` command-line client (`crates/gateway-cli`), its installer,
+  Homebrew formula generator, release workflow, and reference documentation.
+  Payday is API-first with the dashboard for management: every command had an
+  API route or a dashboard control behind it, and those remain. The offline
+  Proof of Payment checks the CLI itemised live on in
+  `gateway_core::verify_proof`; the CLI's optional live receipt checks over
+  JSON-RPC have no replacement yet.
+- The landing page's unused terminal demo and install components.
+
 ### Added
 
-- Payer identity verification for `verified_identity` and
-  `verified_identity_unattributed`, through Didit's hosted document, liveness,
-  and face-match session behind a thin `PayerIdentityProvider` boundary.
-  `POST /v1/payer/payments/{id}/verify/identity/start` (session with a proven
-  mailbox required) answers `{outcome: reused | redirect {url}}`: a hosted
-  session is created lazily, with the merchant-scoped payer reference as
-  vendor data, Payday's attempt id as metadata, and, for `verified_identity`
-  only, the expected first and last name as the details to match; a mismatch
-  declines. Only statuses, the provider's session reference, the document's
-  issuing country, and allowlisted risk categories are kept; the decision
-  types cannot carry names, document numbers, dates of birth, or images, and
-  nothing logs a callback body. Approval sets the document, liveness, and
-  (matched) identity-match facts on the verifying session only, mints a
-  merchant-scoped `document_liveness` credential and, for matched mode, a
-  `matched_identity` credential bound to the expected-identity hash
-  (`keccak256("PAYDAY_EXPECTED_IDENTITY_V1" || JCS(expected_identity))`),
-  and completes the invoice's verification only while it is still live.
-  Credentials (180-day default lifetime) are reused within the merchant on
-  later invoices whose mailbox is proven again — generic ones for
-  unattributed mode, hash-bound ones for the same asserted name — and never
-  across merchants or across different names.
-- Callback and reconciliation: `POST /v1/webhooks/identity` verifies Didit's
-  `X-Signature-V2` (HMAC-SHA256 over Didit's canonical JSON: sorted keys,
-  compact separators, unescaped Unicode, whole floats as integers) and
-  `X-Timestamp` (±300 s), records the event id once, answers `202`, and only
-  brings the attempt's poll forward; a reconciler worker in gatewayd claims
-  open attempts with `FOR UPDATE SKIP LOCKED` and a lease, polls pending
-  sessions every 15 seconds and in-review ones with increasing backoff, stops
-  on a settled status, and defers provider failures with backoff rather than
-  declining the payer. `verification.declined` is now emitted, once per
-  payment, when a decline is recorded.
-- Retry and human review: one automated resubmission after a decline; a
-  second decline sets `review_required` and further starts answer
-  `409 review_required`. `GET /v1/payments/{id}/verification` gives the
-  merchant every attempt with each fact reported separately, provider
-  reference, risk categories, and reviews; `POST …/verification/review`
-  asks a person to look at a declined attempt (automation stops for that
-  payer); `POST /v1/admin/verifications/{id}/decision` records the
-  reviewer (`PAYDAY_ADMIN_REVIEWER_ID`, default `operator`), decision, note,
-  and time, and a manual approval binds the same expected-identity hash.
-  Configured by `PAYDAY_DIDIT_API_KEY`, `PAYDAY_DIDIT_WORKFLOW_ID`,
-  `PAYDAY_DIDIT_WEBHOOK_SECRET` (optional `PAYDAY_DIDIT_BASE_URL`), all
-  together or none; without them identity start answers
-  `503 verification_unavailable`.
-- Checkout: explicit consent before the redirect (matched and unattributed
-  copy, both privacy notices, the wallet-ownership caveat), the session
-  restored from this tab's storage after the provider returns, the return
-  URL's query ignored in favour of polling `GET …/verify`, and, after a
-  decline, one retry and the appeal contact
-  (`NEXT_PUBLIC_PAYER_APPEAL_EMAIL`). Dashboard: verification activity on the
-  invoice page with each fact on its own, every attempt's provider reference
-  and risk categories, the reviewer's outcome, retry availability, and a
-  request-review action. SDK: `payer.verification.startIdentity`,
-  `identity` on the verification status, `payments.verification`, and
-  `payments.requestVerificationReview`.
+- `GET /v1/payments/{id}/verification`: the merchant's verification view of
+  an invoice — each fact the policy needs, and every attempt made against it
+  with its status and times. Dashboard: verification activity on the request
+  detail once the payer has made an attempt. SDK: `payments.verification`.
 
 - Payer email verification. A gated invoice's payer proves ownership of the
   mailbox the merchant asserted through
@@ -79,7 +51,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   (`429 otp_resend_cooldown` with `Retry-After`); permissionless invoices
   answer `409 verification_not_required`, closed ones `410`. For
   `verified_email` the invoice's `verification_completed_at` is set in the
-  same transaction; the identity modes record the mailbox and stay locked.
+  same transaction.
   The write routes answer cross-origin requests from the hosted checkout only
   (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`); the reads keep `*` and now admit the
   session header. Configured by `PAYDAY_PAYER_AUTH0_ISSUER`,
@@ -98,8 +70,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   keeps the session in this tab's `sessionStorage` (never in server output,
   local storage, or a URL), resumes it across reloads, and fetches the QR as
   a blob with the session in a header. Locked invoices render nothing but the
-  issuer, heading, masked mailbox, and requirements; identity modes move on
-  to an identity step after the email.
+  issuer, heading, masked mailbox, and requirements.
 - SDK: `payer.verification.startEmail/confirmEmail/status` and
   `payer.payments.qr(id, payerSession)` returning a `Blob`. `qrUrl` is gone:
   a gated invoice's QR needs a session, which must never be in an image URL.
@@ -109,10 +80,9 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 - Invoice documents. `POST /v1/payments` now takes the document the payment
   fulfils: required `issuer` and `bill_to` parties (name, optional email and
-  free-text details), a required `payer_policy` (`permissionless`,
-  `verified_email`, `verified_identity`, or `verified_identity_unattributed`
-  with the merchant's expected email and, for `verified_identity`, expected
-  name), and optional `heading`, `notes`, `customer_id`, and `attachment_id`.
+  free-text details), a required `payer_policy` (`permissionless` or
+  `verified_email` with the merchant's expected email), and optional
+  `heading`, `notes`, `customer_id`, and `attachment_id`.
   The merchant `Payment` object returns them, the list summary carries
   `heading`, `bill_to_name`, `payer_policy_mode`, `customer_id`,
   `has_attachment`, `verification_completed_at`, and `likely_unsolicited_at`,
@@ -395,14 +365,6 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Removed
 
-- The `payday` command-line client (`crates/gateway-cli`), its installer,
-  Homebrew formula generator, release workflow, and reference documentation.
-  Payday is API-first with the dashboard for management: every command had an
-  API route or a dashboard control behind it, and those remain. The offline
-  Proof of Payment checks the CLI itemised live on in
-  `gateway_core::verify_proof`; the CLI's optional live receipt checks over
-  JSON-RPC have no replacement yet.
-- The landing page's unused terminal demo and install components.
 - `memo` from `POST /v1/payments`, the payment responses, the TypeScript SDK,
   and the CLI (`--memo` survives only as a hidden alias of `--reference`).
   Use `reference` for the invoice number and `notes` for free text.

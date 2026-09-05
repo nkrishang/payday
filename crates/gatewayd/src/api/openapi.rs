@@ -61,26 +61,18 @@ struct Party {
     details: Option<String>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
-struct ExpectedIdentity {
-    first_name: String,
-    last_name: String,
-}
-#[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 enum PayerPolicyMode {
     Permissionless,
     VerifiedEmail,
-    VerifiedIdentity,
-    VerifiedIdentityUnattributed,
 }
-/// `expected_email` is required for every verified mode; `expected_identity`
-/// is required for `verified_identity` and forbidden elsewhere.
+/// `expected_email` is required for `verified_email` and forbidden for
+/// `permissionless`.
 #[derive(Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({"mode":"verified_email","expected_email":"alice@example.com"}))]
 struct PayerPolicy {
     mode: PayerPolicyMode,
     expected_email: Option<String>,
-    expected_identity: Option<ExpectedIdentity>,
 }
 #[derive(Serialize, ToSchema)]
 struct AttachmentDescriptor {
@@ -232,42 +224,18 @@ enum VerificationFactStatus {
 #[derive(Serialize, ToSchema)]
 struct VerificationRequirements {
     email: VerificationFactStatus,
-    document: VerificationFactStatus,
-    liveness: VerificationFactStatus,
-    identity_match: VerificationFactStatus,
     complete: bool,
 }
-#[derive(Serialize, ToSchema)]
-struct VerificationReview {
-    requested_at: String,
-    /// approved or declined once decided.
-    decision: Option<String>,
-    reviewer: Option<String>,
-    note: Option<String>,
-    decided_at: Option<String>,
-}
-/// One attempt: statuses, the provider's reference, and allowlisted risk
-/// categories. Never anything the provider extracted.
+/// One attempt: what was attempted and where it stands.
 #[derive(Serialize, ToSchema)]
 struct VerificationAttempt {
     id: String,
-    /// email or identity.
+    /// email.
     kind: String,
-    /// pending, approved, declined, in_review, expired, abandoned, or review_required.
+    /// pending, approved, or abandoned.
     status: String,
-    /// auth0, didit, or manual.
-    provider: String,
-    provider_reference: Option<String>,
-    attempt_number: u16,
-    document: VerificationFactStatus,
-    liveness: VerificationFactStatus,
-    identity_match: VerificationFactStatus,
-    risk_codes: Vec<String>,
-    country_code: Option<String>,
     verified_at: Option<String>,
-    expires_at: Option<String>,
     created_at: String,
-    review: Option<VerificationReview>,
 }
 #[derive(Serialize, ToSchema)]
 struct VerificationDetail {
@@ -276,10 +244,6 @@ struct VerificationDetail {
     likely_unsolicited_at: Option<String>,
     facts: VerificationRequirements,
     attempts: Vec<VerificationAttempt>,
-    /// The latest identity attempt was declined and a human may be asked.
-    review_available: bool,
-    /// The payer may resubmit from the checkout on their own.
-    retry_available: bool,
 }
 #[derive(Serialize, ToSchema)]
 struct Transfer {
@@ -595,10 +559,8 @@ fn payment_attachment() {}
 fn invoice_pdf() {}
 #[utoipa::path(get, path="/v1/payments/{id}/proof", operation_id="getProofOfPayment", tag="payments", params(("id"=String, Path)), responses((status=200,description="Verifiable offline; gateway_core::verify_proof holds the checks",body=ProofOfPayment),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="payment_not_settled",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn proof() {}
-#[utoipa::path(get, path="/v1/payments/{id}/verification", operation_id="getPaymentVerification", tag="payments", params(("id"=String, Path)), responses((status=200,description="Every verification attempt with each fact reported separately; provider references and risk categories only, never extracted identity",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/payments/{id}/verification", operation_id="getPaymentVerification", tag="payments", params(("id"=String, Path)), responses((status=200,description="Every verification attempt on the invoice with each fact reported separately",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn payment_verification() {}
-#[utoipa::path(post, path="/v1/payments/{id}/verification/review", operation_id="requestVerificationReview", tag="payments", params(("id"=String, Path)), responses((status=200,description="A human review was requested for the latest declined identity attempt; automated resubmission stops",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="review_not_available: no declined identity attempt",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn request_verification_review() {}
 #[utoipa::path(post, path="/v1/customers", operation_id="createCustomer", tag="customers", request_body=CustomerRequest, responses((status=201,body=Customer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_customer() {}
 #[utoipa::path(get, path="/v1/customers", operation_id="listCustomers", tag="customers", params(("starting_after"=Option<uuid::Uuid>, Query, description="Customer id returned as next_cursor"),("limit"=Option<u32>, Query, minimum=1, maximum=100)), responses((status=200,body=CustomerPage),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
@@ -657,8 +619,8 @@ fn list_payout_addresses() {}
 fn delete_payout_address() {}
 
 #[derive(OpenApi)]
-#[openapi(paths(create_payment,list_payments,get_payment,cancel_payment,transfers,payment_attachment,invoice_pdf,proof,payment_verification,request_verification_review,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,ExpectedIdentity,PayerPolicyMode,PayerPolicy,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationReview,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
+#[openapi(paths(create_payment,list_payments,get_payment,cancel_payment,transfers,payment_attachment,invoice_pdf,proof,payment_verification,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
  modifiers(&Security), tags((name="payments",description="Invoice issuance, documents, and payment tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
@@ -707,7 +669,6 @@ mod tests {
         ("/v1/payments/{id}/invoice.pdf", "get"),
         ("/v1/payments/{id}/proof", "get"),
         ("/v1/payments/{id}/verification", "get"),
-        ("/v1/payments/{id}/verification/review", "post"),
         ("/v1/customers", "get"),
         ("/v1/customers", "post"),
         ("/v1/customers/{id}", "get"),
@@ -797,7 +758,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            2
         );
         let proof = &d["components"]["schemas"]["ProofOfPayment"]["properties"];
         for documented in [
@@ -811,17 +772,13 @@ mod tests {
             assert!(proof[documented].is_object(), "{documented}");
         }
         let attempt = &d["components"]["schemas"]["VerificationAttempt"]["properties"];
-        for documented in [
-            "provider_reference",
-            "risk_codes",
-            "document",
-            "liveness",
-            "identity_match",
-            "review",
-        ] {
+        for documented in ["kind", "status", "verified_at", "created_at"] {
             assert!(attempt[documented].is_object(), "{documented}");
         }
         for withheld in [
+            "provider_reference",
+            "risk_codes",
+            "review",
             "first_name",
             "last_name",
             "document_number",
