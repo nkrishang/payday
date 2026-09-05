@@ -19,19 +19,15 @@ the PDF are where that information goes.
 ## What are the payer modes?
 
 `permissionless` lets anyone with the link pay, as before. `verified_email`
-requires the payer to prove ownership of the mailbox you name.
-`verified_identity` additionally requires a document and liveness check that
-matches the first and last name you assert. `verified_identity_unattributed`
-requires a successful document and liveness check for any person, without
-asserting who. For the verified modes the checkout hides the amount, parties,
-PDF, and address until verification completes; funds sent before then are
-flagged as likely unsolicited. Payday reports pass or fail, not the verified
-person's data.
+requires the payer to prove ownership of the mailbox you name. For
+`verified_email` the checkout hides the amount, parties, PDF, and address
+until verification completes; funds sent before then are flagged as likely
+unsolicited. Payday reports pass or fail, not the payer's own data.
 
 ## How do PDF attachments work?
 
-One PDF per invoice, at most 5 MiB. The SDK's `attachments.upload`, the CLI's
-`--attachment`, and the dashboard's upload control reserve a presigned slot,
+One PDF per invoice, at most 5 MiB. The SDK's `attachments.upload` and the
+dashboard's upload control reserve a presigned slot,
 send the bytes straight to storage, and wait for the malware scan to admit the
 file; only then can its `attachment_id` be attached to an invoice. The file's
 SHA-256 is committed into the payment address and appears in the Proof of
@@ -39,14 +35,13 @@ Payment. Reads return a signed URL valid for a few minutes.
 
 ## What is Proof of Payment and how do I verify it?
 
-Once an invoice settles, `payday proof download` (or
-`GET /v1/payments/{id}/proof`) exports the canonical invoice, the nonce and
-salt, the payment address, the settling transfer, and a Payday-signed
-verification attestation. `payday proof verify proof.json` recomputes the hash,
-salt, and address and checks the transfer offline, with no Payday access; add
-`--attachment` to check the PDF and `--rpc-url` to confirm the receipt on
-chain. Share the proof with payers or auditors at your discretion; it is not a
-public link.
+Once an invoice settles, `GET /v1/payments/{id}/proof` exports the canonical
+invoice, the nonce and salt, the payment address, the settling transfer, and a
+Payday-signed verification attestation. Anyone holding it can recompute the
+hash, salt, and address and check the transfer offline, with no Payday access;
+the checks are published as `gateway_core::verify_proof`, and the attached
+PDF's hash can be compared with the one the proof commits to. Share the proof
+with payers or auditors at your discretion; it is not a public link.
 
 ## Which asset and networks can pay?
 
@@ -74,9 +69,9 @@ integrating your own UI, reproduce all safety guidance in
 
 Payday credits only finalized native-USDC transfers. Inclusion or wallet
 confirmation can precede Payday's finality boundary and indexing cursor. Check
-`as_of`, `indexer_freshness`, transfer provenance, and `/v1/status`; use
-`payday get <ID> --watch` or API long polling rather than treating submission as
-payment.
+`as_of`, `indexer_freshness`, transfer provenance, and `/v1/status`; poll
+`GET /v1/payments/{id}` or register a webhook rather than treating submission
+as payment.
 
 ## What happens with exact, partial, or excess payment?
 
@@ -102,7 +97,7 @@ Payday support for return handling.
 
 ## Can I cancel or refund through Payday?
 
-`payday cancel` and `POST /v1/payments/{id}/cancel` are advisory: they stop
+`POST /v1/payments/{id}/cancel` is advisory: it stops
 Payday clients from presenting the payment but cannot disable an EVM address or
 alter its contract. There is no refund endpoint. Funds that settled to your
 payout address are yours to refund through your own wallet/process; recovered
@@ -145,9 +140,8 @@ Create requests accept `expires_in` as integer seconds or `expires_at` as RFC
 
 ## How should API keys be stored and rotated?
 
-Keys are bearer secrets with full account authority. Use the CLI's private,
-API-bound profile or a secret manager; never source control, logs, URLs, or
-shell arguments. The dashboard never holds a key: it signs in with the emailed
+Keys are bearer secrets with full account authority. Keep them in a secret
+manager; never source control, logs, URLs, or shell arguments. The dashboard never holds a key: it signs in with the emailed
 code and uses the short-lived Auth0 token as its session. There is one unnamed key generation per account. Rotation
 keeps the prior key valid for 24 hours so integrations can move safely;
 revocation invalidates current and grace-period keys immediately. Keys are
@@ -155,8 +149,8 @@ shown only at issuance. See [Authentication and API keys](authentication.md).
 
 ## What is available in sandbox?
 
-`payday --sandbox` selects an isolated Monad testnet service, test USDC, and
-`payday_test_…` credentials. It exercises real indexing/finality rather than a
+`https://api.sandbox.payday.sh` is an isolated Monad testnet service with test
+USDC and `payday_test_…` credentials. It exercises real indexing/finality rather than a
 fake “mark paid” endpoint. See [Sandbox](sandbox.md).
 
 ## Where can I get help?

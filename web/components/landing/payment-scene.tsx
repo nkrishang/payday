@@ -8,7 +8,7 @@ const PAYMENTS = [
     reference: "REF # 2381",
     token: "usdc",
     amount: "2,500",
-    checks: ["Email", "Wallet", "KYC"],
+    checks: ["Email", "Wallet"],
     state: "Received",
   },
   {
@@ -35,7 +35,7 @@ const PAYMENTS = [
     reference: "REF # 31607",
     token: "ausd",
     amount: "920",
-    checks: ["Email", "KYC"],
+    checks: ["Email"],
     state: "Waiting",
   },
   {
@@ -44,7 +44,7 @@ const PAYMENTS = [
     reference: "REF # 9926",
     token: "usdt",
     amount: "27,000",
-    checks: ["Email", "KYC"],
+    checks: ["Email", "Wallet"],
     state: "Unverified",
     selected: true,
   },
@@ -54,7 +54,7 @@ const PAYMENTS = [
     reference: "REF # 8042",
     token: "usdt",
     amount: "12,400",
-    checks: ["Email", "Wallet", "KYC"],
+    checks: ["Email", "Wallet"],
     state: "Received",
   },
 ] as const;

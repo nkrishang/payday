@@ -7,8 +7,8 @@ An **invoice** is the document a merchant issues: an issuer and a bill-to party
 directly, optional notes, heading, reference, and metadata, a payer policy,
 and at most one PDF attachment. A **payment** is the on-chain fulfilment of
 that invoice — the virtual account, the transfers that reach it, and its
-settlement. The API keeps `/v1/payments` as the path; the dashboard, CLI, and
-this documentation say invoice for the document and payment for the funds.
+settlement. The API keeps `/v1/payments` as the path; the dashboard and this
+documentation say invoice for the document and payment for the funds.
 
 Payday models no line items, quantities, subtotals, discounts, tax, or fiat.
 The amount is authoritative; an attached PDF is stored, presented, and hashed
@@ -35,7 +35,7 @@ Treat the address as single-use. Share the `payment_url` or all returned
 payment instructions, and stop presenting the address after it is no longer
 payable. Never recycle it for another order.
 
-## Payer policy: four modes
+## Payer policy: two modes
 
 Every invoice names who may pay and what they must prove first:
 
@@ -43,12 +43,10 @@ Every invoice names who may pay and what they must prove first:
 |---|---|---|
 | `permissionless` | Nothing | Nothing |
 | `verified_email` | Expected email | Mailbox ownership |
-| `verified_identity` | Expected email and first/last name | Mailbox ownership, document and liveness check, and a match against the asserted name |
-| `verified_identity_unattributed` | Expected email | Mailbox ownership and a successful document and liveness check for any person |
 
-The merchant asserts; Payday confirms. Payday returns whether the checks
-passed, not the verified person's data, and it never persists vendor-extracted
-identity. For the three verified modes the hosted page withholds the amount,
+The merchant asserts; Payday confirms. Payday returns whether the check
+passed, never the payer's own data. For `verified_email` the hosted page
+withholds the amount,
 bill-to, notes, reference, PDF, address, URI, and QR until the payer's session
 satisfies the policy — only the issuer name and heading show, with a masked
 hint of the expected mailbox. Funds that arrive before verification completes
@@ -140,8 +138,8 @@ outcomes happen after issuance, so they are Payday-attested rather than
 address-committed; the attestation names the invoice's attribution hash and
 payment address, so it belongs to that invoice alone. The proof does not claim
 that the verified person owned the sending wallet. It is available to the merchant
-(`payday proof download`, `GET /v1/payments/{id}/proof`) and shared at the
-merchant's discretion; `payday proof verify` checks it offline.
+(`GET /v1/payments/{id}/proof`) and shared at the merchant's discretion;
+`gateway_core::verify_proof` checks it offline.
 
 ## Safety boundaries
 

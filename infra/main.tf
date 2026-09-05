@@ -35,20 +35,11 @@ locals {
   payer_secrets = local.payer_verification_enabled ? [
     { name = "PAYDAY_PAYER_REF_MASTER_KEY", valueFrom = aws_secretsmanager_secret.payer_ref_master_key.arn }
   ] : []
-  # Identity verification needs a Didit workflow, API key, and webhook secret
-  # (see docs/authentication.md). Until all three exist the settings are
-  # omitted as a group, and identity start answers verification_unavailable.
-  identity_verification_enabled = var.didit_workflow_id != ""
-  identity_environment = local.identity_verification_enabled ? [
-    { name = "PAYDAY_DIDIT_WORKFLOW_ID", value = var.didit_workflow_id },
-    { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
-    ] : [
+  # Who operator decisions are recorded against.
+  identity_environment = [
     { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
   ]
-  identity_secrets = local.identity_verification_enabled ? [
-    { name = "PAYDAY_DIDIT_API_KEY", valueFrom = aws_secretsmanager_secret.didit_api_key[0].arn },
-    { name = "PAYDAY_DIDIT_WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.didit_webhook_secret[0].arn }
-  ] : []
+  identity_secrets = []
 }
 
 resource "aws_vpc" "this" {
@@ -212,8 +203,8 @@ resource "aws_secretsmanager_secret_version" "webhook_encryption_key" {
   secret_string = random_id.webhook_encryption_key.b64_std
 }
 
-# Derives the merchant-scoped payer references; rotating it unlinks every
-# stored identity credential from the mailboxes that earned them.
+# Derives the merchant-scoped payer references stored against verified
+# sessions; rotating it changes every reference derived from then on.
 resource "random_id" "payer_ref_master_key" { byte_length = 32 }
 resource "aws_secretsmanager_secret" "payer_ref_master_key" {
   name = "${var.name}/payer-ref-master-key"
@@ -221,25 +212,6 @@ resource "aws_secretsmanager_secret" "payer_ref_master_key" {
 resource "aws_secretsmanager_secret_version" "payer_ref_master_key" {
   secret_id     = aws_secretsmanager_secret.payer_ref_master_key.id
   secret_string = random_id.payer_ref_master_key.b64_std
-}
-
-resource "aws_secretsmanager_secret" "didit_api_key" {
-  count = local.identity_verification_enabled ? 1 : 0
-  name  = "${var.name}/didit-api-key"
-}
-resource "aws_secretsmanager_secret_version" "didit_api_key" {
-  count         = local.identity_verification_enabled ? 1 : 0
-  secret_id     = aws_secretsmanager_secret.didit_api_key[0].id
-  secret_string = var.didit_api_key
-}
-resource "aws_secretsmanager_secret" "didit_webhook_secret" {
-  count = local.identity_verification_enabled ? 1 : 0
-  name  = "${var.name}/didit-webhook-secret"
-}
-resource "aws_secretsmanager_secret_version" "didit_webhook_secret" {
-  count         = local.identity_verification_enabled ? 1 : 0
-  secret_id     = aws_secretsmanager_secret.didit_webhook_secret[0].id
-  secret_string = var.didit_webhook_secret
 }
 
 resource "random_password" "admin_bearer" {
@@ -363,7 +335,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], aws_secretsmanager_secret.didit_api_key[*].arn, aws_secretsmanager_secret.didit_webhook_secret[*].arn) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn] }] })
 }
 resource "aws_iam_role_policy" "status_secrets" {
   role   = aws_iam_role.status_execution.id

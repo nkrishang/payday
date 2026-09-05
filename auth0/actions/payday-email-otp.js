@@ -4,14 +4,14 @@ const CLAIM_NAMESPACE = "https://api.payday.sh/auth";
 const MAX_AUTHENTICATION_AGE_SECONDS = 5 * 60;
 
 /**
- * The two first-party applications allowed to hold a Payday API token: the CLI
- * (native) and the dashboard (SPA). Both are configured as Action secrets so a
- * tenant edit cannot admit a third client without a reviewed change. An unset
- * secret is dropped rather than compared, because `undefined === undefined`
- * would otherwise admit a request that carries no client at all.
+ * The one first-party application allowed to hold a Payday API token: the
+ * dashboard (SPA). It is configured as an Action secret so a tenant edit
+ * cannot admit another client without a reviewed change. An unset secret is
+ * dropped rather than compared, because `undefined === undefined` would
+ * otherwise admit a request that carries no client at all.
  */
 function allowedClientIds(secrets) {
-  return [secrets.PAYDAY_CLIENT_ID, secrets.PAYDAY_DASHBOARD_CLIENT_ID].filter(
+  return [secrets.PAYDAY_CLIENT_ID].filter(
     (id) => typeof id === "string" && id.length > 0,
   );
 }

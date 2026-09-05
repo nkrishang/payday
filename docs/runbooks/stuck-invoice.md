@@ -33,11 +33,9 @@ in `recovered_funds` (see "Reconciling recovered funds" below). The API reports
 ```bash
 export PAYDAY_API_URL="https://api.payday.sh"
 export PAYDAY_API_KEY="<API-key-for-the-account-that-created-the-invoice>"
-
-./target/release/payday get <PAYMENT_ID>
 ```
 
-Or with curl:
+Then:
 
 ```bash
 curl -s -H "Authorization: Bearer $PAYDAY_API_KEY" \
@@ -138,7 +136,8 @@ from Secrets Manager into an environment variable without printing it:
 ```bash
 export PAYDAY_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
   --secret-id payday/admin-bearer --query SecretString --output text)"
-payday ops release <PAYMENT_ID>
+curl -fsS -X POST "$PAYDAY_API_URL/v1/admin/payments/<PAYMENT_ID>/release" \
+  -H "Authorization: Bearer $PAYDAY_ADMIN_SECRET" | jq
 unset PAYDAY_ADMIN_SECRET
 ```
 

@@ -46,7 +46,7 @@ export function VerificationBadge(facts: Facts) {
   );
 }
 
-/** The full picture for the detail page, including the merchant's assertions. */
+/** The full picture for the detail page, including the merchant's assertion. */
 export function VerificationStatus({
   policy,
   completedAt,
@@ -71,15 +71,6 @@ export function VerificationStatus({
           </>
         ) : null}
 
-        {policy.mode === "verified_identity" ? (
-          <>
-            <dt className="text-faint">Expected identity</dt>
-            <dd>
-              {policy.expected_identity.first_name} {policy.expected_identity.last_name}
-            </dd>
-          </>
-        ) : null}
-
         <dt className="text-faint">Verification</dt>
         <dd className="flex items-center gap-2">
           <StatusDot tone={tone} />
@@ -87,13 +78,6 @@ export function VerificationStatus({
           {completedAt ? <span className="text-muted">· {formatDate(completedAt)}</span> : null}
         </dd>
       </dl>
-
-      {policy.mode === "verified_identity_unattributed" ? (
-        <p className="mt-3 text-[12px] leading-relaxed text-faint">
-          Unattributed: the identity check confirms a real person, not who they are. The payment
-          stays associated with the verified email.
-        </p>
-      ) : null}
 
       {unsolicitedAt ? (
         <p

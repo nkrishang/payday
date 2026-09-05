@@ -1,7 +1,7 @@
 # Merchant dashboard
 
 The dashboard at `payday.sh/dashboard` is the browser face of the same API the
-SDK and CLI use. It issues invoices, keeps customers, uploads the one PDF an
+SDK uses. It issues invoices, keeps customers, uploads the one PDF an
 invoice may carry, and shows what happened to each payment. It adds no rules
 of its own: every limit, policy check, and status comes from the API, and the
 form only gives immediate feedback (a missing name, a file that is not a PDF)
@@ -70,9 +70,9 @@ anything has been issued the same page carries the invoice list, the identities,
 and the customer list in full, filters and cursors included.
 `/dashboard/invoices` and `/dashboard/customers` redirect here.
 
-Setting up gates issuing, never looking: an account that issued from the CLI
-still sees what it has, and only the "New deposit request" action diverts into
-setup.
+Setting up gates issuing, never looking: an account that issued through the
+API still sees what it has, and only the "New deposit request" action diverts
+into setup.
 
 ## Account and wallet
 
@@ -210,9 +210,8 @@ The whole document, exactly as `POST /v1/payments` takes it:
   shows the attachment's own stages: *uploading*, *scanning* (the malware scan
   has not reported), then *ready* with its size and SHA-256 — or *rejected*
   with the API's reason;
-- the payer policy: one of the four modes, with the expected email for every
-  verified mode and the expected first and last name for `verified_identity`
-  only. The expected email is required for every mode beyond permissionless,
+- the payer policy: one of the two modes, with the expected email for
+  `verified_email`. The expected email is required for that mode,
   says so on its label, and arrives pre-filled from the billed party's address
   — following it until the merchant types their own, after which it is theirs.
 
@@ -236,17 +235,12 @@ merchant came for:
 - *Document*: only what the row omits — the billed party's address and details,
   the notes, and a link to the saved customer;
 - *Verification* (gated requests only): the policy mode with the merchant's own
-  assertions (expected email and, for `verified_identity`, the expected name),
-  and the verification verdict — separate from the payment status, because a
-  gated request can be funded before its payer has verified. The activity
-  behind it follows when it has something to add: each fact (email, document,
-  liveness and face match, name match) on its own, every attempt with the
-  provider's reference and allowlisted risk categories, the reviewer's outcome
-  and time, whether the payer may retry, and a *Request review* action for a
-  declined identity check. A policy that only checks a mailbox has one fact,
-  and that fact is the verdict already shown, so nothing is broken out for it.
-  The provider's extracted identity is never shown, because the API never has
-  it;
+  assertion (the expected email), and the verification verdict — separate from
+  the payment status, because a gated request can be funded before its payer
+  has verified. The activity behind it follows once there is any: every
+  attempt the payer made, with its status (code sent, approved, or abandoned)
+  and time. The payer's session and the code itself are never shown, because
+  the API never sends them;
 - *Payment*: the one-time address, the payout address, network and token, the
   funded time, the settlement transaction, and any operator attention message.
   Addresses and the settlement hash are shown in full and link to the
@@ -264,8 +258,8 @@ merchant came for:
 - *Files*: the attached PDF through a short-lived signed URL fetched on demand,
   the deterministic invoice PDF (`GET /v1/payments/{id}/invoice.pdf`), and the
   Proof of Payment as JSON (`GET /v1/payments/{id}/proof`), which becomes
-  available once the request settles and verifies offline with
-  `payday proof verify`.
+  available once the request settles and verifies offline
+  (`gateway_core::verify_proof`).
 
 
 ## Verification and recovery indicators
@@ -274,9 +268,7 @@ Two indicators sit beside the payment status and mean different things.
 
 **Verification** — *Not required* for permissionless invoices; *Pending* until
 the gateway records that the expected payer completed the policy's checks;
-*Verified*, with the completion time, afterwards. For
-`verified_identity_unattributed` the detail page notes that the check confirms
-a real person, not who they are.
+*Verified*, with the completion time, afterwards.
 
 **Likely unsolicited** — shown, with the time, when finalized funds arrived at a
 gated invoice before its verification completed. The address is not

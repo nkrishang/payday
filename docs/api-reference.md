@@ -74,7 +74,7 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `amount` | Required positive USDC decimal; at most six fractional digits. Used directly; nothing is summed or reconciled |
 | `payout_address` | Required nonzero EVM address; receives exactly `amount` |
 | `issuer`, `bill_to` | Required parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim |
-| `payer_policy` | Required; one of the four modes below |
+| `payer_policy` | Required; one of the two modes below |
 | `customer_id` | Optional customer UUID owned by the account; the invoice still stores its own `bill_to` snapshot |
 | `notes` | Optional, up to 4,000 bytes |
 | `heading` | Optional short description, up to 200 bytes; shown to the payer before verification on gated invoices |
@@ -90,15 +90,12 @@ Payer policy shapes:
 ```json
 {"mode": "permissionless"}
 {"mode": "verified_email", "expected_email": "alice@example.com"}
-{"mode": "verified_identity", "expected_email": "alice@example.com",
- "expected_identity": {"first_name": "Alice", "last_name": "Smith"}}
-{"mode": "verified_identity_unattributed", "expected_email": "alice@example.com"}
 ```
 
-`expected_email` is required for every verified mode and is trimmed and
-lowercased; `expected_identity` is required only for `verified_identity` and
-forbidden elsewhere. Assertions are merchant-supplied and cannot be edited by
-the payer; the payer route shows only a masked hint.
+`expected_email` is required for `verified_email`, forbidden for
+`permissionless`, and is trimmed and lowercased. The assertion is
+merchant-supplied and cannot be edited by the payer; the payer route shows
+only a masked hint.
 
 Text fields — party names, emails, and details, `heading`, `reference`,
 `notes`, and customer fields — reject control characters (a NUL or any other
@@ -187,26 +184,11 @@ the same invoice always produces byte-identical output.
 ### `GET /v1/payments/{reference}/verification`
 
 The merchant's verification view of one invoice: `payer_policy_mode`,
-`verification_completed_at`, `likely_unsolicited_at`, `facts` (each of
-`email`, `document`, `liveness`, `identity_match` as `not_required`,
-`pending`, `approved`, or `declined`, plus `complete`), every `attempts[]`
-entry (`kind` email or identity, `status`, `provider` auth0/didit/manual,
-`provider_reference`, `attempt_number`, the three identity facts,
-allowlisted `risk_codes`, `country_code`, timestamps, and any `review`
-with `requested_at`, `decision`, `reviewer`, `note`, `decided_at`), and two
-flags: `review_available` (the latest identity attempt is declined and a
-person may be asked) and `retry_available` (the payer may resubmit from the
-checkout on their own). Nothing the identity provider extracted — no name,
-document number, date of birth, or image — is ever in this response, or
-stored.
-
-### `POST /v1/payments/{reference}/verification/review`
-
-Asks a person to review the latest declined identity attempt and returns the
-same verification view. Automated resubmission stops for that payer once a
-review is requested; the reviewer's decision, identity, note, and time appear
-on the attempt's `review`. `409 review_not_available` when no identity attempt
-is declined.
+`verification_completed_at`, `likely_unsolicited_at`, `facts` (`email` as
+`not_required`, `pending`, or `approved`, plus `complete`), and every
+`attempts[]` entry (`kind` email, `status` pending, approved, or abandoned,
+`verified_at`, `created_at`). The payer's session and the code they typed
+are never in this response.
 
 ### `GET /v1/payments/{reference}/proof`
 
@@ -225,8 +207,8 @@ signature}`). The payload names the invoice's attribution hash, chain, and
 payment address, so an attestation is bound to the document it was issued for
 and cannot be transplanted onto a proof for another invoice. Anyone holding
 the proof (and, if attached, the PDF) can recompute hash → salt → CREATE3
-address offline with `payday proof verify`, which also requires the listed
-transfers to sum to at least the invoice amount; whether the settlement
+address offline — `gateway_core::verify_proof` is the reference — which also
+requires the listed transfers to sum to at least the invoice amount; whether the settlement
 transaction really executed is provable only against the chain
 (`--rpc-url`). It is merchant-accessible and shared at the merchant's
 discretion; it is not a public link.
@@ -442,8 +424,8 @@ integrations are unaffected, and no other route allows cross-origin reads.
 
 The payer response discloses progressively. It always carries `id`,
 `issuer_name`, `heading`, `payer_policy {mode, expected_email_hint}`,
-`requirements {email, document, liveness, identity_match, complete}` (each fact
-`not_required`, `pending`, `approved`, or `declined`), `status`, `payable`,
+`requirements {email, complete}` (`email` is `not_required`, `pending`, or
+`approved`), `status`, `payable`,
 `expires_at`, `server_timestamp`, `settlement_tx_hash`,
 `settlement_explorer_url`, `payer_message`, and `content_unlocked`. For a
 `permissionless` invoice `content_unlocked` is true and the response includes
@@ -478,14 +460,13 @@ it back in `Payday-Payer-Session` on a second `start` resends the code on the
 same session. At most one code per invoice per minute is sent, whoever asks;
 sooner answers `429 otp_resend_cooldown` with `Retry-After`. `confirm` takes
 the session and the code, exchanges it with Auth0 against the payer audience,
-and answers `{requirements, identity_start_available}`. If Auth0 accepts and
+and answers `{requirements}`. If Auth0 accepts and
 consumes the OTP but database persistence remains unavailable, it answers
 `503 verification_persistence_unavailable` with a five-minute, signed
 `continuation`. Retry the same confirm route with `{"continuation":"…"}` and
 the same payer session; this proof is audience-, invoice-, and session-bound,
-contains no Auth0 bearer token, and responses are `no-store`. For `verified_email`
-the invoice's verification completes and the session unlocks the content; the
-identity modes record the mailbox and stay locked until their identity facts.
+contains no Auth0 bearer token, and responses are `no-store`. The invoice's
+verification completes and the session unlocks the content.
 `GET …/verify` reports the same shape for a session, or for the invoice as a
 whole without one. Permissionless invoices answer
 `409 verification_not_required`; invoices past their deadline or already
@@ -500,62 +481,6 @@ checkout origin (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
 `Content-Type` and `Payday-Payer-Session`; they never allow `*`. Bodies are
 limited to 8 KiB.
 
-### Identity verification
-
-```text
-POST /v1/payer/payments/{id}/verify/identity/start
-POST /v1/webhooks/identity
-```
-
-For `verified_identity` and `verified_identity_unattributed`, `identity/start`
-takes the session whose mailbox is proven and answers `{outcome}`: `{"type":
-"reused"}` when an earlier credential of the same merchant satisfies the
-policy (the session is unlocked at once), or `{"type": "redirect", "url"}`
-to send the payer to the provider's hosted document and liveness session.
-Credentials are merchant-scoped and bound to the merchant-scoped payer
-reference: a generic document-and-liveness credential satisfies
-`verified_identity_unattributed`; `verified_identity` reuses only a credential
-earned against the very same expected name (its hash), never one from another
-merchant or another asserted identity. `verified_identity` sends the expected
-name to the provider as the details to match and treats a mismatch as a
-decline; `verified_identity_unattributed` sends no identity and never tells
-the merchant who the payer is. Refusals: `409 email_verification_required`
-before the mailbox is proven in this session, `409 verification_not_required`
-for the other modes, `409 identity_in_review` while the provider is still
-reviewing an earlier attempt, `409 review_required` once automation has
-stopped (a second decline, a merchant review request, or a reviewer's
-decision), `502 identity_provider_unavailable` when the provider could not
-open a session, and `503 verification_unavailable` on a deployment without
-`PAYDAY_DIDIT_*`.
-
-After the payer returns, `GET …/verify` is the only truth: it adds
-`identity {status, attempt_number, retry_available}` for the session's latest
-attempt (`pending`, `in_review`, `approved`, `declined`, `expired`,
-`abandoned`, or `review_required`) and `identity_start_available`. A
-declined fact reads as `declined` in `requirements`. Approval sets the
-document and liveness facts (and the identity-match fact for
-`verified_identity`) on the verifying session only, mints the credentials,
-and completes the invoice's verification while the invoice is still live; a
-completion after the deadline or after settlement records the payer's facts
-but never revives settlement. One automated resubmission follows a decline;
-a second decline sets `review_required`.
-
-The provider's callback, `POST /v1/webhooks/identity`, is authenticated by
-its `X-Signature-V2` (HMAC-SHA256 of the canonical body under
-`PAYDAY_DIDIT_WEBHOOK_SECRET`) and `X-Timestamp` (within ±300 s), answers
-`202` once its event id is recorded (duplicates are no-ops), and only brings
-the attempt's next poll forward: the decision itself is fetched by a
-reconciler that polls every open session, so a lost callback never strands a
-payer. Bad signatures answer `401 webhook_signature_invalid`. Payday keeps
-statuses, the provider's session reference, and allowlisted risk categories;
-it never stores or logs the callback body or anything the provider extracted.
-
-Operators decide held attempts with
-`POST /v1/admin/verifications/{id}/decision` (`{"decision": "approve" |
-"decline", "note"?}`, operator bearer credential); the configured
-`PAYDAY_ADMIN_REVIEWER_ID` is recorded as the reviewer, and an approval
-binds the same expected-identity hash an automated approval would.
-
 ## Stable error codes
 
 | Code | Typical status | Meaning |
@@ -567,15 +492,9 @@ binds the same expected-identity hash an automated approval would.
 | `verification_not_required` | 409 | Verification started on a permissionless invoice |
 | `verification_not_started` | 409 | Confirm called before a code was sent, or after it was spent |
 | `verification_persistence_unavailable` | 503 | Auth0 accepted the OTP but persistence failed; retry confirm with the returned short-lived continuation |
-| `email_verification_required` | 409 | Identity start before this session proved the expected mailbox |
-| `identity_in_review` | 409 | Identity start while the provider is still reviewing an earlier attempt |
-| `review_required` | 409 | Identity start after automation stopped: a second decline, a review request, or a reviewer's decision |
-| `review_not_available` | 409 | Review requested with no declined identity attempt, or a decision on an attempt not held for review |
-| `verification_not_found` | 404 | Operator decision on an unknown verification attempt |
-| `webhook_signature_invalid` | 401 | Identity callback with a missing, stale, or wrong signature or timestamp |
 | `otp_resend_cooldown` | 429 | A code was sent for this invoice within the last minute; see `Retry-After` |
-| `identity_provider_unavailable` | 502 | Auth0 did not answer the passwordless exchange, or Didit could not open a session |
-| `verification_unavailable` | 503 | The deployment has no payer audience (email) or identity provider (identity start, callback) configured |
+| `identity_provider_unavailable` | 502 | Auth0 did not answer the passwordless exchange |
+| `verification_unavailable` | 503 | The deployment has no payer audience configured |
 | `identity_unauthorized` | 401 | An account-key route was called without a dashboard session (an API key, or an invalid Privy identity token) |
 | `identity_unavailable` | 503 | The identity provider's keys could not be fetched; sessions cannot be verified |
 | `account_disabled` | 403 | Account disabled |

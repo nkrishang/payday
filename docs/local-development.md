@@ -108,7 +108,7 @@ just web
 ```
 
 It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
-points at, so the `payment_url` the CLI prints opens the real checkout and the
+points at, so the `payment_url` the API returns opens the real checkout and the
 gateway accepts the dashboard's cross-origin requests (the merchant routes
 answer only that origin). Port 3002 rather than 3001, which belongs to the
 development identity provider. See [web/README.md](../web/README.md).
@@ -260,7 +260,8 @@ cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --rpc-url http://127.0.0.1:8545
 
-./target/debug/payday get <id>
+curl -fsS "http://127.0.0.1:3000/v1/payments/<id>" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
 ```
 
 The status should reach `settled` with `settlement_tx_hash` set. Verify the
@@ -336,13 +337,8 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `payday-payer-local` client and audience
 - `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
   verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
-- `PAYDAY_DIDIT_API_KEY`, `PAYDAY_DIDIT_WORKFLOW_ID`,
-  `PAYDAY_DIDIT_WEBHOOK_SECRET` (optional `PAYDAY_DIDIT_BASE_URL`) — the
-  identity provider, set together or not at all; `just dev` leaves them unset,
-  so identity start answers `verification_unavailable` locally unless you
-  export a Didit sandbox key, and the hosted callback then needs a public URL
-- `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the reviewer on
-  `POST /v1/admin/verifications/{id}/decision`; defaults to `operator`
+- `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the operator on
+  `POST /v1/admin/payments/{id}/release`; defaults to `operator`
 - `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
   issuer; non-loopback HTTP issuers remain rejected
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider

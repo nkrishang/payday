@@ -4,25 +4,21 @@ How to rotate an account API key and infrastructure secrets.
 
 ## Rotate the API key
 
-API keys are rolled from the dashboard: sign in at `payday.sh`, open the
-**API key** section, and choose **Roll key**. The session is the credential —
-an API key cannot roll itself, and the CLI's Auth0 login is no longer accepted
-by the API.
-
-The CLI asks for confirmation (`-y` skips it), saves the replacement securely,
-and masks it by default. Use `--show` only to transfer it directly to an approved
-secret manager. The previous key remains valid for 24 hours:
-
-```bash
-./target/release/payday keys rotate --show -y
-```
+Sign in at `https://payday.sh` as the account owner, open the dashboard's
+**API key** section, and choose **Roll key**; it confirms, then shows the
+replacement exactly once. Copy it directly into the approved secret manager.
+The previous key remains valid for 24 hours. The same step is
+`POST /v1/account/api-key` with `{"expected_generation": <current generation>}`
+and the dashboard session (the Privy identity token) as the bearer — an API
+key cannot roll itself (`docs/authentication.md` § 6).
 
 Store and distribute the new key through the account owner's approved secret
 management process. The service does not retain recoverable plaintext and does
 not need a restart. Verify the new key against a payment owned by this account:
 
 ```bash
-./target/release/payday get <PAYMENT_ID>
+curl -fsS "$PAYDAY_API_URL/v1/payments/<PAYMENT_ID>" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
 ```
 
 CI should receive `PAYDAY_API_KEY` from its secret store rather than performing
@@ -30,9 +26,10 @@ an OTP login. Once consumers migrate, the prior key expires after 24 hours.
 
 ## Revoke API keys
 
-For compromise or decommissioning, `payday keys revoke` immediately invalidates
-the current and grace-period keys and removes the saved credential. Use `-y` to
-skip confirmation. `payday logout` only removes the local profile.
+For compromise or decommissioning, **Revoke** in the dashboard's API key
+section (or `DELETE /v1/account/api-key` with the current
+`expected_generation` and a fresh identity token) immediately invalidates the
+current and grace-period keys. Signing out of the dashboard revokes nothing.
 
 ## Rotate the Resend API key
 

@@ -1,6 +1,6 @@
 # Payday
 
-Payday is a stablecoin payment gateway for merchants: create an invoice through a small API or CLI, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically. Partial payments accumulate; overpayment remainders, expired balances, and late transfers go to the Payday recovery wallet, where they are recorded per invoice and returned after manual review; and every observed transfer remains in an auditable PostgreSQL ledger.
+Payday is a stablecoin payment gateway for merchants: create an invoice through a small API, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle exactly the invoice amount to your wallet automatically. Partial payments accumulate; overpayment remainders, expired balances, and late transfers go to the Payday recovery wallet, where they are recorded per invoice and returned after manual review; and every observed transfer remains in an auditable PostgreSQL ledger.
 
 ## 60-second local quickstart
 
@@ -10,17 +10,11 @@ With Docker, Rust, Foundry (`anvil`, `cast`, and `forge`), `just`, `jq`, and the
 just e2e
 ```
 
-For a live local stack with multiplexed logs, run `just dev`, then `just seed` in another shell. See [Local development](docs/local-development.md) for prerequisites and manual operation.
+For a live local stack with multiplexed logs, run `just dev`, then sign in at the dashboard or run `just seed` in another shell for an API key. See [Local development](docs/local-development.md) for prerequisites and manual operation.
 
-## CLI
+## API
 
-Install the repository's `payday` binary with Cargo:
-
-```bash
-cargo install --path crates/gateway-cli --locked
-```
-
-The CLI provides payment creation and tracking, payer links, and webhook operations against an API key. Its Auth0 login is no longer accepted by the API — merchants sign in through Privy on the dashboard, which is where API keys are managed — and the CLI is on its way out. See [Authentication and API keys](docs/authentication.md).
+`https://api.payday.sh/v1` is the product: create invoices, read and list payments, manage customers and attachments, download proofs, and register webhooks with one bearer API key ([HTTP API reference](docs/api-reference.md)). TypeScript applications can use the zero-dependency client in [`sdk/typescript`](sdk/typescript/README.md). The key is minted in the dashboard, which signs in through Privy with an emailed one-time code and gives every account its own embedded wallet; see [Authentication and API keys](docs/authentication.md).
 
 ## Web
 
@@ -44,12 +38,10 @@ See [web/README.md](web/README.md).
 
 - [Customer quickstart](docs/quickstart.md)
 - [Payment concepts and lifecycle](docs/concepts.md)
-- [CLI reference](docs/cli-reference.md)
 - [HTTP API reference](docs/api-reference.md)
 - [Customer FAQ](docs/faq.md)
 - [Changelog](CHANGELOG.md)
 - [Local development and configuration](docs/local-development.md)
-- [CLI installation](docs/install.md)
 - [Payments API](docs/payments-api.md)
 - [Authentication and API keys](docs/authentication.md)
 - [Merchant dashboard](docs/dashboard.md)

@@ -5,9 +5,8 @@ and confirm the funds reach the beneficiary.
 
 ## Prerequisites
 
-- API key and CLI configured (see [README.md](README.md) prerequisites)
+- API key, `curl`, and `jq` configured (see [README.md](README.md) prerequisites)
 - A wallet with USDC on Monad and its private key
-- The CLI binary built: `cargo build --release -p gateway-cli --bin payday`
 - The indexer running and caught up (see [daily-monitoring.md](daily-monitoring.md))
 
 ## Step 1: Create a payment
@@ -16,12 +15,13 @@ and confirm the funds reach the beneficiary.
 export PAYDAY_API_URL="https://api.payday.sh"
 export PAYDAY_API_KEY="<operator-account-api-key>"
 
-./target/release/payday --json create \
-  --chain-id 143 \
-  --token 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  --payout <PAYOUT_ADDRESS> \
-  --expires-in 3600 \
-  --amount 0.01
+curl -fsS "$PAYDAY_API_URL/v1/payments" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: smoke-$(date +%s)" \
+  -d '{"amount":"0.01","payout_address":"<PAYOUT_ADDRESS>",
+       "issuer":{"name":"Payday"},"bill_to":{"name":"Smoke test"},
+       "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
 Copy `id` and `address` from the JSON output, and confirm `recovery_address`
@@ -42,10 +42,12 @@ cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 
 ```bash
 # One-time check:
-./target/release/payday get <PAYMENT_ID>
+curl -fsS "$PAYDAY_API_URL/v1/payments/<PAYMENT_ID>" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
 
 # Poll every 5 seconds:
-watch -n 5 './target/release/payday get <PAYMENT_ID>'
+watch -n 5 "curl -fsS $PAYDAY_API_URL/v1/payments/<PAYMENT_ID> \
+  -H 'Authorization: Bearer $PAYDAY_API_KEY' | jq .status"
 ```
 
 The status should progress: `awaiting_payment → paid → settled`.

@@ -42,16 +42,12 @@ that updates the lifecycle row.
 | `payment.paid`, `payment.settled`, `payment.expired`, `payment.refunded`, `payment.needs_attention` | The lifecycle transitions above |
 | `payment.recovered_funds` | Payday's recovery wallet received funds on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per recovered amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
 | `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied |
-| `verification.declined` | Raised once per payment, in the transaction that records the first declined identity attempt (provider decline or expected-name mismatch); a later approval on resubmission or review still raises `verification.approved` |
 | `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: funds were first observed before the payer policy was satisfied, so the payment is flagged as likely unsolicited |
 
 `verification.approved` and `payment.likely_unsolicited` are inserted by the
 same `invoices` trigger as the lifecycle events, in the transaction that first
 sets `verification_completed_at` or `likely_unsolicited_at`; nothing sets
 those columns until the payer-policy features are enabled for an account.
-`verification.declined` is written by the identity reconciler when the
-provider's decision is recorded; like the lifecycle events it fires at most
-once per payment, so a second declined attempt raises nothing new.
 
 ## Payload
 
@@ -59,8 +55,8 @@ Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
 `occurred_at`, and `data`. Every payment event carries `data.payment` with the
 public status, `amount`, `received`, `reference`, `metadata`, and three policy
 fields: `payer_policy_mode`, `verification_completed_at`, and
-`likely_unsolicited_at`. The payload never includes the expected email,
-expected identity, or any payer assertion. `payment.needs_attention` adds
+`likely_unsolicited_at`. The payload never includes the expected email or
+any payer assertion. `payment.needs_attention` adds
 `data.payment.attention`. Lifecycle payloads carry no recovery flag by design:
 a `payment.settled` for an overpaid payment is indistinguishable from one for
 an exact payment, and `payment.recovered_funds` is the recovery signal.

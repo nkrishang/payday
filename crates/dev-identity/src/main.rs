@@ -24,12 +24,11 @@ use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
 
-/// The CLI and the dashboard, mirroring the two Auth0 applications the
-/// production merchant Post-Login Action admits. Both exchange an email OTP
-/// for a token bound to the same API audience.
-const CLI_CLIENT_ID: &str = "payday-cli-local";
+/// The dashboard, mirroring the one Auth0 application the production
+/// merchant Post-Login Action admits. It exchanges an email OTP for a token
+/// bound to the API audience; that token is a session for the merchant API
+/// and, while fresh, the credential that issues an API key.
 const DASHBOARD_CLIENT_ID: &str = "payday-dashboard-local";
-const CLIENT_IDS: [&str; 2] = [CLI_CLIENT_ID, DASHBOARD_CLIENT_ID];
 const AUDIENCE: &str = "payday-api-local";
 /// The payer application and its own audience, mirroring the production
 /// payer Action: gatewayd exchanges a payer's code here, and the token it
@@ -56,7 +55,7 @@ const ACCESS_TOKEN_TTL: u64 = 24 * 60 * 60;
 /// The audience a client may request, if any. A merchant client cannot mint
 /// a payer token and the payer client cannot reach the merchant API.
 fn audience_for(client_id: &str) -> Option<&'static str> {
-    if CLIENT_IDS.contains(&client_id) {
+    if client_id == DASHBOARD_CLIENT_ID {
         Some(AUDIENCE)
     } else if client_id == PAYER_CLIENT_ID {
         Some(PAYER_AUDIENCE)
@@ -351,7 +350,7 @@ mod tests {
         }
     }
 
-    /// Decodes a token against the provider's own JWKS with the CLI's validation rules.
+    /// Decodes a token against the provider's own JWKS with the API's validation rules.
     fn verified_claims(state: &AppState, jwt: &str) -> serde_json::Value {
         verified_claims_for(state, jwt, AUDIENCE)
     }
@@ -372,13 +371,17 @@ mod tests {
     #[tokio::test]
     async fn otp_is_single_use_and_token_matches_jwks() {
         let state = new_state("http://127.0.0.1:3001".into());
-        let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
-        let request = || token_request(CLI_CLIENT_ID, "dev@example.com", &otp);
+        let otp = issue_otp(&state, DASHBOARD_CLIENT_ID, "dev@example.com").await;
+        let request = || token_request(DASHBOARD_CLIENT_ID, "dev@example.com", &otp);
         // A wrong code does not spend the right one.
         assert_eq!(
             token(
                 State(state.clone()),
-                Json(token_request(CLI_CLIENT_ID, "dev@example.com", "000000")),
+                Json(token_request(
+                    DASHBOARD_CLIENT_ID,
+                    "dev@example.com",
+                    "000000"
+                )),
             )
             .await
             .unwrap_err(),
@@ -395,10 +398,10 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         let claims = verified_claims(&state, response["access_token"].as_str().unwrap());
-        assert_eq!(claims["azp"], CLI_CLIENT_ID);
+        assert_eq!(claims["azp"], DASHBOARD_CLIENT_ID);
         assert_eq!(
             claims["https://api.payday.sh/auth/client_id"],
-            CLI_CLIENT_ID
+            DASHBOARD_CLIENT_ID
         );
     }
 
@@ -492,7 +495,7 @@ mod tests {
 
         // A code issued to one client is not exchangeable by a client the
         // provider does not know, even with the right OTP.
-        let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
+        let otp = issue_otp(&state, DASHBOARD_CLIENT_ID, "dev@example.com").await;
         let denied = token(
             State(state.clone()),
             Json(token_request("payday-other-local", "dev@example.com", &otp)),
@@ -501,20 +504,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(denied, StatusCode::BAD_REQUEST);
 
-        // Known applications sharing the merchant audience still own distinct
-        // passwordless transactions.
-        let denied = token(
-            State(state.clone()),
-            Json(token_request(DASHBOARD_CLIENT_ID, "dev@example.com", &otp)),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(denied, StatusCode::UNAUTHORIZED);
-
-        // The failed cross-client exchange did not spend the CLI's code.
+        // The failed cross-client exchange did not spend the dashboard's code.
         let _ = token(
             State(state),
-            Json(token_request(CLI_CLIENT_ID, "dev@example.com", &otp)),
+            Json(token_request(DASHBOARD_CLIENT_ID, "dev@example.com", &otp)),
         )
         .await
         .unwrap();
@@ -563,11 +556,11 @@ mod tests {
         );
 
         // And a merchant client cannot request the payer audience.
-        let otp = issue_otp(&state, CLI_CLIENT_ID, "dev@example.com").await;
+        let otp = issue_otp(&state, DASHBOARD_CLIENT_ID, "dev@example.com").await;
         let denied = token(
             State(state.clone()),
             Json(token_request_for(
-                CLI_CLIENT_ID,
+                DASHBOARD_CLIENT_ID,
                 "dev@example.com",
                 &otp,
                 PAYER_AUDIENCE,

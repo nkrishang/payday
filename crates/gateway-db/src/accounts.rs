@@ -697,7 +697,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            repo.metadata(first).await.unwrap().wallet_address.as_deref(),
+            repo.metadata(first)
+                .await
+                .unwrap()
+                .wallet_address
+                .as_deref(),
             Some(WALLET)
         );
         repo.find_or_provision_by_identity(
@@ -709,11 +713,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            repo.metadata(first).await.unwrap().wallet_address.as_deref(),
+            repo.metadata(first)
+                .await
+                .unwrap()
+                .wallet_address
+                .as_deref(),
             Some(OTHER_WALLET)
         );
 
-        // The CLI's login issues from the current generation, as for any
+        // A first issue runs from the current generation, as for any
         // existing identity — but this is a first key, not a rotation, since
         // a dashboard-provisioned identity starts keyless.
         let issued = repo
@@ -722,10 +730,7 @@ mod tests {
             .unwrap();
         assert_eq!(issued.account_id, first);
         assert_eq!(issued.generation, 2);
-        assert!(
-            !issued.replaced_previous_key,
-            "nothing existed to replace"
-        );
+        assert!(!issued.replaced_previous_key, "nothing existed to replace");
         assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), Some(first));
         let metadata = repo.metadata(first).await.unwrap();
         assert!(

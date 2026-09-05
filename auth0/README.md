@@ -57,10 +57,11 @@ requires an explicit reviewed code change.
 
 There is none: the merchant dashboard signs in through Privy, not Auth0 (see
 `docs/authentication.md`). A tenant that still carries a `Payday Dashboard`
-single-page application from before can delete it; nothing reads its client
-ID any more. The merchant `Payday API` audience and the `Payday email OTP
-claims` Action exist only for the CLI's login, which the API no longer
-accepts, and go with the CLI.
+single-page application, the `Payday API` resource server, or the `Payday
+email OTP claims` Action from the dashboard's earlier Auth0 login can delete
+them; the API no longer accepts those tokens and nothing reads that client
+ID. The tracked `payday-email-otp.js` Action source is kept only until that
+cleanup lands.
 
 ## Payer verification application
 
@@ -127,8 +128,8 @@ immediately and audit recipients quarterly.
    allowlisting its source.
 
 Bot Detection has a passwordless challenge policy, but availability and
-behavior depend on the Auth0 subscription and embedded flow, and the CLI does
-not currently implement a CAPTCHA exchange. Do not enable it without selecting
+behavior depend on the Auth0 subscription and embedded flow, and the dashboard
+does not currently implement a CAPTCHA exchange. Do not enable it without selecting
 a fail-closed CAPTCHA, implementing the challenge flow, and testing it in
 staging.
 
@@ -140,9 +141,8 @@ with a custom email-provider Action.
 ## Verification
 
 Auth0 pastes the Action source into a CommonJS runtime, so `payday-email-otp.js`
-uses `require` and `exports`. The Action admits exactly the client IDs in its
-`PAYDAY_CLIENT_ID` and `PAYDAY_DASHBOARD_CLIENT_ID` secrets; an unset secret
-admits nothing. The repository root is an ES module workspace, so
+uses `require` and `exports`. The Action admits exactly the client ID in its
+`PAYDAY_CLIENT_ID` secret; an unset secret admits nothing. The repository root is an ES module workspace, so
 `auth0/package.json` pins this directory back to CommonJS; without it Node reads
 these files as ES modules and the tests fail to load.
 

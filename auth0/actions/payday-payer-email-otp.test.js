@@ -72,8 +72,8 @@ test("accepts the payer client on the payer audience and sets exactly the five c
   assert.ok(Math.abs(Date.now() / 1000 - authenticatedAt) < 5);
 });
 
-test("denies the merchant CLI and dashboard clients on the payer audience", async () => {
-  for (const clientId of ["payday-cli", "payday-dashboard"]) {
+test("denies the merchant dashboard client on the payer audience", async () => {
+  for (const clientId of ["payday-dashboard"]) {
     const result = actionApi();
     await onExecutePostLogin(
       event({ client: { client_id: clientId } }),
@@ -120,7 +120,7 @@ test("sets the email trimmed and lowercased so gatewayd can compare it", async (
 
 test("ignores the merchant API and any other audience, whatever the client", async () => {
   for (const identifier of [MERCHANT_AUDIENCE, "https://unrelated.example"]) {
-    for (const clientId of ["payday-payer", "payday-cli", "other-client"]) {
+    for (const clientId of ["payday-payer", "payday-dashboard", "other-client"]) {
       const result = actionApi();
       await onExecutePostLogin(
         event({

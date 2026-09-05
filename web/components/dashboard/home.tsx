@@ -133,7 +133,7 @@ export function DashboardHome() {
   const ready = identities.filter(usable);
   const started = anything.data.payments.length > 0;
   // Setting up gates issuing, never looking: an account that has issued from
-  // the CLI or the full form must still see what it has. With neither an
+  // the API or the full form must still see what it has. With neither an
   // identity nor a request there is nothing to look at, so the page is the
   // setup itself.
   const forcedSetup = ready.length === 0 && !started;

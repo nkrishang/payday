@@ -227,8 +227,9 @@ seed() {
 }
 
 if [[ "$mode" == seed ]]; then
+  shift
   load_local_env
-  seed
+  seed "$@"
   exit
 fi
 

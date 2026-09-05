@@ -77,7 +77,8 @@ If the indexer was stopped, restart it — see [service-restart.md](service-rest
 ## Step 5: Verify invoices are progressing
 
 ```bash
-./target/release/payday get <INVOICE_ID>
+curl -fsS "$PAYDAY_API_URL/v1/payments/<INVOICE_ID>" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
 ```
 
 The status should advance from `created` to `funded` within a few seconds.

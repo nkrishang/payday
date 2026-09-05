@@ -209,7 +209,9 @@ create_invoice() {
 }
 
 get_invoice() {
-  ./target/debug/payday --json get "$1"
+  curl --fail --silent \
+    --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    "$API_URL/v1/payments/$1"
 }
 
 # Poll at the documented per-account rate until a jq expression is true. A
@@ -608,7 +610,9 @@ assert_eq beneficiary_blacklisted "$(get_invoice "$blacklisted_id" | jq -r .atte
 assert_eq 250000 "$(token_balance "$blacklisted_address")" "funds must stay at the address while blocked"
 set_blacklisted "$BENEFICIARY_BLACKLISTED" false
 # Audited operator procedure from docs/runbooks/stuck-invoice.md.
-./target/debug/payday --json ops release "$blacklisted_id" >/dev/null
+curl --fail --silent --output /dev/null --request POST \
+  --header "Authorization: Bearer $PAYDAY_ADMIN_SECRET" \
+  "$API_URL/v1/admin/payments/$blacklisted_id/release"
 wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
 

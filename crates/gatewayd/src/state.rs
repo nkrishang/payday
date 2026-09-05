@@ -3,7 +3,7 @@ use gateway_core::{ChainId, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
     IssuerRepository, OnboardingDemoPaymentRepository, PayerSessionRepository, ProofRepository,
-    VerificationRepository, WebhookRepository,
+    WebhookRepository,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -15,7 +15,6 @@ use crate::api::error::ApiError;
 use crate::api::{PrivyVerifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
-use crate::identity::PayerIdentityProvider;
 use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
 
@@ -29,13 +28,9 @@ pub struct AppState {
     pub issuers: IssuerRepository,
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
-    pub verifications: VerificationRepository,
     pub onboarding_demo_payments: OnboardingDemoPaymentRepository,
     /// Verifies dashboard sessions; `None` means only API keys authenticate.
     pub merchant_verifier: Option<PrivyVerifier>,
-    /// The document-and-liveness provider; `None` leaves identity start
-    /// answering `verification_unavailable`.
-    pub identity: Option<Arc<dyn PayerIdentityProvider>>,
     /// The payer audience; `None` leaves gated invoices unverifiable and the
     /// email routes answering `verification_unavailable`.
     pub payer_verification: Option<PayerVerification>,
@@ -79,7 +74,6 @@ impl AppState {
         attachment_store: Option<AttachmentStore>,
         attestor: Option<VerificationAttestor>,
         payer_verification: Option<PayerVerification>,
-        identity: Option<Arc<dyn PayerIdentityProvider>>,
         onboarding_payer: Option<OnboardingPayerSigner>,
     ) -> Self {
         let pool = repo.pool().clone();
@@ -90,10 +84,8 @@ impl AppState {
             issuers: IssuerRepository::new(pool.clone()),
             proofs: ProofRepository::new(pool.clone()),
             payer_sessions: PayerSessionRepository::new(pool.clone()),
-            verifications: VerificationRepository::new(pool.clone()),
             onboarding_demo_payments: OnboardingDemoPaymentRepository::new(pool),
             onboarding_payer,
-            identity,
             repo,
             accounts,
             merchant_verifier,

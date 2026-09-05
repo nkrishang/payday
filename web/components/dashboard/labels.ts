@@ -21,7 +21,7 @@ export function statusTone(status: PaymentStatus): CheckoutTone {
   return STATUSES.find((entry) => entry.value === status)?.tone ?? "neutral";
 }
 
-/** The four presets, in the order the form offers them. */
+/** The two presets, in the order the form offers them. */
 export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; description: string }> =
   [
     {
@@ -35,18 +35,6 @@ export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; descr
       label: "Verified email",
       description:
         "The payer must prove ownership of the expected email before the amount, details, and address are shown.",
-    },
-    {
-      value: "verified_identity",
-      label: "Verified identity",
-      description:
-        "Email ownership plus a document and liveness check that must match the named person.",
-    },
-    {
-      value: "verified_identity_unattributed",
-      label: "Verified identity, unattributed",
-      description:
-        "Email ownership plus a document and liveness check, without asserting an expected payer identity.",
     },
   ];
 

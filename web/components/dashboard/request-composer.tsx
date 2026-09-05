@@ -60,8 +60,6 @@ interface Draft {
   notes: string;
   mode: PayerPolicyMode;
   expectedEmail: string;
-  firstName: string;
-  lastName: string;
 }
 
 type Field = keyof Draft;
@@ -137,8 +135,6 @@ function emptyDraft(
     notes: "",
     mode: "permissionless",
     expectedEmail: customer?.email ?? "",
-    firstName: "",
-    lastName: "",
   };
 }
 
@@ -177,10 +173,6 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
     const expected = draft.expectedEmail.trim();
     if (!expected) errors.expectedEmail = "Required for a verified policy.";
     else if (!EMAIL.test(expected)) errors.expectedEmail = "Not a valid email address.";
-    if (draft.mode === "verified_identity") {
-      if (!draft.firstName.trim()) errors.firstName = "Required.";
-      if (!draft.lastName.trim()) errors.lastName = "Required.";
-    }
   }
   return errors;
 }
@@ -371,8 +363,6 @@ export function RequestComposer({
             notes: draft.notes,
             mode: draft.mode,
             expectedEmail: draft.expectedEmail,
-            firstName: draft.firstName,
-            lastName: draft.lastName,
           },
           attachment?.id ?? null,
         ),
@@ -674,28 +664,6 @@ export function RequestComposer({
                         className={cn(controlStyles, "h-11")}
                       />
                     </Labeled>
-                    {draft.mode === "verified_identity" ? (
-                      <div className="grid gap-5 sm:grid-cols-2">
-                        <Labeled label="Expected first name" required error={shown("firstName")}>
-                          <input
-                            maxLength={255}
-                            value={draft.firstName}
-                            onChange={(event) => set("firstName", event.target.value)}
-                            aria-invalid={shown("firstName") ? true : undefined}
-                            className={cn(controlStyles, "h-11")}
-                          />
-                        </Labeled>
-                        <Labeled label="Expected last name" required error={shown("lastName")}>
-                          <input
-                            maxLength={255}
-                            value={draft.lastName}
-                            onChange={(event) => set("lastName", event.target.value)}
-                            aria-invalid={shown("lastName") ? true : undefined}
-                            className={cn(controlStyles, "h-11")}
-                          />
-                        </Labeled>
-                      </div>
-                    ) : null}
                   </div>
                 ) : null}
               </div>

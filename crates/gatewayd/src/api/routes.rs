@@ -14,13 +14,13 @@ use crate::api::attachments;
 use crate::api::auth;
 use crate::api::customers;
 use crate::api::health;
-use crate::api::identity;
 use crate::api::invoices;
 use crate::api::issuers;
 use crate::api::payer;
 use crate::api::payer_verification;
 use crate::api::proof;
 use crate::api::status;
+use crate::api::verification;
 use crate::api::webhooks;
 use crate::api::{middleware as api_middleware, openapi};
 use crate::state::AppState;
@@ -87,11 +87,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/payments/{id}/proof", get(proof::get_proof))
         .route(
             "/v1/payments/{id}/verification",
-            get(identity::merchant_detail),
-        )
-        .route(
-            "/v1/payments/{id}/verification/review",
-            post(identity::request_review),
+            get(verification::merchant_detail),
         )
         .route(
             "/v1/customers",
@@ -144,18 +140,8 @@ pub fn router(state: AppState) -> Router {
 
     let administration = Router::new()
         .route("/v1/admin/payments/{id}/release", post(admin::release))
-        .route(
-            "/v1/admin/verifications/{id}/decision",
-            post(identity::admin_decision),
-        )
         .route_layer(middleware::from_fn(auth::require_admin))
         .layer(RequestBodyLimitLayer::new(16 * 1024));
-
-    // The identity provider's callback: authenticated by its signature, read
-    // as raw bytes, and never fetched from synchronously.
-    let identity_callbacks = Router::new()
-        .route("/v1/webhooks/identity", post(identity::webhook))
-        .layer(RequestBodyLimitLayer::new(64 * 1024));
 
     // A payment link is public by design: anyone holding it may read the payment
     // and fulfil it. These routes accept no API key and return no merchant data,
@@ -191,10 +177,6 @@ pub fn router(state: AppState) -> Router {
             "/v1/payer/payments/{id}/verify/email/confirm",
             post(payer_verification::confirm_email),
         )
-        .route(
-            "/v1/payer/payments/{id}/verify/identity/start",
-            post(identity::start),
-        )
         .layer(RequestBodyLimitLayer::new(8 * 1024))
         .layer(
             CorsLayer::new()
@@ -209,7 +191,6 @@ pub fn router(state: AppState) -> Router {
         .route("/pay/{id}", get(payer::page))
         .merge(payer)
         .merge(payer_verification)
-        .merge(identity_callbacks)
         .route("/openapi.json", get(openapi::spec))
         .route("/docs", get(openapi::reference))
         .route("/api", get(openapi::reference))
@@ -303,7 +284,6 @@ mod tests {
         factory: Address,
         recovery: Address,
         payer_verification: Option<PayerVerification>,
-        identity: Option<Arc<dyn crate::identity::PayerIdentityProvider>>,
     ) -> (AppState, Arc<MemoryObjectStorage>) {
         let storage = Arc::new(MemoryObjectStorage::default());
         let store = AttachmentStore::new(storage.clone(), Duration::from_secs(300));
@@ -322,7 +302,6 @@ mod tests {
             Some(store),
             Some(attestor()),
             payer_verification,
-            identity,
             None,
         );
         (state, storage)
@@ -361,16 +340,9 @@ mod tests {
 
     async fn app_with_payer_verification(pool: PgPool) -> (Router, Arc<FakeTenant>) {
         let (verification, tenant) = payer_verification();
-        let app = build_with(
-            pool,
-            None,
-            Address::ZERO,
-            RECOVERY,
-            Some(verification),
-            None,
-        )
-        .await
-        .router;
+        let app = build_with(pool, None, Address::ZERO, RECOVERY, Some(verification))
+            .await
+            .router;
         (app, tenant)
     }
 
@@ -402,7 +374,7 @@ mod tests {
         factory: Address,
         recovery: Address,
     ) -> TestApp {
-        build_with(pool, merchant_verifier, factory, recovery, None, None).await
+        build_with(pool, merchant_verifier, factory, recovery, None).await
     }
 
     async fn build_with(
@@ -411,7 +383,6 @@ mod tests {
         factory: Address,
         recovery: Address,
         payer_verification: Option<PayerVerification>,
-        identity: Option<Arc<dyn crate::identity::PayerIdentityProvider>>,
     ) -> TestApp {
         let accounts = AccountRepository::new(pool.clone());
         if accounts
@@ -439,7 +410,6 @@ mod tests {
             factory,
             recovery,
             payer_verification,
-            identity,
         );
         TestApp {
             router: router(state),
@@ -493,6 +463,30 @@ mod tests {
     }
 
     /// Start email verification and return the session token.
+    /// Prove the mailbox for `session` with the stand-in tenant's code.
+    async fn confirm_email(app: &Router, id: &str, session: &str) {
+        let confirmed = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{id}/verify/email/confirm"),
+                Some(session),
+                Some(&json!({"otp": OTP})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(confirmed.status(), StatusCode::OK);
+    }
+
+    async fn payer_read(app: &Router, id: &str, session: Option<&str>) -> Value {
+        json_body(
+            app.clone()
+                .oneshot(payer_get(&format!("/v1/payer/payments/{id}"), session))
+                .await
+                .unwrap(),
+        )
+        .await
+    }
+
     async fn start_session(app: &Router, id: &str) -> String {
         let started = app
             .clone()
@@ -977,7 +971,6 @@ mod tests {
             Address::ZERO,
             RECOVERY,
             None,
-            None,
         );
         let app = status_router(state);
 
@@ -1303,9 +1296,8 @@ mod tests {
             "metadata": {"po": "42"},
             "customer_id": customer_id,
             "payer_policy": {
-                "mode": "verified_identity",
-                "expected_email": "Alice@Example.com",
-                "expected_identity": {"first_name": "Alice", "last_name": "Smith"}
+                "mode": "verified_email",
+                "expected_email": "Alice@Example.com"
             },
             "attachment_id": first_pdf
         });
@@ -1357,18 +1349,11 @@ mod tests {
         vary("customer_id", &|b| {
             b.as_object_mut().unwrap().remove("customer_id");
         });
-        vary(
-            "policy mode",
-            &|b| {
-                b["payer_policy"] =
-                    json!({"mode": "verified_email", "expected_email": "alice@example.com"})
-            },
-        );
+        vary("policy mode", &|b| {
+            b["payer_policy"] = json!({"mode": "permissionless"})
+        });
         vary("expected_email", &|b| {
             b["payer_policy"]["expected_email"] = json!("bob@example.com")
-        });
-        vary("expected_identity", &|b| {
-            b["payer_policy"]["expected_identity"]["last_name"] = json!("Smyth")
         });
         vary("expiration intent", &|b| b["expires_in"] = json!(7200));
         vary("amount", &|b| b["amount"] = json!("26"));
@@ -1508,13 +1493,13 @@ mod tests {
         // The mode rules are enforced by the wire shape itself.
         let mut body = valid_body();
         body["payer_policy"] = json!({
-            "mode": "verified_identity_unattributed",
+            "mode": "verified_email",
             "expected_email": "alice@example.com",
             "expected_identity": {"first_name": "Alice", "last_name": "Smith"}
         });
         let response = app
             .clone()
-            .oneshot(create_request(KEY, "unattributed identity", &body))
+            .oneshot(create_request(KEY, "retired assertion", &body))
             .await
             .unwrap();
         assert!(response.status().is_client_error());
@@ -1573,7 +1558,7 @@ mod tests {
             "a****@e***.com"
         );
         assert_eq!(payer["requirements"]["email"], "pending");
-        assert_eq!(payer["requirements"]["document"], "not_required");
+        assert!(payer["requirements"].get("document").is_none());
         assert_eq!(payer["requirements"]["complete"], false);
         for withheld in [
             "amount",
@@ -2116,9 +2101,14 @@ mod tests {
         let privy = PrivyApp::new();
         // The very first session, before Privy has finished making the wallet.
         let early = privy.token(MERCHANT_DID, "Dashboard@Example.com", None);
-        let app = build(pool.clone(), Some(privy.verifier.clone()), Address::ZERO, RECOVERY)
-            .await
-            .router;
+        let app = build(
+            pool.clone(),
+            Some(privy.verifier.clone()),
+            Address::ZERO,
+            RECOVERY,
+        )
+        .await
+        .router;
 
         let created = app
             .clone()
@@ -2167,7 +2157,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.status(), StatusCode::OK);
-        assert!(json_body(listed).await["payments"].as_array().unwrap().is_empty());
+        assert!(
+            json_body(listed).await["payments"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
 
         // Tokens for another app, from another issuer, or signed by someone
         // else are invalid credentials, exactly like a wrong key.
@@ -3571,11 +3566,11 @@ mod tests {
             "Email retainer",
         )
         .await;
-        let (identity_id, _) = create_gated(
+        let (other_id, _) = create_gated(
             &app,
-            "gated-identity",
-            json!({"mode": "verified_identity_unattributed", "expected_email": "bob@example.com"}),
-            "Identity retainer",
+            "gated-other",
+            json!({"mode": "verified_email", "expected_email": "bob@example.com"}),
+            "Other retainer",
         )
         .await;
 
@@ -3685,7 +3680,7 @@ mod tests {
         let confirmed = json_body(confirmed).await;
         assert_eq!(confirmed["requirements"]["email"], "approved");
         assert_eq!(confirmed["requirements"]["complete"], true);
-        assert_eq!(confirmed["identity_start_available"], false);
+        assert!(confirmed.get("identity_start_available").is_none());
         // The code is spent with the attempt.
         let spent = app
             .clone()
@@ -3778,7 +3773,7 @@ mod tests {
         let other = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{identity_id}"),
+                &format!("/v1/payer/payments/{other_id}"),
                 Some(&session),
             ))
             .await
@@ -3789,7 +3784,7 @@ mod tests {
         let other_qr = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{identity_id}/qr"),
+                &format!("/v1/payer/payments/{other_id}/qr"),
                 Some(&session),
             ))
             .await
@@ -3798,7 +3793,7 @@ mod tests {
         let other_status = app
             .clone()
             .oneshot(payer_get(
-                &format!("/v1/payer/payments/{identity_id}/verify"),
+                &format!("/v1/payer/payments/{other_id}/verify"),
                 Some(&session),
             ))
             .await
@@ -3857,52 +3852,32 @@ mod tests {
         let receipt = payer_read(&app, &email_id, Some(&receipt_session)).await;
         assert_eq!(receipt["content_unlocked"], true);
 
-        // An identity mode proves the mailbox the same way but stays
-        // incomplete, locked, and unsettleable until its identity facts.
-        let identity_session = start_session(&app, &identity_id).await;
-        assert_eq!(
-            *tenant.started.lock().unwrap(),
-            ["alice@example.com", "alice@example.com", "bob@example.com"]
-        );
-        let identity_confirmed = app
-            .clone()
-            .oneshot(payer_post(
-                &format!("/v1/payer/payments/{identity_id}/verify/email/confirm"),
-                Some(&identity_session),
-                Some(&json!({"otp": OTP})),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(identity_confirmed.status(), StatusCode::OK);
-        let identity_confirmed = json_body(identity_confirmed).await;
-        assert_eq!(identity_confirmed["requirements"]["email"], "approved");
-        assert_eq!(identity_confirmed["requirements"]["document"], "pending");
-        assert_eq!(identity_confirmed["requirements"]["liveness"], "pending");
-        assert_eq!(
-            identity_confirmed["requirements"]["identity_match"],
-            "not_required"
-        );
-        assert_eq!(identity_confirmed["requirements"]["complete"], false);
-        let identity_read = json_body(
+        // The merchant's verification view lists every attempt on the
+        // invoice and nothing about the sessions behind them.
+        let activity = json_body(
             app.clone()
-                .oneshot(payer_get(
-                    &format!("/v1/payer/payments/{identity_id}"),
-                    Some(&identity_session),
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/payments/{email_id}/verification"),
                 ))
                 .await
                 .unwrap(),
         )
         .await;
-        assert_eq!(identity_read["content_unlocked"], false);
-        assert!(identity_read["address"].is_null());
-        let identity_merchant = json_body(
-            app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{identity_id}")))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert!(identity_merchant["verification_completed_at"].is_null());
+        assert_eq!(activity["payer_policy_mode"], "verified_email");
+        assert!(activity["verification_completed_at"].is_string());
+        assert_eq!(activity["facts"]["email"], "approved");
+        assert_eq!(activity["facts"]["complete"], true);
+        let attempts = activity["attempts"].as_array().unwrap();
+        assert!(attempts.len() >= 2, "{activity}");
+        assert!(attempts.iter().all(|attempt| attempt["kind"] == "email"));
+        assert!(
+            attempts.iter().any(
+                |attempt| attempt["status"] == "approved" && attempt["verified_at"].is_string()
+            )
+        );
+        assert!(!activity.to_string().contains("alice@example.com"));
+        assert!(!activity.to_string().contains("payer_session"));
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -4131,894 +4106,6 @@ mod tests {
                 .unwrap()
                 .to_ascii_lowercase()
                 .contains("payday-payer-session")
-        );
-    }
-
-    // ----- Identity verification --------------------------------------------
-
-    use crate::identity::testing::{
-        CALLBACK_HEADER, CALLBACK_SECRET, FakeIdentityProvider, decision as fake_decision,
-    };
-    use crate::identity::{IdentityProviderStatus, reconciler};
-    use gateway_db::VerificationRepository;
-
-    async fn app_with_identity(
-        pool: PgPool,
-    ) -> (Router, Arc<FakeTenant>, Arc<FakeIdentityProvider>) {
-        let (verification, tenant) = payer_verification();
-        let provider = Arc::new(FakeIdentityProvider::default());
-        let app = build_with(
-            pool,
-            None,
-            Address::ZERO,
-            RECOVERY,
-            Some(verification),
-            Some(provider.clone()),
-        )
-        .await
-        .router;
-        (app, tenant, provider)
-    }
-
-    /// Start a session, prove the mailbox, and return the session token.
-    async fn email_verified_session(app: &Router, id: &str) -> String {
-        let session = start_session(app, id).await;
-        confirm_email(app, id, &session).await;
-        session
-    }
-
-    async fn confirm_email(app: &Router, id: &str, session: &str) {
-        let confirmed = app
-            .clone()
-            .oneshot(payer_post(
-                &format!("/v1/payer/payments/{id}/verify/email/confirm"),
-                Some(session),
-                Some(&json!({"otp": OTP})),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(confirmed.status(), StatusCode::OK);
-    }
-
-    /// A second session on the same invoice, minted directly: the email
-    /// route's per-invoice cooldown would refuse another code so soon.
-    async fn extra_session(pool: &PgPool, id: &str) -> String {
-        let uuid = gateway_core::payment_id(id).unwrap();
-        gateway_db::PayerSessionRepository::new(pool.clone())
-            .create(uuid, gateway_db::PAYER_SESSION_TTL)
-            .await
-            .unwrap()
-            .token
-    }
-
-    async fn identity_start(app: &Router, id: &str, session: Option<&str>) -> (StatusCode, Value) {
-        let response = app
-            .clone()
-            .oneshot(payer_post(
-                &format!("/v1/payer/payments/{id}/verify/identity/start"),
-                session,
-                None,
-            ))
-            .await
-            .unwrap();
-        let status = response.status();
-        if status == StatusCode::OK {
-            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        }
-        (status, json_body(response).await)
-    }
-
-    async fn verify_status(app: &Router, id: &str, session: &str) -> Value {
-        json_body(
-            app.clone()
-                .oneshot(payer_get(
-                    &format!("/v1/payer/payments/{id}/verify"),
-                    Some(session),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await
-    }
-
-    async fn payer_read(app: &Router, id: &str, session: Option<&str>) -> Value {
-        json_body(
-            app.clone()
-                .oneshot(payer_get(&format!("/v1/payer/payments/{id}"), session))
-                .await
-                .unwrap(),
-        )
-        .await
-    }
-
-    /// The provider's callback for `reference`, as the fake verifies it.
-    fn callback(reference: &str, event_id: &str, signed: bool) -> Request<Body> {
-        let mut request =
-            Request::post("/v1/webhooks/identity").header(header::CONTENT_TYPE, "application/json");
-        if signed {
-            request = request.header(CALLBACK_HEADER, CALLBACK_SECRET);
-        }
-        request
-            .body(Body::from(
-                json!({
-                    "event_id": event_id,
-                    "session_id": reference,
-                    "status": "Approved",
-                    "decision": {"id_verifications": [{"first_name": "SENTINEL_FIRST_NAME",
-                        "document_number": "SENTINEL_DOC_NUMBER", "date_of_birth": "1900-01-01",
-                        "portrait_image": "https://sentinel-images.example/p.jpg"}]}
-                })
-                .to_string(),
-            ))
-            .unwrap()
-    }
-
-    /// Run the reconciler over everything due right now.
-    async fn reconcile_due(pool: &PgPool, provider: &FakeIdentityProvider) -> usize {
-        let repo = VerificationRepository::new(pool.clone());
-        let claims = repo
-            .claim_due(10, std::time::Duration::from_secs(60))
-            .await
-            .unwrap();
-        let count = claims.len();
-        for claim in claims {
-            reconciler::reconcile_one(&repo, provider, claim)
-                .await
-                .unwrap();
-        }
-        count
-    }
-
-    /// Bring every open attempt's poll forward, as a callback would.
-    async fn poll_now(pool: &PgPool) {
-        sqlx::query("UPDATE payer_verifications SET next_poll_at = now(), leased_until = NULL WHERE status IN ('pending', 'in_review')")
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-
-    async fn merchant_verification(app: &Router, key: &str, id: &str) -> Value {
-        json_body(
-            app.clone()
-                .oneshot(get_request(key, &format!("/v1/payments/{id}/verification")))
-                .await
-                .unwrap(),
-        )
-        .await
-    }
-
-    const ADMIN_SECRET: &str = "test-admin-bearer-secret-0123456789abcdef";
-
-    fn admin_decision(id: &str, body: &Value) -> Request<Body> {
-        Request::post(format!("/v1/admin/verifications/{id}/decision"))
-            .header(header::AUTHORIZATION, format!("Bearer {ADMIN_SECRET}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn identity_approval_unlocks_one_session_and_credentials_reuse_within_the_merchant(
-        pool: PgPool,
-    ) {
-        let (app, _tenant, provider) = app_with_identity(pool.clone()).await;
-        let unattributed = json!({"mode": "verified_identity_unattributed", "expected_email": "alice@example.com"});
-        let (first_id, _) = create_gated(&app, "identity-1", unattributed.clone(), "First").await;
-
-        // No session, a session without the mailbox proven, and an email-only
-        // invoice are all refused before anything reaches the provider.
-        assert_eq!(
-            identity_start(&app, &first_id, None).await.0,
-            StatusCode::UNAUTHORIZED
-        );
-        let session = start_session(&app, &first_id).await;
-        let (status, body) = identity_start(&app, &first_id, Some(&session)).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"]["code"], "email_verification_required");
-        let (email_id, _) = create_gated(
-            &app,
-            "email-only",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
-            "Email",
-        )
-        .await;
-        let email_session = email_verified_session(&app, &email_id).await;
-        let (status, body) = identity_start(&app, &email_id, Some(&email_session)).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"]["code"], "verification_not_required");
-        assert!(provider.sessions.lock().unwrap().is_empty());
-
-        // The proven session is sent to the hosted flow. The provider learns
-        // Payday's attempt id, the payer reference, and where to return; no
-        // mailbox and, in unattributed mode, no asserted identity.
-        confirm_email(&app, &first_id, &session).await;
-        let before = verify_status(&app, &first_id, &session).await;
-        assert_eq!(before["identity_start_available"], true);
-        assert!(before["identity"].is_null());
-        let (status, started) = identity_start(&app, &first_id, Some(&session)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(started["outcome"]["type"], "redirect");
-        assert_eq!(
-            started["outcome"]["url"],
-            "https://verify.example/session/fake-session-1"
-        );
-        {
-            let sessions = provider.sessions.lock().unwrap();
-            assert_eq!(sessions.len(), 1);
-            assert!(sessions[0].expected_identity.is_none());
-            assert!(
-                sessions[0]
-                    .callback_url
-                    .ends_with(&format!("/pay/{first_id}"))
-            );
-            assert!(!format!("{:?}", sessions[0]).contains("alice"));
-        }
-        let pending = verify_status(&app, &first_id, &session).await;
-        assert_eq!(pending["identity"]["status"], "pending");
-        assert_eq!(pending["identity"]["attempt_number"], 1);
-        assert_eq!(pending["requirements"]["document"], "pending");
-        assert_eq!(
-            payer_read(&app, &first_id, Some(&session)).await["content_unlocked"],
-            false
-        );
-
-        // Every webhook is lost; polling alone settles it.
-        provider.queue(
-            "fake-session-1",
-            Ok(fake_decision(IdentityProviderStatus::Pending)),
-        );
-        provider.queue(
-            "fake-session-1",
-            Ok(fake_decision(IdentityProviderStatus::Approved)),
-        );
-        poll_now(&pool).await;
-        assert_eq!(reconcile_due(&pool, &provider).await, 1);
-        assert_eq!(
-            verify_status(&app, &first_id, &session).await["identity"]["status"],
-            "pending"
-        );
-        poll_now(&pool).await;
-        assert_eq!(reconcile_due(&pool, &provider).await, 1);
-        let approved = verify_status(&app, &first_id, &session).await;
-        assert_eq!(approved["identity"]["status"], "approved");
-        assert_eq!(approved["requirements"]["document"], "approved");
-        assert_eq!(approved["requirements"]["liveness"], "approved");
-        assert_eq!(approved["requirements"]["identity_match"], "not_required");
-        assert_eq!(approved["requirements"]["complete"], true);
-        assert_eq!(approved["identity_start_available"], false);
-        assert_eq!(reconcile_due(&pool, &provider).await, 0);
-
-        // Only the verifying session sees the invoice; the bare link and a
-        // fresh session on the same invoice do not.
-        let unlocked = payer_read(&app, &first_id, Some(&session)).await;
-        assert_eq!(unlocked["content_unlocked"], true);
-        assert!(unlocked["address"].is_string());
-        assert_eq!(
-            payer_read(&app, &first_id, None).await["content_unlocked"],
-            false
-        );
-        let stranger = extra_session(&pool, &first_id).await;
-        assert_eq!(
-            payer_read(&app, &first_id, Some(&stranger)).await["content_unlocked"],
-            false
-        );
-        let merchant = json_body(
-            app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/payments/{first_id}")))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert!(merchant["verification_completed_at"].is_string());
-        let detail = merchant_verification(&app, KEY, &first_id).await;
-        assert_eq!(
-            detail["payer_policy_mode"],
-            "verified_identity_unattributed"
-        );
-        assert_eq!(detail["facts"]["email"], "approved");
-        assert_eq!(detail["facts"]["document"], "approved");
-        assert_eq!(detail["facts"]["complete"], true);
-        assert_eq!(detail["review_available"], false);
-        assert_eq!(detail["retry_available"], false);
-        let attempts = detail["attempts"].as_array().unwrap();
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0]["kind"], "email");
-        assert_eq!(attempts[1]["kind"], "identity");
-        assert_eq!(attempts[1]["status"], "approved");
-        assert_eq!(attempts[1]["provider"], "didit");
-        assert_eq!(attempts[1]["provider_reference"], "fake-session-1");
-        assert_eq!(attempts[1]["country_code"], "DEU");
-        assert!(attempts[1]["review"].is_null());
-
-        // The same merchant's next unattributed invoice reuses the credential
-        // once the mailbox is proven again; the provider is not asked.
-        let (second_id, _) = create_gated(&app, "identity-2", unattributed.clone(), "Second").await;
-        let second_session = email_verified_session(&app, &second_id).await;
-        let (status, reused) = identity_start(&app, &second_id, Some(&second_session)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(reused["outcome"]["type"], "reused");
-        assert_eq!(provider.sessions.lock().unwrap().len(), 1);
-        assert_eq!(
-            payer_read(&app, &second_id, Some(&second_session)).await["content_unlocked"],
-            true
-        );
-        let second_detail = merchant_verification(&app, KEY, &second_id).await;
-        assert_eq!(second_detail["attempts"][1]["status"], "approved");
-        assert!(second_detail["attempts"][1]["provider_reference"].is_null());
-        // Starting again on a satisfied session is a no-op reuse.
-        assert_eq!(
-            identity_start(&app, &second_id, Some(&second_session))
-                .await
-                .1["outcome"]["type"],
-            "reused"
-        );
-
-        // A matched invoice cannot be satisfied by the generic credential:
-        // the provider is asked, this time with the assertion.
-        let (matched_id, _) = create_gated(
-            &app,
-            "identity-matched",
-            json!({"mode": "verified_identity", "expected_email": "alice@example.com",
-                   "expected_identity": {"first_name": "Alice", "last_name": "Smith"}}),
-            "Matched",
-        )
-        .await;
-        let matched_session = email_verified_session(&app, &matched_id).await;
-        let (status, started) = identity_start(&app, &matched_id, Some(&matched_session)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(started["outcome"]["type"], "redirect");
-        {
-            let sessions = provider.sessions.lock().unwrap();
-            assert_eq!(sessions.len(), 2);
-            let asserted = sessions[1].expected_identity.as_ref().unwrap();
-            assert_eq!(asserted.first_name, "Alice");
-            assert_eq!(asserted.last_name, "Smith");
-        }
-        provider.queue(
-            "fake-session-2",
-            Ok(fake_decision(IdentityProviderStatus::Approved)),
-        );
-        poll_now(&pool).await;
-        reconcile_due(&pool, &provider).await;
-        let matched_status = verify_status(&app, &matched_id, &matched_session).await;
-        assert_eq!(matched_status["requirements"]["identity_match"], "approved");
-        assert_eq!(matched_status["requirements"]["complete"], true);
-
-        // The same name on another invoice reuses the matched credential; a
-        // different name does not.
-        let (same_id, _) = create_gated(
-            &app,
-            "identity-matched-again",
-            json!({"mode": "verified_identity", "expected_email": "alice@example.com",
-                   "expected_identity": {"first_name": "Alice", "last_name": "Smith"}}),
-            "Matched again",
-        )
-        .await;
-        let same_session = email_verified_session(&app, &same_id).await;
-        assert_eq!(
-            identity_start(&app, &same_id, Some(&same_session)).await.1["outcome"]["type"],
-            "reused"
-        );
-        let (other_name_id, _) = create_gated(
-            &app,
-            "identity-other-name",
-            json!({"mode": "verified_identity", "expected_email": "alice@example.com",
-                   "expected_identity": {"first_name": "Alicia", "last_name": "Smith"}}),
-            "Other name",
-        )
-        .await;
-        let other_name_session = email_verified_session(&app, &other_name_id).await;
-        assert_eq!(
-            identity_start(&app, &other_name_id, Some(&other_name_session))
-                .await
-                .1["outcome"]["type"],
-            "redirect"
-        );
-        assert_eq!(provider.sessions.lock().unwrap().len(), 3);
-
-        // Another merchant gets nothing from these credentials.
-        const OTHER_KEY: &str = "payday_live_other0123456789abcdef0123456789abcdef";
-        other_account(&pool, OTHER_KEY).await;
-        let mut body = valid_body();
-        body["payer_policy"] = unattributed;
-        let foreign = json_body(
-            app.clone()
-                .oneshot(create_request(OTHER_KEY, "foreign", &body))
-                .await
-                .unwrap(),
-        )
-        .await;
-        let foreign_id = foreign["id"].as_str().unwrap().to_owned();
-        let foreign_session = email_verified_session(&app, &foreign_id).await;
-        assert_eq!(
-            identity_start(&app, &foreign_id, Some(&foreign_session))
-                .await
-                .1["outcome"]["type"],
-            "redirect"
-        );
-        assert_eq!(provider.sessions.lock().unwrap().len(), 4);
-        // And cannot read this merchant's verification detail.
-        let foreign_read = app
-            .clone()
-            .oneshot(get_request(
-                OTHER_KEY,
-                &format!("/v1/payments/{first_id}/verification"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(foreign_read.status(), StatusCode::NOT_FOUND);
-
-        // A provider outage at start leaves nothing pending and says so.
-        let (outage_id, _) = create_gated(
-            &app,
-            "identity-outage",
-            json!({"mode": "verified_identity", "expected_email": "alice@example.com",
-                   "expected_identity": {"first_name": "Zed", "last_name": "Smith"}}),
-            "Outage",
-        )
-        .await;
-        let outage_session = email_verified_session(&app, &outage_id).await;
-        *provider.outage.lock().unwrap() = true;
-        let (status, body) = identity_start(&app, &outage_id, Some(&outage_session)).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(body["error"]["code"], "identity_provider_unavailable");
-        *provider.outage.lock().unwrap() = false;
-        let after_outage = verify_status(&app, &outage_id, &outage_session).await;
-        assert_eq!(after_outage["identity"]["status"], "abandoned");
-        assert_eq!(after_outage["identity_start_available"], true);
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn one_automated_resubmission_then_review_decided_by_the_named_reviewer(pool: PgPool) {
-        // SAFETY: the operator credential and reviewer are read from the
-        // environment per request; no other test in this binary reads them.
-        unsafe {
-            std::env::set_var("PAYDAY_ADMIN_BEARER_SECRET", ADMIN_SECRET);
-            std::env::set_var("PAYDAY_ADMIN_REVIEWER_ID", "reviewer@payday.test");
-        }
-        let (app, _tenant, provider) = app_with_identity(pool.clone()).await;
-        let (id, _) = create_gated(
-            &app,
-            "identity-review",
-            json!({"mode": "verified_identity", "expected_email": "alice@example.com",
-                   "expected_identity": {"first_name": "Alice", "last_name": "Smith"}}),
-            "Review",
-        )
-        .await;
-        let session = email_verified_session(&app, &id).await;
-
-        // First decline: the payer may try once more, and the merchant is
-        // told a review is possible.
-        assert_eq!(
-            identity_start(&app, &id, Some(&session)).await.1["outcome"]["type"],
-            "redirect"
-        );
-        provider.queue(
-            "fake-session-1",
-            Ok(fake_decision(IdentityProviderStatus::Declined)),
-        );
-        poll_now(&pool).await;
-        reconcile_due(&pool, &provider).await;
-        let declined = verify_status(&app, &id, &session).await;
-        assert_eq!(declined["identity"]["status"], "declined");
-        assert_eq!(declined["identity"]["retry_available"], true);
-        assert_eq!(declined["identity_start_available"], true);
-        assert_eq!(declined["requirements"]["document"], "declined");
-        assert_eq!(declined["requirements"]["complete"], false);
-        let detail = merchant_verification(&app, KEY, &id).await;
-        assert_eq!(detail["review_available"], true);
-        assert_eq!(detail["retry_available"], true);
-        assert_eq!(detail["facts"]["document"], "declined");
-        assert_eq!(
-            detail["attempts"][1]["risk_codes"],
-            json!(["DOCUMENT_EXPIRED"])
-        );
-        let declined_events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM webhook_events WHERE event_type = 'verification.declined'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(declined_events, 1);
-
-        // Second decline: review required; a third start is refused.
-        let (status, second) = identity_start(&app, &id, Some(&session)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(second["outcome"]["type"], "redirect");
-        assert_eq!(
-            verify_status(&app, &id, &session).await["identity"]["attempt_number"],
-            2
-        );
-        provider.queue(
-            "fake-session-2",
-            Ok(fake_decision(IdentityProviderStatus::Declined)),
-        );
-        poll_now(&pool).await;
-        reconcile_due(&pool, &provider).await;
-        let stopped = verify_status(&app, &id, &session).await;
-        assert_eq!(stopped["identity"]["status"], "review_required");
-        assert_eq!(stopped["identity"]["retry_available"], false);
-        assert_eq!(stopped["identity_start_available"], false);
-        let (status, body) = identity_start(&app, &id, Some(&session)).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"]["code"], "review_required");
-        assert_eq!(provider.sessions.lock().unwrap().len(), 2);
-
-        // The merchant asks for a review; asking twice is idempotent, and an
-        // invoice with nothing declined has nothing to review.
-        let requested = json_body(
-            app.clone()
-                .oneshot(json_request(
-                    "POST",
-                    KEY,
-                    &format!("/v1/payments/{id}/verification/review"),
-                    &json!({}),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(requested["review_available"], true);
-        assert_eq!(requested["retry_available"], false);
-        assert_eq!(requested["attempts"][2]["status"], "review_required");
-        assert!(requested["attempts"][2]["review"]["requested_at"].is_string());
-        assert!(requested["attempts"][2]["review"]["decision"].is_null());
-        let again = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/payments/{id}/verification/review"),
-                &json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(again.status(), StatusCode::OK);
-        let (clean_id, _) = create_gated(
-            &app,
-            "identity-clean",
-            json!({"mode": "verified_identity_unattributed", "expected_email": "alice@example.com"}),
-            "Clean",
-        )
-        .await;
-        let nothing = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/payments/{clean_id}/verification/review"),
-                &json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(nothing.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            json_body(nothing).await["error"]["code"],
-            "review_not_available"
-        );
-
-        // The operator decides. A wrong credential, an unknown attempt, an
-        // unknown field, and an oversized note are refused.
-        let attempt_id = requested["attempts"][2]["id"].as_str().unwrap().to_owned();
-        let unauthorized = app
-            .clone()
-            .oneshot(
-                Request::post(format!("/v1/admin/verifications/{attempt_id}/decision"))
-                    .header(header::AUTHORIZATION, "Bearer wrong")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({"decision": "approve"}).to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-        let unknown = app
-            .clone()
-            .oneshot(admin_decision(
-                &Uuid::now_v7().to_string(),
-                &json!({"decision": "approve"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
-        let extra = app
-            .clone()
-            .oneshot(admin_decision(
-                &attempt_id,
-                &json!({"decision": "approve", "name": "x"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(extra.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let long_note = app
-            .clone()
-            .oneshot(admin_decision(
-                &attempt_id,
-                &json!({"decision": "approve", "note": "n".repeat(2001)}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(long_note.status(), StatusCode::BAD_REQUEST);
-
-        let decided = app
-            .clone()
-            .oneshot(admin_decision(
-                &attempt_id,
-                &json!({"decision": "approve", "note": "Appeal upheld"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(decided.status(), StatusCode::OK);
-        let decided = json_body(decided).await;
-        assert_eq!(decided["status"], "approved");
-        assert_eq!(decided["provider"], "manual");
-        assert_eq!(decided["identity_match"], "approved");
-        assert_eq!(decided["review"]["decision"], "approved");
-        assert_eq!(decided["review"]["reviewer"], "reviewer@payday.test");
-        assert_eq!(decided["review"]["note"], "Appeal upheld");
-        assert!(decided["review"]["decided_at"].is_string());
-        // Deciding again is refused; the payer's session is unlocked; the
-        // invoice completed; the merchant sees the reviewer's outcome.
-        let twice = app
-            .clone()
-            .oneshot(admin_decision(&attempt_id, &json!({"decision": "decline"})))
-            .await
-            .unwrap();
-        assert_eq!(twice.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            verify_status(&app, &id, &session).await["requirements"]["complete"],
-            true
-        );
-        assert_eq!(
-            payer_read(&app, &id, Some(&session)).await["content_unlocked"],
-            true
-        );
-        let final_detail = merchant_verification(&app, KEY, &id).await;
-        assert!(final_detail["verification_completed_at"].is_string());
-        assert_eq!(
-            final_detail["attempts"][2]["review"]["reviewer"],
-            "reviewer@payday.test"
-        );
-        assert_eq!(final_detail["review_available"], false);
-        let approved_events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM webhook_events WHERE event_type = 'verification.approved'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(approved_events, 1);
-        // The manual approval bound the same assertion hash: the next
-        // invoice for the same name reuses it.
-        let (same_id, _) = create_gated(
-            &app,
-            "identity-review-again",
-            json!({"mode": "verified_identity", "expected_email": "alice@example.com",
-                   "expected_identity": {"first_name": "Alice", "last_name": "Smith"}}),
-            "Same name",
-        )
-        .await;
-        let same_session = email_verified_session(&app, &same_id).await;
-        assert_eq!(
-            identity_start(&app, &same_id, Some(&same_session)).await.1["outcome"]["type"],
-            "reused"
-        );
-    }
-
-    /// Captures everything the gateway logs during a test.
-    #[derive(Clone, Default)]
-    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
-        type Writer = LogCapture;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    impl std::io::Write for LogCapture {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn identity_callbacks_are_verified_deduplicated_and_never_logged(pool: PgPool) {
-        let logs = LogCapture::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
-
-        let (app, _tenant, provider) = app_with_identity(pool.clone()).await;
-        let (id, _) = create_gated(
-            &app,
-            "identity-callback",
-            json!({"mode": "verified_identity_unattributed", "expected_email": "alice@example.com"}),
-            "Callback",
-        )
-        .await;
-        let session = email_verified_session(&app, &id).await;
-        identity_start(&app, &id, Some(&session)).await;
-        let due_before: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>> =
-            sqlx::query_scalar(
-                "SELECT next_poll_at FROM payer_verifications WHERE kind = 'identity'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert!(due_before.unwrap() > sqlx::types::chrono::Utc::now());
-
-        // Unsigned, tampered, and stale callbacks are refused without a poll.
-        let unsigned = app
-            .clone()
-            .oneshot(callback("fake-session-1", "evt-1", false))
-            .await
-            .unwrap();
-        assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            json_body(unsigned).await["error"]["code"],
-            "webhook_signature_invalid"
-        );
-        let tampered = app
-            .clone()
-            .oneshot(
-                Request::post("/v1/webhooks/identity")
-                    .header(CALLBACK_HEADER, CALLBACK_SECRET)
-                    .body(Body::from("{\"event_id\": \"evt-1\""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(tampered.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(reconcile_due(&pool, &provider).await, 0);
-
-        // A valid one is accepted at once, without asking the provider, and
-        // makes the attempt due; the same event again is a no-op.
-        let accepted = app
-            .clone()
-            .oneshot(callback("fake-session-1", "evt-1", true))
-            .await
-            .unwrap();
-        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
-        assert!(provider.fetches.lock().unwrap().is_empty());
-        let duplicate = app
-            .clone()
-            .oneshot(callback("fake-session-1", "evt-1", true))
-            .await
-            .unwrap();
-        assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
-        let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_webhook_receipts")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(receipts, 1);
-        // A callback for a session nobody knows is still just a receipt.
-        let unknown = app
-            .clone()
-            .oneshot(callback("fake-session-99", "evt-2", true))
-            .await
-            .unwrap();
-        assert_eq!(unknown.status(), StatusCode::ACCEPTED);
-
-        // The poll the callback triggered hits a transient failure first,
-        // which defers rather than declines, then approves.
-        provider.queue("fake-session-1", Err("timeout"));
-        provider.queue(
-            "fake-session-1",
-            Ok(fake_decision(IdentityProviderStatus::Approved)),
-        );
-        assert_eq!(reconcile_due(&pool, &provider).await, 1);
-        let deferred = verify_status(&app, &id, &session).await;
-        assert_eq!(deferred["identity"]["status"], "pending");
-        let failures: i32 = sqlx::query_scalar(
-            "SELECT provider_failures FROM payer_verifications WHERE kind = 'identity'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(failures, 1);
-        assert_eq!(reconcile_due(&pool, &provider).await, 0);
-        poll_now(&pool).await;
-        assert_eq!(reconcile_due(&pool, &provider).await, 1);
-        assert_eq!(
-            verify_status(&app, &id, &session).await["requirements"]["complete"],
-            true
-        );
-        assert_eq!(provider.fetches.lock().unwrap().len(), 2);
-
-        // Privacy regression: the callback body's extracted identity is in
-        // no log line, no row, and no response.
-        let responses = format!(
-            "{}{}{}",
-            verify_status(&app, &id, &session).await,
-            merchant_verification(&app, KEY, &id).await,
-            payer_read(&app, &id, Some(&session)).await
-        );
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT row_to_json(v)::text FROM payer_verifications v UNION ALL SELECT row_to_json(c)::text FROM payer_credentials c UNION ALL SELECT row_to_json(r)::text FROM identity_webhook_receipts r UNION ALL SELECT row_to_json(w)::text FROM webhook_events w",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-        assert!(
-            captured.contains("identity callback received"),
-            "{captured}"
-        );
-        assert!(captured.contains("identity callback rejected"));
-        for sentinel in [
-            "SENTINEL_FIRST_NAME",
-            "SENTINEL_DOC_NUMBER",
-            "1900-01-01",
-            "sentinel-images.example",
-        ] {
-            assert!(
-                !captured.contains(sentinel),
-                "{sentinel} in logs: {captured}"
-            );
-            assert!(!responses.contains(sentinel), "{sentinel} in a response");
-            for row in &rows {
-                assert!(!row.contains(sentinel), "{sentinel} in row {row}");
-            }
-        }
-        assert!(!captured.contains("alice@example.com"), "mailbox in logs");
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn identity_start_is_unavailable_without_a_provider_and_answers_checkout_cors_only(
-        pool: PgPool,
-    ) {
-        let (app, _tenant) = app_with_payer_verification(pool.clone()).await;
-        let (id, _) = create_gated(
-            &app,
-            "identity-none",
-            json!({"mode": "verified_identity_unattributed", "expected_email": "alice@example.com"}),
-            "No provider",
-        )
-        .await;
-        let session = email_verified_session(&app, &id).await;
-        assert_eq!(
-            verify_status(&app, &id, &session).await["identity_start_available"],
-            false
-        );
-        let (status, body) = identity_start(&app, &id, Some(&session)).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["error"]["code"], "verification_unavailable");
-        let webhook = app.clone().oneshot(callback("x", "y", true)).await.unwrap();
-        assert_eq!(webhook.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let preflight = |origin: &str| {
-            Request::options(format!("/v1/payer/payments/{id}/verify/identity/start"))
-                .header(header::ORIGIN, origin)
-                .header("access-control-request-method", "POST")
-                .header("access-control-request-headers", "payday-payer-session")
-                .body(Body::empty())
-                .unwrap()
-        };
-        let allowed = app
-            .clone()
-            .oneshot(preflight(CHECKOUT_ORIGIN))
-            .await
-            .unwrap();
-        assert_eq!(
-            allowed.headers()["access-control-allow-origin"],
-            CHECKOUT_ORIGIN
-        );
-        let foreign = app
-            .clone()
-            .oneshot(preflight("https://merchant.example"))
-            .await
-            .unwrap();
-        assert!(
-            !foreign
-                .headers()
-                .contains_key("access-control-allow-origin")
         );
     }
 }

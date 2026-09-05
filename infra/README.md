@@ -23,12 +23,8 @@ empty, the payer settings and the generated `PAYDAY_PAYER_REF_MASTER_KEY`
 secret are not passed to the task and verification is unavailable). Terraform
 passes these non-secret identifiers to ECS; Privy, the embedded email OTP
 connection, and the payer application setup are documented in
-`docs/authentication.md`. Payer identity verification is enabled the same way
-once the Didit workflow exists (`didit_workflow_id`, with the API key and
-webhook secret as `TF_VAR_didit_api_key` and `TF_VAR_didit_webhook_secret`;
-while empty, the identity settings are not passed to the task and identity
-start answers unavailable); `admin_reviewer_id` names who is recorded on
-manual verification decisions.
+`docs/authentication.md`. `admin_reviewer_id` names who is recorded on
+operator decisions.
 
 The same ALB and certificate serve `payment_domain_name` and
 `status_domain_name`. The status hostname routes to an independent ECS service
@@ -152,7 +148,7 @@ rotation is not observed by running ECS tasks. Force a new API deployment after
 rotating the webhook key, and retain prior application key material until
 ciphertext associated with its key ID has been re-encrypted.
 
-KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can pass it to `payday proof verify --trusted-attestor`.
+KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gateway_core::verify_proof`).
 
 WAF request sampling is disabled because samples can contain the bearer `Authorization` header. Fatal indexer safety errors and loss of its database lock exit the process and publish a log-derived CloudWatch alarm. RDS Multi-AZ, ALB, WAF, public IPv4 addresses, Container Insights, logs, Secrets Manager, and KMS incur ongoing charges. Public IPv4 and cross-AZ traffic are billed. This stack has no autoscaling, VPC endpoints, bastion, or automatic finality-reorg recovery.
 

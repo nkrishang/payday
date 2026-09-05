@@ -350,8 +350,8 @@ function Files({ payment }: { payment: Payment }) {
 
       {payment.status !== "settled" ? (
         <p className="mt-3 text-[11.5px] leading-relaxed text-faint">
-          The proof is generated once the request settles, and verifies offline with{" "}
-          <code>payday proof verify</code>.
+          The proof is generated once the request settles, and verifies offline
+          without Payday.
         </p>
       ) : null}
       <div className="mt-2">

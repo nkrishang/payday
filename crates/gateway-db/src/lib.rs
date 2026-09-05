@@ -2,7 +2,6 @@ mod accounts;
 mod attachments;
 mod cursor;
 mod customers;
-mod identity;
 mod invoices;
 mod issuers;
 mod notifications;
@@ -22,13 +21,6 @@ pub use attachments::{
 };
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
-pub use identity::{
-    ClaimedVerification, CredentialKind, DEFAULT_CREDENTIAL_LIFETIME, DbPayerCredential,
-    DbVerificationAttempt, DbVerificationReview, DecisionRecord, IDENTITY_POLL_INTERVAL,
-    IdentityCompletion, IdentityState, IdentityStatus, IdentityStatusParseError,
-    MAX_AUTOMATED_ATTEMPTS, MAX_POLL_BACKOFF, ReviewDecision, ReviewError, StartIdentityError,
-    VerificationRepository, poll_backoff,
-};
 pub use invoices::{
     CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice, DbInvoiceError,
     DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository,
@@ -49,8 +41,9 @@ pub use sweeps::{
     SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats, SweeperStatus,
 };
 pub use verifications::{
-    CreatedPayerSession, DbPayerSession, EmailVerificationAttempt, PAYER_SESSION_TTL,
-    PayerSessionRepository, StartEmailVerificationError, VerificationCompletion, payer_ref,
+    CreatedPayerSession, DbPayerSession, DbVerificationAttempt, EmailVerificationAttempt,
+    PAYER_SESSION_TTL, PayerSessionRepository, StartEmailVerificationError, VerificationCompletion,
+    payer_ref,
 };
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,

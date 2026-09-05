@@ -172,35 +172,6 @@ mailbox verification — answer `503 verification_unavailable`.
 The web app is built with the same app id as `NEXT_PUBLIC_PRIVY_APP_ID`
 (`web/.env.example`).
 
-### Identity verification (Didit)
-
-The two identity modes use Didit's hosted document, liveness, and face-match
-session behind a thin provider boundary. Configure one workflow in the Didit
-console that requires all three checks and declines expected-name mismatches,
-create a webhook destination pointing at
-`https://api.payday.sh/v1/webhooks/identity`, and set (all three together, or
-none):
-
-```bash
-export PAYDAY_DIDIT_API_KEY="<Didit API key>"
-export PAYDAY_DIDIT_WORKFLOW_ID="<pinned workflow id>"
-export PAYDAY_DIDIT_WEBHOOK_SECRET="<the destination's shared secret>"
-# Optional; defaults to https://verification.didit.me.
-export PAYDAY_DIDIT_BASE_URL="https://verification.didit.me"
-# Recorded as the reviewer on manual verification decisions; defaults to
-# "operator".
-export PAYDAY_ADMIN_REVIEWER_ID="reviewer@example.com"
-```
-
-Without them the identity modes can still be issued and email-verified, and
-`identity/start` answers `503 verification_unavailable`. Payday sends Didit
-the payer reference (never the mailbox), Payday's own attempt id as metadata,
-the checkout URL to return to, and, for `verified_identity` only, the
-expected first and last name; it keeps statuses, the session reference, and
-risk categories, and never the extracted identity. Before enabling this in
-production, complete the data-processing, retention, consent, appeal, and
-human-review requirements in `features/product-plan.md` (Slice 0).
-
 For AWS, set `privy_app_id`, `auth0_issuer`, `payer_auth0_audience`, and
 `payer_auth0_client_id` in the untracked `infra/terraform.tfvars`; Terraform
 passes them to the API task.
@@ -216,8 +187,7 @@ The **API key** section generates the key your own server calls the API
 with. It is shown once. The session is the credential: no second code is
 asked for, and an API key can never mint another — `POST /v1/account/api-key`
 refuses anything but a dashboard session (`identity_unauthorized`). Give the
-key to the SDK, `curl`, or the CI secret store; `PAYDAY_API_KEY` is how the
-CLI reads it. The CLI's own `payday login` is no longer accepted by the API.
+key to the SDK, `curl`, or the CI secret store.
 
 ## 6. Rotate or revoke a key
 

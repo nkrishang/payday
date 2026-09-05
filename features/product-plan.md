@@ -1,8 +1,17 @@
 # Payday: Verified Customer Funds — Consolidated Product Plan
 
+> **Superseded on 2026-09-05.** Identity verification is no longer part of
+> the product. Everything below about `verified_identity`,
+> `verified_identity_unattributed`, `expected_identity`, KYC, Didit, the
+> `PayerIdentityProvider` boundary, credential reuse, the reconciler, manual
+> review, and the identity step of the checkout describes a design that was
+> built and then removed. The payer policy has two modes, `permissionless`
+> and `verified_email`. Those sections are kept for the record; treat them
+> as history, not as the current specification.
+
 **Status:** Consolidated implementation plan, updated with owner decisions on all open questions.
 
-**Positioning:** **Payday is the complete solution for receiving attributable, optionally KYC-verified customer funds over stablecoin rails.**
+**Positioning:** **Payday is the complete solution for receiving attributable, verified customer funds over stablecoin rails.**
 
 **Guiding principle:** The product should be the *leanest comprehensive* version — every necessary capability, nothing superfluous, nothing missing.
 
@@ -26,7 +35,6 @@ These form one product. The invoice records the obligation, the payer policy con
 1. **API** — canonical integration and policy surface.
 2. **Merchant dashboard** — primary operating interface.
 3. **Hosted payment page** — invoice presentation and payer verification.
-4. **CLI** — parity for automation and technical users.
 
 Use **invoice** for the issued business document and **payment** for its on-chain fulfillment.
 
@@ -67,16 +75,16 @@ Payday is a confirmation service, not an identity-data marketplace.
 
 ### 3.2 Four presets externally, independent facts internally
 
-The public product exposes exactly four payer modes:
+The public product exposes exactly two payer modes:
 
 | Mode | Merchant supplies | Payer proves |
 |---|---|---|
 | `permissionless` | Nothing | Nothing |
 | `verified_email` | Expected email | Mailbox ownership |
-| `verified_identity` | Expected email and identity | Mailbox ownership, document/liveness KYC, and identity match |
-| `verified_identity_unattributed` | Expected email | Mailbox ownership and successful document/liveness KYC for any person |
 
-Internally, email ownership, document verification, liveness, and identity match remain separate facts with separate statuses. This supports correct implementation without exposing a merchant-configurable policy builder.
+Internally, each fact a policy needs keeps its own status. This supports correct implementation without exposing a merchant-configurable policy builder.
+
+*Historical: the two identity modes that used to sit below these were removed on 2026-09-05; see the note at the top of this document.*
 
 AML screening, wallet ownership, proof of address, and KYB are not additional payer modes in v1.
 
@@ -317,7 +325,7 @@ The recovery address is Payday's custodial recovery wallet, not an expected rece
 
 Consequences:
 
-- Remove merchant control of `refund_address` from the create API, SDK, CLI, and dashboard.
+- Remove merchant control of `refund_address` from the create API, SDK, and dashboard.
 - Configure recovery centrally per chain/environment.
 - Continue storing the selected recovery address on each invoice because it is committed into the counterfactual address.
 - The recovery wallet key is held in AWS KMS (infrastructure already in use), not in a hot wallet or manual key file.
@@ -593,7 +601,7 @@ It is not required for the four-mode launch and must not delay it.
 
 ---
 
-## 7. API, dashboard, checkout, and CLI
+## 7. API, dashboard, and checkout
 
 ### 7.1 API
 
@@ -659,15 +667,9 @@ The checkout:
 
 ### 7.4 CLI
 
-CLI parity includes:
-
-- `payday create --from-file invoice.json`
-- PDF upload/finalization
-- Four payer-policy modes
-- Customer reference
-- Verification status
-- Unsolicited-transfer indication
-- Proof download and offline verification
+Removed. Payday is API-first with the dashboard for management; automation
+uses the API or the TypeScript SDK directly. Offline proof verification lives
+in `gateway_core::verify_proof`.
 
 The existing test forbidding the word "invoice" should be deliberately updated. "Invoice" is now the correct product term.
 
@@ -818,7 +820,6 @@ Attribution, contract, and non-KYC invoice work can proceed in parallel.
 - Render invoices and attachments on `/pay/{id}` — with progressive content visibility per §4.3 for gated invoices.
 - Generate a deterministic Payday invoice-summary PDF.
 - Add dashboard create/list/detail flows.
-- Add CLI `--from-file`.
 - Implement canonicalization, simple attribution hash, and derived salt.
 - Add Proof of Payment export (merchant-accessible, shareable at merchant's discretion) and offline verifier.
 - Extend idempotency comparison to every issuance field and attachment hash.

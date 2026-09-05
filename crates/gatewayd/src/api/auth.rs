@@ -953,11 +953,23 @@ mod tests {
         for (name, token) in [
             (
                 "another app",
-                app.token_with("did:privy:x", PRIVY_ISSUER, "other-app", u64::MAX, good.clone()),
+                app.token_with(
+                    "did:privy:x",
+                    PRIVY_ISSUER,
+                    "other-app",
+                    u64::MAX,
+                    good.clone(),
+                ),
             ),
             (
                 "another issuer",
-                app.token_with("did:privy:x", "https://issuer.example/", APP_ID, u64::MAX, good.clone()),
+                app.token_with(
+                    "did:privy:x",
+                    "https://issuer.example/",
+                    APP_ID,
+                    u64::MAX,
+                    good.clone(),
+                ),
             ),
             (
                 "expired",
@@ -969,7 +981,13 @@ mod tests {
             ),
             (
                 "no mailbox",
-                app.token_with("did:privy:x", PRIVY_ISSUER, APP_ID, u64::MAX, accounts(None)),
+                app.token_with(
+                    "did:privy:x",
+                    PRIVY_ISSUER,
+                    APP_ID,
+                    u64::MAX,
+                    accounts(None),
+                ),
             ),
             (
                 "no linked accounts at all",
@@ -977,11 +995,23 @@ mod tests {
             ),
             (
                 "unparseable linked accounts",
-                app.token_with("did:privy:x", PRIVY_ISSUER, APP_ID, u64::MAX, Some("not json".into())),
+                app.token_with(
+                    "did:privy:x",
+                    PRIVY_ISSUER,
+                    APP_ID,
+                    u64::MAX,
+                    Some("not json".into()),
+                ),
             ),
             (
                 "not an email",
-                app.token_with("did:privy:x", PRIVY_ISSUER, APP_ID, u64::MAX, accounts(Some("nope"))),
+                app.token_with(
+                    "did:privy:x",
+                    PRIVY_ISSUER,
+                    APP_ID,
+                    u64::MAX,
+                    accounts(Some("nope")),
+                ),
             ),
         ] {
             assert!(app.verifier.verify(&token).await.is_err(), "{name}");
