@@ -27,9 +27,9 @@ const AUTHENTICATION_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 const CLOCK_SKEW: Duration = Duration::from_secs(30);
 const EMAIL_OTP_METHOD: &str = "email_otp";
 
-/// A fresh email-OTP authentication from the verifier's own application. For
-/// the merchant audience that is the CLI, the only credential that may issue
-/// or revoke API keys; for the payer audience it is the proof that the
+/// A fresh email-OTP authentication from one of the verifier's own merchant
+/// applications — the CLI or the dashboard — the only credentials that may
+/// issue or revoke API keys; for the payer audience it is the proof that the
 /// merchant-asserted mailbox was just opened.
 #[derive(Clone, Debug)]
 pub struct Identity {
@@ -151,8 +151,14 @@ impl Auth0Verifier {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| ApiError::identity_unauthorized())?
             .as_secs();
-        if claims.azp != self.inner.client_id
-            || claims.authentication_client_id != self.inner.client_id
+        // Either merchant client may hold this, same as a session: the CLI
+        // proves itself the same way the dashboard's own sign-in does. What
+        // makes this stronger than a session is everything below — freshness
+        // and single use — not which application asked.
+        let accepted_client = claims.azp == self.inner.client_id
+            || self.inner.dashboard_client_id.as_deref() == Some(claims.azp.as_str());
+        if !accepted_client
+            || claims.authentication_client_id != claims.azp
             || !email_otp_subject(&claims)
             || claims.authentication_event_id.is_empty()
             || claims.authentication_event_id.len() > 255
@@ -826,7 +832,8 @@ mod tests {
         };
         let stale = now - 24 * 3600;
 
-        // A day-old dashboard token is a fine session and no key credential.
+        // A day-old dashboard token is a fine session, but stale for a key
+        // credential regardless of which merchant client minted it.
         let dashboard = token(
             "payday-dashboard",
             "payday-dashboard",
@@ -838,6 +845,19 @@ mod tests {
         assert_eq!(session.subject, "email|user");
         assert_eq!(session.email, "merchant@example.com");
         assert!(verifier.verify(&dashboard).await.is_err());
+
+        // Freshly authenticated, that same dashboard client is just as good a
+        // key credential as the CLI: the dashboard can step up with its own
+        // sign-in to manage the key, without ever holding one day to day.
+        let fresh_dashboard = token(
+            "payday-dashboard",
+            "payday-dashboard",
+            EMAIL_OTP_METHOD,
+            "email|user",
+            now,
+        );
+        let identity = verifier.verify(&fresh_dashboard).await.unwrap();
+        assert_eq!(identity.subject, "email|user");
 
         // The CLI's own token works as a session too, stale or not.
         let cli = token(

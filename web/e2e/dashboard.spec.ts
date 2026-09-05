@@ -16,11 +16,11 @@ const PDF = Buffer.from(
   "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n",
 );
 
-async function signIn(page: Page) {
+async function signIn(page: Page, email = "merchant@example.com") {
   await page.goto("/");
   await page.getByRole("button", { name: "Start Building" }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Email").fill("merchant@example.com");
+  await dialog.getByLabel("Email").fill(email);
   await dialog.getByRole("button", { name: "Send code" }).click();
   await dialog.getByLabel("One-time code").fill(OTP);
   await dialog.getByRole("button", { name: "Continue" }).click();
@@ -278,6 +278,57 @@ test("a declined identity check shows its facts, reference, and risk categories,
   await expect(activity).toContainText(/awaiting a reviewer/);
   await expect(activity).toContainText("Review required");
   await expect(activity).not.toContainText(/may try the identity check once more/);
+});
+
+test("a merchant can generate, roll, and revoke their API key with a step-up code", async ({
+  page,
+}) => {
+  await signIn(page, "api-key-flow@example.com");
+
+  const section = page.getByRole("region", { name: "API key" });
+  await expect(section).toContainText("No key yet");
+
+  // A first key needs no warning, just the step-up code.
+  await section.getByRole("button", { name: "Generate key" }).click();
+  await expect(section.getByText(/We'll email a one-time code/)).toBeVisible();
+  await section.getByRole("button", { name: "Send code" }).click();
+  await section.getByLabel("One-time code").fill(OTP);
+  await section.getByRole("button", { name: "Confirm & generate" }).click();
+
+  await expect(section.getByText("Key generated")).toBeVisible();
+  const firstKey = await section.locator("code").innerText();
+  expect(firstKey).toMatch(/^payday_test_stub/);
+  await section.getByRole("button", { name: "Done" }).click();
+  await expect(section).toContainText(firstKey.slice(-6));
+  await expect(section.getByRole("button", { name: "Roll key" })).toBeVisible();
+
+  // Rolling warns about the grace period up front, then reveals a new key.
+  await section.getByRole("button", { name: "Roll key" }).click();
+  await expect(section.getByText(/current one keeps working for 24 hours/)).toBeVisible();
+  await section.getByRole("button", { name: "Send code" }).click();
+  await section.getByLabel("One-time code").fill(OTP);
+  await section.getByRole("button", { name: "Confirm & roll key" }).click();
+
+  await expect(section.getByText("Key rolled")).toBeVisible();
+  const secondKey = await section.locator("code").innerText();
+  expect(secondKey).not.toBe(firstKey);
+  await expect(
+    section.getByText(/previous key keeps working for the next 24 hours/),
+  ).toBeVisible();
+  await section.getByRole("button", { name: "Done" }).click();
+  await expect(section.getByText(/previous key still works until/)).toBeVisible();
+
+  // Revoking warns that it is immediate and irreversible before the code step.
+  await section.getByRole("button", { name: "Revoke" }).click();
+  await expect(section.getByText(/can't be undone/)).toBeVisible();
+  await section.getByRole("button", { name: "Send code" }).click();
+  await section.getByLabel("One-time code").fill(OTP);
+  await section.getByRole("button", { name: "Confirm & revoke" }).click();
+
+  await expect(section.getByText("Key revoked.")).toBeVisible();
+  await section.getByRole("button", { name: "Done" }).click();
+  await expect(section).toContainText("Revoked");
+  await expect(section.getByRole("button", { name: "Generate key" })).toBeVisible();
 });
 
 test("signing out ends the session", async ({ page }) => {

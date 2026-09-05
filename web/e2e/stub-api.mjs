@@ -380,6 +380,8 @@ const store = {
   attachments: new Map(),
   /** id -> full PaymentResponse */
   payments: new Map(),
+  /** account key -> { id, generation, keyHint, createdAt, rotatedAt, previousExpiresAt, revokedAt } */
+  accounts: new Map(),
 };
 
 const DECIMALS = 6;
@@ -817,6 +819,101 @@ function issuerWorld(req) {
   return world;
 }
 
+/** That account's key state, created keyless on first sight — as a real dashboard account is. */
+function accountRecord(req) {
+  const key = accountKey(req);
+  let record = store.accounts.get(key);
+  if (!record) {
+    record = {
+      id: randomUUID(),
+      generation: 1,
+      keyHint: null,
+      createdAt: null,
+      rotatedAt: null,
+      previousExpiresAt: null,
+      revokedAt: null,
+    };
+    store.accounts.set(key, record);
+  }
+  return record;
+}
+
+function accountMetadata(record) {
+  return {
+    account_id: record.id,
+    key_hint: record.keyHint,
+    generation: record.generation,
+    created_at: record.createdAt,
+    rotated_at: record.rotatedAt,
+    previous_key_expires_at: record.previousExpiresAt,
+    revoked_at: record.revokedAt,
+  };
+}
+
+/**
+ * `/v1/account` and `/v1/account/api-key`. The real API gates the latter on a
+ * fresh, single-use identity token rather than a plain session or key; the
+ * stub does not model that distinction; it only plays back the shapes the
+ * dashboard's step-up flow drives, so the same bearer check as everything
+ * else here is enough to exercise the UI end to end.
+ */
+async function account(req, res, url) {
+  if (url.pathname !== "/v1/account" && url.pathname !== "/v1/account/api-key") return false;
+  const record = accountRecord(req);
+
+  if (url.pathname === "/v1/account") {
+    if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
+    return send(res, 200, accountMetadata(record));
+  }
+
+  if (req.method === "GET") return send(res, 200, accountMetadata(record));
+
+  if (req.method === "POST") {
+    const body = await readJson(req);
+    if (body.expected_generation !== record.generation) {
+      return fail(
+        res, 409, "api_key_generation_conflict",
+        "The API key changed after confirmation; authenticate and try again",
+      );
+    }
+    const replaced = record.keyHint !== null;
+    const rawKey = `payday_test_stub${randomUUID().replace(/-/g, "")}`;
+    record.generation += 1;
+    record.keyHint = `…${rawKey.slice(-6)}`;
+    const now = new Date().toISOString();
+    record.createdAt = now;
+    record.revokedAt = null;
+    if (replaced) {
+      record.rotatedAt = now;
+      record.previousExpiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+    }
+    return send(res, replaced ? 200 : 201, {
+      api_key: rawKey,
+      generation: record.generation,
+      replaced_previous_key: replaced,
+    });
+  }
+
+  if (req.method === "DELETE") {
+    const body = await readJson(req);
+    if (body.expected_generation !== record.generation) {
+      return fail(
+        res, 409, "api_key_generation_conflict",
+        "The API key changed after confirmation; authenticate and try again",
+      );
+    }
+    record.generation += 1;
+    record.keyHint = null;
+    record.rotatedAt = null;
+    record.previousExpiresAt = null;
+    record.revokedAt = new Date().toISOString();
+    res.writeHead(204, CORS);
+    return res.end();
+  }
+
+  return fail(res, 405, "method_not_allowed", "method not allowed");
+}
+
 function paginate(items, params) {
   const limit = Math.min(Math.max(Number(params.get("limit") ?? 20), 1), 100);
   const after = params.get("starting_after");
@@ -976,9 +1073,16 @@ async function issuer(req, res, url) {
     }
     // The token carries the mailbox it was minted for, so issuer identities
     // are per-merchant here as they are in the API: specs that need an empty
-    // account and specs that need a set-up one can run side by side.
+    // account and specs that need a set-up one can run side by side. The
+    // second segment is shaped like a real access token's claims, base64url
+    // JSON and all, so `sessionEmail` reads the mailbox back out of it exactly
+    // as it would from Auth0's — the stub never checks a signature either way.
+    const email = String(body.username ?? "");
+    const claims = Buffer.from(
+      JSON.stringify({ sub: `email|${email}`, "https://api.payday.sh/auth/email": email }),
+    ).toString("base64url");
     return send(res, 200, {
-      access_token: `${DASHBOARD_TOKEN}.${String(body.username ?? "").replace(/[^a-z0-9]+/gi, "-")}`,
+      access_token: `${DASHBOARD_TOKEN}.${claims}`,
       token_type: "Bearer",
       expires_in: 300,
       scope: "openid",
@@ -1522,6 +1626,7 @@ createServer(async (req, res) => {
       if ((await issuerIdentities(req, res, url)) !== false) return;
       if ((await attachments(req, res, url)) !== false) return;
       if ((await payments(req, res, url)) !== false) return;
+      if ((await account(req, res, url)) !== false) return;
     }
 
     return fail(res, 404, "not_found", "no route");

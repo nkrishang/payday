@@ -10,6 +10,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Problem } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { formatDisplayAmount } from "@/lib/format";
+import { ApiKeySection } from "./api-key-manager";
 import { CustomerTable } from "./customer-table";
 import { InvoiceTable } from "./invoice-table";
 import { IssuerManager } from "./issuer-manager";
@@ -254,6 +255,10 @@ function Overview({
 
       <div className="dash-rise dash-delay-4 mt-14">
         <CustomerTable onAdd={() => router.push("/dashboard/customers/new")} />
+      </div>
+
+      <div className="dash-rise dash-delay-5 mt-14">
+        <ApiKeySection />
       </div>
     </div>
   );

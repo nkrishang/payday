@@ -132,7 +132,7 @@ pub fn router(state: AppState) -> Router {
             auth::require_account,
         ))
         .layer(RequestBodyLimitLayer::new(64 * 1024))
-        .layer(merchant_cors);
+        .layer(merchant_cors.clone());
 
     let account_management = Router::new()
         .route(
@@ -145,7 +145,11 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth::require_identity,
         ))
-        .layer(RequestBodyLimitLayer::new(16 * 1024));
+        .layer(RequestBodyLimitLayer::new(16 * 1024))
+        // The CLI never needed this — a non-browser client is not subject to
+        // CORS — but the dashboard's own step-up sign-in calls this route
+        // directly now, from the same origin `authenticated` already trusts.
+        .layer(merchant_cors);
 
     let administration = Router::new()
         .route("/v1/admin/payments/{id}/release", post(admin::release))
@@ -2232,17 +2236,29 @@ mod tests {
             assert_unauthorized(app.clone(), get_request(&bad, "/v1/payments")).await;
         }
 
-        // Key management keeps the fresh-OTP path: a stale token or a
-        // dashboard token is refused, a fresh CLI token is not.
+        // Key management keeps the fresh-OTP path: a stale token is refused
+        // regardless of which merchant client minted it, and a client this
+        // deployment does not recognize is refused even when it is fresh.
         let key_route = |token: &str| get_request(token, "/v1/account/api-key");
-        for refused in [&dashboard, &cli] {
-            let response = app.clone().oneshot(key_route(refused)).await.unwrap();
+        for stale in [&dashboard, &cli] {
+            let response = app.clone().oneshot(key_route(stale)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(
                 json_body(response).await["error"]["code"],
                 "identity_unauthorized"
             );
         }
+        let fresh_other = session_token(&key, "other-client", audience, unix_now());
+        assert_eq!(
+            app.clone()
+                .oneshot(key_route(&fresh_other))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "a fresh token from an unrecognized client is still refused"
+        );
+
         let fresh_cli = session_token(&key, "payday-cli", audience, unix_now());
         let metadata = app.clone().oneshot(key_route(&fresh_cli)).await.unwrap();
         assert_eq!(metadata.status(), StatusCode::OK);
@@ -2250,6 +2266,16 @@ mod tests {
         assert_eq!(metadata["account_id"], account.0.to_string());
         assert!(metadata["key_hint"].is_null());
         assert_eq!(metadata["generation"], 1);
+
+        // The dashboard's own fresh sign-in works exactly the same way, so it
+        // can manage the key without ever holding one for day-to-day use.
+        let fresh_dashboard = session_token(&key, "payday-dashboard", audience, unix_now());
+        let metadata = app.oneshot(key_route(&fresh_dashboard)).await.unwrap();
+        assert_eq!(metadata.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(metadata).await["account_id"],
+            account.0.to_string()
+        );
     }
 
     /// Reserve an upload slot; returns the attachment id and its object key.
