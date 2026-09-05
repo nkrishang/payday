@@ -52,8 +52,9 @@ pub struct ProofTransfer {
 
 /// One fact Payday observed in the payer's session, with the provider that
 /// established it. `mailbox` is the expected email proven by a one-time
-/// code; `wallet` is the attestation signature being accepted. Never a name,
-/// an email, or any payer data.
+/// code; `merchant_session` is the merchant's client secret being exchanged;
+/// `wallet` is the attestation signature being accepted. Never a name, an
+/// email, or any payer data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationFact {
     /// `mailbox` or `wallet`.

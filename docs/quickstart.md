@@ -52,8 +52,9 @@ curl -fsS "$API/v1/payments" \
 - `payout_address` is the wallet that receives exactly the invoice amount from
   an on-time successful payment.
 - `payer_policy` here is `permissionless`. To require the payer to verify an
-  email address first, or to add party details, notes, a customer, or
-  metadata, see the [API reference](api-reference.md).
+  email address first, to have your own application open the checkout for a
+  user it has signed in (`merchant_session`), or to add party details, notes,
+  a customer, or metadata, see the [API reference](api-reference.md).
 - The response's `address` is null until the payer, on the hosted page, signs
   the request's attestation from the wallet they will pay from; a
   `payment.ready` webhook reports it. Overpayments, late transfers, and

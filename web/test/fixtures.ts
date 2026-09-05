@@ -15,7 +15,7 @@ const READY: ReadyPayerPayment = {
   issuer_name: "Acme Corp",
   heading: null,
   payer_policy: { mode: "permissionless", expected_email_hint: null },
-  requirements: { email: "not_required", wallet: "approved", complete: true },
+  requirements: { email: "not_required", wallet: "approved", merchant_session: "not_required", complete: true },
   status: "awaiting_payment",
   payable: true,
   expires_at: "2026-09-01T00:00:00Z",
@@ -59,7 +59,12 @@ export function unboundPayment(
 ): UnlockedPayerPayment {
   return {
     ...READY,
-    requirements: { email: "not_required", wallet: "pending", complete: true },
+    requirements: {
+      email: "not_required",
+      wallet: "pending",
+      merchant_session: "not_required",
+      complete: true,
+    },
     payer_wallet: null,
     address: null,
     address_explorer_url: null,
@@ -76,7 +81,7 @@ export function lockedPayment(overrides: Partial<PayerPayment> = {}): PayerPayme
   return {
     ...READY,
     payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
-    requirements: { email: "pending", wallet: "pending", complete: false },
+    requirements: { email: "pending", wallet: "pending", merchant_session: "not_required", complete: false },
     content_unlocked: false,
     chain: null,
     token: null,
@@ -93,4 +98,21 @@ export function lockedPayment(overrides: Partial<PayerPayment> = {}): PayerPayme
     invoice: null,
     ...overrides,
   };
+}
+
+/**
+ * A merchant-session invoice before its app has opened it: locked like an
+ * email-gated one, with no mailbox hint and no step the payer can take here.
+ */
+export function merchantSessionPayment(overrides: Partial<PayerPayment> = {}): PayerPayment {
+  return lockedPayment({
+    payer_policy: { mode: "merchant_session", expected_email_hint: null },
+    requirements: {
+      email: "not_required",
+      wallet: "pending",
+      merchant_session: "pending",
+      complete: false,
+    },
+    ...overrides,
+  });
 }

@@ -42,9 +42,10 @@ pub use sweeps::{
     SWEEPABLE_STATUSES, SweepBatch, SweepQueueStats, SweeperStatus,
 };
 pub use verifications::{
+    CLIENT_SECRET_PREFIX, CLIENT_SECRET_TTL, ClientSecretExchange, CreatedClientSecret,
     CreatedPayerSession, DbPayerSession, DbVerificationAttempt, EmailVerificationAttempt,
-    PAYER_SESSION_TTL, PayerSessionRepository, StartEmailVerificationError, VerificationCompletion,
-    WalletChallenge, payer_ref,
+    ExchangeClientSecretError, PAYER_SESSION_TTL, PayerSessionRepository,
+    StartEmailVerificationError, VerificationCompletion, WalletChallenge, payer_ref,
 };
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,

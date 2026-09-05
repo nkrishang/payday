@@ -11,7 +11,7 @@ function mockFetch(handler) {
   return { fetch, calls };
 }
 
-const requirementsNone = { email: "not_required", complete: true };
+const requirementsNone = { email: "not_required", merchant_session: "not_required", complete: true };
 
 const payerPayment = {
   id: "pay_0198f80c-8d2f-7dc1-a369-90556a64f700",
@@ -230,6 +230,48 @@ test("a wrong code and a cooled-down resend surface their codes", async () => {
   await assert.rejects(client.verification.startEmail("pay_1", { payerSession: "pps" }), (error) => {
     assert.equal(error.code, "otp_resend_cooldown");
     assert.equal(error.status, 429);
+    return true;
+  });
+});
+
+test("a client secret is exchanged once for a session, and the failures are told apart", async () => {
+  const opened = {
+    payer_session: "pps_opened",
+    expires_at: "2026-09-02T00:00:00Z",
+    requirements: { ...requirementsNone, merchant_session: "approved" },
+  };
+  let exchanges = 0;
+  const mock = mockFetch(() => {
+    exchanges += 1;
+    if (exchanges === 1) return new Response(JSON.stringify(opened), { status: 200 });
+    if (exchanges === 2) return new Response(JSON.stringify({
+      error: { code: "client_secret_used", message: "This link was already opened" }, request_id: "req-2",
+    }), { status: 409 });
+    return new Response(JSON.stringify({
+      error: { code: "client_secret_invalid", message: "not valid" }, request_id: "req-3",
+    }), { status: 401 });
+  });
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const session = await client.verification.exchangeClientSecret("pay_a/b", "cs_secret");
+  assert.equal(session.payer_session, "pps_opened");
+  assert.equal(session.requirements.merchant_session, "approved");
+  assert.equal(session.requirements.complete, true);
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/payments/pay_a%2Fb/session");
+  assert.equal(mock.calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body), { client_secret: "cs_secret" });
+  assert.equal(mock.calls[0].init.headers.Authorization, undefined);
+  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
+
+  await assert.rejects(client.verification.exchangeClientSecret("pay_a/b", "cs_secret"), (error) => {
+    assert.ok(error instanceof PaydayError);
+    assert.equal(error.code, "client_secret_used");
+    assert.equal(error.status, 409);
+    return true;
+  });
+  await assert.rejects(client.verification.exchangeClientSecret("pay_a/b", "cs_other"), (error) => {
+    assert.equal(error.code, "client_secret_invalid");
+    assert.equal(error.status, 401);
     return true;
   });
 });

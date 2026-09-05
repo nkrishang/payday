@@ -41,10 +41,19 @@ async fn detail(
     let facts = if row.verification_completed_at.is_some() {
         VerificationRequirementsResponse::for_mode(mode, true, wallet)
     } else {
-        let email = attempts
-            .iter()
-            .any(|attempt| attempt.kind == "email" && attempt.status == "approved");
-        VerificationRequirementsResponse::from_facts(mode, VerificationFacts { email, wallet })
+        let approved = |kind: &str| {
+            attempts
+                .iter()
+                .any(|attempt| attempt.kind == kind && attempt.status == "approved")
+        };
+        VerificationRequirementsResponse::from_facts(
+            mode,
+            VerificationFacts {
+                email: approved("email"),
+                wallet,
+                merchant_session: approved("merchant_session"),
+            },
+        )
     };
     Ok(VerificationDetailResponse {
         payer_policy_mode: mode,

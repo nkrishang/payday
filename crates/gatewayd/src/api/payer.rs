@@ -276,8 +276,8 @@ pub async fn authorized_invoice(
         Some(session) => VerificationRequirementsResponse::from_facts(
             mode,
             VerificationFacts {
-                email: session.facts().email,
                 wallet: wallet_bound,
+                ..session.facts()
             },
         ),
         None => VerificationRequirementsResponse::for_mode(mode, false, wallet_bound),

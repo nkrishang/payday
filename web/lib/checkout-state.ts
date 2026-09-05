@@ -27,6 +27,10 @@ export type CheckoutPhase =
   | "verification_required"
   | "email_pending"
   | "wallet_required"
+  /** A merchant-session invoice: only the merchant's app can open it. */
+  | "app_required"
+  /** The client secret from the fragment is being exchanged. */
+  | "app_opening"
   | "awaiting"
   | "partial"
   | "confirming"
@@ -47,6 +51,8 @@ export interface CheckoutLocalState {
   pendingTxHash: string | null;
   /** A verification code was sent for this tab's session and awaits entry. */
   emailCodeSent?: boolean;
+  /** A merchant client secret from the fragment is being exchanged right now. */
+  exchangingClientSecret?: boolean;
 }
 
 export interface CheckoutView {
@@ -176,6 +182,33 @@ export function checkoutView(payment: PayerPayment, local: CheckoutLocalState): 
  */
 function lockedView(payment: PayerPayment, local: CheckoutLocalState): CheckoutView {
   const { requirements, payer_policy } = payment;
+
+  // A merchant-session invoice has no step for the payer to take here: the
+  // merchant's app opened it, or nothing will.
+  if (payer_policy.mode === "merchant_session") {
+    return local.exchangingClientSecret
+      ? {
+          phase: "app_opening",
+          tone: "progress",
+          label: "Opening",
+          title: "Opening your payment",
+          detail: `${payment.issuer_name} is opening this payment for you.`,
+          showInstructions: false,
+          showWalletStep: false,
+          isTerminal: false,
+        }
+      : {
+          phase: "app_required",
+          tone: "neutral",
+          label: "Open from the app",
+          title: `Open this payment from ${payment.issuer_name}`,
+          detail:
+            "The amount and payment details are shown once the app that issued this payment opens it for you.",
+          showInstructions: false,
+          showWalletStep: false,
+          isTerminal: false,
+        };
+  }
 
   // Invoice-level completion from another payer is not evidence for this tab.
   // Treat the internally inconsistent locked/complete response as a fresh gate.

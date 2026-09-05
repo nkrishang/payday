@@ -42,16 +42,39 @@ const QR_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="224" height="224" viewBox="0 0 2 2">' +
   '<rect width="2" height="2" fill="#fff"/><rect width="1" height="1" fill="#090811"/></svg>';
 
-const GATED = new Set(["verified_email"]);
+const GATED = new Set(["verified_email", "merchant_session"]);
 
 /** `VerificationRequirementsResponse::for_mode` */
 function requirements(mode, completed = false, walletBound = true) {
   const required = completed ? "approved" : "pending";
   return {
-    email: GATED.has(mode) ? required : "not_required",
+    email: mode === "verified_email" ? required : "not_required",
     wallet: walletBound ? "approved" : "pending",
+    merchant_session: mode === "merchant_session" ? required : "not_required",
     complete: !GATED.has(mode) || completed,
   };
+}
+
+/**
+ * Client secrets for merchant-session payments: secret -> { id, used }. The
+ * checkout specs use fixed secrets so a URL can be written down; the
+ * merchant routes mint random ones. The fixed "valid" secret is `reusable`:
+ * every spec and every retry opens it afresh, since specs must not depend on
+ * each other's order (single use itself is the API's contract, proven by the
+ * gatewayd tests). `cs_used-…` is born spent, so a spec can open "the same
+ * link a second time" without a first visit.
+ */
+const CLIENT_SECRET_SHAPE = /^cs_[A-Za-z0-9_-]{43}$/;
+const clientSecrets = new Map([
+  [`cs_${"valid".padEnd(43, "0")}`, { id: "pay_gated-merchant", used: false, reusable: true }],
+  [`cs_${"used".padEnd(43, "0")}`, { id: "pay_gated-merchant", used: true }],
+  [`cs_${"other".padEnd(43, "0")}`, { id: "pay_gated-merchant-other", used: false }],
+]);
+
+function mintClientSecret(id) {
+  const secret = `cs_${randomUUID().replaceAll("-", "").padEnd(43, "x")}`;
+  clientSecrets.set(secret, { id, used: false });
+  return { client_secret: secret, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() };
 }
 
 const ATTACHMENT = {
@@ -131,10 +154,14 @@ function sessionFor(req, id) {
 
 /** A gated invoice as its verifying session sees it. */
 function gatedFor(mode, session) {
-  if (!session?.emailVerified) return locked(mode);
+  const opened = mode === "merchant_session" ? session?.merchantSession : session?.emailVerified;
+  if (!opened) return locked(mode);
   return base({
-    heading: "Consulting — August",
-    payer_policy: { mode, expected_email_hint: "a****@e***.com" },
+    heading: mode === "merchant_session" ? "Deposit 25 USDC" : "Consulting — August",
+    payer_policy: {
+      mode,
+      expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
+    },
     requirements: requirements(mode, true),
     invoice: {
       ...base().invoice,
@@ -163,7 +190,10 @@ function projectForPayer(payment) {
     id: payment.id,
     issuer_name: payment.issuer.name,
     heading: payment.heading,
-    payer_policy: { mode, expected_email_hint: gated ? "a****@e***.com" : null },
+    payer_policy: {
+      mode,
+      expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
+    },
     requirements: requirements(mode, Boolean(payment.verification_completed_at)),
     status: payment.status,
     payable: payment.status === "awaiting_payment" || payment.status === "partially_paid",
@@ -220,8 +250,11 @@ function projectForPayer(payment) {
 
 function locked(mode, facts = requirements(mode)) {
   return base({
-    heading: "Consulting — August",
-    payer_policy: { mode, expected_email_hint: "a****@e***.com" },
+    heading: mode === "merchant_session" ? "Deposit 25 USDC" : "Consulting — August",
+    payer_policy: {
+      mode,
+      expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
+    },
     requirements: facts,
     content_unlocked: false,
     chain: null,
@@ -285,6 +318,10 @@ const scenarios = {
   // No wallet signed yet: the page must ask for the signature before it
   // shows any address, and show the address once this session has signed.
   unbound: (id, session) => (session?.walletBound ? base() : base(UNBOUND)),
+  // Opened by the merchant's app with a client secret in the fragment; the
+  // bare link stays locked with nothing for the payer to do here.
+  "gated-merchant": (id, session) => gatedFor("merchant_session", session),
+  "gated-merchant-other": (id, session) => gatedFor("merchant_session", session),
   partial: () => base(PARTIAL),
   paid: () => base({ ...FULL, ...CLOSED, status: "paid" }),
   settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
@@ -875,7 +912,9 @@ async function account(req, res, url) {
     const body = await readJson(req);
     if (body.expected_generation !== record.generation) {
       return fail(
-        res, 409, "api_key_generation_conflict",
+        res,
+        409,
+        "api_key_generation_conflict",
         "The API key changed after confirmation; authenticate and try again",
       );
     }
@@ -901,7 +940,9 @@ async function account(req, res, url) {
     const body = await readJson(req);
     if (body.expected_generation !== record.generation) {
       return fail(
-        res, 409, "api_key_generation_conflict",
+        res,
+        409,
+        "api_key_generation_conflict",
         "The API key changed after confirmation; authenticate and try again",
       );
     }
@@ -951,14 +992,15 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest)?$/,
+    /^\/v1\/payer\/payments\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session)?$/,
   );
   if (!match) return false;
   const write =
     match[2] === "/verify/email/start" ||
     match[2] === "/verify/email/confirm" ||
     match[2] === "/wallet/challenge" ||
-    match[2] === "/wallet/attest";
+    match[2] === "/wallet/attest" ||
+    match[2] === "/session";
   if (req.method !== (write ? "POST" : "GET")) {
     return fail(res, 405, "method_not_allowed", "method not allowed");
   }
@@ -977,7 +1019,38 @@ async function payer(req, res, url) {
   const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued), id };
   const mode = payment.payer_policy.mode;
 
+  if (match[2] === "/session") {
+    if (mode !== "merchant_session") {
+      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session payment");
+    }
+    const body = await readJson(req);
+    const secret = typeof body.client_secret === "string" ? body.client_secret.trim() : "";
+    const record = CLIENT_SECRET_SHAPE.test(secret) ? clientSecrets.get(secret) : undefined;
+    if (!record || record.id !== id) {
+      return fail(res, 401, "client_secret_invalid", "The client secret is not valid");
+    }
+    if (record.used) return fail(res, 409, "client_secret_used", "This link was already opened");
+    if (!record.reusable) record.used = true;
+    const token = `pps_${randomUUID()}`;
+    const opened = { id, emailVerified: false, merchantSession: true };
+    sessions.set(token, opened);
+    if (issued) issued.verification_completed_at ??= new Date().toISOString();
+    return send(res, 200, {
+      payer_session: token,
+      expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      requirements: requirements("merchant_session", true),
+    });
+  }
+
   if (match[2] === "/verify/email/start") {
+    if (mode === "merchant_session") {
+      return fail(
+        res,
+        409,
+        "verification_method_not_applicable",
+        "Opened by the app, not by email",
+      );
+    }
     if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
     // The code goes to the merchant's asserted mailbox; the request names none.
     const reused = session ?? null;
@@ -990,6 +1063,14 @@ async function payer(req, res, url) {
   }
 
   if (match[2] === "/verify/email/confirm") {
+    if (mode === "merchant_session") {
+      return fail(
+        res,
+        409,
+        "verification_method_not_applicable",
+        "Opened by the app, not by email",
+      );
+    }
     if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
     if (!session) return fail(res, 401, "payer_session_invalid", "Start verification again");
     const body = await readJson(req);
@@ -1098,9 +1179,7 @@ async function objectStore(req, res, url) {
  * display decimal strings, so scale by the token's decimals to match.
  */
 function customerStats(customerId) {
-  const own = [...store.payments.values()].filter(
-    (payment) => payment.customer_id === customerId,
-  );
+  const own = [...store.payments.values()].filter((payment) => payment.customer_id === customerId);
   let collected = 0;
   let pending = 0;
   for (const payment of own) {
@@ -1403,13 +1482,18 @@ function validateCreate(body) {
   if (!body.bill_to?.name?.trim()) return "bill_to.name is required";
   const policy = body.payer_policy;
   if (!policy || !MODES.has(policy.mode)) return "payer_policy.mode is invalid";
-  if (GATED.has(policy.mode) && !policy.expected_email)
-    return `expected_email is required for ${policy.mode}`;
+  if (policy.mode === "verified_email" && !policy.expected_email)
+    return "expected_email is required for verified_email";
+  if (policy.mode === "merchant_session" && !policy.payer_reference)
+    return "payer_reference is required for merchant_session";
   if (policy.expected_identity !== undefined) {
     return `expected_identity is not allowed for ${policy.mode}`;
   }
-  if (policy.mode === "permissionless" && policy.expected_email !== undefined) {
-    return "expected_email is not allowed for permissionless";
+  if (policy.mode !== "verified_email" && policy.expected_email !== undefined) {
+    return `expected_email is not allowed for ${policy.mode}`;
+  }
+  if (policy.mode !== "merchant_session" && policy.payer_reference !== undefined) {
+    return `payer_reference is not allowed for ${policy.mode}`;
   }
   if (body.customer_id !== undefined && !store.customers.has(body.customer_id))
     return "customer_id is not yours";
@@ -1443,7 +1527,14 @@ async function payments(req, res, url) {
       }
       const payment = merchantPayment(body, { attachment });
       store.payments.set(payment.id, payment);
-      return send(res, 201, payment);
+      if (payment.payer_policy.mode !== "merchant_session") return send(res, 201, payment);
+      // The secret is in the response that minted it and nowhere else.
+      const minted = mintClientSecret(payment.id);
+      return send(res, 201, {
+        ...payment,
+        client_secret: minted.client_secret,
+        client_secret_expires_at: minted.expires_at,
+      });
     }
     if (req.method === "GET") {
       const status = url.searchParams.get("status");
@@ -1482,11 +1573,20 @@ async function payments(req, res, url) {
   }
 
   const match = url.pathname.match(
-    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers|\/verification|\/onboarding-payment)?$/,
+    /^\/v1\/payments\/([^/]+)(\/attachment|\/invoice\.pdf|\/proof|\/transfers|\/verification|\/onboarding-payment|\/client-secret)?$/,
   );
   if (!match) return false;
   const payment = store.payments.get(decodeURIComponent(match[1]));
   if (!payment) return fail(res, 404, "payment_not_found", "No such payment");
+  if (match[2] === "/client-secret") {
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const mode = payment.payer_policy.mode;
+    if (mode === "permissionless")
+      return fail(res, 409, "verification_not_required", "Nothing to verify");
+    if (mode !== "merchant_session")
+      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session payment");
+    return send(res, 201, mintClientSecret(payment.id));
+  }
   if (match[2] === "/onboarding-payment") {
     // The real endpoint verifies and pays for real; the stub has no real
     // chain to wait on, so it settles the stored payment immediately.
@@ -1503,7 +1603,10 @@ async function payments(req, res, url) {
       settlement_explorer_url: `https://monadvision.com/tx/${txHash}`,
       updated_at: new Date().toISOString(),
     });
-    return send(res, 200, { payer_session: `stub-onboarding-session:${payment.id}`, tx_hash: txHash });
+    return send(res, 200, {
+      payer_session: `stub-onboarding-session:${payment.id}`,
+      tx_hash: txHash,
+    });
   }
   if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
 

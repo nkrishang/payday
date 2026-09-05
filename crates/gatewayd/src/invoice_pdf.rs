@@ -189,6 +189,9 @@ fn policy_words(mode: PayerPolicyMode) -> &'static str {
     match mode {
         PayerPolicyMode::Permissionless => "Anyone holding the payment link may pay",
         PayerPolicyMode::VerifiedEmail => "The payer must verify their email address before paying",
+        PayerPolicyMode::MerchantSession => {
+            "The issuer's application opens this payment for its signed-in customer"
+        }
     }
 }
 

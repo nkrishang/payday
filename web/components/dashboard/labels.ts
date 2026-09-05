@@ -1,4 +1,5 @@
 import type { PayerPolicyMode, PaymentStatus } from "@payday/sdk";
+import type { ComposerMode } from "./create-payment";
 import type { CheckoutTone } from "@/lib/checkout-state";
 
 /** Merchant-facing words for the API's status values, in lifecycle order. */
@@ -21,25 +22,37 @@ export function statusTone(status: PaymentStatus): CheckoutTone {
   return STATUSES.find((entry) => entry.value === status)?.tone ?? "neutral";
 }
 
-/** The two presets, in the order the form offers them. */
-export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; description: string }> =
-  [
-    {
-      value: "permissionless",
-      label: "Permissionless",
-      description:
-        "Anyone holding a link to the deposit request can view payment details and pay it.",
-    },
-    {
-      value: "verified_email",
-      label: "Verified email",
-      description:
-        "The payer must prove ownership of the expected email before the amount, details, and address are shown.",
-    },
-  ];
+/**
+ * The two presets the composer offers, in order. The third mode,
+ * `merchant_session`, is deliberately absent: it exists for an application
+ * that has signed its user in and can hand them the client secret, which a
+ * request composed by hand in the dashboard has no way to do. It is created
+ * through the API only, and the dashboard shows it once it exists.
+ */
+export const MODES: ReadonlyArray<{ value: ComposerMode; label: string; description: string }> = [
+  {
+    value: "permissionless",
+    label: "Permissionless",
+    description:
+      "Anyone holding a link to the deposit request can view payment details and pay it.",
+  },
+  {
+    value: "verified_email",
+    label: "Verified email",
+    description:
+      "The payer must prove ownership of the expected email before the amount, details, and address are shown.",
+  },
+];
+
+/** Every mode's merchant-facing name, including the API-only one. */
+const MODE_LABELS: Record<PayerPolicyMode, string> = {
+  permissionless: "Permissionless",
+  verified_email: "Verified email",
+  merchant_session: "Your app's sign-in",
+};
 
 export function modeLabel(mode: PayerPolicyMode): string {
-  return MODES.find((entry) => entry.value === mode)?.label ?? mode;
+  return MODE_LABELS[mode] ?? mode;
 }
 
 export function formatDate(iso: string): string {

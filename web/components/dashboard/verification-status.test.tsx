@@ -38,6 +38,26 @@ describe("VerificationBadge", () => {
 });
 
 describe("VerificationStatus", () => {
+  it("shows the app's own payer reference for a merchant-session policy, and no email", () => {
+    render(
+      <VerificationStatus
+        policy={{ mode: "merchant_session", payer_reference: "user_123" }}
+        completedAt="2026-08-19T08:30:00Z"
+        unsolicitedAt={null}
+      />,
+    );
+    expect(screen.getByText("Your app's sign-in")).toBeInTheDocument();
+    expect(screen.getByText("Payer reference")).toBeInTheDocument();
+    expect(screen.getByText("user_123")).toBeInTheDocument();
+    expect(screen.queryByText("Expected email")).not.toBeInTheDocument();
+    expect(screen.getByText("Verified")).toBeInTheDocument();
+  });
+
+  it("keeps a merchant-session request pending until its app opens it", () => {
+    render(<VerificationBadge mode="merchant_session" completedAt={null} unsolicitedAt={null} />);
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
   it("shows the merchant's own assertion for a verified email policy", () => {
     render(
       <VerificationStatus

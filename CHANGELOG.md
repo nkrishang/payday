@@ -10,6 +10,44 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- The payment address is created by the payer's wallet, not at issuance. A
+  deposit request is issued without an address; once the payer's session
+  satisfies its policy (at once for `permissionless`, after the mailbox code
+  or the merchant's client secret otherwise), the hosted checkout has the
+  payer sign an EIP-712 `PayerAttestation` from the wallet they will pay
+  from (`POST /v1/payer/payments/{id}/wallet/challenge` then `/attest`). The
+  CREATE3 salt is `keccak256("PAYDAY_SALT_V2" || attribution_hash ||
+  attestation digest)` and the wallet is the address's recovery term, so
+  `address`, `payer_wallet`, `recovery_address`, `wallet_bound_at`, and
+  `self_settlement` are `null` until then and a `payment.ready` webhook
+  reports the binding. The random attribution nonce is gone; the canonical
+  issuance snapshot no longer carries `recovery_address`; `attribution.version`
+  is 2. Only transfers from the attested wallet are the payer's: money from
+  any other wallet still counts and settles but sets `likely_unsolicited_at`
+  (its new meaning) and makes the proof unavailable
+  (`409 payment_sender_mismatch`). `requirements` and the merchant's
+  verification `facts` gain `wallet`; attempts gain the `wallet` kind. The
+  `PaymentFactory` and `Payment` contracts are unchanged.
+- The platform recovery wallet is gone. Overpayment remainders, expired
+  balances, and late transfers return on-chain to the payer's attested
+  wallet; Payday custodies nothing. `gatewayd` no longer reads
+  `PAYDAY_RECOVERY_ADDRESS`, Terraform drops `recovery_address` and the
+  API task's precondition on it, and the `recovery` KMS key stays only as a
+  legacy resource until any balance it holds is returned. The
+  `recovered_funds` ledger and `payment.recovered_funds` webhook now
+  describe returns to the payer.
+- Proof of Payment v2 (`payday.proof.v2`): the proof carries the payer's
+  wallet attestation (the exact typed data signed, its digest, and the
+  signature) and the recovery address, and `gateway_core::verify_proof`
+  checks hash → attestation → salt → CREATE3 address, that every credited
+  transfer came from the attested wallet, and a Payday attestation
+  (`payday.attestation.v2`) that names the wallet, the challenge nonce, and
+  the observed `facts` (`mailbox`, `merchant_session`, `wallet`) alongside
+  the attribution hash, chain, and address.
+- Migration `0018_merchant_session` is renumbered `0019_merchant_session`:
+  it shared version 18 with `0018_account_wallet`, which sqlx refuses to
+  apply. The payer wallet binding is `0020_payer_wallet_binding`. Both
+  reset pre-release rows.
 - Merchants sign in through Privy instead of Auth0. The landing page's
   "Start Building" dialog runs Privy's email code exchange; what the browser
   holds is Privy's identity token, and that token is the dashboard session
@@ -75,6 +113,28 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
+- The `merchant_session` payer mode, for applications that have already
+  signed their user in. The policy names the payer by the merchant's own
+  `payer_reference`; the `201` that issues the payment carries a single-use
+  `client_secret` (fifteen minutes, returned once, stored hashed), and
+  `POST /v1/payments/{id}/client-secret` mints another for a returning user.
+  The merchant's server sends the user to `payment_url#cs=<secret>`; the
+  hosted checkout reads the fragment, removes it from the address bar, and
+  exchanges it at `POST /v1/payer/payments/{id}/session` for a payer session
+  that already satisfies the policy. The exchange completes the payment's
+  verification (raising `verification.approved`), records an approved
+  `merchant_session` attempt, and needs no email provider. A second exchange
+  answers `409 client_secret_used`; an unknown, expired, or foreign secret
+  `401 client_secret_invalid`; email codes on such a payment, or a client
+  secret on a `verified_email` one, `409 verification_method_not_applicable`.
+  Webhook payment objects gain `payer_reference`, so `payment.paid` and
+  `payment.settled` credit the right ledger without a lookup;
+  `requirements` and the merchant's `facts` gain `merchant_session`.
+  Dashboard: the mode is shown on requests that have it (payer reference,
+  "Opened by your app" activity) but is not offered by the composer, since
+  only an application with a signed-in user can hand over the secret. SDK:
+  `payments.createClientSecret`, `verification.exchangeClientSecret`, and
+  `checkoutUrl`. Migration `0018`.
 - `GET /v1/payments/{id}/verification`: the merchant's verification view of
   an invoice — each fact the policy needs, and every attempt made against it
   with its status and times. Dashboard: verification activity on the request

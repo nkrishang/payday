@@ -41,7 +41,7 @@ that updates the lifecycle row.
 |---|---|
 | `payment.paid`, `payment.settled`, `payment.expired`, `payment.refunded`, `payment.needs_attention` | The lifecycle transitions above |
 | `payment.recovered_funds` | Funds went back to the payer's attested wallet on the payment's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per returned amount, written in the transaction that records it, so **a payment can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
-| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied |
+| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the payment's payer policy was satisfied — a proven mailbox, or a merchant-session client secret exchanged by the hosted checkout |
 | `payment.ready` | Raised by the database when `wallet_bound_at` is first set: the payer attested their wallet and the payment address now exists. This is the moment an integration may quote the address |
 | `payment.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: finalized funds arrived from a wallet other than the attested one. They count toward the amount and settle, but they are not the payer's, and no Proof of Payment is issued |
 
@@ -54,11 +54,14 @@ or `likely_unsolicited_at`.
 
 Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
 `occurred_at`, and `data`. Every payment event carries `data.payment` with the
-public status, `amount`, `received`, `reference`, `metadata`, three policy
-fields: `payer_policy_mode`, `verification_completed_at`, and
-`likely_unsolicited_at`, and the binding: `payer_wallet`, `address`, and
-`wallet_bound_at` (all null before `payment.ready`). The payload never
-includes the expected email or any payer assertion. `payment.needs_attention` adds
+public status, `amount`, `received`, `reference`, `metadata`, four policy
+fields: `payer_policy_mode`, `payer_reference`, `verification_completed_at`,
+and `likely_unsolicited_at`, and the binding: `payer_wallet`, `address`, and
+`wallet_bound_at` (all null before `payment.ready`). `payer_reference` is your
+own identifier for the payer on a `merchant_session` payment (`null`
+otherwise), so a `payment.paid` or `payment.settled` handler can credit that
+user's ledger directly. The payload never includes the expected email or the
+payer's own data. `payment.needs_attention` adds
 `data.payment.attention`. Lifecycle payloads carry no recovery flag by design:
 a `payment.settled` for an overpaid payment is indistinguishable from one for
 an exact payment, and `payment.recovered_funds` is the recovery signal.

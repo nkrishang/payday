@@ -110,6 +110,20 @@ pub async fn get_proof(
             at: rfc3339(mailbox),
         });
     }
+    // A merchant-session request's identity fact is the merchant's own
+    // sign-in, vouched for by the client secret its server released.
+    if let Some(opened) = attempts
+        .iter()
+        .filter(|attempt| attempt.kind == "merchant_session" && attempt.status == "approved")
+        .filter_map(|attempt| attempt.verified_at)
+        .min()
+    {
+        facts.push(VerificationFact {
+            kind: "merchant_session".into(),
+            provider: "merchant".into(),
+            at: rfc3339(opened),
+        });
+    }
     facts.push(VerificationFact {
         kind: "wallet".into(),
         provider: "payday".into(),

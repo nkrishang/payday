@@ -45,15 +45,22 @@ pub struct Party {
     pub details: Option<String>,
 }
 
-/// The two public payer modes (product plan §3.2). Deserialization enforces
-/// the mode rules of §4.5 (the expected email is required exactly where its
-/// mode needs it and forbidden elsewhere), so an unrepresentable policy can
-/// never reach validation.
+/// The three public payer modes (product plan §3.2). Deserialization enforces
+/// the mode rules of §4.5 (each assertion is required exactly where its mode
+/// needs it and forbidden elsewhere), so an unrepresentable policy can never
+/// reach validation.
+///
+/// `merchant_session` is the API-first mode: the merchant's own application
+/// has already authenticated the payer, names them by `payer_reference` (its
+/// own user id), and opens the hosted checkout for them with a single-use
+/// client secret. Payday performs no check of its own; it records that the
+/// merchant's server released the secret and binds the session to it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum PayerPolicy {
     Permissionless,
     VerifiedEmail { expected_email: String },
+    MerchantSession { payer_reference: String },
 }
 
 /// The wire shape of every mode. A derived internally tagged enum would let a
@@ -64,22 +71,36 @@ struct PayerPolicyWire {
     mode: PayerPolicyMode,
     #[serde(default)]
     expected_email: Option<String>,
+    #[serde(default)]
+    payer_reference: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for PayerPolicy {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = PayerPolicyWire::deserialize(deserializer)?;
-        match (wire.mode, wire.expected_email) {
-            (PayerPolicyMode::Permissionless, None) => Ok(PayerPolicy::Permissionless),
-            (PayerPolicyMode::VerifiedEmail, Some(expected_email)) => {
-                Ok(PayerPolicy::VerifiedEmail { expected_email })
-            }
-            (PayerPolicyMode::Permissionless, Some(_)) => Err(D::Error::custom(
-                "expected_email is not allowed for permissionless",
-            )),
-            (mode, None) => Err(D::Error::custom(format!(
-                "expected_email is required for {mode}"
-            ))),
+        let mode = wire.mode;
+        if wire.expected_email.is_some() && mode != PayerPolicyMode::VerifiedEmail {
+            return Err(D::Error::custom(format!(
+                "expected_email is not allowed for {mode}"
+            )));
+        }
+        if wire.payer_reference.is_some() && mode != PayerPolicyMode::MerchantSession {
+            return Err(D::Error::custom(format!(
+                "payer_reference is not allowed for {mode}"
+            )));
+        }
+        match mode {
+            PayerPolicyMode::Permissionless => Ok(PayerPolicy::Permissionless),
+            PayerPolicyMode::VerifiedEmail => wire
+                .expected_email
+                .map(|expected_email| PayerPolicy::VerifiedEmail { expected_email })
+                .ok_or_else(|| D::Error::custom("expected_email is required for verified_email")),
+            PayerPolicyMode::MerchantSession => wire
+                .payer_reference
+                .map(|payer_reference| PayerPolicy::MerchantSession { payer_reference })
+                .ok_or_else(|| {
+                    D::Error::custom("payer_reference is required for merchant_session")
+                }),
         }
     }
 }
@@ -89,6 +110,7 @@ impl<'de> Deserialize<'de> for PayerPolicy {
 pub enum PayerPolicyMode {
     Permissionless,
     VerifiedEmail,
+    MerchantSession,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -96,9 +118,10 @@ pub enum PayerPolicyMode {
 pub struct PayerPolicyModeParseError(pub String);
 
 impl PayerPolicyMode {
-    pub const ALL: [PayerPolicyMode; 2] = [
+    pub const ALL: [PayerPolicyMode; 3] = [
         PayerPolicyMode::Permissionless,
         PayerPolicyMode::VerifiedEmail,
+        PayerPolicyMode::MerchantSession,
     ];
 
     /// The canonical string used on the wire and in `invoices.payer_policy_mode`.
@@ -107,6 +130,7 @@ impl PayerPolicyMode {
         match self {
             PayerPolicyMode::Permissionless => "permissionless",
             PayerPolicyMode::VerifiedEmail => "verified_email",
+            PayerPolicyMode::MerchantSession => "merchant_session",
         }
     }
 
@@ -134,10 +158,18 @@ impl FromStr for PayerPolicyMode {
     }
 }
 
+/// The longest `payer_reference` accepted: room for any vendor's user id or a
+/// compound key, never for free text.
+pub const MAX_PAYER_REFERENCE_BYTES: usize = 128;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PayerPolicyError {
     #[error("expected_email must be a valid email address of at most 254 bytes")]
     InvalidExpectedEmail,
+    #[error(
+        "payer_reference must be 1 to 128 bytes of printable text with no whitespace or control characters"
+    )]
+    InvalidPayerReference,
 }
 
 /// The email syntax rule shared with merchant sign-in: bounded, no whitespace,
@@ -153,18 +185,39 @@ pub fn valid_email(value: &str) -> bool {
         })
 }
 
+/// The `payer_reference` rule: an opaque identifier, so it is bounded and must
+/// be a single printable token. Case is preserved; identifiers are often
+/// case-sensitive on the merchant's side.
+pub fn valid_payer_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PAYER_REFERENCE_BYTES
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+}
+
 impl PayerPolicy {
     pub fn mode(&self) -> PayerPolicyMode {
         match self {
             PayerPolicy::Permissionless => PayerPolicyMode::Permissionless,
             PayerPolicy::VerifiedEmail { .. } => PayerPolicyMode::VerifiedEmail,
+            PayerPolicy::MerchantSession { .. } => PayerPolicyMode::MerchantSession,
         }
     }
 
     pub fn expected_email(&self) -> Option<&str> {
         match self {
-            PayerPolicy::Permissionless => None,
             PayerPolicy::VerifiedEmail { expected_email } => Some(expected_email),
+            PayerPolicy::Permissionless | PayerPolicy::MerchantSession { .. } => None,
+        }
+    }
+
+    /// The merchant's own identifier for the authenticated payer, in the
+    /// merchant-session mode only.
+    pub fn payer_reference(&self) -> Option<&str> {
+        match self {
+            PayerPolicy::MerchantSession { payer_reference } => Some(payer_reference),
+            PayerPolicy::Permissionless | PayerPolicy::VerifiedEmail { .. } => None,
         }
     }
 
@@ -175,16 +228,26 @@ impl PayerPolicy {
         {
             return Err(PayerPolicyError::InvalidExpectedEmail);
         }
+        if self
+            .payer_reference()
+            .is_some_and(|reference| !valid_payer_reference(reference))
+        {
+            return Err(PayerPolicyError::InvalidPayerReference);
+        }
         Ok(())
     }
 
     /// The form that is stored and committed: the expected email trimmed and
-    /// lowercased so a retry that only differs in case is the same request.
+    /// lowercased so a retry that only differs in case is the same request,
+    /// and the payer reference trimmed but otherwise as the merchant wrote it.
     pub fn normalized(&self) -> Self {
         match self {
             PayerPolicy::Permissionless => PayerPolicy::Permissionless,
             PayerPolicy::VerifiedEmail { expected_email } => PayerPolicy::VerifiedEmail {
                 expected_email: expected_email.trim().to_lowercase(),
+            },
+            PayerPolicy::MerchantSession { payer_reference } => PayerPolicy::MerchantSession {
+                payer_reference: payer_reference.trim().to_owned(),
             },
         }
     }
@@ -502,6 +565,13 @@ mod tests {
                 },
                 PayerPolicyMode::VerifiedEmail,
             ),
+            (
+                serde_json::json!({"mode": "merchant_session", "payer_reference": "user_123"}),
+                PayerPolicy::MerchantSession {
+                    payer_reference: "user_123".into(),
+                },
+                PayerPolicyMode::MerchantSession,
+            ),
         ];
         for (json, policy, mode) in cases {
             let parsed: PayerPolicy = serde_json::from_value(json.clone()).unwrap();
@@ -512,10 +582,15 @@ mod tests {
             assert_eq!(mode.is_gated(), mode != PayerPolicyMode::Permissionless);
             assert_eq!(
                 parsed.expected_email().is_some(),
-                mode != PayerPolicyMode::Permissionless
+                mode == PayerPolicyMode::VerifiedEmail
+            );
+            assert_eq!(
+                parsed.payer_reference().is_some(),
+                mode == PayerPolicyMode::MerchantSession
             );
             parsed.validate().unwrap();
         }
+        assert_eq!(PayerPolicyMode::ALL.len(), 3);
     }
 
     #[test]
@@ -529,6 +604,11 @@ mod tests {
             serde_json::json!({"mode": "verified_email"}),
             serde_json::json!({"mode": "kyc"}),
             serde_json::json!({}),
+            serde_json::json!({"mode": "merchant_session"}),
+            serde_json::json!({"mode": "merchant_session", "expected_email": "a@b.co"}),
+            serde_json::json!({"mode": "merchant_session", "payer_reference": "u1", "expected_email": "a@b.co"}),
+            serde_json::json!({"mode": "permissionless", "payer_reference": "u1"}),
+            serde_json::json!({"mode": "verified_email", "expected_email": "a@b.co", "payer_reference": "u1"}),
         ] {
             assert!(
                 serde_json::from_value::<PayerPolicy>(rejected.clone()).is_err(),
@@ -557,6 +637,47 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn validation_bounds_the_payer_reference_to_one_printable_token() {
+        for reference in [
+            "",
+            " ",
+            "user 123",
+            "user\n1",
+            "user\u{0}",
+            &"x".repeat(129),
+        ] {
+            let policy = PayerPolicy::MerchantSession {
+                payer_reference: reference.to_owned(),
+            };
+            assert_eq!(
+                policy.validate(),
+                Err(PayerPolicyError::InvalidPayerReference),
+                "{reference:?}"
+            );
+        }
+        for reference in [
+            "user_123",
+            "a",
+            "cus_9f8E|tenant:7",
+            &"x".repeat(128),
+            "ürsula",
+        ] {
+            PayerPolicy::MerchantSession {
+                payer_reference: reference.to_owned(),
+            }
+            .validate()
+            .unwrap_or_else(|error| panic!("{reference:?}: {error}"));
+        }
+        // Trimmed, never lowercased: the merchant's identifier is opaque.
+        let normalized = PayerPolicy::MerchantSession {
+            payer_reference: "  User_ABC ".into(),
+        }
+        .normalized();
+        assert_eq!(normalized.payer_reference(), Some("User_ABC"));
+        normalized.validate().unwrap();
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lockedPayment, payment, unboundPayment } from "@/test/fixtures";
+import { lockedPayment, merchantSessionPayment, payment, unboundPayment } from "@/test/fixtures";
 import { checkoutView, isTerminalStatus, readyPayment, unlockedPayment } from "./checkout-state";
 
 const open = { secondsRemaining: 3_600, pendingTxHash: null };
@@ -221,12 +221,49 @@ describe("checkoutView for a gated invoice", () => {
     expect(`${view.label} ${view.title} ${view.detail}`).not.toMatch(/25|0x9a3f|USDC|Globex/);
   });
 
+  it("sends a merchant-session payer back to the app, and shows progress while the secret is exchanged", () => {
+    const bare = checkoutView(merchantSessionPayment(), open);
+    expect(bare.phase).toBe("app_required");
+    expect(bare.title).toBe("Open this payment from Acme Corp");
+    expect(bare.showInstructions).toBe(false);
+    expect(`${bare.label} ${bare.title} ${bare.detail}`).not.toMatch(
+      /email|code|25|0x9a3f|USDC|Globex/,
+    );
+
+    const opening = checkoutView(merchantSessionPayment(), {
+      ...open,
+      exchangingClientSecret: true,
+    });
+    expect(opening.phase).toBe("app_opening");
+    expect(opening.tone).toBe("progress");
+    expect(opening.showInstructions).toBe(false);
+
+    // A code sent in this tab means nothing for this mode; the API's own
+    // completion without a session does not open it either.
+    expect(checkoutView(merchantSessionPayment(), { ...open, emailCodeSent: true }).phase).toBe(
+      "app_required",
+    );
+    expect(
+      checkoutView(
+        merchantSessionPayment({
+          requirements: {
+            email: "not_required",
+            wallet: "pending",
+            merchant_session: "approved",
+            complete: true,
+          },
+        }),
+        open,
+      ).phase,
+    ).toBe("app_required");
+  });
+
   it("still asks the bare link to verify after another session completed the invoice", () => {
     // The API reports the invoice's own completion without a session; this
     // tab has no session, so it must verify itself.
     const view = checkoutView(
       lockedPayment({
-        requirements: { email: "approved", wallet: "pending", complete: true },
+        requirements: { email: "approved", wallet: "pending", merchant_session: "not_required", complete: true },
       }),
       open,
     );

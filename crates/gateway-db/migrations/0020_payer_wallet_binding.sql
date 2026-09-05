@@ -6,6 +6,10 @@
 -- and written, together, once. The platform recovery wallet is gone: excess
 -- and late funds return to the payer's own wallet.
 --
+-- Numbered after both 0018 migrations (account wallet, merchant session),
+-- which it extends: the merchant-session fields it re-declares below are
+-- carried forward unchanged.
+--
 -- Pre-release reset: every existing request commits to the retired platform
 -- recovery wallet through a nonce-derived salt that the new scheme cannot
 -- re-derive, so those rows and everything hanging off them are deleted
@@ -81,6 +85,7 @@ BEGIN
      OR NEW.reference IS DISTINCT FROM OLD.reference
      OR NEW.payer_policy_mode IS DISTINCT FROM OLD.payer_policy_mode
      OR NEW.expected_email IS DISTINCT FROM OLD.expected_email
+     OR NEW.payer_reference IS DISTINCT FROM OLD.payer_reference
      OR NEW.issuance_snapshot IS DISTINCT FROM OLD.issuance_snapshot
      OR NEW.attribution_version IS DISTINCT FROM OLD.attribution_version
      OR NEW.attribution_hash IS DISTINCT FROM OLD.attribution_hash
@@ -108,7 +113,7 @@ BEFORE UPDATE OF
     token_address, token_decimals, beneficiary_address, expiration_timestamp,
     expires_in_secs, expiration_intent, recovery_address, amount, net_amount,
     salt, payment_address, issuer, bill_to, notes, heading, memo, reference,
-    payer_policy_mode, expected_email, issuance_snapshot,
+    payer_policy_mode, expected_email, payer_reference, issuance_snapshot,
     attribution_version, attribution_hash,
     payer_wallet, payer_attestation, wallet_bound_at
 ON invoices
@@ -127,8 +132,12 @@ ALTER TABLE payer_sessions
 ALTER TABLE payer_verifications
     DROP CONSTRAINT payer_verifications_kind_check,
     DROP CONSTRAINT payer_verifications_provider_check,
-    ADD CONSTRAINT payer_verifications_kind_check CHECK (kind IN ('email', 'wallet')),
-    ADD CONSTRAINT payer_verifications_provider_check CHECK (provider IN ('auth0', 'payday'));
+    ADD CONSTRAINT payer_verifications_kind_check CHECK (
+        kind IN ('email', 'wallet', 'merchant_session')
+    ),
+    ADD CONSTRAINT payer_verifications_provider_check CHECK (
+        provider IN ('auth0', 'payday', 'merchant')
+    );
 
 -- ---------------------------------------------------------------------------
 -- Webhooks: the request becomes payable when its wallet is bound, and the
@@ -153,6 +162,7 @@ LANGUAGE SQL STABLE AS $$
         'reference', invoice.reference,
         'metadata', invoice.metadata,
         'payer_policy_mode', invoice.payer_policy_mode,
+        'payer_reference', invoice.payer_reference,
         'verification_completed_at', invoice.verification_completed_at,
         'likely_unsolicited_at', invoice.likely_unsolicited_at,
         'payer_wallet', CASE WHEN invoice.payer_wallet IS NULL THEN NULL

@@ -7,6 +7,7 @@ pub(crate) mod error;
 mod health;
 mod invoices;
 pub mod issuers;
+pub mod merchant_session;
 mod middleware;
 mod openapi;
 pub mod payer;
