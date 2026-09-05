@@ -5,7 +5,6 @@ mod auth;
 mod customers;
 pub(crate) mod error;
 mod health;
-pub mod identity;
 mod invoices;
 pub mod issuers;
 mod middleware;
@@ -15,6 +14,7 @@ pub mod payer_verification;
 mod proof;
 mod routes;
 mod status;
+mod verification;
 mod webhooks;
 
 pub(crate) use auth::{Auth0Verifier, Identity};

@@ -30,8 +30,6 @@ export interface PaymentValues {
   notes: string;
   mode: PayerPolicyMode;
   expectedEmail: string;
-  firstName: string;
-  lastName: string;
 }
 
 export const EMPTY_VALUES: PaymentValues = {
@@ -52,8 +50,6 @@ export const EMPTY_VALUES: PaymentValues = {
   notes: "",
   mode: "permissionless",
   expectedEmail: "",
-  firstName: "",
-  lastName: "",
 };
 
 function party(name: string, email: string, details: string): Party {
@@ -71,17 +67,6 @@ function policy(values: PaymentValues): PayerPolicy {
       return { mode: "permissionless" };
     case "verified_email":
       return { mode: "verified_email", expected_email };
-    case "verified_identity":
-      return {
-        mode: "verified_identity",
-        expected_email,
-        expected_identity: {
-          first_name: values.firstName.trim(),
-          last_name: values.lastName.trim(),
-        },
-      };
-    case "verified_identity_unattributed":
-      return { mode: "verified_identity_unattributed", expected_email };
   }
 }
 

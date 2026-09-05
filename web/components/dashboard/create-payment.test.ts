@@ -9,11 +9,9 @@ describe("buildCreatePayment", () => {
     amount: "25.5",
     payoutAddress: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     expectedEmail: "Alice@Example.com",
-    firstName: "Alice",
-    lastName: "Smith",
   };
 
-  it("builds each of the four policy shapes without stray fields", () => {
+  it("builds each policy shape without stray fields", () => {
     expect(buildCreatePayment({ ...filled, mode: "permissionless" }, null).payer_policy).toEqual({
       mode: "permissionless",
     });
@@ -21,16 +19,6 @@ describe("buildCreatePayment", () => {
       mode: "verified_email",
       expected_email: "Alice@Example.com",
     });
-    expect(buildCreatePayment({ ...filled, mode: "verified_identity" }, null).payer_policy).toEqual(
-      {
-        mode: "verified_identity",
-        expected_email: "Alice@Example.com",
-        expected_identity: { first_name: "Alice", last_name: "Smith" },
-      },
-    );
-    expect(
-      buildCreatePayment({ ...filled, mode: "verified_identity_unattributed" }, null).payer_policy,
-    ).toEqual({ mode: "verified_identity_unattributed", expected_email: "Alice@Example.com" });
   });
 
   it("omits blank optionals, trims parties, and converts hours to seconds", () => {

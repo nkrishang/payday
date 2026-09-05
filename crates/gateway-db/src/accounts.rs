@@ -646,10 +646,7 @@ mod tests {
             .unwrap();
         assert_eq!(issued.account_id, first);
         assert_eq!(issued.generation, 2);
-        assert!(
-            !issued.replaced_previous_key,
-            "nothing existed to replace"
-        );
+        assert!(!issued.replaced_previous_key, "nothing existed to replace");
         assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), Some(first));
         let metadata = repo.metadata(first).await.unwrap();
         assert!(

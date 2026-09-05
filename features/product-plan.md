@@ -1,8 +1,17 @@
 # Payday: Verified Customer Funds — Consolidated Product Plan
 
+> **Superseded on 2026-09-05.** Identity verification is no longer part of
+> the product. Everything below about `verified_identity`,
+> `verified_identity_unattributed`, `expected_identity`, KYC, Didit, the
+> `PayerIdentityProvider` boundary, credential reuse, the reconciler, manual
+> review, and the identity step of the checkout describes a design that was
+> built and then removed. The payer policy has two modes, `permissionless`
+> and `verified_email`. Those sections are kept for the record; treat them
+> as history, not as the current specification.
+
 **Status:** Consolidated implementation plan, updated with owner decisions on all open questions.
 
-**Positioning:** **Payday is the complete solution for receiving attributable, optionally KYC-verified customer funds over stablecoin rails.**
+**Positioning:** **Payday is the complete solution for receiving attributable, verified customer funds over stablecoin rails.**
 
 **Guiding principle:** The product should be the *leanest comprehensive* version — every necessary capability, nothing superfluous, nothing missing.
 
@@ -67,16 +76,16 @@ Payday is a confirmation service, not an identity-data marketplace.
 
 ### 3.2 Four presets externally, independent facts internally
 
-The public product exposes exactly four payer modes:
+The public product exposes exactly two payer modes:
 
 | Mode | Merchant supplies | Payer proves |
 |---|---|---|
 | `permissionless` | Nothing | Nothing |
 | `verified_email` | Expected email | Mailbox ownership |
-| `verified_identity` | Expected email and identity | Mailbox ownership, document/liveness KYC, and identity match |
-| `verified_identity_unattributed` | Expected email | Mailbox ownership and successful document/liveness KYC for any person |
 
-Internally, email ownership, document verification, liveness, and identity match remain separate facts with separate statuses. This supports correct implementation without exposing a merchant-configurable policy builder.
+Internally, each fact a policy needs keeps its own status. This supports correct implementation without exposing a merchant-configurable policy builder.
+
+*Historical: the two identity modes that used to sit below these were removed on 2026-09-05; see the note at the top of this document.*
 
 AML screening, wallet ownership, proof of address, and KYB are not additional payer modes in v1.
 
