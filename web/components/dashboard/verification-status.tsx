@@ -28,7 +28,9 @@ function verdict({ mode, completedAt }: Facts): {
 export function VerificationBadge(facts: Facts) {
   const { label, tone } = verdict(facts);
   return (
-    <span className="inline-flex items-center gap-2 text-[13px] whitespace-nowrap">
+    // Wraps rather than overflows: the unsolicited flag is a second fact, and
+    // in a narrow column it belongs under the verdict, not past the cell.
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
       <StatusDot tone={tone} />
       {label}
       {facts.unsolicitedAt ? (

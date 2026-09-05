@@ -5,7 +5,7 @@ import { FileText, Loader2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { controlStyles, Problem } from "@/components/ui/field";
 import { fileProblem, uploadAttachment, type UploadState } from "@/lib/attachment-upload";
-import { formatBytes, truncateAddress } from "@/lib/format";
+import { formatBytes } from "@/lib/format";
 import { useMerchant } from "./session";
 
 /**
@@ -14,14 +14,23 @@ import { useMerchant } from "./session";
  * form learns the finalized descriptor's id and nothing else.
  */
 export function AttachmentUpload({
+  value,
   onChange,
   onBusyChange,
 }: {
+  /**
+   * What the caller already holds. The composer unmounts this when its step
+   * changes, so without it a finished upload would come back as an empty
+   * picker while the request still carried the file.
+   */
+  value?: AttachmentDescriptor | null;
   onChange: (attachment: AttachmentDescriptor | null) => void;
   onBusyChange: (busy: boolean) => void;
 }) {
   const { accessToken } = useMerchant();
-  const [state, setState] = useState<UploadState>({ status: "idle" });
+  const [state, setState] = useState<UploadState>(() =>
+    value ? { status: "ready", attachment: value } : { status: "idle" },
+  );
   const [problem, setProblem] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
 
@@ -92,10 +101,7 @@ export function AttachmentUpload({
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium">{attachment.filename}</span>
           <span className="block text-[12px] text-faint">
-            Ready · {formatBytes(attachment.byte_length)} · SHA-256{" "}
-            <span className="font-mono" title={attachment.sha256}>
-              {truncateAddress(attachment.sha256, 10, 6)}
-            </span>
+            Ready · {formatBytes(attachment.byte_length)}
           </span>
         </span>
         <button

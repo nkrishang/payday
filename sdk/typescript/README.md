@@ -99,6 +99,12 @@ The client also provides long polling through `payments.get(id, { waitForChange:
 
 Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never expose an API key in browser-delivered code.
 
+## Managing the API key
+
+`account.get()` returns key metadata for the signed-in account — `key_hint`, `generation`, `created_at`, `rotated_at`, `previous_key_expires_at`, `revoked_at` — using the client's own credential. It never returns the raw key.
+
+`account.issueApiKey(token, expectedGeneration)` and `account.revokeApiKey(token, expectedGeneration)` mint or revoke a key, but they do not use the client's own credential: `token` must be a *fresh, single-use* email-OTP authentication — completed in roughly the last five minutes and not already spent on another issue or revoke — from either the dashboard's own sign-in or the CLI's. A plain session or API key, however valid for everything else, is refused here on purpose: reading an account does not imply permission to mint a live key for it. Pass `expectedGeneration` from the account's current `generation` (omit it only to provision a first key for an identity that has never held one); a mismatch throws `PaydayError` with code `api_key_generation_conflict`, meaning something else changed the key first. `issueApiKey`'s result carries the raw key exactly once — nothing later, including `account.get()`, can return it again — and, when it replaced an earlier key, that key keeps authenticating for 24 hours.
+
 ## Building your own checkout
 
 `PaydayPayerClient` reads the public routes behind a `payment_url`. It takes no API key and is safe to run in a browser: a payment link is open by design, because anyone holding it is allowed to fulfil the payment.

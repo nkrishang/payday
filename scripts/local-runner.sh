@@ -96,6 +96,37 @@ start_minio() {
   export AWS_REGION=us-east-1
 }
 
+# Nothing scans local uploads (see start_minio, above), so this stands in for
+# GuardDuty during an interactive `just dev` session too: a few seconds after
+# a PDF lands, it stamps the clean verdict finalize is waiting on, so a manual
+# upload through the browser does not have to sit out finalize's 2-minute poll
+# timeout. It never overwrites a verdict already present, so stamping one by
+# hand first (docs/local-development.md#attachments-and-the-scan-tag) still
+# walks the rejection path; scripted rejection coverage lives in `just e2e`.
+start_scan_stub() {
+  # A plain space-delimited string, not an associative array: the macOS
+  # system bash (3.2, still /usr/bin/env bash's target on a bare checkout)
+  # has no declare -A.
+  local seen=" "
+  local mc_env="MC_HOST_local=http://${minio_credential}:${minio_credential}@127.0.0.1:${minio_port}"
+  while :; do
+    local listing object tags
+    listing="$(docker run --rm --network host -e "$mc_env" "$mc_image" ls -r "local/${attachment_bucket}" 2>/dev/null)" || true
+    while IFS= read -r object; do
+      [[ -n "$object" ]] || continue
+      case "$seen" in *" $object "*) continue ;; esac
+      tags="$(docker run --rm --network host -e "$mc_env" "$mc_image" tag list "local/${attachment_bucket}/${object}" 2>/dev/null)" || true
+      if [[ "$tags" != *GuardDutyMalwareScanStatus* ]]; then
+        docker run --rm --network host -e "$mc_env" "$mc_image" \
+          tag set "local/${attachment_bucket}/${object}" 'GuardDutyMalwareScanStatus=NO_THREATS_FOUND' >/dev/null 2>&1 || true
+        echo "stamped a clean scan verdict on $object"
+      fi
+      seen="${seen}${object} "
+    done < <(awk '{print $NF}' <<< "$listing")
+    sleep 2
+  done
+}
+
 prefix() {
   local name=$1
   shift
@@ -143,6 +174,13 @@ load_local_env() {
   # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
   # local proof verification; production signs with a KMS key instead.
   export PAYDAY_ATTESTATION_SIGNER_KEY="${PAYDAY_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
+  # Pays the onboarding walkthrough's one self-issued deposit request, so a
+  # brand new merchant sees a real transfer settle before doing anything else.
+  # Anvil account #1 (0x70997970C51812dc3A010C7d01b50e0d17dc79C8), already
+  # minted 1,000,000 test USDC by Bootstrap.s.sol and otherwise unused
+  # locally — a different account than PAYDAY_SIGNER_KEY so the two never
+  # contend for a nonce.
+  export PAYDAY_ONBOARDING_PAYER_KEY="${PAYDAY_ONBOARDING_PAYER_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
   export PAYDAY_DASHBOARD_AUTH0_CLIENT_ID="${PAYDAY_DASHBOARD_AUTH0_CLIENT_ID:-payday-dashboard-local}"
   # Payer email verification against the same development provider, which
   # serves the payer client and audience next to the merchant ones.
@@ -213,6 +251,7 @@ cargo build --locked --workspace
 start_minio
 prefix postgres docker logs -f "$container"
 prefix minio docker logs -f "$minio_container"
+prefix scan-stub start_scan_stub
 prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --slots-in-an-epoch 1 --mixed-mining --block-time 1
 for _ in {1..100}; do
   cast chain-id --rpc-url "$PAYDAY_RPC_URL" >/dev/null 2>&1 && break

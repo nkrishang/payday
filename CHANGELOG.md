@@ -207,14 +207,151 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `/qr`. No other route allows cross-origin reads.
 - A `checkout_base_url` Terraform variable naming the origin that serves the
   checkout, which is where every `payment_url` points.
+- Sign-up from the landing page: the hero's "Start Building" opens a dialog
+  that runs the dashboard's own emailed-code exchange, and the API provisions
+  an account on first sight of the identity, so there is no separate
+  registration. A merchant already holding a session goes straight to the
+  dashboard instead. While a code is live the dialog counts its window down;
+  once the window closes it offers to send another, so two codes are never
+  outstanding at once.
+- Issuer identities and payout addresses: the merchant's own side of an
+  invoice, saved once instead of retyped. `POST /v1/issuers` and its
+  `GET`/`PATCH`/`DELETE`, `POST /v1/payout-addresses` and its `GET`/`DELETE`,
+  and `PUT /v1/issuers/{id}/payout-addresses` to set which wallets an identity
+  settles to. A wallet is stored EIP-55 checksummed and once per account —
+  saving one twice returns the row you have — and the association is
+  many-to-many, with composite foreign keys that make a cross-account link
+  unwritable.
+- The contact address on an identity is **proven with an emailed code** before
+  an invoice can carry it: `POST /v1/issuers/{id}/verify/email/start` sends one
+  to the stored address (never an address in the request, and at most one a
+  minute per identity), and `.../confirm` records the proof. Moving the address
+  clears it, because a different mailbox is a different claim. Payers are told
+  to write to that address, so it gets the same treatment a payer's own mailbox
+  gets rather than being taken on trust.
+- Issuance is deliberately unchanged: `POST /v1/payments` still takes the party
+  and the payout address inline and snapshots them, so an identity edited later
+  cannot reach an invoice already issued. It additionally takes `issuer_id` and
+  stores it immutably beside the document, returning it on `Payment` and
+  `PaymentSummary`: the identity's id is the durable handle, so the requests
+  issued under it stay identifiable after it is renamed, moved to another
+  mailbox, or pointed at different wallets. Deleting an identity that requests
+  were issued under is refused (`issuer_in_use`).
+- `/dashboard` is the whole dashboard, and where signing in now lands: the
+  deposit requests, the customers behind them, and the flow that issues a new
+  one, on one page with no section tabs to click through first. With nothing
+  issued yet it is an empty state that says what a deposit request is and
+  offers the one action worth taking. That action runs in the page rather than
+  in a modal or another route — amount and deadline, billing, payer policy,
+  then a review — with a running preview beside it that doubles as the review
+  and leads back to the step that set each value. `/dashboard/invoices` and
+  `/dashboard/customers` redirect to it.
+- A new account is not shown a description of the product: with neither an
+  identity nor a request, the dashboard *is* the setup — name, contact address,
+  wallet — and issuing follows straight out of it. The whole form is on the page
+  at once: only the section being answered is enabled, the ones after it are
+  visible but inert, and the ones before it keep their answers on screen with a
+  control to go back and change them. The one action lives in a footer that
+  belongs to the form rather than to any card, and sticks to the bottom of the
+  viewport while the form runs past the fold, so it is never a scroll away from
+  the section being answered; it names that section, and completing one scrolls
+  the next into view. It resumes at whatever section is unfinished.
+- `GET /v1/payments` filters on `customer_id`, `issuer_id`, and `verification`
+  (`not_required`, `pending`, `verified`, `likely_unsolicited`). Verification is
+  its own parameter because it is its own fact: a gated request can be funded
+  before its payer has verified.
+- The three dashboard sections — requests, identities, customers — share one
+  shape: heading, a line of what the section holds, and the *New* control on
+  that row, then the content. An account with nothing issued sees the requests
+  table with its columns and an empty row rather than a placeholder frame.
+- The dashboard's tables page five rows at a time and show Previous/Next only
+  when there is another page; the requests table filters on status,
+  verification, and customer through a styled control rather than the platform
+  `<select>`, carries the issuer identity as a badge, shows amounts with the
+  token's mark, and opens a request's detail when a row is clicked. Adding a
+  deposit request, an identity, or a customer is now the same control in the
+  same place above each table.
+- The long invoice form at `/dashboard/invoices/new` is gone, and the composer
+  asks everything `POST /v1/payments` takes. The billing step — renamed from
+  "Billed to", since it now holds more than the party — carries the saved
+  customer, the billed party, what the request is for, the reference, notes,
+  and the PDF attachment. The deadline offers a moment of the merchant's own
+  choosing beside the 24-hour, 7-day, and 30-day presets: a preset is sent as
+  `expires_in`, a picked moment as `expires_at`, since converting it to a
+  duration would re-anchor it to whenever the request arrived. A customer's own
+  page links to `/dashboard?customer=`, which opens the composer on them.
+- The expected payer email is required for every policy beyond permissionless,
+  says so on its label, and arrives pre-filled from the billed party's address,
+  following that field until the merchant types their own.
+- A deposit request opens in its own row rather than on a page of its own. The
+  list is where a merchant works, and reading one request no longer costs the
+  filters and the page they were on. The open row leads with the two questions
+  a list cannot answer, drawn rather than written — a bar for how much of the
+  amount has arrived, and a three-point rail for issued, funded, and however it
+  ended — then the payment, the verification and its activity, the payer's
+  view, and the files, with nothing repeated from the row above. One row is
+  open at a time, and a request is only fetched once its row has been opened.
+  `/dashboard/invoices/{id}` redirects to the list, so links already sent still
+  land somewhere useful. Addresses are shown in full and link to the explorer;
+  a policy that only checks a mailbox no longer breaks that single fact out
+  beside the verdict that already states it.
+- The payer's view sits in the open row — the public payer projection, read
+  with no payer session, so a gated request shows what an unverified visitor
+  would see — with the shareable link ready to copy.
+- An issuer identity's name is unique per account, case and surrounding space
+  included: two identities with the same name are the same row to whoever reads
+  a list or a picker. `POST /v1/issuers` and its `PATCH` answer
+  `409 issuer_name_taken`, a unique index enforces it regardless of the caller,
+  and both dashboard forms refuse the name before the request is made. Contact
+  addresses may still repeat, since identities can share a support mailbox.
+- Removing an identity's only wallet asks for its replacement rather than
+  leaving it with nowhere to settle: the badge greys out, the wallet form
+  opens, and the swap lands as one edit that can still be cancelled. An
+  identity can no longer be stranded into the setup flow by an edit.
+- An identity row takes the API's own answer as its new baseline when it saves,
+  so a wallet that was just added stops reading as an unsaved edit and Save
+  settles instead of staying lit.
+- A billed party typed into the composer is saved as a customer, so it appears
+  in the customers table and the next request can pick it rather than retype
+  it.
+- Every field is checked as it is typed rather than on submit, in the setup
+  form, the composer, and the identity manager: a pasted address that is not one
+  says so at once, and the button to the next step stays inert until the step is
+  answerable. A payout-address label is bounded to 20 characters from a small
+  printable set, in the browser, at the API, and in the column. Setting up gates issuing, never looking, so an account
+  that issued from the CLI still sees what it has. The composer picks the
+  identity and the wallet from what was saved, preselected when there is one of
+  each, and no longer asks for either as free text.
 
 ### Changed
 
+- The dashboard wears the landing page's dark palette and type in both colour
+  schemes, by redefining the theme tokens its pages already read rather than
+  restyling them, so arriving from "Start Building" no longer flips the ground
+  to white. Its header is the landing page's too: the same wordmark at the same
+  size, the same Docs and Pricing links on the same rule, plus Sign out.
+- The dashboard login page is gone. The landing page's "Start Building" dialog
+  is the only way in — it always was the same exchange — and anyone reaching a
+  dashboard route without a live session, or signing out, lands on the landing
+  page rather than on a second sign-in form.
+- `payday-dev-identity` issues access tokens good for 24 hours rather than 5
+  minutes, matching Auth0's default for a resource server. The dashboard
+  session is exactly the token's lifetime because nothing refreshes it, so the
+  old value signed a merchant out mid-invoice; the five-minute freshness that
+  API-key issuance demands is a separate window and is unchanged.
+- `PAYDAY_DEV_IDENTITY_OTP` fixes the code the local provider emails, so
+  signing in during development does not mean reading it out of the runner's
+  log.
 - `issuer`, `bill_to`, and `payer_policy` are required on `POST /v1/payments`;
   a body without them is rejected. An issued invoice is immutable.
+- An emailed one-time code is good for five minutes rather than three, in the
+  Auth0 passwordless connection, in its email, and in `payday-dev-identity`,
+  which previously kept codes until they were used and now refuses and
+  discards an expired one.
 - Cross-origin access to the merchant routes (payments, customers,
-  attachments) is allowed from the configured web origin only
-  (`PAYDAY_PUBLIC_BASE_URL`) for `GET`, `POST`, and `PATCH` with the
+  issuers, attachments) is allowed from the configured web origin only
+  (`PAYDAY_PUBLIC_BASE_URL`) for `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`
+  with the
   `Authorization`, `Content-Type`, `Idempotency-Key`, and `Accept` headers;
   the payer `GET` routes remain open to any origin.
 - Settlement is exact: a live `Payment` deployment transfers exactly the

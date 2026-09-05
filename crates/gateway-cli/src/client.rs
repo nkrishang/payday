@@ -663,6 +663,7 @@ mod tests {
             issuer: party("Acme"),
             bill_to: party("Globex"),
             customer_id: None,
+            issuer_id: None,
             notes: None,
             heading: None,
             reference: None,

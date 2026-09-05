@@ -964,6 +964,7 @@ mod tests {
             heading: Some("March retainer".into()),
             reference: Some("Order 1234".into()),
             customer_id: None,
+            issuer_id: None,
             payer_policy: PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
             },
@@ -1084,6 +1085,7 @@ mod tests {
             received: "25.000000".into(),
             payer_policy_mode: mode,
             customer_id: None,
+            issuer_id: None,
             has_attachment: false,
             verification_completed_at: None,
             likely_unsolicited_at: None,

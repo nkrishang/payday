@@ -4,6 +4,9 @@ import { expect, test, type Page } from "@playwright/test";
  * The dashboard against e2e/stub-api.mjs, which plays the merchant API, the
  * presigned upload target, and the OTP issuer. Each test signs in on its own:
  * the session lives in the tab, and the stub issuer accepts one code.
+ *
+ * Signing in is the landing page's dialog — there is no dashboard login page —
+ * and it is covered on its own in signup.spec.ts.
  */
 
 const STUB = "http://127.0.0.1:4010";
@@ -13,40 +16,19 @@ const PDF = Buffer.from(
   "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n",
 );
 
-async function signIn(page: Page) {
-  await page.goto("/dashboard/login");
-  await page.getByLabel("Email").fill("merchant@example.com");
-  await page.getByRole("button", { name: "Send code" }).click();
-  await page.getByLabel("One-time code").fill(OTP);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices$/);
+async function signIn(page: Page, email = "merchant@example.com") {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Start Building" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Email").fill(email);
+  await dialog.getByRole("button", { name: "Send code" }).click();
+  await dialog.getByLabel("One-time code").fill(OTP);
+  await dialog.getByRole("button", { name: "Continue" }).click();
+  // Everything a merchant does day to day is on this one page.
+  await expect(page).toHaveURL(/\/dashboard$/);
 }
 
-test("signing in takes an emailed code and rejects a wrong one", async ({ page }) => {
-  await page.goto("/dashboard/login");
-  await page.getByLabel("Email").fill("merchant@example.com");
-  await page.getByRole("button", { name: "Send code" }).click();
-  await expect(page.getByText(/We sent a code to merchant@example.com/)).toBeVisible();
-
-  await page.getByLabel("One-time code").fill("000000");
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByText(/code is not valid/)).toBeVisible();
-
-  await page.getByLabel("One-time code").fill(OTP);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices$/);
-  await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
-
-  // The token is the session: in this tab only, never in localStorage.
-  const storage = await page.evaluate(() => ({
-    session: sessionStorage.getItem("payday.dashboard.session"),
-    local: localStorage.length,
-  }));
-  expect(storage.session).toContain("stub-dashboard-token");
-  expect(storage.local).toBe(0);
-});
-
-test("a signed-out visitor is sent to the login page and the shell carries no data", async ({
+test("a signed-out visitor is sent to the landing page and the shell carries no data", async ({
   page,
   request,
 }) => {
@@ -60,8 +42,12 @@ test("a signed-out visitor is sent to the login page and the shell carries no da
   expect(html).not.toContain("Globex");
   expect(html).not.toContain("stub-dashboard-token");
 
-  await page.goto("/dashboard/invoices");
-  await expect(page).toHaveURL(/\/dashboard\/login$/);
+  // Every dashboard route, list or detail, sends a visitor without a session
+  // to the landing page, where the only way in is.
+  await page.goto("/dashboard");
+  await expect(page).toHaveURL("/");
+  await page.goto("/dashboard/invoices/pay_seed-settled");
+  await expect(page).toHaveURL("/");
 });
 
 test("the invoice list shows verification separately from payment and flags unsolicited funds", async ({
@@ -71,7 +57,7 @@ test("the invoice list shows verification separately from payment and flags unso
 
   const settled = page.getByRole("row").filter({ hasText: "Consulting — August" });
   await expect(settled).toContainText("Globex Corporation");
-  await expect(settled).toContainText("25.00 USDC");
+  await expect(settled).toContainText("25.00");
   await expect(settled).toContainText("Settled");
   await expect(settled).toContainText("Verified email");
   await expect(settled).toContainText("Verified");
@@ -82,20 +68,41 @@ test("the invoice list shows verification separately from payment and flags unso
   await expect(unsolicited).toContainText("Pending");
   await expect(unsolicited).toContainText("Likely unsolicited");
 
-  // The filter is the API's status parameter, not a client-side sieve.
-  await page.getByLabel("Status").selectOption("settled");
+  // The filters are the API's own parameters, not a client-side sieve, and
+  // verification narrows separately from payment status.
+  await page.getByLabel("Status").click();
+  await page.getByRole("option", { name: "Settled" }).click();
   await expect(page.getByRole("row").filter({ hasText: "Retainer — September" })).toHaveCount(0);
   await expect(page.getByRole("row").filter({ hasText: "Consulting — August" })).toHaveCount(1);
+
+  await page.getByLabel("Status").click();
+  await page.getByRole("option", { name: "Any status" }).click();
+  await page.getByLabel("Verification").click();
+  await page.getByRole("option", { name: "Pending" }).click();
+  await expect(page.getByRole("row").filter({ hasText: "Consulting — August" })).toHaveCount(0);
+  await expect(page.getByRole("row").filter({ hasText: "Retainer — September" })).toHaveCount(1);
 });
 
-test("a merchant can create a customer, upload a PDF, issue an invoice, and open it", async ({
+test("a merchant can create a customer, upload a PDF, issue a request, and open it", async ({
   page,
 }) => {
   await signIn(page);
 
-  // Customer.
-  await page.getByRole("link", { name: "Customers" }).click();
-  await page.getByRole("link", { name: "New customer" }).click();
+  // An identity first: nothing is issued without one, and the composer is the
+  // only way in — there is no separate invoice form.
+  await page.getByRole("button", { name: "New deposit request" }).click();
+  await page.getByLabel("Issued by").fill("Acme Corp");
+  await page.getByLabel("Contact address").fill("billing@acme.example");
+  await page.getByRole("button", { name: "Send code" }).click();
+  await page.getByLabel("One-time code").fill(OTP);
+  await page.getByRole("button", { name: "Confirm code" }).click();
+  await page.getByLabel("Payout address").fill(PAYOUT);
+  await page.getByLabel("Label").fill("Treasury");
+  await page.getByRole("button", { name: "Save identity" }).click();
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  // Customer, from the dashboard's own customers section.
+  await page.getByRole("button", { name: "New customer" }).click();
   const customerName = `Initrode ${Date.now()}`;
   await page.getByLabel("Name").fill(customerName);
   await page.getByLabel("Email").fill("ap@initrode.example");
@@ -104,15 +111,25 @@ test("a merchant can create a customer, upload a PDF, issue an invoice, and open
   await expect(page).toHaveURL(/\/dashboard\/customers\/[0-9a-f-]{36}$/);
   await expect(page.getByRole("heading", { name: customerName })).toBeVisible();
 
-  // Straight into an invoice for that customer.
-  await page.getByRole("link", { name: "New invoice for this customer" }).click();
-  await expect(page.getByLabel("Bill to name")).toHaveValue(customerName);
-  await expect(page.getByLabel("Bill to email")).toHaveValue("ap@initrode.example");
+  // Straight into a request for that customer, which opens on them.
+  await page.getByRole("link", { name: "New deposit request for this customer" }).click();
+  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
 
-  await page.getByLabel("Issuer name").fill("Acme Corp");
-  await page.getByLabel("Amount (USDC)").fill("120.50");
-  await page.getByLabel("Payout address").fill(PAYOUT);
-  await page.getByLabel("Heading").fill("Design retainer");
+  // Amount, and a deadline of the merchant's own choosing rather than a preset.
+  await page.getByLabel("Amount").fill("120.50");
+  await page.getByRole("radio", { name: "Custom" }).click();
+  const deadline = new Date(Date.now() + 3 * 24 * 3600_000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const chosen =
+    `${deadline.getFullYear()}-${pad(deadline.getMonth() + 1)}-${pad(deadline.getDate())}` +
+    `T${pad(deadline.getHours())}:${pad(deadline.getMinutes())}`;
+  await page.getByLabel("Date and time").fill(chosen);
+  await page.getByRole("button", { name: "Continue" }).click();
+
+  // Billing: the customer came through the link, and the PDF is asked for here.
+  await expect(page.getByLabel("Billed to")).toHaveValue(customerName);
+  await expect(page.getByLabel("Email")).toHaveValue("ap@initrode.example");
+  await page.getByLabel("Reason").fill("Design retainer");
   await page.getByLabel("Reference").fill("INV-2001");
   await page.getByLabel("Notes").fill("Net 15.");
 
@@ -131,30 +148,52 @@ test("a merchant can create a customer, upload a PDF, issue an invoice, and open
   expect(put.headers()["authorization"]).toBeUndefined();
   await expect(page.getByRole("status")).toContainText(/Scanning retainer\.pdf/);
   await expect(page.getByText(/Ready · /)).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Continue" }).click();
 
-  // A gated policy with its assertion.
+  // A gated policy with its assertion; the expected mailbox arrives filled in.
   await page.getByRole("radio", { name: /^Verified identity$/ }).check();
+  await expect(page.getByLabel("Expected payer email")).toHaveValue("ap@initrode.example");
   await page.getByLabel("Expected payer email").fill("peter@initrode.example");
   await page.getByLabel("Expected first name").fill("Peter");
   await page.getByLabel("Expected last name").fill("Gibbons");
+  await page.getByRole("button", { name: "Continue" }).click();
 
-  await page.getByRole("button", { name: "Issue invoice" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices\/pay_[0-9a-f-]{36}$/);
+  // The review carries the whole request, attachment included.
+  const summary = page.getByLabel("Request summary");
+  await expect(summary).toContainText("retainer.pdf");
+  await expect(summary).toContainText("Verified identity");
 
-  // Detail: document, payment, and verification are all there and separate.
-  await expect(page.getByRole("heading", { name: "Design retainer" })).toBeVisible();
-  await expect(page.getByText("Awaiting payment")).toBeVisible();
-  await expect(page.getByText("120.50 USDC").first()).toBeVisible();
-  await expect(page.getByText("INV-2001")).toBeVisible();
+  const created = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith("/v1/payments"),
+  );
+  await page.getByRole("button", { name: "Issue deposit request" }).click();
+  const body = (await created).postDataJSON();
+  // The moment is sent as a moment; a duration would re-anchor it to arrival.
+  expect(body.expires_at).toBe(new Date(chosen).toISOString());
+  expect(body).not.toHaveProperty("expires_in");
+  expect(body.notes).toBe("Net 15.");
+  expect(body.attachment_id).toBeTruthy();
+
+  await expect(page.getByRole("heading", { name: "Deposit request issued." })).toBeVisible();
+  // Tracking it lands back on the list with that request's row already open;
+  // there is no page of its own to navigate to.
+  await page.getByRole("button", { name: "Track this request" }).click();
+  await expect(page).toHaveURL(/\/dashboard(\?.*)?$/);
+
+  // The open row carries the whole request: payment, verification, and files.
+  await expect(page.getByRole("button", { name: /Design retainer/, expanded: true })).toBeVisible();
+  await expect(page.getByText("Awaiting payment").first()).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "Received" })).toBeVisible();
+  await expect(page.getByText("INV-2001").first()).toBeVisible();
   await expect(page.getByText("Net 15.")).toBeVisible();
   await expect(page.getByText("retainer.pdf")).toBeVisible();
-  await expect(page.getByText("Verified identity")).toBeVisible();
+  await expect(page.getByText("Verified identity").first()).toBeVisible();
   await expect(page.getByText("peter@initrode.example")).toBeVisible();
   await expect(page.getByText("Peter Gibbons")).toBeVisible();
   await expect(page.getByText("Pending").first()).toBeVisible();
   await expect(page.getByText(/has not started verifying yet/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Proof of Payment" })).toBeDisabled();
-  await expect(page.getByText(/generated once the invoice settles/)).toBeVisible();
+  await expect(page.getByText(/generated once the request settles/)).toBeVisible();
   await expect(page.getByText("Recovered funds")).toHaveCount(0);
 
   // The signed download URL is fetched on demand, not embedded.
@@ -166,14 +205,15 @@ test("a merchant can create a customer, upload a PDF, issue an invoice, and open
     };
   });
   await page.reload();
+  await page.getByRole("button", { name: /Design retainer/ }).click();
   await page.getByRole("button", { name: "Download attachment" }).click();
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened))
     .toEqual([expect.stringContaining(`${STUB}/__download/`)]);
 
-  // And it is back in the list, linked to its customer.
-  await page.getByRole("link", { name: "Invoices" }).click();
-  const row = page.getByRole("row").filter({ hasText: "Design retainer" });
+  // And its summary row still carries what the list is scanned for.
+  // The summary row, not the detail row under it that repeats the title.
+  const row = page.getByRole("row").filter({ hasText: "Design retainer" }).first();
   await expect(row).toContainText(customerName);
   await expect(row).toContainText("Verified identity");
   await expect(row.getByLabel("Has attachment")).toBeVisible();
@@ -183,11 +223,10 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   page,
 }) => {
   await signIn(page);
-  await page.getByRole("link", { name: "Consulting — August" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices\/pay_seed-settled$/);
+  await page.getByRole("button", { name: /Consulting — August/ }).click();
 
   await expect(page.getByText("Settled").first()).toBeVisible();
-  await expect(page.getByText("Verified", { exact: true })).toBeVisible();
+  await expect(page.getByText("Verified", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("alice@globex.example")).toBeVisible();
 
   // Both the overpayment remainder and the late transfer went to recovery.
@@ -218,8 +257,7 @@ test("a declined identity check shows its facts, reference, and risk categories,
   page,
 }) => {
   await signIn(page);
-  await page.getByRole("link", { name: "Retainer — September" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/invoices\/pay_seed-unsolicited$/);
+  await page.getByRole("button", { name: /Retainer — September/ }).click();
 
   const activity = page.getByLabel("Verification activity");
   await expect(activity).toBeVisible();
@@ -242,10 +280,61 @@ test("a declined identity check shows its facts, reference, and risk categories,
   await expect(activity).not.toContainText(/may try the identity check once more/);
 });
 
+test("a merchant can generate, roll, and revoke their API key with a step-up code", async ({
+  page,
+}) => {
+  await signIn(page, "api-key-flow@example.com");
+
+  const section = page.getByRole("region", { name: "API key" });
+  await expect(section).toContainText("No key yet");
+
+  // A first key needs no warning, just the step-up code.
+  await section.getByRole("button", { name: "Generate key" }).click();
+  await expect(section.getByText(/We'll email a one-time code/)).toBeVisible();
+  await section.getByRole("button", { name: "Send code" }).click();
+  await section.getByLabel("One-time code").fill(OTP);
+  await section.getByRole("button", { name: "Confirm & generate" }).click();
+
+  await expect(section.getByText("Key generated")).toBeVisible();
+  const firstKey = await section.locator("code").innerText();
+  expect(firstKey).toMatch(/^payday_test_stub/);
+  await section.getByRole("button", { name: "Done" }).click();
+  await expect(section).toContainText(firstKey.slice(-6));
+  await expect(section.getByRole("button", { name: "Roll key" })).toBeVisible();
+
+  // Rolling warns about the grace period up front, then reveals a new key.
+  await section.getByRole("button", { name: "Roll key" }).click();
+  await expect(section.getByText(/current one keeps working for 24 hours/)).toBeVisible();
+  await section.getByRole("button", { name: "Send code" }).click();
+  await section.getByLabel("One-time code").fill(OTP);
+  await section.getByRole("button", { name: "Confirm & roll key" }).click();
+
+  await expect(section.getByText("Key rolled")).toBeVisible();
+  const secondKey = await section.locator("code").innerText();
+  expect(secondKey).not.toBe(firstKey);
+  await expect(
+    section.getByText(/previous key keeps working for the next 24 hours/),
+  ).toBeVisible();
+  await section.getByRole("button", { name: "Done" }).click();
+  await expect(section.getByText(/previous key still works until/)).toBeVisible();
+
+  // Revoking warns that it is immediate and irreversible before the code step.
+  await section.getByRole("button", { name: "Revoke" }).click();
+  await expect(section.getByText(/can't be undone/)).toBeVisible();
+  await section.getByRole("button", { name: "Send code" }).click();
+  await section.getByLabel("One-time code").fill(OTP);
+  await section.getByRole("button", { name: "Confirm & revoke" }).click();
+
+  await expect(section.getByText("Key revoked.")).toBeVisible();
+  await section.getByRole("button", { name: "Done" }).click();
+  await expect(section).toContainText("Revoked");
+  await expect(section.getByRole("button", { name: "Generate key" })).toBeVisible();
+});
+
 test("signing out ends the session", async ({ page }) => {
   await signIn(page);
   await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/login$/);
+  await expect(page).toHaveURL("/");
   expect(await page.evaluate(() => sessionStorage.getItem("payday.dashboard.session"))).toBeNull();
 });
 

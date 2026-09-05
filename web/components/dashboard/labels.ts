@@ -27,7 +27,8 @@ export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; descr
     {
       value: "permissionless",
       label: "Permissionless",
-      description: "Anyone holding the link can view and pay it. Content is visible immediately.",
+      description:
+        "Anyone holding a link to the deposit request can view payment details and pay it.",
     },
     {
       value: "verified_email",
@@ -45,7 +46,7 @@ export const MODES: ReadonlyArray<{ value: PayerPolicyMode; label: string; descr
       value: "verified_identity_unattributed",
       label: "Verified identity, unattributed",
       description:
-        "Email ownership plus a document and liveness check, without asserting who the payer is.",
+        "Email ownership plus a document and liveness check, without asserting an expected payer identity.",
     },
   ];
 
@@ -57,4 +58,38 @@ export function formatDate(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/**
+ * How long ago, or how long until — "in 6 days", "2 hours ago". A deadline and
+ * a milestone are both read as distances from now, and a distance is what the
+ * merchant is actually asking for; the exact stamp sits beside it where it
+ * matters.
+ */
+export function formatRelative(iso: string, now = Date.now()): string {
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return iso;
+  const seconds = Math.round((at - now) / 1000);
+  const units: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 31_536_000],
+    ["month", 2_592_000],
+    ["day", 86_400],
+    ["hour", 3_600],
+    ["minute", 60],
+  ];
+  const format = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  for (const [unit, size] of units) {
+    if (Math.abs(seconds) >= size) return format.format(Math.round(seconds / size), unit);
+  }
+  return format.format(seconds, "second");
+}
+
+/**
+ * The date alone, for a table cell. A row is scanned, not read: the minute a
+ * request was issued belongs on its detail page, where there is room for it.
+ */
+export function formatShortDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString(undefined, { dateStyle: "medium" });
 }

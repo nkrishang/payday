@@ -6,6 +6,7 @@ mod deployment;
 mod dispatcher;
 mod identity;
 mod invoice_pdf;
+mod onboarding_payer;
 mod payer_identity;
 mod state;
 mod webhook_worker;
@@ -100,6 +101,26 @@ async fn main() {
     };
     if let Some(attestor) = &attestor {
         tracing::info!(address = %attestor.address(), "configured attestation signer");
+    }
+    // Absent whenever a deployment hasn't deliberately funded and configured
+    // this — production may never set it; only settlement-capable (non
+    // status-only) deployments have the RPC endpoint this needs.
+    let onboarding_payer = match (config.onboarding_payer(), config.settlement()) {
+        (Some(signer_config), Some(settlement)) => Some(
+            onboarding_payer::OnboardingPayerSigner::from_config(
+                signer_config,
+                aws.as_ref()
+                    .expect("AWS configuration is loaded outside status-only mode"),
+                &settlement.rpc_url,
+                config.chain_id().0,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}")),
+        ),
+        _ => None,
+    };
+    if let Some(onboarding_payer) = &onboarding_payer {
+        tracing::info!(address = %onboarding_payer.address(), "configured onboarding payer signer");
     }
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
@@ -199,6 +220,7 @@ async fn main() {
         attestor,
         payer_verification,
         identity_provider.clone(),
+        onboarding_payer,
     );
     if !config.status_only()
         && let Some(key) = state.webhook_encryption_key

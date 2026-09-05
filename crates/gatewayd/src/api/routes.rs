@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::http::{HeaderName, Method, header};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Router, middleware};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -16,6 +16,7 @@ use crate::api::customers;
 use crate::api::health;
 use crate::api::identity;
 use crate::api::invoices;
+use crate::api::issuers;
 use crate::api::payer;
 use crate::api::payer_verification;
 use crate::api::proof;
@@ -36,7 +37,17 @@ pub fn router(state: AppState) -> Router {
     );
     let merchant_cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list([state.payer.origin_header()]))
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
+        // PUT and DELETE joined the list with issuer identities: the dashboard
+        // sets an identity's wallets with PUT and drops a saved wallet with
+        // DELETE, and a method missing here fails the preflight, not the call.
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -55,6 +66,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/payments/{id}", get(invoices::get_payment))
         .route("/v1/payments/{id}/cancel", post(invoices::cancel_payment))
+        .route(
+            "/v1/payments/{id}/onboarding-payment",
+            post(invoices::onboarding_payment),
+        )
         .route("/v1/payments/{id}/transfers", get(invoices::transfers))
         .route(
             "/v1/payments/{id}/attachment",
@@ -74,6 +89,33 @@ pub fn router(state: AppState) -> Router {
             "/v1/customers",
             post(customers::create).get(customers::list),
         )
+        .route("/v1/issuers", post(issuers::create).get(issuers::list))
+        .route(
+            "/v1/issuers/{id}",
+            get(issuers::get)
+                .patch(issuers::update)
+                .delete(issuers::delete),
+        )
+        .route(
+            "/v1/issuers/{id}/verify/email/start",
+            post(issuers::start_email_verification),
+        )
+        .route(
+            "/v1/issuers/{id}/verify/email/confirm",
+            post(issuers::confirm_email_verification),
+        )
+        .route(
+            "/v1/issuers/{id}/payout-addresses",
+            put(issuers::set_payout_addresses),
+        )
+        .route(
+            "/v1/payout-addresses",
+            post(issuers::create_payout_address).get(issuers::list_payout_addresses),
+        )
+        .route(
+            "/v1/payout-addresses/{id}",
+            delete(issuers::delete_payout_address),
+        )
         .route(
             "/v1/customers/{id}",
             get(customers::get).patch(customers::update),
@@ -90,7 +132,7 @@ pub fn router(state: AppState) -> Router {
             auth::require_account,
         ))
         .layer(RequestBodyLimitLayer::new(64 * 1024))
-        .layer(merchant_cors);
+        .layer(merchant_cors.clone());
 
     let account_management = Router::new()
         .route(
@@ -103,7 +145,11 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth::require_identity,
         ))
-        .layer(RequestBodyLimitLayer::new(16 * 1024));
+        .layer(RequestBodyLimitLayer::new(16 * 1024))
+        // The CLI never needed this — a non-browser client is not subject to
+        // CORS — but the dashboard's own step-up sign-in calls this route
+        // directly now, from the same origin `authenticated` already trusts.
+        .layer(merchant_cors);
 
     let administration = Router::new()
         .route("/v1/admin/payments/{id}/release", post(admin::release))
@@ -287,6 +333,7 @@ mod tests {
             Some(attestor()),
             payer_verification,
             identity,
+            None,
         );
         (state, storage)
     }
@@ -2189,17 +2236,29 @@ mod tests {
             assert_unauthorized(app.clone(), get_request(&bad, "/v1/payments")).await;
         }
 
-        // Key management keeps the fresh-OTP path: a stale token or a
-        // dashboard token is refused, a fresh CLI token is not.
+        // Key management keeps the fresh-OTP path: a stale token is refused
+        // regardless of which merchant client minted it, and a client this
+        // deployment does not recognize is refused even when it is fresh.
         let key_route = |token: &str| get_request(token, "/v1/account/api-key");
-        for refused in [&dashboard, &cli] {
-            let response = app.clone().oneshot(key_route(refused)).await.unwrap();
+        for stale in [&dashboard, &cli] {
+            let response = app.clone().oneshot(key_route(stale)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(
                 json_body(response).await["error"]["code"],
                 "identity_unauthorized"
             );
         }
+        let fresh_other = session_token(&key, "other-client", audience, unix_now());
+        assert_eq!(
+            app.clone()
+                .oneshot(key_route(&fresh_other))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "a fresh token from an unrecognized client is still refused"
+        );
+
         let fresh_cli = session_token(&key, "payday-cli", audience, unix_now());
         let metadata = app.clone().oneshot(key_route(&fresh_cli)).await.unwrap();
         assert_eq!(metadata.status(), StatusCode::OK);
@@ -2207,6 +2266,16 @@ mod tests {
         assert_eq!(metadata["account_id"], account.0.to_string());
         assert!(metadata["key_hint"].is_null());
         assert_eq!(metadata["generation"], 1);
+
+        // The dashboard's own fresh sign-in works exactly the same way, so it
+        // can manage the key without ever holding one for day-to-day use.
+        let fresh_dashboard = session_token(&key, "payday-dashboard", audience, unix_now());
+        let metadata = app.oneshot(key_route(&fresh_dashboard)).await.unwrap();
+        assert_eq!(metadata.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(metadata).await["account_id"],
+            account.0.to_string()
+        );
     }
 
     /// Reserve an upload slot; returns the attachment id and its object key.
@@ -2757,7 +2826,9 @@ mod tests {
             .to_str()
             .unwrap()
             .to_owned();
-        for method in ["GET", "POST", "PATCH", "OPTIONS"] {
+        // Every method a browser client uses, or its preflight fails before
+        // the request is ever made.
+        for method in ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"] {
             assert!(methods.contains(method), "{methods}");
         }
         let allowed_headers = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
@@ -2815,6 +2886,419 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn an_issuer_identity_proves_its_contact_mailbox_before_it_counts(pool: PgPool) {
+        let (app, tenant) = app_with_payer_verification(pool.clone()).await;
+
+        let created = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/issuers",
+                &json!({"name": "Acme Inc.", "contact_email": "Billing@Acme.example"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            created["contact_email"], "billing@acme.example",
+            "the address is normalized on the way in"
+        );
+        assert_eq!(created["email_verified"], false);
+        assert!(created["payout_addresses"].as_array().unwrap().is_empty());
+
+        // One name per account, so two identities are never the same row to a
+        // merchant reading a list.
+        for taken in ["Acme Inc.", "acme inc.", "  ACME INC.  "] {
+            let refused = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    "/v1/issuers",
+                    &json!({"name": taken, "contact_email": "other@acme.example"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::CONFLICT, "{taken}");
+            assert_eq!(
+                json_body(refused).await["error"]["code"],
+                "issuer_name_taken"
+            );
+        }
+
+        // The address is the stored one; nothing in the request names it.
+        let started = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/issuers/{id}/verify/email/start"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            json_body(started).await["contact_email"],
+            "billing@acme.example"
+        );
+        assert_eq!(
+            tenant.started.lock().unwrap().as_slice(),
+            ["billing@acme.example"]
+        );
+
+        // One code per identity per minute, whoever asks.
+        let again = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/issuers/{id}/verify/email/start"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            json_body(again).await["error"]["code"],
+            "otp_resend_cooldown"
+        );
+
+        let wrong = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/issuers/{id}/verify/email/confirm"),
+                &json!({"otp": "000000"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(wrong).await["error"]["code"], "otp_invalid");
+
+        let confirmed = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/issuers/{id}/verify/email/confirm"),
+                &json!({"otp": OTP}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        let confirmed = json_body(confirmed).await;
+        assert_eq!(confirmed["email_verified"], true);
+        assert!(confirmed["email_verified_at"].is_string());
+
+        // Once proven there is nothing left to send or confirm.
+        let spent = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/issuers/{id}/verify/email/start"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(spent.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(spent).await["error"]["code"],
+            "issuer_email_already_verified"
+        );
+
+        // Moving the mailbox is a new claim, and starts unproven.
+        let moved = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                KEY,
+                &format!("/v1/issuers/{id}"),
+                &json!({"name": "Acme Inc.", "contact_email": "support@acme.example"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json_body(moved).await["email_verified"], false);
+
+        // Nobody else's identity, listed or fetched.
+        let theirs = other_account(&pool, "payday_live_ffffffffffffffffffffffffffffffff").await;
+        let _ = theirs;
+        let foreign = app
+            .clone()
+            .oneshot(get_request(
+                "payday_live_ffffffffffffffffffffffffffffffff",
+                &format!("/v1/issuers/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(foreign).await["error"]["code"],
+            "issuer_not_found"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn payout_addresses_are_saved_once_and_attached_to_identities(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let wallet = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
+        let checksummed = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+        const OTHER_WALLET: &str = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
+        let saved = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/payout-addresses",
+                &json!({"address": wallet, "label": "Treasury"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::CREATED);
+        let saved = json_body(saved).await;
+        assert_eq!(
+            saved["address"], checksummed,
+            "stored EIP-55 whatever case it arrived in"
+        );
+        let address_id = saved["id"].as_str().unwrap().to_owned();
+
+        // The same wallet again is the same row, not a second one.
+        let repeat = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/payout-addresses",
+                &json!({"address": checksummed}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json_body(repeat).await["id"], address_id);
+        let listed = app
+            .clone()
+            .oneshot(get_request(KEY, "/v1/payout-addresses"))
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(listed).await["payout_addresses"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "saving the same wallet twice is one row"
+        );
+
+        let rejected = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/payout-addresses",
+                &json!({"address": "0xnope"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+        // A label is a short handle, not free text.
+        for label in [
+            "This label is far too long to be one",
+            "-leading",
+            "semi;colon",
+            "emoji 🙂",
+        ] {
+            let refused = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    "/v1/payout-addresses",
+                    &json!({"address": OTHER_WALLET, "label": label}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{label}");
+        }
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/payout-addresses",
+                &json!({"address": OTHER_WALLET, "label": "Ops (EU) & co."}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::CREATED);
+
+        let issuer = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    "/v1/issuers",
+                    &json!({"name": "Acme", "contact_email": "billing@acme.example"}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let issuer_id = issuer["id"].as_str().unwrap().to_owned();
+
+        let attached = app
+            .clone()
+            .oneshot(json_request(
+                "PUT",
+                KEY,
+                &format!("/v1/issuers/{issuer_id}/payout-addresses"),
+                &json!({"payout_address_ids": [address_id]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(attached.status(), StatusCode::OK);
+        let attached = json_body(attached).await;
+        assert_eq!(attached["payout_addresses"][0]["address"], checksummed);
+
+        // An id that is not this account's reads as a missing address.
+        let stranger = app
+            .clone()
+            .oneshot(json_request(
+                "PUT",
+                KEY,
+                &format!("/v1/issuers/{issuer_id}/payout-addresses"),
+                &json!({"payout_address_ids": [Uuid::now_v7().to_string()]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stranger.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(stranger).await["error"]["code"],
+            "payout_address_not_found"
+        );
+
+        // A request issued under the identity keeps the link, and the link
+        // survives the identity being renamed.
+        let issued = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "issuer-link", &{
+                    let mut body = valid_body();
+                    body["issuer_id"] = json!(issuer_id);
+                    body
+                }))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(issued["issuer_id"], issuer_id);
+
+        let renamed = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                KEY,
+                &format!("/v1/issuers/{issuer_id}"),
+                &json!({"name": "Acme GmbH", "contact_email": "billing@acme.example"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json_body(renamed).await["name"], "Acme GmbH");
+        let after = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/payments/{}", issued["id"].as_str().unwrap()),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(after["issuer_id"], issuer_id, "the link is unchanged");
+        assert_eq!(
+            after["issuer"]["name"], "Acme",
+            "and the document still says what it said when issued"
+        );
+
+        // An identity that history refers to cannot be deleted out from under it.
+        let refused = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/issuers/{issuer_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(refused).await["error"]["code"], "issuer_in_use");
+
+        // A request is findable by the identity it was issued under, by the
+        // customer it is billed to, and by where its verification stands —
+        // three separate facts, three separate filters.
+        let listed = |query: &str| get_request(KEY, &format!("/v1/payments?{query}"));
+        for (query, expected) in [
+            (format!("issuer_id={issuer_id}"), 1),
+            (format!("issuer_id={}", Uuid::now_v7()), 0),
+            ("verification=not_required".to_string(), 1),
+            ("verification=verified".to_string(), 0),
+        ] {
+            let page = json_body(app.clone().oneshot(listed(&query)).await.unwrap()).await;
+            assert_eq!(
+                page["payments"].as_array().unwrap().len(),
+                expected,
+                "{query}"
+            );
+        }
+        let refused = app
+            .clone()
+            .oneshot(listed("verification=nonsense"))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+        // The listing carries each identity's addresses with it.
+        let page = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, "/v1/issuers"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(page["issuers"][0]["payout_addresses"][0]["id"], address_id);
+
+        // Deleting the wallet takes its associations with it.
+        let removed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/payout-addresses/{address_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        let after = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/issuers/{issuer_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(after["payout_addresses"].as_array().unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn customers_are_created_listed_updated_and_scoped_to_the_account(pool: PgPool) {
         let app = app(pool.clone()).await;
         let post = |body: Value| json_request("POST", KEY, "/v1/customers", &body);
@@ -2852,7 +3336,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.status(), StatusCode::OK);
-        assert_eq!(json_body(fetched).await["name"], "Globex");
+        let fetched = json_body(fetched).await;
+        assert_eq!(fetched["name"], "Globex");
+        // Only `get` carries stats, and a customer with no invoices yet reads
+        // as zero rather than null.
+        assert_eq!(fetched["stats"]["request_count"], 0);
+        assert_eq!(fetched["stats"]["collected_base_units"], "0");
+        assert_eq!(fetched["stats"]["pending_base_units"], "0");
 
         // Update replaces every editable field: the omitted email clears.
         let updated = app

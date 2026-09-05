@@ -50,6 +50,13 @@ export interface CreatePayment {
   bill_to: Party;
   payer_policy: PayerPolicy;
   customer_id?: string;
+  /**
+   * The saved issuer identity this is issued under. `issuer` above is still
+   * the snapshot the document carries and what the address commits to; this
+   * only records which identity it came from, and keeps pointing at it after
+   * that identity is renamed or moved to another mailbox.
+   */
+  issuer_id?: string;
   notes?: string;
   heading?: string;
   reference?: string;
@@ -98,6 +105,8 @@ export interface Payment {
   heading: string | null;
   reference: string | null;
   customer_id: string | null;
+  /** The issuer identity it was issued under; immutable once issued. */
+  issuer_id: string | null;
   metadata: Record<string, JsonValue>;
   /** Full policy including assertions; merchant-only, never on the payer route. */
   payer_policy: PayerPolicy;
@@ -276,6 +285,7 @@ export interface PaymentSummary {
   metadata: Record<string, JsonValue>;
   payer_policy_mode: PayerPolicyMode;
   customer_id: string | null;
+  issuer_id: string | null;
   has_attachment: boolean;
   verification_completed_at: string | null;
   likely_unsolicited_at: string | null;
@@ -285,13 +295,70 @@ export interface PaymentSummary {
   received: string;
   cancellation_requested_at: string | null;
 }
-export interface ListPaymentsParams { starting_after?: string; status?: PaymentStatus; reference?: string; limit?: number }
+/** Verification is a separate fact from the payment's status, so it filters separately. */
+export type VerificationFilter = "not_required" | "pending" | "verified" | "likely_unsolicited";
+export interface ListPaymentsParams {
+  starting_after?: string;
+  status?: PaymentStatus;
+  reference?: string;
+  /** Only requests billed to this customer. */
+  customer_id?: string;
+  /** Only requests issued under this identity. */
+  issuer_id?: string;
+  verification?: VerificationFilter;
+  limit?: number;
+}
 export interface PaymentPage { payments: PaymentSummary[]; next_cursor: string | null }
 export interface Transfer {
   transaction_hash: string; explorer_url: string | null; sender: string; amount: string; amount_base_units: string;
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
 }
 export interface CancelPaymentResponse { payment: Payment; advisory: string }
+/** Internal: the dashboard onboarding walkthrough's one real demo transfer. */
+export interface OnboardingPaymentResponse { payer_session: string; tx_hash: string }
+
+/** A saved payout wallet, EIP-55 checksummed and unique per account. */
+export interface PayoutAddress {
+  id: string;
+  address: string;
+  label: string | null;
+  created_at: string;
+}
+
+/**
+ * A saved issuer identity: the party an invoice is issued under, its contact
+ * mailbox, and the wallets it may settle to. Issuance is unchanged — a payment
+ * still carries its own `issuer` and `payout_address` snapshot — so editing an
+ * identity never touches an invoice already issued.
+ */
+export interface Issuer {
+  id: string;
+  name: string;
+  contact_email: string;
+  details: string | null;
+  /** Whether the contact mailbox was proven with an emailed code. */
+  email_verified: boolean;
+  email_verified_at: string | null;
+  /** In association order; the first is the sensible default. */
+  payout_addresses: PayoutAddress[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateIssuer {
+  name: string;
+  contact_email: string;
+  details?: string;
+}
+export interface ListIssuersParams { starting_after?: string; limit?: number }
+export interface IssuerPage { issuers: Issuer[]; next_cursor: string | null }
+/** Where the code went, and when another may be asked for. */
+export interface StartIssuerEmailVerification {
+  contact_email: string;
+  resend_available_at: string;
+}
+export interface CreatePayoutAddress { address: string; label?: string }
+export interface PayoutAddressList { payout_addresses: PayoutAddress[] }
 
 export interface Customer {
   id: string;
@@ -306,6 +373,16 @@ export interface CreateCustomer { name: string; email?: string; details?: string
 export interface UpdateCustomer { name: string; email?: string | null; details?: string | null }
 export interface ListCustomersParams { starting_after?: string; limit?: number }
 export interface CustomerPage { customers: Customer[]; next_cursor: string | null }
+/** Base units, like a payment's own `amount_base_units` — scale for display. */
+export interface CustomerStats {
+  request_count: number;
+  collected_base_units: string;
+  pending_base_units: string;
+}
+/** Only `customers.get` carries stats; a list of many would mean one aggregate query per row. */
+export interface CustomerDetail extends Customer {
+  stats: CustomerStats;
+}
 
 /** A presigned slot to PUT one PDF into; `headers` must be sent verbatim with the PUT. */
 export interface AttachmentUpload {
@@ -414,6 +491,25 @@ export interface DeliveryAttempt {
 export interface WebhookDelivery {
   id: string; event_id: string; endpoint_id: string; state: string; attempt_count: number;
   next_attempt_at: string; delivered_at: string | null; attempts: DeliveryAttempt[];
+}
+
+/** Key state, never the key itself: only `account.issueApiKey` ever returns the raw value. */
+export interface AccountMetadata {
+  account_id: string;
+  /** e.g. `"…aB3f9Q"` — the key's last few characters, or `null` with no active key. */
+  key_hint: string | null;
+  generation: number;
+  created_at: string;
+  rotated_at: string | null;
+  /** Set for 24 hours after a rotation, while the replaced key still authenticates. */
+  previous_key_expires_at: string | null;
+  revoked_at: string | null;
+}
+export interface IssuedApiKey {
+  /** Shown once. Nothing later, including `account.get`, can return it again. */
+  api_key: string;
+  generation: number;
+  replaced_previous_key: boolean;
 }
 
 interface PaydayClientCommonOptions {
@@ -562,6 +658,14 @@ export class PaydayClient {
       this.request(`/v1/payments${query(params)}`),
     cancel: (id: string): Promise<CancelPaymentResponse> =>
       this.request(`/v1/payments/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+    /**
+     * Internal: the dashboard onboarding walkthrough's one real demo
+     * transfer and verification. Refuses `409 onboarding_payment_not_eligible`
+     * for anything not addressed to Payday's own onboarding mailbox — not a
+     * general merchant feature.
+     */
+    onboardingPayment: (id: string): Promise<OnboardingPaymentResponse> =>
+      this.request(`/v1/payments/${encodeURIComponent(id)}/onboarding-payment`, { method: "POST" }),
     transfers: (id: string): Promise<Transfer[]> =>
       this.request(`/v1/payments/${encodeURIComponent(id)}/transfers`),
     /** The invoice's PDF attachment with a short-lived `download_url`. */
@@ -590,12 +694,61 @@ export class PaydayClient {
   readonly customers = {
     create: (customer: CreateCustomer): Promise<Customer> =>
       this.request("/v1/customers", { method: "POST", body: customer }),
-    get: (id: string): Promise<Customer> =>
+    get: (id: string): Promise<CustomerDetail> =>
       this.request(`/v1/customers/${encodeURIComponent(id)}`),
     list: (params: ListCustomersParams = {}): Promise<CustomerPage> =>
       this.request(`/v1/customers${query(params)}`),
     update: (id: string, customer: UpdateCustomer): Promise<Customer> =>
       this.request(`/v1/customers/${encodeURIComponent(id)}`, { method: "PATCH", body: customer }),
+  };
+
+  /**
+   * Saved issuer identities. An identity is a convenience for whoever issues:
+   * `payments.create` still takes the party and the payout address inline and
+   * snapshots them, so nothing here can change an invoice already issued. The
+   * contact mailbox is the exception worth proving — payers are told to write
+   * to it — and it is proven with the same emailed code the dashboard signs in
+   * with.
+   */
+  readonly issuers = {
+    create: (issuer: CreateIssuer): Promise<Issuer> =>
+      this.request("/v1/issuers", { method: "POST", body: issuer }),
+    get: (id: string): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}`),
+    list: (params: ListIssuersParams = {}): Promise<IssuerPage> =>
+      this.request(`/v1/issuers${query(params)}`),
+    /** Full replacement; a different `contact_email` clears the verification. */
+    update: (id: string, issuer: CreateIssuer): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "PATCH", body: issuer }),
+    remove: (id: string): Promise<void> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    /**
+     * Emails a code to the identity's stored contact address — the request
+     * never names a mailbox. One code per identity per minute
+     * (`otp_resend_cooldown`).
+     */
+    startEmailVerification: (id: string): Promise<StartIssuerEmailVerification> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}/verify/email/start`, { method: "POST" }),
+    confirmEmailVerification: (id: string, otp: string): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}/verify/email/confirm`, {
+        method: "POST",
+        body: { otp },
+      }),
+    /** Replaces the whole set of addresses this identity may settle to. */
+    setPayoutAddresses: (id: string, payoutAddressIds: string[]): Promise<Issuer> =>
+      this.request(`/v1/issuers/${encodeURIComponent(id)}/payout-addresses`, {
+        method: "PUT",
+        body: { payout_address_ids: payoutAddressIds },
+      }),
+  };
+
+  readonly payoutAddresses = {
+    /** Saving a wallet you already saved returns the row you have. */
+    create: (input: CreatePayoutAddress): Promise<PayoutAddress> =>
+      this.request("/v1/payout-addresses", { method: "POST", body: input }),
+    list: (): Promise<PayoutAddressList> => this.request("/v1/payout-addresses"),
+    remove: (id: string): Promise<void> =>
+      this.request(`/v1/payout-addresses/${encodeURIComponent(id)}`, { method: "DELETE" }),
   };
 
   readonly attachments = {
@@ -658,16 +811,51 @@ export class PaydayClient {
 
   status(): Promise<ServiceStatus> { return this.request("/v1/status"); }
 
+  /**
+   * The signed-in account: key metadata, never the raw key. `get` works with
+   * this client's own credential; the two mutations do not, because whoever
+   * can read an account is not automatically allowed to mint a live key for
+   * it. Each takes a bearer token of its own — a dashboard's fresh sign-in, or
+   * the CLI's — that must be a *fresh, single-use* email-OTP authentication,
+   * completed in roughly the last five minutes and not already spent on
+   * another issue or revoke. Pass `expectedGeneration` from the account's
+   * current `generation` (omit only when provisioning the very first key for
+   * an identity that has never held one); a mismatch throws `PaydayError`
+   * with code `api_key_generation_conflict`, meaning something else changed
+   * the key first — re-read the account and, if the merchant still wants to
+   * proceed, retry with the generation that came back.
+   */
+  readonly account = {
+    get: (): Promise<AccountMetadata> => this.request("/v1/account"),
+    /** Issues a first key, or rotates the current one; the previous key, if any, keeps working for 24 hours. */
+    issueApiKey: (token: string, expectedGeneration?: number | null): Promise<IssuedApiKey> =>
+      this.requestAs(token, "/v1/account/api-key", {
+        method: "POST",
+        body: { expected_generation: expectedGeneration ?? null },
+      }),
+    /** Immediately invalidates the current key and any key still in its rotation grace window. */
+    revokeApiKey: (token: string, expectedGeneration: number): Promise<void> =>
+      this.requestAs(token, "/v1/account/api-key", {
+        method: "DELETE",
+        body: { expected_generation: expectedGeneration },
+      }),
+  };
+
   private request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string; signal?: AbortSignal } = {}): Promise<T> {
     return request<T>(this.fetcher, this.baseUrl, path, this.authorized(options));
+  }
+
+  /** Like {@link request}, but bearing a one-off token rather than this client's own credential. */
+  private requestAs<T>(token: string, path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+    return request<T>(this.fetcher, this.baseUrl, path, this.authorized(options, token));
   }
 
   private send(path: string, options: { method?: string; signal?: AbortSignal; accept?: string } = {}): Promise<Response> {
     return send(this.fetcher, this.baseUrl, path, this.authorized(options));
   }
 
-  private authorized(options: { method?: string; body?: unknown; idempotencyKey?: string; signal?: AbortSignal; accept?: string }): RequestOptions {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.credential}` };
+  private authorized(options: { method?: string; body?: unknown; idempotencyKey?: string; signal?: AbortSignal; accept?: string }, credential: string = this.credential): RequestOptions {
+    const headers: Record<string, string> = { Authorization: `Bearer ${credential}` };
     if (options.idempotencyKey !== undefined) headers["Idempotency-Key"] = options.idempotencyKey;
     return {
       headers,

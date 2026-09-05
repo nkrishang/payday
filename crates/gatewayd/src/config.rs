@@ -25,6 +25,11 @@ pub struct Config {
     /// status-only mode, which serves neither attachments nor proofs.
     attachments: Option<AttachmentConfig>,
     attestation: Option<AttestationSignerConfig>,
+    /// The wallet that pays the onboarding walkthrough's one self-issued
+    /// deposit request; `None` leaves that endpoint unavailable. Unlike
+    /// `attestation`, this stays optional in every mode — production may
+    /// legitimately never fund this feature.
+    onboarding_payer: Option<OnboardingPayerSignerConfig>,
     /// The payer audience and the payer-reference key; both `None` leaves
     /// the email verification routes unavailable.
     payer_verification: Option<PayerVerificationConfig>,
@@ -163,6 +168,12 @@ impl Config {
             .unwrap_or_else(|message| panic!("{message}"))
         });
 
+        let onboarding_payer = onboarding_payer_signer(
+            std::env::var("PAYDAY_ONBOARDING_PAYER_KEY").ok(),
+            std::env::var("PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID").ok(),
+        )
+        .unwrap_or_else(|message| panic!("{message}"));
+
         let api_key_prefix =
             std::env::var("PAYDAY_API_KEY_PREFIX").unwrap_or_else(|_| "payday_live_".into());
         validate_api_key_prefix(&api_key_prefix).unwrap_or_else(|message| panic!("{message}"));
@@ -187,6 +198,7 @@ impl Config {
             settlement,
             attachments,
             attestation,
+            onboarding_payer,
             payer_verification,
             didit,
             public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
@@ -253,6 +265,12 @@ impl Config {
     /// The Proof of Payment attestation key; absent in status-only mode.
     pub fn attestation(&self) -> Option<&AttestationSignerConfig> {
         self.attestation.as_ref()
+    }
+
+    /// The onboarding demo payment's signing wallet; absent unless a
+    /// deployment has deliberately funded and configured one.
+    pub fn onboarding_payer(&self) -> Option<&OnboardingPayerSignerConfig> {
+        self.onboarding_payer.as_ref()
     }
 
     /// The payer Auth0 audience and payer-reference key; absent when email
@@ -329,6 +347,25 @@ fn attestation_signer(
         (None, None) => Err(
             "exactly one of PAYDAY_ATTESTATION_SIGNER_KEY or PAYDAY_ATTESTATION_KMS_KEY_ID must be set",
         ),
+    }
+}
+
+/// At most one onboarding payer signing source, same rule as attestation —
+/// but unlike attestation, having *neither* set is the expected production
+/// default, not a deployment mistake.
+fn onboarding_payer_signer(
+    signer_key: Option<String>,
+    kms_key_id: Option<String>,
+) -> Result<Option<OnboardingPayerSignerConfig>, &'static str> {
+    let signer_key = signer_key.filter(|value| !value.trim().is_empty());
+    let kms_key_id = kms_key_id.filter(|value| !value.trim().is_empty());
+    match (signer_key, kms_key_id) {
+        (Some(key), None) => Ok(Some(OnboardingPayerSignerConfig::Local(key))),
+        (None, Some(key_id)) => Ok(Some(OnboardingPayerSignerConfig::AwsKms(key_id))),
+        (Some(_), Some(_)) => Err(
+            "PAYDAY_ONBOARDING_PAYER_KEY and PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID are mutually exclusive",
+        ),
+        (None, None) => Ok(None),
     }
 }
 
@@ -410,6 +447,12 @@ pub enum AttestationSignerConfig {
     AwsKms(String),
 }
 
+/// Which key signs the onboarding walkthrough's one demo transfer.
+pub enum OnboardingPayerSignerConfig {
+    Local(String),
+    AwsKms(String),
+}
+
 /// The contracts this build must find on the chain and the platform recovery
 /// wallet it stamps on every invoice.
 pub struct SettlementConfig {
@@ -473,6 +516,24 @@ mod tests {
         assert!(attestation_signer(None, None).is_err());
         assert!(attestation_signer(Some(" ".into()), Some("".into())).is_err());
         assert!(attestation_signer(Some("0xabc".into()), Some("arn".into())).is_err());
+    }
+
+    #[test]
+    fn onboarding_payer_signer_is_optional_but_not_ambiguous() {
+        assert!(matches!(
+            onboarding_payer_signer(Some("0xabc".into()), None),
+            Ok(Some(OnboardingPayerSignerConfig::Local(key))) if key == "0xabc"
+        ));
+        assert!(matches!(
+            onboarding_payer_signer(None, Some("arn:aws:kms:key".into())),
+            Ok(Some(OnboardingPayerSignerConfig::AwsKms(id))) if id == "arn:aws:kms:key"
+        ));
+        assert!(matches!(onboarding_payer_signer(None, None), Ok(None)));
+        assert!(matches!(
+            onboarding_payer_signer(Some(" ".into()), Some("".into())),
+            Ok(None)
+        ));
+        assert!(onboarding_payer_signer(Some("0xabc".into()), Some("arn".into())).is_err());
     }
 
     #[test]

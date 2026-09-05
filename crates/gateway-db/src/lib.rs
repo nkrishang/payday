@@ -4,7 +4,9 @@ mod cursor;
 mod customers;
 mod identity;
 mod invoices;
+mod issuers;
 mod notifications;
+mod onboarding;
 mod proofs;
 mod sweeps;
 mod verifications;
@@ -28,11 +30,16 @@ pub use identity::{
     VerificationRepository, poll_backoff,
 };
 pub use invoices::{
-    CreateInvoiceInput, DbIndexerFreshness, DbInvoice, DbInvoiceError, DbInvoiceTransfer,
-    InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository, IssuanceRequest,
-    PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
+    CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice, DbInvoiceError,
+    DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository,
+    IssuanceRequest, PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
+};
+pub use issuers::{
+    CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,
+    ISSUER_NAME_UNIQUE, IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
 };
 pub use notifications::{NotificationEvent, NotificationRepository};
+pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;

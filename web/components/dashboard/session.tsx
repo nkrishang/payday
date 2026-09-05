@@ -16,8 +16,13 @@ import {
 import { describeError } from "@/lib/attachment-upload";
 import { createMerchantClient, merchantSession } from "@/lib/merchant-payday";
 
-export const LOGIN_PATH = "/dashboard/login";
-export const HOME_PATH = "/dashboard/invoices";
+export const HOME_PATH = "/dashboard";
+/**
+ * Where anyone without a session goes. There is no dashboard login page: the
+ * landing page's "Start Building" is the only way in, and it is the same
+ * exchange, so an expired or absent session lands where a new merchant does.
+ */
+export const SIGNED_OUT_PATH = "/";
 
 export interface Merchant {
   client: PaydayClient;
@@ -52,12 +57,12 @@ export function MerchantGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Re-read rather than trust the rendered value: the first commit after
     // hydration still carries the server snapshot.
-    if (merchantSession.get() === null) router.replace(LOGIN_PATH);
+    if (merchantSession.get() === null) router.replace(SIGNED_OUT_PATH);
   }, [accessToken, router]);
 
   const signOut = useCallback(() => {
     merchantSession.clear();
-    router.replace(LOGIN_PATH);
+    router.replace(SIGNED_OUT_PATH);
   }, [router]);
 
   const value = useMemo<Merchant | null>(
@@ -94,7 +99,7 @@ export interface Resource<T> {
 /**
  * Loads one thing with the merchant client. `key` names what is being loaded
  * (an id, a filter, a cursor) and a change re-fetches. A 401 means the token
- * expired: the session ends and the login page takes over, rather than every
+ * expired: the session ends and the landing page takes over, rather than every
  * page handling it.
  */
 export function useResource<T>(

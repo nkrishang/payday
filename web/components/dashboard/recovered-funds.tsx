@@ -23,7 +23,7 @@ export function RecoveredFunds({ payment }: { payment: Payment }) {
   return (
     <section
       aria-labelledby="recovered-funds"
-      className="rounded-[16px] border border-line bg-surface p-5"
+      className="min-w-0 rounded-[16px] border border-line bg-surface p-5"
     >
       <h2 id="recovered-funds" className="text-[13px] font-semibold tracking-tight">
         Recovered funds

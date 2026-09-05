@@ -23,6 +23,11 @@ pub struct CreatePaymentRequest {
     pub bill_to: Party,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customer_id: Option<Uuid>,
+    /// The issuer identity this is issued under. The `issuer` party above is
+    /// still the snapshot the document carries; this only records which saved
+    /// identity it came from, and survives that identity being renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +138,7 @@ pub struct PaymentResponse {
     pub heading: Option<String>,
     pub reference: Option<String>,
     pub customer_id: Option<String>,
+    pub issuer_id: Option<String>,
     /// The complete policy including the merchant's assertions: merchant-only.
     pub payer_policy: PayerPolicy,
     pub attachment: Option<AttachmentDescriptor>,
@@ -373,6 +379,7 @@ pub struct PaymentSummaryResponse {
     pub received: String,
     pub payer_policy_mode: PayerPolicyMode,
     pub customer_id: Option<String>,
+    pub issuer_id: Option<String>,
     pub has_attachment: bool,
     pub verification_completed_at: Option<String>,
     pub likely_unsolicited_at: Option<String>,
@@ -389,6 +396,16 @@ pub struct PaymentListResponse {
 pub struct CancelPaymentResponse {
     pub payment: PaymentResponse,
     pub advisory: String,
+}
+
+/// The onboarding walkthrough's one real demo transfer: a payer session
+/// already proven to have verified the reserved onboarding mailbox (so the
+/// dashboard can unlock the embedded payer view immediately), and the hash
+/// of the transfer that was just broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingPaymentResponse {
+    pub payer_session: String,
+    pub tx_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,6 +552,7 @@ impl PaymentResponse {
             heading: snapshot.heading,
             reference: snapshot.reference,
             customer_id: None,
+            issuer_id: None,
             payer_policy: snapshot.payer_policy,
             attachment: None,
             verification_completed_at: None,
@@ -733,6 +751,7 @@ mod tests {
             id: payment.id,
             heading: payment.heading,
             bill_to_name: payment.bill_to.name,
+            issuer_id: None,
             reference: None,
             metadata: serde_json::json!({}),
             created_at: String::new(),

@@ -29,6 +29,14 @@ export function CustomerForm({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // Nothing to persist until a field actually differs from what is stored;
+  // an edit that is typed and then undone should not leave Save enabled.
+  const dirty =
+    !customer ||
+    name.trim() !== customer.name ||
+    email.trim() !== (customer.email ?? "") ||
+    details.trim() !== (customer.details ?? "");
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -83,10 +91,10 @@ export function CustomerForm({
         />
       </Field>
       <Problem>{error}</Problem>
-      <div className="flex items-center gap-3">
-        <Button type="submit" size="sm" disabled={busy}>
+      <div className="flex items-center justify-end gap-3">
+        <Button type="submit" size="sm" disabled={busy || !dirty}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-          {customer ? "Save changes" : "Create customer"}
+          {customer ? "Save" : "Create customer"}
         </Button>
         {saved ? (
           <span role="status" className="text-[13px] text-success">

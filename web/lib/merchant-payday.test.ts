@@ -4,6 +4,7 @@ import {
   confirmEmailOtp,
   createMerchantClient,
   merchantSession,
+  sessionEmail,
   startEmailOtp,
 } from "./merchant-payday";
 
@@ -75,7 +76,9 @@ describe("startEmailOtp", () => {
 
 describe("confirmEmailOtp", () => {
   it("exchanges the code for an API-audience token and stores the session", async () => {
-    const mock = mockFetch(() => json({ access_token: "eyJ.dash.token", token_type: "Bearer", expires_in: 300 }));
+    const mock = mockFetch(() =>
+      json({ access_token: "eyJ.dash.token", token_type: "Bearer", expires_in: 300 }),
+    );
     const before = Date.now();
 
     const session = await confirmEmailOtp("merchant@example.com", "123456", mock.fetcher);
@@ -98,7 +101,9 @@ describe("confirmEmailOtp", () => {
   it("reports a wrong code as invalid_grant even when the issuer sends no body", async () => {
     const mock = mockFetch(() => new Response(null, { status: 401 }));
 
-    await expect(confirmEmailOtp("merchant@example.com", "000000", mock.fetcher)).rejects.toMatchObject({
+    await expect(
+      confirmEmailOtp("merchant@example.com", "000000", mock.fetcher),
+    ).rejects.toMatchObject({
       code: "invalid_grant",
       status: 401,
     });
@@ -108,9 +113,9 @@ describe("confirmEmailOtp", () => {
   it("refuses a success response without a token", async () => {
     const mock = mockFetch(() => json({ token_type: "Bearer" }));
 
-    await expect(confirmEmailOtp("merchant@example.com", "123456", mock.fetcher)).rejects.toBeInstanceOf(
-      EmailOtpError,
-    );
+    await expect(
+      confirmEmailOtp("merchant@example.com", "123456", mock.fetcher),
+    ).rejects.toBeInstanceOf(EmailOtpError);
   });
 });
 
@@ -150,6 +155,26 @@ describe("createMerchantClient", () => {
     }
 
     expect(mock.calls[0]?.url).toBe("https://api.example.test/v1/payments");
-    expect((mock.calls[0]?.init.headers as Record<string, string>).Authorization).toBe("Bearer eyJ.dash.token");
+    expect((mock.calls[0]?.init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer eyJ.dash.token",
+    );
+  });
+});
+
+describe("sessionEmail", () => {
+  /** A JWT is three base64url segments; only the middle one is read. */
+  const token = (claims: Record<string, unknown>) =>
+    `header.${btoa(JSON.stringify(claims)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}.signature`;
+
+  it("reads the mailbox out of the identity claim", () => {
+    expect(sessionEmail(token({ "https://api.payday.sh/auth/email": "founder@acme.test" }))).toBe(
+      "founder@acme.test",
+    );
+  });
+
+  it("has no mailbox for a token without the claim, or for one that is not a JWT", () => {
+    expect(sessionEmail(token({ sub: "email|abc" }))).toBeNull();
+    expect(sessionEmail("stub-dashboard-token")).toBeNull();
+    expect(sessionEmail("header.not-base64-json.signature")).toBeNull();
   });
 });

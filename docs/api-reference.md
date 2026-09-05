@@ -276,6 +276,72 @@ rejected.
 `Customer` contains `id`, `name`, `email`, `details`, `created_at`, and
 `updated_at`.
 
+## Issuer identities
+
+An issuer identity is the merchant's own side of an invoice, saved once instead
+of retyped: the party it is issued under, the address payers write to, and the
+wallets it settles to. Issuance is unchanged — `POST /v1/payments` still takes
+`issuer` and `payout_address` inline and snapshots them — so editing an identity
+never reaches an invoice already issued.
+
+Bodies carry `name` (1–255 bytes) and `contact_email` (3–254 bytes, lowercased
+on write) with optional `details`; unknown fields are rejected. A name is unique
+among your identities — case and surrounding space are not a difference — so
+create and update answer `409 issuer_name_taken` for one already used. Contact
+addresses may repeat: two identities can share a support mailbox.
+
+- `POST /v1/issuers` → `201 Issuer`, unverified;
+- `GET /v1/issuers?limit=1..100&starting_after={id}` →
+  `{ "issuers": [Issuer], "next_cursor": null | id }`;
+- `GET /v1/issuers/{id}` → `Issuer`; cross-account IDs are
+  `404 issuer_not_found`;
+- `PATCH /v1/issuers/{id}` with the same body as create → updated `Issuer`. A
+  different `contact_email` clears the verification;
+- `DELETE /v1/issuers/{id}` → `204`, with its payout-address associations.
+
+The contact address is proven before an invoice carries it, because payers are
+told to write to it:
+
+- `POST /v1/issuers/{id}/verify/email/start` → `202 { contact_email,
+  resend_available_at }`. The code goes to the *stored* address; the request
+  never names a mailbox. One code per identity per minute
+  (`429 otp_resend_cooldown`), `409 issuer_email_already_verified` once proven,
+  and `503 verification_unavailable` where no identity provider is configured;
+- `POST /v1/issuers/{id}/verify/email/confirm` with `{ "otp": "123456" }` →
+  `Issuer` with `email_verified`. A wrong, spent, or expired code is
+  `401 otp_invalid`, as is a code confirmed after the address moved.
+
+Payout addresses are account-owned and shared between identities:
+
+- `POST /v1/payout-addresses` with `{ address, label? }` → `201 PayoutAddress`.
+  The address is stored EIP-55 checksummed and once per account: saving one you
+  already hold returns the row you have. `label` is at most 20 characters,
+  starts on a letter or digit, and uses letters, digits, spaces, and
+  `. _ ' & ( ) -`;
+- `GET /v1/payout-addresses` → `{ "payout_addresses": [PayoutAddress] }`;
+- `DELETE /v1/payout-addresses/{id}` → `204`, with every association to it;
+- `PUT /v1/issuers/{id}/payout-addresses` with `{ payout_address_ids: [id] }`
+  replaces the whole set (at most 25). An id that is not yours is
+  `404 payout_address_not_found`.
+
+`GET /v1/payments` filters on `customer_id`, `issuer_id`, and `verification`
+(`not_required`, `pending`, `verified`, or `likely_unsolicited`) alongside
+`status` and `reference`. Verification is a separate parameter because it is a
+separate fact: a gated request can be funded before its payer has verified.
+
+An identity's `id` is the durable handle. `POST /v1/payments` takes it as
+`issuer_id`, stores it immutably beside the issued document, and returns it on
+`Payment` and `PaymentSummary` — so the requests issued under an identity stay
+identifiable after it is renamed, moved to another mailbox, or pointed at
+different wallets. The `issuer` party on the invoice remains the snapshot taken
+at issuance, and is what the attribution hash commits to. Deleting an identity
+that requests were issued under is `409 issuer_in_use`.
+
+`Issuer` contains `id`, `name`, `contact_email`, `details`, `email_verified`,
+`email_verified_at`, `payout_addresses` (in association order), `created_at`,
+and `updated_at`. `PayoutAddress` contains `id`, `address`, `label`, and
+`created_at`.
+
 ## Attachments
 
 One PDF per invoice, at most 5 MiB, uploaded straight to object storage with a
@@ -361,11 +427,11 @@ address, metadata, customer, or policy assertions. JSON responses use
 `Cache-Control: no-store`, and QR requests return `410 payment_not_payable` once
 the address should no longer be presented. They send
 `Access-Control-Allow-Origin: *` for `GET`, so a browser on any origin can build
-a checkout against them. The merchant routes (payments, customers,
-attachments) answer cross-origin requests from exactly one origin: the
-configured web origin (`PAYDAY_PUBLIC_BASE_URL`), where the dashboard lives,
-for `GET`, `POST`, and `PATCH` with the `Authorization`, `Content-Type`,
-`Idempotency-Key`, and `Accept` headers. Any other origin receives no
+a checkout against them. The merchant routes (payments, customers, issuers,
+payout addresses, attachments) answer cross-origin requests from exactly one
+origin: the configured web origin (`PAYDAY_PUBLIC_BASE_URL`), where the
+dashboard lives, for `GET`, `POST`, `PATCH`, `PUT`, and `DELETE` with the
+`Authorization`, `Content-Type`, `Idempotency-Key`, and `Accept` headers. Any other origin receives no
 `Access-Control-Allow-Origin` and its preflight fails; server-side
 integrations are unaffected, and no other route allows cross-origin reads.
 
@@ -519,6 +585,11 @@ binds the same expected-identity hash an automated approval would.
 | `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
 | `payment_not_found` | 404 | Missing or cross-account payment |
 | `customer_not_found` | 404 | Missing or cross-account customer |
+| `issuer_not_found` | 404 | Missing or cross-account issuer identity |
+| `payout_address_not_found` | 404 | Missing or cross-account payout address |
+| `issuer_email_already_verified` | 409 | The contact address is already proven |
+| `issuer_in_use` | 409 | Requests were issued under this identity |
+| `issuer_name_taken` | 409 | Another of your identities already uses this name |
 | `attachment_not_found` | 404 | Missing or cross-account attachment, or the invoice has none |
 | `attachment_scan_pending` | 409 | Malware scan has not reported; retry finalize with backoff |
 | `attachment_rejected` | 422 | Not a clean PDF within limits; upload a new file |

@@ -56,6 +56,37 @@ pub struct CustomerPage {
     next_cursor: Option<Uuid>,
 }
 
+/// How many requests this customer has been billed, how much of that has
+/// actually been confirmed on chain, and how much is still outstanding on
+/// the ones still open. Base units, like an invoice's own
+/// `amount_base_units` — the caller scales for display.
+#[derive(Debug, Serialize)]
+pub struct CustomerStats {
+    request_count: i64,
+    collected_base_units: String,
+    pending_base_units: String,
+}
+
+impl From<gateway_db::CustomerInvoiceStats> for CustomerStats {
+    fn from(row: gateway_db::CustomerInvoiceStats) -> Self {
+        Self {
+            request_count: row.request_count,
+            collected_base_units: row.collected_base_units,
+            pending_base_units: row.pending_base_units,
+        }
+    }
+}
+
+/// Only `get` returns stats: a list of many customers would mean one
+/// aggregate query per row, and the list and the composer's picker need
+/// nothing past the fields on [`CustomerResponse`] itself.
+#[derive(Debug, Serialize)]
+pub struct CustomerDetailResponse {
+    #[serde(flatten)]
+    customer: CustomerResponse,
+    stats: CustomerStats,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
@@ -86,14 +117,18 @@ pub async fn get(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
-) -> Result<Json<CustomerResponse>, ApiError> {
+) -> Result<Json<CustomerDetailResponse>, ApiError> {
     let id = customer_id(&id)?;
-    state
+    let row = state
         .customers
         .get_for_account(account, id)
         .await?
-        .map(|row| Json(row.into()))
-        .ok_or_else(ApiError::customer_not_found)
+        .ok_or_else(ApiError::customer_not_found)?;
+    let stats = state.repo.customer_stats(account, id).await?;
+    Ok(Json(CustomerDetailResponse {
+        customer: row.into(),
+        stats: stats.into(),
+    }))
 }
 
 pub async fn list(

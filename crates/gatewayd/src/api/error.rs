@@ -193,6 +193,46 @@ impl ApiError {
         }
     }
 
+    pub fn issuer_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "issuer_not_found",
+            message: "Issuer identity not found".into(),
+        }
+    }
+
+    pub fn payout_address_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "payout_address_not_found",
+            message: "Payout address not found".into(),
+        }
+    }
+
+    pub fn issuer_name_taken() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_name_taken",
+            message: "Another of your issuer identities already uses this name".into(),
+        }
+    }
+
+    pub fn issuer_in_use() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_in_use",
+            message: "Requests were issued under this identity; it cannot be deleted".into(),
+        }
+    }
+
+    pub fn issuer_email_already_verified() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_email_already_verified",
+            message: "This contact address is already verified".into(),
+        }
+    }
+
     pub fn attachment_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -387,6 +427,34 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "verification_not_started",
             message: "Request a code before confirming one".into(),
+        }
+    }
+
+    /// The deployment has no onboarding payer wallet configured.
+    pub fn onboarding_payment_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "onboarding_payment_unavailable",
+            message: "The onboarding demo payment is not available on this deployment".into(),
+        }
+    }
+
+    /// Bounds the endpoint to the one reserved, self-issued deposit request
+    /// shape — never a general "settle any invoice" affordance.
+    pub fn onboarding_payment_not_eligible() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "onboarding_payment_not_eligible",
+            message: "This payment is not the onboarding walkthrough's demo request".into(),
+        }
+    }
+
+    /// At most one onboarding demo payment per account, ever.
+    pub fn onboarding_payment_already_claimed() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "onboarding_payment_already_claimed",
+            message: "This account has already completed its onboarding demo payment".into(),
         }
     }
 

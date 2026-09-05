@@ -1,9 +1,10 @@
-import type { Metadata } from "next";
-import { InvoiceDetail } from "@/components/dashboard/invoice-detail";
+import { redirect } from "next/navigation";
 
-export const metadata: Metadata = { title: "Invoice" };
-
-export default async function InvoicePage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  return <InvoiceDetail id={id} />;
+/**
+ * A request is read in its own row on the dashboard now, not on a page of its
+ * own. Links already sent out — from the CLI, from a colleague — still land
+ * somewhere useful.
+ */
+export default function InvoiceDetailPage() {
+  redirect("/dashboard");
 }

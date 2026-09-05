@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -37,6 +37,22 @@ const AUDIENCE: &str = "payday-api-local";
 const PAYER_CLIENT_ID: &str = "payday-payer-local";
 const PAYER_AUDIENCE: &str = "payday-payer-local";
 
+/// How long an emailed code stays usable, matching the window Auth0's
+/// passwordless connection is configured for in `auth0/passwordless.tf`. The
+/// dashboard counts the same five minutes down before it offers another code,
+/// so a code is never dead on the page while it still works here, or the
+/// reverse.
+const EMAIL_OTP_TTL: Duration = Duration::from_secs(300);
+
+/// How long an issued access token stays valid, matching Auth0's default
+/// lifetime for a resource server. It is the dashboard session's whole length —
+/// the API accepts the token until it expires and there is nothing to refresh
+/// it with — so a short one here does not make development safer, it just signs
+/// a merchant out mid-invoice. The freshness the account routes insist on is a
+/// separate window (`AUTHENTICATION_MAX_AGE` in gatewayd) measured from the
+/// token's own `authenticated_at`, and is unaffected by this.
+const ACCESS_TOKEN_TTL: u64 = 24 * 60 * 60;
+
 /// The audience a client may request, if any. A merchant client cannot mint
 /// a payer token and the payer client cannot reach the merchant API.
 fn audience_for(client_id: &str) -> Option<&'static str> {
@@ -58,7 +74,14 @@ struct AppState {
     // Auth0 passwordless transactions belong to the application that started
     // them. Keep the audience in the key as well so this remains safe if a
     // local client is ever allowed to address more than one API.
-    otps: Arc<Mutex<HashMap<(String, String, String), String>>>,
+    otps: Arc<Mutex<HashMap<(String, String, String), PendingOtp>>>,
+    otp_ttl: Duration,
+}
+
+/// One emailed code, and the moment it stops being one.
+struct PendingOtp {
+    code: String,
+    expires_at: Instant,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +148,7 @@ fn new_state(issuer: String) -> AppState {
         ),
         jwks,
         otps: Arc::new(Mutex::new(HashMap::new())),
+        otp_ttl: EMAIL_OTP_TTL,
     }
 }
 
@@ -181,7 +205,10 @@ async fn start(
             audience.to_owned(),
             request.email.to_ascii_lowercase(),
         ),
-        otp.clone(),
+        PendingOtp {
+            code: otp.clone(),
+            expires_at: Instant::now() + state.otp_ttl,
+        },
     );
     eprintln!("DEV IDENTITY OTP {} {}", request.email, otp);
     Ok(Json(serde_json::json!({})))
@@ -198,7 +225,8 @@ async fn token(
         return Err(StatusCode::BAD_REQUEST);
     }
     // Like Auth0, a wrong code is refused without spending the right one;
-    // the right one is spent on use.
+    // the right one is spent on use, and one past its window is spent whether
+    // or not the digits were right — an expired code is not a code.
     let username = request.username.to_ascii_lowercase();
     let otp_key = (
         request.client_id.clone(),
@@ -206,11 +234,21 @@ async fn token(
         username.clone(),
     );
     let mut otps = state.otps.lock().await;
-    if otps.get(&otp_key) != Some(&request.otp) {
+    let now = Instant::now();
+    let (accepted, expired) = match otps.get(&otp_key) {
+        None => (false, false),
+        Some(pending) => (
+            pending.expires_at > now && pending.code == request.otp,
+            pending.expires_at <= now,
+        ),
+    };
+    if accepted || expired {
+        otps.remove(&otp_key);
+    }
+    drop(otps);
+    if !accepted {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    otps.remove(&otp_key);
-    drop(otps);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -221,7 +259,7 @@ async fn token(
         sub: format!("email|{subject}"),
         iss: state.issuer.clone(),
         aud: request.audience,
-        exp: now + 300,
+        exp: now + ACCESS_TOKEN_TTL,
         azp: request.client_id.clone(),
         method: "email_otp",
         client_id: request.client_id,
@@ -233,9 +271,11 @@ async fn token(
     header.kid = Some(state.kid.clone());
     let access_token = encode(&header, &claims, &state.encoding_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(
-        serde_json::json!({"access_token": access_token, "token_type": "Bearer", "expires_in": 300}),
-    ))
+    Ok(Json(serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": ACCESS_TOKEN_TTL,
+    })))
 }
 
 async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -292,6 +332,7 @@ mod tests {
                 email.to_ascii_lowercase(),
             ))
             .unwrap()
+            .code
             .clone()
     }
 
@@ -358,6 +399,48 @@ mod tests {
         assert_eq!(
             claims["https://api.payday.sh/auth/client_id"],
             CLI_CLIENT_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_code_is_refused_and_cannot_be_retried() {
+        // Nothing here sleeps for five minutes: the window is state, so a
+        // provider whose codes are born expired proves the same rule.
+        let mut state = new_state("http://127.0.0.1:3001".into());
+        state.otp_ttl = Duration::ZERO;
+        let otp = issue_otp(&state, DASHBOARD_CLIENT_ID, "merchant@example.com").await;
+        let request = || token_request(DASHBOARD_CLIENT_ID, "merchant@example.com", &otp);
+
+        assert_eq!(
+            token(State(state.clone()), Json(request()))
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+        // And it is gone rather than merely refused, so a later attempt with
+        // the same digits cannot succeed either.
+        assert!(state.otps.lock().await.is_empty());
+        assert_eq!(
+            token(State(state.clone()), Json(request()))
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // A fresh code from the same mailbox still works.
+        state.otp_ttl = EMAIL_OTP_TTL;
+        let fresh = issue_otp(&state, DASHBOARD_CLIENT_ID, "merchant@example.com").await;
+        assert!(
+            token(
+                State(state.clone()),
+                Json(token_request(
+                    DASHBOARD_CLIENT_ID,
+                    "merchant@example.com",
+                    &fresh,
+                )),
+            )
+            .await
+            .is_ok()
         );
     }
 

@@ -157,16 +157,24 @@ impl AccountRepository {
             }
 
             let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
-            let generation = sqlx::query_scalar(
+            // A dashboard-provisioned identity already has this row, keyless,
+            // before its first key: `id = $3` still matches and takes this
+            // branch, so "the row already existed" cannot stand in for
+            // "a key already existed". Only a real previous key gets a grace
+            // window, rotated_at, or an honest `replaced_previous_key`; the
+            // `CASE` already tells the two apart, so read it back rather than
+            // asserting `true` unconditionally.
+            let (generation, replaced_previous_key) = sqlx::query_as::<_, (i64, bool)>(
                 r#"UPDATE accounts
                    SET previous_api_key_hash = api_key_hash,
                        previous_api_key_expires_at = CASE WHEN api_key_hash IS NULL THEN NULL
                            ELSE now() + make_interval(hours => $4) END,
                        api_key_hash = $1, api_key_hint = $2, key_created_at = now(),
-                       api_key_generation = api_key_generation + 1, key_rotated_at = now(),
+                       api_key_generation = api_key_generation + 1,
+                       key_rotated_at = CASE WHEN api_key_hash IS NULL THEN key_rotated_at ELSE now() END,
                        key_revoked_at = NULL, email = COALESCE($5, email)
                    WHERE id = $3
-                   RETURNING api_key_generation"#,
+                   RETURNING api_key_generation, previous_api_key_expires_at IS NOT NULL"#,
             )
             .bind(hash.as_slice())
             .bind(key_hint(key))
@@ -179,7 +187,7 @@ impl AccountRepository {
             return Ok(IssuedApiKey {
                 account_id: AccountId(account_id),
                 generation,
-                replaced_previous_key: true,
+                replaced_previous_key,
             });
         }
 
@@ -629,15 +637,26 @@ mod tests {
             .unwrap();
         assert_eq!(email, "one@example.com", "the first verified email sticks");
 
-        // The CLI's login rotates from the current generation, as for any
-        // existing identity, and gets a usable key.
+        // The CLI's login issues from the current generation, as for any
+        // existing identity — but this is a first key, not a rotation, since
+        // a dashboard-provisioned identity starts keyless.
         let issued = repo
             .issue_api_key("issuer", "email|one", Some(1), "event-1", FIRST_KEY)
             .await
             .unwrap();
         assert_eq!(issued.account_id, first);
         assert_eq!(issued.generation, 2);
+        assert!(
+            !issued.replaced_previous_key,
+            "nothing existed to replace"
+        );
         assert_eq!(repo.authenticate(FIRST_KEY).await.unwrap(), Some(first));
+        let metadata = repo.metadata(first).await.unwrap();
+        assert!(
+            metadata.previous_key_expires_at.is_none(),
+            "no previous key means no grace window"
+        );
+        assert!(metadata.rotated_at.is_none(), "issued, not rotated");
 
         // An existing keyed identity is found, never duplicated.
         let keyed = repo

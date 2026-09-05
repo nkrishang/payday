@@ -177,8 +177,9 @@ export PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$(cast code 0x9fE46736679d
 ### 3. Start the local attachment store
 
 MinIO stands in for the S3 attachment bucket (the runner does this for you).
-Nothing scans local uploads, so it also stands in for GuardDuty: the tag its
-scanner would write is set by hand, as described under
+Nothing scans local uploads, so `just dev` also runs a small stand-in for
+GuardDuty: a few seconds after a PDF lands it stamps the clean verdict
+finalize is waiting on, as described under
 [Attachments and the scan tag](#attachments-and-the-scan-tag).
 
 ```bash
@@ -272,19 +273,28 @@ cast call <payment_address> 'settled()(bool)' --rpc-url http://127.0.0.1:8545
 with the returned headers, then call `POST /v1/attachments/{id}/finalize`.
 Finalize answers `409 attachment_scan_pending` until the object carries the
 tag GuardDuty Malware Protection writes in production, and
-`422 attachment_rejected` for any other verdict. Stamp a clean verdict on an
-upload by its object key, `uploads/<account_id>/<attachment_id>.pdf`:
+`422 attachment_rejected` for any other verdict.
+
+Under `just dev`, `local-runner.sh`'s `start_scan_stub` polls the bucket and
+stamps a clean verdict on every upload within a couple of seconds, so a
+manual upload through the browser finalizes almost immediately instead of
+sitting out finalize's 2-minute poll timeout. It only fills in the tag when
+none is present yet, so stamping one by hand first still walks the rejection
+path — set any other value on the object key,
+`uploads/<account_id>/<attachment_id>.pdf`, before the stub gets to it:
 
 ```bash
 docker run --rm --network host \
   -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
   minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
-  'GuardDutyMalwareScanStatus=NO_THREATS_FOUND'
+  'GuardDutyMalwareScanStatus=THREATS_FOUND'
 ```
 
-`mc tag list` on the same path shows the tags; set any other value to walk
-the rejection path. `scripts/e2e-anvil.sh` does the same through its
-`tag_object_scanned` helper. No lifecycle rule runs locally, so abandoned
+`mc tag list` on the same path shows the tags. `scripts/e2e-anvil.sh` controls
+verdicts the same way, deterministically, through its own `tag_object_scanned`
+helper — reach for `just e2e` instead when the rejection path needs reliable
+coverage rather than a race against the stub. No lifecycle rule runs locally,
+so abandoned
 uploads stay until the container is removed.
 
 ## Automated tests
@@ -331,6 +341,10 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
 - `PAYDAY_DEV_IDENTITY_ISSUER` — token issuer; must exactly match
   `PAYDAY_AUTH0_ISSUER`
+- `PAYDAY_DEV_IDENTITY_OTP` — the code the development provider emails for
+  every sign-in, instead of a random one it only prints to its log
+  (`DEV IDENTITY OTP <email> <code>`). Local convenience only; the provider
+  refuses to bind anything but loopback, and Auth0 issues the real codes
 - `PAYDAY_CHAIN_ID`
 - `PAYDAY_FACTORY_ADDRESS`
 - `PAYDAY_BATCH_SWEEPER_ADDRESS`
@@ -389,6 +403,11 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
   mutually exclusive with `PAYDAY_ATTESTATION_KMS_KEY_ID`, the production KMS
   secp256k1 key ARN. Exactly one is required unless `PAYDAY_STATUS_ONLY=true`
+- `PAYDAY_ONBOARDING_PAYER_KEY` — local key that pays the dashboard onboarding
+  walkthrough's one self-issued deposit request (Anvil account #1); mutually
+  exclusive with `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
+  key. Unlike attestation, both may be unset in any environment, including
+  production — that simply disables `POST /v1/payments/{id}/onboarding-payment`
 - `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` — optional client ID of the dashboard's
   Auth0 Single Page Application, whose access tokens `gatewayd` accepts next
   to the CLI's; `payday-dashboard-local` with the development identity provider

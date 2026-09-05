@@ -90,6 +90,12 @@ export function explorerTxUrl(explorerUrl: string | null, hash: string): string 
   return explorerUrl ? `${explorerUrl}/tx/${hash}` : null;
 }
 
+/** At most `limit` whitespace-separated words; text within the limit is untouched, a paste past it is cut. */
+export function clampWords(value: string, limit: number): string {
+  const words = value.split(/\s+/).filter(Boolean);
+  return words.length <= limit ? value : words.slice(0, limit).join(" ");
+}
+
 /** "48.2 KB", "1.5 MB" — for an attachment's `byte_length`, which arrives as a decimal string. */
 export function formatBytes(byteLength: string | number): string {
   const bytes = Number(byteLength);

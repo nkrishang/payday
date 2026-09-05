@@ -95,11 +95,6 @@ export function VerificationGate({
           </div>
         )}
       </section>
-
-      <p className="mt-4 text-[12px] leading-relaxed text-faint">
-        Verification proves who may view and pay this invoice. It does not prove ownership of the
-        wallet that sends the funds.
-      </p>
     </div>
   );
 }

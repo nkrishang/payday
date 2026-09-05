@@ -529,7 +529,7 @@ test("the landing page renders and is indexable", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Make every stablecoin accountable." }),
   ).toBeVisible();
-  await expect(page.getByRole("link", { name: "Start Building" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start Building" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Request a demo" })).toBeVisible();
   await expect(page.getByRole("img", { name: "Payday" }).first()).toBeVisible();
   expect(await page.locator('meta[name="robots"]').count()).toBe(0);
