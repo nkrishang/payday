@@ -16,6 +16,7 @@ use crate::api::customers;
 use crate::api::health;
 use crate::api::invoices;
 use crate::api::issuers;
+use crate::api::merchant_session;
 use crate::api::payer;
 use crate::api::payer_verification;
 use crate::api::proof;
@@ -88,6 +89,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/payments/{id}/verification",
             get(verification::merchant_detail),
+        )
+        .route(
+            "/v1/payments/{id}/client-secret",
+            post(merchant_session::mint),
         )
         .route(
             "/v1/customers",
@@ -176,6 +181,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/payer/payments/{id}/verify/email/confirm",
             post(payer_verification::confirm_email),
+        )
+        .route(
+            "/v1/payer/payments/{id}/session",
+            post(merchant_session::exchange),
         )
         .layer(RequestBodyLimitLayer::new(8 * 1024))
         .layer(
@@ -4004,10 +4013,758 @@ mod tests {
         assert_eq!(read.status(), StatusCode::OK);
     }
 
+    /// The merchant-session create body: the merchant's app has signed the
+    /// payer in and names them by its own id.
+    fn merchant_session_body(payer_reference: &str) -> Value {
+        let mut body = valid_body();
+        body["heading"] = json!("Deposit 1 USDC");
+        body["reference"] = json!("dep-8042");
+        body["metadata"] = json!({"order": "8042"});
+        body["payer_policy"] =
+            json!({"mode": "merchant_session", "payer_reference": payer_reference});
+        body
+    }
+
+    /// Exchange a client secret from the hosted checkout.
+    fn exchange_request(id: &str, secret: &str) -> Request<Body> {
+        payer_post(
+            &format!("/v1/payer/payments/{id}/session"),
+            None,
+            Some(&json!({"client_secret": secret})),
+        )
+    }
+
+    /// Every webhook event enqueued for one invoice, oldest first, as
+    /// (type, payload).
+    async fn webhook_events(pool: &PgPool, id: &str) -> Vec<(String, Value)> {
+        sqlx::query_as(
+            "SELECT event_type, payload FROM webhook_events WHERE invoice_id = $1 ORDER BY created_at, id",
+        )
+        .bind(Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap())
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_merchant_session_opens_the_checkout_once_and_carries_the_payer_reference_to_settlement(
+        pool: PgPool,
+    ) {
+        // No payer audience is configured: merchant sessions never touch the
+        // email provider.
+        let app = app(pool.clone()).await;
+
+        // 1. The merchant's server creates the deposit request and receives
+        //    the secret exactly once.
+        let created = app
+            .clone()
+            .oneshot(create_request(
+                KEY,
+                "ms-1",
+                &merchant_session_body("user_123"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let secret = created["client_secret"].as_str().unwrap().to_owned();
+        assert!(secret.starts_with("cs_"), "{secret}");
+        assert_eq!(secret.len(), 46);
+        assert!(created["client_secret_expires_at"].is_string());
+        assert_eq!(created["payer_policy"]["mode"], "merchant_session");
+        assert_eq!(created["payer_policy"]["payer_reference"], "user_123");
+        assert!(created["payer_policy"].get("expected_email").is_none());
+        assert!(created["verification_completed_at"].is_null());
+        assert_eq!(
+            created["payment_url"],
+            format!("http://127.0.0.1:3000/pay/{id}")
+        );
+
+        // A replay is the same invoice without the secret; a different
+        // payer is a different request.
+        let replay = app
+            .clone()
+            .oneshot(create_request(
+                KEY,
+                "ms-1",
+                &merchant_session_body("user_123"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(replay.headers()["Idempotency-Replayed"], "true");
+        let replay = json_body(replay).await;
+        assert_eq!(replay["id"], id);
+        assert!(replay.get("client_secret").is_none());
+        assert!(replay.get("client_secret_expires_at").is_none());
+        let conflict = app
+            .clone()
+            .oneshot(create_request(
+                KEY,
+                "ms-1",
+                &merchant_session_body("user_456"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        // Neither does a merchant read: the secret lives only in the response
+        // that minted it.
+        let fetched = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(fetched.get("client_secret").is_none());
+        assert_eq!(fetched["payer_policy"]["payer_reference"], "user_123");
+        let stored: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT secret_hash FROM payer_client_secrets WHERE invoice_id = $1",
+        )
+        .bind(uuid)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, vec![Sha256::digest(secret.as_bytes()).to_vec()]);
+
+        // 2. Whoever holds the bare link sees a locked page that says the
+        //    app must open it, and learns nothing about the payer.
+        let bare = payer_read(&app, &id, None).await;
+        assert_eq!(bare["content_unlocked"], false);
+        assert_eq!(bare["payer_policy"]["mode"], "merchant_session");
+        assert!(bare["payer_policy"]["expected_email_hint"].is_null());
+        assert_eq!(bare["requirements"]["merchant_session"], "pending");
+        assert_eq!(bare["requirements"]["email"], "not_required");
+        assert_eq!(bare["requirements"]["complete"], false);
+        assert_eq!(bare["issuer_name"], "Acme");
+        assert_eq!(bare["heading"], "Deposit 1 USDC");
+        assert!(bare["amount"].is_null());
+        assert!(bare["address"].is_null());
+        assert!(!bare.to_string().contains("user_123"));
+
+        // 3. The checkout exchanges the secret. Guesses and secrets for
+        //    other payments fail alike; the real one mints the session.
+        let (other_id, other_created) = create_gated(
+            &app,
+            "ms-other",
+            json!({"mode": "merchant_session", "payer_reference": "user_999"}),
+            "Other deposit",
+        )
+        .await;
+        let other_secret = other_created["client_secret"].as_str().unwrap();
+        for (name, wrong) in [
+            ("malformed", "not-a-secret"),
+            ("wrong shape", "cs_short"),
+            ("another payment's", other_secret),
+            (
+                "right shape, unknown",
+                "cs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+        ] {
+            let refused = app
+                .clone()
+                .oneshot(exchange_request(&id, wrong))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{name}");
+            assert_eq!(
+                json_body(refused).await["error"]["code"],
+                "client_secret_invalid",
+                "{name}"
+            );
+        }
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM payer_sessions WHERE invoice_id = $1")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sessions, 0, "a refused exchange mints nothing");
+        let extra_field = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/payments/{id}/session"),
+                None,
+                Some(&json!({"client_secret": secret, "payer_reference": "user_1"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(extra_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let opened = app
+            .clone()
+            .oneshot(exchange_request(&id, &secret))
+            .await
+            .unwrap();
+        assert_eq!(opened.status(), StatusCode::OK);
+        assert_eq!(opened.headers()[header::CACHE_CONTROL], "no-store");
+        let opened = json_body(opened).await;
+        let session = opened["payer_session"].as_str().unwrap().to_owned();
+        assert!(opened["expires_at"].is_string());
+        assert_eq!(opened["requirements"]["merchant_session"], "approved");
+        assert_eq!(opened["requirements"]["email"], "not_required");
+        assert_eq!(opened["requirements"]["complete"], true);
+
+        // Once. The same URL pasted into a second window is told so.
+        let again = app
+            .clone()
+            .oneshot(exchange_request(&id, &secret))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(again).await["error"]["code"],
+            "client_secret_used"
+        );
+
+        // 4. The session unlocks this payment, and only this payment; the
+        //    bare link stays locked even though the invoice is now verified.
+        let unlocked = payer_read(&app, &id, Some(&session)).await;
+        assert_eq!(unlocked["content_unlocked"], true);
+        assert_eq!(unlocked["address"], created["address"]);
+        assert_eq!(unlocked["amount"], "1.000000");
+        assert_eq!(unlocked["invoice"]["reference"], "dep-8042");
+        assert_eq!(unlocked["requirements"]["complete"], true);
+        assert!(
+            unlocked["payment_uri"]
+                .as_str()
+                .unwrap()
+                .starts_with("ethereum:")
+        );
+        let qr = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/payments/{id}/qr"),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(qr.status(), StatusCode::OK);
+        let still_bare = payer_read(&app, &id, None).await;
+        assert_eq!(still_bare["content_unlocked"], false);
+        assert_eq!(still_bare["requirements"]["merchant_session"], "pending");
+        let stranger = payer_read(&app, &other_id, Some(&session)).await;
+        assert_eq!(stranger["content_unlocked"], false);
+        let own_status = json_body(
+            app.clone()
+                .oneshot(payer_get(
+                    &format!("/v1/payer/payments/{id}/verify"),
+                    Some(&session),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(own_status["requirements"]["merchant_session"], "approved");
+
+        // 5. The exchange completed the invoice's verification, which the
+        //    merchant sees and which raised verification.approved with the
+        //    merchant's own payer reference on it.
+        let merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(merchant["verification_completed_at"].is_string());
+        let events = webhook_events(&pool, &id).await;
+        assert_eq!(
+            events
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            ["verification.approved"]
+        );
+        let approved = &events[0].1;
+        assert_eq!(approved["type"], "verification.approved");
+        assert_eq!(approved["data"]["payment"]["id"], uuid.to_string());
+        assert_eq!(
+            approved["data"]["payment"]["payer_policy_mode"],
+            "merchant_session"
+        );
+        assert_eq!(approved["data"]["payment"]["payer_reference"], "user_123");
+        assert_eq!(approved["data"]["payment"]["reference"], "dep-8042");
+        assert_eq!(approved["data"]["payment"]["metadata"]["order"], "8042");
+        assert!(approved["data"]["payment"]["verification_completed_at"].is_string());
+        assert_eq!(approved["data"]["payment"]["status"], "awaiting_payment");
+
+        let activity = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/payments/{id}/verification")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(activity["payer_policy_mode"], "merchant_session");
+        assert_eq!(activity["facts"]["merchant_session"], "approved");
+        assert_eq!(activity["facts"]["email"], "not_required");
+        assert_eq!(activity["facts"]["complete"], true);
+        let attempts = activity["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["kind"], "merchant_session");
+        assert_eq!(attempts[0]["status"], "approved");
+        assert!(attempts[0]["verified_at"].is_string());
+        assert!(!activity.to_string().contains("cs_"));
+        assert!(!activity.to_string().contains("payer_session"));
+
+        // 6. The payer comes back later from the app: the merchant mints a
+        //    fresh secret, and the first, spent one is still spent.
+        let minted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/payments/{id}/client-secret"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(minted.status(), StatusCode::CREATED);
+        assert_eq!(minted.headers()[header::CACHE_CONTROL], "no-store");
+        let minted = json_body(minted).await;
+        let second_secret = minted["client_secret"].as_str().unwrap().to_owned();
+        assert_ne!(second_secret, secret);
+        assert!(minted["expires_at"].is_string());
+        let reopened = json_body(
+            app.clone()
+                .oneshot(exchange_request(&id, &second_secret))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let second_session = reopened["payer_session"].as_str().unwrap().to_owned();
+        assert_ne!(second_session, session);
+        assert_eq!(
+            payer_read(&app, &id, Some(&second_session)).await["content_unlocked"],
+            true
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(exchange_request(&id, &secret))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        // Verification completed once; a second exchange adds an attempt,
+        // not a second completion event.
+        assert_eq!(webhook_events(&pool, &id).await.len(), 1);
+
+        // Only the owner mints, and only for this mode.
+        const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
+        other_account(&pool, OTHER).await;
+        let foreign = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                OTHER,
+                &format!("/v1/payments/{id}/client-secret"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        let open_id = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "ms-open", &valid_body()))
+                .await
+                .unwrap(),
+        )
+        .await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let not_required = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/payments/{open_id}/client-secret"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(not_required.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(not_required).await["error"]["code"],
+            "verification_not_required"
+        );
+        let (email_id, _) = create_gated(
+            &app,
+            "ms-email",
+            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            "Email retainer",
+        )
+        .await;
+        let wrong_mode = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/payments/{email_id}/client-secret"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_mode.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(wrong_mode).await["error"]["code"],
+            "verification_method_not_applicable"
+        );
+        let email_exchange = app
+            .clone()
+            .oneshot(exchange_request(&email_id, &second_secret))
+            .await
+            .unwrap();
+        assert_eq!(email_exchange.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(email_exchange).await["error"]["code"],
+            "verification_method_not_applicable"
+        );
+
+        // 7. The payer pays from the checkout. Funding and settlement raise
+        //    payment.paid and payment.settled, each carrying the payer
+        //    reference the merchant's ledger credits by.
+        let address =
+            Address::parse_checksummed(created["address"].as_str().unwrap(), None).unwrap();
+        sqlx::query(
+            r#"INSERT INTO payment_observations
+                 (chain_id, token_address, block_number, block_hash, block_timestamp,
+                  transaction_hash, transaction_index, log_index, sender_address,
+                  recipient_address, invoice_id, amount, disposition)
+               VALUES (1, $1, 3, $2, 1800000000, $3, 0, 0, $4, $5, $6, '1000000', 'credited')"#,
+        )
+        .bind(Address::ZERO.as_slice())
+        .bind([1u8; 32].as_slice())
+        .bind([3u8; 32].as_slice())
+        .bind(Address::repeat_byte(0xf3).as_slice())
+        .bind(address.as_slice())
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE invoices SET status = 'funded', confirmed_received = '1000000', funded_at_block = 3, paid_at = now() WHERE id = $1",
+        )
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let paid = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/payments/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(paid["status"], "paid");
+        assert!(
+            paid["likely_unsolicited_at"].is_null(),
+            "verified before funding"
+        );
+        let settlement = [9u8; 32];
+        sqlx::query(
+            "UPDATE invoices SET status = 'fulfilled', settlement_tx_hash = $2, resolved_at_block = 9, settled_at = now() WHERE id = $1",
+        )
+        .bind(uuid)
+        .bind(settlement.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let events = webhook_events(&pool, &id).await;
+        assert_eq!(
+            events
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            ["verification.approved", "payment.paid", "payment.settled"]
+        );
+        for (kind, payload) in &events {
+            let payment = &payload["data"]["payment"];
+            assert_eq!(payment["payer_reference"], "user_123", "{kind}");
+            assert_eq!(payment["payer_policy_mode"], "merchant_session", "{kind}");
+            assert_eq!(payment["metadata"]["order"], "8042", "{kind}");
+            assert!(payment["verification_completed_at"].is_string(), "{kind}");
+            assert!(payment["likely_unsolicited_at"].is_null(), "{kind}");
+            // The payload names the merchant's own reference, never a secret
+            // or a session.
+            let serialized = payload.to_string();
+            assert!(!serialized.contains("cs_"), "{kind}: {serialized}");
+            assert!(!serialized.contains(&session), "{kind}");
+        }
+        assert_eq!(events[1].1["data"]["payment"]["status"], "paid");
+        assert_eq!(events[1].1["data"]["payment"]["received"], "1000000");
+        assert_eq!(events[2].1["data"]["payment"]["status"], "settled");
+
+        // 8. The proof attests the merchant session; the snapshot carries
+        //    the merchant's assertion; it verifies offline.
+        let proof: ProofOfPayment = serde_json::from_value(
+            json_body(
+                app.clone()
+                    .oneshot(get_request(KEY, &format!("/v1/payments/{id}/proof")))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            proof.verification.payload.payer_policy_mode,
+            "merchant_session"
+        );
+        assert_eq!(proof.verification.payload.result, "approved");
+        assert!(proof.verification.payload.verified_at.is_some());
+        assert_eq!(
+            proof.canonical_issuance_snapshot.payer_policy,
+            gateway_core::PayerPolicy::MerchantSession {
+                payer_reference: "user_123".into()
+            }
+        );
+        let verified = verify_proof(&proof, None, &[attestor().address()])
+            .unwrap_or_else(|error| panic!("the served proof must verify offline: {error}"));
+        assert_eq!(verified.payment_address, address);
+
+        // 9. Sessions expire; the app can still open the receipt with a fresh
+        //    secret, which never revives the settled invoice.
+        sqlx::query("UPDATE payer_sessions SET created_at = now() - interval '25 hours', expires_at = now() - interval '1 hour' WHERE invoice_id = $1")
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            payer_read(&app, &id, Some(&second_session)).await["content_unlocked"],
+            false
+        );
+        let receipt_secret = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    &format!("/v1/payments/{id}/client-secret"),
+                    &json!({}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await["client_secret"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let receipt = json_body(
+            app.clone()
+                .oneshot(exchange_request(&id, &receipt_secret))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let receipt_session = receipt["payer_session"].as_str().unwrap();
+        let receipt_view = payer_read(&app, &id, Some(receipt_session)).await;
+        assert_eq!(receipt_view["content_unlocked"], true);
+        assert_eq!(receipt_view["status"], "settled");
+        assert_eq!(receipt_view["payable"], false);
+        assert!(receipt_view["payment_uri"].is_null());
+        assert_eq!(webhook_events(&pool, &id).await.len(), 3);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn merchant_sessions_refuse_bad_references_stale_secrets_and_closed_payments(
+        pool: PgPool,
+    ) {
+        let (app, tenant) = app_with_payer_verification(pool.clone()).await;
+
+        // The assertion is required, bounded, and one token.
+        for (name, policy, status) in [
+            (
+                "missing reference",
+                json!({"mode": "merchant_session"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "email on merchant session",
+                json!({"mode": "merchant_session", "payer_reference": "u1", "expected_email": "a@b.co"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "reference on permissionless",
+                json!({"mode": "permissionless", "payer_reference": "u1"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "blank reference",
+                json!({"mode": "merchant_session", "payer_reference": "   "}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "spaced reference",
+                json!({"mode": "merchant_session", "payer_reference": "user 123"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "long reference",
+                json!({"mode": "merchant_session", "payer_reference": "x".repeat(129)}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut body = valid_body();
+            body["payer_policy"] = policy;
+            let response = app
+                .clone()
+                .oneshot(create_request(KEY, name, &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{name}");
+        }
+        // Trimmed, case kept.
+        let mut body = valid_body();
+        body["payer_policy"] =
+            json!({"mode": "merchant_session", "payer_reference": "  User_ABC "});
+        let created = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "trimmed", &body))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(created["payer_policy"]["payer_reference"], "User_ABC");
+        let id = created["id"].as_str().unwrap().to_owned();
+        let uuid = Uuid::parse_str(id.strip_prefix("pay_").unwrap()).unwrap();
+        let secret = created["client_secret"].as_str().unwrap().to_owned();
+
+        // Email codes are not this mode's method, whichever way they are asked for.
+        for path in ["verify/email/start", "verify/email/confirm"] {
+            let body = (path == "verify/email/confirm").then(|| json!({"otp": OTP}));
+            let refused = app
+                .clone()
+                .oneshot(payer_post(
+                    &format!("/v1/payer/payments/{id}/{path}"),
+                    None,
+                    body.as_ref(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::CONFLICT, "{path}");
+            assert_eq!(
+                json_body(refused).await["error"]["code"],
+                "verification_method_not_applicable",
+                "{path}"
+            );
+        }
+        assert!(tenant.started.lock().unwrap().is_empty());
+
+        // A secret past its fifteen minutes is refused like an unknown one.
+        sqlx::query("UPDATE payer_client_secrets SET created_at = now() - interval '20 minutes', expires_at = now() - interval '5 minutes' WHERE invoice_id = $1")
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stale = app
+            .clone()
+            .oneshot(exchange_request(&id, &secret))
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(stale).await["error"]["code"],
+            "client_secret_invalid"
+        );
+        assert!(
+            payer_read(&app, &id, None).await["requirements"]["complete"] == false,
+            "an expired secret verifies nothing"
+        );
+
+        // A closed, never-verified payment can neither mint nor exchange.
+        sqlx::query("UPDATE invoices SET status = 'expired', expired_at = now() WHERE id = $1")
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fresh = json_body(
+            app.clone()
+                .oneshot(create_request(
+                    KEY,
+                    "fresh",
+                    &merchant_session_body("user_7"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let fresh_secret = fresh["client_secret"].as_str().unwrap();
+        let too_late_mint = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/payments/{id}/client-secret"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(too_late_mint.status(), StatusCode::GONE);
+        let too_late_exchange = app
+            .clone()
+            .oneshot(exchange_request(&id, fresh_secret))
+            .await
+            .unwrap();
+        assert_eq!(too_late_exchange.status(), StatusCode::GONE);
+        assert_eq!(
+            json_body(too_late_exchange).await["error"]["code"],
+            "payment_not_payable"
+        );
+        let unknown = app
+            .clone()
+            .oneshot(exchange_request("pay_not-an-id", fresh_secret))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(unknown).await["error"]["code"],
+            "invalid_payment_link"
+        );
+    }
+
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn payer_writes_answer_cors_for_the_hosted_checkout_only(pool: PgPool) {
         let (app, _) = app_with_payer_verification(pool).await;
         let path = "/v1/payer/payments/pay_x/verify/email/start";
+        // The client-secret exchange is a verification write like the email
+        // routes, with the same one-origin answer.
+        let session_preflight = app
+            .clone()
+            .oneshot(
+                Request::options("/v1/payer/payments/pay_x/session")
+                    .header(header::ORIGIN, CHECKOUT_ORIGIN)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session_preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            CHECKOUT_ORIGIN
+        );
+        let foreign_session = app
+            .clone()
+            .oneshot(
+                Request::options("/v1/payer/payments/pay_x/session")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            foreign_session
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
         let preflight = |origin: &str| {
             Request::options(path)
                 .header(header::ORIGIN, origin)

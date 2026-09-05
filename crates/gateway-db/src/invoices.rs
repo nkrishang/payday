@@ -88,6 +88,9 @@ pub struct DbInvoice {
     pub heading: Option<String>,
     pub payer_policy_mode: String,
     pub expected_email: Option<String>,
+    /// The merchant's own identifier for the authenticated payer
+    /// (`merchant_session` mode), opaque to Payday.
+    pub payer_reference: Option<String>,
     pub verification_completed_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     /// Proof material; nullable in the schema only until pre-release reset.
     pub issuance_snapshot: Option<sqlx::types::Json<CanonicalIssuanceSnapshot>>,
@@ -430,6 +433,7 @@ pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> boo
         && existing.heading.as_deref() == request.heading
         && existing.payer_policy_mode == request.payer_policy.mode().as_str()
         && existing.expected_email.as_deref() == request.payer_policy.expected_email()
+        && existing.payer_reference.as_deref() == request.payer_policy.payer_reference()
         && committed.map(|attachment| attachment.id) == request.attachment_id
         && committed == request.attachment
 }
@@ -628,12 +632,12 @@ impl InvoiceRepository {
             r#"
             INSERT INTO invoices
                 (id, account_id, idempotency_key, customer_id, issuer_id, issuer, bill_to, notes, heading,
-                 reference, metadata, payer_policy_mode, expected_email,
+                 reference, metadata, payer_policy_mode, expected_email, payer_reference,
                  chain_id, factory_address, token_address, token_decimals, beneficiary_address,
                  expiration_timestamp, expires_in_secs, expiration_intent, recovery_address,
                  amount, net_amount, salt, payment_address, issuance_snapshot,
                  attribution_version, attribution_nonce, attribution_hash, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $30, $14, $15, $16, $17,
                     $18, $19, $20, $21, $22, $23, $23, $24, $25, $26, $27, $28, $29, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
@@ -668,6 +672,7 @@ impl InvoiceRepository {
         .bind(input.attribution_version as i16)
         .bind(input.attribution_nonce)
         .bind(input.attribution_hash)
+        .bind(input.payer_policy.payer_reference())
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -1403,6 +1408,7 @@ pub(crate) mod tests {
             heading: None,
             payer_policy_mode: "permissionless".into(),
             expected_email: None,
+            payer_reference: None,
             verification_completed_at: None,
             issuance_snapshot: Some(sqlx::types::Json(snapshot())),
             attribution_version: Some(1),
@@ -2018,6 +2024,7 @@ pub(crate) mod tests {
             "reference",
             "metadata",
             "payer_policy_mode",
+            "payer_reference",
             "verification_completed_at",
             "likely_unsolicited_at",
         ]

@@ -65,14 +65,30 @@ struct Party {
 enum PayerPolicyMode {
     Permissionless,
     VerifiedEmail,
+    MerchantSession,
 }
-/// `expected_email` is required for `verified_email` and forbidden for
-/// `permissionless`.
+/// `expected_email` is required for `verified_email`; `payer_reference` is
+/// required for `merchant_session`; each is forbidden elsewhere.
 #[derive(Serialize, Deserialize, ToSchema)]
-#[schema(example = json!({"mode":"verified_email","expected_email":"alice@example.com"}))]
+#[schema(example = json!({"mode":"merchant_session","payer_reference":"user_123"}))]
 struct PayerPolicy {
     mode: PayerPolicyMode,
+    /// Trimmed and lowercased; the payer sees only a masked hint.
     expected_email: Option<String>,
+    /// The merchant application's own identifier for the payer it
+    /// authenticated: 1–128 bytes, one printable token, case preserved.
+    /// Returned on every webhook for the payment; never shown to the payer.
+    payer_reference: Option<String>,
+}
+/// A single-use secret that opens the hosted checkout for the payer the
+/// merchant authenticated. Returned once; the API stores only its hash.
+#[derive(Serialize, ToSchema)]
+struct ClientSecret {
+    /// `cs_` plus 43 URL-safe characters. Hand it to the payer in the
+    /// checkout URL's fragment (`/pay/{id}#cs=…`), never in a path or query.
+    client_secret: String,
+    /// Fifteen minutes after minting; the secret must be exchanged by then.
+    expires_at: String,
 }
 #[derive(Serialize, ToSchema)]
 struct AttachmentDescriptor {
@@ -156,6 +172,11 @@ struct Payment {
     attachment: Option<AttachmentDescriptor>,
     verification_completed_at: Option<String>,
     likely_unsolicited_at: Option<String>,
+    /// `merchant_session` only, and only in the `201` that issued the
+    /// payment: the first client secret. Absent on every later read and
+    /// on idempotent replays; mint another with `POST …/client-secret`.
+    client_secret: Option<String>,
+    client_secret_expires_at: Option<String>,
     attribution: Attribution,
     #[schema(value_type = Object)]
     metadata: serde_json::Value,
@@ -224,15 +245,19 @@ enum VerificationFactStatus {
 #[derive(Serialize, ToSchema)]
 struct VerificationRequirements {
     email: VerificationFactStatus,
+    /// The merchant's application opened the checkout by exchanging a
+    /// client secret.
+    merchant_session: VerificationFactStatus,
     complete: bool,
 }
 /// One attempt: what was attempted and where it stands.
 #[derive(Serialize, ToSchema)]
 struct VerificationAttempt {
     id: String,
-    /// email.
+    /// email or merchant_session.
     kind: String,
-    /// pending, approved, or abandoned.
+    /// pending, approved, or abandoned. A merchant_session attempt is
+    /// recorded approved: the exchange is the proof.
     status: String,
     verified_at: Option<String>,
     created_at: String,
@@ -566,6 +591,8 @@ fn invoice_pdf() {}
 fn proof() {}
 #[utoipa::path(get, path="/v1/payments/{id}/verification", operation_id="getPaymentVerification", tag="payments", params(("id"=String, Path)), responses((status=200,description="Every verification attempt on the invoice with each fact reported separately",body=VerificationDetail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn payment_verification() {}
+#[utoipa::path(post, path="/v1/payments/{id}/client-secret", operation_id="createPaymentClientSecret", tag="payments", params(("id"=String, Path)), responses((status=201,description="A fresh single-use client secret for a merchant_session payment; earlier unspent secrets stay valid until they expire",body=ClientSecret),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="verification_not_required for permissionless payments; verification_method_not_applicable for verified_email payments",body=ErrorResponse),(status=410,description="payment_not_payable: expired, or terminal without a completed verification",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn payment_client_secret() {}
 #[utoipa::path(post, path="/v1/customers", operation_id="createCustomer", tag="customers", request_body=CustomerRequest, responses((status=201,body=Customer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_customer() {}
 #[utoipa::path(get, path="/v1/customers", operation_id="listCustomers", tag="customers", params(("starting_after"=Option<uuid::Uuid>, Query, description="Customer id returned as next_cursor"),("limit"=Option<u32>, Query, minimum=1, maximum=100)), responses((status=200,body=CustomerPage),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
@@ -624,8 +651,8 @@ fn list_payout_addresses() {}
 fn delete_payout_address() {}
 
 #[derive(OpenApi)]
-#[openapi(paths(create_payment,list_payments,get_payment,cancel_payment,transfers,payment_attachment,invoice_pdf,proof,payment_verification,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
+#[openapi(paths(create_payment,list_payments,get_payment,cancel_payment,transfers,payment_attachment,invoice_pdf,proof,payment_verification,payment_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreatePayment,Payment,PaymentStatus,PaymentSummary,PaymentPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CancelPayment,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
  modifiers(&Security), tags((name="payments",description="Invoice issuance, documents, and payment tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
@@ -675,6 +702,7 @@ mod tests {
         ("/v1/payments/{id}/invoice.pdf", "get"),
         ("/v1/payments/{id}/proof", "get"),
         ("/v1/payments/{id}/verification", "get"),
+        ("/v1/payments/{id}/client-secret", "post"),
         ("/v1/customers", "get"),
         ("/v1/customers", "post"),
         ("/v1/customers/{id}", "get"),
@@ -764,7 +792,16 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            3
+        );
+        assert!(payment["client_secret"].is_object());
+        assert!(
+            d["components"]["schemas"]["PayerPolicy"]["properties"]["payer_reference"].is_object()
+        );
+        assert!(
+            d["components"]["schemas"]["VerificationRequirements"]["properties"]
+                ["merchant_session"]
+                .is_object()
         );
         let proof = &d["components"]["schemas"]["ProofOfPayment"]["properties"];
         for documented in [

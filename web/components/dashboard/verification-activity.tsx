@@ -62,12 +62,22 @@ const STATUS_LABEL: Record<VerificationAttempt["status"], string> = {
   abandoned: "Abandoned",
 };
 
+/** An attempt in the merchant's words: what happened, by which method. */
+const KIND_LABEL: Record<VerificationAttempt["kind"], string> = {
+  email: "Email verification",
+  merchant_session: "Opened by your app",
+};
+
 function Attempt({ attempt }: { attempt: VerificationAttempt }) {
+  // A merchant-session attempt is the exchange itself: there is no code to
+  // send, so "Approved" would only restate the kind.
+  const status =
+    attempt.kind === "merchant_session" ? "Session opened" : STATUS_LABEL[attempt.status];
   return (
     <div className="rounded-[10px] border border-line px-3.5 py-3 text-[13px]">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <span className="font-medium">Email verification</span>
-        <span className="text-muted">{STATUS_LABEL[attempt.status]}</span>
+        <span className="font-medium">{KIND_LABEL[attempt.kind] ?? attempt.kind}</span>
+        <span className="text-muted">{status}</span>
       </div>
       <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[12px]">
         <dt className="text-faint">{attempt.verified_at ? "Verified" : "Started"}</dt>

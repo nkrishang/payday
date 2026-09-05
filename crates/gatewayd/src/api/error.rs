@@ -330,6 +330,39 @@ impl ApiError {
         }
     }
 
+    /// The route exists for another policy mode: email codes on a
+    /// merchant-session invoice, or client secrets on any other mode.
+    pub fn verification_method_not_applicable(message: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_method_not_applicable",
+            message: message.into(),
+        }
+    }
+
+    /// Unknown, expired, or minted for another payment: one answer for all
+    /// three, so a guess learns nothing about which.
+    pub fn client_secret_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "client_secret_invalid",
+            message:
+                "The client secret is not valid for this payment; return to the app that opened it"
+                    .into(),
+        }
+    }
+
+    /// The link was opened once already. Told apart from an invalid secret so
+    /// the checkout can say so: the payer most likely has the first tab open.
+    pub fn client_secret_used() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "client_secret_used",
+            message: "This link was already opened; return to the app and open the payment again"
+                .into(),
+        }
+    }
+
     pub fn payer_session_invalid() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,

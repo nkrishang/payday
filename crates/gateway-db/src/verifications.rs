@@ -1,9 +1,15 @@
-//! Payer sessions and email verification attempts (product plan §4.6).
+//! Payer sessions, email verification attempts, and merchant client secrets
+//! (product plan §4.6).
 //!
 //! A payer session is an opaque bearer token scoped to one invoice. Only its
 //! SHA-256 is stored, so a database read never yields a usable token. The
 //! session accumulates verification facts; the invoice's own
 //! `verification_completed_at` is set separately and gates settlement.
+//!
+//! A client secret is the merchant-session mode's credential: minted for one
+//! invoice by the merchant API, returned once, stored hashed, and spent by
+//! exactly one exchange, which mints the payer session that carries the
+//! merchant-session fact.
 
 use std::time::Duration;
 
@@ -22,6 +28,14 @@ use uuid::Uuid;
 /// How long a payer session stays usable: long enough for a payer to come
 /// back to the page later that day, and it never outlives the day.
 pub const PAYER_SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// How long a client secret may wait to be exchanged: long enough for a
+/// redirect and a slow page load, short enough that a leaked link is stale
+/// before it travels far. The merchant mints another for a payer who returns.
+pub const CLIENT_SECRET_TTL: Duration = Duration::from_secs(15 * 60);
+/// Client secrets are recognizable on sight, like API keys, so a merchant
+/// spotting one in a log knows what leaked.
+pub const CLIENT_SECRET_PREFIX: &str = "cs_";
 
 const PAYER_REF_ACCOUNT_DOMAIN: &[u8] = b"PAYDAY_PAYER_REF_ACCOUNT_V1";
 
@@ -50,6 +64,8 @@ pub struct DbPayerSession {
     pub invoice_id: Uuid,
     pub payer_ref: Option<Vec<u8>>,
     pub email_verified_at: Option<DateTime<Utc>>,
+    /// Set when the session was minted by exchanging a merchant client secret.
+    pub merchant_session_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -58,6 +74,7 @@ impl DbPayerSession {
     pub fn facts(&self) -> VerificationFacts {
         VerificationFacts {
             email: self.email_verified_at.is_some(),
+            merchant_session: self.merchant_session_verified_at.is_some(),
         }
     }
 
@@ -81,6 +98,41 @@ pub struct CreatedPayerSession {
 pub struct EmailVerificationAttempt {
     pub id: Uuid,
     pub created_at: DateTime<Utc>,
+}
+
+/// A freshly minted client secret. `secret` exists only here and in the
+/// merchant response that carries it.
+#[derive(Debug, Clone)]
+pub struct CreatedClientSecret {
+    pub id: Uuid,
+    pub secret: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Error)]
+pub enum ExchangeClientSecretError {
+    /// No such secret for this invoice. A secret for another invoice is
+    /// unknown here too: it never opens anything but the invoice it was
+    /// minted for.
+    #[error("the client secret is not valid for this payment")]
+    Unknown,
+    /// The secret was already exchanged; the link was opened once already.
+    #[error("the client secret was already used")]
+    Used,
+    #[error("the client secret has expired")]
+    Expired,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+/// What exchanging a client secret produced: the payer session it minted,
+/// already carrying the merchant-session fact, and whether that completed
+/// the invoice's verification.
+#[derive(Debug, Clone)]
+pub struct ClientSecretExchange {
+    pub session: DbPayerSession,
+    pub token: String,
+    pub invoice_completed_at: Option<DateTime<Utc>>,
 }
 
 /// One verification attempt as the merchant may see it: what was attempted
@@ -122,6 +174,14 @@ fn token_hash(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
+/// 32 random bytes as unpadded base64url: the payer session token, and the
+/// body of a client secret.
+fn random_token() -> String {
+    let mut secret = [0u8; 32];
+    rand::rng().fill_bytes(&mut secret);
+    URL_SAFE_NO_PAD.encode(secret)
+}
+
 impl PayerSessionRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -134,9 +194,7 @@ impl PayerSessionRepository {
         invoice_id: Uuid,
         ttl: Duration,
     ) -> Result<CreatedPayerSession, sqlx::Error> {
-        let mut secret = [0u8; 32];
-        rand::rng().fill_bytes(&mut secret);
-        let token = URL_SAFE_NO_PAD.encode(secret);
+        let token = random_token();
         let id = Uuid::now_v7();
         let expires_at: DateTime<Utc> = sqlx::query_scalar(
             r#"
@@ -167,7 +225,7 @@ impl PayerSessionRepository {
     ) -> Result<Option<DbPayerSession>, sqlx::Error> {
         sqlx::query_as::<_, DbPayerSession>(
             r#"
-            SELECT id, invoice_id, payer_ref, email_verified_at, created_at, expires_at
+            SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
             FROM payer_sessions
             WHERE token_hash = $1 AND invoice_id = $2 AND expires_at > now()
             "#,
@@ -325,7 +383,7 @@ impl PayerSessionRepository {
         {
             let session = sqlx::query_as::<_, DbPayerSession>(
                 r#"
-                SELECT id, invoice_id, payer_ref, email_verified_at, created_at, expires_at
+                SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
                 FROM payer_sessions WHERE id = $1
                 "#,
             )
@@ -364,7 +422,7 @@ impl PayerSessionRepository {
             UPDATE payer_sessions
             SET payer_ref = $2, email_verified_at = COALESCE(email_verified_at, $3)
             WHERE id = $1 AND expires_at > $3
-            RETURNING id, invoice_id, payer_ref, email_verified_at, created_at, expires_at
+            RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
             "#,
         )
         .bind(session_id)
@@ -396,6 +454,153 @@ impl PayerSessionRepository {
         tx.commit().await?;
         Ok(VerificationCompletion {
             session,
+            invoice_completed_at,
+        })
+    }
+
+    /// Mint a client secret for one invoice: `cs_` and 32 random bytes as
+    /// unpadded base64url, of which only the hash is stored. Earlier secrets
+    /// stay valid until they are spent or expire; each is single-use on its
+    /// own, so a merchant retrying a redirect never breaks the link it
+    /// already sent.
+    pub async fn create_client_secret(
+        &self,
+        invoice_id: Uuid,
+        account_id: Uuid,
+        ttl: Duration,
+    ) -> Result<CreatedClientSecret, sqlx::Error> {
+        let secret = format!("{CLIENT_SECRET_PREFIX}{}", random_token());
+        let id = Uuid::now_v7();
+        let expires_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            INSERT INTO payer_client_secrets (id, invoice_id, account_id, secret_hash, expires_at)
+            VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
+            RETURNING expires_at
+            "#,
+        )
+        .bind(id)
+        .bind(invoice_id)
+        .bind(account_id)
+        .bind(token_hash(&secret).as_slice())
+        .bind(ttl.as_secs_f64())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(CreatedClientSecret {
+            id,
+            secret,
+            expires_at,
+        })
+    }
+
+    /// Spend a client secret: in one transaction, mark it used, mint the
+    /// payer session it opens (already carrying the merchant-session fact),
+    /// record the approved attempt, and complete the invoice's verification
+    /// while it is still live. The secret row is locked first, so two
+    /// exchanges of the same secret resolve to one session and one `Used`.
+    pub async fn exchange_client_secret(
+        &self,
+        secret: &str,
+        invoice_id: Uuid,
+        session_ttl: Duration,
+    ) -> Result<ClientSecretExchange, ExchangeClientSecretError> {
+        #[derive(sqlx::FromRow)]
+        struct StoredSecret {
+            id: Uuid,
+            account_id: Uuid,
+            used_at: Option<DateTime<Utc>>,
+            expires_at: DateTime<Utc>,
+        }
+        let mut tx = self.pool.begin().await?;
+        let found = sqlx::query_as::<_, StoredSecret>(
+            r#"
+            SELECT id, account_id, used_at, expires_at
+            FROM payer_client_secrets
+            WHERE secret_hash = $1 AND invoice_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(token_hash(secret).as_slice())
+        .bind(invoice_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(StoredSecret {
+            id: secret_id,
+            account_id,
+            used_at,
+            expires_at,
+        }) = found
+        else {
+            return Err(ExchangeClientSecretError::Unknown);
+        };
+        let now = Utc::now();
+        if used_at.is_some() {
+            return Err(ExchangeClientSecretError::Used);
+        }
+        if expires_at <= now {
+            return Err(ExchangeClientSecretError::Expired);
+        }
+        let token = random_token();
+        let session_id = Uuid::now_v7();
+        let session = sqlx::query_as::<_, DbPayerSession>(
+            r#"
+            INSERT INTO payer_sessions
+                (id, token_hash, invoice_id, expires_at, merchant_session_verified_at)
+            VALUES ($1, $2, $3, $4 + make_interval(secs => $5), $4)
+            RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at, created_at, expires_at
+            "#,
+        )
+        .bind(session_id)
+        .bind(token_hash(&token).as_slice())
+        .bind(invoice_id)
+        .bind(now)
+        .bind(session_ttl.as_secs_f64())
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE payer_client_secrets SET used_at = $2, payer_session_id = $3 WHERE id = $1",
+        )
+        .bind(secret_id)
+        .bind(now)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO payer_verifications
+                (id, invoice_id, account_id, payer_session_id, kind, status, provider, verified_at)
+            VALUES ($1, $2, $3, $4, 'merchant_session', 'approved', 'merchant', $5)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(invoice_id)
+        .bind(account_id)
+        .bind(session_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        // As for a proven mailbox: the first exchange while the invoice is
+        // live completes its verification; a terminal invoice only gains a
+        // fresh receipt session.
+        let invoice_completed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            r#"
+            UPDATE invoices
+            SET verification_completed_at = $2, updated_at = now()
+            WHERE id = $1
+              AND payer_policy_mode = 'merchant_session'
+              AND verification_completed_at IS NULL
+              AND status IN ('created', 'funded', 'deploying')
+              AND expiration_timestamp >= EXTRACT(EPOCH FROM $2)::bigint
+            RETURNING verification_completed_at
+            "#,
+        )
+        .bind(invoice_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ClientSecretExchange {
+            session,
+            token,
             invoice_completed_at,
         })
     }
@@ -635,6 +840,188 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    fn merchant_policy() -> PayerPolicy {
+        PayerPolicy::MerchantSession {
+            payer_reference: "user_123".into(),
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn a_client_secret_is_hashed_single_use_and_opens_only_its_own_invoice(pool: PgPool) {
+        let repo = PayerSessionRepository::new(pool.clone());
+        let row = invoice(&pool, "merchant", merchant_policy()).await;
+        let other = invoice(&pool, "merchant-other", merchant_policy()).await;
+        let minted = repo
+            .create_client_secret(row.id, row.account_id, CLIENT_SECRET_TTL)
+            .await
+            .unwrap();
+
+        assert!(minted.secret.starts_with(CLIENT_SECRET_PREFIX));
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(&minted.secret[CLIENT_SECRET_PREFIX.len()..])
+                .unwrap()
+                .len(),
+            32
+        );
+        let (stored, used): (Vec<u8>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT secret_hash, used_at FROM payer_client_secrets WHERE id = $1")
+                .bind(minted.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, Sha256::digest(minted.secret.as_bytes()).to_vec());
+        assert!(used.is_none());
+        assert!(minted.expires_at > Utc::now() + Duration::from_secs(14 * 60));
+        assert!(minted.expires_at <= Utc::now() + CLIENT_SECRET_TTL);
+
+        // The secret opens the invoice it was minted for and nothing else.
+        assert!(matches!(
+            repo.exchange_client_secret(&minted.secret, other.id, PAYER_SESSION_TTL)
+                .await,
+            Err(ExchangeClientSecretError::Unknown)
+        ));
+        assert!(matches!(
+            repo.exchange_client_secret("cs_not-a-secret", row.id, PAYER_SESSION_TTL)
+                .await,
+            Err(ExchangeClientSecretError::Unknown)
+        ));
+
+        let exchange = repo
+            .exchange_client_secret(&minted.secret, row.id, PAYER_SESSION_TTL)
+            .await
+            .unwrap();
+        assert!(exchange.invoice_completed_at.is_some());
+        assert!(exchange.session.merchant_session_verified_at.is_some());
+        assert!(exchange.session.email_verified_at.is_none());
+        assert!(exchange.session.payer_ref.is_none());
+        assert!(exchange.session.satisfies(PayerPolicyMode::MerchantSession));
+        assert!(!exchange.session.satisfies(PayerPolicyMode::VerifiedEmail));
+        // The minted session is a normal payer session for this invoice only.
+        let found = repo
+            .find_active(&exchange.token, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, exchange.session.id);
+        assert!(
+            repo.find_active(&exchange.token, other.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (used, session_id): (Option<DateTime<Utc>>, Option<Uuid>) = sqlx::query_as(
+            "SELECT used_at, payer_session_id FROM payer_client_secrets WHERE id = $1",
+        )
+        .bind(minted.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(used.is_some());
+        assert_eq!(session_id, Some(exchange.session.id));
+
+        // Spent: a second exchange mints nothing, and the first session lives on.
+        assert!(matches!(
+            repo.exchange_client_secret(&minted.secret, row.id, PAYER_SESSION_TTL)
+                .await,
+            Err(ExchangeClientSecretError::Used)
+        ));
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM payer_sessions WHERE invoice_id = $1")
+                .bind(row.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sessions, 1);
+        let completed: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM invoices WHERE verification_completed_at IS NOT NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(completed, vec![row.id]);
+
+        // The merchant sees one approved merchant-session attempt.
+        let attempts = repo
+            .attempts_for_invoice(row.account_id, row.id)
+            .await
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].kind, "merchant_session");
+        assert_eq!(attempts[0].status, "approved");
+        assert!(attempts[0].verified_at.is_some());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn expired_client_secrets_are_refused_and_fresh_ones_reopen_terminal_invoices(
+        pool: PgPool,
+    ) {
+        let repo = PayerSessionRepository::new(pool.clone());
+        let row = invoice(&pool, "merchant", merchant_policy()).await;
+        let stale = repo
+            .create_client_secret(row.id, row.account_id, CLIENT_SECRET_TTL)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE payer_client_secrets SET created_at = now() - interval '20 minutes', expires_at = now() - interval '5 minutes' WHERE id = $1")
+            .bind(stale.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.exchange_client_secret(&stale.secret, row.id, PAYER_SESSION_TTL)
+                .await,
+            Err(ExchangeClientSecretError::Expired)
+        ));
+        // Minting again does not disturb the earlier secret's record, and
+        // two live secrets are each good exactly once.
+        let first = repo
+            .create_client_secret(row.id, row.account_id, CLIENT_SECRET_TTL)
+            .await
+            .unwrap();
+        let second = repo
+            .create_client_secret(row.id, row.account_id, CLIENT_SECRET_TTL)
+            .await
+            .unwrap();
+        assert_ne!(first.secret, second.secret);
+        let opened = repo
+            .exchange_client_secret(&first.secret, row.id, PAYER_SESSION_TTL)
+            .await
+            .unwrap();
+        assert!(opened.invoice_completed_at.is_some());
+
+        // Settled: a fresh secret still opens a receipt session, but the
+        // invoice's own completion is already recorded and never moves.
+        sqlx::query("UPDATE invoices SET status = 'fulfilled', settlement_tx_hash = $2, settled_at = now() WHERE id = $1")
+            .bind(row.id)
+            .bind([0x44u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let receipt = repo
+            .exchange_client_secret(&second.secret, row.id, PAYER_SESSION_TTL)
+            .await
+            .unwrap();
+        assert!(receipt.invoice_completed_at.is_none());
+        assert!(receipt.session.satisfies(PayerPolicyMode::MerchantSession));
+        let completed_at: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT verification_completed_at FROM invoices WHERE id = $1")
+                .bind(row.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(completed_at, opened.invoice_completed_at);
+        let attempts = repo
+            .attempts_for_invoice(row.account_id, row.id)
+            .await
+            .unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.kind == "merchant_session")
         );
     }
 }

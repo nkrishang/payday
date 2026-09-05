@@ -40,16 +40,43 @@ carrying `refund_address` is rejected.
 
 ## Payer policy
 
-`payer_policy` is one of two presets. The verified mode names the expected
-mailbox:
+`payer_policy` is one of three presets. The verified mode names the expected
+mailbox; the merchant-session mode names the user your own application has
+already signed in, by your own identifier:
 
 ```ts
 { mode: "permissionless" }
 { mode: "verified_email", expected_email: "alice@example.com" }
+{ mode: "merchant_session", payer_reference: "user_123" }
 ```
 
 Gated invoices withhold their content and payment address from the payer page
 until verification completes. The full policy is returned only to the merchant.
+
+### Merchant sessions: your app opens the checkout
+
+For `merchant_session` the create response carries a single-use
+`client_secret`, valid for fifteen minutes and returned exactly once (never on
+a replay or a later read; the API stores only its hash). Your server, having
+authenticated the user, sends them to the payment page with the secret in the
+URL fragment; the hosted checkout exchanges it and the page opens unlocked.
+No code, no vendor, nothing for the payer to type:
+
+```ts
+const payment = await payday.payments.create(
+  { ...request, payer_policy: { mode: "merchant_session", payer_reference: user.id } },
+  `deposit-${deposit.id}`,
+);
+// redirect the signed-in user; the fragment never reaches a server log
+response.redirect(checkoutUrl(payment, payment.client_secret!));
+```
+
+The secret is spent by the first page that opens it: the same link pasted into
+another window is refused with `client_secret_used`. When the user comes back
+later, mint another with `payments.createClientSecret(payment.id)` and redirect
+again. Every webhook for the payment carries `payer_reference`, so the
+`payment.paid` and `payment.settled` handlers can credit the right ledger
+without a lookup.
 
 ## Attachments
 
@@ -74,7 +101,8 @@ also exposed separately as `attachments.create({ filename })` and
 
 - `payments.attachment(id)` — the attached PDF's descriptor with a short-lived `download_url`.
 - `payments.invoicePdf(id)` — Payday's deterministic invoice summary as a `Blob`; the same invoice always renders byte-identical.
-- `payments.verification(id)` — the invoice's verification facts (`email` and `complete`) and every attempt made against it, with its status and times. Never the code or the payer's session.
+- `payments.verification(id)` — the invoice's verification facts (`email`, `merchant_session`, and `complete`) and every attempt made against it, with its status and times. Never the code, the client secret, or the payer's session.
+- `payments.createClientSecret(id)` — a fresh single-use client secret for a `merchant_session` payment, for a user your app signs in again; see [Merchant sessions](#merchant-sessions-your-app-opens-the-checkout).
 - `payments.proof(id)` — the `ProofOfPayment` for a settled invoice (`409 payment_not_settled` before). It ties the canonical issuance snapshot, nonce, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the payment's `settlement_tx_hash`), carries a Payday attestation bound to that invoice, and can be verified offline without contacting Payday (the checks live in `gateway_core::verify_proof`).
 
 ## Customers
@@ -130,6 +158,10 @@ payer.payments.attachment(payment.id, payerSession); // PDF descriptor; 401 veri
 const { payer_session } = await payer.verification.startEmail(payment.id);
 await payer.verification.confirmEmail(payment.id, "123456", payer_session);
 const { requirements } = await payer.verification.status(payment.id, { payerSession: payer_session });
+
+// A merchant-session invoice instead arrives with a client secret in the URL
+// fragment (`#cs=…`); exchange it once for the session, then read as above.
+const opened = await payer.verification.exchangeClientSecret(payment.id, clientSecret);
 ```
 
 For `permissionless` invoices everything is unlocked immediately. For

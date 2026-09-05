@@ -350,7 +350,6 @@ test("an email-gated invoice unlocks for the tab that verifies, and only there",
   expect(errors.filter((error) => !/401/.test(error))).toEqual([]);
 });
 
-
 test("the wallet button refuses a payment for another chain", async ({ page }) => {
   await page.goto("/pay/pay_other-chain");
 
@@ -473,4 +472,125 @@ test("the payment scene stays fixed as its verification panel opens and closes",
   expect(new Set(snapshots.map(({ width }) => width)).size).toBe(1);
   expect(new Set(snapshots.map(({ height }) => height)).size).toBe(1);
   expect(snapshots.map(({ panelOpacity }) => panelOpacity)).toEqual([0, 1, 1, 0]);
+});
+
+/* ------------------------------------------------------------------------ */
+/* Merchant sessions: the merchant's app opens the checkout                 */
+/* ------------------------------------------------------------------------ */
+
+const MERCHANT_LINK = "/pay/pay_gated-merchant";
+const VALID_SECRET = `cs_${"valid".padEnd(43, "0")}`;
+const USED_SECRET = `cs_${"used".padEnd(43, "0")}`;
+const OTHER_SECRET = `cs_${"other".padEnd(43, "0")}`;
+
+/** A merchant-session page that nothing has opened: the app is the only way in. */
+async function expectAppRequired(page: Page, html: string) {
+  await expect(page.getByText("Open from the app").first()).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Acme Corp");
+  await expect(page.getByText("Deposit 25 USDC")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /open this payment from acme corp/i }),
+  ).toBeVisible();
+  await expectNoInstructions(page);
+  // Nothing to type, nothing to click, no mailbox: this mode has no step here.
+  // (Scoped to the gate: the dev server adds its own overlay button.)
+  expect(await page.locator("form, input").count()).toBe(0);
+  const gate = page.getByRole("region", { name: /open this payment from acme corp/i });
+  await expect(gate).toBeVisible();
+  await expect(gate.getByRole("button")).toHaveCount(0);
+  await expect(gate.getByRole("link")).toHaveCount(0);
+  const text = await page.locator("body").innerText();
+  expect(text).not.toMatch(/email|one-time code|a\*\*\*\*@/i);
+  for (const withheld of WITHHELD) {
+    // The heading itself names the amount and asset, as the merchant wrote it;
+    // the withheld amount is the formatted "25.00", which must not appear.
+    if (withheld === "USDC") continue;
+    expect(text, withheld).not.toContain(withheld);
+    expect(html, withheld).not.toContain(withheld);
+  }
+}
+
+test("a merchant-session payment opened from its app is unlocked, and the secret never lingers", async ({
+  page,
+  request,
+  browser,
+}) => {
+  const errors = watchConsole(page);
+  const secretInUrls: string[] = [];
+  page.on("request", (sent) => {
+    if (/cs_valid/.test(sent.url())) secretInUrls.push(sent.url());
+  });
+
+  await page.goto(`${MERCHANT_LINK}#${"cs"}=${VALID_SECRET}`);
+
+  // Everything the gate withheld is on the page, from the session the
+  // exchange minted, with no step taken by the payer.
+  await expect(page.getByRole("region", { name: "Invoice", exact: true })).toBeVisible();
+  await expect(page.getByText(ADDRESS)).toBeVisible();
+  await expect(page.getByRole("img", { name: /QR code/i })).toBeVisible();
+  await expect(page.getByText("Globex Corporation")).toBeVisible();
+  await expect(page.getByText("Open from the app")).toHaveCount(0);
+
+  // The secret left the address bar before the exchange answered, never
+  // travelled in a request URL, and is not in the server render.
+  expect(page.url()).not.toContain("cs_");
+  expect(page.url()).not.toContain("#");
+  expect(secretInUrls).toEqual([]);
+  const html = await (await request.get(MERCHANT_LINK)).text();
+  expect(html).not.toContain(ADDRESS);
+  expect(html).not.toContain("cs_");
+
+  // The session survives a reload in this tab without the secret.
+  await page.reload();
+  await expect(page.getByText(ADDRESS)).toBeVisible();
+
+  // Someone else holding the bare link is told to go through the app.
+  const stranger = await browser.newContext();
+  const other = await stranger.newPage();
+  await other.goto(MERCHANT_LINK);
+  await expectAppRequired(other, html);
+  await stranger.close();
+
+  expect(errors).toEqual([]);
+});
+
+test("a merchant-session link opened a second time says so and shows nothing", async ({
+  page,
+  request,
+}) => {
+  const errors = watchConsole(page);
+  await page.goto(`${MERCHANT_LINK}#cs=${USED_SECRET}`);
+
+  await expect(page.getByText(/this link was already opened/i)).toBeVisible();
+  await expect(page.getByText(/go back to acme corp/i)).toBeVisible();
+  await expectNoInstructions(page);
+  expect(page.url()).not.toContain("cs_");
+  expect(await page.locator("form, input").count()).toBe(0);
+  const html = await (await request.get(MERCHANT_LINK)).text();
+  expect(html).not.toContain(ADDRESS);
+
+  // The only fault is the 409 the spent secret earned.
+  expect(errors.filter((error) => !/409/.test(error))).toEqual([]);
+});
+
+test("a merchant-session secret for another payment is refused", async ({ page }) => {
+  const errors = watchConsole(page);
+  await page.goto(`${MERCHANT_LINK}#cs=${OTHER_SECRET}`);
+
+  await expect(page.getByText(/expired or is not valid/i)).toBeVisible();
+  await expectNoInstructions(page);
+  expect(page.url()).not.toContain("cs_");
+  expect(errors.filter((error) => !/401/.test(error))).toEqual([]);
+});
+
+test("a merchant-session payment opened without its app asks for the app", async ({
+  page,
+  request,
+}) => {
+  const errors = watchConsole(page);
+  const html = await (await request.get(MERCHANT_LINK)).text();
+  await page.goto(MERCHANT_LINK);
+
+  await expectAppRequired(page, html);
+  expect(errors).toEqual([]);
 });

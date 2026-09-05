@@ -76,9 +76,11 @@ fn unix_now() -> u64 {
     Utc::now().timestamp().max(0) as u64
 }
 
-/// The gated invoice behind `id`, still open to verification: permissionless
-/// invoices have nothing to verify, and verification after the deadline or
-/// after settlement cannot change anything, so both are refused up front.
+/// The email-gated invoice behind `id`, still open to verification:
+/// permissionless invoices have nothing to verify, merchant-session invoices
+/// are opened by a client secret rather than a code, and verification after
+/// the deadline or after settlement cannot change anything, so all are
+/// refused up front.
 pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Invoice), ApiError> {
     let uuid = parse_invoice_id(id)?;
     let row = state
@@ -87,8 +89,14 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
         .await?
         .ok_or_else(ApiError::payer_unauthorized)?;
     let invoice = Invoice::try_from(&row)?;
-    if !invoice.issuance_snapshot.payer_policy.mode().is_gated() {
-        return Err(ApiError::verification_not_required());
+    match invoice.issuance_snapshot.payer_policy.mode() {
+        PayerPolicyMode::VerifiedEmail => {}
+        PayerPolicyMode::Permissionless => return Err(ApiError::verification_not_required()),
+        PayerPolicyMode::MerchantSession => {
+            return Err(ApiError::verification_method_not_applicable(
+                "This payment is opened by the issuer's application; it does not send email codes",
+            ));
+        }
     }
     let open = matches!(
         invoice.status,
@@ -112,7 +120,7 @@ fn expected_email(invoice: &Invoice) -> String {
             .issuance_snapshot
             .payer_policy
             .expected_email()
-            .expect("a gated policy carries an expected email"),
+            .expect("gated_invoice admits only verified_email policies"),
     )
 }
 
