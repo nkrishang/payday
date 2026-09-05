@@ -4,7 +4,7 @@ TypeScript applications can use the zero-runtime-dependency client in
 [`sdk/typescript`](../sdk/typescript/README.md).
 
 `/v1/deposit-requests` is the canonical customer API. A deposit request is the document; a
-deposit is its on-chain fulfilment, and the deposit's state is read from the
+deposit is its on-chain fulfilment, and the deposit request's state is read from the
 request. All deposit request routes require bearer authentication — an API key,
 or the short-lived Auth0 access token a signed-in dashboard holds — and creates
 additionally require `Idempotency-Key`. A replay returns
@@ -20,19 +20,23 @@ single-use `client_secret` your server hands that user — see
 fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 `customer_id`, and one finalized `attachment_id` for a scanned PDF. The amount
 is used directly; there are no line items. Exactly `amount` settles to
-`payout_address`; the response's `recovery_address` is the Payday recovery
-wallet the deposit request is committed to, where overpayment remainders, expired
-balances, and late transfers land before the operator returns them after manual
-review. It is platform-configured, so a request carrying `refund_address` is
-rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
+`payout_address`. The response's `address` is null at creation: the deposit request
+address exists only once the payer has attested, from the hosted page, the
+wallet they will pay from (`payer_wallet`), which is the address's recovery
+term (`recovery_address`), where overpayment remainders, expired balances,
+and late transfers return on-chain. The binding raises a `deposit_request.ready`
+webhook. Recovery is never a request field, so a request carrying
+`refund_address` is rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
 both for a 24-hour lifetime. `chain_id` and `token_address` default to the
 configured chain and USDC contract.
 
 Every immutable field, including the attachment's hash, takes part in
 idempotency: reusing a key with a different document returns
-`409 idempotency_conflict`. The issued deposit request is canonicalized and committed
-into the deposit address through the salt, which is what makes the Proof of
-Payment (`GET /v1/deposit-requests/{id}/proof`, after settlement) verifiable offline.
+`409 idempotency_conflict`. The issued deposit request is canonicalized and, together
+with the payer's wallet attestation, committed into the deposit address
+through the salt, which is what makes the Proof of Payment
+(`GET /v1/deposit-requests/{id}/proof`, after settlement) verifiable offline: the
+document, the wallet, the address, and the transfers from that wallet.
 
 Deposit requests expose the public states `awaiting_deposit`, `partially_deposited`, `deposited`,
 `settled`, `expired`, `returned`, and `needs_attention`; amounts are trimmed USDC strings and are
@@ -59,8 +63,10 @@ payer, notes, reference, PDF, address, and QR are withheld
 (`content_unlocked: false`). A `merchant_session` page unlocks the moment your
 application opens it with the client secret in the URL fragment
 (`deposit_url#cs=…`); the bare link tells the payer to open it from your app.
-Reproduce the guidance in [Deposit safety](deposit-safety.md) if you build
-your own.
+Every request then takes the wallet step (`/wallet/challenge` and
+`/wallet/attest`, see the API reference) before the address, QR, and wallet
+button appear. Reproduce the guidance in [Deposit safety](deposit-safety.md)
+if you build your own.
 
 `GET /v1/deposit-requests` accepts `status`, `reference`, `starting_after`, and `limit`.
 `GET /v1/deposit-requests/{id}/transfers` returns finalized transfer provenance.

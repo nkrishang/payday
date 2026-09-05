@@ -231,8 +231,8 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   await expect(page.getByText("Verified", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("alice@globex.example")).toBeVisible();
 
-  // Both the overpayment remainder and the late transfer went to recovery.
-  const recovered = page.getByRole("region", { name: "Recovered funds" });
+  // Both the overpayment remainder and the late transfer went back to the payer.
+  const recovered = page.getByRole("region", { name: "Returned to the payer" });
   await expect(recovered).toContainText("Overpayment remainder");
   await expect(recovered).toContainText("5.00 USDC");
   await expect(recovered).toContainText("Late transfer");
@@ -243,7 +243,9 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("payday.proof.v1");
+  expect(body.version).toBe("payday.proof.v2");
+  expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
+  expect(body.recovery_address).toBe(body.payer_wallet.address);
   expect(body.payment_id).toBe("dr_seed-settled");
   expect(body.canonical_issuance_snapshot.attachment.sha256).toMatch(/^0x[0-9a-f]{64}$/);
   expect(body.verification.signer).toBe("0x976EA74026E726554dB657fA54763abd0C3a0aa9");

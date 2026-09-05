@@ -11,6 +11,7 @@
 --   payment.needs_attention    -> deposit_request.needs_attention
 --   payment.likely_unsolicited -> deposit_request.likely_unsolicited
 --   payment.recovered_funds    -> deposit_request.recovered_funds
+--   payment.ready              -> deposit_request.ready
 --   data.payment               -> data.deposit_request
 --
 -- The public status vocabulary inside the envelope follows the API's:
@@ -33,6 +34,7 @@ UPDATE webhook_events SET event_type = CASE event_type
     WHEN 'payment.needs_attention' THEN 'deposit_request.needs_attention'
     WHEN 'payment.likely_unsolicited' THEN 'deposit_request.likely_unsolicited'
     WHEN 'payment.recovered_funds' THEN 'deposit_request.recovered_funds'
+    WHEN 'payment.ready' THEN 'deposit_request.ready'
     ELSE event_type END
 WHERE event_type LIKE 'payment.%';
 
@@ -61,7 +63,7 @@ ALTER TABLE webhook_events ADD CONSTRAINT webhook_events_event_type_check CHECK 
         'deposit_request.deposited', 'deposit_request.settled', 'deposit_request.expired',
         'deposit_request.returned', 'deposit_request.needs_attention',
         'deposit_request.likely_unsolicited', 'deposit_request.recovered_funds',
-        'verification.approved', 'webhook.test'
+        'deposit_request.ready', 'verification.approved', 'webhook.test'
     )
 );
 
@@ -87,8 +89,8 @@ $$;
 
 -- The deposit request object shared by every event. Same fields as before:
 -- the policy mode, the merchant's own payer reference, verification
--- completion, and the unsolicited-funding timestamp; never the expected
--- email or any payer assertion.
+-- completion, the unsolicited-funding timestamp, and the bound wallet and
+-- address; never the expected email or any payer assertion.
 CREATE FUNCTION webhook_deposit_request_object(invoice invoices) RETURNS JSONB
 LANGUAGE SQL STABLE AS $$
     SELECT jsonb_build_object(
@@ -101,7 +103,12 @@ LANGUAGE SQL STABLE AS $$
         'payer_policy_mode', invoice.payer_policy_mode,
         'payer_reference', invoice.payer_reference,
         'verification_completed_at', invoice.verification_completed_at,
-        'likely_unsolicited_at', invoice.likely_unsolicited_at)
+        'likely_unsolicited_at', invoice.likely_unsolicited_at,
+        'payer_wallet', CASE WHEN invoice.payer_wallet IS NULL THEN NULL
+                             ELSE '0x' || encode(invoice.payer_wallet, 'hex') END,
+        'address', CASE WHEN invoice.payment_address IS NULL THEN NULL
+                        ELSE '0x' || encode(invoice.payment_address, 'hex') END,
+        'wallet_bound_at', invoice.wallet_bound_at)
 $$;
 
 CREATE OR REPLACE FUNCTION enqueue_invoice_webhook_event(
@@ -146,6 +153,11 @@ BEGIN
   IF NEW.verification_completed_at IS NOT NULL AND OLD.verification_completed_at IS NULL THEN
     PERFORM enqueue_invoice_webhook_event(NEW.account_id, NEW.id, 'verification.approved',
       NEW.verification_completed_at, jsonb_build_object('deposit_request', deposit_request));
+  END IF;
+
+  IF NEW.wallet_bound_at IS NOT NULL AND OLD.wallet_bound_at IS NULL THEN
+    PERFORM enqueue_invoice_webhook_event(NEW.account_id, NEW.id, 'deposit_request.ready',
+      NEW.wallet_bound_at, jsonb_build_object('deposit_request', deposit_request));
   END IF;
 
   IF NEW.likely_unsolicited_at IS NOT NULL AND OLD.likely_unsolicited_at IS NULL THEN

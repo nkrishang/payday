@@ -195,14 +195,34 @@ function Loaded({ payment }: { payment: DepositRequest }) {
       <Panel label="DepositRequest">
         <Facts>
           <Fact label="Address">
-            <AddressLink
-              address={payment.address}
-              href={
-                payment.address_explorer_url ??
-                explorerAddressUrl(config.explorerUrl, payment.address)
-              }
-            />
+            {payment.address ? (
+              <AddressLink
+                address={payment.address}
+                href={
+                  payment.address_explorer_url ??
+                  explorerAddressUrl(config.explorerUrl, payment.address)
+                }
+              />
+            ) : (
+              <span className="text-muted">
+                Created once the payer signs from the wallet they will pay from
+              </span>
+            )}
           </Fact>
+          {payment.payer_wallet ? (
+            <Fact label="Payer wallet">
+              <AddressLink
+                address={payment.payer_wallet}
+                href={explorerAddressUrl(config.explorerUrl, payment.payer_wallet)}
+              />
+              {payment.wallet_bound_at ? (
+                <span className="block text-[12px] text-faint">
+                  Signed {formatDate(payment.wallet_bound_at)}. Only its transfers count; excess
+                  and late funds return to it.
+                </span>
+              ) : null}
+            </Fact>
+          ) : null}
           <Fact label="Settles to">
             <AddressLink
               address={payment.payout_address}

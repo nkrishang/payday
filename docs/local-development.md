@@ -2,8 +2,11 @@
 
 ## System overview
 
-The API creates a deposit request with a counterfactual CREATE3 deposit address. The
-payer transfers USDC to that address. The indexer reads finalized ranges of
+The API creates a deposit request; its counterfactual CREATE3 deposit address is
+derived once the payer attests, from the hosted page, the wallet they will
+pay from (`POST /v1/payer/deposit-requests/{id}/wallet/challenge` and `/attest`),
+because the address commits to that wallet as its recovery term and to the
+signature through the salt. The payer transfers USDC to that address. The indexer reads finalized ranges of
 `Transfer(address,address,uint256)` logs from the configured USDC contract,
 attributes matching recipients in one database query, and advances deposit requests
 from `created` to `funded` when cumulative transfers reach the requested
@@ -12,10 +15,10 @@ amount, or to `expired` when the finalized block timestamp passes the deadline.
 The sweep worker submits batches to `BatchSweeper`. For an address without
 code it calls `PaymentFactory.execute`, which deploys `DepositRequest` at the
 counterfactual address; before expiry the constructor pays the beneficiary
-exactly the requested amount and sends any remainder to the Payday recovery
+exactly the requested amount and sends any remainder back to the payer's
 wallet, and after expiry it sends the whole balance to that wallet. For an
 address that already has code it calls `Deposit.recover`, which forwards
-anything that arrived later to the recovery wallet. The finalized receipt
+anything that arrived later to the payer's wallet. The finalized receipt
 decides the outcome: `Settled` → `fulfilled` (with a `Recovered` remainder
 when overpaid), standalone `Recovered` → `recovered`, `SweepRecovered` → late
 funds collected, and `SweepFailed` → retried or `blocked` after reading
@@ -24,9 +27,9 @@ recovery is written to the `recovered_funds` ledger in the transaction that
 resolves the batch, and each ledger row raises a `deposit_request.recovered_funds`
 webhook.
 
-The recovery wallet is platform-controlled: `gatewayd` stamps
-`PAYDAY_RECOVERY_ADDRESS` on every deposit request and rejects a create request that
-carries `refund_address`.
+The recovery wallet is the payer's attested wallet, never a configured or
+requested value: `gatewayd` rejects a create request that carries
+`refund_address`.
 
 ```
 created → funded → deploying → fulfilled
@@ -123,12 +126,15 @@ the development identity provider, printed in its log.
 
 ## Local Anvil end-to-end run
 
-`scripts/e2e-anvil.sh` runs the complete flow (exact, partial, and batched
-deposits; an overpayment split between the beneficiary and the Payday recovery
-wallet; late transfers; third-party execution; a paused token; a blacklisted
-beneficiary and its operator release; an expired partial deposit recovered
-automatically and completed late; the `recovered_funds` ledger and its
-webhook events) against a fresh Anvil started with
+`scripts/e2e-anvil.sh` runs the complete flow (the payer's wallet binding,
+signed with `cast` exactly as a wallet signs EIP-712 typed data; exact,
+partial, and batched deposits; an overpayment split between the beneficiary
+and the payer's wallet; late transfers; third-party execution; a paused
+token; a blacklisted beneficiary and its operator release; an expired partial
+deposit returned automatically and completed late; a gated request whose
+wallet step follows its email verification; funds from a stranger's wallet
+flagged and refused a proof; the `recovered_funds` ledger and its webhook
+events) against a fresh Anvil started with
 `--slots-in-an-epoch 1 --block-time 1`, which makes the node's
 `finalized` tag advance like a real chain, and a fresh MinIO container
 standing in for the attachment bucket. Use it whenever the contracts or
@@ -168,9 +174,9 @@ It deploys:
 - `MockUSDC`: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
 - `BatchSweeper`: `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`
 
-Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC. Account #5,
-`0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc`, is the local Payday recovery
-wallet (`PAYDAY_RECOVERY_ADDRESS`).
+Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC. Account #1 is
+the end-to-end suite's payer, whose wallet every request is bound to; account
+#5 plays the stranger who pays from an unattested wallet.
 
 Pin the deployed generation for both services (the runner does this for you):
 
@@ -201,7 +207,7 @@ docker run --rm --network host \
 
 ### 4. Build and start the services manually
 
-Ensure `.env` contains the local addresses, recovery address, database URL,
+Ensure `.env` contains the local addresses, database URL,
 RPC URL, finality settings, start block, signer and attestation keys,
 attachment store, and identity settings, and that the two code hashes above
 are exported (the `.env.example` placeholders are zero and will be refused).
@@ -245,11 +251,14 @@ Expirations must be at least ten minutes and at most a year ahead.
   --amount 1.5
 ```
 
-The response's `recovery_address` is the configured Payday recovery wallet;
-there is no flag to choose it.
+The response's `address` is null: bind the payer's wallet first, as the
+hosted checkout does (challenge, sign the typed data with `cast wallet sign
+--data --from-file`, attest; `scripts/e2e-anvil.sh`'s `bind_payer_wallet`
+is the reference). `recovery_address` is then that wallet; there is no flag
+to choose it.
 
-Copy `id` and `address` from the response, then transfer 1.5 USDC
-(`1500000` atomic units):
+Copy `id` and, after the binding, `address` from `GET /v1/deposit-requests/{id}`,
+then transfer 1.5 USDC (`1500000` atomic units) from the bound wallet:
 
 The `self_settlement` object contains the factory and salt needed for anyone
 to settle the deposit request on-chain if Payday is unavailable.
@@ -312,8 +321,10 @@ forge test
 just web-check   # SDK and web app: build, types, lint, unit tests
 ```
 
-Coverage includes exact, partial, and overpayment funding; the overpayment
-split between beneficiary and recovery and the `recovered_funds` ledger;
+Coverage includes the payer wallet binding and Proof of Payment v2 (the
+EIP-712 digest is pinned against viem in `web/lib/payer-attestation.test.ts`);
+exact, partial, and overpayment funding; the overpayment split between
+beneficiary and the payer's wallet and the `recovered_funds` ledger;
 deployment code-hash and bound-factory verification at startup; finality-tag
 and confirmation gating; multi-range draining; range replay idempotency; chain
 isolation; expiry by block timestamp; settlement, recovery, third-party
@@ -358,9 +369,6 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   compare them with the live chain at startup, also checking that
   `BatchSweeper.factory()` is `PAYDAY_FACTORY_ADDRESS`, and refuse to start on
   a mismatch. `just dev` and `just e2e` compute them from the running chain
-- `PAYDAY_RECOVERY_ADDRESS` — the Payday recovery wallet `gatewayd` stamps on
-  every deposit request; a nonzero address, Anvil account #5 locally, the recovery KMS
-  key's address in production
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
   deposit links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
@@ -372,8 +380,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   fresh database (the current block at first deployment)
 - `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally; read by
   both services (`gatewayd` uses it for deployment verification and skips it,
-  along with the recovery address and code hashes, when
-  `PAYDAY_STATUS_ONLY=true`)
+  along with the code hashes, when `PAYDAY_STATUS_ONLY=true`)
 - `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
   or `latest`
 - `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality

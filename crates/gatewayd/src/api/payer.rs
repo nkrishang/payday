@@ -7,8 +7,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use gateway_core::{
     AttachmentDescriptor, DepositRequestResponse, Invoice, InvoiceId, InvoiceStatus,
-    PayerDepositRequestDetails, PayerDepositRequestResponse, PayerPolicyResponse,
-    VerificationRequirementsResponse, deposit_request_id, masked_email,
+    PayerDepositRequestDetails, PayerDepositRequestResponse, PayerPolicyResponse, PaymentBinding,
+    VerificationFacts, VerificationRequirementsResponse, deposit_request_id, masked_email,
 };
 use gateway_db::DbAttachment;
 use qrcode::{QrCode, render::svg};
@@ -121,12 +121,12 @@ fn validate_base_url(
     Ok(value)
 }
 
-fn deposit_uri(invoice: &Invoice, amount: U256) -> String {
+fn deposit_uri(invoice: &Invoice, binding: &PaymentBinding, amount: U256) -> String {
     format!(
         "ethereum:{}@{}/transfer?address={}&uint256={}",
         invoice.token.0.to_checksum(None),
         invoice.chain_id.0,
-        invoice.payment_address.0.to_checksum(None),
+        binding.payment_address.0.to_checksum(None),
         amount,
     )
 }
@@ -164,8 +164,12 @@ pub struct PayerInvoiceAccess {
 /// guarded on its own. The settlement transaction is gated too: it is a
 /// public on-chain record naming the payment address, the amount, and the
 /// merchant's payout address, which is exactly what a locked invoice
-/// withholds.
-fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerDepositRequestResponse {
+/// withholds. The address itself has a second condition: it exists only
+/// once a payer wallet is bound, and it is the bound wallet's address.
+pub(crate) fn payer_response(
+    state: &AppState,
+    access: PayerInvoiceAccess,
+) -> PayerDepositRequestResponse {
     let PayerInvoiceAccess {
         invoice,
         settlement_tx_hash,
@@ -175,7 +179,11 @@ fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerDepositR
     } = access;
     let now = unix_now();
     let (remaining, payable) = payment_state(&invoice, now);
-    let deposit_uri = (unlocked && payable).then(|| deposit_uri(&invoice, remaining));
+    let deposit_uri = invoice
+        .binding
+        .as_ref()
+        .filter(|_| unlocked && payable)
+        .map(|binding| deposit_uri(&invoice, binding, remaining));
     let payer_message = invoice.blocked_reason.as_ref().map(|_| {
         "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.".into()
     });
@@ -213,10 +221,13 @@ fn payer_response(state: &AppState, access: PayerInvoiceAccess) -> PayerDepositR
         received_base_units: gated(response.received_base_units),
         remaining: gated(response.remaining),
         remaining_base_units: gated(remaining.to_string()),
-        address_explorer_url: unlocked
-            .then(|| state.payer.address_url(&response.address))
-            .flatten(),
-        address: gated(response.address),
+        payer_wallet: response.payer_wallet.filter(|_| unlocked),
+        address_explorer_url: response
+            .address
+            .as_deref()
+            .filter(|_| unlocked)
+            .and_then(|address| state.payer.address_url(address)),
+        address: response.address.filter(|_| unlocked),
         deposit_uri,
         details: unlocked.then(|| PayerDepositRequestDetails {
             amount: response.amount,
@@ -261,9 +272,18 @@ pub async fn authorized_invoice(
         Some(token) if mode.is_gated() => state.payer_sessions.find_active(token, row.id).await?,
         _ => None,
     };
+    // The wallet fact belongs to the invoice: one wallet is bound to it,
+    // whichever session did the binding.
+    let wallet_bound = row.payment_address.is_some();
     let requirements = match &session {
-        Some(session) => VerificationRequirementsResponse::from_facts(mode, session.facts()),
-        None => VerificationRequirementsResponse::for_mode(mode, false),
+        Some(session) => VerificationRequirementsResponse::from_facts(
+            mode,
+            VerificationFacts {
+                wallet: wallet_bound,
+                ..session.facts()
+            },
+        ),
+        None => VerificationRequirementsResponse::for_mode(mode, false, wallet_bound),
     };
     let content_unlocked = !mode.is_gated()
         || session
@@ -298,7 +318,8 @@ pub async fn get(
     Ok((headers, Json(payer_response(&state, access))))
 }
 
-/// The payment QR. A gated invoice needs an unlocked session first; a
+/// The payment QR. A gated invoice needs an unlocked session first, and any
+/// invoice needs its payer wallet bound (`409 wallet_required` before); a
 /// closed one answers `410 deposit_request_not_payable` even to an unlocked session,
 /// so the code never invites a transfer that would route to recovery.
 pub async fn qr(
@@ -310,11 +331,16 @@ pub async fn qr(
     if !access.content_unlocked {
         return Err(ApiError::verification_required());
     }
+    let binding = access
+        .invoice
+        .binding
+        .as_ref()
+        .ok_or_else(ApiError::wallet_required)?;
     let (remaining, payable) = payment_state(&access.invoice, unix_now());
     if !payable {
         return Err(ApiError::deposit_request_not_payable());
     }
-    let svg = QrCode::new(deposit_uri(&access.invoice, remaining).as_bytes())
+    let svg = QrCode::new(deposit_uri(&access.invoice, binding, remaining).as_bytes())
         .map_err(|error| ApiError::internal(format!("failed to render deposit QR: {error}")))?
         .render::<svg::Color>()
         .min_dimensions(224, 224)
@@ -384,13 +410,15 @@ pub async fn page(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{U256, address};
+    use alloy_primitives::{B256, U256, address};
     use gateway_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        Party, PayerPolicy, RecoveryAddress, TokenAddress,
+        Party, PayerAttestation, PayerPolicy, TokenAddress, sign_payer_attestation, wallet_of,
     };
 
     use super::*;
+
+    const PAYER_KEY: [u8; 32] = [7u8; 32];
 
     fn invoice() -> Invoice {
         let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
@@ -398,7 +426,6 @@ mod tests {
         let beneficiary =
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000002"));
         let amount = Amount(U256::from(1_500_000));
-        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000003"));
         let party = |name: &str| Party {
             name: name.into(),
             email: None,
@@ -414,19 +441,29 @@ mod tests {
             beneficiary,
             amount,
             u64::MAX / 2,
-            recovery,
         );
-        Invoice::issue(
+        let mut invoice = Invoice::issue(
             factory,
             ChainId(143),
             token,
             beneficiary,
             amount,
             u64::MAX / 2,
-            recovery,
             snapshot,
         )
-        .unwrap()
+        .unwrap();
+        let message = PayerAttestation::new(
+            invoice.attribution_hash,
+            wallet_of(&PAYER_KEY),
+            B256::repeat_byte(0x11),
+            invoice.expiration_timestamp,
+        );
+        let attestation = sign_payer_attestation(&PAYER_KEY, &message, 143, factory.0);
+        let binding = invoice
+            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .unwrap();
+        invoice.binding = Some(binding);
+        invoice
     }
 
     #[test]
@@ -443,11 +480,12 @@ mod tests {
         assert!(!url.contains("token"));
         assert_eq!(access.origin(), "https://pay.payday.sh");
         assert_eq!(access.origin_header(), "https://pay.payday.sh");
+        let binding = invoice.binding.as_ref().unwrap();
         assert_eq!(
-            deposit_uri(&invoice, invoice.amount.0),
+            deposit_uri(&invoice, binding, invoice.amount.0),
             format!(
                 "ethereum:0x754704Bc059F8C67012fEd69BC8A327a5aafb603@143/transfer?address={}&uint256=1500000",
-                invoice.payment_address.0.to_checksum(None)
+                binding.payment_address.0.to_checksum(None)
             )
         );
     }
@@ -459,7 +497,8 @@ mod tests {
         let (remaining, payable) = payment_state(&invoice, invoice.expiration_timestamp);
         assert_eq!(remaining, U256::from(1_000_000));
         assert!(payable);
-        assert!(deposit_uri(&invoice, remaining).ends_with("uint256=1000000"));
+        let binding = invoice.binding.clone().unwrap();
+        assert!(deposit_uri(&invoice, &binding, remaining).ends_with("uint256=1000000"));
 
         assert!(!payment_state(&invoice, invoice.expiration_timestamp + 1).1);
         invoice.status = InvoiceStatus::Funded;

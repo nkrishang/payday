@@ -2,15 +2,15 @@
 
 This is the first-production deployment path for one operator. Terraform owns
 the AWS resources; Docker images contain the two Rust services; AWS KMS owns
-the non-exportable sweep key, recovery key, and Proof of Payment attestation
-key. Do not accept a real deposit until the final end-to-end test in this
-runbook succeeds.
+the non-exportable sweep key and Proof of Payment attestation key. Do not
+accept a real deposit until the final end-to-end test in this runbook
+succeeds.
 
-Two things Payday holds and one it never does: the sweep signer holds only MON
-for gas; the Payday recovery wallet holds recovered USDC (overpayment
-remainders, expired balances, late transfers) until the operator returns it by
-hand; the intended requested amount moves directly from the deposit address to
-the merchant and never passes through Payday.
+One thing Payday holds and two it never does: the sweep signer holds only MON
+for gas; the intended requested amount moves directly from the deposit address
+to the merchant; and overpayment remainders, expired balances, and late
+transfers go back on-chain to the payer's own attested wallet, which is every
+deposit address's recovery term. Payday custodies no USDC.
 
 ## Accounts and assets the operator must provide
 
@@ -204,9 +204,6 @@ Replace every placeholder in `terraform.tfvars`, including:
 - `image_tag = "git-<full commit SHA>"`
 - deployed `factory_address` and `batch_sweeper_address`, with their
   `factory_code_hash` and `batch_sweeper_code_hash` from step 2
-- `recovery_address`, filled in during step 6 once the recovery key exists;
-  leave it unset until then. There is no safe placeholder, and the full apply
-  in step 7 refuses until it is set
 - current `usdc_start_block`
 - `privy_app_id`, the Privy app merchants sign in to (the web app is built
   with the same id)
@@ -221,20 +218,16 @@ export TF_VAR_rpc_url="$MONAD_RPC_URL"
 Terraform stores generated credentials and the RPC URL in its encrypted state.
 Treat state files and saved plans as secrets.
 
-## 6. Bootstrap ECR, the recovery key, and push images
+## 6. Bootstrap ECR and push images
 
 The repositories must exist before images can be pushed, while ECS cannot start
-until those images exist. The recovery KMS key is created in the same targeted
-apply because its address is a Terraform input (`recovery_address`) that the
-API task needs before it can start:
+until those images exist:
 
 ```bash
 terraform -chdir=infra init -backend-config=backend.hcl
 terraform -chdir=infra apply \
   -target=aws_ecr_repository.api \
-  -target=aws_ecr_repository.indexer \
-  -target=aws_kms_key.recovery \
-  -target=aws_kms_alias.recovery
+  -target=aws_ecr_repository.indexer
 
 api_repo=$(terraform -chdir=infra output -raw api_ecr_repository_url)
 indexer_repo=$(terraform -chdir=infra output -raw indexer_ecr_repository_url)
@@ -247,24 +240,11 @@ The push script requires exactly `git-<full HEAD SHA>` and refuses a dirty
 worktree. Commit and review every source change before building. This makes the
 image-to-source relationship and rollback deterministic.
 
-Now derive the Payday recovery wallet from the recovery key and add it to
-`terraform.tfvars` as `recovery_address`, which has been unset until now:
-
-```bash
-export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw recovery_kms_key_arn)"
-cast wallet address --aws
-```
-
-KMS returns a public key, not an address; `cast` derives it. Verify the
-derivation independently before relying on it: every deposit request commits this
-address into its deposit address, and it cannot be changed for deposit requests that
-already exist. Replacing the key later therefore only affects deposit requests created
-after `recovery_address` changes, and because the recovery wallet is one of the
-parameters an `Idempotency-Key` commits to, a `POST /v1/deposit-requests` replay from
-before the change answers `409 idempotency_conflict`; the original deposit request must
-be fetched with `GET`. No task role is granted `kms:Sign` on this key;
-returning recovered funds is a manual operator action with the same `--aws`
-signer.
+The stack still declares a `recovery` KMS key. It is legacy: before deposits
+returned excess funds to the payer's own wallet, it was every deposit request's
+recovery term. Nothing reads its address any more and no task role can sign
+with it; keep it only until any balance it holds from that period has been
+returned by hand, then remove its `prevent_destroy` guard and the resource.
 
 ## 7. Create the complete AWS stack
 
@@ -283,9 +263,9 @@ terraform -chdir=infra apply deploy.tfplan
 
 Review the plan before applying it. In particular, reject unexplained database
 replacement/destruction, IAM permissions broader than the named secrets, the
-attachment bucket's `uploads/` prefix, and the named KMS keys (nothing may
-gain `kms:Sign` on the recovery key, and only the API task role may sign with
-the attestation key), a worker count other than one, or plaintext/non-HTTPS
+attachment bucket's `uploads/` prefix, and the named KMS keys (only the API
+task role may sign with the attestation key, and nothing signs with the
+legacy recovery key), a worker count other than one, or plaintext/non-HTTPS
 endpoints.
 
 AWS creates the TLS certificate, DNS record, ALB/WAF, ECS services, RDS database,
@@ -380,20 +360,22 @@ curl --fail -sS "https://api.payday.sh/v1/deposit-requests" \
        "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
-The response's `recovery_address` must be the Payday recovery wallet from
-step 6. Pay exactly 0.01 native USDC to the returned deposit address. Confirm
-that:
+The response's `address` is null until a wallet is bound. Open the returned
+`deposit_url` in a browser, connect the wallet you will pay from, and sign
+the attestation; `GET /v1/deposit-requests/{id}` then carries `address`,
+`payer_wallet`, and `recovery_address` (the same wallet), and a
+`deposit_request.ready` webhook fires. Pay exactly 0.01 native USDC to that address
+from that wallet. Confirm that:
 
 1. `GET /v1/deposit-requests/{id}` progresses `awaiting_deposit → deposited → settled`, with
    `received_base_units`, `settlement_tx_hash`, `settled_at`, and `settled_block` set.
 2. The beneficiary receives exactly the USDC amount.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
-5. Send a second, small deposit to the same address and confirm it reaches
-   the Payday recovery wallet within a minute while the status stays
+5. Send a second, small deposit to the same address and confirm it comes
+   back to the paying wallet within a minute while the status stays
    `settled`, and that `recovered_funds` records it with reason
    `late_transfer` (see the [smoke test](runbooks/end-to-end-smoke-test.md)).
-   Return it by hand from the recovery key afterwards.
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
 8. `GET /v1/deposit-requests/{id}/proof` returns a proof whose attestation `signer`
@@ -457,9 +439,9 @@ fails closed rather than settling against the wrong contracts.
 - Rotate account API keys from the dashboard's API key section as described
   in the secrets-rotation runbook. The previous key has a 24-hour grace period;
   revoking invalidates current and grace-period keys immediately.
-- Review the `recovered_funds` ledger and return held amounts by hand from the
-  recovery key; see "Reconciling recovered funds" in
-  `docs/runbooks/stuck-deposit-request.md`. Nothing automates a return.
+- The `recovered_funds` ledger records every amount returned to a payer's
+  wallet; nothing is held, so there is nothing to return by hand. See
+  "Reconciling returned funds" in `docs/runbooks/stuck-deposit-request.md`.
 - Attached PDFs stay in the versioned, KMS-encrypted attachment bucket for as
   long as their deposit request; the lifecycle rule removes only uploads that were
   never attached (still tagged `payday-upload=pending`) after seven days.

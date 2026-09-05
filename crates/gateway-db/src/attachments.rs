@@ -644,10 +644,7 @@ pub(crate) mod tests {
             .unwrap();
         assert!(!issued.replayed);
         let row = invoices.find_by_id(issued.row.id).await.unwrap().unwrap();
-        assert_eq!(
-            row.issuance_snapshot.unwrap().0.attachment.unwrap().id,
-            document.id
-        );
+        assert_eq!(row.issuance_snapshot.0.attachment.unwrap().id, document.id);
         let bound = attachments
             .get_for_account(owner, document.id)
             .await

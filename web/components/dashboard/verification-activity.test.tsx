@@ -24,7 +24,7 @@ const VERIFIED: VerificationDetail = {
   payer_policy_mode: "verified_email",
   verification_completed_at: "2026-08-25T10:05:00Z",
   likely_unsolicited_at: null,
-  facts: { email: "approved", merchant_session: "not_required", complete: true },
+  facts: { email: "approved", wallet: "pending", merchant_session: "not_required", complete: true },
   attempts: [ABANDONED_ATTEMPT, EMAIL_ATTEMPT],
 };
 
@@ -60,7 +60,7 @@ describe("VerificationActivity", () => {
       payer_policy_mode: "merchant_session",
       verification_completed_at: "2026-08-25T10:05:00Z",
       likely_unsolicited_at: null,
-      facts: { email: "not_required", merchant_session: "approved", complete: true },
+      facts: { email: "not_required", wallet: "pending", merchant_session: "approved", complete: true },
       attempts: [
         {
           id: "v-session",
@@ -83,7 +83,7 @@ describe("VerificationActivity", () => {
     const { verification } = renderActivity({
       ...VERIFIED,
       verification_completed_at: null,
-      facts: { email: "pending", merchant_session: "not_required", complete: false },
+      facts: { email: "pending", wallet: "pending", merchant_session: "not_required", complete: false },
       attempts: [],
     });
 

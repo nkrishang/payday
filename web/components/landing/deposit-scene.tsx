@@ -199,7 +199,7 @@ function DepositRow({
 
 function CheckoutPanel() {
   return (
-    <aside className="checkout-panel" aria-label="DepositRequest verification preview">
+    <aside className="checkout-panel" aria-label="Deposit verification preview">
       <div className="checkout-variant checkout-variant-a" aria-hidden="true">
         <CheckoutPanelContent payment={DEPOSITS[5]} />
       </div>

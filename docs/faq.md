@@ -4,8 +4,8 @@
 
 The deposit request is the document you issue: issuer and payer parties, one amount,
 optional notes, heading, reference, and metadata, a payer policy, and at most
-one PDF. The deposit is its on-chain fulfilment at a one-time address. The API
-resource is the deposit request, and the deposit's state is read from it.
+one PDF. The deposit request is its on-chain fulfilment at a one-time address. The API
+resource is the deposit request, and the deposit request's state is read from it.
 Issued deposit requests are immutable — to change one, cancel it and issue another.
 
 ## Can I add line items or tax?
@@ -52,10 +52,12 @@ chain's gas currency do not count and may be unrecoverable.
 
 ## What is the deposit address?
 
-It is a unique counterfactual smart-contract address for one deposit request. USDC can
-arrive before the contract exists; deployment later routes its balance under
-the amount, payout, expiry, and Payday recovery terms committed into that
-address. Never reuse it for another order.
+It is a unique counterfactual smart-contract address for one deposit request and one
+payer wallet. It exists once the payer has signed the request's attestation
+from the wallet they will pay from; USDC can then arrive before the contract
+exists, and deployment later routes its balance under the amount, payout,
+expiry, and recovery terms committed into that address, the recovery term
+being the payer's own wallet. Never reuse it for another order.
 
 ## What should I give the payer?
 
@@ -71,7 +73,7 @@ Payday credits only finalized native-USDC transfers. Inclusion or wallet
 confirmation can precede Payday's finality boundary and indexing cursor. Check
 `as_of`, `indexer_freshness`, transfer provenance, and `/v1/status`; poll
 `GET /v1/deposit-requests/{id}` or register a webhook rather than treating submission
-as a deposit.
+as a deposit request.
 
 ## What happens with exact, partial, or excess deposits?
 
@@ -79,21 +81,21 @@ as a deposit.
   reach the requested amount.
 - `partially_deposited` remains open while the finalized total is short.
 - On-time execution sends exactly the requested amount to payout. Any excess goes
-  to the Payday recovery wallet and is returned after manual review; it is
-  never forwarded to the merchant.
-- If execution happens after expiry, the complete balance goes to the Payday
-  recovery wallet—even if enough USDC arrived earlier.
+  back to the payer's attested wallet in the same transaction; it is never
+  forwarded to the merchant.
+- If execution happens after expiry, the complete balance goes back to the
+  payer's attested wallet—even if enough USDC arrived earlier.
 
 Leave time for inclusion, finality, and settlement before the deadline.
 
 ## Where do expired or late funds go?
 
-An underpaid address is recovered after expiry. Native USDC sent after expiry
-or after the deposit contract executes is routed to the Payday recovery wallet
-(`recovery_address` on the deposit request). Payday holds those funds, records each
-amount against the deposit request, reviews it manually, and returns it; the wallet is
-not the payer's and not the merchant's. Payers should contact the merchant and
-Payday support for return handling.
+An underpaid address is returned after expiry. Native USDC sent after expiry
+or after the deposit contract executes is forwarded to the payer's attested
+wallet (`recovery_address` on the deposit request, always equal to `payer_wallet`).
+Payday holds nothing: every return is on-chain and recorded against the
+deposit. A payer who sent from a wallet other than the one they signed with
+will find the return in the attested wallet.
 
 ## Can I cancel or refund through Payday?
 

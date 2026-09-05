@@ -1,6 +1,6 @@
 "use client";
 
-import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
+import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, Wallet } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { erc20Abi, type Hex } from "viem";
@@ -34,12 +34,16 @@ const ZERO = "0x0000000000000000000000000000000000000000" as const;
  * 2. The chain and token contract are checked against this deployment's
  *    configured values before the button will do anything, so a wrong or
  *    tampered response cannot get a signature for an unexpected token.
+ * 3. The connected wallet must be the one the payer attested. The address
+ *    commits to that wallet and the indexer credits only its transfers, so
+ *    the button refuses to send from any other rather than let money arrive
+ *    that will not count.
  */
 export function WalletPay({
   payment,
   onSent,
 }: {
-  payment: UnlockedPayerDepositRequest;
+  payment: ReadyPayerDepositRequest;
   onSent: (hash: string) => void;
 }) {
   const { address, isConnected, chainId } = useAccount();
@@ -54,6 +58,8 @@ export function WalletPay({
   const chainMatches = payment.chain.id === String(config.chainId);
   const tokenMatches = payment.token.address.toLowerCase() === config.usdcAddress;
   const supported = chainMatches && tokenMatches;
+  const walletMatches =
+    !isConnected || !address || address.toLowerCase() === payment.payer_wallet.toLowerCase();
 
   const usdc = useReadContract({
     address: payment.token.address as Hex,
@@ -99,6 +105,7 @@ export function WalletPay({
       setConnectOpen(true);
       return;
     }
+    if (!walletMatches) return;
 
     try {
       setTxHash(null);
@@ -130,6 +137,7 @@ export function WalletPay({
     payment.remaining_base_units,
     payment.token.address,
     switchChainAsync,
+    walletMatches,
     writeContractAsync,
   ]);
 
@@ -152,7 +160,7 @@ export function WalletPay({
     return `Pay ${formatDisplayAmount(payment.remaining)} ${payment.token.symbol}`;
   })();
 
-  const blocked = isConnected && (!holdsEnough || !hasGas);
+  const blocked = isConnected && (!walletMatches || !holdsEnough || !hasGas);
   const message = (() => {
     if (error) return error;
     if (reverted) return "The transfer was reverted on-chain. Nothing was sent.";
@@ -182,14 +190,22 @@ export function WalletPay({
         </div>
       ) : null}
 
-      {isConnected && !holdsEnough && usdc.data !== undefined ? (
+      {isConnected && !walletMatches ? (
+        <p role="alert" className="mt-2.5 text-center text-[13px] text-warning">
+          This request is bound to{" "}
+          <span className="font-mono">{truncateAddress(payment.payer_wallet)}</span>. Switch to
+          that wallet: transfers from any other are not credited to you.
+        </p>
+      ) : null}
+
+      {isConnected && walletMatches && !holdsEnough && usdc.data !== undefined ? (
         <p className="mt-2.5 text-center text-[13px] text-warning">
           This wallet holds {formatBaseUnits(usdc.data, payment.token.decimals)}{" "}
           {payment.token.symbol}, less than the {formatDisplayAmount(payment.remaining)} due.
         </p>
       ) : null}
 
-      {isConnected && holdsEnough && !hasGas ? (
+      {isConnected && walletMatches && holdsEnough && !hasGas ? (
         <p className="mt-2.5 text-center text-[13px] text-warning">
           This wallet has no {config.nativeSymbol} to pay for gas on {paydayChain.name}.
         </p>

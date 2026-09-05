@@ -1,15 +1,17 @@
 use std::fmt;
 use std::str::FromStr;
 
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     ATTRIBUTION_VERSION, Amount, AttributionError, BeneficiaryAddress, CANONICALIZATION,
-    CanonicalIssuanceSnapshot, ChainId, FactoryAddress, PaymentAddress, RecoveryAddress,
+    CanonicalIssuanceSnapshot, ChainId, FactoryAddress, PayerAttestationError,
+    PayerAttestationScope, PayerWalletAttestation, PaymentAddress, RecoveryAddress,
     SNAPSHOT_SCHEMA, Salt, TokenAddress, derive_attribution, predict_payment_address,
+    recompute_salt, verify_payer_attestation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,6 +40,10 @@ pub fn generate_invoice_id() -> InvoiceId {
 
 /// Invoice lifecycle.
 ///
+/// A `created` invoice has no payment address until a payer binds a wallet
+/// (see [`Invoice::bind_payer_wallet`]); funds can only start arriving after
+/// that, so the statuses below never depend on whether a binding exists.
+///
 /// ```text
 /// created ──(finalized credit ≥ amount)──▶ funded ──(claimed)──▶ deploying ──▶ fulfilled
 ///    │                                       │                        │
@@ -48,8 +54,8 @@ pub fn generate_invoice_id() -> InvoiceId {
 ///
 /// `blocked` is reached from `deploying` or `expired` when a sweep fails for
 /// a reason the worker classifies as permanent. Funds arriving after
-/// `fulfilled`/`recovered` are forwarded to the recovery address without
-/// changing the status.
+/// `fulfilled`/`recovered` are forwarded to the recovery address (the payer's
+/// attested wallet) without changing the status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InvoiceStatus {
@@ -120,6 +126,21 @@ impl FromStr for InvoiceStatus {
     }
 }
 
+/// The payer's wallet, attested in their session, and everything derived
+/// from it: the recovery term, the salt, and the CREATE3 payment address.
+/// Immutable once set; the address commits to all of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentBinding {
+    pub payer_wallet: Address,
+    pub attestation: PayerWalletAttestation,
+    /// Always the payer's wallet: excess and late funds return to the payer.
+    pub recovery: RecoveryAddress,
+    pub salt: Salt,
+    pub payment_address: PaymentAddress,
+    /// RFC 3339, when the attestation was accepted.
+    pub bound_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: InvoiceId,
@@ -127,11 +148,11 @@ pub struct Invoice {
     pub token: TokenAddress,
     pub beneficiary: BeneficiaryAddress,
     pub expiration_timestamp: u64,
-    pub recovery: RecoveryAddress,
     pub factory: FactoryAddress,
     pub amount: Amount,
-    pub salt: Salt,
-    pub payment_address: PaymentAddress,
+    /// `None` until a payer has attested a wallet; only then does the
+    /// request have an address anyone can pay.
+    pub binding: Option<PaymentBinding>,
     pub status: InvoiceStatus,
     /// Finalized transfers credited toward `amount`, in base units.
     pub received: Amount,
@@ -147,19 +168,19 @@ pub struct Invoice {
     /// advisory metadata and does not alter the immutable payment contract.
     pub cancellation_requested_at: Option<String>,
     /// Proof material (product plan §5): the commitment scheme version, the
-    /// nonce and hash the salt was derived from, and the document that was
-    /// hashed. None of it is a settlement dependency.
+    /// hash the salt is derived from, and the document that was hashed. None
+    /// of it is a settlement dependency.
     pub attribution_version: u16,
-    pub attribution_nonce: B256,
     pub attribution_hash: B256,
     pub issuance_snapshot: CanonicalIssuanceSnapshot,
 }
 
 impl Invoice {
-    /// Issue an invoice: commit to `snapshot`, derive the salt from it, and
-    /// compute the payment address. The typed parameters are the ones the
-    /// address is derived from, so the snapshot must describe exactly those;
-    /// otherwise a proof would verify against terms nobody was paid under.
+    /// Issue an invoice: commit to `snapshot` and hash it. The typed
+    /// parameters are the ones the address will be derived from, so the
+    /// snapshot must describe exactly those; otherwise a proof would verify
+    /// against terms nobody was paid under. No address exists yet: see
+    /// [`Invoice::bind_payer_wallet`].
     #[allow(clippy::too_many_arguments)]
     pub fn issue(
         factory: FactoryAddress,
@@ -168,7 +189,6 @@ impl Invoice {
         beneficiary: BeneficiaryAddress,
         amount: Amount,
         expiration_timestamp: u64,
-        recovery: RecoveryAddress,
         snapshot: CanonicalIssuanceSnapshot,
     ) -> Result<Self, AttributionError> {
         let expected = CanonicalIssuanceSnapshot::new(
@@ -181,7 +201,6 @@ impl Invoice {
             beneficiary,
             amount,
             expiration_timestamp,
-            recovery,
         );
         for (field, actual, wanted) in [
             ("schema", &snapshot.schema, SNAPSHOT_SCHEMA),
@@ -200,11 +219,6 @@ impl Invoice {
                 "receiver_address",
                 &snapshot.receiver_address,
                 &expected.receiver_address,
-            ),
-            (
-                "recovery_address",
-                &snapshot.recovery_address,
-                &expected.recovery_address,
             ),
             (
                 "factory_address",
@@ -228,26 +242,15 @@ impl Invoice {
         }
 
         let attribution = derive_attribution(&snapshot)?;
-        let salt = attribution.salt;
         Ok(Invoice {
             id: generate_invoice_id(),
             chain_id,
             token,
             beneficiary,
             expiration_timestamp,
-            recovery,
             factory,
             amount,
-            salt,
-            payment_address: predict_payment_address(
-                factory,
-                token,
-                amount,
-                beneficiary,
-                expiration_timestamp,
-                recovery,
-                salt,
-            ),
+            binding: None,
             status: InvoiceStatus::Created,
             received: Amount(U256::ZERO),
             execute_tx_hash: None,
@@ -256,25 +259,74 @@ impl Invoice {
             blocked_reason: None,
             cancellation_requested_at: None,
             attribution_version: ATTRIBUTION_VERSION,
-            attribution_nonce: attribution.nonce,
             attribution_hash: attribution.attribution_hash,
             issuance_snapshot: snapshot,
         })
     }
 
-    /// Recompute the counterfactual address from the stored parameters. A
-    /// mismatch means the row no longer describes the address payers were
-    /// given and must never be swept.
-    pub fn address_matches_parameters(&self) -> bool {
-        predict_payment_address(
+    /// What the payer's attestation must be for: this deployment and this
+    /// request's commitment.
+    pub fn attestation_scope(&self) -> PayerAttestationScope {
+        PayerAttestationScope {
+            chain_id: self.chain_id.0,
+            factory: self.factory.0,
+            attribution_hash: self.attribution_hash,
+        }
+    }
+
+    /// Derive the binding a verified attestation produces: the payer's wallet
+    /// is the recovery term, the salt commits to the attribution hash and the
+    /// attestation digest, and the address follows from both. The attestation
+    /// is verified here; a binding never exists for a signature that does
+    /// not recover to its wallet.
+    pub fn bind_payer_wallet(
+        &self,
+        attestation: PayerWalletAttestation,
+        bound_at: String,
+    ) -> Result<PaymentBinding, PayerAttestationError> {
+        let verified = verify_payer_attestation(&attestation, self.attestation_scope())?;
+        let recovery = RecoveryAddress(verified.wallet);
+        let salt = recompute_salt(self.attribution_hash, verified.digest);
+        let payment_address = predict_payment_address(
             self.factory,
             self.token,
             self.amount,
             self.beneficiary,
             self.expiration_timestamp,
-            self.recovery,
-            self.salt,
-        ) == self.payment_address
+            recovery,
+            salt,
+        );
+        Ok(PaymentBinding {
+            payer_wallet: verified.wallet,
+            attestation,
+            recovery,
+            salt,
+            payment_address,
+            bound_at,
+        })
+    }
+
+    /// The address payers were given, once a wallet is bound.
+    pub fn payment_address(&self) -> Option<PaymentAddress> {
+        self.binding.as_ref().map(|binding| binding.payment_address)
+    }
+
+    /// Recompute the counterfactual address from the stored parameters. A
+    /// mismatch means the row no longer describes the address payers were
+    /// given and must never be swept. An unbound invoice has no address to
+    /// mismatch.
+    pub fn address_matches_parameters(&self) -> bool {
+        self.binding.as_ref().is_none_or(|binding| {
+            predict_payment_address(
+                self.factory,
+                self.token,
+                self.amount,
+                self.beneficiary,
+                self.expiration_timestamp,
+                binding.recovery,
+                binding.salt,
+            ) == binding.payment_address
+        })
     }
 }
 
@@ -333,10 +385,13 @@ mod tests {
     }
 
     use crate::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Party, PayerPolicy, RecoveryAddress,
-        TokenAddress, predict_payment_address, recompute_salt,
+        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Party, PayerAttestation, PayerPolicy,
+        RecoveryAddress, TokenAddress, predict_payment_address, recompute_salt,
+        sign_payer_attestation, wallet_of,
     };
     use alloy_primitives::{U256, address};
+
+    const PAYER_KEY: [u8; 32] = [7u8; 32];
 
     fn party(name: &str) -> Party {
         Party {
@@ -354,7 +409,6 @@ mod tests {
         beneficiary: BeneficiaryAddress,
         amount: Amount,
         expiration_timestamp: u64,
-        recovery: RecoveryAddress,
     ) -> Invoice {
         let snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
@@ -366,7 +420,6 @@ mod tests {
             beneficiary,
             amount,
             expiration_timestamp,
-            recovery,
         );
         Invoice::issue(
             factory,
@@ -375,7 +428,6 @@ mod tests {
             beneficiary,
             amount,
             expiration_timestamp,
-            recovery,
             snapshot,
         )
         .unwrap()
@@ -389,8 +441,31 @@ mod tests {
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
             1_900_000_000,
-            RecoveryAddress(address!("0x0000000000000000000000000000000000000002")),
         )
+    }
+
+    /// The attestation a payer's wallet would sign for `invoice` under a
+    /// given session nonce.
+    fn attest(invoice: &Invoice, key: &[u8; 32], nonce: u8) -> PayerWalletAttestation {
+        let message = PayerAttestation::new(
+            invoice.attribution_hash,
+            wallet_of(key),
+            B256::repeat_byte(nonce),
+            invoice.expiration_timestamp,
+        );
+        sign_payer_attestation(key, &message, invoice.chain_id.0, invoice.factory.0)
+    }
+
+    fn bound_invoice() -> Invoice {
+        let mut invoice = sample_invoice();
+        let binding = invoice
+            .bind_payer_wallet(
+                attest(&invoice, &PAYER_KEY, 0x11),
+                "2026-09-06T00:00:00Z".into(),
+            )
+            .unwrap();
+        invoice.binding = Some(binding);
+        invoice
     }
 
     #[test]
@@ -430,9 +505,12 @@ mod tests {
     }
 
     #[test]
-    fn new_invoice_has_created_status_and_no_operational_state() {
+    fn new_invoice_has_created_status_no_address_and_no_operational_state() {
         let invoice = sample_invoice();
         assert_eq!(invoice.status, InvoiceStatus::Created);
+        assert_eq!(invoice.binding, None);
+        assert_eq!(invoice.payment_address(), None);
+        assert!(invoice.address_matches_parameters());
         assert_eq!(invoice.received, Amount(U256::ZERO));
         assert_eq!(invoice.execute_tx_hash, None);
         assert_eq!(invoice.resolved_at_block, None);
@@ -454,7 +532,6 @@ mod tests {
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(100));
         let expiration_timestamp = 1_900_000_000;
-        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
 
         let invoice = issue(
             factory,
@@ -463,7 +540,6 @@ mod tests {
             beneficiary,
             amount,
             expiration_timestamp,
-            recovery,
         );
 
         assert_eq!(invoice.factory, factory);
@@ -472,90 +548,112 @@ mod tests {
         assert_eq!(invoice.beneficiary, beneficiary);
         assert_eq!(invoice.amount, amount);
         assert_eq!(invoice.expiration_timestamp, expiration_timestamp);
-        assert_eq!(invoice.recovery, recovery);
     }
 
     #[test]
-    fn new_invoice_payment_address_matches_predict() {
-        // The address stored on the invoice must equal what predict_payment_address
-        // returns for the same inputs — this is the integration test that ties
-        // derive_attribution, generate_invoice_id, and predict_payment_address together.
-        let invoice = sample_invoice();
-
+    fn binding_derives_recovery_salt_and_address_from_the_attestation() {
+        // The integration test that ties derive_attribution, the payer
+        // attestation, recompute_salt, and predict_payment_address together.
+        let invoice = bound_invoice();
+        let binding = invoice.binding.as_ref().unwrap();
+        assert_eq!(binding.payer_wallet, wallet_of(&PAYER_KEY));
+        assert_eq!(binding.recovery, RecoveryAddress(wallet_of(&PAYER_KEY)));
+        let digest: B256 = binding.attestation.digest.parse().unwrap();
+        assert_eq!(
+            binding.salt,
+            recompute_salt(invoice.attribution_hash, digest)
+        );
         let expected = predict_payment_address(
             invoice.factory,
             invoice.token,
             invoice.amount,
             invoice.beneficiary,
             invoice.expiration_timestamp,
-            invoice.recovery,
-            invoice.salt,
+            binding.recovery,
+            binding.salt,
         );
-
-        assert_eq!(invoice.payment_address, expected);
+        assert_eq!(binding.payment_address, expected);
+        assert_eq!(invoice.payment_address(), Some(expected));
         assert!(invoice.address_matches_parameters());
     }
 
     #[test]
+    fn binding_refuses_an_attestation_for_another_request_or_wallet() {
+        let invoice = sample_invoice();
+        let other = sample_invoice();
+        assert_eq!(invoice.attribution_hash, other.attribution_hash);
+        let mut foreign = issue(
+            invoice.factory,
+            invoice.chain_id,
+            invoice.token,
+            invoice.beneficiary,
+            Amount(U256::from(101)),
+            invoice.expiration_timestamp,
+        );
+        foreign.binding = None;
+        assert_eq!(
+            invoice
+                .bind_payer_wallet(attest(&foreign, &PAYER_KEY, 0x11), String::new())
+                .unwrap_err(),
+            PayerAttestationError::AttributionHashMismatch
+        );
+        let mut forged = attest(&invoice, &PAYER_KEY, 0x11);
+        forged.signature = attest(&invoice, &[9u8; 32], 0x11).signature;
+        assert_eq!(
+            invoice
+                .bind_payer_wallet(forged, String::new())
+                .unwrap_err(),
+            PayerAttestationError::SignerMismatch
+        );
+    }
+
+    #[test]
     fn tampered_parameters_no_longer_match_the_stored_address() {
-        let mut invoice = sample_invoice();
+        let mut invoice = bound_invoice();
         invoice.beneficiary =
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000009"));
         assert!(!invoice.address_matches_parameters());
     }
 
     #[test]
-    fn two_invoices_with_same_inputs_get_different_addresses() {
-        // Because the salt is random per invoice, identical economic parameters
-        // must still produce different payment addresses. This verifies the salt
-        // is actually unique per call and is wired into address derivation.
-        let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
-        let chain_id = ChainId(1);
-        let token = TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6"));
-        let beneficiary =
-            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
-        let amount = Amount(U256::from(100));
-        let expiration_timestamp = 1_900_000_000;
-        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
-
-        let a = issue(
-            factory,
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            expiration_timestamp,
-            recovery,
-        );
-        let b = issue(
-            factory,
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            expiration_timestamp,
-            recovery,
-        );
-
+    fn same_request_and_wallet_with_different_nonces_get_different_addresses() {
+        // Identical terms hash identically; the session nonce inside the
+        // attestation is what keeps their addresses apart, and a payer who
+        // signs twice for the same request produces two distinct salts.
+        let invoice = sample_invoice();
+        let a = invoice
+            .bind_payer_wallet(attest(&invoice, &PAYER_KEY, 0x11), String::new())
+            .unwrap();
+        let b = invoice
+            .bind_payer_wallet(attest(&invoice, &PAYER_KEY, 0x12), String::new())
+            .unwrap();
         assert_ne!(a.salt, b.salt, "salts must differ");
-        assert_ne!(a.id, b.id, "IDs must differ");
         assert_ne!(
             a.payment_address, b.payment_address,
             "addresses must differ"
         );
+        // A different wallet moves both the salt (through the digest) and
+        // the recovery term.
+        let c = invoice
+            .bind_payer_wallet(attest(&invoice, &[9u8; 32], 0x11), String::new())
+            .unwrap();
+        assert_ne!(a.salt, c.salt);
+        assert_ne!(a.recovery, c.recovery);
+        assert_ne!(a.payment_address, c.payment_address);
     }
 
     #[test]
     fn expiration_and_recovery_are_address_parameters() {
-        let invoice = sample_invoice();
+        let invoice = bound_invoice();
+        let binding = invoice.binding.as_ref().unwrap();
         let later_expiration = predict_payment_address(
             invoice.factory,
             invoice.token,
             invoice.amount,
             invoice.beneficiary,
             invoice.expiration_timestamp + 1,
-            invoice.recovery,
-            invoice.salt,
+            binding.recovery,
+            binding.salt,
         );
         let other_recovery = predict_payment_address(
             invoice.factory,
@@ -564,11 +662,11 @@ mod tests {
             invoice.beneficiary,
             invoice.expiration_timestamp,
             RecoveryAddress(address!("0x0000000000000000000000000000000000000003")),
-            invoice.salt,
+            binding.salt,
         );
 
-        assert_ne!(invoice.payment_address, later_expiration);
-        assert_ne!(invoice.payment_address, other_recovery);
+        assert_ne!(binding.payment_address, later_expiration);
+        assert_ne!(binding.payment_address, other_recovery);
     }
 
     #[test]
@@ -576,8 +674,10 @@ mod tests {
         let invoice = sample_invoice();
         assert_eq!(invoice.attribution_version, ATTRIBUTION_VERSION);
         assert_eq!(
-            invoice.salt,
-            recompute_salt(invoice.attribution_nonce, invoice.attribution_hash)
+            invoice.attribution_hash,
+            derive_attribution(&invoice.issuance_snapshot)
+                .unwrap()
+                .attribution_hash
         );
         assert_eq!(invoice.issuance_snapshot.amount_base_units, "100");
         assert_eq!(invoice.issuance_snapshot.chain_id, "1");
@@ -595,7 +695,6 @@ mod tests {
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(100));
-        let recovery = RecoveryAddress(address!("0x0000000000000000000000000000000000000002"));
         let snapshot = || {
             CanonicalIssuanceSnapshot::new(
                 party("Acme"),
@@ -607,7 +706,6 @@ mod tests {
                 beneficiary,
                 amount,
                 1_900_000_000,
-                recovery,
             )
         };
         let mismatches: Vec<(&str, CanonicalIssuanceSnapshot)> = vec![
@@ -623,7 +721,7 @@ mod tests {
             }),
             ("receiver_address", {
                 let mut s = snapshot();
-                s.receiver_address = s.recovery_address.clone();
+                s.receiver_address = s.factory_address.clone();
                 s
             }),
             ("token_address", {
@@ -645,7 +743,6 @@ mod tests {
                 beneficiary,
                 amount,
                 1_900_000_000,
-                recovery,
                 snapshot,
             )
             .unwrap_err();
@@ -660,15 +757,14 @@ mod tests {
     fn address_matches_parameters_uses_stored_salt_only() {
         // Attribution metadata is proof material. Losing or corrupting it
         // must never make a funded address look unsafe to sweep.
-        let mut invoice = sample_invoice();
-        invoice.attribution_nonce = B256::repeat_byte(0xEE);
+        let mut invoice = bound_invoice();
         invoice.attribution_hash = B256::repeat_byte(0xFF);
         invoice.issuance_snapshot.notes = Some("rewritten after the fact".into());
         invoice.issuance_snapshot.amount_base_units = "999".into();
         invoice.attribution_version = 7;
         assert!(invoice.address_matches_parameters());
 
-        invoice.salt = Salt(B256::repeat_byte(0x01));
+        invoice.binding.as_mut().unwrap().salt = Salt(B256::repeat_byte(0x01));
         assert!(!invoice.address_matches_parameters());
     }
 }

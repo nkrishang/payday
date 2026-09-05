@@ -13,21 +13,23 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - Deposits and deposit requests are the product's two primitives, and every
   surface now says so. The API resource `/v1/payments` is
   `/v1/deposit-requests` (payer routes `/v1/payer/deposit-requests/{id}`,
-  the operator release route `/v1/admin/deposit-requests/{id}/release`, the
-  rendered document `…/request.pdf`, the onboarding demo `…/onboarding-deposit`);
-  IDs are `dr_…`; the request body's `bill_to` party is `payer`, list
-  summaries carry `payer_name`, `payment_url` is `deposit_url`, the payer
-  response's `payment_uri` is `deposit_uri` and its unlocked `invoice` block
-  is `details`, and `paid_at`/`paid_at_block` are `deposited_at`/
+  the wallet challenge and attestation routes under it, the operator release
+  route `/v1/admin/deposit-requests/{id}/release`, the rendered document
+  `…/request.pdf`, the onboarding demo `…/onboarding-deposit`); IDs are
+  `dr_…`; the request body's `bill_to` party is `payer`, list summaries carry
+  `payer_name`, `payment_url` is `deposit_url`, the payer response's
+  `payment_uri` is `deposit_uri` and its unlocked `invoice` block is
+  `details`, and `paid_at`/`paid_at_block` are `deposited_at`/
   `deposited_at_block`. Public statuses are `awaiting_deposit`,
   `partially_deposited`, `deposited`, `settled`, `expired`, `returned`, and
   `needs_attention`. Webhook events are `deposit_request.deposited`,
   `.settled`, `.expired`, `.returned` (formerly `payment.refunded`),
-  `.needs_attention`, `.likely_unsolicited`, and `.recovered_funds`, with
-  `data.deposit_request` in place of `data.payment` and the envelope's status
-  vocabulary now identical to the API's (migration `0020`, which also rewrites
-  queued events). Error codes follow: `deposit_request_not_found`,
-  `deposit_request_not_payable`, `deposit_request_not_settled`,
+  `.needs_attention`, `.likely_unsolicited`, `.recovered_funds`, and
+  `.ready`, with `data.deposit_request` in place of `data.payment` and the
+  envelope's status vocabulary now identical to the API's (migration `0021`,
+  which also rewrites queued events). Error codes follow:
+  `deposit_request_not_found`, `deposit_request_not_payable`,
+  `deposit_request_not_settled`, `deposit_sender_mismatch`,
   `invalid_deposit_link`, `deposit_request_not_blocked`, and
   `onboarding_deposit_*`. `GET /v1/status` reports
   `deposit_indexing_and_settlement`. The SDK's `payments` namespace is
@@ -35,12 +37,48 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `DepositRequestStatus`, `PayerDepositRequest`, `requestPdf`,
   `onboardingDeposit`); the dashboard lists deposits at `/dashboard/deposits`
   and the composer, checkout, PDF, and emails speak of deposit requests,
-  payers, and deposits. The Proof of Payment keeps its name and its frozen
-  `payday.proof.v1` field names (`payment_id`, `payment_address`, the
+  payers, and deposits. The Proof of Payment keeps its name and its
+  versioned field names (`payment_id`, `payment_address`, the
   `payday.invoice` snapshot schema with `bill_to`), because those are
   hash-committed and signed formats that change only with a version bump.
-  The two migrations both numbered `0018` on `main` are now `0018` and
-  `0019`, which unblocks every `sqlx::test`.
+- The payment address is created by the payer's wallet, not at issuance. A
+  deposit request is issued without an address; once the payer's session
+  satisfies its policy (at once for `permissionless`, after the mailbox code
+  or the merchant's client secret otherwise), the hosted checkout has the
+  payer sign an EIP-712 `PayerAttestation` from the wallet they will pay
+  from (`POST /v1/payer/payments/{id}/wallet/challenge` then `/attest`). The
+  CREATE3 salt is `keccak256("PAYDAY_SALT_V2" || attribution_hash ||
+  attestation digest)` and the wallet is the address's recovery term, so
+  `address`, `payer_wallet`, `recovery_address`, `wallet_bound_at`, and
+  `self_settlement` are `null` until then and a `payment.ready` webhook
+  reports the binding. The random attribution nonce is gone; the canonical
+  issuance snapshot no longer carries `recovery_address`; `attribution.version`
+  is 2. Only transfers from the attested wallet are the payer's: money from
+  any other wallet still counts and settles but sets `likely_unsolicited_at`
+  (its new meaning) and makes the proof unavailable
+  (`409 payment_sender_mismatch`). `requirements` and the merchant's
+  verification `facts` gain `wallet`; attempts gain the `wallet` kind. The
+  `PaymentFactory` and `Payment` contracts are unchanged.
+- The platform recovery wallet is gone. Overpayment remainders, expired
+  balances, and late transfers return on-chain to the payer's attested
+  wallet; Payday custodies nothing. `gatewayd` no longer reads
+  `PAYDAY_RECOVERY_ADDRESS`, Terraform drops `recovery_address` and the
+  API task's precondition on it, and the `recovery` KMS key stays only as a
+  legacy resource until any balance it holds is returned. The
+  `recovered_funds` ledger and `payment.recovered_funds` webhook now
+  describe returns to the payer.
+- Proof of Payment v2 (`payday.proof.v2`): the proof carries the payer's
+  wallet attestation (the exact typed data signed, its digest, and the
+  signature) and the recovery address, and `gateway_core::verify_proof`
+  checks hash → attestation → salt → CREATE3 address, that every credited
+  transfer came from the attested wallet, and a Payday attestation
+  (`payday.attestation.v2`) that names the wallet, the challenge nonce, and
+  the observed `facts` (`mailbox`, `merchant_session`, `wallet`) alongside
+  the attribution hash, chain, and address.
+- Migration `0018_merchant_session` is renumbered `0019_merchant_session`:
+  it shared version 18 with `0018_account_wallet`, which sqlx refuses to
+  apply. The payer wallet binding is `0020_payer_wallet_binding`. Both
+  reset pre-release rows.
 - Merchants sign in through Privy instead of Auth0. The landing page's
   "Start Building" dialog runs Privy's email code exchange; what the browser
   holds is Privy's identity token, and that token is the dashboard session

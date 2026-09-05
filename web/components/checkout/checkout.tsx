@@ -2,7 +2,7 @@
 
 import type { PayerDepositRequest } from "@payday/sdk";
 import { useCallback, useState } from "react";
-import { checkoutView, unlockedDepositRequest } from "@/lib/checkout-state";
+import { checkoutView, readyDepositRequest, unlockedDepositRequest } from "@/lib/checkout-state";
 import { usePayerSession } from "@/lib/payer-session";
 import { StatusDot } from "@/components/ui/status-dot";
 import { AddressRow } from "./address-row";
@@ -17,6 +17,7 @@ import { QrPanel } from "./qr-panel";
 import { Resolved } from "./resolved";
 import { useDepositRequest, useSecondsRemaining } from "./use-deposit-request";
 import { VerificationGate } from "./verification-gate";
+import { WalletAttestation } from "./wallet-attestation";
 import { WalletPay } from "./wallet-pay";
 
 export function Checkout({
@@ -72,8 +73,10 @@ function CheckoutBody({
     exchangingClientSecret: clientSecretStatus === "exchanging",
   });
   // Null exactly when the phase is one of the locked ones: the same narrowing
-  // decides the phase and what may enter the tree.
+  // decides the phase and what may enter the tree. `ready` is null until the
+  // payer's wallet is bound and the address exists.
   const unlocked = unlockedDepositRequest(payment);
+  const ready = unlocked === null ? null : readyDepositRequest(unlocked);
 
   return (
     <CheckoutFrame
@@ -117,15 +120,31 @@ function CheckoutBody({
         <>
           <RequestDetails payment={unlocked} payerSession={payerSession} />
 
-          {view.showInstructions ? (
+          {view.showWalletStep ? (
             <section aria-label={view.title} className="px-5 py-6 sm:px-6">
               <AmountDue payment={unlocked} />
-              <ReceivedProgress payment={unlocked} />
+
+              <h2 className="mt-5 text-[15px] font-semibold tracking-tight">{view.title}</h2>
+              <p className="mt-2 text-[13px] leading-relaxed text-muted">{view.detail}</p>
+
+              <div className="mt-6">
+                <WalletAttestation
+                  payment={unlocked}
+                  payerSession={payerSession}
+                  onSession={updateSession}
+                  onBound={refresh}
+                />
+              </div>
+            </section>
+          ) : view.showInstructions && ready !== null ? (
+            <section aria-label={view.title} className="px-5 py-6 sm:px-6">
+              <AmountDue payment={ready} />
+              <ReceivedProgress payment={ready} />
 
               <p className="mt-4 text-[13px] leading-relaxed text-muted">{view.detail}</p>
 
               <div className="mt-6">
-                <WalletPay payment={unlocked} onSent={markSent} />
+                <WalletPay payment={ready} onSent={markSent} />
               </div>
 
               <div className="my-6 flex items-center gap-3" aria-hidden>
@@ -136,11 +155,11 @@ function CheckoutBody({
                 <span className="h-px flex-1 bg-line" />
               </div>
 
-              <QrPanel payment={unlocked} payerSession={payerSession} />
+              <QrPanel payment={ready} payerSession={payerSession} />
 
               <div className="mt-6 space-y-4">
-                <AddressRow payment={unlocked} />
-                <AssetNotice payment={unlocked} />
+                <AddressRow payment={ready} />
+                <AssetNotice payment={ready} />
               </div>
             </section>
           ) : (

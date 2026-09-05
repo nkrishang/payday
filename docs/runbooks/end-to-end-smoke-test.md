@@ -24,8 +24,15 @@ curl -fsS "$PAYDAY_API_URL/v1/deposit-requests" \
        "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
-Copy `id` and `address` from the JSON output, and confirm `recovery_address`
-is the Payday recovery wallet configured as `recovery_address` in Terraform.
+Copy `id` and `deposit_url` from the JSON output; `address` is null until the
+payer's wallet is bound. Open `deposit_url` in a browser, connect the wallet
+you will pay from, and sign the attestation it offers. Then re-read the
+deposit and confirm `address` is set, `payer_wallet` is your wallet, and
+`recovery_address` equals it:
+
+```bash
+curl -s "$PAYDAY_API_URL/v1/deposit-requests/<ID>" -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+```
 
 ## Step 2: Send USDC to the deposit address
 
@@ -71,11 +78,11 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
-## Step 5: Verify late funds reach the Payday recovery wallet
+## Step 5: Verify late funds come back to the payer's wallet
 
-Send a second, small transfer to the same deposit address. It must reach the
-Payday recovery wallet within a minute while the status stays `settled`, and
-the `recovered_funds` ledger must record it:
+Send a second, small transfer to the same deposit address from the wallet you
+signed with. It must come back to that wallet within a minute while the
+status stays `settled`, and the `recovered_funds` ledger must record it:
 
 ```bash
 cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
@@ -84,7 +91,7 @@ cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --rpc-url "$MONAD_RPC_URL"
 
 cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  'balanceOf(address)(uint256)' <RECOVERY_ADDRESS> \
+  'balanceOf(address)(uint256)' <YOUR_WALLET> \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
@@ -106,7 +113,7 @@ recovered amount by hand afterwards; nothing automates it.
 | Deposit status | `settled` |
 | Deposit address USDC balance | `0` |
 | Deposit address code | Non-empty (contract deployed) |
-| Payout address USDC balance | Increased by exactly the deposit request amount |
+| Payout address USDC balance | Increased by exactly the requested amount |
 | Recovery wallet USDC balance | Increased by the late transfer, with a matching `recovered_funds` row |
 
 ## Understanding the sweep transaction

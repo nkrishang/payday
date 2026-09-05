@@ -115,9 +115,13 @@ mod tests {
             attribution_hash: alloy_primitives::B256::repeat_byte(0x11).to_string(),
             chain_id: "143".into(),
             payment_address: Address::repeat_byte(0x22).to_checksum(None),
+            payer_wallet: Address::repeat_byte(0x33).to_checksum(None),
+            wallet_nonce: alloy_primitives::B256::repeat_byte(0x44).to_string(),
             payer_policy_mode: "permissionless".into(),
             result: result.into(),
             verified_at: None,
+            wallet_bound_at: "2026-09-06T00:00:00Z".into(),
+            facts: Vec::new(),
         }
     }
 

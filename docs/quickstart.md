@@ -55,9 +55,11 @@ curl -fsS "$API/v1/deposit-requests" \
   email address first, to have your own application open the checkout for a
   user it has signed in (`merchant_session`), or to add party details, notes,
   a customer, or metadata, see the [API reference](api-reference.md).
-- Overpayments, late transfers, and expired balances go to the Payday recovery
-  wallet. They are reviewed manually and returned by Payday; they are not sent
-  back to the payer automatically, and you cannot choose that wallet.
+- The response's `address` is null until the payer, on the hosted page, signs
+  the request's attestation from the wallet they will pay from; a
+  `deposit_request.ready` webhook reports it. Overpayments, late transfers, and
+  expired balances go back to that wallet on-chain, automatically; you cannot
+  choose it, and Payday never holds them.
 - Expiry defaults to 24 hours. Use `expires_in` in seconds or an RFC 3339
   `expires_at`. The allowed window is 10 minutes to 366 days.
 - The deployment chooses the chain and exact Circle-issued native USDC contract.

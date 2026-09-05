@@ -37,8 +37,9 @@ async fn detail(
         .payer_sessions
         .attempts_for_invoice(account.0, row.id)
         .await?;
+    let wallet = row.payment_address.is_some();
     let facts = if row.verification_completed_at.is_some() {
-        VerificationRequirementsResponse::for_mode(mode, true)
+        VerificationRequirementsResponse::for_mode(mode, true, wallet)
     } else {
         let approved = |kind: &str| {
             attempts
@@ -49,6 +50,7 @@ async fn detail(
             mode,
             VerificationFacts {
                 email: approved("email"),
+                wallet,
                 merchant_session: approved("merchant_session"),
             },
         )

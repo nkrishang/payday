@@ -1,6 +1,6 @@
 # Payday
 
-Payday is a stablecoin deposit gateway for merchants: create a deposit request through a small API, share its one-time USDC address or payer link, and let Payday detect finalized transfers and settle exactly the requested amount to your wallet automatically. Partial deposits accumulate; overpayment remainders, expired balances, and late transfers go to the Payday recovery wallet, where they are recorded per deposit request and returned after manual review; and every observed transfer remains in an auditable PostgreSQL ledger.
+Payday is a stablecoin deposit gateway for merchants: create a deposit request through a small API, share its payer link, and let Payday bind the payer's attested wallet to a one-time USDC address, detect finalized transfers from that wallet, and settle exactly the requested amount to your wallet automatically. Partial deposits accumulate; overpayment remainders, expired balances, and late transfers go back to the payer's own wallet on-chain and are recorded per request; every observed transfer remains in an auditable PostgreSQL ledger; and every settled request yields an offline-verifiable Proof of Payment tying the document, the wallet, the address, and the transfers together.
 
 ## 60-second local quickstart
 

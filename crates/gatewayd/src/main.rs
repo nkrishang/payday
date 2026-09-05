@@ -12,7 +12,6 @@ mod webhook_worker;
 
 use std::sync::Arc;
 
-use alloy_primitives::Address;
 use axum::serve;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -173,10 +172,6 @@ async fn main() {
         .await
         .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
     }
-    // Status-only mode never issues invoices, so it has no wallet to stamp.
-    let recovery_address = config
-        .settlement()
-        .map_or(Address::ZERO, |settlement| settlement.recovery_address);
     let state = state::AppState::new(
         repo,
         accounts,
@@ -184,7 +179,6 @@ async fn main() {
         config.chain_id(),
         config.factory_address(),
         config.usdc_address(),
-        recovery_address,
         payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),

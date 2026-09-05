@@ -32,11 +32,13 @@ the routes stay under `/v1/deposit-requests`. There are no line items; attach a 
 an itemized breakdown. An issued deposit request is immutable — change anything and you
 cancel and reissue.
 
-Exactly `amount` settles to `payout_address`. The response's `recovery_address`
-is the Payday recovery wallet the deposit request is committed to: overpayment
-remainders, expired balances, and late transfers land there and are returned by
-the operator after manual review. It is platform-configured, so a create request
-carrying `refund_address` is rejected.
+Exactly `amount` settles to `payout_address`. The response's `address` is null
+at creation: the deposit address exists only once the payer has attested, from
+the hosted page, the wallet they will pay from (`payer_wallet`). That wallet is
+the address's recovery term (`recovery_address` always equals it), so overpayment
+remainders, expired balances, and late transfers return to the payer. Wait for
+the `deposit_request.ready` webhook, or poll until `address` is set, before quoting an
+address anywhere. A create request carrying `refund_address` is rejected.
 
 ## Payer policy
 
@@ -50,8 +52,10 @@ already signed in, by your own identifier:
 { mode: "merchant_session", payer_reference: "user_123" }
 ```
 
-Gated deposit requests withhold their content and deposit address from the payer page
-until verification completes. The full policy is returned only to the merchant.
+Gated deposit requests withhold their content from the payer page until verification
+completes; every request, gated or not, withholds its deposit address until the
+payer's wallet attestation (`PaydayPayerClient.wallet.challenge` then `attest`).
+The full policy is returned only to the merchant.
 
 ### Merchant sessions: your app opens the checkout
 

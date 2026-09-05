@@ -195,25 +195,6 @@ variable "batch_sweeper_code_hash" {
   }
 }
 
-variable "recovery_address" {
-  description = <<-EOT
-    Payday's custodial recovery wallet: the Ethereum address of the recovery
-    KMS key (cast wallet address --aws with recovery_kms_key_arn). gatewayd
-    stamps it on every deposit request; overpayment remainders, expired balances, and
-    late transfers land here and are returned manually by the operator.
-    Null until the key exists: there is no safe placeholder, because every
-    deposit request commits this address into its deposit address, so the API task
-    definition refuses to plan while it is unset.
-  EOT
-  type        = string
-  default     = null
-  nullable    = true
-  validation {
-    condition     = var.recovery_address == null || can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address))
-    error_message = "recovery_address must be a 20-byte 0x-prefixed EVM address."
-  }
-}
-
 variable "usdc_address" {
   type = string
   validation {

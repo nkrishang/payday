@@ -22,9 +22,10 @@ pub use attachments::{
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
 pub use invoices::{
-    CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice, DbInvoiceError,
-    DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError, InvoiceRepository,
-    IssuanceRequest, PaymentObservation, RangeOutcome, ReleasePaymentError, same_issuance,
+    BindPayerWallet, CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice,
+    DbInvoiceError, DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError,
+    InvoiceRepository, IssuanceRequest, PaymentObservation, RangeOutcome, ReleasePaymentError,
+    same_issuance,
 };
 pub use issuers::{
     CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,
@@ -44,7 +45,7 @@ pub use verifications::{
     CLIENT_SECRET_PREFIX, CLIENT_SECRET_TTL, ClientSecretExchange, CreatedClientSecret,
     CreatedPayerSession, DbPayerSession, DbVerificationAttempt, EmailVerificationAttempt,
     ExchangeClientSecretError, PAYER_SESSION_TTL, PayerSessionRepository,
-    StartEmailVerificationError, VerificationCompletion, payer_ref,
+    StartEmailVerificationError, VerificationCompletion, WalletChallenge, payer_ref,
 };
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,

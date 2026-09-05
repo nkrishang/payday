@@ -107,17 +107,25 @@ would improve a case that is already handled. See `lib/poll.ts`.
 device clock never decides that a deposit request expired — chain time does, so a
 countdown reaching zero moves the page to "the deadline has been reached" and
 waits for the server. And deposit instructions disappear the moment the request
-stops being payable, because funds sent afterwards route to the Payday recovery
-wallet rather than back to the payer; the page tells payers to contact the
-merchant and Payday support for return handling.
+stops being payable, because funds sent afterwards route back to the payer's
+attested wallet rather than to the merchant.
 
 **A locked deposit request is absent, not hidden.** `unlockedDepositRequest` in
 `lib/checkout-state.ts` narrows the payer response to the shape whose
-mechanics are present; every component that renders an amount, address, QR, or
-attachment takes that narrowed type, so a gated request's withheld content
-cannot be rendered by accident and the page shows only the issuer, heading, and
-masked mailbox until the API unlocks it. The attachment's signed URL is fetched
-on click and never server-rendered.
+content is present; every component that renders an amount or attachment takes
+that narrowed type, so a gated request's withheld content cannot be rendered by
+accident and the page shows only the issuer, heading, and masked mailbox until
+the API unlocks it. The attachment's signed URL is fetched on click and never
+server-rendered.
+
+**The address exists only after the wallet step.** An unlocked request has no
+payment address until the payer signs the API's EIP-712 attestation from the
+wallet they will pay from (`components/checkout/wallet-attestation.tsx`; the
+document is minted by the API and passed to the wallet verbatim through
+`lib/payer-attestation.ts`). `readyPayment` narrows again to the shape with an
+address and a payer wallet; the address row, QR, and wallet button take that
+type, and the wallet button refuses to send from any wallet but the attested
+one, because only its transfers are credited to the payer.
 
 **Amounts are never floats.** The API sends every amount twice, as a display
 string and as integer `_base_units`. Arithmetic uses base units as `BigInt`;
