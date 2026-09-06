@@ -19,7 +19,7 @@ export default function Home() {
         <nav className="mx-auto flex h-[76px] max-w-[1240px] items-center justify-between px-5 sm:px-8">
           <Image
             src="/payday-logo-full.svg"
-            width={3200}
+            width={2929}
             height={1000}
             priority
             alt="Payday"
@@ -76,7 +76,7 @@ export default function Home() {
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <Image
               src="/payday-logo-full.svg"
-              width={3200}
+              width={2929}
               height={1000}
               alt="Payday"
               className="h-auto w-[88px]"
