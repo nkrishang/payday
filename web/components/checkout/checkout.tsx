@@ -1,9 +1,9 @@
 "use client";
 
 import type { PayerDepositRequest } from "@payday/sdk";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { checkoutView, readyDepositRequest, unlockedDepositRequest } from "@/lib/checkout-state";
-import { usePayerSession } from "@/lib/payer-session";
+import { takePreviewSession, usePayerSession } from "@/lib/payer-session";
 import { StatusDot } from "@/components/ui/status-dot";
 import { AddressRow } from "./address-row";
 import { AmountDue, ReceivedProgress } from "./amount";
@@ -58,6 +58,20 @@ function CheckoutBody({
     },
     [setPayerSession],
   );
+  // The deposit request's own issuing merchant previews it exactly this way,
+  // regardless of payer policy: a session already minted server-side
+  // (`depositRequests.previewSession`), carried in the fragment precisely
+  // like a merchant-session client secret, but adopted directly — there is
+  // nothing to exchange, it is already a valid session.
+  useEffect(() => {
+    const token = takePreviewSession();
+    if (!token) return;
+    // Deferred a tick, like the client secret exchange below: an effect
+    // should not call setState synchronously within its own body.
+    void Promise.resolve().then(() => updateSession(token));
+    // Runs once, on mount, exactly like the client secret exchange below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // A merchant-session deposit request arrives with its client secret in the URL
   // fragment. The exchange below reads it once, on the client only, and the
   // session it mints takes the same path the email flow's session does.

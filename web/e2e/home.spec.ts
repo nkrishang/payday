@@ -365,6 +365,54 @@ test("a request row opens in place, showing an abbreviated link to the payer's v
   await expect(payerLink).toHaveAttribute("target", "_blank");
 });
 
+test("the payer's view link opens unlocked for the issuing merchant, without verifying it", async ({
+  page,
+}) => {
+  await signIn(page, "preview-merchant@example.com");
+  await setUpIdentity(page, "Acme Inc.");
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  // A freshly issued, still-unverified verified_email request — no ambiguity
+  // with a settled request's own receipt access.
+  await page.getByRole("button", { name: "New deposit request" }).click();
+  await page.getByLabel("Amount").fill("12");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Payer").fill("Globex LLC");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("radio", { name: "Verified email" }).check();
+  await page.getByLabel("Expected payer email").fill("payer@example.com");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Issue deposit request" }).click();
+  await expect(page.getByRole("heading", { name: "Deposit request issued." })).toBeVisible();
+
+  // The preview session is minted up front, so the link only becomes the
+  // enhanced one once that lands — a bare "/pay/" href would still open,
+  // just locked. Opened as a fresh navigation (rather than through the
+  // link's own click and popup) so the assertion is about what the URL
+  // itself carries, not about this browser's popup-handling.
+  const payerLink = page.getByRole("link", { name: "Open the payer's view" });
+  await expect(payerLink).toHaveAttribute("href", /#ps=/);
+  const href = (await payerLink.getAttribute("href"))!;
+  const browser = page.context().browser()!;
+
+  const merchant = await (await browser.newContext()).newPage();
+  await merchant.goto(href);
+  // Everything a locked link would withhold is visible, from a click alone —
+  // no code, no form.
+  await expect(merchant.getByRole("region", { name: "Deposit request", exact: true })).toBeVisible();
+  await expect(merchant.getByText("Verification required")).toHaveCount(0);
+  await merchant.context().close();
+
+  // Previewing is not verifying: a stranger holding the bare link (without
+  // the merchant's own fragment) is still locked, exactly as before the
+  // merchant looked at it.
+  const bareUrl = href.split("#")[0]!;
+  const stranger = await (await browser.newContext()).newPage();
+  await stranger.goto(bareUrl);
+  await expect(stranger.getByText("Verification required")).toBeVisible();
+  await stranger.context().close();
+});
+
 test("an identity can be renamed, and moving its contact address unproves it", async ({ page }) => {
   await signIn(page, "manage@example.com");
   await setUpIdentity(page, "Acme Inc.");

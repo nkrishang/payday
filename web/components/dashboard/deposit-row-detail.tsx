@@ -26,6 +26,7 @@ import {
   truncateAddress,
   truncateHash,
 } from "@/lib/format";
+import { usePayerPreviewUrl } from "@/lib/payer-session";
 import { formatDate, formatRelative } from "./labels";
 import { RecoveredFunds } from "./recovered-funds";
 import { useMerchant, useResource } from "./session";
@@ -73,6 +74,8 @@ const LINK =
   "text-brand-green underline decoration-brand-green/40 underline-offset-2 transition-colors hover:decoration-brand-green";
 
 function Loaded({ payment }: { payment: DepositRequest }) {
+  const { client } = useMerchant();
+  const previewHref = usePayerPreviewUrl(client, payment);
   // One reading of the clock for the whole row, so its relative times agree
   // with each other and do not shift between renders.
   const [now] = useState(() => Date.now());
@@ -139,7 +142,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
       <p className="flex min-w-0 items-center gap-1.5 text-[12.5px]">
         <span className="shrink-0 text-faint">Payer&apos;s view</span>
         <a
-          href={payment.deposit_url}
+          href={previewHref}
           target="_blank"
           rel="noreferrer noopener"
           className={cn(MONO, LINK, "min-w-0 truncate")}

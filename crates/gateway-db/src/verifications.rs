@@ -243,6 +243,43 @@ impl PayerSessionRepository {
         })
     }
 
+    /// Mints a session that already satisfies `verified_email` and
+    /// `merchant_session` alike, for the invoice's own issuing merchant to
+    /// preview the payer view exactly as a verified payer would see it.
+    ///
+    /// Unlike every other session-minting method here, this records no
+    /// verification attempt and touches nothing on the invoice itself: the
+    /// merchant looking at their own request proves nothing about a payer,
+    /// and must never complete the invoice's real verification or read as
+    /// one in `attempts_for_invoice`.
+    pub async fn create_merchant_preview(
+        &self,
+        invoice_id: Uuid,
+        ttl: Duration,
+    ) -> Result<CreatedPayerSession, sqlx::Error> {
+        let token = random_token();
+        let id = Uuid::now_v7();
+        let expires_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            INSERT INTO payer_sessions
+                (id, token_hash, invoice_id, email_verified_at, merchant_session_verified_at, expires_at)
+            VALUES ($1, $2, $3, now(), now(), now() + make_interval(secs => $4))
+            RETURNING expires_at
+            "#,
+        )
+        .bind(id)
+        .bind(token_hash(&token).as_slice())
+        .bind(invoice_id)
+        .bind(ttl.as_secs_f64())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(CreatedPayerSession {
+            id,
+            token,
+            expires_at,
+        })
+    }
+
     /// The unexpired session behind `token`, only if it belongs to
     /// `invoice_id`: a session never unlocks another invoice.
     pub async fn find_active(

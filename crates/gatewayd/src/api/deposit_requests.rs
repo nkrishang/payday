@@ -849,6 +849,43 @@ pub async fn onboarding_deposit(
     }))
 }
 
+#[derive(serde::Serialize)]
+pub struct PreviewSessionResponse {
+    pub payer_session: String,
+    pub expires_at: String,
+}
+
+/// A session that lets the deposit request's own issuing merchant open its
+/// payer view exactly as a verified payer would see it — the dashboard's
+/// "Open the payer's view" and "Track this request" links use this instead
+/// of the bare `deposit_url`, which otherwise looks exactly as locked to the
+/// issuing merchant as it does to a stranger holding the link.
+///
+/// This is deliberately not verification: it records no attempt and never
+/// touches the invoice's own `verification_completed_at` or fires a
+/// `verification.*` webhook. A merchant looking at their own request proves
+/// nothing about a payer, and must never be confused with one actually
+/// completing it — see `PayerSessionRepository::create_merchant_preview`.
+pub async fn preview_session(
+    State(state): State<AppState>,
+    Extension(account): Extension<AccountId>,
+    Path(reference): Path<String>,
+) -> Result<Json<PreviewSessionResponse>, ApiError> {
+    let row = resolve_deposit_request(&state, account, &reference).await?;
+    let invoice = Invoice::try_from(&row)?;
+    if !crate::api::merchant_session::openable(&row, &invoice) {
+        return Err(ApiError::deposit_request_not_payable());
+    }
+    let session = state
+        .payer_sessions
+        .create_merchant_preview(row.id, PAYER_SESSION_TTL)
+        .await?;
+    Ok(Json(PreviewSessionResponse {
+        payer_session: session.token,
+        expires_at: session.expires_at.to_rfc3339(),
+    }))
+}
+
 pub(crate) async fn resolve_deposit_request(
     state: &AppState,
     account: AccountId,

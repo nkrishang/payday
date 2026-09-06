@@ -183,9 +183,18 @@ function verifyStatus(payment) {
  * A merchant-issued deposit request as its payer sees it: everything withheld while
  * the policy is gated, since this projection carries no payer session.
  */
-function projectForPayer(payment) {
+function projectForPayer(payment, session) {
   const mode = payment.payer_policy.mode;
   const gated = GATED.has(mode);
+  // A session can satisfy the policy on its own — a preview session
+  // (depositRequests.previewSession) unlocks this way deliberately, without
+  // ever touching the record's own verification_completed_at — exactly like
+  // the real API's session-based unlock, which this generic (non-scenario)
+  // projection previously ignored in favor of only the record's permanent
+  // flag.
+  const sessionSatisfies =
+    mode === "merchant_session" ? Boolean(session?.merchantSession) : Boolean(session?.emailVerified);
+  const unlocked = Boolean(payment.verification_completed_at) || sessionSatisfies;
   const shared = {
     id: payment.id,
     issuer_name: payment.issuer.name,
@@ -194,7 +203,7 @@ function projectForPayer(payment) {
       mode,
       expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
     },
-    requirements: requirements(mode, Boolean(payment.verification_completed_at)),
+    requirements: requirements(mode, unlocked),
     status: payment.status,
     payable: payment.status === "awaiting_deposit" || payment.status === "partially_deposited",
     expires_at: payment.expires_at,
@@ -203,7 +212,7 @@ function projectForPayer(payment) {
     settlement_explorer_url: payment.settlement_explorer_url ?? null,
     payer_message: null,
   };
-  if (gated && !payment.verification_completed_at) {
+  if (gated && !unlocked) {
     return {
       ...shared,
       content_unlocked: false,
@@ -1016,7 +1025,7 @@ async function payer(req, res, url) {
   }
 
   const session = sessionFor(req, id);
-  const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued), id };
+  const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued, session), id };
   const mode = payment.payer_policy.mode;
 
   if (match[2] === "/session") {
@@ -1117,7 +1126,7 @@ async function payer(req, res, url) {
       return fail(res, 401, "wallet_signature_invalid", "Bad signature");
     }
     session.walletBound = true;
-    const current = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued), id };
+    const current = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued, session), id };
     return send(res, 200, current);
   }
 
@@ -1573,7 +1582,7 @@ async function payments(req, res, url) {
   }
 
   const match = url.pathname.match(
-    /^\/v1\/deposit-requests\/([^/]+)(\/attachment|\/request\.pdf|\/proof|\/transfers|\/verification|\/onboarding-deposit|\/client-secret)?$/,
+    /^\/v1\/deposit-requests\/([^/]+)(\/attachment|\/request\.pdf|\/proof|\/transfers|\/verification|\/onboarding-deposit|\/client-secret|\/preview-session)?$/,
   );
   if (!match) return false;
   const payment = store.depositRequests.get(decodeURIComponent(match[1]));
@@ -1586,6 +1595,17 @@ async function payments(req, res, url) {
     if (mode !== "merchant_session")
       return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session deposit request");
     return send(res, 201, mintClientSecret(payment.id));
+  }
+  if (match[2] === "/preview-session") {
+    // Mirrors gatewayd's preview-session: satisfies every mode at once and
+    // is not verification, so it never touches verification_completed_at.
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const token = `stub-preview-session:${randomUUID()}`;
+    sessions.set(token, { id: payment.id, emailVerified: true, merchantSession: true });
+    return send(res, 200, {
+      payer_session: token,
+      expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
+    });
   }
   if (match[2] === "/onboarding-deposit") {
     // The real endpoint verifies and pays for real; the stub has no real

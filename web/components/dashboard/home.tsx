@@ -10,6 +10,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Problem } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { formatDisplayAmount } from "@/lib/format";
+import { usePayerPreviewUrl } from "@/lib/payer-session";
 import { AccountSection } from "./account-section";
 import { ApiKeySection } from "./api-key-manager";
 import { CustomerTable } from "./customer-table";
@@ -19,7 +20,7 @@ import { IssuerSetup } from "./issuer-setup";
 import { OnboardingSuccess } from "./onboarding-success";
 import { OnboardingWalkthrough } from "./onboarding-walkthrough";
 import { RequestComposer } from "./request-composer";
-import { useResource } from "./session";
+import { useMerchant, useResource } from "./session";
 
 /**
  * The dashboard.
@@ -303,6 +304,8 @@ function Issued({
   onTrack: () => void;
   onDone: () => void;
 }) {
+  const { client } = useMerchant();
+  const previewHref = usePayerPreviewUrl(client, payment);
   return (
     <div className="dash-hero mx-auto max-w-[620px] pt-6 text-center sm:pt-12">
       <svg viewBox="0 0 64 64" className="mx-auto size-14" fill="none" aria-hidden="true">
@@ -353,7 +356,7 @@ function Issued({
 
       <div className="dash-rise dash-delay-5 mt-5 flex flex-wrap items-center justify-center gap-2.5">
         <a
-          href={payment.deposit_url}
+          href={previewHref}
           target="_blank"
           rel="noreferrer noopener"
           className={cn(

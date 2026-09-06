@@ -110,6 +110,10 @@ pub fn router(state: AppState) -> Router {
             post(merchant_session::mint),
         )
         .route(
+            "/v1/deposit-requests/{id}/preview-session",
+            post(deposit_requests::preview_session),
+        )
+        .route(
             "/v1/customers",
             post(customers::create).get(customers::list),
         )
@@ -5289,5 +5293,102 @@ mod tests {
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(pregenerator.asked.lock().unwrap().len(), 1);
+    }
+
+    fn preview_session_request(key: &str, id: &str) -> Request<Body> {
+        json_request(
+            "POST",
+            key,
+            &format!("/v1/deposit-requests/{id}/preview-session"),
+            &json!({}),
+        )
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn preview_session_unlocks_the_payer_view_for_the_issuing_merchant_without_verifying_it(
+        pool: PgPool,
+    ) {
+        let app = app(pool).await;
+        let (id, _) = create_gated(
+            &app,
+            "preview-email",
+            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            "Preview retainer",
+        )
+        .await;
+
+        // A stranger holding the link sees the locked view.
+        assert_eq!(payer_read(&app, &id, None).await["content_unlocked"], false);
+
+        let minted = app
+            .clone()
+            .oneshot(preview_session_request(KEY, &id))
+            .await
+            .unwrap();
+        assert_eq!(minted.status(), StatusCode::OK);
+        let minted = json_body(minted).await;
+        let session = minted["payer_session"].as_str().unwrap().to_owned();
+        assert!(minted["expires_at"].is_string());
+
+        // The issuing merchant, holding the same link, now sees it unlocked.
+        assert_eq!(
+            payer_read(&app, &id, Some(&session)).await["content_unlocked"],
+            true
+        );
+
+        // Previewing is not verifying: the invoice's own completion, and the
+        // merchant's own verification activity log, are both untouched.
+        let activity = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/deposit-requests/{id}/verification"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(activity["facts"]["complete"], false);
+        assert!(activity["attempts"].as_array().unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn preview_session_is_scoped_to_the_owning_merchant_and_a_payable_request(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let (id, _) = create_gated(
+            &app,
+            "preview-owner",
+            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            "Owner retainer",
+        )
+        .await;
+
+        const OTHER: &str = "payday_live_previewother0123456789abcdef012345";
+        other_account(&pool, OTHER).await;
+        let foreign = app
+            .clone()
+            .oneshot(preview_session_request(OTHER, &id))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+
+        // Cancellation is advisory only (see cancel_deposit_request) and does
+        // not affect payability; a real terminal, never-verified state does.
+        let uuid = gateway_core::deposit_request_id(&id).unwrap();
+        sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = $1")
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let refused = app
+            .clone()
+            .oneshot(preview_session_request(KEY, &id))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::GONE);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "deposit_request_not_payable"
+        );
     }
 }

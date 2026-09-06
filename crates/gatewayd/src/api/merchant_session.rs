@@ -65,7 +65,7 @@ fn rfc3339(value: chrono::DateTime<Utc>) -> String {
 /// Whether a secret may still be minted or exchanged for this invoice: it is
 /// live, or it is terminal and was verified, in which case the session is a
 /// receipt. The same rule the email routes apply to a gated invoice.
-fn openable(row: &gateway_db::DbInvoice, invoice: &Invoice) -> bool {
+pub(crate) fn openable(row: &gateway_db::DbInvoice, invoice: &Invoice) -> bool {
     let open = matches!(
         invoice.status,
         InvoiceStatus::Created | InvoiceStatus::Funded | InvoiceStatus::Deploying

@@ -189,6 +189,21 @@ export function checkoutUrl(depositRequest: Pick<DepositRequest, "deposit_url">,
   return `${depositRequest.deposit_url}#${CLIENT_SECRET_FRAGMENT_KEY}=${encodeURIComponent(clientSecret)}`;
 }
 
+/** The fragment key the hosted checkout reads a merchant preview session from. */
+export const PREVIEW_SESSION_FRAGMENT_KEY = "ps";
+
+/**
+ * The URL to preview a deposit request's own payer view as its issuing
+ * merchant, unlocked exactly as a verified payer would see it: the preview
+ * session (`depositRequests.previewSession`) in the fragment, the same way
+ * `checkoutUrl` carries a client secret — never reaching a server log, a
+ * Referer header, or an analytics beacon.
+ */
+export function previewUrl(depositRequest: Pick<DepositRequest, "deposit_url">, previewSession: string): string {
+  if (!previewSession) throw new TypeError("previewSession is required");
+  return `${depositRequest.deposit_url}#${PREVIEW_SESSION_FRAGMENT_KEY}=${encodeURIComponent(previewSession)}`;
+}
+
 /** The policy as the payer may see it: the mode and a masked mailbox hint such as `a****@e***.com`. */
 export interface PayerPolicySummary { mode: PayerPolicyMode; expected_email_hint: string | null }
 
@@ -757,6 +772,17 @@ export class PaydayClient {
      */
     createClientSecret: (id: string): Promise<ClientSecret> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/client-secret`, { method: "POST" }),
+    /**
+     * A session that opens the deposit request's own payer view exactly as a
+     * verified payer would see it, for the issuing merchant to preview their
+     * own request — works for every payer policy, not only
+     * `merchant_session`. This is not verification: it records no attempt
+     * and never marks the deposit request's own verification complete.
+     * `410 deposit_request_not_payable` once the request is closed without
+     * having verified.
+     */
+    previewSession: (id: string): Promise<StartEmailVerification> =>
+      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/preview-session`, { method: "POST" }),
   };
 
   readonly customers = {
