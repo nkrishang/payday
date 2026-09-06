@@ -54,17 +54,21 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
       </div>
 
       <div className="mt-6 overflow-x-auto rounded-[16px] border border-line bg-surface">
+        {/* On a phone the date column would be too narrow for a date, so it
+            goes and the two that identify a customer share the width. */}
         <table className="w-full table-fixed text-[13px]">
           <colgroup>
-            <col className="w-[40%]" />
-            <col className="w-[40%]" />
-            <col className="w-[20%]" />
+            <col className="w-1/2 sm:w-[40%]" />
+            <col className="w-1/2 sm:w-[40%]" />
+            <col className="hidden sm:table-column sm:w-[20%]" />
           </colgroup>
           <thead className="border-b border-line text-[11px] font-medium tracking-[0.1em] text-faint uppercase">
             <tr>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Name</th>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Email</th>
-              <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Created</th>
+              <th className="hidden px-4 py-3 text-right font-medium whitespace-nowrap sm:table-cell">
+                Created
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -88,7 +92,7 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
                   <td className="truncate px-4 py-3 text-left text-muted">
                     {customer.email ?? "—"}
                   </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap text-muted">
+                  <td className="hidden px-4 py-3 text-right whitespace-nowrap text-muted sm:table-cell">
                     {formatShortDate(customer.created_at)}
                   </td>
                 </tr>

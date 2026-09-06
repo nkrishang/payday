@@ -367,7 +367,7 @@ function Highlight({ guidance, children }: { guidance: string; children: ReactNo
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between gap-4">
+    <div className="flex min-w-0 items-baseline justify-between gap-4">
       <dt className="text-faint">{label}</dt>
       <dd className="min-w-0 truncate text-right">{children}</dd>
     </div>

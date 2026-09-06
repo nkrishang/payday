@@ -63,10 +63,10 @@ function Header() {
           />
         </Link>
 
-        <div className="flex items-center text-[15px] text-brand-grey sm:text-[16px]">
+        <div className="flex items-center whitespace-nowrap text-[15px] text-brand-grey sm:text-[16px]">
           {/* The landing page's two nav items keep its spacing; signing out is
               not one of them, so a rule and a wider gap set it apart. */}
-          <div className="flex items-center gap-6 sm:gap-9">
+          <div className="flex items-center gap-5 sm:gap-9">
             <a
               href="https://github.com/nkrishang/payday/tree/main/docs"
               className="transition-colors hover:text-brand-white"
@@ -76,15 +76,19 @@ function Header() {
             <PricingDialog />
           </div>
 
-          <span aria-hidden="true" className="mx-5 h-5 w-px bg-brand-grey/25 sm:mx-7" />
+          <span aria-hidden="true" className="mx-4 h-5 w-px bg-brand-grey/25 sm:mx-7" />
 
+          {/* On a phone the wordmark, both nav items, and this label do not fit
+              on the 76px rule together, so the icon carries it alone there and
+              the label is its accessible name. */}
           <button
             type="button"
             onClick={signOut}
+            aria-label="Sign out"
             className="inline-flex items-center gap-2 transition-colors hover:text-brand-white"
           >
             <LogOut aria-hidden="true" className="size-4" />
-            Sign out
+            <span className="hidden sm:inline">Sign out</span>
           </button>
         </div>
       </nav>
