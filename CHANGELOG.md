@@ -6,10 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers. The project is currently
 pre-release software; the `0.1.0` version does not imply a stable public API.
 
+### Added
+
+- A staging environment (`docs/staging.md`): a second, isolated copy of the
+  AWS stack at `api.staging.payday.sh`, on Monad mainnet with real USDC and
+  its own contract generation, database, keys, bucket, and email identity,
+  whose checkout origin is the web app on the operator's machine. `just
+  web-staging` serves the local web app against it (`web/.env.staging`),
+  and `just live-smoke` (`scripts/live-smoke.sh`) runs a real deposit end
+  to end against any live API: issue, wallet attestation signed with
+  `cast`, on-chain transfer, finalized settlement, Proof of Payment. The
+  `Deploy staging` workflow builds and pushes images for every commit that
+  reaches `main` and passes CI, then applies
+  `infra/environments/staging.tfvars` with that tag, assuming a GitHub OIDC
+  role that the staging Terraform creates when `github_repository` is set,
+  and replaces staging's database whenever the migrations directory changed
+  since the deployed commit. `checkout_base_url` accepts a loopback HTTP
+  origin for this.
+
 ## [Unreleased]
 
 ### Changed
 
+- The public status page is gone: the `status.payday.sh` hostname, the
+  separate ECS `status` service with its target group, listener rule, alarms,
+  log group, and IAM role, `gatewayd`'s `PAYDAY_STATUS_ONLY` mode and its
+  `/`, `/live`, and unauthenticated `/v1/status` routes, the
+  `PAYDAY_STATUS_INDEXER_STALE_SECONDS` setting, the API heartbeat and the
+  `api_status` table that existed only to feed the page, and the
+  public-status-incident runbook. The authenticated merchant `GET /v1/status`
+  and the SDK's `status()` are unchanged.
+- The database schema is one baseline migration again.
+  `crates/gateway-db/migrations/0001_initial_schema.sql` now holds the whole
+  schema that the pre-release chain of 21 migrations ended with (same
+  tables, columns, constraints, indexes, functions, and triggers; the one
+  constraint name PostgreSQL had truncated at 63 characters is spelled out
+  as `payment_observations_collected_at_tx_index_non_negative`). Payday is
+  pre-release with no data to carry forward, so there is no upgrade path:
+  a database that ran the old chain refuses the new set, and every existing
+  environment is recreated empty. Until launch, schema changes keep editing
+  the baseline; staging recreates its database when it deploys one.
+- `pay.payday.sh` is gone. It was a second hostname on the API's load
+  balancer whose only page, `GET /pay/{id}`, answered a `301` to the checkout
+  on `payday.sh`; every `deposit_url` already points at the checkout, so the
+  hostname, the `payment_domain_name` and `payment_route53_zone_id`
+  variables, the certificate name, and the redirect route are removed, and
+  `checkout_base_url` is required.
+- Terraform no longer creates the SES DKIM records. They are names under
+  `payday.sh`, whose DNS is hosted at Vercel, so they are published as the
+  `notification_dkim_records` output and added in Vercel DNS by hand; the
+  API's Route53 zone covers `api.payday.sh` alone.
+- The deployment runbook (`docs/production-runbook.md`) is rewritten around
+  the current shape of the product: the web app (landing, checkout,
+  dashboard) on Vercel at `payday.sh`, the `api` and `indexer` services on
+  AWS, Privy, Auth0 and Resend, and the contract generation on Monad. DNS
+  stays as it is: `payday.sh` at Vercel with only `api.payday.sh` delegated
+  to Route53. The sandbox tfvars example sends email from its own subdomain
+  and no longer mentions the removed `recovery_address` variable.
 - Deposits and deposit requests are the product's two primitives, and every
   surface now says so. The API resource `/v1/payments` is
   `/v1/deposit-requests` (payer routes `/v1/payer/deposit-requests/{id}`,

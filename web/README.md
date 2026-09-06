@@ -144,6 +144,5 @@ the payer actually has installed. WalletConnect is added when
 ## Deployment
 
 A Vercel project rooted at `web/`, serving `payday.sh`. Point the gateway at it
-with the `checkout_base_url` Terraform variable; the gateway answers its own
-`GET /pay/{id}` with a `301` here, so links shared before the checkout moved keep
-working.
+with the `checkout_base_url` Terraform variable, which is where every
+`deposit_url` it mints points. See `docs/production-runbook.md` §9.

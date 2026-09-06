@@ -42,11 +42,10 @@ pub struct AppState {
     /// 256-bit AEAD key. Webhook APIs remain unavailable when not configured.
     pub webhook_encryption_key: Option<[u8; 32]>,
     pub api_key_prefix: String,
-    pub status_stale_seconds: u64,
     pub rate_limits: Arc<Mutex<HashMap<Uuid, (f64, Instant)>>>,
     proof_cache: Arc<StdMutex<HashMap<(Uuid, Uuid, Address), ProofOfPayment>>>,
-    /// The attachment bucket and the attestation key are `None` only in
-    /// status-only mode, whose router never reaches the routes that need them.
+    /// The attachment bucket and the attestation key; the service configures
+    /// both at startup, and a route that needs one answers 500 without it.
     attachment_store: Option<AttachmentStore>,
     attestor: Option<VerificationAttestor>,
     /// `None` unless a deployment has deliberately funded and configured a
@@ -66,7 +65,6 @@ impl AppState {
         payer: PayerAccess,
         api_key_prefix: String,
         webhook_encryption_key: Option<[u8; 32]>,
-        status_stale_seconds: u64,
         attachment_store: Option<AttachmentStore>,
         attestor: Option<VerificationAttestor>,
         payer_verification: Option<PayerVerification>,
@@ -92,7 +90,6 @@ impl AppState {
             payer,
             webhook_encryption_key,
             api_key_prefix,
-            status_stale_seconds,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
             proof_cache: Arc::new(StdMutex::new(HashMap::new())),
             attachment_store,

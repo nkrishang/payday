@@ -22,32 +22,17 @@ variable "domain_name" {
   }
 }
 
-variable "payment_domain_name" {
-  description = "Public hostname used for payer checkout links (pay.payday.sh in production)."
-  type        = string
-  validation {
-    condition     = length(var.payment_domain_name) <= 253 && can(regex("^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}$", var.payment_domain_name))
-    error_message = "payment_domain_name must be a valid fully qualified DNS name without a scheme or path."
-  }
-}
-
-variable "payment_route53_zone_id" {
-  description = "ID of the public Route53 hosted zone containing payment_domain_name."
-  type        = string
-}
-
 variable "checkout_base_url" {
   description = <<-EOT
     Origin serving the hosted checkout at /pay/{id}, which is where every
-    deposit_url points. In production this is the Vercel-hosted site at
-    https://payday.sh. Leave empty to keep links on payment_domain_name, which
-    this service answers with a 301 to this origin.
+    deposit_url points: the Vercel-hosted site, https://payday.sh in
+    production. Staging points at the web app running on the operator's
+    machine, so a loopback HTTP origin is also accepted (docs/staging.md).
   EOT
   type        = string
-  default     = ""
   validation {
-    condition     = var.checkout_base_url == "" || can(regex("^https://[^/?#]+$", var.checkout_base_url))
-    error_message = "checkout_base_url must be an HTTPS origin without a trailing slash, path, query, or fragment."
+    condition     = can(regex("^https://[^/?#]+$", var.checkout_base_url)) || can(regex("^http://(127\\.0\\.0\\.1|localhost)(:[0-9]{1,5})?$", var.checkout_base_url))
+    error_message = "checkout_base_url must be an HTTPS origin (or a loopback HTTP origin) without a trailing slash, path, query, or fragment."
   }
 }
 
@@ -58,22 +43,6 @@ variable "explorer_base_url" {
   validation {
     condition     = can(regex("^https://[^/?#]+/?$", var.explorer_base_url))
     error_message = "explorer_base_url must be an HTTPS origin without a path, query, or fragment."
-  }
-}
-
-variable "status_domain_name" {
-  description = "Public status page DNS name."
-  type        = string
-  default     = "status.payday.sh"
-}
-
-variable "status_indexer_stale_seconds" {
-  description = "Age at which an unchanged deposit cursor makes public status degraded."
-  type        = number
-  default     = 120
-  validation {
-    condition     = var.status_indexer_stale_seconds >= 30 && floor(var.status_indexer_stale_seconds) == var.status_indexer_stale_seconds
-    error_message = "status_indexer_stale_seconds must be an integer of at least 30."
   }
 }
 
@@ -351,5 +320,21 @@ variable "notification_domain_name" {
   validation {
     condition     = endswith(var.notification_from_address, "@${var.notification_domain_name}")
     error_message = "notification_from_address must belong to notification_domain_name."
+  }
+}
+
+variable "github_repository" {
+  description = <<-EOT
+    GitHub repository (owner/name) whose main branch deploys this environment
+    through GitHub Actions. Set only for staging (docs/staging.md): it
+    creates the account's GitHub OIDC provider and a deploy role that the
+    workflow assumes, so at most one environment per AWS account may set it.
+    Empty, as in production, creates nothing and every apply is manual.
+  EOT
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.github_repository == "" || can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    error_message = "github_repository must be owner/name."
   }
 }

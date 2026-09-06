@@ -18,6 +18,17 @@ seed EMAIL="dev@example.test":
 web:
     npm run dev --workspace @payday/web
 
+# Serve the web app on port 3002 against the staging API (docs/staging.md):
+# sign in, mint keys, issue and pay deposit requests on a live stack running
+# main. The staging values win over web/.env.local.
+web-staging:
+    set -a; source web/.env.staging; set +a; npm run dev --workspace @payday/web
+
+# A real deposit end to end against a live API, staging by default. Needs
+# PAYDAY_API_KEY, PAYDAY_RPC_URL, and PAYER_KEY (docs/staging.md).
+live-smoke:
+    ./scripts/live-smoke.sh
+
 # Type-check, lint, and unit-test the TypeScript SDK and web app.
 web-check:
     npm run build --workspace @payday/sdk

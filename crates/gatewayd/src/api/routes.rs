@@ -226,7 +226,6 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health::health))
-        .route("/pay/{id}", get(payer::page))
         .merge(payer)
         .merge(payer_verification)
         .route("/openapi.json", get(openapi::spec))
@@ -261,14 +260,6 @@ pub fn router(state: AppState) -> Router {
                 ),
         )
         .layer(middleware::from_fn(api_middleware::request_id))
-}
-
-pub fn status_router(state: AppState) -> Router {
-    Router::new()
-        .route("/live", get(health::live))
-        .route("/v1/status", get(status::public_json))
-        .route("/", get(status::html))
-        .with_state(state)
 }
 
 #[cfg(test)]
@@ -334,7 +325,6 @@ mod tests {
             payer_access(),
             "payday_live_".into(),
             None,
-            120,
             Some(store),
             Some(attestor()),
             payer_verification,
@@ -1047,60 +1037,6 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn public_status_tracks_real_workers_and_liveness_survives_database_loss(pool: PgPool) {
-        sqlx::query("INSERT INTO api_status(chain_id) VALUES(1)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO indexer_cursor(chain_id,token_address,last_block,last_block_hash,last_block_timestamp) VALUES(1,$1,100,$2,1700000000)")
-            .bind(Address::ZERO.as_slice()).bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO indexer_status(chain_id,token_address,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,$1,100,$2,1700000000)")
-            .bind(Address::ZERO.as_slice()).bind([2_u8; 32].as_slice()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO sweeper_status(chain_id,state) VALUES(1,'running')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let (state, _) = test_state(
-            pool.clone(),
-            AccountRepository::new(pool.clone()),
-            None,
-            Address::ZERO,
-            None,
-        );
-        let app = status_router(state);
-
-        let healthy = app
-            .clone()
-            .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(json_body(healthy).await["status"], "operational");
-
-        sqlx::query("UPDATE indexer_status SET finalized_block=1101 WHERE chain_id=1")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let lagging = app
-            .clone()
-            .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let lagging = json_body(lagging).await;
-        assert_eq!(lagging["status"], "degraded");
-        assert_eq!(
-            lagging["components"]["deposit_indexing_and_settlement"]["status"],
-            "degraded"
-        );
-
-        pool.close().await;
-        let live = app
-            .oneshot(Request::get("/live").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(live.status(), StatusCode::OK);
-    }
-
-    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn address_lookup_cancel_and_bounded_list_shape_work(pool: PgPool) {
         let app = app(pool.clone()).await;
         let body = json!({
@@ -1218,37 +1154,6 @@ mod tests {
         let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
         assert!(!deposit_url.contains("token"));
         assert!(deposit_url.ends_with(&format!("/pay/{id}")));
-
-        // The checkout is hosted at PAYDAY_PUBLIC_BASE_URL, so this service only
-        // forwards the link that merchants have already shared.
-        let page = app
-            .clone()
-            .oneshot(
-                Request::get(format!("/pay/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(page.status(), StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            page.headers()[header::LOCATION],
-            format!("http://127.0.0.1:3000/pay/{id}").as_str()
-        );
-        assert_eq!(page.headers()[header::REFERRER_POLICY], "no-referrer");
-
-        // An id that is not a payment must not reach the Location header.
-        let bogus = app
-            .clone()
-            .oneshot(
-                Request::get("/pay/https:%2F%2Fevil.test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(bogus.status(), StatusCode::UNAUTHORIZED);
-        assert!(!bogus.headers().contains_key(header::LOCATION));
 
         // Browsers on the checkout origin read these routes directly.
         let cors = app
@@ -4592,12 +4497,20 @@ mod tests {
         //    bare link stays locked even though the invoice is now verified.
         let unlocked = payer_read(&app, &id, Some(&session)).await;
         assert_eq!(unlocked["content_unlocked"], true);
-        assert_eq!(unlocked["address"], created["address"]);
         assert_eq!(unlocked["amount"], "1.000000");
         assert_eq!(unlocked["details"]["reference"], "dep-8042");
         assert_eq!(unlocked["requirements"]["complete"], true);
+        // Unlocked is not yet payable: the address waits for the wallet
+        // step, which this verified session may now take.
+        assert!(created["address"].is_null());
+        assert!(unlocked["address"].is_null());
+        assert!(unlocked["deposit_uri"].is_null());
+        assert_eq!(unlocked["requirements"]["wallet"], "pending");
+        let (bound, _) = bind_wallet(&app, &id, Some(&session), &PAYER_KEY).await;
+        assert!(bound["address"].as_str().unwrap().starts_with("0x"));
+        assert_eq!(bound["requirements"]["wallet"], "approved");
         assert!(
-            unlocked["deposit_uri"]
+            bound["deposit_uri"]
                 .as_str()
                 .unwrap()
                 .starts_with("ethereum:")
@@ -4630,7 +4543,8 @@ mod tests {
 
         // 5. The exchange completed the invoice's verification, which the
         //    merchant sees and which raised verification.approved with the
-        //    merchant's own payer reference on it.
+        //    merchant's own payer reference on it; the wallet step then
+        //    raised deposit_request.ready.
         let merchant = json_body(
             app.clone()
                 .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
@@ -4639,13 +4553,14 @@ mod tests {
         )
         .await;
         assert!(merchant["verification_completed_at"].is_string());
+        assert_eq!(merchant["address"], bound["address"]);
         let events = webhook_events(&pool, &id).await;
         assert_eq!(
             events
                 .iter()
                 .map(|(kind, _)| kind.as_str())
                 .collect::<Vec<_>>(),
-            ["verification.approved"]
+            ["verification.approved", "deposit_request.ready"]
         );
         let approved = &events[0].1;
         assert_eq!(approved["type"], "verification.approved");
@@ -4683,11 +4598,14 @@ mod tests {
         assert_eq!(activity["facts"]["merchant_session"], "approved");
         assert_eq!(activity["facts"]["email"], "not_required");
         assert_eq!(activity["facts"]["complete"], true);
+        assert_eq!(activity["facts"]["wallet"], "approved");
         let attempts = activity["attempts"].as_array().unwrap();
-        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0]["kind"], "merchant_session");
         assert_eq!(attempts[0]["status"], "approved");
         assert!(attempts[0]["verified_at"].is_string());
+        assert_eq!(attempts[1]["kind"], "wallet");
+        assert_eq!(attempts[1]["status"], "approved");
         assert!(!activity.to_string().contains("cs_"));
         assert!(!activity.to_string().contains("payer_session"));
 
@@ -4732,7 +4650,7 @@ mod tests {
         );
         // Verification completed once; a second exchange adds an attempt,
         // not a second completion event.
-        assert_eq!(webhook_events(&pool, &id).await.len(), 1);
+        assert_eq!(webhook_events(&pool, &id).await.len(), 2);
 
         // Only the owner mints, and only for this mode.
         const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
@@ -4809,8 +4727,7 @@ mod tests {
         // 7. The payer pays from the checkout. Funding and settlement raise
         //    deposit_request.deposited and deposit_request.settled, each carrying the payer
         //    reference the merchant's ledger credits by.
-        let address =
-            Address::parse_checksummed(created["address"].as_str().unwrap(), None).unwrap();
+        let address = Address::parse_checksummed(bound["address"].as_str().unwrap(), None).unwrap();
         sqlx::query(
             r#"INSERT INTO payment_observations
                  (chain_id, token_address, block_number, block_hash, block_timestamp,
@@ -4821,7 +4738,7 @@ mod tests {
         .bind(Address::ZERO.as_slice())
         .bind([1u8; 32].as_slice())
         .bind([3u8; 32].as_slice())
-        .bind(Address::repeat_byte(0xf3).as_slice())
+        .bind(gateway_core::wallet_of(&PAYER_KEY).as_slice())
         .bind(address.as_slice())
         .bind(uuid)
         .execute(&pool)
@@ -4863,6 +4780,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "verification.approved",
+                "deposit_request.ready",
                 "deposit_request.deposited",
                 "deposit_request.settled"
             ]
@@ -4881,14 +4799,14 @@ mod tests {
             assert!(!serialized.contains(&session), "{kind}");
         }
         assert_eq!(
-            events[1].1["data"]["deposit_request"]["status"],
+            events[2].1["data"]["deposit_request"]["status"],
             "deposited"
         );
         assert_eq!(
-            events[1].1["data"]["deposit_request"]["received"],
+            events[2].1["data"]["deposit_request"]["received"],
             "1000000"
         );
-        assert_eq!(events[2].1["data"]["deposit_request"]["status"], "settled");
+        assert_eq!(events[3].1["data"]["deposit_request"]["status"], "settled");
 
         // 8. The proof attests the merchant session; the snapshot carries
         //    the merchant's assertion; it verifies offline.
@@ -4960,7 +4878,7 @@ mod tests {
         assert_eq!(receipt_view["status"], "settled");
         assert_eq!(receipt_view["payable"], false);
         assert!(receipt_view["deposit_uri"].is_null());
-        assert_eq!(webhook_events(&pool, &id).await.len(), 3);
+        assert_eq!(webhook_events(&pool, &id).await.len(), 4);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]

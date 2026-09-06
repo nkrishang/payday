@@ -18,7 +18,6 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 |-------|---------|---------|
 | `payday-unhealthy-targets` | API `/health` is failing (the check includes a database round-trip) | [service-restart.md](service-restart.md) |
 | `payday-api-task-count` | API container is not running | [service-restart.md](service-restart.md) |
-| `payday-status-unhealthy-targets` / `payday-status-task-count` | The independently deployed public status page is unavailable | [service-restart.md](service-restart.md) |
 | `payday-indexer-task-count` | Indexer container is not running | [service-restart.md](service-restart.md) |
 | `payday-indexer-fatal` | Block indexer hit a permanent halt (cursor mismatch, etc.) | [indexer-fatal-halt.md](indexer-fatal-halt.md) |
 | `payday-indexer-sweep-paused` | Sweep worker cannot resolve its in-flight helper transaction; indexing continues | [stuck-deposit-request.md](stuck-deposit-request.md#sweep-worker-paused) |

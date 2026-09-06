@@ -30,7 +30,6 @@ export PAYDAY_API_KEY="<operator-account-api-key>"
 | [stuck-deposit-request.md](stuck-deposit-request.md) | A deposit request is not progressing through its lifecycle |
 | [indexer-cursor-reset.md](indexer-cursor-reset.md) | The indexer is far behind or has a stale cursor |
 | [indexer-fatal-halt.md](indexer-fatal-halt.md) | The indexer stopped due to a finalized reorg or permanent error |
-| [public-status-incident.md](public-status-incident.md) | Public communication when deposit indexing is delayed |
 | [service-restart.md](service-restart.md) | The API or indexer container needs a restart |
 | [acm-certificate-failure.md](acm-certificate-failure.md) | ACM certificate validation fails (CAA error) |
 | [quicknode-rpc-limits.md](quicknode-rpc-limits.md) | RPC provider rejects log ranges with HTTP 413 |

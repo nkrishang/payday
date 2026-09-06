@@ -3,13 +3,6 @@ use axum::http::StatusCode;
 
 use crate::state::AppState;
 
-/// Process-only liveness used by the independently deployed public status
-/// service. Operational dependencies are reported by `/v1/status`, not by
-/// removing the status page from service.
-pub async fn live() -> (StatusCode, &'static str) {
-    (StatusCode::OK, "ok")
-}
-
 /// Liveness for the load balancer. A database round-trip is part of the check
 /// so a task that cannot serve invoice requests is taken out of rotation
 /// instead of reporting healthy while every request fails.

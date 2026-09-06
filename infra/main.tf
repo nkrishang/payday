@@ -2,17 +2,11 @@ data "aws_availability_zones" "available" { state = "available" }
 data "aws_caller_identity" "current" {}
 
 locals {
-  # Payer links point at the hosted checkout. gatewayd validates this as a bare
-  # HTTPS origin and redirects its own /pay/{id} to it, so links shared before
-  # the checkout moved keep working.
-  checkout_base_url = var.checkout_base_url != "" ? var.checkout_base_url : "https://${var.payment_domain_name}"
+  # Payer links point at the hosted checkout; gatewayd validates this as a
+  # bare HTTPS origin and allows merchant-route CORS from it alone.
+  checkout_base_url = var.checkout_base_url
 
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
-  certificate_validation_zone_ids = {
-    (var.domain_name)         = var.route53_zone_id
-    (var.payment_domain_name) = var.payment_route53_zone_id
-    (var.status_domain_name)  = var.route53_zone_id
-  }
   common_environment = [
     { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
     { name = "PAYDAY_FACTORY_ADDRESS", value = var.factory_address },
@@ -296,10 +290,6 @@ resource "aws_cloudwatch_log_group" "api" {
   name              = "/ecs/${var.name}/api"
   retention_in_days = 30
 }
-resource "aws_cloudwatch_log_group" "status" {
-  name              = "/ecs/${var.name}/status"
-  retention_in_days = 30
-}
 resource "aws_cloudwatch_log_group" "indexer" {
   name              = "/ecs/${var.name}/indexer"
   retention_in_days = 30
@@ -317,20 +307,12 @@ resource "aws_iam_role" "api_execution" {
   name               = "${var.name}-api-execution"
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "ecs-tasks.amazonaws.com" }, Action = "sts:AssumeRole" }] })
 }
-resource "aws_iam_role" "status_execution" {
-  name               = "${var.name}-status-execution"
-  assume_role_policy = aws_iam_role.api_execution.assume_role_policy
-}
 resource "aws_iam_role" "indexer_execution" {
   name               = "${var.name}-indexer-execution"
   assume_role_policy = aws_iam_role.api_execution.assume_role_policy
 }
 resource "aws_iam_role_policy_attachment" "api_execution" {
   role       = aws_iam_role.api_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-resource "aws_iam_role_policy_attachment" "status_execution" {
-  role       = aws_iam_role.status_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 resource "aws_iam_role_policy_attachment" "indexer_execution" {
@@ -341,10 +323,6 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn] }] })
-}
-resource "aws_iam_role_policy" "status_secrets" {
-  role   = aws_iam_role.status_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = aws_secretsmanager_secret.database_url.arn }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
@@ -358,14 +336,9 @@ resource "aws_iam_role" "api_task" {
 resource "aws_sesv2_email_identity" "notifications" {
   email_identity = var.notification_domain_name
 }
-resource "aws_route53_record" "ses_dkim" {
-  count   = 3
-  zone_id = var.route53_zone_id
-  name    = "${aws_sesv2_email_identity.notifications.dkim_signing_attributes[0].tokens[count.index]}._domainkey.${var.notification_domain_name}"
-  type    = "CNAME"
-  ttl     = 300
-  records = ["${aws_sesv2_email_identity.notifications.dkim_signing_attributes[0].tokens[count.index]}.dkim.amazonses.com"]
-}
+# The DKIM CNAMEs live under notification_domain_name (payday.sh), whose DNS
+# is hosted at Vercel, not in the API's Route53 zone; they are published as
+# the notification_dkim_records output and added there by hand.
 resource "aws_iam_role_policy" "api_ses" {
   role   = aws_iam_role.api_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["ses:SendEmail"], Resource = aws_sesv2_email_identity.notifications.arn }] })
@@ -641,7 +614,6 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
       { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
-      { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) },
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
@@ -655,31 +627,6 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
     ], local.payer_secrets, local.identity_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
-  }])
-}
-
-resource "aws_ecs_task_definition" "status" {
-  family                   = "${var.name}-status"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 256
-  memory                   = 512
-  execution_role_arn       = aws_iam_role.status_execution.arn
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = "X86_64"
-  }
-  container_definitions = jsonencode([{
-    name                   = "status", image = "${aws_ecr_repository.api.repository_url}:${var.image_tag}", essential = true,
-    readonlyRootFilesystem = true,
-    portMappings           = [{ containerPort = var.api_port, protocol = "tcp" }],
-    environment = concat(local.common_environment, [
-      { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
-      { name = "PAYDAY_STATUS_ONLY", value = "true" },
-      { name = "PAYDAY_STATUS_INDEXER_STALE_SECONDS", value = tostring(var.status_indexer_stale_seconds) }
-    ]),
-    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }],
-    logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.status.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "status" } }
   }])
 }
 
@@ -729,27 +676,14 @@ resource "aws_lb_target_group" "api" {
     matcher = "200-399"
   }
 }
-resource "aws_lb_target_group" "status" {
-  name        = "${var.name}-status"
-  port        = var.api_port
-  protocol    = "HTTP"
-  target_type = "ip"
-  vpc_id      = aws_vpc.this.id
-  health_check {
-    path    = "/live"
-    matcher = "200-399"
-  }
-}
-
 resource "aws_acm_certificate" "api" {
-  domain_name               = var.domain_name
-  subject_alternative_names = [var.payment_domain_name, var.status_domain_name]
-  validation_method         = "DNS"
+  domain_name       = var.domain_name
+  validation_method = "DNS"
   lifecycle { create_before_destroy = true }
 }
 resource "aws_route53_record" "validation" {
   for_each = { for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => { name = dvo.resource_record_name, record = dvo.resource_record_value, type = dvo.resource_record_type } }
-  zone_id  = local.certificate_validation_zone_ids[each.key]
+  zone_id  = var.route53_zone_id
   name     = each.value.name
   type     = each.value.type
   records  = [each.value.record]
@@ -783,17 +717,6 @@ resource "aws_lb_listener" "https" {
     target_group_arn = aws_lb_target_group.api.arn
   }
 }
-resource "aws_lb_listener_rule" "status" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 10
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.status.arn
-  }
-  condition {
-    host_header { values = [var.status_domain_name] }
-  }
-}
 resource "aws_route53_record" "api" {
   zone_id = var.route53_zone_id
   name    = var.domain_name
@@ -804,28 +727,6 @@ resource "aws_route53_record" "api" {
     evaluate_target_health = true
   }
 }
-resource "aws_route53_record" "payment" {
-  zone_id = var.payment_route53_zone_id
-  name    = var.payment_domain_name
-  type    = "A"
-  alias {
-    name                   = aws_lb.api.dns_name
-    zone_id                = aws_lb.api.zone_id
-    evaluate_target_health = true
-  }
-}
-
-resource "aws_route53_record" "status" {
-  zone_id = var.route53_zone_id
-  name    = var.status_domain_name
-  type    = "A"
-  alias {
-    name                   = aws_lb.api.dns_name
-    zone_id                = aws_lb.api.zone_id
-    evaluate_target_health = true
-  }
-}
-
 resource "aws_ecs_service" "api" {
   name            = "api"
   cluster         = aws_ecs_cluster.this.id
@@ -847,28 +748,6 @@ resource "aws_ecs_service" "api" {
     container_port   = var.api_port
   }
   depends_on = [aws_lb_listener.https]
-}
-resource "aws_ecs_service" "status" {
-  name            = "status"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.status.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-  network_configuration {
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.api.id]
-    assign_public_ip = true
-  }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.status.arn
-    container_name   = "status"
-    container_port   = var.api_port
-  }
-  depends_on = [aws_lb_listener_rule.status]
 }
 resource "aws_ecs_service" "indexer" {
   name                               = "indexer"
@@ -958,32 +837,6 @@ resource "aws_cloudwatch_metric_alarm" "api_tasks" {
   comparison_operator = "LessThanThreshold"
   treat_missing_data  = "breaching"
   dimensions          = { ClusterName = aws_ecs_cluster.this.name, ServiceName = aws_ecs_service.api.name }
-  alarm_actions       = [aws_sns_topic.alarms.arn]
-}
-resource "aws_cloudwatch_metric_alarm" "status_unhealthy" {
-  alarm_name          = "${var.name}-status-unhealthy-targets"
-  namespace           = "AWS/ApplicationELB"
-  metric_name         = "UnHealthyHostCount"
-  statistic           = "Maximum"
-  period              = 60
-  evaluation_periods  = 2
-  threshold           = 0
-  comparison_operator = "GreaterThanThreshold"
-  treat_missing_data  = "breaching"
-  dimensions          = { LoadBalancer = aws_lb.api.arn_suffix, TargetGroup = aws_lb_target_group.status.arn_suffix }
-  alarm_actions       = [aws_sns_topic.alarms.arn]
-}
-resource "aws_cloudwatch_metric_alarm" "status_tasks" {
-  alarm_name          = "${var.name}-status-task-count"
-  namespace           = "ECS/ContainerInsights"
-  metric_name         = "RunningTaskCount"
-  statistic           = "Minimum"
-  period              = 60
-  evaluation_periods  = 2
-  threshold           = 1
-  comparison_operator = "LessThanThreshold"
-  treat_missing_data  = "breaching"
-  dimensions          = { ClusterName = aws_ecs_cluster.this.name, ServiceName = aws_ecs_service.status.name }
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
 resource "aws_cloudwatch_metric_alarm" "indexer_tasks" {
@@ -1085,7 +938,7 @@ locals {
     cursor_lagging = {
       pattern     = "\"indexer cursor lagging\""
       period      = 60
-      description = "The block indexer trails finality by more than a thousand blocks; follow docs/runbooks/public-status-incident.md"
+      description = "The block indexer trails finality by more than a thousand blocks; follow docs/runbooks/stuck-deposit-request.md"
     }
     sweep_backlog_stale = {
       pattern     = "\"sweep backlog stale\""
@@ -1151,4 +1004,38 @@ resource "aws_cloudwatch_metric_alarm" "db_storage" {
   comparison_operator = "LessThanThreshold"
   dimensions          = { DBInstanceIdentifier = aws_db_instance.this.identifier }
   alarm_actions       = [aws_sns_topic.alarms.arn]
+}
+
+# Continuous deployment of main from GitHub Actions (docs/staging.md). The
+# OIDC provider is one per AWS account, so only the environment that sets
+# github_repository declares it. The role trusts exactly that repository's
+# main branch; it carries AdministratorAccess because a Terraform apply of
+# this stack touches IAM, KMS, RDS, ECS, S3, and more, which is why the trust
+# policy, not the permissions, is the control.
+resource "aws_iam_openid_connect_provider" "github" {
+  count           = var.github_repository != "" ? 1 : 0
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
+}
+resource "aws_iam_role" "github_deploy" {
+  count = var.github_repository != "" ? 1 : 0
+  name  = "${var.name}-github-deploy"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.github[0].arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
+        StringLike   = { "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:ref:refs/heads/main" }
+      }
+    }]
+  })
+}
+resource "aws_iam_role_policy_attachment" "github_deploy" {
+  count      = var.github_repository != "" ? 1 : 0
+  role       = aws_iam_role.github_deploy[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }

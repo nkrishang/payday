@@ -16,3 +16,18 @@ output "ecs_cluster_name" { value = aws_ecs_cluster.this.name }
 output "api_service_name" { value = aws_ecs_service.api.name }
 output "indexer_service_name" { value = aws_ecs_service.indexer.name }
 output "rds_endpoint" { value = aws_db_instance.this.endpoint }
+output "notification_dkim_records" {
+  description = "CNAME records to add in the DNS provider hosting notification_domain_name (Vercel for payday.sh); SES verifies the sending identity once they resolve."
+  value = {
+    for token in aws_sesv2_email_identity.notifications.dkim_signing_attributes[0].tokens :
+    "${token}._domainkey.${var.notification_domain_name}" => "${token}.dkim.amazonses.com"
+  }
+}
+output "github_deploy_role_arn" {
+  description = "Role the deploy-staging workflow assumes; null unless github_repository is set."
+  value       = try(aws_iam_role.github_deploy[0].arn, null)
+}
+output "image_tag" {
+  description = "The git-<sha> tag currently applied; the deploy-staging workflow diffs the migrations directory against it."
+  value       = var.image_tag
+}
