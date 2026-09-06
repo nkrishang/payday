@@ -11,7 +11,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 const CUSTOMER: Customer = {
-  id: "0198f80c-8d2f-7dc1-a369-90556a64f7c1",
+  id: "cus_0198f80c-8d2f-7dc1-a369-90556a64f7c1",
   name: "Globex Corporation",
   email: "ap@globex.example",
   details: "PO 7781",
@@ -20,7 +20,7 @@ const CUSTOMER: Customer = {
 };
 
 function renderForm(props: { customer?: Customer; onSaved?: (customer: Customer) => void } = {}) {
-  const create = vi.fn().mockResolvedValue({ ...CUSTOMER, id: "0198f80c-0000-7dc1-a369-90556a64f7c2" });
+  const create = vi.fn().mockResolvedValue({ ...CUSTOMER, id: "cus_0198f80c-0000-7dc1-a369-90556a64f7c2" });
   const update = vi.fn().mockResolvedValue({ ...CUSTOMER, email: null, details: null });
   const client = { customers: { create, update } } as unknown as PaydayClient;
   render(
@@ -49,7 +49,7 @@ describe("CustomerForm create", () => {
     // A blank optional is omitted rather than sent as "", so the API stores
     // no email or details instead of rejecting an empty string.
     expect(create.mock.calls[0]![0]).toEqual({ name: "Globex Corporation" });
-    expect(push).toHaveBeenCalledWith("/dashboard/customers/0198f80c-0000-7dc1-a369-90556a64f7c2");
+    expect(push).toHaveBeenCalledWith("/dashboard/customers/cus_0198f80c-0000-7dc1-a369-90556a64f7c2");
   });
 
   it("flags a blank name in the form and never calls the API", async () => {

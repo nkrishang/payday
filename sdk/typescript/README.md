@@ -37,6 +37,12 @@ await payday.depositRequests.create(
 );
 ```
 
+Every id the API hands back is a UUID behind a prefix naming the resource:
+`dr_` deposit request, `cus_` customer, `iss_` issuer identity, `pa_` payout
+address, `att_` attachment, `wh_` webhook, `whd_` delivery, `evt_` event,
+`acct_` account. Pass them back exactly as received; a bare UUID or the wrong
+prefix is refused.
+
 A deposit request is the document: issuer, payer, one directly specified amount,
 optional `notes`, `heading`, `reference`, and `metadata`, a payer policy, and at
 most one PDF attachment. The deposit request is its on-chain fulfilment, which is why

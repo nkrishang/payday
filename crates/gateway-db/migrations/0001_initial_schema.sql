@@ -976,8 +976,10 @@ LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
 $$;
 
 -- The deposit request object shared by every event, a strict subset of the
--- API's own object under the same names, units, and formats: the `dr_` id,
--- decimal amounts beside their base units, the policy mode, the merchant's
+-- API's own object under the same names, units, and formats: the `dr_` id
+-- (and `cus_`/`iss_` for the records it names — every id the API emits is a
+-- UUID behind a resource prefix), decimal amounts beside their base units,
+-- the policy mode, the merchant's
 -- own payer reference, verification completion, the unsolicited-funding
 -- timestamp, and the bound wallet and address; never the expected email or
 -- any payer assertion. Addresses leave here as lowercase hex; the delivery
@@ -994,8 +996,8 @@ LANGUAGE SQL STABLE AS $$
         'heading', invoice.heading,
         'reference', invoice.reference,
         'metadata', invoice.metadata,
-        'customer_id', invoice.customer_id,
-        'issuer_id', invoice.issuer_id,
+        'customer_id', 'cus_' || invoice.customer_id::text,
+        'issuer_id', 'iss_' || invoice.issuer_id::text,
         'payer_policy_mode', invoice.payer_policy_mode,
         'payer_reference', invoice.payer_reference,
         'verification_completed_at', webhook_rfc3339(invoice.verification_completed_at),
@@ -1017,7 +1019,7 @@ BEGIN
   event_uuid := gen_random_uuid();
   INSERT INTO webhook_events(id, account_id, invoice_id, event_type, payload)
   VALUES (event_uuid, account, invoice, kind,
-    jsonb_build_object('version', '2026-08-01', 'id', event_uuid, 'type', kind,
+    jsonb_build_object('version', '2026-08-01', 'id', 'evt_' || event_uuid::text, 'type', kind,
       'occurred_at', webhook_rfc3339(COALESCE(occurred, now())), 'data', data))
   ON CONFLICT (invoice_id, event_type)
     WHERE invoice_id IS NOT NULL AND fanout AND event_type <> 'deposit_request.recovered_funds'
@@ -1083,7 +1085,7 @@ BEGIN
     jsonb_build_object(
       'deposit_request', webhook_deposit_request_object(invoice),
       'recovery', jsonb_build_object(
-        'id', NEW.id,
+        'id', 'rec_' || NEW.id::text,
         'amount', webhook_decimal_amount(NEW.amount, invoice.token_decimals),
         'amount_base_units', NEW.amount,
         'reason', NEW.reason,

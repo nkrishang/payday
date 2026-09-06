@@ -10,8 +10,8 @@
 use axum::Extension;
 use axum::extract::{Path, State};
 use gateway_core::{
-    PayerPolicyMode, VerificationAttemptResponse, VerificationDetailResponse, VerificationFacts,
-    VerificationRequirementsResponse, rfc3339,
+    PayerPolicyMode, VerificationAttemptId, VerificationAttemptResponse,
+    VerificationDetailResponse, VerificationFacts, VerificationRequirementsResponse, rfc3339,
 };
 use gateway_db::{AccountId, DbInvoice};
 
@@ -59,7 +59,7 @@ async fn detail(
         attempts: attempts
             .iter()
             .map(|attempt| VerificationAttemptResponse {
-                id: attempt.id.to_string(),
+                id: VerificationAttemptId(attempt.id).to_string(),
                 kind: attempt.kind.clone(),
                 status: attempt.status.clone(),
                 verified_at: attempt.verified_at.map(rfc3339),

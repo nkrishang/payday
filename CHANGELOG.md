@@ -28,6 +28,17 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- Every id the API emits is now a UUID behind a prefix naming the resource,
+  as deposit requests' `dr_` ids already were: `cus_` customer, `iss_`
+  issuer identity, `pa_` payout address, `att_` attachment, `wh_` webhook
+  endpoint, `whd_` webhook delivery, `evt_` webhook event (the envelope `id`
+  and `Payday-Event-Id`), `va_` verification attempt, `rec_` recovery ledger
+  entry, and `acct_` account. Only that canonical form is accepted back: a
+  bare UUID or the wrong prefix in a path is `404 <resource>_not_found`, and
+  in a body or query field `400 invalid_request` naming the form wanted. The
+  database still stores UUIDs; attachment object keys and the Proof of
+  Payment's `canonical_issuance_snapshot.attachment.id` (a hashed, frozen
+  document) carry the raw UUID behind the `att_` id.
 - An ergonomics pass over the merchant API, so every resource follows one
   set of conventions (documented under Conventions in
   `docs/api-reference.md`). A request body or query string that does not

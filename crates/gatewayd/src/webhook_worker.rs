@@ -142,7 +142,10 @@ async fn deliver(key: [u8; 32], job: &gateway_db::DeliveryClaim) -> Result<u16, 
     let signature = hex::encode(mac.finalize().into_bytes());
     let response = http
         .post(url)
-        .header("Payday-Event-Id", job.event_id.to_string())
+        .header(
+            "Payday-Event-Id",
+            gateway_core::WebhookEventId(job.event_id).to_string(),
+        )
         .header("Payday-Event-Type", &job.event_type)
         .header(
             "Payday-Signature",

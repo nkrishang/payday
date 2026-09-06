@@ -22,7 +22,9 @@ fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 PDF. A request that names a saved customer may leave `payer` out, and one
 that names a saved issuer identity may leave `issuer` and `payout_address`
 out: the saved record is snapshotted in their place, and the smallest valid
-request is `amount`, `issuer_id`, `customer_id`, and `payer_policy`. The amount
+request is `amount`, `issuer_id`, `customer_id`, and `payer_policy`. Ids are
+prefixed (`dr_`, `cus_`, `iss_`, `att_`; see the reference's Conventions) and
+are passed back exactly as received. The amount
 is used directly; there are no line items. Exactly `amount` settles to
 `payout_address`. The response's `address` is null at creation: the deposit request
 address exists only once the payer has attested, from the hosted page, the

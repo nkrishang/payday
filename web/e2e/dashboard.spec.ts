@@ -107,7 +107,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await page.getByLabel("Email").fill("ap@initrode.example");
   await page.getByLabel("Details").fill("Vendor #4471");
   await page.getByRole("button", { name: "Create customer" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/customers\/[0-9a-f-]{36}$/);
+  await expect(page).toHaveURL(/\/dashboard\/customers\/cus_[0-9a-f-]{36}$/);
   await expect(page.getByRole("heading", { name: customerName })).toBeVisible();
 
   // Straight into a request for that customer, which opens on them.

@@ -28,10 +28,7 @@ impl fmt::Display for InvoiceId {
 /// accepted: partial IDs and other UUID spellings are rejected so a lookup can
 /// never resolve to more than one deposit request.
 pub fn deposit_request_id(value: &str) -> Option<Uuid> {
-    let suffix = value.strip_prefix("dr_")?;
-    let uuid = Uuid::try_parse(suffix).ok()?;
-    let mut canonical = [0u8; uuid::fmt::Hyphenated::LENGTH];
-    (uuid.hyphenated().encode_lower(&mut canonical) == suffix).then_some(uuid)
+    crate::parse_prefixed("dr_", value)
 }
 
 pub fn generate_invoice_id() -> InvoiceId {

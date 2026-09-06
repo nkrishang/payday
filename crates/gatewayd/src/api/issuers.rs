@@ -28,7 +28,7 @@ use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::Utc;
-use gateway_core::rfc3339;
+use gateway_core::{IssuerId, PayoutAddressId, rfc3339};
 use gateway_db::{
     AccountId, CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbPayoutAddress,
     IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
@@ -92,19 +92,19 @@ pub struct PayoutAddressRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPayoutAddressesRequest {
-    payout_address_ids: Vec<Uuid>,
+    payout_address_ids: Vec<PayoutAddressId>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     limit: Option<u32>,
-    starting_after: Option<Uuid>,
+    starting_after: Option<IssuerId>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PayoutAddressResponse {
-    id: Uuid,
+    id: PayoutAddressId,
     /// EIP-55 checksummed, ready to send back as `payout_address`.
     address: String,
     label: Option<String>,
@@ -114,7 +114,7 @@ pub struct PayoutAddressResponse {
 impl From<DbPayoutAddress> for PayoutAddressResponse {
     fn from(row: DbPayoutAddress) -> Self {
         Self {
-            id: row.id,
+            id: PayoutAddressId(row.id),
             address: row.address,
             label: row.label,
             created_at: rfc3339(row.created_at),
@@ -124,7 +124,7 @@ impl From<DbPayoutAddress> for PayoutAddressResponse {
 
 #[derive(Debug, Serialize)]
 pub struct IssuerResponse {
-    id: Uuid,
+    id: IssuerId,
     name: String,
     contact_email: String,
     details: Option<String>,
@@ -140,7 +140,7 @@ pub struct IssuerResponse {
 impl IssuerResponse {
     fn build(row: DbIssuer, payout_addresses: Vec<PayoutAddressResponse>) -> Self {
         Self {
-            id: row.id,
+            id: IssuerId(row.id),
             name: row.name,
             contact_email: row.contact_email,
             details: row.details,
@@ -156,7 +156,7 @@ impl IssuerResponse {
 #[derive(Debug, Serialize)]
 pub struct IssuerPage {
     issuers: Vec<IssuerResponse>,
-    next_cursor: Option<Uuid>,
+    next_cursor: Option<IssuerId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,7 +217,7 @@ pub async fn list(
     if let Some(cursor) = query.starting_after
         && state
             .issuers
-            .get_for_account(account, cursor)
+            .get_for_account(account, cursor.0)
             .await?
             .is_none()
     {
@@ -227,11 +227,11 @@ pub async fn list(
     }
     let mut rows = state
         .issuers
-        .list_for_account(account, limit, query.starting_after)
+        .list_for_account(account, limit, query.starting_after.map(Uuid::from))
         .await?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let next_cursor = has_more.then(|| rows.last().expect("nonzero limit").id);
+    let next_cursor = has_more.then(|| IssuerId(rows.last().expect("nonzero limit").id));
 
     // One query for every identity's addresses rather than one per row.
     let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
@@ -241,7 +241,7 @@ pub async fn list(
             .entry(link.issuer_id)
             .or_default()
             .push(PayoutAddressResponse {
-                id: link.id,
+                id: PayoutAddressId(link.id),
                 address: link.address,
                 label: link.label,
                 created_at: rfc3339(link.created_at),
@@ -396,9 +396,14 @@ pub async fn set_payout_addresses(
         )));
     }
     let row = load(&state.issuers, account, id).await?;
+    let addresses: Vec<Uuid> = request
+        .payout_address_ids
+        .into_iter()
+        .map(Uuid::from)
+        .collect();
     // Checked here rather than left to the foreign key, so an id belonging to
     // another account reads as a missing address instead of a server error.
-    for address in &request.payout_address_ids {
+    for address in &addresses {
         if state
             .issuers
             .get_payout_address(account, *address)
@@ -410,7 +415,7 @@ pub async fn set_payout_addresses(
     }
     state
         .issuers
-        .set_payout_addresses(account, id, &request.payout_address_ids)
+        .set_payout_addresses(account, id, &addresses)
         .await?;
     Ok(Json(with_addresses(&state.issuers, account, row).await?))
 }
@@ -471,7 +476,9 @@ pub async fn delete_payout_address(
     Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let id = Uuid::from_str(&id).map_err(|_| ApiError::payout_address_not_found())?;
+    let id = PayoutAddressId::parse(&id)
+        .map(Uuid::from)
+        .ok_or_else(ApiError::payout_address_not_found)?;
     if state.issuers.delete_payout_address(account, id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -525,8 +532,11 @@ fn label_shape_ok(label: &str) -> bool {
         })
 }
 
+/// Anything but a canonical `iss_` id is a missing identity.
 fn issuer_id(value: &str) -> Result<Uuid, ApiError> {
-    Uuid::from_str(value).map_err(|_| ApiError::issuer_not_found())
+    IssuerId::parse(value)
+        .map(Uuid::from)
+        .ok_or_else(ApiError::issuer_not_found)
 }
 
 /// The same limits an invoice party carries, since that is what this becomes,

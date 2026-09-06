@@ -53,6 +53,32 @@ another account's id is `404 <resource>_not_found`. Creates answer `201`,
 disables and deletes answer `204`, and `PATCH` is partial: a field left out
 keeps its value, and only an explicit `null` clears one.
 
+Every id is a UUID behind a prefix that says what it names, so a log line, a
+support ticket, or a mistaken field reads for itself:
+
+| Prefix | Resource |
+|---|---|
+| `dr_` | deposit request |
+| `cus_` | customer |
+| `iss_` | issuer identity |
+| `pa_` | payout address |
+| `att_` | attachment |
+| `wh_` | webhook endpoint |
+| `whd_` | webhook delivery |
+| `evt_` | webhook event (the envelope `id` and `Payday-Event-Id`) |
+| `va_` | verification attempt |
+| `rec_` | recovery ledger entry (in `deposit_request.recovered_funds`) |
+| `acct_` | account |
+
+Only the canonical form the API emits is accepted back: the exact prefix,
+then a lowercase hyphenated UUID. A `cus_` id handed to an attachment route
+is `404 attachment_not_found`, and a bare UUID in a body field such as
+`customer_id` is `400 invalid_request` naming the form wanted. The one place
+a raw UUID remains is the Proof of Payment's
+`canonical_issuance_snapshot.attachment.id`: that document is hashed into the
+deposit address and its schema is frozen, so it carries the UUID the `att_`
+id wraps.
+
 API-key traffic has a process-local per-account token bucket: capacity 60,
 refill one request per second. Responses include `X-RateLimit-Limit`,
 `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. A rejected request returns
@@ -80,8 +106,8 @@ Requires `Idempotency-Key` containing 1–255 bytes.
   "reference": "INV-1042",
   "notes": "Net 30. Thank you.",
   "payer_policy": {"mode": "verified_email", "expected_email": "alice@customer.example"},
-  "attachment_id": "0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "customer_id": "0198f80c-1111-7dc1-a369-90556a64f700",
+  "attachment_id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
   "expires_in": 3600,
   "metadata": {"po": "PO-77"}
 }
@@ -93,12 +119,12 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `payout_address` | Nonzero EVM address; receives exactly `amount`. Optional when `issuer_id` names an identity with a saved payout address, whose first address is then used |
 | `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is optional when `issuer_id` is given and `payer` when `customer_id` is given: the saved record's name, email (`contact_email` for an identity), and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Payday emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
 | `payer_policy` | Required; one of the three modes below |
-| `customer_id` | Optional customer UUID owned by the account; the deposit request still stores its own `payer` snapshot |
-| `issuer_id` | Optional issuer identity UUID owned by the account, stored immutably beside the issued document; see [Issuer identities](#issuer-identities) |
+| `customer_id` | Optional `cus_` id of a customer the account owns; the deposit request still stores its own `payer` snapshot |
+| `issuer_id` | Optional `iss_` id of an issuer identity the account owns, stored immutably beside the issued document; see [Issuer identities](#issuer-identities) |
 | `notes` | Optional, up to 4,000 bytes |
 | `heading` | Optional short description, up to 200 bytes; shown to the payer before verification on gated deposit requests |
 | `reference` | Optional merchant reference, at most 128 characters |
-| `attachment_id` | Optional finalized attachment UUID; one PDF per deposit request |
+| `attachment_id` | Optional `att_` id of a finalized attachment; one PDF per deposit request |
 | `expires_in` | Optional lifetime in seconds |
 | `expires_at` | Optional RFC 3339 deadline; mutually exclusive with `expires_in` |
 | `chain_id`, `token_address` | Optional deployment overrides; otherwise configured chain/native USDC |
@@ -137,7 +163,7 @@ never leaves a half-issued deposit request or a retagged attachment behind.
 The smallest valid request names saved records and nothing else:
 
 ```json
-{"amount": "10.50", "issuer_id": "0198f80c-…", "customer_id": "0198f80c-…", "payer_policy": {"mode": "permissionless"}}
+{"amount": "10.50", "issuer_id": "iss_0198f80c-…", "customer_id": "cus_0198f80c-…", "payer_policy": {"mode": "permissionless"}}
 ```
 
 Unknown fields are rejected; `memo` and `refund_address` are not fields.
@@ -212,7 +238,7 @@ for a few minutes (`PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS`, default 300).
 
 ```json
 {
-  "id": "0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "filename": "request.pdf",
   "mime_type": "application/pdf",
   "byte_length": "48211",
@@ -254,7 +280,10 @@ verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/deposit-requests/{reference}/proof`
 
-Returns the Proof of Payment JSON (`payday.proof.v2`) for a settled deposit request;
+Returns the Proof of Payment JSON (`payday.proof.v2`) for a settled deposit request
+(`payment_id` is the `dr_` id; inside `canonical_issuance_snapshot`, `attachment.id`
+is the raw UUID behind the API's `att_` id, since that document is the hashed
+commitment and its schema is frozen);
 `409 deposit_request_not_settled` before then, and `409 deposit_sender_mismatch` when
 any credited transfer came from a wallet other than the attested one, since
 no proof can then claim the attested wallet paid. The proof carries the

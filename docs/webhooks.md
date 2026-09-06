@@ -55,8 +55,9 @@ or `likely_unsolicited_at`.
 
 ## Payload
 
-Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
-`occurred_at`, and `data`. Every deposit request event carries
+Payloads use the public, versioned `2026-08-01` envelope: `id` (the `evt_`
+event id, also sent as `Payday-Event-Id`), `type`, `occurred_at`, and
+`data`. Every deposit request event carries
 `data.deposit_request`, a strict subset of the API's own deposit request
 object under the same names, units, and formats — so a handler can hand
 `id` straight to `GET /v1/deposit-requests/{id}`, compare `amount` with the
@@ -74,7 +75,7 @@ API's `amount`, and parse every timestamp the same way:
   "reference": "INV-1042",
   "metadata": {"po": "PO-77"},
   "customer_id": null,
-  "issuer_id": "0198f80c-1111-7dc1-a369-90556a64f700",
+  "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
   "payer_policy_mode": "merchant_session",
   "payer_reference": "user_123",
   "verification_completed_at": "2026-09-01T11:58:00Z",
@@ -105,7 +106,7 @@ request is indistinguishable from one for an exact deposit, and
 
 ```json
 {
-  "id": "…",
+  "id": "rec_0198f80c-2222-7dc1-a369-90556a64f700",
   "amount": "0.250000",
   "amount_base_units": "250000",
   "reason": "overpayment",

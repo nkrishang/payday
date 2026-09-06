@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
-    DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
-    DepositRequestSummaryResponse, FactoryAddress, IndexerFreshnessDto, Invoice,
+    CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
+    DepositRequestSummaryResponse, FactoryAddress, IndexerFreshnessDto, Invoice, IssuerId,
     OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
     PayerPolicyMode, TokenAddress, TransferDto, TransferListResponse, USDC_DECIMALS,
     parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
@@ -87,8 +87,8 @@ fn enrich_response(
         .as_deref()
         .and_then(|address| state.payer.address_url(address));
     response.metadata = row.metadata.0.clone();
-    response.customer_id = row.customer_id.map(|id| id.to_string());
-    response.issuer_id = row.issuer_id.map(|id| id.to_string());
+    response.customer_id = row.customer_id.map(|id| CustomerId(id).to_string());
+    response.issuer_id = row.issuer_id.map(|id| IssuerId(id).to_string());
     // The signed download link is added by the attachment route.
     response.attachment = attachment.as_ref().and_then(DbAttachment::descriptor);
     response.verification_completed_at = row.verification_completed_at.map(rfc3339);
@@ -189,7 +189,7 @@ pub async fn create_deposit_request(
         Some(customer_id) => Some(
             state
                 .customers
-                .get_for_account(account, customer_id)
+                .get_for_account(account, customer_id.0)
                 .await?
                 .ok_or_else(|| {
                     ApiError::invalid_request("customer_id does not identify one of your customers")
@@ -201,7 +201,7 @@ pub async fn create_deposit_request(
         Some(issuer_id) => Some(
             state
                 .issuers
-                .get_for_account(account, issuer_id)
+                .get_for_account(account, issuer_id.0)
                 .await?
                 .ok_or_else(|| {
                     ApiError::invalid_request(
@@ -322,7 +322,7 @@ pub async fn create_deposit_request(
         Some(attachment_id) => Some(
             state
                 .attachments
-                .get_for_account(account, attachment_id)
+                .get_for_account(account, attachment_id.0)
                 .await?
                 .ok_or_else(|| {
                     ApiError::invalid_request("attachment_id does not identify one of your uploads")
@@ -348,10 +348,10 @@ pub async fn create_deposit_request(
         heading: req.heading.as_deref(),
         reference: req.reference.as_deref(),
         metadata: &req.metadata,
-        customer_id: req.customer_id,
-        issuer_id: req.issuer_id,
+        customer_id: req.customer_id.map(Uuid::from),
+        issuer_id: req.issuer_id.map(Uuid::from),
         payer_policy: &payer_policy,
-        attachment_id: req.attachment_id,
+        attachment_id: req.attachment_id.map(Uuid::from),
         attachment: attachment_commitment.as_ref(),
     };
 
@@ -446,12 +446,16 @@ pub async fn create_deposit_request(
         expiration_timestamp - now,
         expiration.intent.clone(),
     );
-    input.customer_id = req.customer_id;
-    input.issuer_id = req.issuer_id;
+    input.customer_id = req.customer_id.map(Uuid::from);
+    input.issuer_id = req.issuer_id.map(Uuid::from);
     input.metadata = req.metadata.clone();
     input.payer_notification_email = payer_notification_email(&payer, &payer_policy);
 
-    let issued = match state.repo.insert_issued(&input, req.attachment_id).await {
+    let issued = match state
+        .repo
+        .insert_issued(&input, req.attachment_id.map(Uuid::from))
+        .await
+    {
         Ok(issued) => issued,
         Err(error) => {
             // The retag above preceded a transaction that did not commit, so
@@ -622,8 +626,8 @@ pub struct GetQuery {
 pub struct ListQuery {
     status: Option<String>,
     reference: Option<String>,
-    customer_id: Option<Uuid>,
-    issuer_id: Option<Uuid>,
+    customer_id: Option<CustomerId>,
+    issuer_id: Option<IssuerId>,
     /// Verification is a separate fact from the payment's status, so it is a
     /// separate filter: `not_required`, `pending`, `verified`, or
     /// `likely_unsolicited`.
@@ -677,8 +681,8 @@ pub async fn list_deposit_requests(
             account,
             status.map(DepositRequestStatus::as_str),
             query.reference.as_deref(),
-            query.customer_id,
-            query.issuer_id,
+            query.customer_id.map(Uuid::from),
+            query.issuer_id.map(Uuid::from),
             query.verification.as_deref(),
             starting_after,
             limit,
@@ -708,8 +712,8 @@ pub async fn list_deposit_requests(
                 amount: response.amount,
                 received: response.received,
                 payer_policy_mode: response.payer_policy.mode(),
-                customer_id: row.customer_id.map(|id| id.to_string()),
-                issuer_id: row.issuer_id.map(|id| id.to_string()),
+                customer_id: row.customer_id.map(|id| CustomerId(id).to_string()),
+                issuer_id: row.issuer_id.map(|id| IssuerId(id).to_string()),
                 has_attachment,
                 verification_completed_at: row.verification_completed_at.map(rfc3339),
                 likely_unsolicited_at: row.likely_unsolicited_at.map(rfc3339),
@@ -1180,8 +1184,8 @@ mod tests {
     fn parties_and_payout_address_may_be_left_to_saved_records() {
         let request: CreateDepositRequest = serde_json::from_value(serde_json::json!({
             "amount": "1",
-            "issuer_id": "0198f80c-1111-7dc1-a369-90556a64f700",
-            "customer_id": "0198f80c-2222-7dc1-a369-90556a64f700",
+            "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
+            "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700",
             "payer_policy": {"mode": "permissionless"}
         }))
         .unwrap();
@@ -1189,6 +1193,18 @@ mod tests {
         assert!(request.payer.is_none());
         assert!(request.payout_address.is_none());
         assert!(request.issuer_id.is_some() && request.customer_id.is_some());
+        // A bare UUID is refused with a message naming the form wanted.
+        let bare = serde_json::from_value::<CreateDepositRequest>(serde_json::json!({
+            "amount": "1",
+            "customer_id": "0198f80c-2222-7dc1-a369-90556a64f700",
+            "payer_policy": {"mode": "permissionless"}
+        }))
+        .unwrap_err();
+        assert!(
+            bare.to_string()
+                .contains("expected a customer id like cus_"),
+            "{bare}"
+        );
     }
 
     #[test]

@@ -372,7 +372,8 @@ stage_attachment() {
   id="$(jq -er .id <<<"$slot")"
   upload_attachment "$slot" "$file"
   if [[ -n "$verdict" ]]; then
-    minio_client tag set "local/${ATTACHMENT_BUCKET}/uploads/${account_id}/${id}.pdf" \
+    # Object keys carry the raw UUIDs behind the API's acct_ and att_ ids.
+    minio_client tag set "local/${ATTACHMENT_BUCKET}/uploads/${account_id#acct_}/${id#att_}.pdf" \
       "GuardDutyMalwareScanStatus=${verdict}" >/dev/null
   fi
   echo "$id"
@@ -758,7 +759,7 @@ assert_eq 409 "$(api_status POST "/v1/attachments/$attachment_id/finalize")" \
   "an unscanned upload was finalized"
 assert_eq attachment_scan_pending "$(api_error_code POST "/v1/attachments/$attachment_id/finalize")" \
   "unscanned upload reported the wrong error"
-tag_object_scanned "uploads/${account_id}/${attachment_id}.pdf"
+tag_object_scanned "uploads/${account_id#acct_}/${attachment_id#att_}.pdf"
 finalized="$(api_json POST "/v1/attachments/$attachment_id/finalize")"
 assert_eq "$pdf_sha256" "$(jq -r .sha256 <<<"$finalized")" "finalized attachment hash mismatch"
 assert_eq "$(wc -c <"$pdf_file" | tr -d ' ')" "$(jq -r .byte_length <<<"$finalized")" \

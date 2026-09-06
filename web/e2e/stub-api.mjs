@@ -17,6 +17,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
+// The API renders every timestamp as RFC 3339 to the second (`…:25Z`), so
+// the stub does too. This also keeps a withheld amount such as `25.00` from
+// matching the milliseconds of a timestamp (`…:25.000Z`) in a page-source
+// assertion.
+const toISOString = Date.prototype.toISOString;
+Date.prototype.toISOString = function toSecondISOString() {
+  return toISOString.call(this).replace(/\.\d{3}Z$/, "Z");
+};
+
 const PORT = Number(process.env.STUB_PORT ?? 4010);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
@@ -78,7 +87,7 @@ function mintClientSecret(id) {
 }
 
 const ATTACHMENT = {
-  id: "0198f80c-8d2f-7dc1-a369-90556a64f7aa",
+  id: "att_0198f80c-8d2f-7dc1-a369-90556a64f7aa",
   filename: "INV-1042.pdf",
   mime_type: "application/pdf",
   byte_length: "48211",
@@ -653,7 +662,7 @@ function typedData(attributionHash, wallet, nonce) {
 
 function seed() {
   const customer = {
-    id: "0198f80c-8d2f-7dc1-a369-90556a64f7c1",
+    id: "cus_0198f80c-8d2f-7dc1-a369-90556a64f7c1",
     name: "Globex Corporation",
     email: "ap@globex.example",
     details: "PO 7781",
@@ -739,14 +748,14 @@ function seed() {
       // The payer asked for a code twice and never entered one.
       verification_attempts: [
         {
-          id: "0198f80c-8d2f-7dc1-a369-90556a64f7e1",
+          id: "va_0198f80c-8d2f-7dc1-a369-90556a64f7e1",
           kind: "email",
           status: "abandoned",
           verified_at: null,
           created_at: "2026-08-26T10:29:00.000Z",
         },
         {
-          id: "0198f80c-8d2f-7dc1-a369-90556a64f7e2",
+          id: "va_0198f80c-8d2f-7dc1-a369-90556a64f7e2",
           kind: "email",
           status: "pending",
           verified_at: null,
@@ -875,7 +884,7 @@ function accountRecord(req) {
   let record = store.accounts.get(key);
   if (!record) {
     record = {
-      id: randomUUID(),
+      id: `acct_${randomUUID()}`,
       generation: 1,
       keyHint: null,
       createdAt: null,
@@ -993,7 +1002,7 @@ function customerFrom(body, existing) {
   const field = (key) => (key in body || !existing ? optional(body[key]) : existing[key]);
   const now = new Date().toISOString();
   return {
-    id: existing?.id ?? randomUUID(),
+    id: existing?.id ?? `cus_${randomUUID()}`,
     name,
     email: field("email"),
     details: field("details"),
@@ -1288,7 +1297,7 @@ async function issuerIdentities(req, res, url) {
         return fail(res, 400, "invalid_request", "contact_email is required");
       const now = new Date().toISOString();
       const row = {
-        id: randomUUID(),
+        id: `iss_${randomUUID()}`,
         name,
         contact_email: email,
         details: body.details ?? null,
@@ -1325,7 +1334,7 @@ async function issuerIdentities(req, res, url) {
       }
       if (existing) return send(res, 201, existing);
       const row = {
-        id: randomUUID(),
+        id: `pa_${randomUUID()}`,
         address,
         label: label || null,
         created_at: new Date().toISOString(),
@@ -1442,7 +1451,7 @@ async function attachments(req, res, url) {
     if (typeof body.filename !== "string" || !body.filename.trim()) {
       return fail(res, 400, "invalid_request", "filename is required");
     }
-    const id = randomUUID();
+    const id = `att_${randomUUID()}`;
     store.attachments.set(id, {
       id,
       filename: body.filename.trim(),

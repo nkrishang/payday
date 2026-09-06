@@ -4,9 +4,11 @@
 use alloy_primitives::utils::format_units;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::{Invoice, InvoiceStatus, Party, PayerPolicy, PayerPolicyMode, USDC_DECIMALS};
+use crate::{
+    AttachmentId, CustomerId, Invoice, InvoiceStatus, IssuerId, Party, PayerPolicy,
+    PayerPolicyMode, USDC_DECIMALS,
+};
 
 /// The only attachment type Payday accepts (product plan §4.2).
 pub const PDF_MIME_TYPE: &str = "application/pdf";
@@ -41,12 +43,12 @@ pub struct CreateDepositRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payer: Option<Party>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub customer_id: Option<Uuid>,
+    pub customer_id: Option<CustomerId>,
     /// The issuer identity this is issued under. The `issuer` party above is
     /// still the snapshot the document carries; this only records which saved
     /// identity it came from, and survives that identity being renamed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer_id: Option<Uuid>,
+    pub issuer_id: Option<IssuerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,7 +59,7 @@ pub struct CreateDepositRequest {
     pub metadata: serde_json::Value,
     pub payer_policy: PayerPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachment_id: Option<Uuid>,
+    pub attachment_id: Option<AttachmentId>,
     /// Lifetime in seconds. Idempotent retries retain the original deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
@@ -100,7 +102,9 @@ pub struct AsOfDto {
 /// serves it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachmentDescriptor {
-    pub id: Uuid,
+    /// The `att_` id. The canonical issuance snapshot's `attachment.id` is
+    /// the UUID inside it, since that document's schema is frozen.
+    pub id: AttachmentId,
     pub filename: String,
     pub mime_type: String,
     pub byte_length: String,

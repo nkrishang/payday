@@ -24,14 +24,14 @@ describe("buildCreateDepositRequest", () => {
   it("omits blank optionals, trims parties, and converts hours to seconds", () => {
     const body = buildCreateDepositRequest(
       { ...filled, heading: "  ", reference: "INV-1", expiresInHours: "48" },
-      "0198f80c-8d2f-7dc1-a369-90556a64f7aa",
+      "att_0198f80c-8d2f-7dc1-a369-90556a64f7aa",
     );
     expect(body.issuer).toEqual({ name: "Acme Corp" });
     expect(body).not.toHaveProperty("heading");
     expect(body).not.toHaveProperty("notes");
     expect(body.reference).toBe("INV-1");
     expect(body.expires_in).toBe(172_800);
-    expect(body.attachment_id).toBe("0198f80c-8d2f-7dc1-a369-90556a64f7aa");
+    expect(body.attachment_id).toBe("att_0198f80c-8d2f-7dc1-a369-90556a64f7aa");
   });
 
   it("sends a chosen moment as a moment, in place of any duration", () => {

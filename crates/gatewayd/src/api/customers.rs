@@ -1,12 +1,10 @@
 //! Customer routes (product plan §4.4): merchant-owned counterparty records
 //! that provide defaults when issuing; invoices snapshot what they used.
 
-use std::str::FromStr;
-
 use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use gateway_core::rfc3339;
+use gateway_core::{CustomerId, rfc3339};
 use gateway_db::{AccountId, CreateCustomerInput, DbCustomer};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -51,7 +49,7 @@ where
 
 #[derive(Debug, Serialize)]
 pub struct CustomerResponse {
-    id: Uuid,
+    id: CustomerId,
     name: String,
     email: Option<String>,
     details: Option<String>,
@@ -62,7 +60,7 @@ pub struct CustomerResponse {
 impl From<DbCustomer> for CustomerResponse {
     fn from(row: DbCustomer) -> Self {
         Self {
-            id: row.id,
+            id: CustomerId(row.id),
             name: row.name,
             email: row.email,
             details: row.details,
@@ -75,7 +73,7 @@ impl From<DbCustomer> for CustomerResponse {
 #[derive(Debug, Serialize)]
 pub struct CustomerPage {
     customers: Vec<CustomerResponse>,
-    next_cursor: Option<Uuid>,
+    next_cursor: Option<CustomerId>,
 }
 
 /// How many requests this customer has been billed, how much of that has
@@ -113,7 +111,7 @@ pub struct CustomerDetailResponse {
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     limit: Option<u32>,
-    starting_after: Option<Uuid>,
+    starting_after: Option<CustomerId>,
 }
 
 pub async fn create(
@@ -165,7 +163,7 @@ pub async fn list(
     if let Some(cursor) = query.starting_after
         && state
             .customers
-            .get_for_account(account, cursor)
+            .get_for_account(account, cursor.0)
             .await?
             .is_none()
     {
@@ -175,11 +173,11 @@ pub async fn list(
     }
     let mut rows = state
         .customers
-        .list_for_account(account, limit, query.starting_after)
+        .list_for_account(account, limit, query.starting_after.map(Uuid::from))
         .await?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let next_cursor = has_more.then(|| rows.last().expect("nonzero limit").id);
+    let next_cursor = has_more.then(|| CustomerId(rows.last().expect("nonzero limit").id));
     Ok(Json(CustomerPage {
         customers: rows.into_iter().map(Into::into).collect(),
         next_cursor,
@@ -214,8 +212,11 @@ pub async fn update(
         .ok_or_else(ApiError::customer_not_found)
 }
 
+/// Anything but a canonical `cus_` id is a missing customer.
 fn customer_id(value: &str) -> Result<Uuid, ApiError> {
-    Uuid::from_str(value).map_err(|_| ApiError::customer_not_found())
+    CustomerId::parse(value)
+        .map(Uuid::from)
+        .ok_or_else(ApiError::customer_not_found)
 }
 
 /// The same limits as an invoice party, since a customer is what one is

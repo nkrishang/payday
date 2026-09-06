@@ -16,6 +16,9 @@ pub use invoice::*;
 mod dto;
 pub use dto::*;
 
+mod ids;
+pub use ids::*;
+
 mod deterministic_address;
 pub use deterministic_address::*;
 

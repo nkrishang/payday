@@ -104,7 +104,7 @@ impl WebhookRepository {
         if !exists {
             return Ok(None);
         }
-        let payload = serde_json::json!({"version":"2026-08-01","id":event,"type":"webhook.test","occurred_at":gateway_core::rfc3339(Utc::now()),"data":{"test":true}});
+        let payload = serde_json::json!({"version":"2026-08-01","id":gateway_core::WebhookEventId(event).to_string(),"type":"webhook.test","occurred_at":gateway_core::rfc3339(Utc::now()),"data":{"test":true}});
         sqlx::query("INSERT INTO webhook_events(id,account_id,event_type,payload,fanout) VALUES($1,$2,'webhook.test',$3,false)").bind(event).bind(account.0).bind(payload).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO webhook_deliveries(id,event_id,endpoint_id) VALUES($1,$2,$3)")
             .bind(delivery)

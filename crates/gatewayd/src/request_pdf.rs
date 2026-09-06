@@ -456,7 +456,7 @@ mod tests {
         let mut response = DepositRequestResponse::from_invoice(invoice, None);
         response.created_at = "2026-09-01T12:00:00+00:00".into();
         response.attachment = Some(AttachmentDescriptor {
-            id: Uuid::from_u128(9),
+            id: gateway_core::AttachmentId(Uuid::from_u128(9)),
             filename: "contract.pdf".into(),
             mime_type: "application/pdf".into(),
             byte_length: "48211".into(),

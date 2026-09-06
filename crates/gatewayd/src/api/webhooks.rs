@@ -12,7 +12,6 @@
 //! are enveloped, and deliveries page with `limit` and `starting_after`.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use crate::{
     api::{
@@ -27,7 +26,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use gateway_core::rfc3339;
+use gateway_core::{WebhookDeliveryId, WebhookEventId, WebhookId, rfc3339};
 use gateway_db::{AccountId, WebhookAttempt, WebhookDelivery};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -41,7 +40,7 @@ pub struct AddRequest {
 
 #[derive(Serialize)]
 pub struct EndpointResponse {
-    id: Uuid,
+    id: WebhookId,
     url: String,
     created_at: String,
     /// Set once the endpoint was disabled; such an endpoint is no longer
@@ -59,7 +58,7 @@ pub struct EndpointList {
 
 #[derive(Serialize)]
 pub struct TestDeliveryResponse {
-    delivery_id: Uuid,
+    delivery_id: WebhookDeliveryId,
 }
 
 #[derive(Serialize)]
@@ -73,9 +72,10 @@ pub struct DeliveryAttemptResponse {
 
 #[derive(Serialize)]
 pub struct DeliveryResponse {
-    id: Uuid,
-    event_id: Uuid,
-    endpoint_id: Uuid,
+    id: WebhookDeliveryId,
+    /// The envelope `id` and `Payday-Event-Id` the delivery carried.
+    event_id: WebhookEventId,
+    endpoint_id: WebhookId,
     /// `pending`, `delivered`, or `failed`.
     state: String,
     attempt_count: i32,
@@ -88,7 +88,7 @@ pub struct DeliveryResponse {
 #[derive(Serialize)]
 pub struct DeliveryPage {
     deliveries: Vec<DeliveryResponse>,
-    next_cursor: Option<Uuid>,
+    next_cursor: Option<WebhookDeliveryId>,
 }
 
 #[derive(Deserialize)]
@@ -102,7 +102,7 @@ pub struct DeliveriesQuery {
 
 fn endpoint(row: gateway_db::WebhookEndpoint, secret: Option<String>) -> EndpointResponse {
     EndpointResponse {
-        id: row.id,
+        id: WebhookId(row.id),
         url: row.url,
         created_at: rfc3339(row.created_at),
         disabled_at: row.disabled_at.map(rfc3339),
@@ -112,9 +112,9 @@ fn endpoint(row: gateway_db::WebhookEndpoint, secret: Option<String>) -> Endpoin
 
 fn delivery(row: WebhookDelivery, attempts: Vec<WebhookAttempt>) -> DeliveryResponse {
     DeliveryResponse {
-        id: row.id,
-        event_id: row.event_id,
-        endpoint_id: row.endpoint_id,
+        id: WebhookDeliveryId(row.id),
+        event_id: WebhookEventId(row.event_id),
+        endpoint_id: WebhookId(row.endpoint_id),
         state: row.state,
         attempt_count: row.attempt_count,
         next_attempt_at: rfc3339(row.next_attempt_at),
@@ -139,9 +139,12 @@ fn key(state: &AppState) -> Result<[u8; 32], ApiError> {
         .ok_or_else(ApiError::webhooks_unavailable)
 }
 
-/// A malformed id is a missing endpoint, as for every other resource.
+/// Anything but a canonical `wh_` id is a missing endpoint, as for every
+/// other resource.
 fn webhook_id(value: &str) -> Result<Uuid, ApiError> {
-    Uuid::from_str(value).map_err(|_| ApiError::webhook_not_found())
+    WebhookId::parse(value)
+        .map(Uuid::from)
+        .ok_or_else(ApiError::webhook_not_found)
 }
 
 pub async fn add(
@@ -216,7 +219,9 @@ pub async fn test(
         .ok_or_else(ApiError::webhook_not_found)?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(TestDeliveryResponse { delivery_id }),
+        Json(TestDeliveryResponse {
+            delivery_id: WebhookDeliveryId(delivery_id),
+        }),
     ))
 }
 
@@ -255,7 +260,7 @@ pub async fn deliveries(
     };
     let starting_after = match query.starting_after.as_deref() {
         Some(value) => {
-            let id = Uuid::from_str(value).ok();
+            let id = WebhookDeliveryId::parse(value).map(Uuid::from);
             match id {
                 Some(id) if state.webhooks.delivery(account, id).await?.is_some() => Some(id),
                 _ => {
@@ -273,7 +278,7 @@ pub async fn deliveries(
         .await?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    let next_cursor = has_more.then(|| rows.last().expect("nonzero limit").id);
+    let next_cursor = has_more.then(|| WebhookDeliveryId(rows.last().expect("nonzero limit").id));
     let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
     let mut attempts: HashMap<Uuid, Vec<WebhookAttempt>> = HashMap::new();
     for attempt in state.webhooks.attempts_for(&ids).await? {

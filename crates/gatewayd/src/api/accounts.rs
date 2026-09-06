@@ -143,7 +143,7 @@ fn issue_error(error: IssueApiKeyError) -> ApiError {
 
 fn account_response(metadata: gateway_db::ApiKeyMetadata) -> AccountResponse {
     AccountResponse {
-        account_id: metadata.account_id.to_string(),
+        account_id: gateway_core::AccountId(metadata.account_id).to_string(),
         email: metadata.email,
         wallet_address: metadata.wallet_address,
         key_hint: metadata.hint,

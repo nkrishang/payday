@@ -4,7 +4,7 @@ import { payment } from "@/test/fixtures";
 import { RequestDetails } from "./request-details";
 
 const ATTACHMENT = {
-  id: "0198f80c-8d2f-7dc1-a369-90556a64f7aa",
+  id: "att_0198f80c-8d2f-7dc1-a369-90556a64f7aa",
   filename: "INV-1042.pdf",
   mime_type: "application/pdf" as const,
   byte_length: "48211",

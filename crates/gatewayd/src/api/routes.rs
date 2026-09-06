@@ -291,7 +291,10 @@ mod tests {
     use alloy_signer_local::PrivateKeySigner;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
-    use gateway_core::{ChainId, Invoice, ProofError, ProofOfPayment, verify_proof};
+    use gateway_core::{
+        AttachmentId, ChainId, CustomerId, Invoice, IssuerId, PayoutAddressId, ProofError,
+        ProofOfPayment, WebhookId, verify_proof,
+    };
     use gateway_db::{AccountId, AccountRepository, InvoiceRepository};
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
@@ -697,7 +700,7 @@ mod tests {
     }
 
     /// A finalized upload, exactly as the attachment routes leave it.
-    async fn ready_attachment(pool: &PgPool, account: AccountId, filename: &str) -> Uuid {
+    async fn ready_attachment(pool: &PgPool, account: AccountId, filename: &str) -> AttachmentId {
         let id = Uuid::now_v7();
         sqlx::query(
             r#"INSERT INTO invoice_attachments
@@ -713,11 +716,11 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        id
+        AttachmentId(id)
     }
 
     /// An upload that was staged but never finalized.
-    async fn pending_attachment(pool: &PgPool, account: AccountId) -> Uuid {
+    async fn pending_attachment(pool: &PgPool, account: AccountId) -> AttachmentId {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO invoice_attachments (id, account_id, object_key, original_filename, mime_type, status) VALUES ($1, $2, $3, 'pending.pdf', 'application/pdf', 'pending_upload')",
@@ -728,10 +731,10 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        id
+        AttachmentId(id)
     }
 
-    async fn customer(pool: &PgPool, account: AccountId, name: &str) -> Uuid {
+    async fn customer(pool: &PgPool, account: AccountId, name: &str) -> CustomerId {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO customers (id, account_id, name) VALUES ($1, $2, $3)")
             .bind(id)
@@ -740,7 +743,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        id
+        CustomerId(id)
     }
 
     fn create_request(key: &str, idempotency_key: &str, body: &Value) -> Request<Body> {
@@ -1502,6 +1505,13 @@ mod tests {
             ),
             (
                 "unknown attachment",
+                "attachment_id",
+                json!(AttachmentId::generate()),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "bare uuid where an att_ id belongs",
                 "attachment_id",
                 json!(Uuid::now_v7()),
                 StatusCode::BAD_REQUEST,
@@ -2483,7 +2493,11 @@ mod tests {
     }
 
     /// Reserve an upload slot; returns the attachment id and its object key.
-    async fn reserve_upload(app: &Router, key: &str, filename: &str) -> (Uuid, String, Value) {
+    async fn reserve_upload(
+        app: &Router,
+        key: &str,
+        filename: &str,
+    ) -> (AttachmentId, String, Value) {
         let response = app
             .clone()
             .oneshot(json_request(
@@ -2496,7 +2510,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = json_body(response).await;
-        let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+        let id = AttachmentId::parse(body["id"].as_str().unwrap()).expect("an att_ id");
         let url = body["upload_url"].as_str().unwrap();
         let object_key = url
             .strip_prefix("memory://")
@@ -2506,7 +2520,7 @@ mod tests {
         (id, object_key, body)
     }
 
-    async fn finalize(app: &Router, key: &str, id: Uuid) -> (StatusCode, Value) {
+    async fn finalize(app: &Router, key: &str, id: AttachmentId) -> (StatusCode, Value) {
         let response = app
             .clone()
             .oneshot(
@@ -2532,9 +2546,10 @@ mod tests {
         let account = test_account(&pool).await;
 
         let (id, object_key, reserved) = reserve_upload(&app, KEY, "contract.pdf").await;
+        // Object keys carry the raw UUIDs behind the acct_ and att_ ids.
         assert_eq!(
             object_key,
-            format!("uploads/{}/{id}.pdf", account.0),
+            format!("uploads/{}/{}.pdf", account.0, id.0),
             "the key is reserved under the account"
         );
         assert_eq!(reserved["headers"]["content-type"], "application/pdf");
@@ -2573,7 +2588,7 @@ mod tests {
         assert_eq!(again, ready);
         let pinned: Option<String> =
             sqlx::query_scalar("SELECT version_id FROM invoice_attachments WHERE id = $1")
-                .bind(id)
+                .bind(id.0)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -2751,7 +2766,12 @@ mod tests {
         let (status, body) = finalize(&app, OTHER, id).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "attachment_not_found");
-        for missing in [Uuid::now_v7().to_string(), "not-a-uuid".into()] {
+        // Unknown, bare (unprefixed), and malformed ids all read as missing.
+        for missing in [
+            AttachmentId::generate().to_string(),
+            Uuid::now_v7().to_string(),
+            "not-a-uuid".into(),
+        ] {
             let response = app
                 .clone()
                 .oneshot(
@@ -2809,7 +2829,10 @@ mod tests {
 
     /// A finalized upload, exactly as a client and the scanner leave it in
     /// the bucket, then admitted by the finalize route.
-    async fn finalized_upload(app: &Router, storage: &MemoryObjectStorage) -> (Uuid, String) {
+    async fn finalized_upload(
+        app: &Router,
+        storage: &MemoryObjectStorage,
+    ) -> (AttachmentId, String) {
         let (id, object_key, _) = reserve_upload(app, KEY, "contract.pdf").await;
         storage.put(&object_key, "application/pdf", PDF);
         storage.tag(&object_key, SCAN_STATUS_TAG, CLEAN_SCAN);
@@ -2818,9 +2841,9 @@ mod tests {
         (id, object_key)
     }
 
-    async fn attachment_row(pool: &PgPool, id: Uuid) -> (String, Option<String>) {
+    async fn attachment_row(pool: &PgPool, id: AttachmentId) -> (String, Option<String>) {
         sqlx::query_as("SELECT status, scan_result FROM invoice_attachments WHERE id = $1")
-            .bind(id)
+            .bind(id.0)
             .fetch_one(pool)
             .await
             .unwrap()
@@ -2965,7 +2988,7 @@ mod tests {
         assert_eq!(attachment_row(&pool, id).await.0, "ready");
         let bound: Option<Uuid> =
             sqlx::query_scalar("SELECT invoice_id FROM invoice_attachments WHERE id = $1")
-                .bind(id)
+                .bind(id.0)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -3394,7 +3417,7 @@ mod tests {
                 "PUT",
                 KEY,
                 &format!("/v1/issuers/{issuer_id}/payout-addresses"),
-                &json!({"payout_address_ids": [Uuid::now_v7().to_string()]}),
+                &json!({"payout_address_ids": [PayoutAddressId::generate()]}),
             ))
             .await
             .unwrap();
@@ -3468,7 +3491,7 @@ mod tests {
         let listed = |query: &str| get_request(KEY, &format!("/v1/deposit-requests?{query}"));
         for (query, expected) in [
             (format!("issuer_id={issuer_id}"), 1),
-            (format!("issuer_id={}", Uuid::now_v7()), 0),
+            (format!("issuer_id={}", IssuerId::generate()), 0),
             ("verification=not_required".to_string(), 1),
             ("verification=verified".to_string(), 0),
         ] {
@@ -3535,7 +3558,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
-        assert!(Uuid::parse_str(&id).is_ok());
+        assert!(CustomerId::parse(&id).is_some(), "{id}");
         assert_eq!(created["name"], "Globex");
         assert_eq!(created["email"], "ap@globex.example");
         assert_eq!(created["details"], "Net 30");
@@ -5540,7 +5563,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let id = endpoint.id.to_string();
+        let id = WebhookId(endpoint.id).to_string();
+        // A bare UUID is not an id the API knows.
+        let bare = app
+            .clone()
+            .oneshot(get_request(KEY, &format!("/v1/webhooks/{}", endpoint.id)))
+            .await
+            .unwrap();
+        assert_eq!(bare.status(), StatusCode::NOT_FOUND);
 
         let listed = json_body(
             app.clone()
@@ -5616,6 +5646,7 @@ mod tests {
         const OTHER: &str = "payday_live_webhookother0123456789abcdef012345";
         other_account(&pool, OTHER).await;
         for (key, path) in [
+            (KEY, format!("/v1/webhooks/{}", WebhookId::generate())),
             (KEY, format!("/v1/webhooks/{}", Uuid::now_v7())),
             (KEY, "/v1/webhooks/not-a-uuid".to_owned()),
             (OTHER, format!("/v1/webhooks/{id}")),

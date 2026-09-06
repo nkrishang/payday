@@ -114,7 +114,7 @@ impl DbAttachment {
     pub fn descriptor(&self) -> Option<AttachmentDescriptor> {
         let commitment = self.commitment()?;
         Some(AttachmentDescriptor {
-            id: self.id,
+            id: gateway_core::AttachmentId(self.id),
             filename: self.original_filename.clone(),
             mime_type: self.mime_type.clone(),
             byte_length: commitment.byte_length,
