@@ -67,12 +67,9 @@ function Header() {
           {/* The landing page's two nav items keep its spacing; signing out is
               not one of them, so a rule and a wider gap set it apart. */}
           <div className="flex items-center gap-5 sm:gap-9">
-            <a
-              href="https://github.com/nkrishang/payday/tree/main/docs"
-              className="transition-colors hover:text-brand-white"
-            >
+            <Link href="/docs" className="transition-colors hover:text-brand-white">
               Docs
-            </a>
+            </Link>
             <PricingDialog />
           </div>
 

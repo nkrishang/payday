@@ -26,6 +26,21 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Added
+
+- Customer documentation at `payday.sh/docs` (`web/app/docs`), in the web
+  app's own design: an introduction, quickstart, concepts, payer
+  verification, the dashboard, the hosted checkout, webhooks, Proof of
+  Payment, recipes, the TypeScript SDK, environments, a nine-page API
+  reference with every route, field, answer, and error code, an
+  architecture and security page written for due diligence, and a FAQ.
+  Pages are static and carry inline diagrams (the deposit flow, the
+  lifecycle, address derivation, the verification sequences, the indexer),
+  a locked-and-unlocked checkout mock, code samples with server-side
+  highlighting and copy, and curl/TypeScript tabs whose choice is
+  remembered. The landing page's and dashboard's Docs links now point here
+  instead of the repository.
+
 ### Changed
 
 - Every id the API emits is now a UUID behind a prefix naming the resource,

@@ -36,6 +36,11 @@ See [web/README.md](web/README.md).
 
 ## Documentation
 
+Customer documentation is published at [payday.sh/docs](https://payday.sh/docs)
+(`web/app/docs`): concepts, the dashboard, the hosted checkout, webhooks, the
+SDK, the full API reference, and an architecture page for due diligence. The
+Markdown below is the engineering record it draws on.
+
 - [Customer quickstart](docs/quickstart.md)
 - [Deposit concepts and lifecycle](docs/concepts.md)
 - [HTTP API reference](docs/api-reference.md)
