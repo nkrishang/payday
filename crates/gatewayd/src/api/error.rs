@@ -445,6 +445,16 @@ impl ApiError {
         }
     }
 
+    /// The deployment has no Privy app secret configured for wallet
+    /// pregeneration; sign-in still creates a merchant's wallet itself.
+    pub fn wallet_pregeneration_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "wallet_pregeneration_unavailable",
+            message: "Wallet pregeneration is not available on this deployment".into(),
+        }
+    }
+
     /// The deployment has no onboarding payer wallet configured.
     pub fn onboarding_deposit_unavailable() -> Self {
         Self {

@@ -7,9 +7,17 @@ use gateway_db::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// A merchant resending their code, or two tabs open on the same sign-up,
+/// should not re-trigger a Privy user-creation call; a legitimate sign-up
+/// only ever needs one.
+const PREGENERATE_WALLET_COOLDOWN: Duration = Duration::from_secs(30);
+/// Bounds `pregenerate_wallet_asked` against an arbitrary stream of emails;
+/// the same trade-off `AppState::cache_proof` makes.
+const PREGENERATE_WALLET_ASKED_CAP: usize = 4_096;
 
 use crate::api::error::ApiError;
 use crate::api::{PrivyVerifier, payer::PayerAccess};
@@ -17,6 +25,7 @@ use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
 use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
+use crate::pregenerated_wallet::WalletPregenerator;
 
 /// Shared application state passed to all Axum handlers via `.with_state()`.
 #[derive(Clone)]
@@ -51,6 +60,16 @@ pub struct AppState {
     /// `None` unless a deployment has deliberately funded and configured a
     /// wallet for the onboarding walkthrough's one demo transfer.
     onboarding_payer: Option<OnboardingPayerSigner>,
+    /// `None` unless `PAYDAY_PRIVY_APP_SECRET` is configured; wallet
+    /// pregeneration (pregenerated_wallet.rs) is a latency optimization, not
+    /// a dependency, so its absence never blocks sign-in.
+    pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
+    /// One entry per email that has asked for pregeneration recently, so a
+    /// merchant resending their code cannot re-trigger it needlessly and an
+    /// arbitrary stream of emails cannot grow this without bound. Bounded and
+    /// cleared the same way `proof_cache` is, not decayed per-entry: a
+    /// legitimate sign-up only ever needs this once.
+    pregenerate_wallet_asked: Arc<StdMutex<HashMap<String, Instant>>>,
 }
 
 impl AppState {
@@ -69,6 +88,7 @@ impl AppState {
         attestor: Option<VerificationAttestor>,
         payer_verification: Option<PayerVerification>,
         onboarding_payer: Option<OnboardingPayerSigner>,
+        pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
     ) -> Self {
         let pool = repo.pool().clone();
         Self {
@@ -94,6 +114,8 @@ impl AppState {
             proof_cache: Arc::new(StdMutex::new(HashMap::new())),
             attachment_store,
             attestor,
+            pregenerated_wallets,
+            pregenerate_wallet_asked: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -113,6 +135,36 @@ impl AppState {
         self.onboarding_payer
             .as_ref()
             .ok_or_else(ApiError::onboarding_deposit_unavailable)
+    }
+
+    /// The pregenerator to call for `email`, if the deployment has one
+    /// configured and this email has not already asked recently. Checking
+    /// and marking are one step so two concurrent requests for the same
+    /// email cannot both slip through the cooldown.
+    pub fn pregenerate_wallet_for(
+        &self,
+        email: &str,
+    ) -> Result<Arc<dyn WalletPregenerator>, ApiError> {
+        let pregenerator = self
+            .pregenerated_wallets
+            .clone()
+            .ok_or_else(ApiError::wallet_pregeneration_unavailable)?;
+        let now = Instant::now();
+        let mut asked = self
+            .pregenerate_wallet_asked
+            .lock()
+            .expect("pregenerate wallet lock poisoned");
+        if asked
+            .get(email)
+            .is_some_and(|last| now.duration_since(*last) < PREGENERATE_WALLET_COOLDOWN)
+        {
+            return Err(ApiError::rate_limited());
+        }
+        if asked.len() >= PREGENERATE_WALLET_ASKED_CAP {
+            asked.clear();
+        }
+        asked.insert(email.to_owned(), now);
+        Ok(pregenerator)
     }
 
     pub fn cached_proof(

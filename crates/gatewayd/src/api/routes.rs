@@ -23,6 +23,7 @@ use crate::api::payer_wallet;
 use crate::api::proof;
 use crate::api::status;
 use crate::api::verification;
+use crate::api::wallet_pregeneration;
 use crate::api::webhooks;
 use crate::api::{middleware as api_middleware, openapi};
 use crate::state::AppState;
@@ -155,6 +156,19 @@ pub fn router(state: AppState) -> Router {
             auth::require_account,
         ))
         .layer(RequestBodyLimitLayer::new(64 * 1024))
+        .layer(merchant_cors.clone());
+
+    // Pregenerating a wallet happens before the merchant has a session — the
+    // sign-up dialog calls this the moment they submit their email, in
+    // parallel with Privy sending the code — so it cannot sit behind
+    // `require_account` like the routes above. Still only the dashboard
+    // origin, and its own tiny body limit: one email, nothing else.
+    let merchant_onboarding = Router::new()
+        .route(
+            "/v1/wallets/pregenerate",
+            post(wallet_pregeneration::pregenerate),
+        )
+        .layer(RequestBodyLimitLayer::new(1024))
         .layer(merchant_cors);
 
     let administration = Router::new()
@@ -228,6 +242,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .merge(payer)
         .merge(payer_verification)
+        .merge(merchant_onboarding)
         .route("/openapi.json", get(openapi::spec))
         .route("/docs", get(openapi::reference))
         .route("/api", get(openapi::reference))
@@ -288,6 +303,8 @@ mod tests {
     use crate::attestation::VerificationAttestor;
     use crate::payer_identity::PayerVerification;
     use crate::payer_identity::testing::{FakeTenant, OTP};
+    use crate::pregenerated_wallet::WalletPregenerator;
+    use crate::pregenerated_wallet::testing::FakePregenerator;
 
     const KEY: &str = "payday_live_0123456789abcdef0123456789abcdef";
     /// The wallet the test payer signs attestations with.
@@ -312,6 +329,7 @@ mod tests {
         merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
         payer_verification: Option<PayerVerification>,
+        pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
     ) -> (AppState, Arc<MemoryObjectStorage>) {
         let storage = Arc::new(MemoryObjectStorage::default());
         let store = AttachmentStore::new(storage.clone(), Duration::from_secs(300));
@@ -329,6 +347,7 @@ mod tests {
             Some(attestor()),
             payer_verification,
             None,
+            pregenerated_wallets,
         );
         (state, storage)
     }
@@ -366,10 +385,24 @@ mod tests {
 
     async fn app_with_payer_verification(pool: PgPool) -> (Router, Arc<FakeTenant>) {
         let (verification, tenant) = payer_verification();
-        let app = build_with(pool, None, Address::ZERO, Some(verification))
+        let app = build_with(pool, None, Address::ZERO, Some(verification), None)
             .await
             .router;
         (app, tenant)
+    }
+
+    async fn app_with_pregeneration(pool: PgPool) -> (Router, Arc<FakePregenerator>) {
+        let pregenerator = Arc::new(FakePregenerator::default());
+        let app = build_with(
+            pool,
+            None,
+            Address::ZERO,
+            None,
+            Some(pregenerator.clone() as Arc<dyn WalletPregenerator>),
+        )
+        .await
+        .router;
+        (app, pregenerator)
     }
 
     /// The Privy DID and the embedded wallet of the merchant the session
@@ -395,7 +428,7 @@ mod tests {
         merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
     ) -> TestApp {
-        build_with(pool, merchant_verifier, factory, None).await
+        build_with(pool, merchant_verifier, factory, None, None).await
     }
 
     async fn build_with(
@@ -403,6 +436,7 @@ mod tests {
         merchant_verifier: Option<auth::PrivyVerifier>,
         factory: Address,
         payer_verification: Option<PayerVerification>,
+        pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
     ) -> TestApp {
         let accounts = AccountRepository::new(pool.clone());
         if accounts
@@ -429,6 +463,7 @@ mod tests {
             merchant_verifier,
             factory,
             payer_verification,
+            pregenerated_wallets,
         );
         TestApp {
             router: router(state),
@@ -5176,5 +5211,83 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("payday-payer-session")
         );
+    }
+
+    fn pregenerate_request(email: &str) -> Request<Body> {
+        Request::post("/v1/wallets/pregenerate")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "email": email }).to_string()))
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn pregenerating_a_wallet_asks_the_configured_provider_a_normalized_email(
+        pool: PgPool,
+    ) {
+        let (app, pregenerator) = app_with_pregeneration(pool).await;
+        let response = app
+            .oneshot(pregenerate_request("  Founder@Example.com  "))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            *pregenerator.asked.lock().unwrap(),
+            vec!["founder@example.com".to_string()]
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn pregenerating_a_wallet_rejects_an_invalid_email(pool: PgPool) {
+        let (app, pregenerator) = app_with_pregeneration(pool).await;
+        let response = app
+            .oneshot(pregenerate_request("not-an-email"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(pregenerator.asked.lock().unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn pregenerating_a_wallet_is_unavailable_without_a_configured_provider(pool: PgPool) {
+        let app = app(pool).await;
+        let response = app
+            .oneshot(pregenerate_request("founder@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "wallet_pregeneration_unavailable"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn pregenerating_a_wallet_reports_an_upstream_outage(pool: PgPool) {
+        let (app, pregenerator) = app_with_pregeneration(pool).await;
+        *pregenerator.outage.lock().unwrap() = true;
+        let response = app
+            .oneshot(pregenerate_request("founder@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn pregenerating_a_wallet_is_cooled_down_per_email(pool: PgPool) {
+        let (app, pregenerator) = app_with_pregeneration(pool).await;
+        let first = app
+            .clone()
+            .oneshot(pregenerate_request("founder@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::NO_CONTENT);
+        // A resend, or a second tab, asking again right away must not spend
+        // a second call against Privy for the same mailbox.
+        let second = app
+            .oneshot(pregenerate_request("founder@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(pregenerator.asked.lock().unwrap().len(), 1);
     }
 }

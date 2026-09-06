@@ -10,9 +10,10 @@ import { useCallback, useSyncExternalStore, type ReactNode } from "react";
  * code. So when the suite asks (`PAYDAY_PRIVY_STUB=1`, see next.config.ts)
  * this module takes the SDK's place at bundle time, with the same hooks and
  * the same shapes the app reads — `usePrivy`, `useLoginWithEmail`,
- * `useIdentityToken`, `useCreateWallet` — backed by a session kept in the
- * tab's `sessionStorage`. The one code it accepts is `123456`, the same one
- * `e2e/stub-api.mjs` accepts everywhere else.
+ * `useIdentityToken`, `getIdentityToken`, `useCreateWallet`, `useUser` —
+ * backed by a session kept in the tab's `sessionStorage`. The one code it
+ * accepts is `123456`, the same one `e2e/stub-api.mjs` accepts everywhere
+ * else.
  *
  * The identity token it mints is what the stub API recognizes as a dashboard
  * session: the fixed bearer prefix, then the claims (mailbox, DID, wallet) as
@@ -142,16 +143,20 @@ export function usePrivy() {
 
 export function useIdentityToken() {
   const session = useSession();
-  return {
-    identityToken: session?.identityToken ?? null,
-    getIdentityToken: async () => session?.identityToken ?? null,
-  };
+  return { identityToken: session?.identityToken ?? null };
 }
 
-export function useLoginWithEmail(_options?: {
-  onComplete?: (params: unknown) => void;
-  onError?: (error: Error) => void;
-}) {
+/**
+ * The imperative counterpart to useIdentityToken, exported at module scope
+ * exactly like the real SDK's — signup-dialog.tsx's waitForWallet reads the
+ * account straight after login, before any hook reflecting the new session
+ * has necessarily re-rendered.
+ */
+export async function getIdentityToken(): Promise<string | null> {
+  return read()?.identityToken ?? null;
+}
+
+export function useLoginWithEmail() {
   const sendCode = useCallback(async ({ email }: { email: string }) => {
     if (!email.includes("@")) throw new Error("Invalid email address");
     pending = email.trim().toLowerCase();
@@ -177,4 +182,12 @@ export function useCreateWallet() {
     return { address: session.wallet };
   }, []);
   return { createWallet };
+}
+
+export function useUser() {
+  // signup-dialog.tsx only reads refreshUser: the stub's identity token
+  // already carries the wallet the instant loginWithCode writes it, so
+  // there is nothing a refresh would ever change.
+  const refreshUser = useCallback(async () => undefined, []);
+  return { refreshUser };
 }

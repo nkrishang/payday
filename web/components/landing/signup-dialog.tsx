@@ -1,6 +1,12 @@
 "use client";
 
-import { useLoginWithEmail, usePrivy } from "@privy-io/react-auth";
+import {
+  getIdentityToken,
+  useCreateWallet,
+  useLoginWithEmail,
+  usePrivy,
+  useUser,
+} from "@privy-io/react-auth";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Loader2, X } from "lucide-react";
 import Image from "next/image";
@@ -8,7 +14,48 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { HOME_PATH } from "@/components/dashboard/session";
 import { cn } from "@/lib/cn";
-import { describeLoginError, RESEND_COOLDOWN_MS } from "@/lib/merchant-payday";
+import {
+  createMerchantClient,
+  describeLoginError,
+  pregenerateWallet,
+  RESEND_COOLDOWN_MS,
+} from "@/lib/merchant-payday";
+
+const WALLET_POLL_INTERVAL_MS = 900;
+const WALLET_POLL_TIMEOUT_MS = 30_000;
+
+/**
+ * Confirms gatewayd reports a `wallet_address` for this account.
+ *
+ * By the time this runs, `signIn` has already explicitly created the wallet
+ * and asked Privy to refresh the identity token, so this is normally a single
+ * check, not a real wait — it stayed a short poll rather than one bare call
+ * because wallet creation is not documented as a guaranteed identity-token
+ * refresh trigger (docs/user-management/users/identity-tokens), so a fresh
+ * token here can still lag by a beat. gatewayd reads the wallet straight out
+ * of whatever identity token is presented (crates/gatewayd/src/api/auth.rs),
+ * so once account.get() reports one, Privy's side is genuinely done.
+ *
+ * Gives up after WALLET_POLL_TIMEOUT_MS rather than hang forever; from there
+ * the dashboard's own "Check again" affordance (account-section.tsx,
+ * onboarding-walkthrough.tsx) covers whatever is left.
+ */
+async function waitForWallet(): Promise<void> {
+  const deadline = Date.now() + WALLET_POLL_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const token = await getIdentityToken();
+      if (token) {
+        const account = await createMerchantClient(token).account.get();
+        if (account.wallet_address) return;
+      }
+    } catch {
+      // A fresh token or a slow first request — keep polling.
+    }
+    if (Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, WALLET_POLL_INTERVAL_MS));
+  }
+}
 
 /**
  * Signing up from the landing page.
@@ -48,13 +95,15 @@ function countdown(ms: number): string {
 export function StartBuilding() {
   const router = useRouter();
   const { authenticated } = usePrivy();
-  const { sendCode, loginWithCode } = useLoginWithEmail();
   const [open, setOpen] = useState(false);
   const [wasOpen, setWasOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
-  const [step, setStep] = useState<"email" | "code">("email");
+  const [step, setStep] = useState<"email" | "code" | "wallet">("email");
   const [busy, setBusy] = useState(false);
+  const { sendCode, loginWithCode } = useLoginWithEmail();
+  const { createWallet } = useCreateWallet();
+  const { refreshUser } = useUser();
   const [error, setError] = useState<string | null>(null);
   const [sentAt, setSentAt] = useState(0);
   const [now, setNow] = useState(0);
@@ -97,6 +146,9 @@ export function StartBuilding() {
       router.push(HOME_PATH);
       return;
     }
+    // Closing here would strand the account mid-setup with no way back in
+    // short of signing in again; wait it out instead.
+    if (!next && step === "wallet") return;
     setOpen(next);
   };
 
@@ -105,6 +157,10 @@ export function StartBuilding() {
     setBusy(true);
     setError(null);
     try {
+      // Not awaited: gives Privy the time between now and the merchant
+      // typing their code back to finish creating the wallet on its own, so
+      // signIn's own createWallet call below usually finds it already there.
+      pregenerateWallet(email.trim());
       await sendCode({ email: email.trim() });
       markSent(Date.now());
       setStep("code");
@@ -120,6 +176,7 @@ export function StartBuilding() {
     setError(null);
     setOtp("");
     try {
+      pregenerateWallet(email.trim());
       await sendCode({ email: email.trim() });
       markSent(Date.now());
       otpField.current?.focus();
@@ -136,8 +193,26 @@ export function StartBuilding() {
     setError(null);
     try {
       await loginWithCode({ code: otp.trim() });
-      // Stays busy through the navigation: the dialog is done, and a second
-      // submit would spend a code that no longer exists.
+      // The code is spent and won't come back, so there is nothing left for
+      // this form to do; stay busy and hold here until there's a wallet to
+      // settle to. Privy's `createOnLogin` never applies to loginWithCode
+      // (see merchant-auth.tsx), so this explicit call is the only thing
+      // that ever asks it to create one — and calling it here, immediately
+      // after the code is verified, starts that clock as early as possible
+      // instead of leaving it to fire later from the dashboard.
+      setStep("wallet");
+      try {
+        await createWallet();
+      } catch {
+        // A returning merchant already has one — createWallet rejects for
+        // an account that's already got an embedded wallet — so there is
+        // nothing left to create either way.
+      }
+      // Wallet creation isn't documented as a guaranteed identity-token
+      // refresh trigger, so ask directly rather than hope the reactive
+      // token catches up before waitForWallet reads it.
+      await refreshUser().catch(() => {});
+      await waitForWallet();
       router.push(HOME_PATH);
     } catch (cause) {
       setError(describeLoginError(cause));
@@ -174,23 +249,33 @@ export function StartBuilding() {
             />
             <Dialog.Close
               aria-label="Close"
-              className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-brand-grey transition-colors hover:bg-white/[0.06] hover:text-brand-white"
+              disabled={step === "wallet"}
+              className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-brand-grey transition-colors hover:bg-white/[0.06] hover:text-brand-white disabled:pointer-events-none disabled:opacity-30"
             >
               <X className="size-4" />
             </Dialog.Close>
           </div>
 
           <Dialog.Title className="font-heading mt-5 text-[27px] leading-[1.12] font-medium tracking-[-0.045em]">
-            {step === "email" ? "Start building" : "Check your email"}
+            {step === "email" ? "Start building" : step === "code" ? "Check your email" : "Almost there"}
             <span className="text-brand-yellow">.</span>
           </Dialog.Title>
           <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-[#b0afa9]">
             {step === "email"
               ? "Enter your email and we'll send a one-time code. No passwords or cards."
-              : `We sent a six-digit code to ${email.trim()}.`}
+              : step === "code"
+                ? `We sent a six-digit code to ${email.trim()}.`
+                : "Setting up your Payday wallet. This only takes a moment."}
           </Dialog.Description>
 
-          {step === "email" ? (
+          {step === "wallet" ? (
+            <div className="mt-8 flex flex-col items-center gap-4 py-4">
+              <Loader2 className="size-6 animate-spin text-brand-green" aria-hidden="true" />
+              <p role="status" className="text-[13px] text-brand-grey">
+                Creating your wallet…
+              </p>
+            </div>
+          ) : step === "email" ? (
             <form onSubmit={send} className="mt-6">
               <label className="block">
                 <span className={labelStyles}>Email</span>
@@ -266,10 +351,11 @@ export function StartBuilding() {
             </form>
           )}
 
-          <p className="mt-6 border-t border-brand-grey/20 pt-4 text-[12px] leading-relaxed text-brand-grey">
-            Already have an account? The same code signs you in. Payday stores no password; your
-            session is kept by Privy in this browser until you sign out.
-          </p>
+          {step === "wallet" ? null : (
+            <p className="mt-6 border-t border-brand-grey/20 pt-4 text-[12px] leading-relaxed text-brand-grey">
+              Already have an account? The same code signs you in. Payday stores no password.
+            </p>
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

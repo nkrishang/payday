@@ -59,6 +59,23 @@ export function createMerchantClient(
 }
 
 /**
+ * Asks gatewayd to pregenerate this email's embedded wallet with Privy right
+ * away, in parallel with Privy sending the sign-in code
+ * (crates/gatewayd/src/pregenerated_wallet.rs), so it is often already there
+ * by the time the code comes back. Fire-and-forget: sign-in's own explicit
+ * wallet creation is the correctness guarantee regardless, so a failure here
+ * — including a deployment with no `PAYDAY_PRIVY_APP_SECRET` configured — is
+ * never worth surfacing.
+ */
+export function pregenerateWallet(email: string): void {
+  fetch(`${config.apiUrl}/v1/wallets/pregenerate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  }).catch(() => {});
+}
+
+/**
  * What to tell a merchant when Privy refuses a step of the sign-in. Privy's
  * errors are not typed for this, so the message is read for the one case
  * worth naming — a code that was wrong, expired, or already used — and

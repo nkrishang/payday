@@ -17,6 +17,7 @@ mod proof;
 mod routes;
 mod status;
 mod verification;
+mod wallet_pregeneration;
 mod webhooks;
 
 pub(crate) use auth::{Auth0Verifier, Identity, PrivyVerifier};

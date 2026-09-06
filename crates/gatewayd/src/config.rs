@@ -44,11 +44,23 @@ impl Config {
         let dev_identity = std::env::var("PAYDAY_DEV_IDENTITY").as_deref() == Ok("1");
         // Absent (or empty, as an unconfigured task might set it) means
         // dashboard sessions are not accepted at all.
+        let privy_app_secret = std::env::var("PAYDAY_PRIVY_APP_SECRET")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         let privy = std::env::var("PAYDAY_PRIVY_APP_ID")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
-            .map(|app_id| PrivyConfig { app_id });
+            .map(|app_id| PrivyConfig {
+                app_id,
+                app_secret: privy_app_secret.clone(),
+            });
+        if privy.is_none() && privy_app_secret.is_some() {
+            panic!(
+                "PAYDAY_PRIVY_APP_SECRET is set but PAYDAY_PRIVY_APP_ID is not; wallet pregeneration needs both"
+            );
+        }
 
         let payer_verification = match (
             std::env::var("PAYDAY_PAYER_AUTH0_ISSUER").ok(),
@@ -341,11 +353,15 @@ pub struct PayerVerificationConfig {
     pub payer_ref_master_key: [u8; 32],
 }
 
-/// The Privy app merchants sign in to. Its public app id is all the API
-/// needs: it names the JWKS the identity tokens are verified against and is
-/// the audience they must carry. There is no app secret anywhere in Payday.
+/// The Privy app merchants sign in to. The public app id is all that dashboard
+/// session verification needs: it names the JWKS identity tokens are checked
+/// against and is the audience they must carry. `app_secret` is unrelated to
+/// verification — it is only for wallet pregeneration
+/// (pregenerated_wallet.rs), and stays optional: sign-in creates a merchant's
+/// wallet itself regardless of whether this is set.
 pub struct PrivyConfig {
     pub app_id: String,
+    pub app_secret: Option<String>,
 }
 
 /// The S3 bucket (or MinIO, through the endpoint override) holding PDFs.

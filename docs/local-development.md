@@ -341,6 +341,14 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   verifies dashboard sessions against its published keys, fetched at startup
   (see `docs/authentication.md`). `just dev` sets the development app; unset,
   only API keys authenticate, which is how `just e2e` runs
+- `PAYDAY_PRIVY_APP_SECRET` — optional; unrelated to session verification.
+  Enables `POST /v1/wallets/pregenerate`, which the sign-up dialog calls the
+  moment a merchant submits their email so Privy can create the embedded
+  wallet in parallel with sending the code, instead of only starting once the
+  code is verified (`crates/gatewayd/src/pregenerated_wallet.rs`). Unset
+  anywhere, sign-in still creates the wallet itself; the dialog just waits
+  slightly longer for it. Rate-limited to one request per email per 30
+  seconds, in memory, bounded the same way the proof cache is
 - `PAYDAY_PAYER_AUTH0_ISSUER`, `PAYDAY_PAYER_AUTH0_AUDIENCE`,
   `PAYDAY_PAYER_AUTH0_CLIENT_ID`, `PAYDAY_PAYER_REF_MASTER_KEY` — the payer
   email-verification audience and the payer-reference key, set together or not

@@ -12,7 +12,11 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "Referrer-Policy", value: "no-referrer" },
-  { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+  // Not the stricter "same-origin": wagmi's Coinbase Wallet and Base Account
+  // connectors open a popup and rely on window.opener to complete the
+  // handshake. This value still isolates the page from unrelated
+  // cross-origin openers, just not from popups it opens itself.
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
   {
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",

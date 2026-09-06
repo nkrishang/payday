@@ -6,6 +6,7 @@ mod deployment;
 mod dispatcher;
 mod onboarding_payer;
 mod payer_identity;
+mod pregenerated_wallet;
 mod request_pdf;
 mod state;
 mod webhook_worker;
@@ -84,6 +85,27 @@ async fn main() {
     if let Some(onboarding_payer) = &onboarding_payer {
         tracing::info!(address = %onboarding_payer.address(), "configured onboarding payer signer");
     }
+    // Absent whenever PAYDAY_PRIVY_APP_SECRET isn't set — a latency
+    // optimization, not a dependency: sign-in still creates a merchant's
+    // wallet itself either way (config.rs's PrivyConfig doc comment).
+    let pregenerated_wallets: Option<Arc<dyn pregenerated_wallet::WalletPregenerator>> =
+        match config.privy().and_then(|privy| privy.app_secret.clone()) {
+            Some(app_secret) => {
+                let app_id = config
+                    .privy()
+                    .expect("app_secret is only set alongside app_id")
+                    .app_id
+                    .clone();
+                Some(Arc::new(
+                    pregenerated_wallet::PrivyPregeneration::new(app_id, app_secret)
+                        .unwrap_or_else(|error| panic!("{error}")),
+                ) as Arc<dyn pregenerated_wallet::WalletPregenerator>)
+            }
+            None => None,
+        };
+    if pregenerated_wallets.is_some() {
+        tracing::info!("configured Privy wallet pregeneration");
+    }
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
         config.explorer_base_url().map(str::to_owned),
@@ -150,6 +172,7 @@ async fn main() {
         Some(attestor),
         payer_verification,
         onboarding_payer,
+        pregenerated_wallets,
     );
     if let Some(key) = state.webhook_encryption_key {
         tokio::spawn(webhook_worker::run(state.webhooks.clone(), key));
