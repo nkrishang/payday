@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Image from "next/image";
+import Link from "next/link";
 import { DepositScene } from "@/components/landing/deposit-scene";
 import { StartBuilding } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
@@ -27,12 +28,9 @@ export default function Home() {
           />
 
           <div className="flex items-center gap-6 text-[15px] text-brand-grey sm:gap-9 sm:text-[16px]">
-            <a
-              href="https://github.com/nkrishang/payday/tree/main/docs"
-              className="transition-colors hover:text-brand-white"
-            >
+            <Link href="/docs" className="transition-colors hover:text-brand-white">
               Docs
-            </a>
+            </Link>
             <PricingDialog />
           </div>
         </nav>
