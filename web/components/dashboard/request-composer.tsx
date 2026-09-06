@@ -421,8 +421,12 @@ export function RequestComposer({
         ))}
       </ol>
 
-      <div className="mt-8 grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <form onSubmit={last ? (event) => event.preventDefault() : advance}>
+      {/* Both columns are `minmax(0, …)` and both children `min-w-0`: a grid
+          track's floor is otherwise its content's min-content width, and one
+          long attachment filename or address would widen the whole column past
+          a phone's viewport instead of truncating inside it. */}
+      <div className="mt-8 grid grid-cols-[minmax(0,1fr)] items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <form className="min-w-0" onSubmit={last ? (event) => event.preventDefault() : advance}>
           <div key={step} data-direction={direction} className="dash-step">
             {step === 0 ? (
               <div className="dash-stagger grid gap-5">
@@ -791,7 +795,7 @@ function Preview({
   const title = draft.heading.trim() || draft.reference.trim();
 
   return (
-    <aside className="rounded-[16px] border border-line bg-surface p-5 lg:sticky lg:top-6">
+    <aside className="min-w-0 rounded-[16px] border border-line bg-surface p-5 lg:sticky lg:top-6">
       <p className="text-[11px] tracking-[0.12em] text-faint uppercase">Deposit request</p>
       <p className="mt-3 flex items-center gap-1.5">
         <span
@@ -841,11 +845,17 @@ function Preview({
   );
 }
 
+/**
+ * One line of the review. Beside a 300px preview there is room to keep each
+ * value on the label's line and let a long one truncate; on a phone the
+ * value wraps under its label instead, because the review is the last look
+ * before issuing and an ellipsis would hide the very thing it should confirm.
+ */
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between gap-4">
+    <div className="grid min-w-0 gap-0.5 sm:flex sm:items-baseline sm:justify-between sm:gap-4">
       <dt className="text-faint">{label}</dt>
-      <dd className="min-w-0 truncate text-right">{children}</dd>
+      <dd className="min-w-0 break-words sm:truncate sm:text-right">{children}</dd>
     </div>
   );
 }
@@ -940,7 +950,7 @@ function Line({
   onEdit: (step: number) => void;
 }) {
   return (
-    <div className="flex items-baseline justify-between gap-3">
+    <div className="flex min-w-0 items-baseline justify-between gap-3">
       <dt className="text-faint">{label}</dt>
       <dd
         className={cn(

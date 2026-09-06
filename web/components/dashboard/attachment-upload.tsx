@@ -73,7 +73,7 @@ export function AttachmentUpload({
     return (
       <div
         role="status"
-        className="flex items-center gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-[13px]"
+        className="flex min-w-0 items-center gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-[13px]"
       >
         <Loader2 className="size-4 shrink-0 animate-spin text-muted" />
         <span className="min-w-0 flex-1 truncate">
@@ -96,7 +96,7 @@ export function AttachmentUpload({
   if (state.status === "ready") {
     const { attachment } = state;
     return (
-      <div className="flex items-center gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-[13px]">
+      <div className="flex min-w-0 items-center gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-[13px]">
         <ShieldCheck className="size-4 shrink-0 text-success" />
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium">{attachment.filename}</span>

@@ -51,7 +51,7 @@ export function CheckoutFrame({
         <Link href="/" className="rounded-md" aria-label="Payday">
           <Image
             src="/payday-logo-full.svg"
-            width={3200}
+            width={2929}
             height={1000}
             priority
             alt="Payday"

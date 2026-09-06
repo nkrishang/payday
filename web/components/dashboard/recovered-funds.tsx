@@ -33,7 +33,7 @@ export function RecoveredFunds({ payment }: { payment: DepositRequest }) {
         {payment.payer_wallet ? (
           <>
             {" "}
-            (<span className="font-mono">{payment.payer_wallet}</span>)
+            (<span className="font-mono break-all">{payment.payer_wallet}</span>)
           </>
         ) : null}
         , not to the payout address. Nothing is held by Payday.

@@ -242,7 +242,7 @@ export function StartBuilding() {
           <div className="flex items-start justify-between gap-4">
             <Image
               src="/payday-logo-full.svg"
-              width={3200}
+              width={2929}
               height={1000}
               alt="Payday"
               className="mt-0.5 h-auto w-[84px]"

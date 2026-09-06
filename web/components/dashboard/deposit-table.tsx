@@ -36,6 +36,10 @@ const PAGE_SIZE = 5;
 
 type VerificationFilter = "not_required" | "pending" | "verified" | "likely_unsolicited";
 
+/** A column shown from `md` up; see the table's own comment. */
+const WIDE_CELL = "hidden md:table-cell";
+const WIDE_COL = "hidden md:table-column";
+
 const VERIFICATIONS: ReadonlyArray<{ value: VerificationFilter; label: string }> = [
   { value: "not_required", label: "Not required" },
   { value: "pending", label: "Pending" },
@@ -112,6 +116,10 @@ export function DepositTable({
   // caller already narrowed to, so it should not read "no matches" for a
   // customer with no requests at all.
   const filtered = Boolean(status || verification || (!lockedCustomerId && customer));
+
+  // The columns a phone drops. The customer's own table is three columns and
+  // already fits, so there they stay.
+  const wide = lockedCustomerId ? "" : WIDE_CELL;
 
   return (
     <section aria-label="Deposits">
@@ -219,8 +227,17 @@ export function DepositTable({
             it was created all read faster as a picture than as more columns,
             and the open row already draws that picture — so that table stays
             to what is scanned across many requests at once: what, who, and
-            how much. */}
-        <table className={cn("w-full table-fixed text-[13px]", !lockedCustomerId && "min-w-[960px]")}>
+            how much.
+
+            Below `md` the eight columns become two — the request and its
+            amount, with the status under the amount — rather than a 960px
+            table scrolled sideways: the open row is the reason the table is
+            here, and it has to be as wide as the phone, not the table. The
+            hidden columns' `<col>`s are hidden too, or a fixed layout would
+            keep dealing them their share of the width. */}
+        <table
+          className={cn("w-full table-fixed text-[13px]", !lockedCustomerId && "md:min-w-[960px]")}
+        >
           <colgroup>
             {lockedCustomerId ? (
               <>
@@ -230,33 +247,43 @@ export function DepositTable({
               </>
             ) : (
               <>
-                <col className="w-[17%]" />
-                <col className="w-[9%]" />
-                <col className="w-[11%]" />
-                <col className="w-[10%]" />
-                <col className="w-[16%]" />
-                <col className="w-[12%]" />
-                <col className="w-[15%]" />
-                <col className="w-[10%]" />
+                <col className="w-[60%] md:w-[17%]" />
+                <col className={cn(WIDE_COL, "md:w-[9%]")} />
+                <col className={cn(WIDE_COL, "md:w-[11%]")} />
+                <col className="w-[40%] md:w-[10%]" />
+                <col className={cn(WIDE_COL, "md:w-[16%]")} />
+                <col className={cn(WIDE_COL, "md:w-[12%]")} />
+                <col className={cn(WIDE_COL, "md:w-[15%]")} />
+                <col className={cn(WIDE_COL, "md:w-[10%]")} />
               </>
             )}
           </colgroup>
           <thead className="border-b border-line text-[11px] font-medium tracking-[0.1em] text-faint uppercase">
             <tr>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Request</th>
-              <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Issued by</th>
+              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
+                Issued by
+              </th>
               {lockedCustomerId ? null : (
-                <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Payer</th>
+                <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
+                  Payer
+                </th>
               )}
               <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Amount</th>
               {lockedCustomerId ? null : (
                 <>
-                  <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Status</th>
-                  <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Policy</th>
-                  <th className="px-4 py-3 text-left font-medium whitespace-nowrap">
+                  <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
+                    Status
+                  </th>
+                  <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
+                    Policy
+                  </th>
+                  <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
                     Verification
                   </th>
-                  <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Created</th>
+                  <th className={cn("px-4 py-3 text-right font-medium whitespace-nowrap", wide)}>
+                    Created
+                  </th>
                 </>
               )}
             </tr>
@@ -309,7 +336,7 @@ export function DepositTable({
                       </span>
                     ) : null}
                   </td>
-                  <td className="px-4 py-3 text-left">
+                  <td className={cn("px-4 py-3 text-left", wide)}>
                     {issuer ? (
                       <span className="inline-flex max-w-[160px] items-center rounded-full border border-line-strong bg-raised px-2 py-0.5 text-[11.5px]">
                         <span className="truncate">{issuer}</span>
@@ -319,27 +346,34 @@ export function DepositTable({
                     )}
                   </td>
                   {lockedCustomerId ? null : (
-                    <td className="truncate px-4 py-3 text-left">{request.payer_name}</td>
+                    <td className={cn("truncate px-4 py-3 text-left", wide)}>
+                      {request.payer_name}
+                    </td>
                   )}
                   <td className="px-4 py-3 text-right">
                     <Amount value={request.amount} />
+                    {lockedCustomerId ? null : (
+                      <span className="mt-1.5 flex justify-end md:hidden">
+                        <StatusBadge status={request.status} />
+                      </span>
+                    )}
                   </td>
                   {lockedCustomerId ? null : (
                     <>
-                      <td className="px-4 py-3 text-left">
+                      <td className={cn("px-4 py-3 text-left", wide)}>
                         <StatusBadge status={request.status} />
                       </td>
-                      <td className="truncate px-4 py-3 text-left">
+                      <td className={cn("truncate px-4 py-3 text-left", wide)}>
                         {modeLabel(request.payer_policy_mode)}
                       </td>
-                      <td className="px-4 py-3 text-left">
+                      <td className={cn("px-4 py-3 text-left", wide)}>
                         <VerificationBadge
                           mode={request.payer_policy_mode}
                           completedAt={request.verification_completed_at}
                           unsolicitedAt={request.likely_unsolicited_at}
                         />
                       </td>
-                      <td className="px-4 py-3 text-right whitespace-nowrap text-muted">
+                      <td className={cn("px-4 py-3 text-right whitespace-nowrap text-muted", wide)}>
                         {formatShortDate(request.created_at)}
                       </td>
                     </>

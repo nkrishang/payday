@@ -184,7 +184,9 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
 
   // The open row carries the whole request: deposit, verification, and files.
   await expect(page.getByRole("button", { name: /Design retainer/, expanded: true })).toBeVisible();
-  await expect(page.getByText("Awaiting deposit").first()).toBeVisible();
+  // The status is in the row twice — once for phones, once for wider screens —
+  // and only one of them is shown, so the assertion is on the shown one.
+  await expect(page.getByText("Awaiting deposit").filter({ visible: true }).first()).toBeVisible();
   await expect(page.getByRole("progressbar", { name: "Received" })).toBeVisible();
   await expect(page.getByText("INV-2001").first()).toBeVisible();
   await expect(page.getByText("Net 15.")).toBeVisible();
@@ -227,7 +229,7 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   await signIn(page);
   await page.getByRole("button", { name: /Consulting — August/ }).click();
 
-  await expect(page.getByText("Settled").first()).toBeVisible();
+  await expect(page.getByText("Settled").filter({ visible: true }).first()).toBeVisible();
   await expect(page.getByText("Verified", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("alice@globex.example")).toBeVisible();
 
