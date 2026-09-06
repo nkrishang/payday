@@ -570,7 +570,11 @@ export function RequestComposer({
                       className={cn(controlStyles, "h-11")}
                     />
                   </Labeled>
-                  <Labeled label="Email" error={shown("billEmail")}>
+                  <Labeled
+                    label="Email"
+                    hint="Payday emails them a link to the request once it's issued."
+                    error={shown("billEmail")}
+                  >
                     <input
                       type="email"
                       value={draft.billEmail}
@@ -699,7 +703,10 @@ export function RequestComposer({
                   <Row label="Payer">
                     {draft.billName.trim()}
                     {draft.billEmail.trim() ? (
-                      <span className="text-muted"> · {draft.billEmail.trim()}</span>
+                      <span className="text-muted">
+                        {" "}
+                        · {draft.billEmail.trim()} · emailed a link
+                      </span>
                     ) : null}
                   </Row>
                   <Row label="Verification">

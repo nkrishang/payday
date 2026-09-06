@@ -74,7 +74,7 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 |---|---|
 | `amount` | Required positive USDC decimal; at most six fractional digits. Used directly; nothing is summed or reconciled |
 | `payout_address` | Required nonzero EVM address; receives exactly `amount` |
-| `issuer`, `payer` | Required parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim |
+| `issuer`, `payer` | Required parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. A `payer.email` is also where Payday emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
 | `payer_policy` | Required; one of the three modes below |
 | `customer_id` | Optional customer UUID owned by the account; the deposit request still stores its own `payer` snapshot |
 | `notes` | Optional, up to 4,000 bytes |

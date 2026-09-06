@@ -208,6 +208,30 @@ resource "aws_secretsmanager_secret_version" "payer_ref_master_key" {
   secret_string = random_id.payer_ref_master_key.b64_std
 }
 
+# The payer's deposit request email goes out through Resend with a key the
+# operator supplies. Empty means not configured: no secret, no setting, and
+# gatewayd leaves those emails queued.
+locals {
+  resend_enabled = nonsensitive(var.resend_api_key != "")
+}
+resource "aws_secretsmanager_secret" "resend_api_key" {
+  count = local.resend_enabled ? 1 : 0
+  name  = "${var.name}/resend-api-key"
+}
+resource "aws_secretsmanager_secret_version" "resend_api_key" {
+  count         = local.resend_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.resend_api_key[0].id
+  secret_string = var.resend_api_key
+}
+locals {
+  payer_email_environment = local.resend_enabled ? [
+    { name = "PAYDAY_PAYER_EMAIL_FROM", value = var.payer_email_from }
+  ] : []
+  payer_email_secrets = local.resend_enabled ? [
+    { name = "PAYDAY_RESEND_API_KEY", valueFrom = aws_secretsmanager_secret.resend_api_key[0].arn }
+  ] : []
+}
+
 resource "random_password" "admin_bearer" {
   length  = 48
   special = false
@@ -322,7 +346,7 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], aws_secretsmanager_secret.resend_api_key[*].arn) }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
@@ -617,7 +641,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
-    ], local.payer_environment, local.identity_environment),
+    ], local.payer_environment, local.payer_email_environment, local.identity_environment),
     # The API verifies the deployed contract generation at startup, so it reads
     # the chain through the same RPC secret as the indexer.
     secrets = concat([
@@ -625,7 +649,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
-    ], local.payer_secrets, local.identity_secrets),
+    ], local.payer_secrets, local.payer_email_secrets, local.identity_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 }

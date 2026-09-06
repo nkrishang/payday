@@ -356,6 +356,12 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `payday-payer-local` client and audience
 - `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
   verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
+- `PAYDAY_RESEND_API_KEY` — optional; the Resend key that emails a payer
+  named with an `email` on a deposit request their link to it, from
+  `PAYDAY_PAYER_EMAIL_FROM` (default `Payday <contact@payday.sh>`). Unset,
+  as `just dev` leaves it, the emails are queued in `notification_outbox`
+  and never sent; set it against a Resend domain you control to see the
+  real message
 - `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the operator on
   `POST /v1/admin/deposit-requests/{id}/release`; defaults to `operator`
 - `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP

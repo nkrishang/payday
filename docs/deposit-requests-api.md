@@ -53,6 +53,18 @@ live finalized status, and can send the transfer from a connected wallet.
 Address, settlement, and transfer explorer URLs are included when the configured
 chain has an explorer.
 
+When the `payer` party carries an `email`, Payday also emails that address as
+the request is issued: a message from `contact@payday.sh`, in Payday's design,
+that names the issuer, the amount, the heading and reference, and the expiry,
+with a button to the same `deposit_url` and `contact@payday.sh` for questions.
+The email is queued in the issuing transaction and sent by a background
+worker, so it never delays the create response and is never lost to a
+provider outage; an idempotent replay sends nothing again, and a request that
+is cancelled, funded, or expired before the worker reaches it is not sent.
+Merchant-session requests are never emailed, since their link opens only
+from your own application. The email is a courtesy, not a verification step:
+the `verified_email` policy still checks `expected_email`, which may differ.
+
 The link is unauthenticated by design — anyone holding it may read the deposit request
 and pay it. `GET /v1/payer/deposit-requests/{id}`, its `/qr`, and its `/attachment`
 accept no API key, return no merchant data, and send

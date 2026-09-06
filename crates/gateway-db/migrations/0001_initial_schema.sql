@@ -844,13 +844,19 @@ CREATE TABLE onboarding_demo_payments (
 );
 
 -- ---------------------------------------------------------------------------
--- Merchant email notifications: an outbox drained by the API, and the
--- verified contact it delivers to.
+-- Email notifications: an outbox drained by the API. A `merchant` row tells
+-- the account's verified contact about a payout that needs attention; a
+-- `payer` row sends the payer named on a deposit request, at the
+-- `payer.email` given at issuance, their link to it. The dispatcher claims
+-- only the recipients it has a sender configured for. A row the provider
+-- rejects outright, or whose request no longer stands, is abandoned rather
+-- than retried forever.
 -- ---------------------------------------------------------------------------
 CREATE TABLE notification_outbox (
     id UUID PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES accounts(id),
     invoice_id UUID NOT NULL REFERENCES invoices(id),
+    recipient TEXT NOT NULL DEFAULT 'merchant' CHECK (recipient IN ('merchant', 'payer')),
     reason TEXT NOT NULL,
     email TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -858,12 +864,14 @@ CREATE TABLE notification_outbox (
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     delivered_at TIMESTAMPTZ,
     missing_email_reported_at TIMESTAMPTZ,
+    abandoned_at TIMESTAMPTZ,
     leased_until TIMESTAMPTZ,
     last_error TEXT
 );
 CREATE INDEX notification_outbox_pending ON notification_outbox (next_attempt_at)
-    WHERE (email IS NOT NULL AND delivered_at IS NULL)
-       OR (email IS NULL AND missing_email_reported_at IS NULL);
+    WHERE abandoned_at IS NULL
+      AND ((email IS NOT NULL AND delivered_at IS NULL)
+        OR (email IS NULL AND missing_email_reported_at IS NULL));
 
 -- ---------------------------------------------------------------------------
 -- Webhooks: durable, account-scoped delivery. Events are written by the

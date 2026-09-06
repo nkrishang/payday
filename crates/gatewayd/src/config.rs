@@ -37,6 +37,18 @@ pub struct Config {
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
     notification_from_address: Option<String>,
+    /// The Resend key that sends payers their deposit request emails;
+    /// `None` leaves those queued and unsent.
+    resend: Option<ResendConfig>,
+}
+
+/// Payer email goes out through Resend, the account Auth0 already sends
+/// its codes from.
+#[derive(Clone, Debug)]
+pub struct ResendConfig {
+    pub api_key: String,
+    /// The `From` header, `Name <address>` or a bare address.
+    pub from: String,
 }
 
 impl Config {
@@ -153,6 +165,16 @@ impl Config {
                         .unwrap_or_else(|message| panic!("{message}"))
                 });
 
+        let resend = std::env::var("PAYDAY_RESEND_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(|api_key| ResendConfig {
+                api_key,
+                from: payer_email_from(std::env::var("PAYDAY_PAYER_EMAIL_FROM").ok())
+                    .unwrap_or_else(|message| panic!("{message}")),
+            });
+
         Config {
             bind_addr: std::env::var("PAYDAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
@@ -176,6 +198,7 @@ impl Config {
             api_key_prefix,
             webhook_encryption_key,
             notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
+            resend,
         }
     }
 
@@ -260,6 +283,30 @@ impl Config {
 
     pub fn notification_from_address(&self) -> Option<&str> {
         self.notification_from_address.as_deref()
+    }
+
+    pub fn resend(&self) -> Option<&ResendConfig> {
+        self.resend.as_ref()
+    }
+}
+
+/// The payer email's `From`: Payday's contact mailbox unless a deployment
+/// (the sandbox, on its own subdomain) says otherwise. Whatever it is, it
+/// must at least look like a mailbox, since the dispatcher only learns of a
+/// bad sender from the provider, one rejected email at a time.
+fn payer_email_from(value: Option<String>) -> Result<String, String> {
+    let value = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::payer_email::DEFAULT_FROM.to_owned());
+    let address = match (value.rfind('<'), value.ends_with('>')) {
+        (Some(start), true) => &value[start + 1..value.len() - 1],
+        (None, false) => value.as_str(),
+        _ => return Err(format!("invalid PAYDAY_PAYER_EMAIL_FROM '{value}'")),
+    };
+    match address.split_once('@') {
+        Some((local, domain)) if !local.is_empty() && domain.contains('.') => Ok(value),
+        _ => Err(format!("invalid PAYDAY_PAYER_EMAIL_FROM '{value}'")),
     }
 }
 
@@ -479,5 +526,33 @@ mod tests {
                 .unwrap_err()
                 .contains("PAYDAY_PAYER_REF_MASTER_KEY")
         );
+    }
+
+    #[test]
+    fn payer_email_from_defaults_to_contact_and_must_be_a_mailbox() {
+        assert_eq!(
+            payer_email_from(None).unwrap(),
+            "Payday <contact@payday.sh>"
+        );
+        assert_eq!(
+            payer_email_from(Some("  ".into())).unwrap(),
+            "Payday <contact@payday.sh>"
+        );
+        assert_eq!(
+            payer_email_from(Some(" Payday Sandbox <contact@sandbox.payday.sh> ".into())).unwrap(),
+            "Payday Sandbox <contact@sandbox.payday.sh>"
+        );
+        assert_eq!(
+            payer_email_from(Some("contact@payday.sh".into())).unwrap(),
+            "contact@payday.sh"
+        );
+        for bad in [
+            "Payday",
+            "Payday <contact>",
+            "Payday <contact@payday.sh",
+            "@payday.sh",
+        ] {
+            assert!(payer_email_from(Some(bad.into())).is_err(), "{bad}");
+        }
     }
 }

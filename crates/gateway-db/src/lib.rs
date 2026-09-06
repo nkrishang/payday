@@ -31,7 +31,9 @@ pub use issuers::{
     CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,
     ISSUER_NAME_UNIQUE, IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
 };
-pub use notifications::{NotificationEvent, NotificationRepository};
+pub use notifications::{
+    NotificationEvent, NotificationRecipient, NotificationRepository, PAYER_DEPOSIT_REQUEST_ISSUED,
+};
 pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 use sqlx::PgPool;

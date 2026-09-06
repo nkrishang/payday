@@ -313,6 +313,28 @@ variable "notification_from_address" {
   }
 }
 
+variable "resend_api_key" {
+  description = <<-EOT
+    Resend API key the API emails payers their deposit requests with, from
+    payer_email_from. Leave empty to queue those emails without sending
+    them. Supply as TF_VAR_resend_api_key. WARNING: sensitive values remain
+    in Terraform state.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "payer_email_from" {
+  description = "From header of the payer's deposit request email; Resend must have verified its domain."
+  type        = string
+  default     = "Payday <contact@payday.sh>"
+  validation {
+    condition     = can(regex("^([^<>]+<)?[^@<>[:space:]]+@[^@<>[:space:]]+\\.[^@<>[:space:]]+>?$", var.payer_email_from))
+    error_message = "payer_email_from must be an email address, optionally as Name <address>."
+  }
+}
+
 variable "notification_domain_name" {
   description = "SES Easy DKIM domain for merchant notification email."
   type        = string

@@ -394,6 +394,7 @@ pub async fn create_deposit_request(
     input.customer_id = req.customer_id;
     input.issuer_id = req.issuer_id;
     input.metadata = req.metadata.clone();
+    input.payer_notification_email = payer_notification_email(&req.payer, &payer_policy);
 
     let issued = match state.repo.insert_issued(&input, req.attachment_id).await {
         Ok(issued) => issued,
@@ -919,6 +920,21 @@ fn unix_now() -> u64 {
 /// issued under an idempotency key. What the server generated (id, salt,
 /// address, nonce, the resolved deadline of a relative expiry) is not part of
 /// the request and is not compared.
+/// Whom to email the request to, if anyone: the payer the merchant named,
+/// provided the link in that email would open for them. A merchant-session
+/// request opens only from inside the merchant's own app, and the onboarding
+/// walkthrough's payer is Payday's reserved mailbox.
+fn payer_notification_email(payer: &Party, policy: &PayerPolicy) -> Option<String> {
+    let email = payer.email.as_deref()?.trim();
+    if email.is_empty()
+        || email.eq_ignore_ascii_case(ONBOARDING_EMAIL)
+        || policy.mode() == PayerPolicyMode::MerchantSession
+    {
+        return None;
+    }
+    Some(email.to_owned())
+}
+
 fn validate_party(field: &str, party: &Party) -> Result<(), ApiError> {
     validate_party_fields(
         &format!("{field}."),
@@ -1104,6 +1120,44 @@ mod tests {
             Some("alice@example.com")
         );
         validate_document(&request).unwrap();
+    }
+
+    #[test]
+    fn payer_email_is_queued_only_where_the_link_would_open() {
+        let policy = |json: serde_json::Value| {
+            serde_json::from_value::<PayerPolicy>(json)
+                .unwrap()
+                .normalized()
+        };
+        let open = policy(serde_json::json!({"mode": "permissionless"}));
+        let gated = policy(
+            serde_json::json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+        );
+        let embedded =
+            policy(serde_json::json!({"mode": "merchant_session", "payer_reference": "user-1"}));
+        let payer = |email: Option<&str>| Party {
+            name: "Globex".into(),
+            email: email.map(str::to_owned),
+            details: None,
+        };
+        assert_eq!(
+            payer_notification_email(&payer(Some(" Bob@Example.com ")), &open).as_deref(),
+            Some("Bob@Example.com")
+        );
+        assert_eq!(
+            payer_notification_email(&payer(Some("bob@example.com")), &gated).as_deref(),
+            Some("bob@example.com")
+        );
+        assert_eq!(payer_notification_email(&payer(None), &open), None);
+        assert_eq!(payer_notification_email(&payer(Some("   ")), &open), None);
+        assert_eq!(
+            payer_notification_email(&payer(Some("bob@example.com")), &embedded),
+            None
+        );
+        assert_eq!(
+            payer_notification_email(&payer(Some("Onboarding@payday.sh")), &gated),
+            None
+        );
     }
 
     #[test]
