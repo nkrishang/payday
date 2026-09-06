@@ -20,4 +20,4 @@ mod verification;
 mod webhooks;
 
 pub(crate) use auth::{Auth0Verifier, Identity, PrivyVerifier};
-pub use routes::{router, status_router};
+pub use routes::router;

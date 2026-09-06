@@ -24,27 +24,17 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let pool = if config.status_only() {
-        gateway_db::connect_lazy(config.database_url()).expect("invalid database URL")
-    } else {
-        gateway_db::connect(config.database_url())
-            .await
-            .expect("failed to connect to database")
-    };
+    let pool = gateway_db::connect(config.database_url())
+        .await
+        .expect("failed to connect to database");
 
     let repo = gateway_db::InvoiceRepository::new(pool.clone());
     let accounts = gateway_db::AccountRepository::new(pool.clone());
-    let cursor = gateway_db::CursorRepository::new(pool.clone());
-    let health_cursor = cursor.clone();
     let notifications = gateway_db::NotificationRepository::new(pool.clone());
     // Privy key discovery and AWS provider-chain loading are independent
     // network work. Start them together, and retain one AWS configuration for
-    // S3, KMS, and SES; status-only mode uses neither AWS nor any sign-in.
-    let privy_app_id = config
-        .privy()
-        .filter(|_| !config.status_only())
-        .map(|privy| privy.app_id.clone());
-    let status_only = config.status_only();
+    // S3, KMS, and SES.
+    let privy_app_id = config.privy().map(|privy| privy.app_id.clone());
     let (merchant_verifier, aws) = tokio::join!(
         async move {
             match privy_app_id {
@@ -54,64 +44,42 @@ async fn main() {
                         .expect("failed to initialize Privy identity token verification"),
                 ),
                 None => {
-                    if !status_only {
-                        tracing::warn!(
-                            "PAYDAY_PRIVY_APP_ID is unset; dashboard sessions are refused and only API keys authenticate"
-                        );
-                    }
+                    tracing::warn!(
+                        "PAYDAY_PRIVY_APP_ID is unset; dashboard sessions are refused and only API keys authenticate"
+                    );
                     None
                 }
             }
         },
-        async move {
-            if status_only {
-                None
-            } else {
-                Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
-            }
-        }
+        aws_config::load_defaults(aws_config::BehaviorVersion::latest())
     );
-    let attachment_store = config.attachments().map(|attachments| {
-        let storage = attachments::S3ObjectStorage::new(
-            aws.as_ref()
-                .expect("AWS configuration is loaded outside status-only mode"),
-            attachments.bucket.clone(),
-            attachments.s3_endpoint.as_deref(),
-            attachments.force_path_style,
-        );
-        attachments::AttachmentStore::new(Arc::new(storage), attachments.download_ttl)
-    });
-    let attestor = match config.attestation() {
-        Some(signer) => Some(
-            attestation::VerificationAttestor::from_config(
-                signer,
-                aws.as_ref()
-                    .expect("AWS configuration is loaded outside status-only mode"),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{error}")),
-        ),
-        None => None,
-    };
-    if let Some(attestor) = &attestor {
-        tracing::info!(address = %attestor.address(), "configured attestation signer");
-    }
+    let attachments = config.attachments();
+    let storage = attachments::S3ObjectStorage::new(
+        &aws,
+        attachments.bucket.clone(),
+        attachments.s3_endpoint.as_deref(),
+        attachments.force_path_style,
+    );
+    let attachment_store =
+        attachments::AttachmentStore::new(Arc::new(storage), attachments.download_ttl);
+    let attestor = attestation::VerificationAttestor::from_config(config.attestation(), &aws)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    tracing::info!(address = %attestor.address(), "configured attestation signer");
     // Absent whenever a deployment hasn't deliberately funded and configured
-    // this — production may never set it; only settlement-capable (non
-    // status-only) deployments have the RPC endpoint this needs.
-    let onboarding_payer = match (config.onboarding_payer(), config.settlement()) {
-        (Some(signer_config), Some(settlement)) => Some(
+    // this — production may never set it.
+    let onboarding_payer = match config.onboarding_payer() {
+        Some(signer_config) => Some(
             onboarding_payer::OnboardingPayerSigner::from_config(
                 signer_config,
-                aws.as_ref()
-                    .expect("AWS configuration is loaded outside status-only mode"),
-                &settlement.rpc_url,
+                &aws,
+                &config.settlement().rpc_url,
                 config.chain_id().0,
             )
             .await
             .unwrap_or_else(|error| panic!("{error}")),
         ),
-        _ => None,
+        None => None,
     };
     if let Some(onboarding_payer) = &onboarding_payer {
         tracing::info!(address = %onboarding_payer.address(), "configured onboarding payer signer");
@@ -123,9 +91,9 @@ async fn main() {
     )
     .expect("invalid payer link configuration");
     // The payer audience is its own Auth0 API and application (product plan
-    // §6.1); status-only mode never verifies anyone.
+    // §6.1).
     let payer_verification = match config.payer_verification() {
-        Some(payer_auth) if !config.status_only() => {
+        Some(payer_auth) => {
             let verifier = api::Auth0Verifier::new(
                 payer_auth.issuer.clone(),
                 payer_auth.audience.clone(),
@@ -146,32 +114,28 @@ async fn main() {
                 payer_auth.payer_ref_master_key,
             ))
         }
-        Some(_) => None,
         None => {
-            if !config.status_only() {
-                tracing::warn!(
-                    "PAYDAY_PAYER_AUTH0_* and PAYDAY_PAYER_REF_MASTER_KEY are unset; gated invoices cannot be verified"
-                );
-            }
+            tracing::warn!(
+                "PAYDAY_PAYER_AUTH0_* and PAYDAY_PAYER_REF_MASTER_KEY are unset; gated invoices cannot be verified"
+            );
             None
         }
     };
     // Every payment address this service hands out assumes the reviewed
     // contract generation, so refuse to serve against any other deployment.
-    if let Some(settlement) = config.settlement() {
-        deployment::verify_deployment(
-            &settlement.rpc_url,
-            &deployment::ExpectedDeployment {
-                chain_id: config.chain_id().0,
-                factory: config.factory_address(),
-                factory_code_hash: settlement.factory_code_hash,
-                batch_sweeper: settlement.batch_sweeper_address,
-                batch_sweeper_code_hash: settlement.batch_sweeper_code_hash,
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
-    }
+    let settlement = config.settlement();
+    deployment::verify_deployment(
+        &settlement.rpc_url,
+        &deployment::ExpectedDeployment {
+            chain_id: config.chain_id().0,
+            factory: config.factory_address(),
+            factory_code_hash: settlement.factory_code_hash,
+            batch_sweeper: settlement.batch_sweeper_address,
+            batch_sweeper_code_hash: settlement.batch_sweeper_code_hash,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
     let state = state::AppState::new(
         repo,
         accounts,
@@ -182,63 +146,30 @@ async fn main() {
         payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),
-        config.status_stale_seconds(),
-        attachment_store,
-        attestor,
+        Some(attachment_store),
+        Some(attestor),
         payer_verification,
         onboarding_payer,
     );
-    if !config.status_only()
-        && let Some(key) = state.webhook_encryption_key
-    {
+    if let Some(key) = state.webhook_encryption_key {
         tokio::spawn(webhook_worker::run(state.webhooks.clone(), key));
-    } else if !config.status_only() {
+    } else {
         tracing::warn!(
             "PAYDAY_WEBHOOK_ENCRYPTION_KEY is unset; webhook API and delivery are disabled"
         );
     }
 
-    let app = if config.status_only() {
-        api::status_router(state)
-    } else {
-        api::router(state)
-    };
+    let app = api::router(state);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let api_health = if !config.status_only() {
-        let mut shutdown = shutdown_rx.clone();
-        let chain_id = config.chain_id().0;
-        Some(tokio::spawn(async move {
-            loop {
-                if let Err(error) = health_cursor.record_api_health(chain_id).await {
-                    tracing::error!(%error, "API health heartbeat failed");
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
-                    _ = shutdown.changed() => break,
-                }
-            }
-        }))
-    } else {
-        None
-    };
-    let dispatcher = if !config.status_only() {
-        if let Some(from) = config.notification_from_address() {
-            let aws = aws
-                .as_ref()
-                .expect("AWS configuration is loaded outside status-only mode");
-            Some(tokio::spawn(dispatcher::run(
-                notifications,
-                aws_sdk_sesv2::Client::new(aws),
-                from.to_owned(),
-                shutdown_rx,
-            )))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let dispatcher = config.notification_from_address().map(|from| {
+        tokio::spawn(dispatcher::run(
+            notifications,
+            aws_sdk_sesv2::Client::new(&aws),
+            from.to_owned(),
+            shutdown_rx,
+        ))
+    });
 
     let listener = TcpListener::bind(config.bind_addr())
         .await
@@ -257,9 +188,6 @@ async fn main() {
     }
     let _ = shutdown_tx.send(true);
     if let Some(worker) = dispatcher {
-        let _ = worker.await;
-    }
-    if let Some(worker) = api_health {
         let _ = worker.await;
     }
 }

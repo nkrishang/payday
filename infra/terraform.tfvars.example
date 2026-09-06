@@ -1,10 +1,8 @@
 aws_region       = "us-east-1"
 api_key_prefix   = "payday_live_"
 domain_name      = "api.payday.sh"
-payment_domain_name = "pay.payday.sh"
-# Origin serving /pay/{id}. Links on payment_domain_name 301 here.
-checkout_base_url   = "https://payday.sh"
-payment_route53_zone_id = "Z0987654321EXAMPLE"
+# The Vercel-hosted site serving the checkout at /pay/{id}.
+checkout_base_url = "https://payday.sh"
 # The Privy app merchants sign in to (see docs/authentication.md); the web app
 # is built with the same id as NEXT_PUBLIC_PRIVY_APP_ID.
 privy_app_id     = "your-privy-app-id"

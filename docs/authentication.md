@@ -235,12 +235,13 @@ into the local database with `scripts/local-api-key.sh` instead.
 
 ## Clean pre-launch database
 
-This release intentionally changes the initial schema rather than carrying
-forward the global test key and pre-release deposit requests. Immediately before the
-first deployment of this release, stop both services, delete the pre-release
-database contents, recreate an empty `gateway` database/schema, and then start
-the API and indexer so embedded migrations create the schema from scratch. Do
-not deploy this build over the old test schema.
+The schema ships as one baseline migration rather than carrying forward
+pre-release accounts, keys, and deposit requests. Immediately before the
+first deployment of this release, stop the services, empty the pre-release
+database, and start them again so the embedded baseline creates the schema
+from scratch; a database that ran the earlier migration chain refuses the
+new set. The procedure is in `docs/production-runbook.md` §7. Do not deploy
+this build over the old schema.
 
 ## Local and staging verification
 

@@ -371,7 +371,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   a mismatch. `just dev` and `just e2e` compute them from the running chain
 - `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
 - `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
-  deposit links point and where `GET /pay/{id}` redirects; `http://127.0.0.1:3002`
+  deposit links point; `http://127.0.0.1:3002`
   locally, `https://payday.sh` in production. Must be a bare origin, and HTTPS
   unless it is loopback
 - `PAYDAY_EXPLORER_BASE_URL` — optional HTTPS explorer origin; production
@@ -379,8 +379,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
   fresh database (the current block at first deployment)
 - `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally; read by
-  both services (`gatewayd` uses it for deployment verification and skips it,
-  along with the code hashes, when `PAYDAY_STATUS_ONLY=true`)
+  both services (`gatewayd` uses it for deployment verification)
 - `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
   or `latest`
 - `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality
@@ -413,7 +412,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   verification attestations (Anvil account #6, whose address
   `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
   mutually exclusive with `PAYDAY_ATTESTATION_KMS_KEY_ID`, the production KMS
-  secp256k1 key ARN. Exactly one is required unless `PAYDAY_STATUS_ONLY=true`
+  secp256k1 key ARN. Exactly one is required
 - `PAYDAY_ONBOARDING_PAYER_KEY` — local key that pays the dashboard onboarding
   walkthrough's one self-issued deposit request (Anvil account #1); mutually
   exclusive with `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS

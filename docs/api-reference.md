@@ -447,8 +447,7 @@ loopback, link-local, or reserved targets are rejected. See
 ## Payer links and documentation
 
 The `deposit_url` points at the hosted checkout, whose origin is
-`PAYDAY_PUBLIC_BASE_URL`. This service answers its own `GET /pay/{id}` with a
-`301` to that origin so links shared earlier keep working.
+`PAYDAY_PUBLIC_BASE_URL`.
 
 The checkout reads deposit data from `GET /v1/payer/deposit-requests/{id}`, QR SVG
 from `GET /v1/payer/deposit-requests/{id}/qr`, and the PDF descriptor from

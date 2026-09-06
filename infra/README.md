@@ -26,14 +26,9 @@ connection, and the payer application setup are documented in
 `docs/authentication.md`. `admin_reviewer_id` names who is recorded on
 operator decisions.
 
-The same ALB and certificate serve `payment_domain_name` and
-`status_domain_name`. The status hostname routes to an independent ECS service
-and target group whose `/live` check reports process health without requiring
-the database; the public status response checks database-backed state lazily.
-Gatewayd embeds the
-cacheable deposit page, signs each scoped payer URL with a generated Secrets
-Manager value, and links Monad addresses and settlement transactions through
-the configured explorer origin.
+Gatewayd links Monad addresses and settlement transactions through the
+configured explorer origin; every `deposit_url` points at the checkout on
+`checkout_base_url`.
 
 ## Remote state bootstrap
 
@@ -70,9 +65,12 @@ AWS_KMS_KEY_ID="$(terraform output -raw attestation_kms_key_arn)" cast wallet ad
 
 Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address, code hash, or USDC start block is defaulted. Retrieve generated values from Secrets Manager rather than Terraform output.
 After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do not deliver until it is confirmed.
-The stack verifies `notification_domain_name` with SES Easy DKIM. Before launch,
-also move the SES account out of the sandbox in this region and verify a test
-message from `notification_from_address` reaches an external recipient.
+The stack creates an SES identity for `notification_domain_name` with Easy
+DKIM. Its three CNAMEs are the `notification_dkim_records` output; add them in
+the DNS provider hosting that domain (Vercel for `payday.sh`), since the API's
+Route53 zone covers only `domain_name`. Before launch, also move the SES
+account out of the sandbox in this region and verify a test message from
+`notification_from_address` reaches an external recipient.
 
 ## Sandbox deployment
 
@@ -83,7 +81,7 @@ state. The examples document planning only and do not change external state.
 
 ## Deposit request attachments
 
-`<name>-deposit request-attachments` holds one PDF per deposit request (S3 bucket names are
+`<name>-invoice-attachments` holds one PDF per deposit request (S3 bucket names are
 global; change `name` if it is taken). It is private, versioned, encrypted
 with `aws_kms_key.attachments`, and answers browser preflights only from
 `checkout_base_url`, where the dashboard lives. gatewayd never proxies upload
@@ -134,8 +132,7 @@ plans, CI logs, and access accordingly; never commit `terraform.tfvars`,
 The API execution role can read only the database, RPC, webhook encryption,
 and generated operator credential secrets; its task role can send mail only
 from the verified SES identity, work the attachment bucket as described above,
-and `kms:GetPublicKey`/`kms:Sign` with the attestation key alone. The status
-execution role can read only the database secret. Indexer execution can read only database/RPC secrets. The
+and `kms:GetPublicKey`/`kms:Sign` with the attestation key alone. Indexer execution can read only database/RPC secrets. The
 indexer task role can only `kms:GetPublicKey` and `kms:Sign` on the signer
 key. No role at all can sign with the legacy recovery key. RDS
 connections use hostname and certificate verification against the

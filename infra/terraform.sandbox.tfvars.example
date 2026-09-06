@@ -4,10 +4,12 @@ name             = "payday-sandbox"
 api_key_prefix   = "payday_test_"
 aws_region       = "us-east-1"
 domain_name      = "api.sandbox.payday.sh"
-payment_domain_name = "pay.sandbox.payday.sh"
-# Origin serving /pay/{id}. Links on payment_domain_name 301 here.
-checkout_base_url   = "https://sandbox.payday.sh"
-payment_route53_zone_id = "Z0987654321EXAMPLE"
+# A separate Vercel deployment of the web app serves the sandbox checkout.
+checkout_base_url = "https://sandbox.payday.sh"
+# The sandbox sends merchant email from its own subdomain, so its SES identity
+# and DKIM records never collide with production's.
+notification_domain_name  = "sandbox.payday.sh"
+notification_from_address = "alerts@sandbox.payday.sh"
 # A separate Privy app for the sandbox, so sandbox accounts and wallets never
 # mix with production ones.
 privy_app_id     = "your-sandbox-privy-app-id"
@@ -27,12 +29,6 @@ factory_address         = "0x0000000000000000000000000000000000000001"
 batch_sweeper_address   = "0x0000000000000000000000000000000000000002"
 factory_code_hash       = "0x0000000000000000000000000000000000000000000000000000000000000000"
 batch_sweeper_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-# The sandbox has its own recovery KMS key; derive its address the same way as
-# production, after the targeted apply that creates the key. Sandbox and
-# production recovery wallets must never be shared. There is no safe
-# placeholder, so leave it unset until then; the full apply refuses until it
-# is set.
-# recovery_address = "0x<address of the sandbox recovery key>"
 # Set to the Monad testnet block immediately before deploying the services.
 usdc_start_block      = 0
 finality_confirmations = 2

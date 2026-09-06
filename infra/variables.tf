@@ -22,31 +22,15 @@ variable "domain_name" {
   }
 }
 
-variable "payment_domain_name" {
-  description = "Public hostname used for payer checkout links (pay.payday.sh in production)."
-  type        = string
-  validation {
-    condition     = length(var.payment_domain_name) <= 253 && can(regex("^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}$", var.payment_domain_name))
-    error_message = "payment_domain_name must be a valid fully qualified DNS name without a scheme or path."
-  }
-}
-
-variable "payment_route53_zone_id" {
-  description = "ID of the public Route53 hosted zone containing payment_domain_name."
-  type        = string
-}
-
 variable "checkout_base_url" {
   description = <<-EOT
     Origin serving the hosted checkout at /pay/{id}, which is where every
-    deposit_url points. In production this is the Vercel-hosted site at
-    https://payday.sh. Leave empty to keep links on payment_domain_name, which
-    this service answers with a 301 to this origin.
+    deposit_url points: the Vercel-hosted site, https://payday.sh in
+    production.
   EOT
   type        = string
-  default     = ""
   validation {
-    condition     = var.checkout_base_url == "" || can(regex("^https://[^/?#]+$", var.checkout_base_url))
+    condition     = can(regex("^https://[^/?#]+$", var.checkout_base_url))
     error_message = "checkout_base_url must be an HTTPS origin without a trailing slash, path, query, or fragment."
   }
 }
@@ -58,22 +42,6 @@ variable "explorer_base_url" {
   validation {
     condition     = can(regex("^https://[^/?#]+/?$", var.explorer_base_url))
     error_message = "explorer_base_url must be an HTTPS origin without a path, query, or fragment."
-  }
-}
-
-variable "status_domain_name" {
-  description = "Public status page DNS name."
-  type        = string
-  default     = "status.payday.sh"
-}
-
-variable "status_indexer_stale_seconds" {
-  description = "Age at which an unchanged deposit cursor makes public status degraded."
-  type        = number
-  default     = 120
-  validation {
-    condition     = var.status_indexer_stale_seconds >= 30 && floor(var.status_indexer_stale_seconds) == var.status_indexer_stale_seconds
-    error_message = "status_indexer_stale_seconds must be an integer of at least 30."
   }
 }
 

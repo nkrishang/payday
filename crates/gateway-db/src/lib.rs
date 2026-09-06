@@ -70,12 +70,3 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
 
     Ok(pool)
 }
-
-/// Build a short-timeout pool without opening a connection. The independently
-/// deployed public status process must start even while RDS is unavailable.
-pub fn connect_lazy(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(2))
-        .connect_lazy(database_url)
-}

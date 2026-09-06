@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use alloy_primitives::{B256, U256};
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use gateway_core::{
     AttachmentDescriptor, DepositRequestResponse, Invoice, InvoiceId, InvoiceStatus,
@@ -378,36 +378,6 @@ pub async fn attachment(
     ))
 }
 
-/// Permanently redirect a payer link to the hosted checkout.
-///
-/// The checkout is served from `PAYDAY_PUBLIC_BASE_URL`, which is a different
-/// origin from this service, so every link ever shared keeps working after the
-/// page moved. The id is parsed strictly before it is interpolated: without
-/// that check an arbitrary path segment would end up in a `Location` header.
-pub async fn page(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ApiError> {
-    let location = state.payer.checkout_url(&InvoiceId(parse_invoice_id(&id)?));
-    let location =
-        HeaderValue::from_str(&location).map_err(|_| ApiError::internal("invalid payer link"))?;
-    Ok((
-        StatusCode::MOVED_PERMANENTLY,
-        [
-            (header::LOCATION, location),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=3600"),
-            ),
-            (
-                header::REFERRER_POLICY,
-                HeaderValue::from_static("no-referrer"),
-            ),
-        ],
-    )
-        .into_response())
-}
-
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{B256, U256, address};
@@ -469,17 +439,17 @@ mod tests {
     #[test]
     fn payment_url_is_tokenless_and_payment_uri_is_eip_681() {
         let access = PayerAccess::new(
-            "https://pay.payday.sh/",
+            "https://payday.sh/",
             Some("https://monadvision.com/".into()),
             None,
         )
         .unwrap();
         let invoice = invoice();
         let url = access.deposit_url(&invoice).unwrap();
-        assert_eq!(url, format!("https://pay.payday.sh/pay/{}", invoice.id));
+        assert_eq!(url, format!("https://payday.sh/pay/{}", invoice.id));
         assert!(!url.contains("token"));
-        assert_eq!(access.origin(), "https://pay.payday.sh");
-        assert_eq!(access.origin_header(), "https://pay.payday.sh");
+        assert_eq!(access.origin(), "https://payday.sh");
+        assert_eq!(access.origin_header(), "https://payday.sh");
         let binding = invoice.binding.as_ref().unwrap();
         assert_eq!(
             deposit_uri(&invoice, binding, invoice.amount.0),
@@ -507,13 +477,13 @@ mod tests {
 
     #[test]
     fn configuration_rejects_insecure_remote_urls() {
-        assert!(PayerAccess::new("http://pay.payday.sh", None, None).is_err());
-        assert!(PayerAccess::new("https://pay.payday.sh/base", None, None).is_err());
-        assert!(PayerAccess::new("https://user@pay.payday.sh", None, None).is_err());
+        assert!(PayerAccess::new("http://payday.sh", None, None).is_err());
+        assert!(PayerAccess::new("https://payday.sh/base", None, None).is_err());
+        assert!(PayerAccess::new("https://user@payday.sh", None, None).is_err());
         assert!(PayerAccess::new("http://127.0.0.1:3000", None, None).is_ok());
         assert!(
             PayerAccess::new(
-                "https://pay.payday.sh",
+                "https://payday.sh",
                 Some("http://monadvision.com".into()),
                 None,
             )
@@ -521,7 +491,7 @@ mod tests {
         );
         assert!(
             PayerAccess::new(
-                "https://pay.payday.sh",
+                "https://payday.sh",
                 None,
                 Some("http://checkout.payday.sh".into()),
             )

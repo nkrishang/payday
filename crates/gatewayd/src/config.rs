@@ -12,7 +12,6 @@ const MAX_PRESIGN_SECS: u64 = 7 * 24 * 3600;
 pub struct Config {
     bind_addr: String,
     database_url: String,
-    status_only: bool,
     /// The Privy app merchants sign in to; `None` leaves dashboard sessions
     /// unaccepted and only API keys authenticate.
     privy: Option<PrivyConfig>,
@@ -20,17 +19,13 @@ pub struct Config {
     chain_id: ChainId,
     factory_address: Address,
     usdc_address: Address,
-    /// `None` only in status-only mode, which never issues invoices or reads
-    /// the chain, so it needs neither an RPC endpoint nor a recovery wallet.
-    settlement: Option<SettlementConfig>,
-    /// The attachment bucket and the attestation key; both `None` only in
-    /// status-only mode, which serves neither attachments nor proofs.
-    attachments: Option<AttachmentConfig>,
-    attestation: Option<AttestationSignerConfig>,
+    settlement: SettlementConfig,
+    attachments: AttachmentConfig,
+    attestation: AttestationSignerConfig,
     /// The wallet that pays the onboarding walkthrough's one self-issued
     /// deposit request; `None` leaves that endpoint unavailable. Unlike
-    /// `attestation`, this stays optional in every mode — production may
-    /// legitimately never fund this feature.
+    /// `attestation`, this stays optional — production may legitimately
+    /// never fund this feature.
     onboarding_payer: Option<OnboardingPayerSignerConfig>,
     /// The payer audience and the payer-reference key; both `None` leaves
     /// the email verification routes unavailable.
@@ -42,12 +37,10 @@ pub struct Config {
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
     notification_from_address: Option<String>,
-    status_stale_seconds: u64,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let status_only = std::env::var("PAYDAY_STATUS_ONLY").as_deref() == Ok("true");
         let dev_identity = std::env::var("PAYDAY_DEV_IDENTITY").as_deref() == Ok("1");
         // Absent (or empty, as an unconfigured task might set it) means
         // dashboard sessions are not accepted at all.
@@ -95,7 +88,7 @@ impl Config {
 
         let required =
             |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
-        let settlement = (!status_only).then(|| SettlementConfig {
+        let settlement = SettlementConfig {
             rpc_url: required("PAYDAY_RPC_URL"),
             batch_sweeper_address: Address::from_str(&required("PAYDAY_BATCH_SWEEPER_ADDRESS"))
                 .unwrap_or_else(|e| panic!("invalid PAYDAY_BATCH_SWEEPER_ADDRESS: {e}")),
@@ -109,9 +102,9 @@ impl Config {
                 &required("PAYDAY_BATCH_SWEEPER_CODE_HASH"),
             )
             .unwrap_or_else(|message| panic!("{message}")),
-        });
+        };
 
-        let attachments = (!status_only).then(|| AttachmentConfig {
+        let attachments = AttachmentConfig {
             bucket: required("PAYDAY_ATTACHMENT_BUCKET"),
             s3_endpoint: std::env::var("PAYDAY_ATTACHMENT_S3_ENDPOINT")
                 .ok()
@@ -124,14 +117,12 @@ impl Config {
                     .as_deref(),
             )
             .unwrap_or_else(|message| panic!("{message}")),
-        });
-        let attestation = (!status_only).then(|| {
-            attestation_signer(
-                std::env::var("PAYDAY_ATTESTATION_SIGNER_KEY").ok(),
-                std::env::var("PAYDAY_ATTESTATION_KMS_KEY_ID").ok(),
-            )
-            .unwrap_or_else(|message| panic!("{message}"))
-        });
+        };
+        let attestation = attestation_signer(
+            std::env::var("PAYDAY_ATTESTATION_SIGNER_KEY").ok(),
+            std::env::var("PAYDAY_ATTESTATION_KMS_KEY_ID").ok(),
+        )
+        .unwrap_or_else(|message| panic!("{message}"));
 
         let onboarding_payer = onboarding_payer_signer(
             std::env::var("PAYDAY_ONBOARDING_PAYER_KEY").ok(),
@@ -154,7 +145,6 @@ impl Config {
             bind_addr: std::env::var("PAYDAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
-            status_only,
             privy,
             dev_identity,
             chain_id: ChainId(chain_id),
@@ -174,9 +164,6 @@ impl Config {
             api_key_prefix,
             webhook_encryption_key,
             notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
-            status_stale_seconds: std::env::var("PAYDAY_STATUS_INDEXER_STALE_SECONDS")
-                .map_or(Ok(120), |value| value.parse())
-                .expect("PAYDAY_STATUS_INDEXER_STALE_SECONDS must be an integer"),
         }
     }
 
@@ -186,14 +173,6 @@ impl Config {
 
     pub fn database_url(&self) -> &str {
         &self.database_url
-    }
-
-    pub fn status_only(&self) -> bool {
-        self.status_only
-    }
-
-    pub fn status_stale_seconds(&self) -> u64 {
-        self.status_stale_seconds
     }
 
     /// The Privy app whose identity tokens are dashboard sessions; absent
@@ -218,19 +197,19 @@ impl Config {
         self.usdc_address
     }
 
-    /// The chain deployment; absent in status-only mode.
-    pub fn settlement(&self) -> Option<&SettlementConfig> {
-        self.settlement.as_ref()
+    /// The chain deployment this service issues addresses against.
+    pub fn settlement(&self) -> &SettlementConfig {
+        &self.settlement
     }
 
-    /// The attachment bucket; absent in status-only mode.
-    pub fn attachments(&self) -> Option<&AttachmentConfig> {
-        self.attachments.as_ref()
+    /// The attachment bucket.
+    pub fn attachments(&self) -> &AttachmentConfig {
+        &self.attachments
     }
 
-    /// The Proof of Payment attestation key; absent in status-only mode.
-    pub fn attestation(&self) -> Option<&AttestationSignerConfig> {
-        self.attestation.as_ref()
+    /// The Proof of Payment attestation key.
+    pub fn attestation(&self) -> &AttestationSignerConfig {
+        &self.attestation
     }
 
     /// The onboarding demo payment's signing wallet; absent unless a
