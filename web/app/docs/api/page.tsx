@@ -1,10 +1,11 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { Callout, Card, Cards, DocsPage, H2, H3, Table } from "@/components/docs/prose";
 import { config } from "@/lib/config";
 
 export const metadata: Metadata = {
-  title: "API conventions",
+  title: "API reference",
   description:
     "Base URLs, authentication, id prefixes, error shape, pagination, idempotency, rate limits, and the formats every Payday API response shares.",
 };
@@ -34,8 +35,8 @@ export default function ApiConventionsPage() {
   return (
     <DocsPage
       eyebrow="API reference"
-      title="Conventions"
-      lead="One set of rules for every route. Read this page once; the resource pages assume it."
+      title="Introduction"
+      lead="One HTTP API behind the dashboard, the SDK, and every integration. This page is the set of rules every route follows; the pages in the sidebar are the routes, one each."
     >
       <Cards>
         <Card href={`${config.apiUrl}/docs`} title="OpenAPI reference" external>
@@ -104,7 +105,7 @@ export default function ApiConventionsPage() {
         <li>Keys are shown once and stored hashed. Keep them in a secret manager.</li>
       </ul>
       <p>
-        The <a href="/docs/api/payer">payer routes</a> take no credential at all. They are the
+        The <Link href="/docs/api/payer">payer routes</Link> take no credential at all. They are the
         public face of every deposit link.
       </p>
 
@@ -182,7 +183,7 @@ export default function ApiConventionsPage() {
         <code>400 invalid_request</code> with the field named. Every request body rejects unknown
         fields. A missing, malformed, or another account&apos;s id is{" "}
         <code>404 &lt;resource&gt;_not_found</code>. The full list is on{" "}
-        <a href="/docs/api/errors">Errors</a>.
+        <Link href="/docs/api/errors">Errors</Link>.
       </p>
 
       <H2 id="shapes">Response shapes</H2>

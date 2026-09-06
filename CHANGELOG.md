@@ -31,9 +31,15 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - Customer documentation at `payday.sh/docs` (`web/app/docs`), in the web
   app's own design: an introduction, quickstart, concepts, payer
   verification, the dashboard, the hosted checkout, webhooks, Proof of
-  Payment, recipes, the TypeScript SDK, environments, a nine-page API
-  reference with every route, field, answer, and error code, an
-  architecture and security page written for due diligence, and a FAQ.
+  Payment, recipes, the TypeScript SDK, environments, an architecture and
+  security page written for due diligence, and a FAQ. The API reference is
+  its own section, switched to from a tab row under the header: an
+  introduction and the error table, then every route as a page of its own
+  under its resource, listed in the sidebar with a method badge and a
+  plain-English name. Routes are described once, as typed records in
+  `web/components/docs/api`, and one template renders each page with the
+  fields and answers on the left and the request and response samples
+  beside them.
   Pages are static and carry inline diagrams (the deposit flow, the
   lifecycle, address derivation, the verification sequences, the indexer),
   a locked-and-unlocked checkout mock, code samples with server-side

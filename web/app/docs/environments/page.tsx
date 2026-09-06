@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { Callout, DocsPage, H2, Table } from "@/components/docs/prose";
@@ -116,7 +117,7 @@ export default function EnvironmentsPage() {
         <li>
           <code>GET /v1/status</code>, with a key, reports the chain&apos;s finalized position, the
           indexer&apos;s cursor and lag, and the settlement queue. See{" "}
-          <a href="/docs/api/account#get-status">Account and status</a>.
+          <Link href="/docs/api/account#get-status">Account and status</Link>.
         </li>
         <li>
           Every response carries <code>X-Request-Id</code>. Quote it to support.

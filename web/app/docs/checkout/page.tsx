@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { CheckoutMock } from "@/components/docs/figures";
@@ -78,8 +79,9 @@ export default function CheckoutPage() {
       </ul>
       <p>
         For a gated request only the issuer name and heading show until the payer&apos;s session
-        satisfies the policy; see <a href="/docs/payer-verification">Verifying the payer</a>. For
-        every request, the address, the QR, and the pay button appear only after the wallet step.
+        satisfies the policy; see <Link href="/docs/payer-verification">Verifying the payer</Link>.
+        For every request, the address, the QR, and the pay button appear only after the wallet
+        step.
       </p>
 
       <H2 id="three-ways-to-pay">Three ways to pay</H2>
@@ -163,7 +165,7 @@ export default function CheckoutPage() {
       <p>
         Then render <code>address</code>, <code>deposit_uri</code>, and the QR from{" "}
         <code>GET /v1/payer/deposit-requests/&#123;id&#125;/qr</code>, and poll the request until it
-        settles. The routes are listed under <a href="/docs/api/payer">Payer routes</a>.
+        settles. The routes are listed under <Link href="/docs/api/payer">Payer routes</Link>.
       </p>
       <Callout title="Rules the hosted page follows, which yours should too">
         <p>

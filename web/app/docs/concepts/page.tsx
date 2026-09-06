@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { AddressDerivationDiagram, LifecycleDiagram } from "@/components/docs/diagrams";
 import { RoutingFigure } from "@/components/docs/figures";
@@ -55,12 +56,14 @@ export default function ConceptsPage() {
 
       <Defs>
         <Def term="issuer">
-          The party asking. Usually saved once as an <a href="/docs/api/issuers">issuer identity</a>{" "}
-          with a proven contact mailbox, so the payer can write back.
+          The party asking. Usually saved once as an{" "}
+          <Link href="/docs/api/issuers">issuer identity</Link> with a proven contact mailbox, so
+          the payer can write back.
         </Def>
         <Def term="payer">
           The party expected to pay. Optionally linked to a saved{" "}
-          <a href="/docs/api/customers">customer</a>; the request still stores its own snapshot.
+          <Link href="/docs/api/customers">customer</Link>; the request still stores its own
+          snapshot.
         </Def>
         <Def term="amount">
           A USDC decimal with up to six fractional digits. Exactly this settles to your payout
@@ -72,7 +75,7 @@ export default function ConceptsPage() {
         </Def>
         <Def term="payer_policy">
           Who may pay and what they prove first. See{" "}
-          <a href="/docs/payer-verification">Verifying the payer</a>.
+          <Link href="/docs/payer-verification">Verifying the payer</Link>.
         </Def>
         <Def term="expires_at">
           The deadline, decided by chain time. Default 24 hours; 10 minutes to 366 days.
@@ -243,8 +246,8 @@ export default function ConceptsPage() {
         </li>
       </ul>
       <p>
-        The authenticated <a href="/docs/api/account#get-status">status route</a> reports the same
-        for the service as a whole.
+        The authenticated <Link href="/docs/api/account#get-status">status route</Link> reports the
+        same for the service as a whole.
       </p>
 
       <H3 id="amounts">Amounts</H3>
@@ -261,7 +264,7 @@ export default function ConceptsPage() {
         payer&apos;s wallet attestation, the salt, the addresses, the credited transfers, the
         settlement transaction, and a Payday-signed statement of the verification facts. From it
         anyone can recompute the address and check the transfers with no access to Payday. See{" "}
-        <a href="/docs/proof-of-payment">Proof of Payment</a>.
+        <Link href="/docs/proof-of-payment">Proof of Payment</Link>.
       </p>
 
       <H2 id="safety-boundaries">Safety boundaries</H2>

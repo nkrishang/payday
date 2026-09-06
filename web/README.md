@@ -8,9 +8,13 @@ The documentation is static: every page under `app/docs` is written as
 ordinary HTML with the primitives in `components/docs` (a page frame, code
 samples highlighted on the server, curl/TypeScript tabs, route and parameter
 blocks, and the SVG diagrams), prerendered at build time, and reads nothing
-from the API. Its table of contents is one list, `components/docs/nav.ts`,
-which the sidebar, the pager, and the browser suite all read — add a page
-there and it appears everywhere.
+from the API. Its two tables of contents — the guides and the API reference —
+live in `components/docs/nav.ts`, which the sidebar, the pager, and the
+browser suite all read: add a guide there and it appears everywhere. The
+reference's endpoint pages are not written by hand: each route is a typed
+record in `components/docs/api/`, the sidebar entries derive from those
+records, and `app/docs/api/[group]/[slug]` renders every one of them with
+the same template.
 
 The checkout is built on Payday's own public payer API through
 [`@payday/sdk`](../sdk/typescript). Those routes take no API key and expose no

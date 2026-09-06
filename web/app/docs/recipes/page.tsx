@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { CodeTabs } from "@/components/docs/code-tabs";
@@ -235,8 +236,8 @@ export default function RecipesPage() {
           wallet&apos;s incoming transaction.
         </li>
         <li>
-          Once settled, the <a href="/docs/proof-of-payment">Proof of Payment</a> is the durable
-          record: keep it with the invoice.
+          Once settled, the <Link href="/docs/proof-of-payment">Proof of Payment</Link> is the
+          durable record: keep it with the invoice.
         </li>
       </ul>
 
@@ -276,7 +277,7 @@ export default function RecipesPage() {
         <code>payday_test_</code> key and run the same code against Monad testnet and Circle&apos;s
         test USDC. The sandbox runs real indexing and finality rather than a fake &quot;mark
         paid&quot; button, so what you see there is what production does. See{" "}
-        <a href="/docs/environments">Environments</a>.
+        <Link href="/docs/environments">Environments</Link>.
       </p>
     </DocsPage>
   );

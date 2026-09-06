@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { Callout, DocsPage, H2, Table } from "@/components/docs/prose";
@@ -149,7 +150,7 @@ export default function SdkPage() {
         </tbody>
       </Table>
       <p>
-        Every method maps to one route in the <a href="/docs/api">API reference</a>, takes and
+        Every method maps to one route in the <Link href="/docs/api">API reference</Link>, takes and
         returns the same fields, and is typed. <code>attachments.upload</code> is the one
         convenience: it reserves the slot, sends the bytes with the presigned headers, and polls
         finalization with backoff until the scan admits or rejects the file. Pass an{" "}
@@ -179,7 +180,7 @@ export default function SdkPage() {
       <p>
         For a checkout of your own. It reads what the hosted page reads and exposes the verification
         and wallet writes. See{" "}
-        <a href="/docs/checkout#build-your-own">Building your own checkout</a> for the flow.
+        <Link href="/docs/checkout#build-your-own">Building your own checkout</Link> for the flow.
       </p>
       <CodeBlock code={PAYER} lang="ts" />
 

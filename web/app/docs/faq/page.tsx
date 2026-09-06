@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { DocsPage, H2 } from "@/components/docs/prose";
 
@@ -19,7 +20,7 @@ export default function FaqPage() {
       <p>
         The request is the document you issue. The deposit is the funds that answer it at a one-time
         address. The API resource is the request, and you read the deposit&apos;s state from it. See{" "}
-        <a href="/docs/concepts">Deposit requests and deposits</a>.
+        <Link href="/docs/concepts">Deposit requests and deposits</Link>.
       </p>
 
       <H2 id="line-items">Can I add line items or tax?</H2>
@@ -35,7 +36,7 @@ export default function FaqPage() {
         production, Monad testnet in the sandbox. Read <code>chain</code> and <code>token</code>{" "}
         from the request. Bridged USDC, look-alike tokens, another network&apos;s USDC, and gas
         tokens do not count and may be unrecoverable. See{" "}
-        <a href="/docs/environments">Environments</a>.
+        <Link href="/docs/environments">Environments</Link>.
       </p>
 
       <H2 id="why-null-address">Why is the address null after I create a request?</H2>
@@ -43,14 +44,17 @@ export default function FaqPage() {
         Because it does not exist yet. The address is derived from the payer&apos;s wallet
         signature, so it appears once the payer signs on the hosted page. Wait for{" "}
         <code>deposit_request.ready</code> or poll until <code>address</code> is set. See{" "}
-        <a href="/docs/concepts#one-request-one-address-one-wallet">One request, one address</a>.
+        <Link href="/docs/concepts#one-request-one-address-one-wallet">
+          One request, one address
+        </Link>
+        .
       </p>
 
       <H2 id="what-to-give-the-payer">What should I give the payer?</H2>
       <p>
         The <code>deposit_url</code>. It shows everything they need, withholds what they should not
         see, and handles the wallet step. If you build your own page, reproduce the safety guidance
-        in <a href="/docs/checkout">Hosted checkout</a>.
+        in <Link href="/docs/checkout">Hosted checkout</Link>.
       </p>
 
       <H2 id="not-appeared">A payer says they paid. Why has nothing changed?</H2>
@@ -67,7 +71,7 @@ export default function FaqPage() {
         Partial transfers accumulate. Excess goes back to the payer&apos;s wallet at settlement.
         Funds still short at the deadline, or arriving after it, go back to the payer&apos;s wallet.
         Nothing is held by Payday. See{" "}
-        <a href="/docs/concepts#where-the-usdc-goes">Where the USDC goes</a>.
+        <Link href="/docs/concepts#where-the-usdc-goes">Where the USDC goes</Link>.
       </p>
 
       <H2 id="cancel-refund">Can I cancel or refund through Payday?</H2>
@@ -91,7 +95,7 @@ export default function FaqPage() {
       <p>
         Webhooks for automation, long polling for a screen that is open now. Verify the signature
         over the raw body, reject stale timestamps, and deduplicate on the event id. See{" "}
-        <a href="/docs/webhooks">Webhooks</a>.
+        <Link href="/docs/webhooks">Webhooks</Link>.
       </p>
 
       <H2 id="needs-attention">What does needs_attention mean?</H2>
@@ -105,14 +109,14 @@ export default function FaqPage() {
       <p>
         A JSON record of the document, the payer&apos;s wallet signature, the address derivation,
         the transfers, and the settlement transaction. Anyone can recompute it offline, and the
-        checks are published. See <a href="/docs/proof-of-payment">Proof of Payment</a>.
+        checks are published. See <Link href="/docs/proof-of-payment">Proof of Payment</Link>.
       </p>
 
       <H2 id="keys">How should I store and rotate API keys?</H2>
       <p>
         In a secret manager, never in a browser, a repository, a URL, or a log. Roll a key from the
         dashboard and the old one keeps working for 24 hours; revoke for a compromise. A key cannot
-        mint another key. See <a href="/docs/api#authentication">Authentication</a>.
+        mint another key. See <Link href="/docs/api#authentication">Authentication</Link>.
       </p>
 
       <H2 id="amounts">How are amounts and deadlines encoded?</H2>
@@ -126,7 +130,7 @@ export default function FaqPage() {
       <p>
         Yes: <code>https://api.sandbox.payday.sh</code> with <code>payday_test_</code> keys, on
         Monad testnet with Circle&apos;s test USDC and the same real indexing and finality. See{" "}
-        <a href="/docs/environments">Environments</a>.
+        <Link href="/docs/environments">Environments</Link>.
       </p>
 
       <H2 id="help">Where can I get help?</H2>

@@ -1946,3 +1946,29 @@ body:has(.dash, .brand-dark) :focus-visible {
 .docs-prose > details > :last-child {
   padding-bottom: 14px;
 }
+
+/* An endpoint page's prose after the summary: plain paragraphs, no outline. */
+.docs-endpoint-body > p {
+  margin: 0 0 1em;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.docs-endpoint-body > p:last-child {
+  margin-bottom: 0;
+}
+
+.docs-endpoint-body a {
+  color: var(--color-brand-green);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--color-brand-green) 35%, transparent);
+  text-underline-offset: 3px;
+}
+
+/* The route lists on the reference's overview pages: the path may truncate. */
+.docs-prose > ul > li > a + span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -1,69 +1,57 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import type { Method } from "./api/types";
 
 /**
- * The reference pages' vocabulary: a route, the fields it takes, and the
- * answers it gives. The route heading carries an id so the page's outline
- * and deep links reach it.
+ * The reference's vocabulary: a method badge, the fields a route takes or
+ * returns, and the answers it gives.
  */
 
-type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-
-const METHOD_CLASS: Record<Method, string> = {
-  GET: "text-brand-green border-brand-green/40",
-  POST: "text-term-id border-term-id/40",
-  PUT: "text-brand-yellow border-brand-yellow/40",
-  PATCH: "text-brand-yellow border-brand-yellow/40",
-  DELETE: "text-danger border-danger/40",
+const METHOD_TEXT: Record<Method, string> = {
+  GET: "text-brand-green",
+  POST: "text-term-id",
+  PUT: "text-brand-yellow",
+  PATCH: "text-[#f0a35e]",
+  DELETE: "text-danger",
 };
 
-export function slugForRoute(method: Method, path: string): string {
-  return `${method.toLowerCase()}-${path
-    .replace(/^\/v1\//, "")
-    .replace(/[{}]/g, "")
-    .replace(/[^a-z0-9]+/gi, "-")
-    .replace(/^-|-$/g, "")
-    .toLowerCase()}`;
-}
+const METHOD_TINT: Record<Method, string> = {
+  GET: "bg-brand-green/12",
+  POST: "bg-term-id/12",
+  PUT: "bg-brand-yellow/12",
+  PATCH: "bg-[#f0a35e]/12",
+  DELETE: "bg-danger/12",
+};
 
-/** A route heading: `POST /v1/deposit-requests`. */
-export function Endpoint({
+const METHOD_BORDER: Record<Method, string> = {
+  GET: "border-brand-green/40",
+  POST: "border-term-id/40",
+  PUT: "border-brand-yellow/40",
+  PATCH: "border-[#f0a35e]/40",
+  DELETE: "border-danger/40",
+};
+
+/**
+ * `outline` sits beside a path in a heading; `tint` is the sidebar's, a
+ * filled chip of fixed width so the titles beside it line up.
+ */
+export function MethodBadge({
   method,
-  path,
-  id,
-  children,
+  variant = "outline",
+  className,
 }: {
   method: Method;
-  path: string;
-  /** Overrides the id derived from the method and path. */
-  id?: string;
-  /** One line on what the route does. */
-  children?: ReactNode;
+  variant?: "outline" | "tint";
+  className?: string;
 }) {
-  const anchor = id ?? slugForRoute(method, path);
-  return (
-    <div className="mt-12 mb-4 first:mt-0">
-      <h3
-        id={anchor}
-        className="docs-endpoint flex scroll-mt-24 flex-wrap items-center gap-x-3 gap-y-2 font-mono text-[15px] font-normal tracking-normal"
-      >
-        <MethodBadge method={method} />
-        <span className="text-ink">{path}</span>
-        <a href={`#${anchor}`} aria-label="Link to this route" className="docs-anchor">
-          #
-        </a>
-      </h3>
-      {children ? <p className="mt-2 text-[15px] leading-[1.65] text-muted">{children}</p> : null}
-    </div>
-  );
-}
-
-export function MethodBadge({ method, className }: { method: Method; className?: string }) {
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center rounded-[6px] border px-2 font-mono text-[11px] font-semibold tracking-[0.04em]",
-        METHOD_CLASS[method],
+        "inline-flex shrink-0 items-center justify-center font-mono font-semibold tracking-[0.04em]",
+        variant === "outline"
+          ? cn("h-6 rounded-[6px] border px-2 text-[11px]", METHOD_BORDER[method])
+          : cn("h-[19px] w-[50px] rounded-[5px] text-[9.5px]", METHOD_TINT[method]),
+        METHOD_TEXT[method],
         className,
       )}
     >
@@ -82,7 +70,7 @@ export interface ParamRow {
 /** The fields a body, a query string, or a response carries. */
 export function Params({ title, rows }: { title?: string; rows: ParamRow[] }) {
   return (
-    <div className="my-5 overflow-hidden rounded-[12px] border border-line bg-surface">
+    <div className="my-4 overflow-hidden rounded-[12px] border border-line bg-surface">
       {title ? (
         <p className="border-b border-line px-4 py-2.5 font-heading text-[12px] font-medium tracking-[0.06em] text-muted uppercase">
           {title}
@@ -111,17 +99,22 @@ export function Params({ title, rows }: { title?: string; rows: ParamRow[] }) {
   );
 }
 
-/** The status codes a route answers with, beyond the success it documents. */
+/** The status codes a route answers with. */
 export function Answers({
   rows,
+  bare = false,
 }: {
   rows: Array<{ status: number; code?: string; when: ReactNode }>;
+  /** Without the "Answers" chrome bar, under a heading that already says so. */
+  bare?: boolean;
 }) {
   return (
-    <div className="my-5 overflow-hidden rounded-[12px] border border-line bg-surface">
-      <p className="border-b border-line px-4 py-2.5 font-heading text-[12px] font-medium tracking-[0.06em] text-muted uppercase">
-        Answers
-      </p>
+    <div className="my-4 overflow-hidden rounded-[12px] border border-line bg-surface">
+      {bare ? null : (
+        <p className="border-b border-line px-4 py-2.5 font-heading text-[12px] font-medium tracking-[0.06em] text-muted uppercase">
+          Answers
+        </p>
+      )}
       <ul className="divide-y divide-line">
         {rows.map((row, index) => (
           <li

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { Callout, DocsPage, H2, H3, Step, Steps, Table } from "@/components/docs/prose";
 
@@ -220,7 +221,7 @@ export default function DashboardPage() {
             <td>Status</td>
             <td>
               The deposit&apos;s lifecycle state, from awaiting deposit to settled or returned. See
-              the <a href="/docs/concepts#lifecycle">lifecycle</a>.
+              the <Link href="/docs/concepts#lifecycle">lifecycle</Link>.
             </td>
           </tr>
           <tr>

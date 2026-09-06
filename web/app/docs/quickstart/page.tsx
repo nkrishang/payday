@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { CodeTabs } from "@/components/docs/code-tabs";
@@ -86,8 +87,8 @@ export default function QuickstartPage() {
       lead="Issue a USDC deposit request, share its link, and watch finalized funds settle to your wallet. Five steps, one API key, no smart-contract code."
     >
       <Callout title="Prefer not to write code?">
-        Everything on this page is also in the <a href="/docs/dashboard">dashboard</a>, which signs
-        in with an emailed code and needs no API key. Start there if you want to see a request
+        Everything on this page is also in the <Link href="/docs/dashboard">dashboard</Link>, which
+        signs in with an emailed code and needs no API key. Start there if you want to see a request
         settle before integrating.
       </Callout>
 
@@ -102,12 +103,13 @@ export default function QuickstartPage() {
             In the dashboard&apos;s <strong>API key</strong> section, generate a key. It is shown
             exactly once. Store it as <code>PAYDAY_API_KEY</code> in your server&apos;s secret
             store, never in a browser or a repository. A key has full authority over the account;
-            see <a href="/docs/api#authentication">Authentication</a> for rotation and revocation.
+            see <Link href="/docs/api#authentication">Authentication</Link> for rotation and
+            revocation.
           </p>
           <p>
             To try against test USDC first, use the sandbox at{" "}
             <code>https://api.sandbox.payday.sh</code> with a <code>payday_test_</code> key. See{" "}
-            <a href="/docs/environments">Environments</a>.
+            <Link href="/docs/environments">Environments</Link>.
           </p>
         </Step>
 
@@ -159,7 +161,7 @@ export default function QuickstartPage() {
         <Step title="Track settlement">
           <p>
             Read the request whenever you like, or long-poll so a screen updates the moment
-            something changes. For automation, register a <a href="/docs/webhooks">webhook</a>{" "}
+            something changes. For automation, register a <Link href="/docs/webhooks">webhook</Link>{" "}
             instead and let Payday tell you.
           </p>
           <CodeTabs
@@ -195,19 +197,19 @@ export default function QuickstartPage() {
       <H2 id="next">Next</H2>
       <ul>
         <li>
-          <a href="/docs/payer-verification">Verify the payer</a> with an emailed code, or open the
-          checkout from your own application for a user it has signed in.
+          <Link href="/docs/payer-verification">Verify the payer</Link> with an emailed code, or
+          open the checkout from your own application for a user it has signed in.
         </li>
         <li>
-          <a href="/docs/webhooks">Register a webhook</a> so your system credits the deposit without
-          polling.
+          <Link href="/docs/webhooks">Register a webhook</Link> so your system credits the deposit
+          without polling.
         </li>
         <li>
-          <a href="/docs/api/attachments">Attach a PDF</a> for an itemised breakdown; its hash is
-          committed into the address.
+          <Link href="/docs/api/attachments">Attach a PDF</Link> for an itemised breakdown; its hash
+          is committed into the address.
         </li>
         <li>
-          <a href="/docs/recipes">Recipes</a> walk through complete integrations.
+          <Link href="/docs/recipes">Recipes</Link> walk through complete integrations.
         </li>
       </ul>
     </DocsPage>

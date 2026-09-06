@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { AddressDerivationDiagram, IndexerDiagram } from "@/components/docs/diagrams";
 import {
@@ -222,9 +223,9 @@ export default function SecurityPage() {
         </tbody>
       </Table>
       <p>
-        The result is the <a href="/docs/proof-of-payment">Proof of Payment</a>: the recomputable
-        parts are recomputable, the attested parts are signed and bound to that request and that
-        payer, and Payday declines to issue a proof it cannot stand behind.
+        The result is the <Link href="/docs/proof-of-payment">Proof of Payment</Link>: the
+        recomputable parts are recomputable, the attested parts are signed and bound to that request
+        and that payer, and Payday declines to issue a proof it cannot stand behind.
       </p>
 
       <H2 id="credentials">Credentials and secrets</H2>

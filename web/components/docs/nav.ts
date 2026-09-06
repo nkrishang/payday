@@ -1,20 +1,30 @@
+import { API_GROUPS } from "./api";
+import type { Method } from "./api/types";
+
 /**
- * The documentation's table of contents. One list, read by the sidebar, the
- * previous/next pager at the foot of every page, and the landing cards on
- * `/docs` — so a page added here appears everywhere at once.
+ * The documentation's two tables of contents: the guides, and the API
+ * reference. Each is one list, read by the sidebar, the previous/next pager
+ * at the foot of every page, the landing cards, and the browser suite — so a
+ * page added here appears everywhere at once. The reference's endpoint
+ * entries are derived from the endpoint records in `./api`, never listed by
+ * hand.
  */
 
 export interface DocsPageEntry {
   href: string;
   title: string;
   /** One line under the title on the landing cards and in the pager. */
-  summary: string;
+  summary?: string;
+  /** Shown as a badge before the title in the reference sidebar. */
+  method?: Method;
 }
 
 export interface DocsGroup {
   title: string;
   pages: DocsPageEntry[];
 }
+
+export type DocsSection = "docs" | "api";
 
 export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
   {
@@ -83,52 +93,6 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
     ],
   },
   {
-    title: "API reference",
-    pages: [
-      {
-        href: "/docs/api",
-        title: "Conventions",
-        summary: "Authentication, ids, errors, paging, limits.",
-      },
-      {
-        href: "/docs/api/deposit-requests",
-        title: "Deposit requests",
-        summary: "Create, read, list, cancel, transfers, documents, proof.",
-      },
-      { href: "/docs/api/customers", title: "Customers", summary: "Reusable payer records." },
-      {
-        href: "/docs/api/issuers",
-        title: "Issuers and payout addresses",
-        summary: "The party you issue under and the wallets you settle to.",
-      },
-      {
-        href: "/docs/api/attachments",
-        title: "Attachments",
-        summary: "One scanned PDF per request.",
-      },
-      {
-        href: "/docs/api/webhooks",
-        title: "Webhooks",
-        summary: "Endpoints, tests, and delivery history.",
-      },
-      {
-        href: "/docs/api/account",
-        title: "Account and status",
-        summary: "Your account, its key, and service health.",
-      },
-      {
-        href: "/docs/api/payer",
-        title: "Payer routes",
-        summary: "The public, keyless routes behind every deposit link.",
-      },
-      {
-        href: "/docs/api/errors",
-        title: "Errors",
-        summary: "Every stable error code and what to do about it.",
-      },
-    ],
-  },
-  {
     title: "Trust",
     pages: [
       {
@@ -141,17 +105,56 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
   },
 ];
 
+export const API_NAV: ReadonlyArray<DocsGroup> = [
+  {
+    title: "API reference",
+    pages: [
+      {
+        href: "/docs/api",
+        title: "Introduction",
+        summary: "Base URLs, authentication, ids, errors, paging, limits.",
+      },
+      {
+        href: "/docs/api/errors",
+        title: "Errors",
+        summary: "Every stable error code and what to do about it.",
+      },
+    ],
+  },
+  ...API_GROUPS.map((group) => ({
+    title: group.title,
+    pages: [
+      ...(group.overview ? [{ href: `/docs/api/${group.slug}`, title: group.overview.title }] : []),
+      ...group.endpoints.map((endpoint) => ({
+        href: `/docs/api/${group.slug}/${endpoint.slug}`,
+        title: endpoint.title,
+        method: endpoint.method,
+      })),
+    ],
+  })),
+];
+
 export const DOCS_PAGES: ReadonlyArray<DocsPageEntry> = DOCS_NAV.flatMap((group) => group.pages);
+export const API_PAGES: ReadonlyArray<DocsPageEntry> = API_NAV.flatMap((group) => group.pages);
+
+export function sectionOf(pathname: string): DocsSection {
+  return pathname === "/docs/api" || pathname.startsWith("/docs/api/") ? "api" : "docs";
+}
+
+export function navFor(section: DocsSection): ReadonlyArray<DocsGroup> {
+  return section === "api" ? API_NAV : DOCS_NAV;
+}
 
 export function findPage(href: string): DocsPageEntry | undefined {
-  return DOCS_PAGES.find((page) => page.href === href);
+  return [...DOCS_PAGES, ...API_PAGES].find((page) => page.href === href);
 }
 
 export function neighbours(href: string): { previous?: DocsPageEntry; next?: DocsPageEntry } {
-  const index = DOCS_PAGES.findIndex((page) => page.href === href);
+  const pages = sectionOf(href) === "api" ? API_PAGES : DOCS_PAGES;
+  const index = pages.findIndex((page) => page.href === href);
   if (index === -1) return {};
-  const previous = DOCS_PAGES[index - 1];
-  const next = DOCS_PAGES[index + 1];
+  const previous = pages[index - 1];
+  const next = pages[index + 1];
   return {
     ...(previous ? { previous } : {}),
     ...(next ? { next } : {}),

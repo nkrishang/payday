@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { CodeTabs } from "@/components/docs/code-tabs";
@@ -307,7 +308,7 @@ export default function WebhooksPage() {
         </li>
         <li>
           After the twelfth failure the delivery is <code>failed</code> and stays that way. The{" "}
-          <a href="/docs/api/webhooks#get-webhook-deliveries">deliveries route</a> shows every
+          <Link href="/docs/api/webhooks#get-webhook-deliveries">deliveries route</Link> shows every
           attempt with its status, error, time, and duration, so a missed event can be reconciled by
           hand.
         </li>
