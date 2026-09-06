@@ -1,8 +1,11 @@
-use axum::{Json, extract::State};
+use axum::extract::State;
 use gateway_db::CursorRepository;
 use serde::Serialize;
 
-use crate::{api::error::ApiError, state::AppState};
+use crate::{
+    api::{error::ApiError, json::Json},
+    state::AppState,
+};
 
 #[derive(Serialize)]
 pub struct ServiceStatus {
@@ -33,7 +36,7 @@ struct SweeperStatus {
 }
 
 fn timestamp(value: u64) -> Option<String> {
-    sqlx::types::chrono::DateTime::from_timestamp(value as i64, 0).map(|value| value.to_rfc3339())
+    sqlx::types::chrono::DateTime::from_timestamp(value as i64, 0).map(gateway_core::rfc3339)
 }
 
 pub async fn get(State(state): State<AppState>) -> Result<Json<ServiceStatus>, ApiError> {

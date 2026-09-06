@@ -1023,7 +1023,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(event.0, "deposit_request.recovered_funds");
-        assert_eq!(event.1["data"]["recovery"]["amount"], "50");
+        assert_eq!(event.1["data"]["recovery"]["amount_base_units"], "50");
         assert_eq!(event.1["data"]["recovery"]["reason"], "overpayment");
         assert_eq!(event.1["data"]["deposit_request"]["status"], "settled");
     }

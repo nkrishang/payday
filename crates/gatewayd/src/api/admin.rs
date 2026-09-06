@@ -1,9 +1,9 @@
 use crate::{
-    api::{auth::Reviewer, error::ApiError},
+    api::{auth::Reviewer, error::ApiError, json::Json},
     state::AppState,
 };
 use axum::{
-    Extension, Json,
+    Extension,
     extract::{Path, State},
 };
 use gateway_core::{DepositRequestResponse, Invoice};

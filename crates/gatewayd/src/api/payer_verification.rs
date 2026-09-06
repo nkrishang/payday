@@ -12,13 +12,13 @@
 
 use std::time::Duration;
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 use gateway_core::{
     Invoice, InvoiceStatus, PayerPolicyMode, VerificationFacts, VerificationRequirementsResponse,
+    rfc3339,
 };
 use gateway_db::{DbInvoice, DbPayerSession, PAYER_SESSION_TTL, StartEmailVerificationError};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::api::attachments::no_store;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::api::payer::parse_invoice_id;
 use crate::payer_identity::EmailContinuation;
 use crate::state::AppState;
@@ -209,7 +210,7 @@ pub async fn start_email(
         no_store(),
         Json(StartEmailResponse {
             payer_session: token,
-            expires_at: expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            expires_at: rfc3339(expires_at),
         }),
     )
         .into_response())

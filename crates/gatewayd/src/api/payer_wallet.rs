@@ -16,20 +16,20 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{Address, Signature, hex};
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 use gateway_core::{
     Invoice, InvoiceStatus, PayerAttestation, PayerAttestationError, PayerAttestationTypedData,
-    PayerDepositRequestResponse, payer_wallet_attestation,
+    PayerDepositRequestResponse, payer_wallet_attestation, rfc3339,
 };
 use gateway_db::{BindPayerWallet, DbInvoice, DbPayerSession, PAYER_SESSION_TTL};
 use serde::{Deserialize, Serialize};
 
 use crate::api::attachments::no_store;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::api::payer::{authorized_invoice, parse_invoice_id, payer_response};
 use crate::api::payer_verification::session_token;
 use crate::state::AppState;
@@ -155,9 +155,7 @@ pub async fn challenge(
         no_store(),
         Json(ChallengeResponse {
             payer_session: token,
-            expires_at: challenge
-                .expires_at
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            expires_at: rfc3339(challenge.expires_at),
             typed_data: message.typed_data(invoice.chain_id.0, invoice.factory.0),
         }),
     )
@@ -202,10 +200,7 @@ pub async fn attest(
     let attestation =
         payer_wallet_attestation(&message, invoice.chain_id.0, invoice.factory.0, &signature);
     let binding = invoice
-        .bind_payer_wallet(
-            attestation,
-            now.to_rfc3339_opts(SecondsFormat::Secs, true),
-        )
+        .bind_payer_wallet(attestation, rfc3339(now))
         .map_err(|error| match error {
             PayerAttestationError::SignatureInvalid | PayerAttestationError::SignerMismatch => {
                 ApiError::wallet_signature_invalid()

@@ -132,15 +132,19 @@ test("customer methods use canonical routes, PATCH for updates, and encoded curs
   await client.customers.get("cus/1");
   await client.customers.list({ limit: 50, starting_after: "cus/cursor" });
   await client.customers.update("cus/1", { name: "Customer Inc", email: null, details: "Net 30" });
+  // A partial update sends only what changes; the API keeps the rest.
+  await client.customers.update("cus/1", { details: "Net 45" });
 
   assert.deepEqual(mock.calls.map((call) => [call.init.method, call.url]), [
     ["POST", "https://example.test/v1/customers"],
     ["GET", "https://example.test/v1/customers/cus%2F1"],
     ["GET", "https://example.test/v1/customers?limit=50&starting_after=cus%2Fcursor"],
     ["PATCH", "https://example.test/v1/customers/cus%2F1"],
+    ["PATCH", "https://example.test/v1/customers/cus%2F1"],
   ]);
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), { name: "Customer Inc", email: "ap@customer.example" });
   assert.deepEqual(JSON.parse(mock.calls[3].init.body), { name: "Customer Inc", email: null, details: "Net 30" });
+  assert.deepEqual(JSON.parse(mock.calls[4].init.body), { details: "Net 45" });
   assert.equal(mock.calls[3].init.headers["Content-Type"], "application/json");
 });
 
@@ -264,21 +268,63 @@ test("upload forwards an abort signal to every request and to the scan wait", as
   for (const call of mock.calls) assert.equal(call.init.signal, controller.signal);
 });
 
-test("webhook and status methods use canonical routes", async () => {
-  const mock = mockFetch(() => new Response("[]"));
+test("webhook and status methods use canonical routes and enveloped lists", async () => {
+  const mock = mockFetch((url, init) => {
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
+    if (url.endsWith("/v1/webhooks") && init.method === "GET") return json({ webhooks: [] });
+    if (url.includes("/v1/webhook-deliveries")) return json({ deliveries: [], next_cursor: null });
+    return json({});
+  });
   const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   await client.webhooks.add("https://hooks.example.test/payday");
-  await client.webhooks.remove("endpoint/id");
+  const listed = await client.webhooks.list();
+  await client.webhooks.get("endpoint/id");
+  const removed = await client.webhooks.remove("endpoint/id");
   await client.webhooks.test("endpoint/id");
-  await client.webhooks.deliveries();
+  const page = await client.webhooks.deliveries({ endpoint_id: "endpoint/id", limit: 10, starting_after: "d/1" });
   await client.status();
+  assert.deepEqual(listed, { webhooks: [] });
+  assert.equal(removed, undefined);
+  assert.deepEqual(page, { deliveries: [], next_cursor: null });
   assert.deepEqual(mock.calls.map((call) => [call.init.method, call.url]), [
     ["POST", "https://example.test/v1/webhooks"],
+    ["GET", "https://example.test/v1/webhooks"],
+    ["GET", "https://example.test/v1/webhooks/endpoint%2Fid"],
     ["DELETE", "https://example.test/v1/webhooks/endpoint%2Fid"],
     ["POST", "https://example.test/v1/webhooks/endpoint%2Fid/test"],
-    ["GET", "https://example.test/v1/webhook-deliveries"],
+    ["GET", "https://example.test/v1/webhook-deliveries?endpoint_id=endpoint%2Fid&limit=10&starting_after=d%2F1"],
     ["GET", "https://example.test/v1/status"],
   ]);
+});
+
+test("cancel and transfers return the deposit request and an enveloped list", async () => {
+  const mock = mockFetch((url) =>
+    url.endsWith("/cancel")
+      ? json({ id: "dr_1", status: "awaiting_deposit", cancellation_requested_at: "2026-09-06T12:00:00Z" })
+      : json({ transfers: [] }),
+  );
+  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const cancelled = await client.depositRequests.cancel("dr_1");
+  const transfers = await client.depositRequests.transfers("dr_1");
+  assert.equal(cancelled.id, "dr_1");
+  assert.equal(cancelled.cancellation_requested_at, "2026-09-06T12:00:00Z");
+  assert.deepEqual(transfers, { transfers: [] });
+  assert.deepEqual(mock.calls.map((call) => [call.init.method, call.url]), [
+    ["POST", "https://example.test/v1/deposit-requests/dr_1/cancel"],
+    ["GET", "https://example.test/v1/deposit-requests/dr_1/transfers"],
+  ]);
+});
+
+test("create may name saved records instead of inline parties", async () => {
+  const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
+  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  await client.depositRequests.create(
+    { amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", payer_policy: { mode: "permissionless" } },
+    "order-124",
+  );
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body), {
+    amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", payer_policy: { mode: "permissionless" },
+  });
 });
 
 test("API errors expose stable code, requestId, and HTTP status", async () => {

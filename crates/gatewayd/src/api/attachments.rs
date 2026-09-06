@@ -2,20 +2,18 @@
 //! uploaded object once it is a clean PDF, and hand out signed download links.
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 
 use axum::Extension;
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use chrono::SecondsFormat;
-use gateway_core::AttachmentDescriptor;
+use gateway_core::{AttachmentDescriptor, AttachmentId, rfc3339};
 use gateway_db::{AccountId, AttachmentStatus, CreateAttachmentUpload, DbAttachment};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::attachments::{AttachmentError, AttachmentStore, CLEAN_SCAN};
 use crate::state::AppState;
 
@@ -29,7 +27,7 @@ pub struct CreateAttachmentRequest {
 
 #[derive(Debug, Serialize)]
 pub struct AttachmentUploadResponse {
-    id: Uuid,
+    id: AttachmentId,
     upload_url: String,
     /// Every header the PUT must carry verbatim; they are part of the
     /// signature.
@@ -71,10 +69,10 @@ pub async fn create(
     Ok((
         StatusCode::CREATED,
         Json(AttachmentUploadResponse {
-            id: upload.attachment_id,
+            id: AttachmentId(upload.attachment_id),
             upload_url: upload.upload_url,
             headers: upload.headers,
-            expires_at: upload.expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            expires_at: rfc3339(upload.expires_at),
         }),
     ))
 }
@@ -84,7 +82,10 @@ pub async fn finalize(
     Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
 ) -> Result<Json<AttachmentDescriptor>, ApiError> {
-    let id = Uuid::from_str(&id).map_err(|_| ApiError::attachment_not_found())?;
+    // Anything but a canonical `att_` id is a missing attachment.
+    let id = AttachmentId::parse(&id)
+        .map(Uuid::from)
+        .ok_or_else(ApiError::attachment_not_found)?;
     let attachment = state
         .attachments
         .get_for_account(account, id)

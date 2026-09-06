@@ -7,6 +7,7 @@ mod deposit_requests;
 pub(crate) mod error;
 mod health;
 pub mod issuers;
+mod json;
 pub mod merchant_session;
 mod middleware;
 mod openapi;

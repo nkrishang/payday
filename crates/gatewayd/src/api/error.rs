@@ -483,6 +483,24 @@ impl ApiError {
         }
     }
 
+    pub fn webhook_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "webhook_not_found",
+            message: "Webhook endpoint not found".into(),
+        }
+    }
+
+    /// The deployment has no webhook encryption key, so no endpoint can be
+    /// registered: the secret it would be issued could not be stored.
+    pub fn webhooks_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "webhooks_unavailable",
+            message: "Webhooks are not available on this deployment".into(),
+        }
+    }
+
     pub fn rate_limited() -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,

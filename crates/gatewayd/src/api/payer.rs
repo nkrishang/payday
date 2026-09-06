@@ -1,7 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, U256};
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
@@ -16,6 +15,7 @@ use uuid::Uuid;
 
 use crate::api::attachments::{no_store, signed_descriptor};
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::api::payer_verification::session_token;
 use crate::state::AppState;
 

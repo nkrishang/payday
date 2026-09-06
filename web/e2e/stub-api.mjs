@@ -17,6 +17,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
+// The API renders every timestamp as RFC 3339 to the second (`…:25Z`), so
+// the stub does too. This also keeps a withheld amount such as `25.00` from
+// matching the milliseconds of a timestamp (`…:25.000Z`) in a page-source
+// assertion.
+const toISOString = Date.prototype.toISOString;
+Date.prototype.toISOString = function toSecondISOString() {
+  return toISOString.call(this).replace(/\.\d{3}Z$/, "Z");
+};
+
 const PORT = Number(process.env.STUB_PORT ?? 4010);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
@@ -78,7 +87,7 @@ function mintClientSecret(id) {
 }
 
 const ATTACHMENT = {
-  id: "0198f80c-8d2f-7dc1-a369-90556a64f7aa",
+  id: "att_0198f80c-8d2f-7dc1-a369-90556a64f7aa",
   filename: "INV-1042.pdf",
   mime_type: "application/pdf",
   byte_length: "48211",
@@ -524,6 +533,9 @@ function verificationDetail(payment) {
 function summary(payment) {
   return {
     id: payment.id,
+    deposit_url: payment.deposit_url,
+    updated_at: payment.updated_at,
+    expires_at: payment.expires_at,
     heading: payment.heading,
     payer_name: payment.payer.name,
     issuer_id: payment.issuer_id ?? null,
@@ -650,7 +662,7 @@ function typedData(attributionHash, wallet, nonce) {
 
 function seed() {
   const customer = {
-    id: "0198f80c-8d2f-7dc1-a369-90556a64f7c1",
+    id: "cus_0198f80c-8d2f-7dc1-a369-90556a64f7c1",
     name: "Globex Corporation",
     email: "ap@globex.example",
     details: "PO 7781",
@@ -736,14 +748,14 @@ function seed() {
       // The payer asked for a code twice and never entered one.
       verification_attempts: [
         {
-          id: "0198f80c-8d2f-7dc1-a369-90556a64f7e1",
+          id: "va_0198f80c-8d2f-7dc1-a369-90556a64f7e1",
           kind: "email",
           status: "abandoned",
           verified_at: null,
           created_at: "2026-08-26T10:29:00.000Z",
         },
         {
-          id: "0198f80c-8d2f-7dc1-a369-90556a64f7e2",
+          id: "va_0198f80c-8d2f-7dc1-a369-90556a64f7e2",
           kind: "email",
           status: "pending",
           verified_at: null,
@@ -872,7 +884,7 @@ function accountRecord(req) {
   let record = store.accounts.get(key);
   if (!record) {
     record = {
-      id: randomUUID(),
+      id: `acct_${randomUUID()}`,
       generation: 1,
       keyHint: null,
       createdAt: null,
@@ -904,7 +916,7 @@ function accountMetadata(record, req) {
  * `/v1/account` and `/v1/account/api-key`. The real API refuses the latter to
  * an API key and takes only a dashboard session; every credential here is a
  * session, so the same bearer check as everything else is enough to exercise
- * the UI end to end.
+ * the UI end to end. The key route has no GET: the account is the resource.
  */
 async function account(req, res, url) {
   if (url.pathname !== "/v1/account" && url.pathname !== "/v1/account/api-key") return false;
@@ -914,8 +926,6 @@ async function account(req, res, url) {
     if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
     return send(res, 200, accountMetadata(record, req));
   }
-
-  if (req.method === "GET") return send(res, 200, accountMetadata(record, req));
 
   if (req.method === "POST") {
     const body = await readJson(req);
@@ -980,16 +990,22 @@ function paginate(items, params) {
   return { page, next };
 }
 
+/**
+ * Create takes the whole body; update is partial like the API's PATCH: a
+ * field left out keeps its value, an explicit null clears it.
+ */
 function customerFrom(body, existing) {
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  if (!name || name.length > 255) throw new Error("name is required");
   const optional = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+  const name =
+    typeof body.name === "string" ? body.name.trim() : existing && !("name" in body) ? existing.name : "";
+  if (!name || name.length > 255) throw new Error("name is required");
+  const field = (key) => (key in body || !existing ? optional(body[key]) : existing[key]);
   const now = new Date().toISOString();
   return {
-    id: existing?.id ?? randomUUID(),
+    id: existing?.id ?? `cus_${randomUUID()}`,
     name,
-    email: optional(body.email),
-    details: optional(body.details),
+    email: field("email"),
+    details: field("details"),
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };
@@ -1281,7 +1297,7 @@ async function issuerIdentities(req, res, url) {
         return fail(res, 400, "invalid_request", "contact_email is required");
       const now = new Date().toISOString();
       const row = {
-        id: randomUUID(),
+        id: `iss_${randomUUID()}`,
         name,
         contact_email: email,
         details: body.details ?? null,
@@ -1318,7 +1334,7 @@ async function issuerIdentities(req, res, url) {
       }
       if (existing) return send(res, 201, existing);
       const row = {
-        id: randomUUID(),
+        id: `pa_${randomUUID()}`,
         address,
         label: label || null,
         created_at: new Date().toISOString(),
@@ -1394,23 +1410,28 @@ async function issuerIdentities(req, res, url) {
 
   if (req.method === "GET") return send(res, 200, shape(row));
   if (req.method === "PATCH") {
+    // Partial, like the API: a field left out keeps its value.
     const body = await readJson(req);
-    const email = String(body.contact_email ?? "")
-      .trim()
-      .toLowerCase();
-    if (!String(body.name ?? "").trim() || !email.includes("@")) {
-      return fail(res, 400, "invalid_request", "name and contact_email are required");
+    const name = "name" in body ? String(body.name ?? "").trim() : row.name;
+    const email =
+      "contact_email" in body
+        ? String(body.contact_email ?? "")
+            .trim()
+            .toLowerCase()
+        : row.contact_email;
+    if (!name || !email.includes("@")) {
+      return fail(res, 400, "invalid_request", "name and contact_email must not be blank");
     }
-    if (nameTaken(world, String(body.name), row.id)) {
+    if (nameTaken(world, name, row.id)) {
       return fail(res, 409, "issuer_name_taken", "Another identity already uses this name");
     }
     if (email !== row.contact_email) {
       row.email_verified = false;
       row.email_verified_at = null;
     }
-    row.name = String(body.name).trim();
+    row.name = name;
     row.contact_email = email;
-    row.details = body.details ?? null;
+    if ("details" in body) row.details = body.details ?? null;
     row.updated_at = new Date().toISOString();
     return send(res, 200, shape(row));
   }
@@ -1430,7 +1451,7 @@ async function attachments(req, res, url) {
     if (typeof body.filename !== "string" || !body.filename.trim()) {
       return fail(res, 400, "invalid_request", "filename is required");
     }
-    const id = randomUUID();
+    const id = `att_${randomUUID()}`;
     store.attachments.set(id, {
       id,
       filename: body.filename.trim(),
@@ -1646,7 +1667,7 @@ async function payments(req, res, url) {
         return fail(res, 409, "deposit_request_not_settled", "Proof is available once settled");
       return send(res, 200, proofFor(payment));
     case "/transfers":
-      return send(res, 200, payment.transfers);
+      return send(res, 200, { transfers: payment.transfers });
     default:
       return send(res, 200, payment);
   }

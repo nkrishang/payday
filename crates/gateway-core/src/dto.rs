@@ -4,12 +4,22 @@
 use alloy_primitives::utils::format_units;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::{Invoice, InvoiceStatus, Party, PayerPolicy, PayerPolicyMode, USDC_DECIMALS};
+use crate::{
+    AttachmentId, CustomerId, Invoice, InvoiceStatus, IssuerId, Party, PayerPolicy,
+    PayerPolicyMode, USDC_DECIMALS,
+};
 
 /// The only attachment type Payday accepts (product plan §4.2).
 pub const PDF_MIME_TYPE: &str = "application/pdf";
+
+/// Every timestamp the API emits, in one shape: RFC 3339, UTC, whole
+/// seconds, `Z` suffix (`2026-09-06T12:00:00Z`). The signed artifacts (the
+/// wallet binding, the Proof of Payment) already use it, so nothing on the
+/// wire needs a second parser.
+pub fn rfc3339(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,17 +28,27 @@ pub struct CreateDepositRequest {
     pub chain_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_address: Option<String>,
-    pub payout_address: String,
-    pub amount: String,
-    pub issuer: Party,
-    pub payer: Party,
+    /// Where exactly `amount` settles. Optional when `issuer_id` names an
+    /// identity with a saved payout address: the first one is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub customer_id: Option<Uuid>,
+    pub payout_address: Option<String>,
+    pub amount: String,
+    /// The issuing party as the document will carry it. Optional when
+    /// `issuer_id` is given: the saved identity's name, contact address, and
+    /// details are snapshotted in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<Party>,
+    /// The paying party. Optional when `customer_id` is given: the saved
+    /// customer is snapshotted in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payer: Option<Party>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_id: Option<CustomerId>,
     /// The issuer identity this is issued under. The `issuer` party above is
     /// still the snapshot the document carries; this only records which saved
     /// identity it came from, and survives that identity being renamed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer_id: Option<Uuid>,
+    pub issuer_id: Option<IssuerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,7 +59,7 @@ pub struct CreateDepositRequest {
     pub metadata: serde_json::Value,
     pub payer_policy: PayerPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachment_id: Option<Uuid>,
+    pub attachment_id: Option<AttachmentId>,
     /// Lifetime in seconds. Idempotent retries retain the original deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
@@ -82,7 +102,9 @@ pub struct AsOfDto {
 /// serves it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachmentDescriptor {
-    pub id: Uuid,
+    /// The `att_` id. The canonical issuance snapshot's `attachment.id` is
+    /// the UUID inside it, since that document's schema is frozen.
+    pub id: AttachmentId,
     pub filename: String,
     pub mime_type: String,
     pub byte_length: String,
@@ -367,11 +389,14 @@ pub struct PayerDepositRequestResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositRequestSummaryResponse {
     pub id: String,
+    pub deposit_url: String,
     pub heading: Option<String>,
     pub payer_name: String,
     pub reference: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: String,
+    pub updated_at: String,
+    pub expires_at: String,
     pub status: DepositRequestStatus,
     pub amount: String,
     pub received: String,
@@ -390,10 +415,11 @@ pub struct DepositRequestListResponse {
     pub next_cursor: Option<String>,
 }
 
+/// `GET /v1/deposit-requests/{id}/transfers`: an envelope like every other
+/// list, so it can grow a field without breaking a reader.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelDepositRequestResponse {
-    pub deposit_request: DepositRequestResponse,
-    pub advisory: String,
+pub struct TransferListResponse {
+    pub transfers: Vec<TransferDto>,
 }
 
 /// The onboarding walkthrough's one real demo transfer: a payer session
@@ -510,9 +536,10 @@ impl DepositRequestResponse {
             payer_wallet: binding.map(|b| b.payer_wallet.to_checksum(None)),
             recovery_address: binding.map(|b| b.recovery.0.to_checksum(None)),
             wallet_bound_at: binding.map(|b| b.bound_at.clone()),
-            expires_at: DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
-                .expect("validated timestamp")
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            expires_at: rfc3339(
+                DateTime::<Utc>::from_timestamp(inv.expiration_timestamp as i64, 0)
+                    .expect("validated timestamp"),
+            ),
             expires_in,
             amount: human(inv.amount.0),
             amount_base_units: inv.amount.0.to_string(),
@@ -537,10 +564,9 @@ impl DepositRequestResponse {
             },
             settlement_tx_hash: inv.execute_tx_hash.map(|h| h.to_string()),
             settlement_explorer_url: None,
-            settled_at: inv.settled_at_timestamp.and_then(|t| {
-                DateTime::<Utc>::from_timestamp(t as i64, 0)
-                    .map(|d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
-            }),
+            settled_at: inv
+                .settled_at_timestamp
+                .and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0).map(rfc3339)),
             settled_block: inv.resolved_at_block.map(|b| b.to_string()),
             self_settlement: binding.map(|b| SelfSettlementDto {
                 factory: inv.factory.0.to_checksum(None),
@@ -819,12 +845,15 @@ mod tests {
 
         let summary = DepositRequestSummaryResponse {
             id: payment.id,
+            deposit_url: payment.deposit_url,
             heading: payment.heading,
             payer_name: payment.payer.name,
             issuer_id: None,
             reference: None,
             metadata: serde_json::json!({}),
             created_at: String::new(),
+            updated_at: String::new(),
+            expires_at: payment.expires_at,
             status: payment.status,
             amount: payment.amount,
             received: payment.received,
@@ -869,12 +898,22 @@ mod tests {
             let error = serde_json::from_value::<CreateDepositRequest>(rejected).unwrap_err();
             assert!(error.to_string().contains(field), "{field}: {error}");
         }
-        for required in ["issuer", "payer", "payer_policy"] {
+        for required in ["amount", "payer_policy"] {
             let mut missing = accepted.clone();
             missing.as_object_mut().unwrap().remove(required);
             assert!(
                 serde_json::from_value::<CreateDepositRequest>(missing).is_err(),
                 "{required} must be required"
+            );
+        }
+        // The parties and the payout address may be left to saved records;
+        // the handler decides whether the request named any.
+        for optional in ["issuer", "payer", "payout_address"] {
+            let mut missing = accepted.clone();
+            missing.as_object_mut().unwrap().remove(optional);
+            assert!(
+                serde_json::from_value::<CreateDepositRequest>(missing).is_ok(),
+                "{optional} is resolved by the handler"
             );
         }
     }

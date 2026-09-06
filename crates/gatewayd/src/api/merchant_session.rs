@@ -15,13 +15,14 @@
 //! opened; who the payer is remains the merchant's assertion, carried as
 //! `payer_reference` in the policy and every webhook.
 
+use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json};
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 use gateway_core::{
     Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse, deposit_request_id,
+    rfc3339,
 };
 use gateway_db::{
     AccountId, CLIENT_SECRET_PREFIX, CLIENT_SECRET_TTL, ExchangeClientSecretError,
@@ -32,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::attachments::no_store;
 use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::state::AppState;
 
 /// `cs_` plus 43 characters of unpadded base64url; anything else is refused
@@ -56,10 +58,6 @@ pub struct ExchangeClientSecretResponse {
     pub payer_session: String,
     pub expires_at: String,
     pub requirements: VerificationRequirementsResponse,
-}
-
-fn rfc3339(value: chrono::DateTime<Utc>) -> String {
-    value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 /// Whether a secret may still be minted or exchanged for this invoice: it is

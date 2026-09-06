@@ -38,14 +38,57 @@ value:
 {"error":{"code":"invalid_request","message":"…"},"request_id":"…"}
 ```
 
+A body or query string that does not fit the route — malformed JSON, a
+missing or unknown field, a value of the wrong type, a missing
+`Content-Type: application/json` — is `400 invalid_request`, and the message
+names the problem (`unknown field `rotate`, expected `expected_generation``,
+`missing field `amount``). Every request body rejects unknown fields.
+
+Resources follow one set of conventions. Lists are enveloped under the
+resource's plural (`deposit_requests`, `customers`, `issuers`,
+`payout_addresses`, `webhooks`, `deliveries`, `transfers`) with a
+`next_cursor` where they page; `limit` is 1–100 and defaults to 20;
+`starting_after` is the id of the last item seen. A missing, malformed, or
+another account's id is `404 <resource>_not_found`. Creates answer `201`,
+disables and deletes answer `204`, and `PATCH` is partial: a field left out
+keeps its value, and only an explicit `null` clears one.
+
+Every id is a UUID behind a prefix that says what it names, so a log line, a
+support ticket, or a mistaken field reads for itself:
+
+| Prefix | Resource |
+|---|---|
+| `dr_` | deposit request |
+| `cus_` | customer |
+| `iss_` | issuer identity |
+| `pa_` | payout address |
+| `att_` | attachment |
+| `wh_` | webhook endpoint |
+| `whd_` | webhook delivery |
+| `evt_` | webhook event (the envelope `id` and `Payday-Event-Id`) |
+| `va_` | verification attempt |
+| `rec_` | recovery ledger entry (in `deposit_request.recovered_funds`) |
+| `acct_` | account |
+
+Only the canonical form the API emits is accepted back: the exact prefix,
+then a lowercase hyphenated UUID. A `cus_` id handed to an attachment route
+is `404 attachment_not_found`, and a bare UUID in a body field such as
+`customer_id` is `400 invalid_request` naming the form wanted. The one place
+a raw UUID remains is the Proof of Payment's
+`canonical_issuance_snapshot.attachment.id`: that document is hashed into the
+deposit address and its schema is frozen, so it carries the UUID the `att_`
+id wraps.
+
 API-key traffic has a process-local per-account token bucket: capacity 60,
 refill one request per second. Responses include `X-RateLimit-Limit`,
 `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. A rejected request returns
 `429 rate_limited` and `Retry-After: 1`.
 
 Block numbers, log indexes, and exact base-unit amounts are decimal strings. Human
-USDC values are decimal strings with six-decimal precision. Timestamps are RFC
-3339 unless explicitly described as Unix seconds.
+USDC values are decimal strings with six-decimal precision. Every timestamp
+is RFC 3339 in UTC to the second with a `Z` suffix (`2026-09-06T12:00:00Z`),
+in API responses and webhook payloads alike, unless explicitly described as
+Unix seconds.
 
 ## Deposit requests
 
@@ -63,8 +106,8 @@ Requires `Idempotency-Key` containing 1–255 bytes.
   "reference": "INV-1042",
   "notes": "Net 30. Thank you.",
   "payer_policy": {"mode": "verified_email", "expected_email": "alice@customer.example"},
-  "attachment_id": "0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "customer_id": "0198f80c-1111-7dc1-a369-90556a64f700",
+  "attachment_id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
   "expires_in": 3600,
   "metadata": {"po": "PO-77"}
 }
@@ -73,14 +116,15 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | Field | Rules |
 |---|---|
 | `amount` | Required positive USDC decimal; at most six fractional digits. Used directly; nothing is summed or reconciled |
-| `payout_address` | Required nonzero EVM address; receives exactly `amount` |
-| `issuer`, `payer` | Required parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. A `payer.email` is also where Payday emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
+| `payout_address` | Nonzero EVM address; receives exactly `amount`. Optional when `issuer_id` names an identity with a saved payout address, whose first address is then used |
+| `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is optional when `issuer_id` is given and `payer` when `customer_id` is given: the saved record's name, email (`contact_email` for an identity), and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Payday emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
 | `payer_policy` | Required; one of the three modes below |
-| `customer_id` | Optional customer UUID owned by the account; the deposit request still stores its own `payer` snapshot |
+| `customer_id` | Optional `cus_` id of a customer the account owns; the deposit request still stores its own `payer` snapshot |
+| `issuer_id` | Optional `iss_` id of an issuer identity the account owns, stored immutably beside the issued document; see [Issuer identities](#issuer-identities) |
 | `notes` | Optional, up to 4,000 bytes |
 | `heading` | Optional short description, up to 200 bytes; shown to the payer before verification on gated deposit requests |
 | `reference` | Optional merchant reference, at most 128 characters |
-| `attachment_id` | Optional finalized attachment UUID; one PDF per deposit request |
+| `attachment_id` | Optional `att_` id of a finalized attachment; one PDF per deposit request |
 | `expires_in` | Optional lifetime in seconds |
 | `expires_at` | Optional RFC 3339 deadline; mutually exclusive with `expires_in` |
 | `chain_id`, `token_address` | Optional deployment overrides; otherwise configured chain/native USDC |
@@ -116,6 +160,12 @@ C0 control) with `400 invalid_request`; multi-line free text keeps its line
 breaks and tabs. The check runs before anything is stored, so a bad document
 never leaves a half-issued deposit request or a retagged attachment behind.
 
+The smallest valid request names saved records and nothing else:
+
+```json
+{"amount": "10.50", "issuer_id": "iss_0198f80c-…", "customer_id": "cus_0198f80c-…", "payer_policy": {"mode": "permissionless"}}
+```
+
 Unknown fields are rejected; `memo` and `refund_address` are not fields.
 Recovery is not a request field: it is the payer's attested wallet, bound
 after issuance. Expiry defaults to 24 hours and must be 10 minutes to 366 days
@@ -150,10 +200,12 @@ Lists newest first. Query parameters:
 - `starting_after`: complete `dr_…` cursor returned as `next_cursor`.
 
 Returns `{ "deposit_requests": [DepositRequestSummary], "next_cursor": null | "dr_…" }`.
-Summaries contain `id`, `heading`, `payer_name`, `reference`, `metadata`,
-`payer_policy_mode`, `customer_id`, `has_attachment`,
-`verification_completed_at`, `likely_unsolicited_at`, `created_at`, `status`,
-`amount`, `received`, and `cancellation_requested_at`.
+Summaries contain `id`, `deposit_url`, `heading`, `payer_name`, `reference`,
+`metadata`, `payer_policy_mode`, `customer_id`, `issuer_id`,
+`has_attachment`, `verification_completed_at`, `likely_unsolicited_at`,
+`created_at`, `updated_at`, `expires_at`, `status`, `amount`, `received`, and
+`cancellation_requested_at`: what a list needs to render and link each row
+without a second read.
 
 ### `GET /v1/deposit-requests/{reference}`
 
@@ -167,15 +219,16 @@ timeout is 1–30 seconds and defaults to 30. The request returns when
 
 ### `POST /v1/deposit-requests/{reference}/cancel`
 
-Returns `{ "deposit_request": DepositRequest, "advisory": "…" }`. Cancellation is
-presentation-only: it records `cancellation_requested_at` but cannot disable the
-address or change immutable settlement terms.
+Returns the `DepositRequest` with `cancellation_requested_at` set. Cancellation
+is presentation-only: it records the request but cannot disable the address
+or change the immutable settlement terms the address commits to.
 
 ### `GET /v1/deposit-requests/{reference}/transfers`
 
-Returns finalized transfer provenance as an array. Each item has `timestamp`,
-`amount`, `amount_base_units`, `sender`, `transaction_hash`, optional
-`explorer_url`, `block`, `disposition`, and `collected`.
+Returns `{ "transfers": [Transfer] }`, the finalized transfer provenance. Each
+item has `timestamp`, `amount`, `amount_base_units`, `sender`,
+`transaction_hash`, optional `explorer_url`, `block`, `disposition`
+(`credited`, `late`, or `zero`), and `collected`.
 
 ### `GET /v1/deposit-requests/{reference}/attachment`
 
@@ -185,7 +238,7 @@ for a few minutes (`PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS`, default 300).
 
 ```json
 {
-  "id": "0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "filename": "request.pdf",
   "mime_type": "application/pdf",
   "byte_length": "48211",
@@ -227,7 +280,10 @@ verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/deposit-requests/{reference}/proof`
 
-Returns the Proof of Payment JSON (`payday.proof.v2`) for a settled deposit request;
+Returns the Proof of Payment JSON (`payday.proof.v2`) for a settled deposit request
+(`payment_id` is the `dr_` id; inside `canonical_issuance_snapshot`, `attachment.id`
+is the raw UUID behind the API's `att_` id, since that document is the hashed
+commitment and its schema is frozen);
 `409 deposit_request_not_settled` before then, and `409 deposit_sender_mismatch` when
 any credited transfer came from a wallet other than the attested one, since
 no proof can then claim the attested wallet paid. The proof carries the
@@ -295,9 +351,13 @@ rejected.
 - `POST /v1/customers` → `201 Customer`;
 - `GET /v1/customers?limit=1..100&starting_after={id}` →
   `{ "customers": [Customer], "next_cursor": null | id }`;
-- `GET /v1/customers/{id}` → `Customer`; cross-account IDs are
+- `GET /v1/customers/{id}` → `Customer` plus `stats {request_count,
+  collected_base_units, pending_base_units}`; cross-account IDs are
   `404 customer_not_found`;
-- `PATCH /v1/customers/{id}` with the same body as create → updated `Customer`.
+- `PATCH /v1/customers/{id}` with any subset of `name`, `email`, and
+  `details` → updated `Customer`. A field left out keeps its value; `email`
+  or `details` sent as `null` is cleared. The merged record is validated
+  whole, so `{"name": "  "}` is `400 invalid_request`.
 
 `Customer` contains `id`, `name`, `email`, `details`, `created_at`, and
 `updated_at`.
@@ -321,8 +381,10 @@ addresses may repeat: two identities can share a support mailbox.
   `{ "issuers": [Issuer], "next_cursor": null | id }`;
 - `GET /v1/issuers/{id}` → `Issuer`; cross-account IDs are
   `404 issuer_not_found`;
-- `PATCH /v1/issuers/{id}` with the same body as create → updated `Issuer`. A
-  different `contact_email` clears the verification;
+- `PATCH /v1/issuers/{id}` with any subset of `name`, `contact_email`, and
+  `details` → updated `Issuer`. A field left out keeps its value and
+  `details: null` clears it, so a rename alone never touches a proven
+  mailbox; a different `contact_email` clears the verification;
 - `DELETE /v1/issuers/{id}` → `204`, with its payout-address associations.
 
 The contact address is proven before a deposit request carries it, because payers are
@@ -359,8 +421,12 @@ An identity's `id` is the durable handle. `POST /v1/deposit-requests` takes it a
 `issuer_id`, stores it immutably beside the issued document, and returns it on
 `DepositRequest` and `DepositRequestSummary` — so the requests issued under an identity stay
 identifiable after it is renamed, moved to another mailbox, or pointed at
-different wallets. The `issuer` party on the deposit request remains the snapshot taken
-at issuance, and is what the attribution hash commits to. Deleting an identity
+different wallets. A request that names `issuer_id` may leave `issuer` and
+`payout_address` out: the identity's name, `contact_email`, and details
+become the `issuer` party, and its first saved payout address the
+`payout_address`. Either may still be given inline, and then wins. The
+`issuer` party on the deposit request remains the snapshot taken at
+issuance, and is what the attribution hash commits to. Deleting an identity
 that requests were issued under is `409 issuer_in_use`.
 
 `Issuer` contains `id`, `name`, `contact_email`, `details`, `email_verified`,
@@ -419,9 +485,10 @@ The SDK's `attachments.upload` performs the whole exchange.
 ## Account-key API
 
 These routes take a dashboard session (the Privy identity token), never a
-Payday API key — a key presenting itself here gets `401 identity_unauthorized`:
+Payday API key — a key presenting itself here gets `401 identity_unauthorized`.
+The key has no read route of its own: `GET /v1/account` is where its
+non-secret state (`key_hint`, `generation`, rotation timestamps) lives.
 
-- `GET /v1/account/api-key` — the same non-secret account as `GET /v1/account`;
 - `POST /v1/account/api-key` with `{ "expected_generation": N }` — first
   issuance (`201`) or safe rotation (`200`), returning the plaintext key once;
   the previous key remains valid for 24 hours. A signed-in account already
@@ -434,15 +501,32 @@ Generation checks prevent racing an unexpected rotation.
 
 ## Webhooks
 
-- `POST /v1/webhooks` with `{ "url": "https://…" }` → `201`; secret returned once;
-- `GET /v1/webhooks` → active endpoints without secrets;
-- `DELETE /v1/webhooks/{uuid}` → disable endpoint;
-- `POST /v1/webhooks/{uuid}/test` → `202 {"delivery_id":"…"}`;
-- `GET /v1/webhook-deliveries` → delivery state and immutable attempt history.
+- `POST /v1/webhooks` with `{ "url": "https://…" }` → `201 Webhook` with
+  `secret`, returned once; `503 webhooks_unavailable` on a deployment with
+  no webhook encryption key;
+- `GET /v1/webhooks` → `{ "webhooks": [Webhook] }`, the active endpoints
+  without secrets;
+- `GET /v1/webhooks/{id}` → `Webhook`, disabled or not, without its secret;
+- `DELETE /v1/webhooks/{id}` → `204`; disables the endpoint. Idempotent, and
+  its delivery history stays readable;
+- `POST /v1/webhooks/{id}/test` → `202 { "delivery_id": "…" }`; queues a
+  `webhook.test` event for this endpoint only. A disabled endpoint is
+  `404 webhook_not_found`;
+- `GET /v1/webhook-deliveries?endpoint_id=&limit=1..100&starting_after={id}`
+  → `{ "deliveries": [Delivery], "next_cursor": null | id }`, newest first,
+  each with its immutable `attempts[]`.
 
-URLs must be credential-free HTTPS public destinations; redirects and private,
-loopback, link-local, or reserved targets are rejected. See
-[Webhooks](webhooks.md) for signatures, event types, and retry policy.
+`Webhook` contains `id`, `url`, `created_at`, and `disabled_at`. `Delivery`
+contains `id`, `event_id`, `endpoint_id`, `state` (`pending`, `delivered`, or
+`failed`), `attempt_count`, `next_attempt_at`, `delivered_at`, `created_at`,
+and `attempts[{number, attempted_at, duration_ms, status, error}]`. A
+missing, malformed, or another account's endpoint id is
+`404 webhook_not_found` everywhere.
+
+URLs must be credential-free HTTPS public destinations named by DNS hostname;
+redirects and private, loopback, link-local, or reserved targets are
+rejected. See [Webhooks](webhooks.md) for signatures, event types, payloads,
+and retry policy.
 
 ## Payer links and documentation
 
@@ -620,6 +704,7 @@ limited to 8 KiB.
 | `identity_provider_unavailable` | 502 | Auth0 did not answer the passwordless exchange |
 | `verification_unavailable` | 503 | The deployment has no payer audience configured |
 | `identity_unauthorized` | 401 | An account-key route was called without a dashboard session (an API key, or an invalid Privy identity token) |
+| `admin_unauthorized` | 401 | An operator route was called without the operator credential |
 | `identity_unavailable` | 503 | The identity provider's keys could not be fetched; sessions cannot be verified |
 | `account_disabled` | 403 | Account disabled |
 | `account_contact_required` | 409 | Login again to attach a verified merchant email |
@@ -627,13 +712,19 @@ limited to 8 KiB.
 | `api_key_generation_conflict` | 409 | Key generation changed or was omitted incorrectly |
 | `missing_idempotency_key` | 400 | Create header absent |
 | `idempotency_conflict` | 409 | Key reused with any different immutable deposit request field, including the attachment hash; fetch the original with `GET` |
-| `invalid_request` | 400 | Invalid field, query, JSON, or request shape, including control characters in a text field |
+| `invalid_request` | 400 | Invalid field, query, JSON, or request shape — malformed JSON, a missing or unknown field, a wrong type, a missing JSON content type, control characters in a text field — with the problem named in the message |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
 | `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
 | `deposit_request_not_found` | 404 | Missing or cross-account deposit request |
 | `customer_not_found` | 404 | Missing or cross-account customer |
 | `issuer_not_found` | 404 | Missing or cross-account issuer identity |
 | `payout_address_not_found` | 404 | Missing or cross-account payout address |
+| `webhook_not_found` | 404 | Missing, malformed, or cross-account webhook endpoint; also a disabled endpoint asked to send a test event |
+| `webhooks_unavailable` | 503 | The deployment has no webhook encryption key, so no endpoint can be registered |
+| `onboarding_deposit_unavailable` | 503 | The deployment has no onboarding payer wallet (dashboard walkthrough only) |
+| `onboarding_deposit_not_eligible`, `onboarding_deposit_already_claimed` | 409 | The onboarding demo deposit was asked of a request that is not the walkthrough's, or a second time (dashboard walkthrough only) |
+| `wallet_pregeneration_unavailable` | 503 | The deployment has no Privy app secret for wallet pregeneration (dashboard sign-up only) |
+| `deposit_request_not_blocked` | 409 | An operator release was asked of a request that needs no attention |
 | `issuer_email_already_verified` | 409 | The contact address is already proven |
 | `issuer_in_use` | 409 | Requests were issued under this identity |
 | `issuer_name_taken` | 409 | Another of your identities already uses this name |

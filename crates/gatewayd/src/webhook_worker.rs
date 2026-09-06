@@ -129,7 +129,9 @@ async fn deliver(key: [u8; 32], job: &gateway_db::DeliveryClaim) -> Result<u16, 
     let secret = cipher
         .decrypt(&Nonce::from(nonce), &job.secret_ciphertext[12..])
         .map_err(|_| "secret decryption failed")?;
-    let body = serde_json::to_vec(&job.payload).map_err(|e| e.to_string())?;
+    let mut payload = job.payload.clone();
+    checksum_addresses(&mut payload);
+    let body = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -140,7 +142,10 @@ async fn deliver(key: [u8; 32], job: &gateway_db::DeliveryClaim) -> Result<u16, 
     let signature = hex::encode(mac.finalize().into_bytes());
     let response = http
         .post(url)
-        .header("Payday-Event-Id", job.event_id.to_string())
+        .header(
+            "Payday-Event-Id",
+            gateway_core::WebhookEventId(job.event_id).to_string(),
+        )
         .header("Payday-Event-Type", &job.event_type)
         .header(
             "Payday-Signature",
@@ -154,9 +159,51 @@ async fn deliver(key: [u8; 32], job: &gateway_db::DeliveryClaim) -> Result<u16, 
     Ok(response.status().as_u16())
 }
 
+/// The database renders the deposit request's addresses as lowercase hex,
+/// having no keccak to checksum with; the API renders them EIP-55. A handler
+/// comparing the two must not have to normalize, so the body is brought to
+/// the API's form here, before it is signed. Anything that is not a 20-byte
+/// hex address is left exactly as it was.
+fn checksum_addresses(payload: &mut serde_json::Value) {
+    let Some(deposit_request) = payload
+        .get_mut("data")
+        .and_then(|data| data.get_mut("deposit_request"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for field in ["payer_wallet", "address"] {
+        if let Some(serde_json::Value::String(value)) = deposit_request.get_mut(field)
+            && let Ok(address) = value.parse::<alloy_primitives::Address>()
+        {
+            *value = address.to_checksum(None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivered_addresses_are_checksummed_like_the_api() {
+        let mut payload = serde_json::json!({
+            "data": {"deposit_request": {
+                "payer_wallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+                "address": null,
+                "status": "settled"
+            }}
+        });
+        checksum_addresses(&mut payload);
+        assert_eq!(
+            payload["data"]["deposit_request"]["payer_wallet"],
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+        );
+        assert!(payload["data"]["deposit_request"]["address"].is_null());
+        let mut test_event = serde_json::json!({"data": {"test": true}});
+        let before = test_event.clone();
+        checksum_addresses(&mut test_event);
+        assert_eq!(test_event, before);
+    }
     #[test]
     fn rejects_non_public_ranges() {
         for ip in [

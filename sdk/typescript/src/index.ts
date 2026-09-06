@@ -41,9 +41,22 @@ export interface AttachmentDescriptor {
 
 export interface CreateDepositRequest {
   amount: string;
-  payout_address: string;
-  issuer: Party;
-  payer: Party;
+  /**
+   * Where exactly `amount` settles. May be left out when `issuer_id` names an
+   * identity with a saved payout address: its first one is used.
+   */
+  payout_address?: string;
+  /**
+   * The issuing party as the document will carry it. May be left out when
+   * `issuer_id` is given: the identity's name, contact address, and details
+   * are snapshotted in its place. An inline party always wins.
+   */
+  issuer?: Party;
+  /**
+   * The paying party. May be left out when `customer_id` is given: the saved
+   * customer is snapshotted in its place. An inline party always wins.
+   */
+  payer?: Party;
   payer_policy: PayerPolicy;
   customer_id?: string;
   /**
@@ -319,6 +332,7 @@ export interface WalletChallenge {
 
 export interface DepositRequestSummary {
   id: string;
+  deposit_url: string;
   heading: string | null;
   payer_name: string;
   reference: string | null;
@@ -330,6 +344,8 @@ export interface DepositRequestSummary {
   verification_completed_at: string | null;
   likely_unsolicited_at: string | null;
   created_at: string;
+  updated_at: string;
+  expires_at: string;
   status: DepositRequestStatus;
   amount: string;
   received: string;
@@ -353,7 +369,7 @@ export interface Transfer {
   transaction_hash: string; explorer_url: string | null; sender: string; amount: string; amount_base_units: string;
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
 }
-export interface CancelDepositRequestResponse { deposit_request: DepositRequest; advisory: string }
+export interface TransferList { transfers: Transfer[] }
 /** Internal: the dashboard onboarding walkthrough's one real demo transfer. */
 export interface OnboardingDepositResponse { payer_session: string; tx_hash: string }
 
@@ -390,6 +406,12 @@ export interface CreateIssuer {
   contact_email: string;
   details?: string;
 }
+/**
+ * A partial update: a field left out keeps its value; `details: null` clears
+ * it. A changed `contact_email` clears the verification, so a rename alone
+ * never touches a proven mailbox.
+ */
+export interface UpdateIssuer { name?: string; contact_email?: string; details?: string | null }
 export interface ListIssuersParams { starting_after?: string; limit?: number }
 export interface IssuerPage { issuers: Issuer[]; next_cursor: string | null }
 /** Where the code went, and when another may be asked for. */
@@ -409,8 +431,8 @@ export interface Customer {
   updated_at: string;
 }
 export interface CreateCustomer { name: string; email?: string; details?: string }
-/** Full replacement of the editable fields; a field left out or set to null is cleared. */
-export interface UpdateCustomer { name: string; email?: string | null; details?: string | null }
+/** A partial update: a field left out keeps its value; `email: null` or `details: null` clears it. */
+export interface UpdateCustomer { name?: string; email?: string | null; details?: string | null }
 export interface ListCustomersParams { starting_after?: string; limit?: number }
 export interface CustomerPage { customers: Customer[]; next_cursor: string | null }
 /** Base units, like a deposit request's own `amount_base_units` — scale for display. */
@@ -555,16 +577,31 @@ export interface ServiceStatus {
   indexer: { cursor_block: string | null; cursor_at: string | null; lag_blocks: number | null };
   sweeper: { state: string; queued: number };
 }
-export interface Webhook { id: string; url: string; created_at: string; secret?: string }
+export interface Webhook {
+  id: string;
+  url: string;
+  created_at: string;
+  /** Set once disabled: no longer listed, receives nothing, but still readable with its deliveries. */
+  disabled_at: string | null;
+  /** The signing secret, on the response to `webhooks.add` only. */
+  secret?: string;
+}
+export interface WebhookList { webhooks: Webhook[] }
 export interface TestDelivery { delivery_id: string }
-export interface RemovedWebhook { id: string; disabled: true }
 export interface DeliveryAttempt {
   number: number; attempted_at: string; duration_ms: number; status: number | null; error: string | null;
 }
 export interface WebhookDelivery {
-  id: string; event_id: string; endpoint_id: string; state: string; attempt_count: number;
-  next_attempt_at: string; delivered_at: string | null; attempts: DeliveryAttempt[];
+  id: string; event_id: string; endpoint_id: string; state: "pending" | "delivered" | "failed"; attempt_count: number;
+  next_attempt_at: string; delivered_at: string | null; created_at: string; attempts: DeliveryAttempt[];
 }
+export interface ListWebhookDeliveriesParams {
+  /** Only this endpoint's deliveries, disabled or not. */
+  endpoint_id?: string;
+  starting_after?: string;
+  limit?: number;
+}
+export interface WebhookDeliveryPage { deliveries: WebhookDelivery[]; next_cursor: string | null }
 
 /** The account: who it is, where it settles, and its key state — never the key itself, which only `account.issueApiKey` ever returns. */
 export interface AccountMetadata {
@@ -736,7 +773,12 @@ export class PaydayClient {
     },
     list: (params: ListDepositRequestsParams = {}): Promise<DepositRequestPage> =>
       this.request(`/v1/deposit-requests${query(params)}`),
-    cancel: (id: string): Promise<CancelDepositRequestResponse> =>
+    /**
+     * Records the cancellation and returns the deposit request with
+     * `cancellation_requested_at` set. Presentation only: it cannot disable
+     * the address or change the settlement terms the address commits to.
+     */
+    cancel: (id: string): Promise<DepositRequest> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
     /**
      * Internal: the dashboard onboarding walkthrough's one real demo
@@ -746,7 +788,8 @@ export class PaydayClient {
      */
     onboardingDeposit: (id: string): Promise<OnboardingDepositResponse> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/onboarding-deposit`, { method: "POST" }),
-    transfers: (id: string): Promise<Transfer[]> =>
+    /** Finalized transfer provenance for the deposit request. */
+    transfers: (id: string): Promise<TransferList> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/transfers`),
     /** The deposit request's PDF attachment with a short-lived `download_url`. */
     attachment: (id: string): Promise<AttachmentDescriptor> =>
@@ -811,8 +854,8 @@ export class PaydayClient {
       this.request(`/v1/issuers/${encodeURIComponent(id)}`),
     list: (params: ListIssuersParams = {}): Promise<IssuerPage> =>
       this.request(`/v1/issuers${query(params)}`),
-    /** Full replacement; a different `contact_email` clears the verification. */
-    update: (id: string, issuer: CreateIssuer): Promise<Issuer> =>
+    /** Partial: only the fields given change; a different `contact_email` clears the verification. */
+    update: (id: string, issuer: UpdateIssuer): Promise<Issuer> =>
       this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "PATCH", body: issuer }),
     remove: (id: string): Promise<void> =>
       this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -893,14 +936,27 @@ export class PaydayClient {
     },
   };
 
+  /**
+   * Webhook endpoints and their delivery history. A missing, malformed, or
+   * foreign id is `404 webhook_not_found`; `add` throws `webhooks_unavailable`
+   * (503) on a deployment with no webhook encryption key.
+   */
   readonly webhooks = {
+    /** Registers a credential-free public HTTPS URL; the secret is returned once. */
     add: (url: string): Promise<Webhook> => this.request("/v1/webhooks", { method: "POST", body: { url } }),
-    list: (): Promise<Webhook[]> => this.request("/v1/webhooks"),
-    remove: (id: string): Promise<RemovedWebhook> =>
+    /** Active endpoints, without secrets. */
+    list: (): Promise<WebhookList> => this.request("/v1/webhooks"),
+    /** One endpoint, disabled or not, without its secret. */
+    get: (id: string): Promise<Webhook> => this.request(`/v1/webhooks/${encodeURIComponent(id)}`),
+    /** Disables the endpoint. Idempotent; its delivery history stays readable. */
+    remove: (id: string): Promise<void> =>
       this.request(`/v1/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    /** Queues a `webhook.test` event for this endpoint only. */
     test: (id: string): Promise<TestDelivery> =>
       this.request(`/v1/webhooks/${encodeURIComponent(id)}/test`, { method: "POST" }),
-    deliveries: (): Promise<WebhookDelivery[]> => this.request("/v1/webhook-deliveries"),
+    /** Deliveries newest first, with each one's attempt history; page with `starting_after`. */
+    deliveries: (params: ListWebhookDeliveriesParams = {}): Promise<WebhookDeliveryPage> =>
+      this.request(`/v1/webhook-deliveries${query(params)}`),
   };
 
   status(): Promise<ServiceStatus> { return this.request("/v1/status"); }
