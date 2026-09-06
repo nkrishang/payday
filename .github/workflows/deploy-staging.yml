@@ -109,6 +109,7 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         env:
           TF_VAR_rpc_url: ${{ secrets.STAGING_RPC_URL }}
+          TF_VAR_resend_api_key: ${{ secrets.STAGING_RESEND_API_KEY }}
           TF_IN_AUTOMATION: "true"
         run: |
           terraform -chdir=infra init -input=false -backend-config=environments/staging.backend.hcl

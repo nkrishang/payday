@@ -5,6 +5,7 @@ mod config;
 mod deployment;
 mod dispatcher;
 mod onboarding_payer;
+mod payer_email;
 mod payer_identity;
 mod pregenerated_wallet;
 mod request_pdf;
@@ -99,7 +100,8 @@ async fn main() {
                 Some(Arc::new(
                     pregenerated_wallet::PrivyPregeneration::new(app_id, app_secret)
                         .unwrap_or_else(|error| panic!("{error}")),
-                ) as Arc<dyn pregenerated_wallet::WalletPregenerator>)
+                )
+                    as Arc<dyn pregenerated_wallet::WalletPregenerator>)
             }
             None => None,
         };
@@ -182,14 +184,31 @@ async fn main() {
         );
     }
 
+    // The dispatcher renders the payer's link and reads the request it is
+    // about through the same repositories the routes use.
+    let (invoices, payer_access) = (state.repo.clone(), state.payer.clone());
     let app = api::router(state);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let dispatcher = config.notification_from_address().map(|from| {
+    let senders = dispatcher::Senders {
+        merchant: config
+            .notification_from_address()
+            .map(|from| (aws_sdk_sesv2::Client::new(&aws), from.to_owned())),
+        payer: config.resend().map(|resend| {
+            payer_email::ResendClient::new(resend.api_key.clone(), resend.from.clone())
+        }),
+    };
+    if senders.payer.is_none() {
+        tracing::warn!(
+            "PAYDAY_RESEND_API_KEY is unset; payers named on a deposit request are not emailed"
+        );
+    }
+    let dispatcher = (!senders.recipients().is_empty()).then(|| {
         tokio::spawn(dispatcher::run(
             notifications,
-            aws_sdk_sesv2::Client::new(&aws),
-            from.to_owned(),
+            invoices,
+            payer_access,
+            senders,
             shutdown_rx,
         ))
     });

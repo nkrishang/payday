@@ -185,6 +185,9 @@ Payday AWS account.
    `AWS_STAGING_DEPLOY_ROLE_ARN`, from
    `terraform -chdir=infra output -raw github_deploy_role_arn`, and
    `STAGING_RPC_URL`, the same endpoint you exported as `TF_VAR_rpc_url`.
+   A third, `STAGING_RESEND_API_KEY`, is optional: with it, staging emails
+   payers their deposit requests through Resend; without it, those emails
+   queue unsent.
    Commit the filled-in tfvars. The next merge to `main` deploys itself; or
    run the workflow by hand once from the Actions tab to confirm.
 8. **Verify.** `just web-staging`, sign in, mint a key, and run

@@ -72,6 +72,12 @@ Route53 zone covers only `domain_name`. Before launch, also move the SES
 account out of the sandbox in this region and verify a test message from
 `notification_from_address` reaches an external recipient.
 
+Payers named with an email on a deposit request are emailed their link
+through Resend, not SES. Supply the key as `TF_VAR_resend_api_key` (never in
+a tfvars file); the stack stores it in Secrets Manager and passes it to the
+API as `PAYDAY_RESEND_API_KEY` together with `payer_email_from`. Left empty,
+those emails queue unsent.
+
 ## Sandbox deployment
 
 The same architecture can be instantiated independently for Monad testnet.

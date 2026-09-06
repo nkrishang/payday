@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::attachments::{AttachInvoiceError, DbAttachment, attach_in_transaction};
 use crate::cursor::IndexerCursor;
+use crate::notifications::{NotificationRecipient, PAYER_DEPOSIT_REQUEST_ISSUED};
 use crate::{AccountId, attachments};
 use gateway_core::{
     Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
@@ -349,6 +350,12 @@ pub struct CreateInvoiceInput {
     pub issuance_snapshot: CanonicalIssuanceSnapshot,
     pub attribution_version: u16,
     pub attribution_hash: [u8; 32],
+    /// Where to send the payer their copy of the request, if anywhere. Set
+    /// by the API from `payer.email` when the request is one a payer can
+    /// open from a link; the row is queued in the issuance transaction so a
+    /// request is never issued without its email, or emailed without being
+    /// issued.
+    pub payer_notification_email: Option<String>,
 }
 
 /// Merchant-controlled issuance fields used by both the optimistic API replay
@@ -483,6 +490,7 @@ impl CreateInvoiceInput {
             issuance_snapshot: snapshot.clone(),
             attribution_version: invoice.attribution_version,
             attribution_hash: invoice.attribution_hash.into(),
+            payer_notification_email: None,
         }
     }
 
@@ -643,6 +651,19 @@ impl InvoiceRepository {
             }
             None => None,
         };
+        if let Some(email) = &input.payer_notification_email {
+            sqlx::query(
+                "INSERT INTO notification_outbox(id,account_id,invoice_id,recipient,reason,email) VALUES($1,$2,$3,$4,$5,$6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(input.account_id.0)
+            .bind(row.id)
+            .bind(NotificationRecipient::Payer.as_str())
+            .bind(PAYER_DEPOSIT_REQUEST_ISSUED)
+            .bind(email)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(InsertIssuedInvoice {
             row,
@@ -2202,6 +2223,82 @@ pub(crate) mod tests {
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn issuance_queues_the_payer_email_once_and_only_when_asked(pool: PgPool) {
+        let account = AccountId(Uuid::now_v7());
+        sqlx::query("INSERT INTO accounts(id,api_key_hash,api_key_hint,email) VALUES($1,$2,'hint','merchant@example.com')")
+            .bind(account.0).bind(account.0.as_bytes().repeat(2)).execute(&pool).await.unwrap();
+        let repo = InvoiceRepository::new(pool.clone());
+        let notifications = crate::NotificationRepository::new(pool.clone());
+
+        let mut input = issuance_input(account, "emailed", None);
+        input.payer_notification_email = Some("payer@example.com".into());
+        let issued = repo.insert_issued(&input, None).await.unwrap();
+        assert!(!issued.replayed);
+        // A replay of the same request issues nothing, so it queues nothing.
+        let replayed = repo.insert_issued(&input, None).await.unwrap();
+        assert!(replayed.replayed);
+        let quiet = issuance_input(account, "quiet", None);
+        repo.insert_issued(&quiet, None).await.unwrap();
+
+        let queued: Vec<(Uuid, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT invoice_id, recipient, reason, email FROM notification_outbox WHERE account_id=$1",
+        )
+        .bind(account.0)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            queued,
+            vec![(
+                issued.row.id,
+                "payer".to_string(),
+                PAYER_DEPOSIT_REQUEST_ISSUED.to_string(),
+                Some("payer@example.com".to_string())
+            )]
+        );
+
+        // A dispatcher without a payer sender never leases the row.
+        assert!(
+            notifications
+                .claim(&[NotificationRecipient::Merchant])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let event = notifications
+            .claim(&[NotificationRecipient::Payer])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.invoice_id, issued.row.id);
+        assert_eq!(event.recipient, "payer");
+        assert_eq!(event.attempts, 1);
+        notifications
+            .abandon(event.id, "invalid `to`")
+            .await
+            .unwrap();
+        assert!(
+            notifications
+                .claim(&[
+                    NotificationRecipient::Payer,
+                    NotificationRecipient::Merchant
+                ])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (abandoned, error): (bool, Option<String>) = sqlx::query_as(
+            "SELECT abandoned_at IS NOT NULL, last_error FROM notification_outbox WHERE id=$1",
+        )
+        .bind(event.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(abandoned);
+        assert_eq!(error.as_deref(), Some("invalid `to`"));
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn attention_transition_notifies_once_and_release_is_guarded(pool: PgPool) {
         let account = AccountId(Uuid::now_v7());
         sqlx::query("INSERT INTO accounts(id,api_key_hash,api_key_hint,email) VALUES($1,$2,'hint','merchant@example.com')")
@@ -2278,7 +2375,11 @@ pub(crate) mod tests {
             1
         );
         let notifications = crate::NotificationRepository::new(pool.clone());
-        let missing = notifications.claim().await.unwrap().unwrap();
+        let missing = notifications
+            .claim(&[NotificationRecipient::Merchant])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(missing.email.is_none());
         assert!(
             notifications
@@ -2292,7 +2393,13 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
         );
-        assert!(notifications.claim().await.unwrap().is_none());
+        assert!(
+            notifications
+                .claim(&[NotificationRecipient::Merchant])
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         assert!(matches!(
             repo.release_blocked(Uuid::now_v7()).await,

@@ -26,6 +26,24 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Added
+
+- A payer named with an `email` on a deposit request is emailed their link
+  to it as the request is issued, from the dashboard or the API alike. The
+  message comes from `contact@payday.sh` through Resend
+  (`PAYDAY_RESEND_API_KEY`, `PAYDAY_PAYER_EMAIL_FROM`; `resend_api_key` and
+  `payer_email_from` in Terraform), in Payday's design, and names the
+  issuer, the amount, the heading and reference, and the expiry, with a
+  button to the `deposit_url` and `contact@payday.sh` for questions. It is
+  queued in the issuing transaction, as a `payer` row of the notification
+  outbox, and sent by the dispatcher that already delivers merchant
+  attention email, so issuance never waits on the provider, transient
+  failures retry on the outbox's backoff, and a rejection the provider
+  will not change (`abandoned_at`) or a request that was cancelled, funded,
+  or expired first is dropped rather than retried. Merchant-session
+  requests and the onboarding walkthrough's reserved mailbox are never
+  emailed. The dashboard's composer says so under the payer's email.
+
 ### Changed
 
 - The public status page is gone: the `status.payday.sh` hostname, the

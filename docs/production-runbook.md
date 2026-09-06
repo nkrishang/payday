@@ -29,6 +29,7 @@ address's recovery term. Payday custodies no USDC.
 | Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
 | Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
 | Merchant notification email | SES identity for `payday.sh` | `alerts@payday.sh` | `infra/` |
+| Payer deposit request email | Resend, with the API's own key (`resend_api_key`) | `contact@payday.sh` | `infra/` |
 | Merchant sign-in | Privy app (email code, embedded wallet, identity token) | | `docs/authentication.md` |
 | Payer and issuer-mailbox codes | Auth0 tenant (Terraform in `auth0/`) sending through Resend | | `auth0/README.md` |
 | Contracts | `PaymentFactory` + `BatchSweeper`, one generation, on Monad mainnet | | `foundry/` |
@@ -231,7 +232,9 @@ The outputs this runbook needs:
   Terraform in `auth0/` (`terraform -chdir=auth0 apply`, with its own state
   key as described in [`auth0/README.md`](../auth0/README.md));
 - a Resend sending domain verified and connected to Auth0 as its email
-  provider. The Resend API key lives only in Auth0.
+  provider. The API needs a Resend API key of its own as well (§6): it
+  emails payers their deposit requests from `contact@payday.sh`, so the
+  verified domain must cover that address.
 
 The payer verification settings are optional to Terraform as a group: leave
 `payer_auth0_audience` and `payer_auth0_client_id` unset and the API still
@@ -304,7 +307,13 @@ Replace every placeholder in `terraform.tfvars`, including:
 
 ```bash
 export TF_VAR_rpc_url="$MONAD_RPC_URL"
+export TF_VAR_resend_api_key="$RESEND_API_KEY"
 ```
+
+The Resend key is optional to Terraform: leave it unset and the stack passes
+no `PAYDAY_RESEND_API_KEY`, so the API queues each payer's deposit request
+email but sends none until a key is configured. `payer_email_from` defaults
+to `Payday <contact@payday.sh>`.
 
 ## 7. Bootstrap ECR, push images, and create the AWS stack
 
