@@ -11,33 +11,21 @@ export const ATTACHMENTS: EndpointGroup = {
       method: "POST",
       path: "/v1/attachments",
       auth: "key",
-      summary:
-        "Reserve a presigned slot for one PDF. PUT the bytes to upload_url with exactly the returned headers, then finalize.",
+      summary: "Reserves a presigned upload slot for one PDF.",
       body: (
         <p>
-          The headers include <code>If-None-Match: *</code>, which makes the object write-once: a
-          second <code>PUT</code> fails, so the bytes Payday hashes cannot be swapped afterwards.
-          The slot expires; reserve another if it has. The API never receives the bytes.
+          <code>PUT</code> the bytes to <code>upload_url</code> with <code>headers</code> verbatim.
+          The headers include <code>If-None-Match: *</code>: the object is write-once. The API never
+          receives the bytes. Slots expire; reserve again.
         </p>
       ),
-      bodyFields: [
-        {
-          name: "filename",
-          type: "string",
-          required: true,
-          description: "Shown to the payer and on the request.",
-        },
-      ],
+      bodyFields: [{ name: "filename", type: "string", required: true, description: "" }],
       response: {
         fields: [
-          { name: "id", type: "att_ id", description: "The attachment." },
-          { name: "upload_url", type: "string", description: "Where to PUT the bytes." },
-          { name: "headers", type: "object", description: "Send these verbatim with the PUT." },
-          {
-            name: "expires_at",
-            type: "timestamp",
-            description: "When the slot stops accepting the PUT.",
-          },
+          { name: "id", type: "att_ id", description: "" },
+          { name: "upload_url", type: "string", description: "Presigned PUT target." },
+          { name: "headers", type: "object", description: "Send verbatim." },
+          { name: "expires_at", type: "timestamp", description: "" },
         ],
       },
       examples: {
@@ -45,14 +33,13 @@ export const ATTACHMENTS: EndpointGroup = {
   -H "Authorization: Bearer $PAYDAY_API_KEY" -H "Content-Type: application/json" \\
   -d '{ "filename": "INV-1042.pdf" }')
 
-# PUT the bytes with exactly the returned headers.
 curl -fsS -X PUT "$(echo "$SLOT" | jq -r .upload_url)" \\
   $(echo "$SLOT" | jq -r '.headers | to_entries[] | "-H \\"\\(.key): \\(.value)\\""' | xargs) \\
   --data-binary @INV-1042.pdf`,
         ts: `const slot = await payday.attachments.create({ filename: "INV-1042.pdf" });
 await fetch(slot.upload_url, { method: "PUT", headers: slot.headers, body: bytes });
 
-// Or let the SDK run the whole exchange, including the finalize polling:
+// Reserve + PUT + finalize with backoff:
 const pdf = await payday.attachments.upload(bytes, "INV-1042.pdf");`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
@@ -69,55 +56,45 @@ const pdf = await payday.attachments.upload(bytes, "INV-1042.pdf");`,
       method: "POST",
       path: "/v1/attachments/{id}/finalize",
       auth: "key",
-      summary:
-        "Ask Payday to admit the uploaded bytes. Answers 409 while the malware scan is running; retry with backoff. Idempotent afterwards.",
+      summary: "Admits the uploaded object once scanned. Idempotent.",
       body: (
         <p>
-          Payday hashes the stored bytes itself and pins the object version it admitted; browser
-          MIME types, extensions, and client digests are never trusted. A rejected object is
-          deleted. An unattached upload is deleted after seven days.
+          Payday hashes the stored bytes and pins the admitted object version. Client-supplied MIME
+          types, extensions, and digests are ignored. Rejected objects are deleted. Unattached
+          uploads are deleted after seven days.
         </p>
       ),
-      pathParams: [{ name: "id", type: "att_ id", required: true, description: "The attachment." }],
+      pathParams: [{ name: "id", type: "att_ id", required: true, description: "" }],
       response: {
         fields: [
+          { name: "id", type: "att_ id", description: "Use as attachment_id." },
           {
-            name: "id",
-            type: "att_ id",
-            description: "Pass as attachment_id when creating the request.",
-          },
-          { name: "filename, mime_type", type: "string", description: "Always application/pdf." },
-          {
-            name: "byte_length",
+            name: "filename, mime_type",
             type: "string",
-            description: "Decimal byte count, 1 to 5,242,880.",
+            description: "mime_type is application/pdf.",
           },
-          {
-            name: "sha256",
-            type: "string",
-            description: "Hash of the stored bytes; committed into the address.",
-          },
+          { name: "byte_length", type: "string", description: "Decimal. 1 to 5,242,880." },
+          { name: "sha256", type: "string", description: "0x hex." },
         ],
       },
       answers: [
-        { status: 200, when: "A clean PDF within limits." },
+        { status: 200, when: "" },
         {
           status: 409,
           code: "attachment_scan_pending",
-          when: "The malware scan has not reported. Retry with backoff.",
+          when: "Scan not reported. Retry with backoff.",
         },
-        { status: 409, code: "attachment_not_ready", when: "Nothing has reached upload_url yet." },
+        { status: 409, code: "attachment_not_ready", when: "No object at upload_url." },
         {
           status: 422,
           code: "attachment_rejected",
-          when: "Not application/pdf, outside 1 byte to 5 MiB, missing the PDF header, or flagged. Upload a new file.",
+          when: "Not application/pdf, outside 1 B–5 MiB, missing %PDF- header, or flagged. Object deleted.",
         },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/attachments/att_0198f80c-…/finalize" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const descriptor = await payday.attachments.finalize(slot.id);
-// throws PaydayError attachment_scan_pending while scanning`,
+        ts: `const descriptor = await payday.attachments.finalize(slot.id);`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "filename": "INV-1042.pdf",

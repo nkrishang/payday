@@ -5,8 +5,7 @@ import { DocsPage, H2, Table } from "@/components/docs/prose";
 
 export const metadata: Metadata = {
   title: "Errors",
-  description:
-    "Every stable error code the Payday API returns, its usual status, and what to do about it.",
+  description: "Every stable error code, its status, and its condition.",
 };
 
 const SHAPE = `{
@@ -29,83 +28,52 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
         code: "invalid_request",
         status: "400",
         meaning:
-          "Malformed JSON, a missing or unknown field, a wrong type, a missing JSON content type, or a control character in text. The message names the field.",
+          "Malformed JSON, missing or unknown field, wrong type, missing JSON content type, or control character. Message names the field.",
       },
-      {
-        code: "invalid_amount",
-        status: "400",
-        meaning: "Bad amount syntax, more than six decimals, or not positive.",
-      },
-      { code: "missing_idempotency_key", status: "400", meaning: "The create header is absent." },
+      { code: "invalid_amount", status: "400", meaning: "Syntax, precision, or sign." },
+      { code: "missing_idempotency_key", status: "400", meaning: "Header absent on create." },
       {
         code: "idempotency_conflict",
         status: "409",
-        meaning:
-          "The key was reused with a different immutable field, including the attachment's hash. Fetch the original.",
+        meaning: "Key reused with a different immutable field, including attachment hash.",
       },
-      { code: "payload_too_large", status: "413", meaning: "The body exceeds the route's limit." },
-      {
-        code: "rate_limited",
-        status: "429",
-        meaning: "The per-account allowance is spent; see Retry-After.",
-      },
-      {
-        code: "not_found, method_not_allowed",
-        status: "404 / 405",
-        meaning: "No such route, or not that method.",
-      },
-      {
-        code: "internal_error",
-        status: "500",
-        meaning: "Something failed on Payday's side. Quote the request id.",
-      },
-      {
-        code: "database_unavailable",
-        status: "503",
-        meaning: "Persistent storage is unavailable. Retry.",
-      },
+      { code: "payload_too_large", status: "413", meaning: "Body exceeds the route limit." },
+      { code: "rate_limited", status: "429", meaning: "Retry-After set." },
+      { code: "not_found, method_not_allowed", status: "404 / 405", meaning: "Route or method." },
+      { code: "internal_error", status: "500", meaning: "" },
+      { code: "database_unavailable", status: "503", meaning: "" },
     ],
   },
   {
     title: "Authentication and account",
     id: "authentication",
     rows: [
-      {
-        code: "unauthorized",
-        status: "401",
-        meaning: "Missing or invalid API key or dashboard session.",
-      },
+      { code: "unauthorized", status: "401", meaning: "Missing or invalid API key or session." },
       {
         code: "identity_unauthorized",
         status: "401",
-        meaning:
-          "An account-key route was called without a dashboard session: an API key, or an invalid session token.",
+        meaning: "Session-only route called with an API key or invalid session.",
       },
       {
         code: "identity_unavailable",
         status: "503",
-        meaning:
-          "The identity provider's keys could not be fetched; sessions cannot be verified right now.",
+        meaning: "Identity provider keys unavailable; sessions cannot be verified.",
       },
-      {
-        code: "account_disabled",
-        status: "403",
-        meaning: "The account is disabled. Contact support.",
-      },
+      { code: "account_disabled", status: "403", meaning: "" },
       {
         code: "account_contact_required",
         status: "409",
-        meaning: "Sign in to the dashboard again so the account has a verified email.",
+        meaning: "Account has no verified email.",
       },
       {
         code: "api_key_generation_conflict",
         status: "409",
-        meaning: "The key generation moved. Re-read the account.",
+        meaning: "expected_generation mismatch.",
       },
       {
         code: "authentication_event_already_used",
         status: "409",
-        meaning: "The sign-in event already changed key state.",
+        meaning: "Sign-in event already consumed.",
       },
     ],
   },
@@ -116,45 +84,29 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
       {
         code: "deposit_request_not_found",
         status: "404",
-        meaning: "Missing, malformed, or another account's.",
+        meaning: "Missing, malformed, or foreign id.",
       },
-      { code: "customer_not_found", status: "404", meaning: "Same." },
-      { code: "issuer_not_found", status: "404", meaning: "Same." },
-      { code: "payout_address_not_found", status: "404", meaning: "Same." },
+      { code: "customer_not_found", status: "404", meaning: "" },
+      { code: "issuer_not_found", status: "404", meaning: "" },
+      { code: "payout_address_not_found", status: "404", meaning: "" },
       {
         code: "webhook_not_found",
         status: "404",
-        meaning: "Same, and also a disabled endpoint asked to send a test.",
+        meaning: "Also: test event requested on a disabled endpoint.",
       },
-      {
-        code: "attachment_not_found",
-        status: "404",
-        meaning: "Same, or the request has no attachment.",
-      },
-      {
-        code: "issuer_name_taken",
-        status: "409",
-        meaning: "Another of your identities already uses this name.",
-      },
-      {
-        code: "issuer_in_use",
-        status: "409",
-        meaning: "Requests were issued under this identity; it cannot be deleted.",
-      },
-      {
-        code: "issuer_email_already_verified",
-        status: "409",
-        meaning: "The contact address is already proven.",
-      },
+      { code: "attachment_not_found", status: "404", meaning: "Also: request has no attachment." },
+      { code: "issuer_name_taken", status: "409", meaning: "" },
+      { code: "issuer_in_use", status: "409", meaning: "Requests issued under the identity." },
+      { code: "issuer_email_already_verified", status: "409", meaning: "" },
       {
         code: "unsupported_chain, unsupported_token",
         status: "422",
-        meaning: "The environment does not serve the requested chain or token.",
+        meaning: "Override not served by the environment.",
       },
       {
         code: "webhooks_unavailable",
         status: "503",
-        meaning: "The environment cannot store webhook secrets.",
+        meaning: "No webhook encryption key configured.",
       },
     ],
   },
@@ -165,23 +117,22 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
       {
         code: "attachment_scan_pending",
         status: "409",
-        meaning: "The malware scan has not reported. Retry finalize with backoff.",
+        meaning: "Scan not reported. Retry finalize with backoff.",
       },
       {
         code: "attachment_rejected",
         status: "422",
-        meaning: "Not a clean PDF within limits. Upload a new file.",
+        meaning: "Not a clean PDF within limits. Object deleted.",
       },
       {
         code: "attachment_not_ready",
         status: "409",
-        meaning:
-          "The attachment is not finalized, was rejected, or expired unused; also finalize before any bytes arrived.",
+        meaning: "Not finalized, rejected, expired unused, or no object uploaded.",
       },
       {
         code: "attachment_already_attached",
         status: "409",
-        meaning: "The attachment belongs to another request.",
+        meaning: "Belongs to another request.",
       },
     ],
   },
@@ -192,23 +143,22 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
       {
         code: "deposit_request_not_settled",
         status: "409",
-        meaning: "The proof was requested before settlement.",
+        meaning: "Proof requested before settlement.",
       },
       {
         code: "deposit_sender_mismatch",
         status: "409",
-        meaning:
-          "A credited transfer came from a wallet other than the attested one; no proof is issued.",
+        meaning: "Credited transfer from a wallet other than payer_wallet. No proof issued.",
       },
       {
         code: "deposit_request_not_payable",
         status: "410",
-        meaning: "The request is no longer payable: past its deadline, settled, or closed.",
+        meaning: "Expired, settled, or closed.",
       },
       {
         code: "deposit_request_not_blocked",
         status: "409",
-        meaning: "An operator release was asked of a request that needs no attention.",
+        meaning: "Operator release on a request not in needs_attention.",
       },
     ],
   },
@@ -216,88 +166,58 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
     title: "Verification and wallet",
     id: "verification",
     rows: [
-      {
-        code: "invalid_deposit_link",
-        status: "401",
-        meaning: "The deposit link does not resolve to a request.",
-      },
+      { code: "invalid_deposit_link", status: "401", meaning: "Unknown id on a payer route." },
       {
         code: "verification_required",
         status: "401",
-        meaning: "Gated content or the QR was requested without an unlocked session.",
+        meaning: "Gated content requested without an unlocked session.",
       },
       {
         code: "payer_session_invalid",
         status: "401",
-        meaning: "The session header is missing, unknown, expired, or for another request.",
+        meaning: "Header missing, unknown, expired, or for another request.",
       },
-      { code: "otp_invalid", status: "401", meaning: "The code was not accepted." },
+      { code: "otp_invalid", status: "401", meaning: "" },
       {
         code: "otp_resend_cooldown",
         status: "429",
-        meaning: "A code was sent within the last minute; see Retry-After.",
+        meaning: "One code per minute. Retry-After set.",
       },
-      {
-        code: "verification_not_started",
-        status: "409",
-        meaning: "Confirm was called before a code was sent, or after it was spent.",
-      },
-      {
-        code: "verification_not_required",
-        status: "409",
-        meaning: "Verification or a client secret was asked of a permissionless request.",
-      },
+      { code: "verification_not_started", status: "409", meaning: "No outstanding code." },
+      { code: "verification_not_required", status: "409", meaning: "Mode is permissionless." },
       {
         code: "verification_method_not_applicable",
         status: "409",
-        meaning:
-          "Email codes on a merchant-session request, or a client secret on a verified-email one.",
+        meaning: "Email routes under merchant_session; client secret under verified_email.",
       },
       {
         code: "verification_persistence_unavailable",
         status: "503",
-        meaning:
-          "The code was accepted but not recorded; retry confirm with the returned continuation.",
+        meaning: "Code accepted, not recorded. Retry with continuation.",
       },
       {
         code: "verification_unavailable",
         status: "503",
-        meaning: "The environment has no email verification configured.",
+        meaning: "No identity provider configured.",
       },
-      {
-        code: "identity_provider_unavailable",
-        status: "502",
-        meaning: "The email verification provider did not answer.",
-      },
+      { code: "identity_provider_unavailable", status: "502", meaning: "" },
       {
         code: "client_secret_invalid",
         status: "401",
-        meaning: "Unknown, malformed, expired, or for another request.",
+        meaning: "Unknown, malformed, expired, or foreign.",
       },
-      {
-        code: "client_secret_used",
-        status: "409",
-        meaning: "Already exchanged; the link was opened once.",
-      },
-      {
-        code: "wallet_required",
-        status: "409",
-        meaning: "The QR was requested before a wallet was bound.",
-      },
+      { code: "client_secret_used", status: "409", meaning: "Already exchanged." },
+      { code: "wallet_required", status: "409", meaning: "QR requested before a wallet is bound." },
       {
         code: "wallet_challenge_required",
         status: "409",
-        meaning: "Attest was called without an outstanding challenge.",
+        meaning: "No unexpired challenge on the session.",
       },
-      {
-        code: "wallet_already_bound",
-        status: "409",
-        meaning: "The request is bound to another wallet; the message names it.",
-      },
+      { code: "wallet_already_bound", status: "409", meaning: "Message names the bound wallet." },
       {
         code: "wallet_signature_invalid",
         status: "401",
-        meaning: "The signature does not recover to the stated wallet.",
+        meaning: "Signature does not recover to wallet.",
       },
     ],
   },
@@ -308,7 +228,7 @@ export default function ErrorsPage() {
     <DocsPage
       eyebrow="API reference"
       title="Errors"
-      lead="Every error is JSON with a stable code, a message that names the problem, and the request id. Branch on the code; show the message to a developer; quote the id to support."
+      lead="Stable codes. Branch on error.code; log request_id."
     >
       <CodeBlock code={SHAPE} lang="json" />
       {GROUPS.map((group) => (
@@ -319,7 +239,7 @@ export default function ErrorsPage() {
               <tr>
                 <th>Code</th>
                 <th>Status</th>
-                <th>Meaning</th>
+                <th>Condition</th>
               </tr>
             </thead>
             <tbody>

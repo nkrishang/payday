@@ -1,147 +1,127 @@
 import type { EndpointGroup, FieldDoc } from "./types";
 
-/** The `DepositRequest` object, as the create and read routes return it. */
+/** The `DepositRequest` object. */
 export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
-  { name: "id", type: "dr_ id", description: "The deposit request." },
-  {
-    name: "deposit_url",
-    type: "string",
-    description: "The hosted checkout. Give this to the payer.",
-  },
+  { name: "id", type: "dr_ id", description: "Deposit request id." },
+  { name: "deposit_url", type: "string", description: "Hosted checkout URL." },
   {
     name: "status",
-    type: "string",
+    type: "enum",
     description: (
       <>
-        <code>awaiting_deposit</code>, <code>partially_deposited</code>, <code>deposited</code>,{" "}
-        <code>settled</code>, <code>expired</code>, <code>returned</code>, or{" "}
-        <code>needs_attention</code>.
+        <code>awaiting_deposit</code> · <code>partially_deposited</code> · <code>deposited</code> ·{" "}
+        <code>settled</code> · <code>expired</code> · <code>returned</code> ·{" "}
+        <code>needs_attention</code>
       </>
     ),
   },
-  {
-    name: "chain",
-    type: "object",
-    description: "{ id, name } of the chain the request settles on.",
-  },
+  { name: "chain", type: "object", description: "{ id, name }." },
   {
     name: "token",
     type: "object",
-    description: "{ symbol, address, decimals } of the exact USDC contract.",
+    description: "{ symbol, address, decimals }. The exact USDC contract.",
   },
+  { name: "currency", type: "string", description: "USDC." },
   {
     name: "address",
     type: "string | null",
-    description: "The one-time deposit address. Null until the payer signs the wallet attestation.",
+    description: "One-time deposit address. Null until the payer's wallet attestation is accepted.",
   },
   {
     name: "address_explorer_url",
     type: "string | null",
-    description: "Explorer link for the address, when the chain has one.",
+    description: "When an explorer is configured.",
   },
-  { name: "payout_address", type: "string", description: "Your wallet; receives exactly amount." },
+  { name: "payout_address", type: "string", description: "Receives exactly amount at settlement." },
   {
     name: "payer_wallet",
     type: "string | null",
-    description: "The wallet the payer attested. Only its transfers are the payer's.",
+    description: "Attested payer wallet. Null until bound.",
   },
   {
     name: "recovery_address",
     type: "string | null",
-    description: "Always equal to payer_wallet: where returns go.",
+    description: "Equals payer_wallet. Destination of all returns.",
   },
-  {
-    name: "wallet_bound_at",
-    type: "timestamp | null",
-    description: "When the attestation was accepted and the address derived.",
-  },
+  { name: "wallet_bound_at", type: "timestamp | null", description: "" },
   {
     name: "amount, received, remaining",
-    type: "decimal strings",
+    type: "decimal string",
     description: (
       <>
-        Six-decimal USDC, each beside an integer <code>_base_units</code> twin.
+        Six-decimal USDC. Each has an integer <code>*_base_units</code> counterpart.
       </>
     ),
   },
   {
     name: "fee_amount, net_amount",
-    type: "decimal strings",
-    description: "Fees are currently zero, so net_amount equals amount.",
+    type: "decimal string",
+    description: "Fees are zero. net_amount = amount.",
   },
   {
     name: "issuer, payer",
-    type: "object",
-    description: "The parties as snapshotted at issuance: { name, email?, details? }.",
+    type: "Party",
+    description: "{ name, email?, details? }. Snapshot at issuance.",
   },
-  { name: "heading, reference, notes", type: "string | null", description: "As given." },
-  {
-    name: "metadata",
-    type: "object",
-    description: "Your own keys and values. Never shown to the payer.",
-  },
-  {
-    name: "customer_id, issuer_id",
-    type: "id | null",
-    description: "The saved records the request was issued from, if any.",
-  },
+  { name: "heading, reference, notes", type: "string | null", description: "As submitted." },
+  { name: "metadata", type: "object", description: "As submitted. Merchant-only." },
+  { name: "customer_id, issuer_id", type: "id | null", description: "Linked records." },
   {
     name: "payer_policy",
     type: "object",
-    description: "The full policy including its assertion. Merchant-only.",
+    description: "Full policy, including the assertion. Merchant-only.",
   },
   {
     name: "attachment",
     type: "object | null",
-    description: "{ id, filename, mime_type, byte_length, sha256 } when a PDF is attached.",
+    description: "{ id, filename, mime_type, byte_length, sha256 }.",
   },
   {
     name: "client_secret, client_secret_expires_at",
     type: "string",
-    description: "merchant_session only, and only on the 201 that issued the request.",
+    description: "merchant_session only. Present on the issuing 201; never again.",
   },
   {
     name: "verification_completed_at",
     type: "timestamp | null",
-    description: "When the payer policy was satisfied.",
+    description: "Payer policy satisfied.",
   },
   {
     name: "likely_unsolicited_at",
     type: "timestamp | null",
-    description: "When finalized funds first arrived from a wallet other than the attested one.",
+    description: "First finalized credit from a wallet other than payer_wallet.",
   },
   { name: "created_at, updated_at, expires_at", type: "timestamp", description: "RFC 3339 UTC." },
   {
     name: "deposited_at, settled_at, expired_at",
     type: "timestamp | null",
-    description:
-      "Lifecycle milestones, with deposited_at_block and settled_block beside the first two.",
+    description: "Lifecycle milestones. deposited_at_block and settled_block carry block numbers.",
   },
   {
     name: "cancellation_requested_at",
     type: "timestamp | null",
-    description: "Set by the cancel route.",
+    description: "Set by POST …/cancel.",
   },
   {
     name: "settlement_tx_hash",
     type: "string | null",
     description:
-      "The transaction that executed the contract and paid you, with settlement_explorer_url.",
+      "Transaction that executed the deposit contract. settlement_explorer_url when configured.",
   },
   {
     name: "attention",
     type: "object | null",
-    description: "{ code, message, action } while the request needs attention.",
+    description: "{ code, message, action } while status is needs_attention.",
   },
   {
     name: "transfers",
     type: "Transfer[]",
-    description: "Every finalized transfer to the address; see the transfers route.",
+    description: "Finalized transfers to address. Same shape as GET …/transfers.",
   },
   {
     name: "as_of",
     type: "object | null",
-    description: "{ block, at } through which this state is committed.",
+    description: "{ block, at }. Commit point of this projection.",
   },
   {
     name: "indexer_freshness",
@@ -151,12 +131,12 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
   {
     name: "self_settlement",
     type: "object | null",
-    description: "{ factory, salt }: what a third party needs to execute the contract.",
+    description: "{ factory, salt }. Sufficient to execute the contract. Null until bound.",
   },
   {
     name: "attribution",
     type: "object",
-    description: "{ version, hash }: the commitment to the issued document.",
+    description: "{ version, hash }. Commitment to the canonical issued document.",
   },
 ];
 
@@ -240,8 +220,7 @@ const CREATE_BODY: FieldDoc[] = [
     name: "amount",
     type: "string",
     required: true,
-    description:
-      "Positive USDC decimal with at most six fractional digits. Used exactly as given; nothing is summed or reconciled.",
+    description: "Positive USDC decimal; at most six fractional digits. Settled exactly.",
   },
   {
     name: "payer_policy",
@@ -249,12 +228,11 @@ const CREATE_BODY: FieldDoc[] = [
     required: true,
     description: (
       <>
-        <code>{`{"mode":"permissionless"}`}</code>,{" "}
-        <code>{`{"mode":"verified_email","expected_email":"…"}`}</code>, or{" "}
-        <code>{`{"mode":"merchant_session","payer_reference":"…"}`}</code>. The expected email is
-        trimmed and lowercased. The payer reference is 1 to 128 bytes of printable text with no
-        whitespace, case preserved: your own id for the user. Each assertion is forbidden on the
-        other modes.
+        <code>{`{"mode":"permissionless"}`}</code> ·{" "}
+        <code>{`{"mode":"verified_email","expected_email"}`}</code> ·{" "}
+        <code>{`{"mode":"merchant_session","payer_reference"}`}</code>. <code>expected_email</code>{" "}
+        is trimmed and lowercased. <code>payer_reference</code>: 1–128 printable bytes, no
+        whitespace, case preserved. Assertions are rejected on other modes.
       </>
     ),
   },
@@ -263,30 +241,29 @@ const CREATE_BODY: FieldDoc[] = [
     type: "string",
     description: (
       <>
-        Nonzero EVM address that receives exactly <code>amount</code>. Optional when{" "}
-        <code>issuer_id</code> names an identity with a saved payout address; its first one is used.
+        Nonzero EVM address. Required unless <code>issuer_id</code> names an identity with a saved
+        payout address, whose first address is used.
       </>
     ),
   },
   {
     name: "issuer",
-    type: "object",
+    type: "Party",
     description: (
       <>
-        The issuing party: <code>name</code> (1 to 255 bytes), optional <code>email</code> (3 to 254
-        bytes), optional <code>details</code> (up to 4,000 bytes, shown verbatim). Optional when{" "}
-        <code>issuer_id</code> is given; an inline party always wins.
+        <code>name</code> 1–255 bytes; <code>email</code> 3–254 bytes; <code>details</code> ≤4,000
+        bytes. Required unless <code>issuer_id</code> is given. Inline wins.
       </>
     ),
   },
   {
     name: "payer",
-    type: "object",
+    type: "Party",
     description: (
       <>
-        The paying party, same shape. Optional when <code>customer_id</code> is given. A{" "}
-        <code>payer.email</code> is also where Payday emails the issued request, except for
-        merchant-session requests.
+        Same shape. Required unless <code>customer_id</code> is given. Inline wins.{" "}
+        <code>payer.email</code> receives the issued request by email, except under{" "}
+        <code>merchant_session</code>.
       </>
     ),
   },
@@ -294,52 +271,50 @@ const CREATE_BODY: FieldDoc[] = [
     name: "issuer_id",
     type: "iss_ id",
     description:
-      "A saved issuer identity. Stored immutably beside the request; supplies the issuer party and payout address when they are left out.",
+      "Stored immutably on the request. Supplies issuer and payout_address when omitted.",
   },
   {
     name: "customer_id",
     type: "cus_ id",
     description:
-      "A saved customer. Supplies the payer party when it is left out; the request still stores its own snapshot.",
+      "Stored on the request. Supplies payer when omitted; the request keeps its own snapshot.",
   },
   {
     name: "heading",
     type: "string",
-    description: "Up to 200 bytes. Shown to the payer before verification on gated requests.",
+    description: "≤200 bytes. Visible to the payer before verification.",
   },
   {
     name: "reference",
     type: "string",
-    description: "Your own reference, up to 128 characters. Filterable on the list route.",
+    description: "≤128 characters. Exact-match filter on list.",
   },
   {
     name: "notes",
     type: "string",
-    description: "Up to 4,000 bytes, shown to the payer after verification.",
+    description: "≤4,000 bytes. Visible to the payer after verification.",
   },
   {
     name: "attachment_id",
     type: "att_ id",
-    description: "A finalized attachment. One PDF per request.",
+    description: "A finalized attachment. One per request.",
   },
   {
     name: "expires_in",
     type: "integer",
-    description:
-      "Lifetime in seconds. Mutually exclusive with expires_at. Default 24 hours; 10 minutes to 366 days.",
+    description: "Seconds. Exclusive with expires_at. Default 86,400; range 600 to 31,622,400.",
   },
-  { name: "expires_at", type: "string", description: "RFC 3339 deadline. Same window." },
+  { name: "expires_at", type: "timestamp", description: "RFC 3339. Same range." },
   {
     name: "metadata",
     type: "object",
     description:
-      "Up to 16 keys, each value at most 512 encoded bytes. Returned to you and carried on webhooks; never shown to the payer.",
+      "≤16 keys; ≤512 encoded bytes per value. Returned on reads and webhooks. Merchant-only.",
   },
   {
     name: "chain_id, token_address",
     type: "string",
-    description:
-      "Deployment overrides. Leave them out; the environment's chain and USDC contract apply.",
+    description: "Deployment overrides. Must equal the environment's values when present.",
   },
 ];
 
@@ -354,89 +329,75 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       method: "POST",
       path: "/v1/deposit-requests",
       auth: "key",
-      summary:
-        "Issue a deposit request. The response is the full object with a deposit_url to give the payer; the one-time address arrives later, once the payer signs from their wallet.",
+      summary: "Issues a deposit request.",
       body: (
         <>
           <p>
-            The smallest valid request names saved records and nothing else: <code>amount</code>,{" "}
-            <code>issuer_id</code>, <code>customer_id</code>, and <code>payer_policy</code>. Every
-            immutable field takes part in idempotency, so a retry with the same key and body returns
-            the original instead of issuing twice.
+            Minimal body: <code>amount</code>, <code>issuer_id</code>, <code>customer_id</code>,{" "}
+            <code>payer_policy</code>. Unknown fields are rejected. Text fields reject control
+            characters. Every immutable field participates in idempotency, including the
+            attachment&apos;s hash.
           </p>
           <p>
             <code>address</code>, <code>payer_wallet</code>, <code>recovery_address</code>,{" "}
-            <code>wallet_bound_at</code>, and <code>self_settlement</code> are <code>null</code> on
-            this response and stay so until the payer signs the wallet attestation on the hosted
-            page. Wait for <code>deposit_request.ready</code>, or poll until <code>address</code> is
-            set, before quoting an address anywhere. Recovery is never a request field: the
-            payer&apos;s attested wallet is the recovery address, always.
+            <code>wallet_bound_at</code>, and <code>self_settlement</code> are null until the
+            payer&apos;s wallet attestation is accepted, signalled by{" "}
+            <code>deposit_request.ready</code>. Recovery is not a request field;{" "}
+            <code>recovery_address</code> is always the attested wallet.
           </p>
         </>
       ),
       headers: [
-        {
-          name: "Idempotency-Key",
-          type: "string",
-          required: true,
-          description: "1 to 255 bytes. Use your own order or invoice id.",
-        },
+        { name: "Idempotency-Key", type: "string", required: true, description: "1–255 bytes." },
       ],
       bodyFields: CREATE_BODY,
       response: {
         description: (
           <>
-            The deposit request object. For <code>merchant_session</code> it also carries{" "}
-            <code>client_secret</code> and <code>client_secret_expires_at</code>, exactly once.
+            <code>DepositRequest</code>. Under <code>merchant_session</code>, also{" "}
+            <code>client_secret</code> and <code>client_secret_expires_at</code>, once.
           </>
         ),
       },
       answers: [
         { status: 201, when: "Issued." },
-        {
-          status: 200,
-          when: "An idempotent replay: the original, with Idempotency-Replayed: true.",
-        },
+        { status: 200, when: "Idempotent replay. Idempotency-Replayed: true." },
         {
           status: 400,
           code: "invalid_request",
-          when: "A field is missing, unknown, malformed, or carries a control character; the message names it.",
+          when: "Shape, unknown field, type, or control character. Message names the field.",
         },
-        {
-          status: 400,
-          code: "invalid_amount",
-          when: "Bad syntax, more than six decimals, or not positive.",
-        },
-        { status: 400, code: "missing_idempotency_key", when: "The header is absent." },
+        { status: 400, code: "invalid_amount", when: "Syntax, precision, or sign." },
+        { status: 400, code: "missing_idempotency_key", when: "Header absent." },
         {
           status: 404,
           code: "customer_not_found / issuer_not_found",
-          when: "The named record is not yours.",
+          when: "Not owned by the account.",
         },
         {
           status: 409,
           code: "idempotency_conflict",
-          when: "The key was used with a different document. Fetch the original.",
+          when: "Key reused with a different document.",
         },
         {
           status: 409,
           code: "attachment_not_ready",
-          when: "The attachment is not finalized, was rejected, or expired unused.",
+          when: "Attachment not finalized, rejected, or expired unused.",
         },
         {
           status: 409,
           code: "attachment_already_attached",
-          when: "The attachment belongs to another request.",
+          when: "Attachment belongs to another request.",
         },
         {
           status: 409,
           code: "account_contact_required",
-          when: "Sign in to the dashboard again to attach a verified email to the account.",
+          when: "Account has no verified email. Re-authenticate in the dashboard.",
         },
         {
           status: 422,
           code: "unsupported_chain / unsupported_token",
-          when: "An override the environment does not serve.",
+          when: "Override not served by the environment.",
         },
       ],
       examples: {
@@ -473,7 +434,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
     expires_in: 3600,
     metadata: { po: "PO-77" },
   },
-  "INV-1042", // idempotency key
+  "INV-1042", // Idempotency-Key
 );`,
         response: OBJECT,
         responseTitle: "201 Created",
@@ -485,54 +446,43 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       method: "GET",
       path: "/v1/deposit-requests",
       auth: "key",
-      summary:
-        "Deposit requests newest first, as summaries with what a list needs to render and link each row without a second read.",
+      summary: "Lists deposit requests, newest first, as summaries.",
       query: [
-        { name: "status", type: "string", description: "One public status." },
-        { name: "reference", type: "string", description: "Exact match on your reference." },
-        {
-          name: "customer_id",
-          type: "cus_ id",
-          description: "Only requests addressed to this customer.",
-        },
-        {
-          name: "issuer_id",
-          type: "iss_ id",
-          description: "Only requests issued under this identity.",
-        },
+        { name: "status", type: "enum", description: "One public status." },
+        { name: "reference", type: "string", description: "Exact match." },
+        { name: "customer_id", type: "cus_ id", description: "" },
+        { name: "issuer_id", type: "iss_ id", description: "" },
         {
           name: "verification",
-          type: "string",
+          type: "enum",
           description: (
             <>
-              <code>not_required</code>, <code>pending</code>, <code>verified</code>, or{" "}
-              <code>likely_unsolicited</code>. Separate from status: a gated request can be funded
-              before its payer has verified.
+              <code>not_required</code> · <code>pending</code> · <code>verified</code> ·{" "}
+              <code>likely_unsolicited</code>. Independent of <code>status</code>.
             </>
           ),
         },
-        { name: "limit", type: "integer", description: "1 to 100, default 20." },
-        { name: "starting_after", type: "dr_ id", description: "The previous page's next_cursor." },
+        { name: "limit", type: "integer", description: "1–100. Default 20." },
+        { name: "starting_after", type: "dr_ id", description: "Cursor from next_cursor." },
       ],
       response: {
         description: (
           <>
             <code>{`{ deposit_requests: DepositRequestSummary[], next_cursor: dr_ id | null }`}</code>
-            . A summary carries <code>id</code>, <code>deposit_url</code>, <code>heading</code>,{" "}
+            . Summary fields: <code>id</code>, <code>deposit_url</code>, <code>heading</code>,{" "}
             <code>payer_name</code>, <code>reference</code>, <code>metadata</code>,{" "}
             <code>payer_policy_mode</code>, <code>customer_id</code>, <code>issuer_id</code>,{" "}
             <code>has_attachment</code>, <code>verification_completed_at</code>,{" "}
             <code>likely_unsolicited_at</code>, <code>status</code>, <code>amount</code>,{" "}
             <code>received</code>, <code>cancellation_requested_at</code>, <code>created_at</code>,{" "}
-            <code>updated_at</code>, and <code>expires_at</code>.
+            <code>updated_at</code>, <code>expires_at</code>.
           </>
         ),
       },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests?status=partially_deposited&limit=20" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const page = await payday.depositRequests.list({ status: "partially_deposited", limit: 20 });
-// page.next_cursor → pass as starting_after for the next page`,
+        ts: `const page = await payday.depositRequests.list({ status: "partially_deposited", limit: 20 });`,
         response: `{
   "deposit_requests": [
     {
@@ -567,14 +517,13 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       method: "GET",
       path: "/v1/deposit-requests/{id}",
       auth: "key",
-      summary:
-        "One deposit request, by its dr_ id or by its deposit address. Add wait_for=change to long-poll.",
+      summary: "Retrieves a deposit request by id or by deposit address.",
       pathParams: [
         {
           name: "id",
           type: "dr_ id | address",
           required: true,
-          description: "A complete id in canonical form, or the one-time address.",
+          description: "Complete canonical id, or the one-time address.",
         },
       ],
       query: [
@@ -583,7 +532,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
           type: '"change"',
           description: (
             <>
-              Long-poll: the response returns when <code>updated_at</code> changes or the timeout
+              Long-poll. Returns when <code>updated_at</code> changes or <code>timeout</code>{" "}
               elapses.
             </>
           ),
@@ -591,20 +540,23 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         {
           name: "timeout",
           type: "integer",
-          description: "1 to 30 seconds, default 30. Only with wait_for.",
+          description: "1–30 seconds. Default 30. Requires wait_for.",
         },
       ],
-      response: { description: "The deposit request object." },
+      response: { description: "DepositRequest." },
       answers: [
-        { status: 200, when: "The deposit request." },
-        { status: 400, code: "invalid_request", when: "A partial id. Ids must be complete." },
-        { status: 404, code: "deposit_request_not_found", when: "Missing, or another account's." },
+        { status: 200, when: "" },
+        { status: 400, code: "invalid_request", when: "Partial id." },
+        {
+          status: 404,
+          code: "deposit_request_not_found",
+          when: "Unknown, or not owned by the account.",
+        },
       ],
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-8d2f-7dc1-a369-90556a64f700?wait_for=change&timeout=30" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
         ts: `const request = await payday.depositRequests.get(id);
-// or block until something changes, up to 30 s:
 const latest = await payday.depositRequests.get(id, { waitForChange: true, timeout: 30 });`,
         response: SETTLED,
         responseTitle: "200 OK",
@@ -616,29 +568,25 @@ const latest = await payday.depositRequests.get(id, { waitForChange: true, timeo
       method: "POST",
       path: "/v1/deposit-requests/{id}/cancel",
       auth: "key",
-      summary:
-        "Record a cancellation. Presentation only: it asks Payday's own pages to stop showing the request, but cannot disable the address or change the terms the address commits to.",
+      summary: "Records a cancellation request.",
       body: (
         <p>
-          A transfer sent after cancellation is still detected and routed under the address&apos;s
-          terms. To change anything about a request, cancel it and issue another.
+          Presentation only. The address remains live and its terms unchanged; later transfers are
+          detected and routed under those terms. Idempotent.
         </p>
       ),
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "The deposit request." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         description: (
           <>
-            The deposit request with <code>cancellation_requested_at</code> set.
+            <code>DepositRequest</code> with <code>cancellation_requested_at</code> set.
           </>
         ),
       },
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/cancel" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const cancelled = await payday.depositRequests.cancel(id);
-cancelled.cancellation_requested_at; // "2026-09-06T12:30:00Z"`,
+        ts: `const cancelled = await payday.depositRequests.cancel(id);`,
         response: OBJECT.replace(
           '"cancellation_requested_at": null',
           '"cancellation_requested_at": "2026-09-06T12:30:00Z"',
@@ -652,44 +600,30 @@ cancelled.cancellation_requested_at; // "2026-09-06T12:30:00Z"`,
       method: "GET",
       path: "/v1/deposit-requests/{id}/transfers",
       auth: "key",
-      summary:
-        "Every finalized transfer to the one-time address: who sent it, when, and what became of it.",
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "The deposit request." },
-      ],
+      summary: "Lists finalized transfers to the deposit address.",
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
+        description: <code>{`{ transfers: Transfer[] }`}</code>,
         fields: [
-          { name: "timestamp", type: "timestamp", description: "Block time of the transfer." },
-          {
-            name: "amount, amount_base_units",
-            type: "strings",
-            description: "The transferred USDC.",
-          },
-          {
-            name: "sender",
-            type: "string",
-            description: "The sending wallet. Compare with payer_wallet.",
-          },
+          { name: "timestamp", type: "timestamp", description: "Block time." },
+          { name: "amount, amount_base_units", type: "string", description: "" },
+          { name: "sender", type: "string", description: "" },
           {
             name: "transaction_hash",
             type: "string",
-            description: "With explorer_url when the chain has an explorer.",
+            description: "explorer_url when configured.",
           },
-          { name: "block", type: "string", description: "Block number." },
+          { name: "block", type: "string", description: "" },
           {
             name: "disposition",
-            type: "string",
+            type: "enum",
             description: (
               <>
-                <code>credited</code>, <code>late</code>, or <code>zero</code>.
+                <code>credited</code> · <code>late</code> · <code>zero</code>
               </>
             ),
           },
-          {
-            name: "collected",
-            type: "boolean",
-            description: "Whether settlement or a return has moved the funds on.",
-          },
+          { name: "collected", type: "boolean", description: "Moved on by settlement or return." },
         ],
       },
       examples: {
@@ -719,33 +653,22 @@ cancelled.cancellation_requested_at; // "2026-09-06T12:30:00Z"`,
       method: "GET",
       path: "/v1/deposit-requests/{id}/verification",
       auth: "key",
-      summary:
-        "The merchant's verification view: each fact on its own and every attempt the payer made.",
+      summary: "Retrieves verification facts and attempts.",
       body: (
         <p>
-          Facts are <code>not_required</code>, <code>pending</code>, or <code>approved</code>;{" "}
-          <code>wallet</code> is never <code>not_required</code>. Attempts are <code>email</code>,{" "}
-          <code>wallet</code>, or <code>merchant_session</code>, each <code>pending</code>,{" "}
-          <code>approved</code>, or <code>abandoned</code>. The payer&apos;s session, the client
-          secret, and the code are never here.
+          Fact values: <code>not_required</code>, <code>pending</code>, <code>approved</code>;{" "}
+          <code>wallet</code> is never <code>not_required</code>. Attempt kinds: <code>email</code>,{" "}
+          <code>wallet</code>, <code>merchant_session</code>; statuses <code>pending</code>,{" "}
+          <code>approved</code>, <code>abandoned</code>. Sessions, client secrets, and codes are
+          never returned.
         </p>
       ),
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "The deposit request." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          { name: "payer_policy_mode", type: "string", description: "The request's policy mode." },
-          {
-            name: "verification_completed_at",
-            type: "timestamp | null",
-            description: "When the policy was satisfied.",
-          },
-          {
-            name: "likely_unsolicited_at",
-            type: "timestamp | null",
-            description: "When funds first arrived from another wallet.",
-          },
+          { name: "payer_policy_mode", type: "enum", description: "" },
+          { name: "verification_completed_at", type: "timestamp | null", description: "" },
+          { name: "likely_unsolicited_at", type: "timestamp | null", description: "" },
           {
             name: "facts",
             type: "object",
@@ -754,15 +677,14 @@ cancelled.cancellation_requested_at; // "2026-09-06T12:30:00Z"`,
           {
             name: "attempts",
             type: "object[]",
-            description: "{ id, kind, status, verified_at, created_at } each.",
+            description: "{ id, kind, status, verified_at, created_at }.",
           },
         ],
       },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/verification" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const detail = await payday.depositRequests.verification(id);
-detail.facts.complete; // true once the policy is satisfied`,
+        ts: `const detail = await payday.depositRequests.verification(id);`,
         response: `{
   "payer_policy_mode": "verified_email",
   "verification_completed_at": "2026-09-06T12:05:00Z",
@@ -781,46 +703,33 @@ detail.facts.complete; // true once the policy is satisfied`,
       method: "POST",
       path: "/v1/deposit-requests/{id}/client-secret",
       auth: "key",
-      summary:
-        "Mint a fresh single-use client secret for a merchant-session request, for a user your application signs in again after the first secret was spent or expired.",
+      summary: "Mints a single-use client secret for a merchant_session request.",
       body: (
         <p>
-          Earlier unspent secrets stay valid until they expire, so retrying a redirect never breaks
-          a link already sent. Put the secret in the deposit link&apos;s fragment (
-          <code>deposit_url#cs=…</code>); the SDK&apos;s <code>checkoutUrl</code> does this. The
-          response is not cached.
+          Valid fifteen minutes; spent on first exchange. Earlier unspent secrets remain valid.
+          Transport: URL fragment, <code>deposit_url#cs=&lt;secret&gt;</code>. Response is{" "}
+          <code>Cache-Control: no-store</code>.
         </p>
       ),
-      pathParams: [
-        {
-          name: "id",
-          type: "dr_ id",
-          required: true,
-          description: "A merchant_session deposit request.",
-        },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          {
-            name: "client_secret",
-            type: "string",
-            description: "Returned once; Payday stores only its hash.",
-          },
-          { name: "expires_at", type: "timestamp", description: "Fifteen minutes out." },
+          { name: "client_secret", type: "string", description: "Returned once. Stored hashed." },
+          { name: "expires_at", type: "timestamp", description: "" },
         ],
       },
       answers: [
-        { status: 201, when: "A secret valid for fifteen minutes." },
-        { status: 409, code: "verification_not_required", when: "The request is permissionless." },
+        { status: 201, when: "" },
+        { status: 409, code: "verification_not_required", when: "Mode is permissionless." },
         {
           status: 409,
           code: "verification_method_not_applicable",
-          when: "The request is verified_email.",
+          when: "Mode is verified_email.",
         },
         {
           status: 410,
           code: "deposit_request_not_payable",
-          when: "Closed without verifying. A settled request that did verify still mints, to reopen its receipt.",
+          when: "Closed without verification. A settled, verified request still mints.",
         },
       ],
       examples: {
@@ -844,29 +753,22 @@ res.redirect(303, checkoutUrl(request, client_secret));`,
       path: "/v1/deposit-requests/{id}/preview-session",
       auth: "key",
       summary:
-        "A session that opens the request's payer view unlocked, for its own issuer, so you can see a gated request exactly as a verified payer would before sending it.",
+        "Mints a payer session that opens the request's payer view unlocked, for the issuing account.",
       body: (
         <p>
-          This is not verification: it records no attempt and never marks the request verified. Put
-          the session in the link&apos;s fragment (<code>deposit_url#ps=…</code>); the SDK&apos;s{" "}
-          <code>previewUrl</code> does this. Works for every policy.
+          Not verification: records no attempt and never sets <code>verification_completed_at</code>
+          . Any policy mode. Transport: URL fragment, <code>deposit_url#ps=&lt;session&gt;</code>.
         </p>
       ),
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "The deposit request." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          { name: "payer_session", type: "string", description: "An opaque preview session." },
-          { name: "expires_at", type: "timestamp", description: "When it stops opening the page." },
+          { name: "payer_session", type: "string", description: "" },
+          { name: "expires_at", type: "timestamp", description: "" },
         ],
       },
       answers: [
-        {
-          status: 410,
-          code: "deposit_request_not_payable",
-          when: "The request closed without verifying.",
-        },
+        { status: 410, code: "deposit_request_not_payable", when: "Closed without verification." },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/preview-session" \\
@@ -887,31 +789,30 @@ window.open(previewUrl(request, payer_session));`,
       method: "GET",
       path: "/v1/deposit-requests/{id}/attachment",
       auth: "key",
-      summary: "The attached PDF's descriptor with a signed download_url valid for a few minutes.",
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "The deposit request." },
-      ],
+      summary: "Retrieves the attachment descriptor with a signed download URL.",
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          { name: "id", type: "att_ id", description: "The attachment." },
-          { name: "filename, mime_type", type: "string", description: "Always application/pdf." },
-          { name: "byte_length", type: "string", description: "Decimal byte count." },
+          { name: "id", type: "att_ id", description: "" },
+          {
+            name: "filename, mime_type",
+            type: "string",
+            description: "mime_type is application/pdf.",
+          },
+          { name: "byte_length", type: "string", description: "Decimal." },
           {
             name: "sha256",
             type: "string",
-            description: "Hash of the stored bytes; committed into the address.",
+            description: "0x hex. Committed into the deposit address.",
           },
-          { name: "download_url", type: "string", description: "Signed, short-lived." },
+          { name: "download_url", type: "string", description: "Signed. Valid 300 seconds." },
         ],
       },
-      answers: [
-        { status: 404, code: "attachment_not_found", when: "The request has no attachment." },
-      ],
+      answers: [{ status: 404, code: "attachment_not_found", when: "No attachment." }],
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/attachment" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const pdf = await payday.depositRequests.attachment(id);
-// fetch pdf.download_url within a few minutes`,
+        ts: `const pdf = await payday.depositRequests.attachment(id);`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "filename": "INV-1042.pdf",
@@ -929,11 +830,9 @@ window.open(previewUrl(request, payer_session));`,
       path: "/v1/deposit-requests/{id}/request.pdf",
       auth: "key",
       summary:
-        "Payday's own PDF rendering of the request. Deterministic: the same request always produces byte-identical output, so two copies can be compared by hash.",
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "The deposit request." },
-      ],
-      response: { description: "application/pdf bytes." },
+        "Renders the deposit request as PDF. Deterministic: identical input yields identical bytes.",
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      response: { description: "application/pdf." },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/request.pdf" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY" -o request.pdf`,
@@ -950,25 +849,26 @@ Content-Length: 31288`,
       method: "GET",
       path: "/v1/deposit-requests/{id}/proof",
       auth: "key",
-      summary:
-        "The offline-verifiable record for a settled request: the canonical document, the payer's wallet attestation, the salt and addresses, the credited transfers, the settlement transaction, and Payday's signed verification facts.",
+      summary: "Retrieves the Proof of Payment for a settled request.",
       body: (
         <p>
-          See <a href="/docs/proof-of-payment">Proof of Payment</a> for what each field
-          commits to and how to verify one.
+          Document version <code>payday.proof.v2</code>: canonical issuance snapshot, attribution
+          hash, payer wallet attestation, salt, chain, factory, token, deposit and recovery
+          addresses, credited transfers, settlement transaction hash, and a Payday-signed
+          verification attestation. Verifiable offline; reference implementation{" "}
+          <code>gateway_core::verify_proof</code>. Schema:{" "}
+          <a href="/docs/proof-of-payment">Proof of Payment</a>.
         </p>
       ),
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "A settled deposit request." },
-      ],
-      response: { description: "The payday.proof.v2 document." },
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      response: { description: "ProofOfPayment." },
       answers: [
-        { status: 200, when: "The proof." },
-        { status: 409, code: "deposit_request_not_settled", when: "Not settled yet." },
+        { status: 200, when: "" },
+        { status: 409, code: "deposit_request_not_settled", when: "" },
         {
           status: 409,
           code: "deposit_sender_mismatch",
-          when: "A credited transfer came from a wallet other than the attested one; no proof can claim the payer paid it.",
+          when: "A credited transfer originated from a wallet other than payer_wallet. No proof is issued.",
         },
       ],
       examples: {

@@ -17,50 +17,33 @@ export const WEBHOOKS: EndpointGroup = {
       method: "POST",
       path: "/v1/webhooks",
       auth: "key",
-      summary:
-        "Register an HTTPS endpoint. The signing secret is returned once; later reads omit it. Events, signatures, payloads, and retries are in the Webhooks guide.",
+      summary: "Registers a webhook endpoint. The signing secret is returned once.",
       body: (
         <p>
-          The URL must be a public HTTPS destination with a DNS hostname and no credentials in it.
-          Private, loopback, link-local, and reserved destinations are rejected at registration and
-          again before every delivery. Redirects are never followed. See{" "}
+          HTTPS; DNS hostname; no credentials. Private, loopback, link-local, and reserved
+          destinations are rejected at registration and before each delivery. Redirects are not
+          followed. Event types, payloads, signatures, retry policy:{" "}
           <a href="/docs/webhooks">Webhooks</a>.
         </p>
       ),
-      bodyFields: [
-        {
-          name: "url",
-          type: "string",
-          required: true,
-          description: "A credential-free public HTTPS URL.",
-        },
-      ],
+      bodyFields: [{ name: "url", type: "string", required: true, description: "" }],
       response: {
         description: (
           <>
-            The endpoint with <code>secret</code>, on this response only.
+            <code>Webhook</code> with <code>secret</code>. This response only.
           </>
         ),
       },
       answers: [
-        {
-          status: 400,
-          code: "invalid_request",
-          when: "The URL is not acceptable; the message says why.",
-        },
-        {
-          status: 503,
-          code: "webhooks_unavailable",
-          when: "The environment cannot store secrets.",
-        },
+        { status: 400, code: "invalid_request", when: "URL rejected. Message states why." },
+        { status: 503, code: "webhooks_unavailable", when: "No encryption key configured." },
       ],
       examples: {
         curl: `curl -fsS "$API/v1/webhooks" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "url": "https://example.com/payday/webhook" }'`,
-        ts: `const endpoint = await payday.webhooks.add("https://example.com/payday/webhook");
-// endpoint.secret is returned exactly once. Store it beside the API key.`,
+        ts: `const endpoint = await payday.webhooks.add("https://example.com/payday/webhook");`,
         response: WEBHOOK.replace('"created_at"', '"secret": "whsec_…",\n  "created_at"'),
         responseTitle: "201 Created",
       },
@@ -71,7 +54,7 @@ export const WEBHOOKS: EndpointGroup = {
       method: "GET",
       path: "/v1/webhooks",
       auth: "key",
-      summary: "Active endpoints, without secrets.",
+      summary: "Lists active endpoints. Secrets omitted.",
       response: { description: "{ webhooks: Webhook[] }." },
       examples: {
         curl: `curl -fsS "$API/v1/webhooks" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
@@ -87,16 +70,10 @@ export const WEBHOOKS: EndpointGroup = {
       method: "GET",
       path: "/v1/webhooks/{id}",
       auth: "key",
-      summary: "One endpoint, disabled or not, without its secret.",
-      pathParams: [{ name: "id", type: "wh_ id", required: true, description: "The endpoint." }],
-      response: { description: "The endpoint." },
-      answers: [
-        {
-          status: 404,
-          code: "webhook_not_found",
-          when: "Missing, malformed, or another account's.",
-        },
-      ],
+      summary: "Retrieves an endpoint, active or disabled. Secret omitted.",
+      pathParams: [{ name: "id", type: "wh_ id", required: true, description: "" }],
+      response: { description: "Webhook." },
+      answers: [{ status: 404, code: "webhook_not_found", when: "" }],
       examples: {
         curl: `curl -fsS "$API/v1/webhooks/wh_0198f80c-…" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
         ts: `const endpoint = await payday.webhooks.get(id);`,
@@ -109,9 +86,8 @@ export const WEBHOOKS: EndpointGroup = {
       method: "DELETE",
       path: "/v1/webhooks/{id}",
       auth: "key",
-      summary:
-        "Disable the endpoint. Idempotent; its delivery history stays readable, and the same URL can be registered again with a new secret.",
-      pathParams: [{ name: "id", type: "wh_ id", required: true, description: "The endpoint." }],
+      summary: "Disables an endpoint. Idempotent. Delivery history remains readable.",
+      pathParams: [{ name: "id", type: "wh_ id", required: true, description: "" }],
       response: { description: "204 No Content." },
       examples: {
         curl: `curl -fsS -X DELETE "$API/v1/webhooks/wh_0198f80c-…" \\
@@ -127,26 +103,12 @@ export const WEBHOOKS: EndpointGroup = {
       method: "POST",
       path: "/v1/webhooks/{id}/test",
       auth: "key",
-      summary: "Queue a webhook.test event to this endpoint only. It carries no deposit request.",
-      pathParams: [
-        { name: "id", type: "wh_ id", required: true, description: "An active endpoint." },
-      ],
-      response: {
-        fields: [
-          {
-            name: "delivery_id",
-            type: "whd_ id",
-            description: "Follow it on the deliveries route.",
-          },
-        ],
-      },
+      summary: "Queues a webhook.test event to one endpoint.",
+      pathParams: [{ name: "id", type: "wh_ id", required: true, description: "Active endpoint." }],
+      response: { fields: [{ name: "delivery_id", type: "whd_ id", description: "" }] },
       answers: [
-        { status: 202, when: "Queued." },
-        {
-          status: 404,
-          code: "webhook_not_found",
-          when: "Missing, another account's, or disabled.",
-        },
+        { status: 202, when: "" },
+        { status: 404, code: "webhook_not_found", when: "Unknown or disabled." },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/webhooks/wh_0198f80c-…/test" \\
@@ -164,49 +126,36 @@ export const WEBHOOKS: EndpointGroup = {
       method: "GET",
       path: "/v1/webhook-deliveries",
       auth: "key",
-      summary:
-        "Deliveries newest first, each with its immutable attempt history, so a missed event can be found and reconciled.",
+      summary: "Lists deliveries, newest first, with attempt history.",
       query: [
-        {
-          name: "endpoint_id",
-          type: "wh_ id",
-          description: "Only this endpoint's deliveries, disabled or not.",
-        },
-        { name: "limit", type: "integer", description: "1 to 100, default 20." },
-        {
-          name: "starting_after",
-          type: "whd_ id",
-          description: "The previous page's next_cursor.",
-        },
+        { name: "endpoint_id", type: "wh_ id", description: "Disabled endpoints included." },
+        { name: "limit", type: "integer", description: "1–100. Default 20." },
+        { name: "starting_after", type: "whd_ id", description: "Cursor from next_cursor." },
       ],
       response: {
         fields: [
-          { name: "id", type: "whd_ id", description: "The delivery." },
-          {
-            name: "event_id",
-            type: "evt_ id",
-            description: "The event, also sent as Payday-Event-Id.",
-          },
-          { name: "endpoint_id", type: "wh_ id", description: "The endpoint." },
+          { name: "id", type: "whd_ id", description: "" },
+          { name: "event_id", type: "evt_ id", description: "Also sent as Payday-Event-Id." },
+          { name: "endpoint_id", type: "wh_ id", description: "" },
           {
             name: "state",
-            type: "string",
+            type: "enum",
             description: (
               <>
-                <code>pending</code>, <code>delivered</code>, or <code>failed</code> after the
-                twelfth failed attempt.
+                <code>pending</code> · <code>delivered</code> · <code>failed</code> (after twelve
+                attempts).
               </>
             ),
           },
           {
             name: "attempt_count, next_attempt_at, delivered_at, created_at",
-            type: "…",
-            description: "Scheduling and outcome.",
+            type: "",
+            description: "",
           },
           {
             name: "attempts",
             type: "object[]",
-            description: "{ number, attempted_at, duration_ms, status, error } each.",
+            description: "{ number, attempted_at, duration_ms, status, error }. Immutable.",
           },
         ],
       },

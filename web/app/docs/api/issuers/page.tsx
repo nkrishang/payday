@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 import { ISSUERS, PAYOUT_ADDRESSES } from "@/components/docs/api/issuers";
 import { CodeBlock } from "@/components/docs/code";
-import { MethodBadge } from "@/components/docs/endpoint";
-import { Callout, DocsPage, H2, Step, Steps } from "@/components/docs/prose";
+import { Params } from "@/components/docs/endpoint";
+import { DocsPage, H2 } from "@/components/docs/prose";
+import { RouteList } from "@/components/docs/route-list";
 
 export const metadata: Metadata = {
   title: "Issuer identities",
-  description:
-    "Save the party you issue under, prove its contact mailbox, and keep the wallets you settle to.",
+  description: "The Issuer and PayoutAddress objects and the routes that operate on them.",
 };
 
 const ISSUER = `{
@@ -24,69 +24,59 @@ const ISSUER = `{
   "updated_at": "2026-09-06T12:05:00Z"
 }`;
 
-const SETUP = `const acme = await payday.issuers.create({ name: "Acme LLC", contact_email: "billing@acme.example" });
-
-await payday.issuers.startEmailVerification(acme.id);   // a code goes to billing@acme.example
-await payday.issuers.confirmEmailVerification(acme.id, "123456");
-
-const treasury = await payday.payoutAddresses.create({ address: "0x1111…", label: "Treasury" });
-await payday.issuers.setPayoutAddresses(acme.id, [treasury.id]);`;
-
 export default function IssuersOverviewPage() {
   return (
     <DocsPage
       eyebrow="Issuers"
       title="Issuer identities"
-      lead="An issuer identity is your own side of a deposit request, saved once instead of retyped: the party it is issued under, the mailbox payers write to, and the wallets it settles to."
+      lead="A saved issuing party with a verified contact mailbox and an ordered set of payout addresses. Referenced from a deposit request by issuer_id; the request snapshots the party at issuance."
     >
-      <p>
-        Issuance is unchanged by any of this. A request still carries its own <code>issuer</code>{" "}
-        and <code>payout_address</code> snapshot, so editing an identity never reaches a request
-        already issued. What the identity does is stop the retyping, prove the mailbox, and leave a
-        durable <code>issuer_id</code> on every request issued under it, so &quot;issued under
-        Acme&quot; stays answerable after a rename.
-      </p>
-      <CodeBlock code={ISSUER} lang="json" title="The issuer object" />
+      <H2 id="issuer">Issuer</H2>
+      <Params
+        rows={[
+          { name: "id", type: "iss_ id", description: "" },
+          {
+            name: "name",
+            type: "string",
+            description: "Unique per account, case- and whitespace-insensitive.",
+          },
+          { name: "contact_email", type: "string", description: "Lowercased." },
+          { name: "details", type: "string | null", description: "" },
+          {
+            name: "email_verified, email_verified_at",
+            type: "boolean, timestamp | null",
+            description: "Set by the confirm route. Reset by a contact_email change.",
+          },
+          {
+            name: "payout_addresses",
+            type: "PayoutAddress[]",
+            description: "Association order. First is the default for issuer_id-only creates.",
+          },
+          { name: "created_at, updated_at", type: "timestamp", description: "" },
+        ]}
+      />
+      <CodeBlock code={ISSUER} lang="json" title="Issuer" />
 
-      <H2 id="setting-one-up">Setting one up</H2>
-      <Steps>
-        <Step title="Create it">
-          A name and a contact address. Names are unique among your identities, ignoring case and
-          surrounding space; contact addresses may repeat.
-        </Step>
-        <Step title="Prove the mailbox">
-          Start verification and a six-digit code goes to the stored address; confirm it. Payers are
-          told to write there, so a request cannot carry an unproven mailbox.
-        </Step>
-        <Step title="Save the wallets it settles to (optional)">
-          Payout addresses are account-owned and shared between identities. An identity with none
-          settles to the account&apos;s own Payday wallet.
-        </Step>
-      </Steps>
-      <CodeBlock code={SETUP} lang="ts" />
+      <H2 id="payout-address">PayoutAddress</H2>
+      <Params
+        rows={[
+          { name: "id", type: "pa_ id", description: "" },
+          { name: "address", type: "string", description: "EIP-55. Unique per account." },
+          { name: "label", type: "string | null", description: "≤20 characters." },
+          { name: "created_at", type: "timestamp", description: "" },
+        ]}
+      />
 
-      <Callout title="Where a request settles">
-        <code>POST /v1/deposit-requests</code> with an <code>issuer_id</code> and no{" "}
-        <code>payout_address</code> settles to the identity&apos;s first saved wallet. An explicit{" "}
-        <code>payout_address</code> always wins. Before accepting deposits, confirm your
-        organisation controls whichever wallet that is.
-      </Callout>
+      <H2 id="constraints">Constraints</H2>
+      <ul>
+        <li>A request cannot carry an identity whose mailbox is unverified.</li>
+        <li>Editing an identity does not touch issued requests.</li>
+        <li>An identity with issued requests cannot be deleted.</li>
+        <li>Identities with no payout addresses settle to the account wallet.</li>
+      </ul>
 
       <H2 id="routes">Routes</H2>
-      <ul>
-        {[
-          ...ISSUERS.endpoints.map((e) => [ISSUERS.slug, e] as const),
-          ...PAYOUT_ADDRESSES.endpoints.map((e) => [PAYOUT_ADDRESSES.slug, e] as const),
-        ].map(([group, endpoint]) => (
-          <li key={`${group}/${endpoint.slug}`} className="flex items-center gap-2.5">
-            <MethodBadge method={endpoint.method} variant="tint" />
-            <a href={`/docs/api/${group}/${endpoint.slug}`}>{endpoint.title}</a>
-            <span className="hidden font-mono text-[12px] text-faint sm:inline">
-              {endpoint.path}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <RouteList groups={[ISSUERS, PAYOUT_ADDRESSES]} />
     </DocsPage>
   );
 }

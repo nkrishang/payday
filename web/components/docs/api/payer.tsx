@@ -1,12 +1,7 @@
 import type { EndpointGroup, FieldDoc } from "./types";
 
 const SESSION_HEADER: FieldDoc[] = [
-  {
-    name: "Payday-Payer-Session",
-    type: "string",
-    description:
-      "The payer session from verification, a client-secret exchange, or a wallet challenge.",
-  },
+  { name: "Payday-Payer-Session", type: "string", description: "Payer session token." },
 ];
 
 const LOCKED = `{
@@ -89,38 +84,32 @@ export const PAYER: EndpointGroup = {
       method: "GET",
       path: "/v1/payer/deposit-requests/{id}",
       auth: "payer_session",
-      summary:
-        "The request as the payer may see it. Always the issuer name, heading, status, and requirements; the amounts and details once unlocked; the address and QR once a wallet is bound.",
+      summary: "Retrieves the payer projection of a deposit request.",
       body: (
         <>
           <p>
-            For a permissionless request everything but the address is present at once. For the
-            gated modes <code>chain</code>, <code>token</code>, the amounts, and{" "}
-            <code>details</code> are <code>null</code> until the session satisfies the policy, and{" "}
-            <code>settlement_tx_hash</code> is withheld too, since it would reveal the amount and
-            payout address. <code>payer_wallet</code>, <code>address</code>, and{" "}
-            <code>deposit_uri</code> appear once a wallet is bound; <code>deposit_uri</code> becomes{" "}
-            <code>null</code> again once the request is not payable.
+            Gated modes: <code>chain</code>, <code>token</code>, amounts, <code>details</code>, and{" "}
+            <code>settlement_tx_hash</code> are null until the session satisfies the policy.
+            Permissionless: present immediately. <code>payer_wallet</code>, <code>address</code>,{" "}
+            <code>address_explorer_url</code>, and <code>deposit_uri</code> are null until a wallet
+            is bound; <code>deposit_uri</code> returns to null when <code>payable</code> is false.
           </p>
           <p>
-            With a session, <code>requirements</code> reports that session&apos;s facts; without one
-            it reports what the request as a whole has completed, which never unlocks a read. The
-            response carries no merchant data: no payout or recovery address, metadata, customer, or
-            policy assertion, only a masked email hint.
+            With a session, <code>requirements</code> reflects that session. Without one, it
+            reflects the request as a whole and unlocks nothing. No merchant data is present: no
+            payout or recovery address, metadata, customer, or policy assertion.
           </p>
         </>
       ),
       headers: SESSION_HEADER,
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "From the deposit link." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          { name: "issuer_name, heading", type: "string", description: "Always shown." },
+          { name: "issuer_name, heading", type: "string", description: "Always present." },
           {
             name: "payer_policy",
             type: "object",
-            description: "{ mode, expected_email_hint }; the hint is null for merchant sessions.",
+            description: "{ mode, expected_email_hint }. Hint is null under merchant_session.",
           },
           {
             name: "requirements",
@@ -129,57 +118,48 @@ export const PAYER: EndpointGroup = {
           },
           {
             name: "status, payable, expires_at",
-            type: "…",
-            description: "Lifecycle; payable is false once the address must stop being shown.",
+            type: "",
+            description: "payable false: stop presenting the address.",
           },
           {
             name: "server_timestamp",
             type: "string",
-            description: "Unix seconds. Render the countdown from this, never the device clock.",
+            description: "Unix seconds. Authoritative clock for the deadline.",
           },
-          {
-            name: "content_unlocked",
-            type: "boolean",
-            description: "Whether the gated fields are present.",
-          },
+          { name: "content_unlocked", type: "boolean", description: "" },
           {
             name: "chain, token, amount, received, remaining",
-            type: "… | null",
-            description: "Present once unlocked, with base-unit twins.",
+            type: "| null",
+            description: "Gated. Base-unit counterparts included.",
           },
           {
             name: "payer_wallet, address, address_explorer_url, deposit_uri",
             type: "string | null",
-            description: "Present once a wallet is bound.",
+            description: "Present once bound. deposit_uri is EIP-681 for remaining.",
           },
           {
             name: "details",
             type: "object | null",
-            description: "{ amount, payer, notes, reference, attachment } once unlocked.",
+            description:
+              "{ amount, amount_base_units, payer, notes, reference, attachment }. Gated.",
           },
           {
             name: "payer_message",
             type: "string | null",
-            description: "Safety guidance, only when the request needs attention.",
+            description: "Present under needs_attention.",
           },
         ],
       },
-      answers: [
-        {
-          status: 401,
-          code: "invalid_deposit_link",
-          when: "The id does not resolve to a request.",
-        },
-      ],
+      answers: [{ status: 401, code: "invalid_deposit_link", when: "Unknown id." }],
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-8d2f-7dc1-a369-90556a64f700" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION"   # omit for a first read`,
+  -H "Payday-Payer-Session: $PAYER_SESSION"`,
         ts: `import { PaydayPayerClient } from "@payday/sdk";
 
-const payer = new PaydayPayerClient(); // no key
+const payer = new PaydayPayerClient();
 const view = await payer.depositRequests.get(id, { payerSession });`,
         response: UNLOCKED,
-        responseTitle: "200 OK, unlocked and bound",
+        responseTitle: "200 OK — unlocked, bound",
       },
     },
     {
@@ -188,29 +168,19 @@ const view = await payer.depositRequests.get(id, { payerSession });`,
       method: "GET",
       path: "/v1/payer/deposit-requests/{id}/qr",
       auth: "payer_session",
-      summary: "An SVG encoding deposit_uri: the EIP-681 request for the amount still due.",
+      summary: "Renders deposit_uri as SVG.",
       headers: SESSION_HEADER,
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "From the deposit link." },
-      ],
-      response: { description: "image/svg+xml." },
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      response: { description: "image/svg+xml. Cache-Control: no-store." },
       answers: [
-        { status: 401, code: "verification_required", when: "The content is still gated." },
-        {
-          status: 409,
-          code: "wallet_required",
-          when: "No wallet is bound; there is no address yet.",
-        },
-        {
-          status: 410,
-          code: "deposit_request_not_payable",
-          when: "The address must no longer be presented.",
-        },
+        { status: 401, code: "verification_required", when: "Content gated." },
+        { status: 409, code: "wallet_required", when: "No wallet bound." },
+        { status: 410, code: "deposit_request_not_payable", when: "" },
       ],
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/qr" \\
   -H "Payday-Payer-Session: $PAYER_SESSION" -o qr.svg`,
-        ts: `const svg = await payer.depositRequests.qr(id, payerSession); // Blob for an <img>`,
+        ts: `const svg = await payer.depositRequests.qr(id, payerSession);`,
         response: `HTTP/1.1 200 OK
 Content-Type: image/svg+xml
 Cache-Control: no-store`,
@@ -223,16 +193,13 @@ Cache-Control: no-store`,
       method: "GET",
       path: "/v1/payer/deposit-requests/{id}/attachment",
       auth: "payer_session",
-      summary:
-        "The attached PDF's descriptor with a short-lived download_url, once the content is unlocked.",
+      summary: "Retrieves the attachment descriptor with a signed download URL.",
       headers: SESSION_HEADER,
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "From the deposit link." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: { description: "{ id, filename, mime_type, byte_length, sha256, download_url }." },
       answers: [
-        { status: 401, code: "verification_required", when: "The content is still gated." },
-        { status: 404, code: "attachment_not_found", when: "The request has no attachment." },
+        { status: 401, code: "verification_required", when: "Content gated." },
+        { status: 404, code: "attachment_not_found", when: "" },
       ],
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/attachment" \\
@@ -254,11 +221,9 @@ Cache-Control: no-store`,
       method: "GET",
       path: "/v1/payer/deposit-requests/{id}/verify",
       auth: "payer_session",
-      summary: "The session's requirements, or the request's as a whole without a session.",
+      summary: "Retrieves requirements for the session, or for the request without one.",
       headers: SESSION_HEADER,
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "From the deposit link." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: { description: "{ requirements }." },
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/verify" \\
@@ -273,48 +238,36 @@ Cache-Control: no-store`,
       method: "POST",
       path: "/v1/payer/deposit-requests/{id}/verify/email/start",
       auth: "none",
-      summary:
-        "Send a code to the mailbox the merchant asserted. The request names no mailbox. Answers the payer session the code belongs to.",
+      summary: "Sends a one-time code to the asserted mailbox and mints a payer session.",
       body: (
         <p>
-          The session is an opaque token valid for 24 hours, of which Payday stores only a hash.
-          Sending it back in the header on a second <code>start</code> resends the code on the same
-          session. At most one code per request per minute, whoever asks. This write is answered
-          cross-origin for the hosted checkout only.
+          The request carries no mailbox. Session: opaque, 24 hours, stored hashed. A session in the
+          header resends on that session. One code per request per minute. Cross-origin: hosted
+          checkout origin only.
         </p>
       ),
-      headers: [{ ...SESSION_HEADER[0]!, description: "Optional: resend on an existing session." }],
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "A verified_email request." },
-      ],
+      headers: [{ ...SESSION_HEADER[0]!, description: "Optional. Resend on an existing session." }],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          {
-            name: "payer_session",
-            type: "string",
-            description: "Send it in Payday-Payer-Session from now on.",
-          },
-          { name: "expires_at", type: "timestamp", description: "24 hours out." },
+          { name: "payer_session", type: "string", description: "" },
+          { name: "expires_at", type: "timestamp", description: "" },
         ],
       },
       answers: [
-        { status: 429, code: "otp_resend_cooldown", when: "One code per minute; see Retry-After." },
-        { status: 409, code: "verification_not_required", when: "The request is permissionless." },
+        { status: 429, code: "otp_resend_cooldown", when: "Retry-After set." },
+        { status: 409, code: "verification_not_required", when: "Mode is permissionless." },
         {
           status: 409,
           code: "verification_method_not_applicable",
-          when: "The request is a merchant session; it sends no codes.",
+          when: "Mode is merchant_session.",
         },
         {
           status: 410,
           code: "deposit_request_not_payable",
-          when: "Closed without verifying. A settled request that did verify re-proves the mailbox to reopen its receipt.",
+          when: "Closed without verification. A settled, verified request re-proves for receipt access.",
         },
-        {
-          status: 503,
-          code: "verification_unavailable",
-          when: "The environment has no email verification configured.",
-        },
+        { status: 503, code: "verification_unavailable", when: "No identity provider configured." },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/verify/email/start"`,
@@ -331,45 +284,29 @@ Cache-Control: no-store`,
       method: "POST",
       path: "/v1/payer/deposit-requests/{id}/verify/email/confirm",
       auth: "payer_session",
-      summary:
-        "Exchange the code on the session. The content unlocks and verification.approved is raised.",
+      summary: "Confirms the code on the session. Unlocks content; raises verification.approved.",
       body: (
         <p>
-          If the code was accepted but could not be recorded, the answer is{" "}
-          <code>503 verification_persistence_unavailable</code> with a short-lived{" "}
-          <code>continuation</code>: retry this route with <code>{`{ "continuation": "…" }`}</code>{" "}
-          and the same session instead of a new code.
+          On <code>503 verification_persistence_unavailable</code> the body carries a{" "}
+          <code>continuation</code> valid five minutes. Retry this route with{" "}
+          <code>{`{ "continuation" }`}</code> on the same session.
         </p>
       ),
       headers: SESSION_HEADER,
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "A verified_email request." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       bodyFields: [
-        { name: "otp", type: "string", description: "The six digits from the email." },
-        {
-          name: "continuation",
-          type: "string",
-          description: "Instead of otp, after a 503 with one.",
-        },
+        { name: "otp", type: "string", description: "Six digits." },
+        { name: "continuation", type: "string", description: "Exclusive with otp." },
       ],
       response: { description: "{ requirements }." },
       answers: [
-        { status: 401, code: "otp_invalid", when: "Wrong, spent, or expired." },
-        {
-          status: 401,
-          code: "payer_session_invalid",
-          when: "The header is missing, unknown, expired, or for another request.",
-        },
-        {
-          status: 409,
-          code: "verification_not_started",
-          when: "No code was sent, or it was already spent.",
-        },
+        { status: 401, code: "otp_invalid", when: "" },
+        { status: 401, code: "payer_session_invalid", when: "" },
+        { status: 409, code: "verification_not_started", when: "No outstanding code." },
         {
           status: 503,
           code: "verification_persistence_unavailable",
-          when: "Accepted but not recorded; retry with the continuation.",
+          when: "Retry with continuation.",
         },
       ],
       examples: {
@@ -387,48 +324,29 @@ Cache-Control: no-store`,
       method: "POST",
       path: "/v1/payer/deposit-requests/{id}/session",
       auth: "none",
-      summary:
-        "Exchange a merchant-session client secret for a payer session that already satisfies the policy. The exchange is the verification, and it happens exactly once per secret.",
+      summary: "Exchanges a merchant_session client secret for a payer session. Single use.",
       body: (
         <p>
-          The hosted checkout reads the secret from the URL fragment (<code>#cs=…</code>), removes
-          it from the address bar, and calls this. It mints a 24-hour session, records an approved
-          attempt, and, while the request is live, sets <code>verification_completed_at</code>. An
-          unknown, malformed, expired, or wrong-request secret gets one answer, so a guess learns
-          nothing.
+          The exchange is the verification: mints a 24-hour session satisfying the policy, records
+          an approved <code>merchant_session</code> attempt, and sets{" "}
+          <code>verification_completed_at</code> while the request is live. Unknown, malformed,
+          expired, and foreign secrets receive one answer. Response is{" "}
+          <code>Cache-Control: no-store</code>.
         </p>
       ),
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "A merchant_session request." },
-      ],
-      bodyFields: [
-        {
-          name: "client_secret",
-          type: "string",
-          required: true,
-          description: "From the fragment.",
-        },
-      ],
-      response: { description: "{ payer_session, expires_at, requirements }. Not cached." },
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      bodyFields: [{ name: "client_secret", type: "string", required: true, description: "" }],
+      response: { description: "{ payer_session, expires_at, requirements }." },
       answers: [
-        {
-          status: 409,
-          code: "client_secret_used",
-          when: "Already exchanged; the link was opened once. Mint another.",
-        },
-        {
-          status: 401,
-          code: "client_secret_invalid",
-          when: "Unknown, malformed, expired, or for another request.",
-        },
-        { status: 410, code: "deposit_request_not_payable", when: "Closed without verifying." },
+        { status: 409, code: "client_secret_used", when: "Already exchanged." },
+        { status: 401, code: "client_secret_invalid", when: "" },
+        { status: 410, code: "deposit_request_not_payable", when: "Closed without verification." },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/session" \\
   -H "Content-Type: application/json" \\
   -d '{ "client_secret": "cs_…" }'`,
-        ts: `const opened = await payer.verification.exchangeClientSecret(id, clientSecret);
-opened.requirements.complete; // true`,
+        ts: `const opened = await payer.verification.exchangeClientSecret(id, clientSecret);`,
         response: `{
   "payer_session": "…",
   "expires_at": "2026-09-07T12:00:00Z",
@@ -442,46 +360,29 @@ opened.requirements.complete; // true`,
       method: "POST",
       path: "/v1/payer/deposit-requests/{id}/wallet/challenge",
       auth: "payer_session",
-      summary:
-        "Mint a one-time nonce for the wallet that will pay and return the EIP-712 document to sign. Every request, gated or not, takes this step before it has an address.",
+      summary: "Mints a one-time nonce and returns the EIP-712 attestation to sign.",
       body: (
         <p>
-          A gated request needs the session that satisfied its policy. A permissionless request with
-          no session yet is given one here, returned as <code>payer_session</code>. Hand{" "}
-          <code>typed_data</code> to the wallet&apos;s <code>eth_signTypedData_v4</code> verbatim.
-          The challenge is void after ten minutes.
+          Required for every request before an address exists. Gated modes require a session that
+          satisfies the policy; permissionless requests without a session receive one. Pass{" "}
+          <code>typed_data</code> to <code>eth_signTypedData_v4</code> unmodified. Challenge
+          validity: ten minutes.
         </p>
       ),
-      headers: [
-        {
-          ...SESSION_HEADER[0]!,
-          description: "Required for gated requests; optional for permissionless ones.",
-        },
-      ],
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "From the deposit link." },
-      ],
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       bodyFields: [
-        {
-          name: "wallet",
-          type: "string",
-          required: true,
-          description: "The address that will pay.",
-        },
+        { name: "wallet", type: "string", required: true, description: "Paying wallet." },
       ],
       response: {
         fields: [
-          {
-            name: "payer_session",
-            type: "string",
-            description: "The session the challenge belongs to.",
-          },
-          { name: "expires_at", type: "timestamp", description: "Ten minutes out." },
+          { name: "payer_session", type: "string", description: "" },
+          { name: "expires_at", type: "timestamp", description: "" },
           {
             name: "typed_data",
             type: "object",
             description:
-              "Domain { name: Payday, version: 1, chainId, verifyingContract }, primary type PayerAttestation, message { statement, attributionHash, wallet, nonce, expiresAt }.",
+              'Domain { name: "Payday", version: "1", chainId, verifyingContract }. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
           },
         ],
       },
@@ -489,14 +390,10 @@ opened.requirements.complete; // true`,
         {
           status: 401,
           code: "verification_required / payer_session_invalid",
-          when: "A gated request without an unlocked session.",
+          when: "Gated; session missing or unsatisfied.",
         },
-        {
-          status: 409,
-          code: "wallet_already_bound",
-          when: "Another wallet already won; the message names it.",
-        },
-        { status: 410, code: "deposit_request_not_payable", when: "Past its deadline or closed." },
+        { status: 409, code: "wallet_already_bound", when: "Message names the bound wallet." },
+        { status: 410, code: "deposit_request_not_payable", when: "" },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/wallet/challenge" \\
@@ -529,60 +426,37 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       method: "POST",
       path: "/v1/payer/deposit-requests/{id}/wallet/attest",
       auth: "payer_session",
-      summary:
-        "Hand back the signature. The salt, the recovery term, and the one-time address are written together, once, and the unlocked view is returned with address and payer_wallet set.",
+      summary: "Submits the signature. Binds the wallet and derives the deposit address.",
       body: (
         <p>
-          The signature must recover to <code>wallet</code>: externally owned accounts only for now.
-          Binding raises <code>deposit_request.ready</code>. From here, only transfers from this
-          wallet are the payer&apos;s, and anything returned goes back to it.
+          Signature must recover to <code>wallet</code> (EOA only). Salt, recovery term, and address
+          are written atomically, once. Raises <code>deposit_request.ready</code>.
         </p>
       ),
       headers: SESSION_HEADER,
-      pathParams: [
-        { name: "id", type: "dr_ id", required: true, description: "From the deposit link." },
-      ],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       bodyFields: [
-        {
-          name: "wallet",
-          type: "string",
-          required: true,
-          description: "The address that will pay.",
-        },
-        {
-          name: "signature",
-          type: "string",
-          required: true,
-          description: "The 65-byte signature over the challenge's typed data.",
-        },
+        { name: "wallet", type: "string", required: true, description: "" },
+        { name: "signature", type: "string", required: true, description: "65 bytes, 0x hex." },
       ],
-      response: { description: "The payer view, unlocked, with address and payer_wallet." },
+      response: { description: "Payer view, unlocked, with address and payer_wallet." },
       answers: [
-        {
-          status: 401,
-          code: "wallet_signature_invalid",
-          when: "The signature does not recover to the stated wallet.",
-        },
-        {
-          status: 401,
-          code: "verification_required / payer_session_invalid",
-          when: "A gated request without an unlocked session.",
-        },
+        { status: 401, code: "wallet_signature_invalid", when: "" },
+        { status: 401, code: "verification_required / payer_session_invalid", when: "" },
         {
           status: 409,
           code: "wallet_challenge_required",
-          when: "No outstanding, unexpired challenge on the session.",
+          when: "No unexpired challenge on the session.",
         },
-        { status: 409, code: "wallet_already_bound", when: "Another wallet already won." },
-        { status: 410, code: "deposit_request_not_payable", when: "Past its deadline or closed." },
+        { status: 409, code: "wallet_already_bound", when: "" },
+        { status: 410, code: "deposit_request_not_payable", when: "" },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/wallet/attest" \\
   -H "Payday-Payer-Session: $PAYER_SESSION" \\
   -H "Content-Type: application/json" \\
   -d '{ "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "signature": "0x…" }'`,
-        ts: `const ready = await payer.wallet.attest(id, account, signature, challenge.payer_session);
-ready.address; // "0x2222…"`,
+        ts: `const ready = await payer.wallet.attest(id, account, signature, challenge.payer_session);`,
         response: UNLOCKED,
       },
     },

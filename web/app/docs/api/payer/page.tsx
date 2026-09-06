@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import { PAYER, PAYER_LOCKED_EXAMPLE } from "@/components/docs/api/payer";
 import { CodeBlock } from "@/components/docs/code";
-import { MethodBadge } from "@/components/docs/endpoint";
-import { DisclosureTable, NeverShown } from "@/components/docs/figures";
-import { Callout, DocsPage, Figure, H2 } from "@/components/docs/prose";
+import { DisclosureTable } from "@/components/docs/figures";
+import { DocsPage, Figure, H2 } from "@/components/docs/prose";
+import { RouteList } from "@/components/docs/route-list";
 
 export const metadata: Metadata = {
   title: "The payer view",
   description:
-    "The public, keyless routes behind every deposit link: what they disclose, when, and how a session unlocks them.",
+    "The unauthenticated routes behind a deposit link: disclosure rules, sessions, and CORS.",
 };
 
 export default function PayerOverviewPage() {
@@ -16,51 +16,46 @@ export default function PayerOverviewPage() {
     <DocsPage
       eyebrow="Payer routes"
       title="The payer view"
-      lead="What a deposit link resolves to. These routes take no API key, expose no merchant data, and are what the hosted checkout is built on, so a checkout of your own can use them too."
+      lead="Unauthenticated. No API key accepted. No merchant data returned. A payer session in Payday-Payer-Session unlocks gated content for exactly one request."
     >
-      <p>
-        Reads answer any browser origin. A payer session token, obtained by completing verification,
-        exchanging a client secret, or (for a permissionless request) requesting a wallet challenge,
-        travels in the <code>Payday-Payer-Session</code> header on every read and unlocks exactly
-        the request it was minted for. The writes answer the hosted checkout&apos;s origin only and
-        limit bodies to 8 KiB. JSON responses are never cached.
-      </p>
+      <H2 id="sessions">Sessions</H2>
+      <ul>
+        <li>Opaque token; 24-hour validity; stored hashed; bound to one deposit request.</li>
+        <li>
+          Minted by: email verification start, client-secret exchange, wallet challenge
+          (permissionless only), or the merchant preview route.
+        </li>
+        <li>Header transport only. Never in a path or query.</li>
+      </ul>
 
-      <Figure caption="Disclosure by moment. A permissionless request starts in the middle column: everything but the address is visible at once.">
+      <H2 id="disclosure">Disclosure</H2>
+      <Figure caption="Field availability by state. Permissionless requests begin in the second column.">
         <DisclosureTable />
       </Figure>
-      <Figure caption="Never shown to a payer, whatever the policy.">
-        <NeverShown />
-      </Figure>
-
-      <H2 id="locked">A gated request, locked</H2>
       <p>
-        Without a session that satisfies the policy, the gated fields are <code>null</code>: not
-        hidden, absent. The hosted page renders only what it is sent, and so should yours.
+        Never present: <code>payout_address</code>, <code>recovery_address</code>,{" "}
+        <code>metadata</code>, <code>customer_id</code>, <code>issuer_id</code>, policy assertions.{" "}
+        <code>expected_email</code> is masked (<code>a****@c***.example</code>); absent under{" "}
+        <code>merchant_session</code>. Gated fields are <code>null</code>, not omitted.
       </p>
-      <CodeBlock
-        code={PAYER_LOCKED_EXAMPLE}
-        lang="json"
-        title="GET /v1/payer/deposit-requests/{id}, no session"
-      />
+      <CodeBlock code={PAYER_LOCKED_EXAMPLE} lang="json" title="Locked" />
 
-      <Callout title="Never in a URL">
-        The session token goes in the <code>Payday-Payer-Session</code> header, and a client secret
-        in a URL fragment. Neither should appear in a path, a query string, or a log.
-      </Callout>
+      <H2 id="cors">CORS</H2>
+      <ul>
+        <li>
+          Reads (<code>GET</code>): any origin. <code>Payday-Payer-Session</code> allowed.
+        </li>
+        <li>
+          Writes (verification, session exchange, wallet): hosted checkout origin only. Body limit 8
+          KiB.
+        </li>
+        <li>
+          JSON responses: <code>Cache-Control: no-store</code>.
+        </li>
+      </ul>
 
       <H2 id="routes">Routes</H2>
-      <ul>
-        {PAYER.endpoints.map((endpoint) => (
-          <li key={endpoint.slug} className="flex items-center gap-2.5">
-            <MethodBadge method={endpoint.method} variant="tint" />
-            <a href={`/docs/api/payer/${endpoint.slug}`}>{endpoint.title}</a>
-            <span className="hidden font-mono text-[12px] text-faint sm:inline">
-              {endpoint.path}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <RouteList groups={[PAYER]} />
     </DocsPage>
   );
 }

@@ -19,22 +19,13 @@ export const CUSTOMERS: EndpointGroup = {
       method: "POST",
       path: "/v1/customers",
       auth: "key",
-      summary:
-        "A reusable payer record: a name, an optional email, optional details. Name it on a deposit request and it supplies the payer party.",
+      summary: "Creates a customer.",
       bodyFields: [
-        { name: "name", type: "string", required: true, description: "1 to 255 bytes." },
-        {
-          name: "email",
-          type: "string",
-          description: "3 to 254 bytes. Where Payday emails a request issued to this customer.",
-        },
-        {
-          name: "details",
-          type: "string",
-          description: "Up to 4,000 bytes of free text, shown verbatim on the request.",
-        },
+        { name: "name", type: "string", required: true, description: "1–255 bytes." },
+        { name: "email", type: "string", description: "3–254 bytes." },
+        { name: "details", type: "string", description: "≤4,000 bytes." },
       ],
-      response: { description: "The customer." },
+      response: { description: "Customer." },
       examples: {
         curl: `curl -fsS "$API/v1/customers" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY" \\
@@ -55,14 +46,10 @@ export const CUSTOMERS: EndpointGroup = {
       method: "GET",
       path: "/v1/customers",
       auth: "key",
-      summary: "Customers newest first, with a cursor.",
+      summary: "Lists customers, newest first.",
       query: [
-        { name: "limit", type: "integer", description: "1 to 100, default 20." },
-        {
-          name: "starting_after",
-          type: "cus_ id",
-          description: "The previous page's next_cursor.",
-        },
+        { name: "limit", type: "integer", description: "1–100. Default 20." },
+        { name: "starting_after", type: "cus_ id", description: "Cursor from next_cursor." },
       ],
       response: { description: "{ customers: Customer[], next_cursor: cus_ id | null }." },
       examples: {
@@ -81,30 +68,21 @@ export const CUSTOMERS: EndpointGroup = {
       method: "GET",
       path: "/v1/customers/{id}",
       auth: "key",
-      summary:
-        "One customer, with how much its requests have collected and how much is still open.",
-      pathParams: [{ name: "id", type: "cus_ id", required: true, description: "The customer." }],
+      summary: "Retrieves a customer with aggregate statistics.",
+      pathParams: [{ name: "id", type: "cus_ id", required: true, description: "" }],
       response: {
         description: (
           <>
-            The customer plus <code>stats</code>, in base units: <code>request_count</code>,{" "}
-            <code>collected_base_units</code> (settled across its requests), and{" "}
-            <code>pending_base_units</code> (still open). Only the single read carries stats.
+            <code>Customer</code> plus <code>stats</code>: <code>request_count</code>,{" "}
+            <code>collected_base_units</code>, <code>pending_base_units</code>. This route only.
           </>
         ),
       },
-      answers: [
-        {
-          status: 404,
-          code: "customer_not_found",
-          when: "Missing, malformed, or another account's.",
-        },
-      ],
+      answers: [{ status: 404, code: "customer_not_found", when: "" }],
       examples: {
         curl: `curl -fsS "$API/v1/customers/cus_0198f80c-1111-7dc1-a369-90556a64f700" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const customer = await payday.customers.get(id);
-customer.stats.pending_base_units; // "1250000000"`,
+        ts: `const customer = await payday.customers.get(id);`,
         response: CUSTOMER.replace(
           '"updated_at": "2026-09-06T12:00:00Z"',
           '"updated_at": "2026-09-06T12:00:00Z",\n  "stats": { "request_count": 3, "collected_base_units": "2500000000", "pending_base_units": "1250000000" }',
@@ -117,21 +95,21 @@ customer.stats.pending_base_units; // "1250000000"`,
       method: "PATCH",
       path: "/v1/customers/{id}",
       auth: "key",
-      summary:
-        "Change any subset of name, email, and details. A field left out keeps its value; null clears email or details.",
+      summary: "Updates a customer. Partial.",
       body: (
         <p>
-          The merged record is validated whole, so a blank name is refused. Editing a customer never
-          changes a request already issued.
+          Omitted fields are unchanged. <code>null</code> clears <code>email</code> or{" "}
+          <code>details</code>. The merged record is validated whole. Issued requests are
+          unaffected.
         </p>
       ),
-      pathParams: [{ name: "id", type: "cus_ id", required: true, description: "The customer." }],
+      pathParams: [{ name: "id", type: "cus_ id", required: true, description: "" }],
       bodyFields: [
-        { name: "name", type: "string", description: "1 to 255 bytes." },
-        { name: "email", type: "string | null", description: "A new address, or null to clear." },
-        { name: "details", type: "string | null", description: "New details, or null to clear." },
+        { name: "name", type: "string", description: "1–255 bytes." },
+        { name: "email", type: "string | null", description: "" },
+        { name: "details", type: "string | null", description: "" },
       ],
-      response: { description: "The updated customer." },
+      response: { description: "Customer." },
       examples: {
         curl: `curl -fsS -X PATCH "$API/v1/customers/cus_0198f80c-…" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY" \\

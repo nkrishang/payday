@@ -7,29 +7,19 @@ import { Answers, MethodBadge, Params } from "./endpoint";
 import { Pager } from "./pager";
 
 /**
- * One route, one page: the reference's template. The left column reads top
- * to bottom — what the route does, what it takes, what it answers — and the
- * right column keeps the request and response samples in view beside it,
- * the way an engineer reads a reference: prose on one side, the shape of the
- * call on the other. Below `xl` the samples follow the summary instead.
+ * One route, one page: the reference's template. Prose, fields, and status
+ * codes on the left; request and response samples pinned on the right at
+ * `xl`, under the summary below it.
  */
 
 const AUTH: Record<Auth, { icon: typeof KeyRound; label: string; detail: string }> = {
-  key: {
-    icon: KeyRound,
-    label: "API key",
-    detail: "Authorization: Bearer payday_live_… — or the dashboard session.",
-  },
-  session: {
-    icon: ShieldCheck,
-    label: "Dashboard session only",
-    detail: "An API key is refused here with 401 identity_unauthorized.",
-  },
-  none: { icon: LockOpen, label: "Public", detail: "No credential. Safe to call from a browser." },
+  key: { icon: KeyRound, label: "API key", detail: "or dashboard session." },
+  session: { icon: ShieldCheck, label: "Dashboard session", detail: "API keys refused." },
+  none: { icon: LockOpen, label: "Unauthenticated", detail: "" },
   payer_session: {
     icon: Lock,
-    label: "Payer session",
-    detail: "Public; takes Payday-Payer-Session for content a policy gates.",
+    label: "Unauthenticated",
+    detail: "Payday-Payer-Session unlocks gated content.",
   },
 };
 
@@ -87,10 +77,11 @@ export function EndpointPage({ group, endpoint }: { group: EndpointGroup; endpoi
 
           <p className="mt-5 text-[16px] leading-[1.65] text-muted">{endpoint.summary}</p>
 
-          <p className="mt-4 flex items-start gap-2 text-[13.5px] leading-[1.55] text-muted">
-            <AuthIcon className="mt-0.5 size-3.5 shrink-0 text-faint" />
+          <p className="mt-3 flex items-center gap-2 text-[13px] text-muted">
+            <AuthIcon className="size-3.5 shrink-0 text-faint" />
             <span>
-              <span className="font-medium text-ink">{auth.label}.</span> {auth.detail}
+              <span className="font-medium text-ink">{auth.label}</span>
+              {auth.detail ? <> · {auth.detail}</> : null}
             </span>
           </p>
 
@@ -117,7 +108,7 @@ export function EndpointPage({ group, endpoint }: { group: EndpointGroup; endpoi
 
           {endpoint.answers ? (
             <section className="mt-9">
-              <SectionTitle>Answers</SectionTitle>
+              <SectionTitle>Status codes</SectionTitle>
               <Answers rows={endpoint.answers} bare />
             </section>
           ) : null}

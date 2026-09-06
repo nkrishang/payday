@@ -22,41 +22,31 @@ export const ACCOUNT_GROUP: EndpointGroup = {
       method: "GET",
       path: "/v1/account",
       auth: "key",
-      summary:
-        "Who you are, where you settle by default, and the state of your key. Never the key itself.",
+      summary: "Retrieves the account and its key state. The key itself is never returned.",
       response: {
         fields: [
-          { name: "account_id", type: "acct_ id", description: "The account." },
-          {
-            name: "email",
-            type: "string | null",
-            description: "The mailbox the account signs in with.",
-          },
+          { name: "account_id", type: "acct_ id", description: "" },
+          { name: "email", type: "string | null", description: "Sign-in mailbox." },
           {
             name: "wallet_address",
             type: "string | null",
-            description:
-              "The account's own EVM wallet, created at first sign-in, where deposits settle by default.",
+            description: "Account wallet, EIP-55. Default settlement destination.",
           },
           {
             name: "key_hint",
             type: "string | null",
-            description: "The key's last six characters, or null with no active key.",
+            description: "Last six characters of the active key.",
           },
           {
             name: "generation",
             type: "integer",
-            description: "Increments on every issuance or rotation; guards the key routes.",
+            description: "Increments per issuance or rotation.",
           },
-          {
-            name: "created_at, rotated_at, revoked_at",
-            type: "timestamp | null",
-            description: "Key milestones.",
-          },
+          { name: "created_at, rotated_at, revoked_at", type: "timestamp | null", description: "" },
           {
             name: "previous_key_expires_at",
             type: "timestamp | null",
-            description: "Set for 24 hours after a rotation, while the replaced key still works.",
+            description: "End of the 24-hour rotation grace window.",
           },
         ],
       },
@@ -72,53 +62,37 @@ export const ACCOUNT_GROUP: EndpointGroup = {
       method: "POST",
       path: "/v1/account/api-key",
       auth: "session",
-      summary:
-        "Issue a first key, or rotate the current one. The plaintext is returned once. A rotation keeps the previous key working for 24 hours.",
+      summary: "Issues the first key, or rotates the current one. Plaintext returned once.",
       body: (
         <p>
-          Only a signed-in dashboard session may call this. An API key, however valid elsewhere, is
-          refused, so whoever holds a key can never widen or prolong their own access. Pass the
-          generation the account currently reports; a mismatch means something else changed the key
-          first.
+          Dashboard session only. On rotation the previous key remains valid for 24 hours.{" "}
+          <code>expected_generation</code> must equal the account&apos;s current{" "}
+          <code>generation</code>.
         </p>
       ),
       bodyFields: [
-        {
-          name: "expected_generation",
-          type: "integer",
-          required: true,
-          description: "The account's current generation.",
-        },
+        { name: "expected_generation", type: "integer", required: true, description: "" },
       ],
       response: {
         fields: [
-          {
-            name: "api_key",
-            type: "string",
-            description: "Shown once. Nothing later can return it.",
-          },
-          { name: "generation", type: "integer", description: "The new generation." },
-          { name: "replaced_previous_key", type: "boolean", description: "True on a rotation." },
+          { name: "api_key", type: "string", description: "Plaintext. Once." },
+          { name: "generation", type: "integer", description: "" },
+          { name: "replaced_previous_key", type: "boolean", description: "" },
         ],
       },
       answers: [
-        { status: 201, when: "The first key." },
-        { status: 200, when: "A rotation." },
-        { status: 401, code: "identity_unauthorized", when: "An API key was presented." },
-        {
-          status: 409,
-          code: "api_key_generation_conflict",
-          when: "The generation moved. Re-read the account and decide again.",
-        },
+        { status: 201, when: "First issuance." },
+        { status: 200, when: "Rotation." },
+        { status: 401, code: "identity_unauthorized", when: "API key presented." },
+        { status: 409, code: "api_key_generation_conflict", when: "Generation mismatch." },
       ],
       examples: {
         curl: `curl -fsS "$API/v1/account/api-key" \\
   -H "Authorization: Bearer $DASHBOARD_SESSION_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{ "expected_generation": 3 }'`,
-        ts: `const payday = new PaydayClient({ accessToken: identityToken }); // a session, not a key
-const issued = await payday.account.issueApiKey(account.generation);
-issued.api_key; // shown once`,
+        ts: `const payday = new PaydayClient({ accessToken: identityToken });
+const issued = await payday.account.issueApiKey(account.generation);`,
         response: `{
   "api_key": "payday_live_…",
   "generation": 4,
@@ -132,20 +106,14 @@ issued.api_key; // shown once`,
       method: "DELETE",
       path: "/v1/account/api-key",
       auth: "session",
-      summary:
-        "Immediately invalidate the current key and any key still in its rotation grace window. A later issuance starts a new generation.",
+      summary: "Revokes the current key and any key in its grace window. Immediate.",
       bodyFields: [
-        {
-          name: "expected_generation",
-          type: "integer",
-          required: true,
-          description: "The account's current generation.",
-        },
+        { name: "expected_generation", type: "integer", required: true, description: "" },
       ],
       response: { description: "204 No Content." },
       answers: [
-        { status: 401, code: "identity_unauthorized", when: "An API key was presented." },
-        { status: 409, code: "api_key_generation_conflict", when: "The generation moved." },
+        { status: 401, code: "identity_unauthorized", when: "API key presented." },
+        { status: 409, code: "api_key_generation_conflict", when: "Generation mismatch." },
       ],
       examples: {
         curl: `curl -fsS -X DELETE "$API/v1/account/api-key" \\
@@ -170,8 +138,7 @@ export const STATUS_GROUP: EndpointGroup = {
       method: "GET",
       path: "/v1/status",
       auth: "key",
-      summary:
-        "Chain, indexer, and settlement-queue health. Use it when a payer can see a transaction that a request does not yet reflect.",
+      summary: "Reports chain, indexer, and settlement-queue position.",
       response: {
         fields: [
           {
@@ -182,21 +149,15 @@ export const STATUS_GROUP: EndpointGroup = {
           {
             name: "indexer",
             type: "object",
-            description:
-              "{ cursor_block, cursor_at, lag_blocks }: how far behind the finalized head the indexer is.",
+            description: "{ cursor_block, cursor_at, lag_blocks }.",
           },
-          {
-            name: "sweeper",
-            type: "object",
-            description: "{ state, queued }: the settlement queue.",
-          },
+          { name: "sweeper", type: "object", description: "{ state, queued }." },
         ],
       },
-      answers: [{ status: 503, when: "The state cannot be read." }],
+      answers: [{ status: 503, when: "State unreadable." }],
       examples: {
         curl: `curl -fsS "$API/v1/status" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const status = await payday.status();
-status.indexer.lag_blocks; // 2`,
+        ts: `const status = await payday.status();`,
         response: `{
   "chain": { "id": "143", "name": "Monad", "finalized_block": "98765432", "finalized_at": "2026-09-06T12:00:00Z" },
   "indexer": { "cursor_block": "98765430", "cursor_at": "2026-09-06T12:00:01Z", "lag_blocks": 2 },
@@ -210,8 +171,8 @@ status.indexer.lag_blocks; // 2`,
       method: "GET",
       path: "/health",
       auth: "none",
-      summary: "Unauthenticated readiness: ok when the API can reach its database.",
-      response: { description: "Plain text." },
+      summary: "Readiness. Requires a database round trip.",
+      response: { description: "text/plain." },
       answers: [
         { status: 200, when: "ok" },
         { status: 503, when: "database unavailable" },
