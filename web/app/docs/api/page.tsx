@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { CodeBlock } from "@/components/docs/code";
 import { Callout, Card, Cards, DocsPage, H2, H3, Table } from "@/components/docs/prose";
+import { config } from "@/lib/config";
 
 export const metadata: Metadata = {
   title: "API conventions",
@@ -37,8 +38,11 @@ export default function ApiConventionsPage() {
       lead="One set of rules for every route. Read this page once; the resource pages assume it."
     >
       <Cards>
-        <Card href="https://api.payday.sh/docs" title="Interactive reference" external>
-          The live OpenAPI 3.1 document, rendered. Also at <code>/openapi.json</code>.
+        <Card href={`${config.apiUrl}/docs`} title="OpenAPI reference" external>
+          The API also describes itself in OpenAPI 3.1, a machine-readable document for client
+          generators and API tools, served at <code>/openapi.json</code> on the API origin and
+          rendered as a browsable page at <code>/docs</code> there. The pages here are the written
+          reference; that one is the raw contract.
         </Card>
         <Card href="/docs/sdk" title="TypeScript SDK">
           Every route below, as a typed method.

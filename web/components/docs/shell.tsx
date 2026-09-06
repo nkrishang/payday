@@ -59,14 +59,6 @@ export function DocsShell({ children }: { children: ReactNode }) {
           </div>
 
           <div className="hidden items-center gap-9 text-[16px] text-brand-grey md:flex">
-            <a
-              href="https://api.payday.sh/docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="transition-colors hover:text-brand-white"
-            >
-              OpenAPI
-            </a>
             <PricingDialog />
             <Link
               href="/dashboard"
@@ -95,14 +87,6 @@ export function DocsShell({ children }: { children: ReactNode }) {
         >
           <SectionList pathname={pathname} onNavigate={() => setOpen(false)} />
           <div className="mt-6 flex flex-wrap items-center gap-4 border-t border-brand-grey/20 pt-5 text-[15px] text-brand-grey">
-            <a
-              href="https://api.payday.sh/docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="transition-colors hover:text-brand-white"
-            >
-              OpenAPI
-            </a>
             <PricingDialog />
             <Link href="/dashboard" className="text-brand-green">
               Dashboard
