@@ -38,6 +38,7 @@ pub struct WebhookDelivery {
 }
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct WebhookAttempt {
+    pub delivery_id: Uuid,
     pub attempt_number: i32,
     pub attempted_at: DateTime<Utc>,
     pub duration_ms: i64,
@@ -103,7 +104,7 @@ impl WebhookRepository {
         if !exists {
             return Ok(None);
         }
-        let payload = serde_json::json!({"version":"2026-08-01","id":event,"type":"webhook.test","occurred_at":Utc::now().to_rfc3339(),"data":{"test":true}});
+        let payload = serde_json::json!({"version":"2026-08-01","id":event,"type":"webhook.test","occurred_at":gateway_core::rfc3339(Utc::now()),"data":{"test":true}});
         sqlx::query("INSERT INTO webhook_events(id,account_id,event_type,payload,fanout) VALUES($1,$2,'webhook.test',$3,false)").bind(event).bind(account.0).bind(payload).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO webhook_deliveries(id,event_id,endpoint_id) VALUES($1,$2,$3)")
             .bind(delivery)
@@ -114,14 +115,40 @@ impl WebhookRepository {
         tx.commit().await?;
         Ok(Some(delivery))
     }
+    /// One delivery the account owns, for cursor validation and reads.
+    pub async fn delivery(
+        &self,
+        account: AccountId,
+        id: Uuid,
+    ) -> Result<Option<WebhookDelivery>, sqlx::Error> {
+        sqlx::query_as("SELECT d.id,d.event_id,d.endpoint_id,d.attempt_count,d.next_attempt_at,d.state,d.delivered_at,d.created_at FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id WHERE e.account_id=$1 AND d.id=$2")
+            .bind(account.0).bind(id).fetch_optional(&self.pool).await
+    }
+    /// Newest first, keyed on the UUIDv7 id so the cursor is the id of the
+    /// last row shown. Returns up to `limit + 1` rows so the caller can tell
+    /// whether a next page exists. `endpoint` narrows to one endpoint's
+    /// deliveries, disabled or not: history outlives the endpoint.
     pub async fn deliveries(
         &self,
         account: AccountId,
+        endpoint: Option<Uuid>,
+        starting_after: Option<Uuid>,
+        limit: i64,
     ) -> Result<Vec<WebhookDelivery>, sqlx::Error> {
-        sqlx::query_as("SELECT d.id,d.event_id,d.endpoint_id,d.attempt_count,d.next_attempt_at,d.state,d.delivered_at,d.created_at FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id WHERE e.account_id=$1 ORDER BY d.created_at DESC LIMIT 100").bind(account.0).fetch_all(&self.pool).await
+        sqlx::query_as("SELECT d.id,d.event_id,d.endpoint_id,d.attempt_count,d.next_attempt_at,d.state,d.delivered_at,d.created_at FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id WHERE e.account_id=$1 AND ($2::uuid IS NULL OR d.endpoint_id=$2) AND ($3::uuid IS NULL OR d.id<$3) ORDER BY d.id DESC LIMIT $4")
+            .bind(account.0).bind(endpoint).bind(starting_after).bind(limit + 1).fetch_all(&self.pool).await
     }
     pub async fn attempts(&self, delivery: Uuid) -> Result<Vec<WebhookAttempt>, sqlx::Error> {
-        sqlx::query_as("SELECT attempt_number,attempted_at,duration_ms,status,error FROM webhook_delivery_attempts WHERE delivery_id=$1 ORDER BY attempt_number").bind(delivery).fetch_all(&self.pool).await
+        sqlx::query_as("SELECT delivery_id,attempt_number,attempted_at,duration_ms,status,error FROM webhook_delivery_attempts WHERE delivery_id=$1 ORDER BY attempt_number").bind(delivery).fetch_all(&self.pool).await
+    }
+    /// Every attempt of every listed delivery in one query, ordered by
+    /// delivery then attempt number, so a page of deliveries is two queries
+    /// rather than one per row.
+    pub async fn attempts_for(
+        &self,
+        deliveries: &[Uuid],
+    ) -> Result<Vec<WebhookAttempt>, sqlx::Error> {
+        sqlx::query_as("SELECT delivery_id,attempt_number,attempted_at,duration_ms,status,error FROM webhook_delivery_attempts WHERE delivery_id=ANY($1) ORDER BY delivery_id,attempt_number").bind(deliveries).fetch_all(&self.pool).await
     }
     pub async fn claim(&self) -> Result<Option<DeliveryClaim>, sqlx::Error> {
         let lease_token = Uuid::now_v7();

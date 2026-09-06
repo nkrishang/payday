@@ -5,17 +5,16 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use axum::Extension;
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use chrono::SecondsFormat;
-use gateway_core::AttachmentDescriptor;
+use gateway_core::{AttachmentDescriptor, rfc3339};
 use gateway_db::{AccountId, AttachmentStatus, CreateAttachmentUpload, DbAttachment};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::attachments::{AttachmentError, AttachmentStore, CLEAN_SCAN};
 use crate::state::AppState;
 
@@ -74,7 +73,7 @@ pub async fn create(
             id: upload.attachment_id,
             upload_url: upload.upload_url,
             headers: upload.headers,
-            expires_at: upload.expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            expires_at: rfc3339(upload.expires_at),
         }),
     ))
 }

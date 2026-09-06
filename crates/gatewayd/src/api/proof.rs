@@ -7,7 +7,6 @@
 
 use alloy_primitives::{Address, B256};
 use axum::Extension;
-use axum::Json;
 use axum::extract::{Path, State};
 use chrono::SecondsFormat;
 use gateway_core::{
@@ -18,6 +17,7 @@ use gateway_db::AccountId;
 
 use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::state::AppState;
 
 pub async fn get_proof(

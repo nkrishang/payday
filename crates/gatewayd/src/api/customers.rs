@@ -4,19 +4,18 @@
 use std::str::FromStr;
 
 use axum::Extension;
-use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use gateway_core::rfc3339;
 use gateway_db::{AccountId, CreateCustomerInput, DbCustomer};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::api::deposit_requests::validate_party_fields;
 use crate::api::error::ApiError;
+use crate::api::json::{Json, Query};
 use crate::state::AppState;
 
-/// Create and update share one body; update replaces every editable field,
-/// so an omitted or null `email`/`details` clears it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomerRequest {
@@ -25,6 +24,29 @@ pub struct CustomerRequest {
     email: Option<String>,
     #[serde(default)]
     details: Option<String>,
+}
+
+/// A partial update: a field left out keeps its value, a field sent as
+/// `null` is cleared. Telling the two apart is what `patch_field` is for.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCustomerRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "patch_field")]
+    email: Option<Option<String>>,
+    #[serde(default, deserialize_with = "patch_field")]
+    details: Option<Option<String>>,
+}
+
+/// `Some(None)` for an explicit `null`, `Some(Some(v))` for a value; the
+/// `default` attribute on the field supplies `None` when it is absent.
+pub(crate) fn patch_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize)]
@@ -44,8 +66,8 @@ impl From<DbCustomer> for CustomerResponse {
             name: row.name,
             email: row.email,
             details: row.details,
-            created_at: row.created_at.to_rfc3339(),
-            updated_at: row.updated_at.to_rfc3339(),
+            created_at: rfc3339(row.created_at),
+            updated_at: rfc3339(row.updated_at),
         }
     }
 }
@@ -164,17 +186,29 @@ pub async fn list(
     }))
 }
 
+/// Changes only the fields the body names; the merged record is validated
+/// whole, so a partial body can never leave an invalid customer behind.
 pub async fn update(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
-    Json(request): Json<CustomerRequest>,
+    Json(request): Json<UpdateCustomerRequest>,
 ) -> Result<Json<CustomerResponse>, ApiError> {
     let id = customer_id(&id)?;
-    validate(&request)?;
+    let current = state
+        .customers
+        .get_for_account(account, id)
+        .await?
+        .ok_or_else(ApiError::customer_not_found)?;
+    let merged = CustomerRequest {
+        name: request.name.unwrap_or(current.name),
+        email: request.email.unwrap_or(current.email),
+        details: request.details.unwrap_or(current.details),
+    };
+    validate(&merged)?;
     state
         .customers
-        .update(account, id, request.name, request.email, request.details)
+        .update(account, id, merged.name, merged.email, merged.details)
         .await?
         .map(|row| Json(row.into()))
         .ok_or_else(ApiError::customer_not_found)
@@ -193,4 +227,22 @@ fn validate(request: &CustomerRequest) -> Result<(), ApiError> {
         request.email.as_deref(),
         request.details.as_deref(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_patch_tells_an_absent_field_from_an_explicit_null() {
+        let absent: UpdateCustomerRequest = serde_json::from_str(r#"{"name":"Globex"}"#).unwrap();
+        assert_eq!(absent.name.as_deref(), Some("Globex"));
+        assert_eq!(absent.email, None);
+        let cleared: UpdateCustomerRequest =
+            serde_json::from_str(r#"{"email":null,"details":"Net 45"}"#).unwrap();
+        assert_eq!(cleared.name, None);
+        assert_eq!(cleared.email, Some(None));
+        assert_eq!(cleared.details, Some(Some("Net 45".into())));
+        assert!(serde_json::from_str::<UpdateCustomerRequest>(r#"{"nam":"x"}"#).is_err());
+    }
 }

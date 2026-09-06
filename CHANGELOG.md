@@ -26,7 +26,58 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed
+
+- An ergonomics pass over the merchant API, so every resource follows one
+  set of conventions (documented under Conventions in
+  `docs/api-reference.md`). A request body or query string that does not
+  fit a route — malformed JSON, a missing or unknown field, a wrong type, a
+  missing JSON content type — is now `400 invalid_request` with the
+  deserializer's own message naming the field, where it was a `422` whose
+  message said only "Unprocessable Entity". Webhooks catch up with the other
+  resources: a missing, malformed, or foreign endpoint id is
+  `404 webhook_not_found` (it was `400 invalid_request`), `DELETE
+  /v1/webhooks/{id}` answers `204` and is idempotent, `GET /v1/webhooks`
+  is enveloped as `{webhooks}`, `GET /v1/webhooks/{id}` reads one endpoint,
+  `GET /v1/webhook-deliveries` pages with `limit` and `starting_after`,
+  filters on `endpoint_id`, and answers `{deliveries, next_cursor}` with two
+  queries instead of one per row, and registering an endpoint on a
+  deployment with no encryption key is `503 webhooks_unavailable`, not a
+  `500`. `GET /v1/deposit-requests/{id}/transfers` is enveloped as
+  `{transfers}`. `POST /v1/deposit-requests/{id}/cancel` returns the
+  deposit request itself rather than `{deposit_request, advisory}`. `PATCH
+  /v1/customers/{id}` and `PATCH /v1/issuers/{id}` are partial: a field
+  left out keeps its value and only an explicit `null` clears one, so
+  renaming an issuer identity no longer requires resending (and risking)
+  its proven contact address. `GET /v1/account/api-key`, a duplicate of
+  `GET /v1/account`, is gone, and the key routes reject unknown body
+  fields like every other route. Every timestamp the API and the webhook
+  payloads emit is RFC 3339 in UTC to the second with a `Z` suffix; the
+  previous mix of nanosecond `+00:00` and second `Z` forms is gone.
+- Webhook payloads now carry a strict subset of the API's own deposit
+  request object under the same names, units, and formats, so a handler can
+  hand `data.deposit_request.id` straight to `GET /v1/deposit-requests/{id}`
+  and compare amounts with the API's: the id is the `dr_`-prefixed form
+  (it was a bare UUID), `amount` and `received` are the human decimal with
+  `amount_base_units` and `received_base_units` beside them (`amount` was
+  base units under the API's decimal name), `payer_wallet` and `address`
+  are EIP-55 checksummed, `attention.code` matches the API's `attention`
+  object (it was `reason_code`), `heading`, `customer_id`, `issuer_id`,
+  `expires_at`, and `created_at` are included, and `recovery.block_number`
+  is a decimal string like every other block number, with
+  `recovery.amount` decimal beside `recovery.amount_base_units`.
+
 ### Added
+
+- `POST /v1/deposit-requests` can take its parties and payout address from
+  saved records instead of retyping them: with `issuer_id`, `issuer` and
+  `payout_address` may be left out (the identity's name, contact address,
+  details, and first saved payout address are snapshotted), and with
+  `customer_id`, `payer` may be left out. An inline party still wins. The
+  smallest valid request is `amount`, `issuer_id`, `customer_id`, and
+  `payer_policy`.
+- `DepositRequestSummary` carries `deposit_url`, `updated_at`, and
+  `expires_at`, so a list renders and links each row without a second read.
 
 - A payer named with an `email` on a deposit request is emailed their link
   to it as the request is issued, from the dashboard or the API alike. The

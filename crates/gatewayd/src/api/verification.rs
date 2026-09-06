@@ -7,22 +7,18 @@
 //! Each fact the policy needs on its own, and every attempt made against the
 //! invoice. Nothing here names the payer's session or the code they typed.
 
+use axum::Extension;
 use axum::extract::{Path, State};
-use axum::{Extension, Json};
-use chrono::{DateTime, SecondsFormat, Utc};
 use gateway_core::{
     PayerPolicyMode, VerificationAttemptResponse, VerificationDetailResponse, VerificationFacts,
-    VerificationRequirementsResponse,
+    VerificationRequirementsResponse, rfc3339,
 };
 use gateway_db::{AccountId, DbInvoice};
 
 use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::state::AppState;
-
-fn rfc3339(value: DateTime<Utc>) -> String {
-    value.to_rfc3339_opts(SecondsFormat::Secs, true)
-}
 
 async fn detail(
     state: &AppState,

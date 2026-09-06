@@ -7,24 +7,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use alloy_primitives::utils::format_units;
 use alloy_primitives::{Address, B256, U256};
 use axum::Extension;
-use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use uuid::Uuid;
 
 use gateway_core::{
-    Amount, AsOfDto, BeneficiaryAddress, CancelDepositRequestResponse, CanonicalIssuanceSnapshot,
-    ChainId, CreateDepositRequest, DepositRequestListResponse, DepositRequestResponse,
-    DepositRequestStatus, DepositRequestSummaryResponse, FactoryAddress, IndexerFreshnessDto,
-    Invoice, OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
-    PayerPolicyMode, TokenAddress, TransferDto, USDC_DECIMALS, parse_expiration,
-    payer_wallet_attestation, validate_expiration_window,
+    Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
+    DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
+    DepositRequestSummaryResponse, FactoryAddress, IndexerFreshnessDto, Invoice,
+    OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
+    PayerPolicyMode, TokenAddress, TransferDto, TransferListResponse, USDC_DECIMALS,
+    parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
 };
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
+use crate::api::json::{Json, Query};
 use crate::attachments::{AttachmentError, StorageError, content_disposition};
 use crate::request_pdf::render_request_pdf;
 use crate::state::AppState;
@@ -91,13 +91,13 @@ fn enrich_response(
     response.issuer_id = row.issuer_id.map(|id| id.to_string());
     // The signed download link is added by the attachment route.
     response.attachment = attachment.as_ref().and_then(DbAttachment::descriptor);
-    response.verification_completed_at = row.verification_completed_at.map(|v| v.to_rfc3339());
-    response.likely_unsolicited_at = row.likely_unsolicited_at.map(|v| v.to_rfc3339());
-    response.created_at = row.created_at.to_rfc3339();
-    response.updated_at = row.updated_at.to_rfc3339();
-    response.deposited_at = row.paid_at.map(|value| value.to_rfc3339());
+    response.verification_completed_at = row.verification_completed_at.map(rfc3339);
+    response.likely_unsolicited_at = row.likely_unsolicited_at.map(rfc3339);
+    response.created_at = rfc3339(row.created_at);
+    response.updated_at = rfc3339(row.updated_at);
+    response.deposited_at = row.paid_at.map(rfc3339);
     response.deposited_at_block = row.funded_at_block.map(|value| value.to_string());
-    response.expired_at = row.expired_at.map(|value| value.to_rfc3339());
+    response.expired_at = row.expired_at.map(rfc3339);
     response.settlement_tx_hash = row
         .settlement_tx_hash
         .as_deref()
@@ -122,7 +122,7 @@ fn enrich_response(
             let units = U256::from_str_radix(&t.amount, 10)
                 .map_err(|_| ApiError::internal("invalid transfer amount"))?;
             Ok(TransferDto {
-                timestamp: timestamp.to_rfc3339(),
+                timestamp: rfc3339(timestamp),
                 amount: format_units(units, USDC_DECIMALS).unwrap_or_default(),
                 amount_base_units: t.amount,
                 sender: sender.to_checksum(None),
@@ -144,8 +144,10 @@ fn enrich_response(
     response.as_of = cursor.as_ref().and_then(|cursor| {
         Some(AsOfDto {
             block: cursor.last_block.to_string(),
-            at: sqlx::types::chrono::DateTime::from_timestamp(cursor.last_block_timestamp?, 0)?
-                .to_rfc3339(),
+            at: rfc3339(sqlx::types::chrono::DateTime::from_timestamp(
+                cursor.last_block_timestamp?,
+                0,
+            )?),
         })
     });
     response.indexer_freshness = IndexerFreshnessDto {
@@ -154,7 +156,7 @@ fn enrich_response(
             .as_ref()
             .and_then(|c| c.finalized_block)
             .map(|block| block.to_string()),
-        cursor_updated_at: cursor.map(|c| c.updated_at.to_rfc3339()),
+        cursor_updated_at: cursor.map(|c| rfc3339(c.updated_at)),
     };
     Ok(response)
 }
@@ -179,8 +181,83 @@ pub async fn create_deposit_request(
         )));
     }
 
-    // 2. Parse and validate every request field.
-    validate_document(&req)?;
+    // 2. Resolve the parties, then validate every request field. A saved
+    //    customer or issuer identity stands in for a party the request left
+    //    out; what is snapshotted is the same either way, and a reference to
+    //    a record that is not this account's reads as an invalid field.
+    let customer = match req.customer_id {
+        Some(customer_id) => Some(
+            state
+                .customers
+                .get_for_account(account, customer_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::invalid_request("customer_id does not identify one of your customers")
+                })?,
+        ),
+        None => None,
+    };
+    let identity = match req.issuer_id {
+        Some(issuer_id) => Some(
+            state
+                .issuers
+                .get_for_account(account, issuer_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::invalid_request(
+                        "issuer_id does not identify one of your issuer identities",
+                    )
+                })?,
+        ),
+        None => None,
+    };
+    let issuer = match (&req.issuer, &identity) {
+        (Some(party), _) => party.clone(),
+        (None, Some(identity)) => Party {
+            name: identity.name.clone(),
+            email: Some(identity.contact_email.clone()),
+            details: identity.details.clone(),
+        },
+        (None, None) => {
+            return Err(ApiError::invalid_request(
+                "issuer is required unless issuer_id names a saved issuer identity",
+            ));
+        }
+    };
+    let payer = match (&req.payer, &customer) {
+        (Some(party), _) => party.clone(),
+        (None, Some(customer)) => Party {
+            name: customer.name.clone(),
+            email: customer.email.clone(),
+            details: customer.details.clone(),
+        },
+        (None, None) => {
+            return Err(ApiError::invalid_request(
+                "payer is required unless customer_id names a saved customer",
+            ));
+        }
+    };
+    let payout_address = match (&req.payout_address, &identity) {
+        (Some(address), _) => address.clone(),
+        (None, Some(identity)) => state
+            .issuers
+            .addresses_for_issuer(account, identity.id)
+            .await?
+            .into_iter()
+            .next()
+            .map(|saved| saved.address)
+            .ok_or_else(|| {
+                ApiError::invalid_request(
+                    "payout_address is required unless issuer_id names an identity with a saved payout address",
+                )
+            })?,
+        (None, None) => {
+            return Err(ApiError::invalid_request(
+                "payout_address is required unless issuer_id names an identity with a saved payout address",
+            ));
+        }
+    };
+    validate_document(&issuer, &payer, &req)?;
     let payer_policy = req.payer_policy.normalized();
     payer_policy
         .validate()
@@ -201,7 +278,7 @@ pub async fn create_deposit_request(
             Address::from_str(value)
                 .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))
         })?;
-    let beneficiary_addr = Address::from_str(&req.payout_address)
+    let beneficiary_addr = Address::from_str(&payout_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid payout_address: {e}")))?;
     if beneficiary_addr.is_zero() {
         return Err(ApiError::invalid_request(
@@ -238,31 +315,9 @@ pub async fn create_deposit_request(
         return Err(ApiError::invalid_amount("amount must be positive"));
     }
 
-    // 5. The customer link and the attachment must be this account's. The
-    // attachment's readiness is checked only for a new issuance: a replay
-    // compares against a document that is, by then, attached.
-    if let Some(customer_id) = req.customer_id
-        && state
-            .customers
-            .get_for_account(account, customer_id)
-            .await?
-            .is_none()
-    {
-        return Err(ApiError::invalid_request(
-            "customer_id does not identify one of your customers",
-        ));
-    }
-    if let Some(issuer_id) = req.issuer_id
-        && state
-            .issuers
-            .get_for_account(account, issuer_id)
-            .await?
-            .is_none()
-    {
-        return Err(ApiError::invalid_request(
-            "issuer_id does not identify one of your issuer identities",
-        ));
-    }
+    // 5. The attachment must be this account's. Its readiness is checked only
+    // for a new issuance: a replay compares against a document that is, by
+    // then, attached.
     let attachment = match req.attachment_id {
         Some(attachment_id) => Some(
             state
@@ -287,8 +342,8 @@ pub async fn create_deposit_request(
         beneficiary: beneficiary_addr.as_slice(),
         amount: amount.0,
         expiration_intent: &expiration.intent,
-        issuer: &req.issuer,
-        bill_to: &req.payer,
+        issuer: &issuer,
+        bill_to: &payer,
         notes: req.notes.as_deref(),
         heading: req.heading.as_deref(),
         reference: req.reference.as_deref(),
@@ -352,8 +407,8 @@ pub async fn create_deposit_request(
     let factory = FactoryAddress(state.factory_address);
     let beneficiary = BeneficiaryAddress(beneficiary_addr);
     let mut snapshot = CanonicalIssuanceSnapshot::new(
-        req.issuer.clone(),
-        req.payer.clone(),
+        issuer.clone(),
+        payer.clone(),
         payer_policy.clone(),
         factory,
         ChainId(chain_id),
@@ -394,7 +449,7 @@ pub async fn create_deposit_request(
     input.customer_id = req.customer_id;
     input.issuer_id = req.issuer_id;
     input.metadata = req.metadata.clone();
-    input.payer_notification_email = payer_notification_email(&req.payer, &payer_policy);
+    input.payer_notification_email = payer_notification_email(&payer, &payer_policy);
 
     let issued = match state.repo.insert_issued(&input, req.attachment_id).await {
         Ok(issued) => issued,
@@ -462,11 +517,7 @@ pub async fn create_deposit_request(
             .create_client_secret(invoice_id, account.0, CLIENT_SECRET_TTL)
             .await?;
         response.client_secret = Some(minted.secret);
-        response.client_secret_expires_at = Some(
-            minted
-                .expires_at
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        );
+        response.client_secret_expires_at = Some(rfc3339(minted.expires_at));
     }
     Ok((StatusCode::CREATED, HeaderMap::new(), Json(response)))
 }
@@ -522,9 +573,11 @@ pub async fn transfers(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
-) -> Result<Json<Vec<TransferDto>>, ApiError> {
+) -> Result<Json<TransferListResponse>, ApiError> {
     let row = resolve_deposit_request(&state, account, &reference).await?;
-    Ok(Json(to_response(&state, account, row).await?.transfers))
+    Ok(Json(TransferListResponse {
+        transfers: to_response(&state, account, row).await?.transfers,
+    }))
 }
 
 /// Payday's invoice summary as a PDF download, rendered deterministically
@@ -639,14 +692,18 @@ pub async fn list_deposit_requests(
         .map(|row| -> Result<_, ApiError> {
             let invoice = Invoice::try_from(&row)?;
             let has_attachment = invoice.issuance_snapshot.attachment.is_some();
+            let deposit_url = state.payer.deposit_url(&invoice)?;
             let response = DepositRequestResponse::from_invoice(invoice, None);
             Ok(DepositRequestSummaryResponse {
                 id: response.id,
+                deposit_url,
                 heading: response.heading,
                 payer_name: response.payer.name,
                 reference: row.reference,
                 metadata: row.metadata.0,
-                created_at: row.created_at.to_rfc3339(),
+                created_at: rfc3339(row.created_at),
+                updated_at: rfc3339(row.updated_at),
+                expires_at: response.expires_at,
                 status: response.status,
                 amount: response.amount,
                 received: response.received,
@@ -654,9 +711,9 @@ pub async fn list_deposit_requests(
                 customer_id: row.customer_id.map(|id| id.to_string()),
                 issuer_id: row.issuer_id.map(|id| id.to_string()),
                 has_attachment,
-                verification_completed_at: row.verification_completed_at.map(|v| v.to_rfc3339()),
-                likely_unsolicited_at: row.likely_unsolicited_at.map(|v| v.to_rfc3339()),
-                cancellation_requested_at: row.cancellation_requested_at.map(|v| v.to_rfc3339()),
+                verification_completed_at: row.verification_completed_at.map(rfc3339),
+                likely_unsolicited_at: row.likely_unsolicited_at.map(rfc3339),
+                cancellation_requested_at: row.cancellation_requested_at.map(rfc3339),
             })
         })
         .collect::<Result<_, _>>()?;
@@ -675,21 +732,22 @@ fn full_deposit_request_id(value: &str) -> Result<Uuid, ApiError> {
     })
 }
 
+/// Records the cancellation and answers with the deposit request itself, as
+/// every other route does. Cancellation is presentation only: it sets
+/// `cancellation_requested_at` and cannot disable the address or change the
+/// settlement terms the address commits to, which the reference documents.
 pub async fn cancel_deposit_request(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(reference): Path<String>,
-) -> Result<Json<CancelDepositRequestResponse>, ApiError> {
+) -> Result<Json<DepositRequestResponse>, ApiError> {
     let invoice = resolve_deposit_request(&state, account, &reference).await?;
     let row = state
         .repo
         .request_cancellation(account, invoice.id)
         .await?
         .ok_or_else(ApiError::deposit_request_not_found)?;
-    Ok(Json(CancelDepositRequestResponse {
-        deposit_request: to_response(&state, account, row).await?,
-        advisory: "Cancellation is advisory only and does not alter the deposit contract or its encoded settlement terms".into(),
-    }))
+    Ok(Json(to_response(&state, account, row).await?))
 }
 
 /// The onboarding walkthrough's one real demo transfer and verification
@@ -800,10 +858,7 @@ pub async fn onboarding_deposit(
             );
             let now = Utc::now();
             let binding = invoice
-                .bind_payer_wallet(
-                    attestation,
-                    now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                )
+                .bind_payer_wallet(attestation, rfc3339(now))
                 .map_err(|error| {
                     tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation did not verify");
                     ApiError::internal("failed to verify the onboarding payer attestation")
@@ -883,7 +938,7 @@ pub async fn preview_session(
         .await?;
     Ok(Json(PreviewSessionResponse {
         payer_session: session.token,
-        expires_at: session.expires_at.to_rfc3339(),
+        expires_at: rfc3339(session.expires_at),
     }))
 }
 
@@ -1028,9 +1083,16 @@ fn reject_nul_in_json(field: &str, value: &serde_json::Value) -> Result<(), ApiE
     Ok(())
 }
 
-fn validate_document(req: &CreateDepositRequest) -> Result<(), ApiError> {
-    validate_party("issuer", &req.issuer)?;
-    validate_party("payer", &req.payer)?;
+/// The document as it will be issued: the parties already resolved (inline,
+/// or from the saved records the request named) plus the request's own text
+/// and metadata.
+fn validate_document(
+    issuer: &Party,
+    payer: &Party,
+    req: &CreateDepositRequest,
+) -> Result<(), ApiError> {
+    validate_party("issuer", issuer)?;
+    validate_party("payer", payer)?;
     if req
         .notes
         .as_ref()
@@ -1105,6 +1167,30 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
+    /// The document check on a request whose parties were given inline.
+    fn validate_inline(request: &CreateDepositRequest) -> Result<(), ApiError> {
+        validate_document(
+            request.issuer.as_ref().unwrap(),
+            request.payer.as_ref().unwrap(),
+            request,
+        )
+    }
+
+    #[test]
+    fn parties_and_payout_address_may_be_left_to_saved_records() {
+        let request: CreateDepositRequest = serde_json::from_value(serde_json::json!({
+            "amount": "1",
+            "issuer_id": "0198f80c-1111-7dc1-a369-90556a64f700",
+            "customer_id": "0198f80c-2222-7dc1-a369-90556a64f700",
+            "payer_policy": {"mode": "permissionless"}
+        }))
+        .unwrap();
+        assert!(request.issuer.is_none());
+        assert!(request.payer.is_none());
+        assert!(request.payout_address.is_none());
+        assert!(request.issuer_id.is_some() && request.customer_id.is_some());
+    }
+
     #[test]
     fn create_wire_shape_defaults_metadata_and_takes_the_document() {
         let request = request(serde_json::json!({
@@ -1119,7 +1205,7 @@ mod tests {
             request.payer_policy.normalized().expected_email(),
             Some("alice@example.com")
         );
-        validate_document(&request).unwrap();
+        validate_inline(&request).unwrap();
     }
 
     #[test]
@@ -1217,16 +1303,16 @@ mod tests {
                 serde_json::json!({"metadata": {"p\u{0}o": "42"}}),
             ),
         ] {
-            let error = validate_document(&request(overrides)).unwrap_err();
+            let error = validate_inline(&request(overrides)).unwrap_err();
             assert_eq!(error.code, "invalid_request", "{name}");
         }
-        validate_document(&request(serde_json::json!({
+        validate_inline(&request(serde_json::json!({
             "issuer": {"name": "x".repeat(255), "email": "a@b", "details": "x".repeat(4000)},
             "notes": "x".repeat(4000), "heading": "x".repeat(200), "reference": "é".repeat(128)
         })))
         .unwrap();
         // Free text that wraps may hold line breaks and tabs.
-        validate_document(&request(serde_json::json!({
+        validate_inline(&request(serde_json::json!({
             "issuer": {"name": "Acme", "details": "1 Main St\r\nSpringfield\tUSA"},
             "notes": "Net 30\nThank you", "metadata": {"po": "4\n2"}
         })))

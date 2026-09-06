@@ -6,7 +6,7 @@ TypeScript applications can use the zero-runtime-dependency client in
 `/v1/deposit-requests` is the canonical customer API. A deposit request is the document; a
 deposit is its on-chain fulfilment, and the deposit request's state is read from the
 request. All deposit request routes require bearer authentication — an API key,
-or the short-lived Auth0 access token a signed-in dashboard holds — and creates
+or the Privy identity token a signed-in dashboard holds — and creates
 additionally require `Idempotency-Key`. A replay returns
 `Idempotency-Replayed: true`.
 
@@ -18,7 +18,11 @@ own application has signed in, by your `payer_reference`, and returns a
 single-use `client_secret` your server hands that user — see
 [Merchant sessions](api-reference.md#merchant-sessions)). Optional
 fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
-`customer_id`, and one finalized `attachment_id` for a scanned PDF. The amount
+`customer_id`, an `issuer_id`, and one finalized `attachment_id` for a scanned
+PDF. A request that names a saved customer may leave `payer` out, and one
+that names a saved issuer identity may leave `issuer` and `payout_address`
+out: the saved record is snapshotted in their place, and the smallest valid
+request is `amount`, `issuer_id`, `customer_id`, and `payer_policy`. The amount
 is used directly; there are no line items. Exactly `amount` settles to
 `payout_address`. The response's `address` is null at creation: the deposit request
 address exists only once the payer has attested, from the hosted page, the
@@ -80,8 +84,12 @@ Every request then takes the wallet step (`/wallet/challenge` and
 button appear. Reproduce the guidance in [Deposit safety](deposit-safety.md)
 if you build your own.
 
-`GET /v1/deposit-requests` accepts `status`, `reference`, `starting_after`, and `limit`.
-`GET /v1/deposit-requests/{id}/transfers` returns finalized transfer provenance.
+`GET /v1/deposit-requests` accepts `status`, `reference`, `customer_id`,
+`issuer_id`, `verification`, `starting_after`, and `limit`.
+`POST /v1/deposit-requests/{id}/cancel` returns the deposit request with
+`cancellation_requested_at` set.
+`GET /v1/deposit-requests/{id}/transfers` returns `{ "transfers": [...] }`, the
+finalized transfer provenance.
 `GET /v1/deposit-requests/{id}/attachment` returns the PDF descriptor with a signed
 download URL, `GET /v1/deposit-requests/{id}/request.pdf` renders Payday's
 deterministic deposit request summary, and `GET /v1/deposit-requests/{id}/proof` returns the
@@ -133,8 +141,12 @@ REQUEST=$(curl -fsS "$API/v1/deposit-requests" \
        "issuer":{"name":"Acme LLC"},"payer":{"name":"Customer Inc"},
        "payer_policy":{"mode":"permissionless"},"expires_in":3600}')
 DEPOSIT_REQUEST_ID=$(printf '%s' "$REQUEST" | jq -r .id)
-DEPOSIT_ADDRESS=$(printf '%s' "$REQUEST" | jq -r .address)
-# Send test USDC to $DEPOSIT_ADDRESS using the sandbox faucet/wallet; there is
-# intentionally no privileged "mark deposited" endpoint because indexer finality is tested.
-curl -fsS "$API/v1/deposit-requests/$DEPOSIT_REQUEST_ID" -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+DEPOSIT_URL=$(printf '%s' "$REQUEST" | jq -r .deposit_url)
+# Open $DEPOSIT_URL as the payer and sign the wallet attestation: the one-time
+# address exists only once the payer's wallet is bound (deposit_request.ready),
+# so `.address` is null on the create response. Then send test USDC to it from
+# that wallet; there is intentionally no privileged "mark deposited" endpoint
+# because indexer finality is tested.
+curl -fsS "$API/v1/deposit-requests/$DEPOSIT_REQUEST_ID?wait_for=change&timeout=30" \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq '{status, address, received}'
 ```

@@ -67,9 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/account", get(accounts::get_account))
         .route(
             "/v1/account/api-key",
-            post(accounts::issue)
-                .get(accounts::metadata)
-                .delete(accounts::revoke),
+            post(accounts::issue).delete(accounts::revoke),
         )
         .route(
             "/v1/deposit-requests",
@@ -152,7 +150,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/attachments/{id}/finalize", post(attachments::finalize))
         .route("/v1/status", get(status::get))
         .route("/v1/webhooks", post(webhooks::add).get(webhooks::list))
-        .route("/v1/webhooks/{id}", delete(webhooks::remove))
+        .route(
+            "/v1/webhooks/{id}",
+            get(webhooks::get).delete(webhooks::remove),
+        )
         .route("/v1/webhooks/{id}/test", post(webhooks::test))
         .route("/v1/webhook-deliveries", get(webhooks::deliveries))
         .route_layer(middleware::from_fn_with_state(
@@ -346,7 +347,7 @@ mod tests {
             Address::ZERO,
             payer_access(),
             "payday_live_".into(),
-            None,
+            Some(WEBHOOK_KEY),
             Some(store),
             Some(attestor()),
             payer_verification,
@@ -355,6 +356,10 @@ mod tests {
         );
         (state, storage)
     }
+
+    /// The webhook secret-encryption key the test deployment is configured
+    /// with, so endpoints can be registered.
+    const WEBHOOK_KEY: [u8; 32] = [9u8; 32];
 
     /// A payer audience with its own signing key, and the stand-in tenant
     /// that mints tokens for it.
@@ -1136,6 +1141,38 @@ mod tests {
         assert_eq!(listed["deposit_requests"][0]["id"], id);
         assert!(listed["deposit_requests"][0].get("transfers").is_none());
         assert_eq!(listed["deposit_requests"][0]["payer_name"], "Globex");
+        // A summary carries what a list needs to render and link without a
+        // second read per row.
+        assert_eq!(
+            listed["deposit_requests"][0]["deposit_url"],
+            created["deposit_url"]
+        );
+        assert_eq!(
+            listed["deposit_requests"][0]["expires_at"],
+            created["expires_at"]
+        );
+        assert!(listed["deposit_requests"][0]["updated_at"].is_string());
+        // Every timestamp is RFC 3339 in UTC to the second, `Z` suffixed.
+        for field in ["created_at", "updated_at", "expires_at"] {
+            let value = created[field].as_str().unwrap();
+            assert!(
+                value.len() == 20 && value.ends_with('Z'),
+                "{field}: {value}"
+            );
+        }
+
+        // Transfers are enveloped like every other list.
+        let transfers = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/deposit-requests/{id}/transfers"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(transfers["transfers"], json!([]));
         assert_eq!(
             listed["deposit_requests"][0]["payer_policy_mode"],
             "permissionless"
@@ -1168,15 +1205,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled.status(), StatusCode::OK);
+        // Cancel answers with the deposit request itself, like every route.
         let cancelled = json_body(cancelled).await;
-        assert_eq!(cancelled["deposit_request"]["status"], "awaiting_deposit");
-        assert!(cancelled["deposit_request"]["cancellation_requested_at"].is_string());
-        assert!(
-            cancelled["advisory"]
-                .as_str()
-                .unwrap()
-                .contains("does not alter")
-        );
+        assert_eq!(cancelled["id"], id);
+        assert_eq!(cancelled["status"], "awaiting_deposit");
+        assert!(cancelled["cancellation_requested_at"].is_string());
+        assert!(cancelled.get("deposit_request").is_none());
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -2272,7 +2306,6 @@ mod tests {
         assert!(metadata["previous_key_expires_at"].is_string());
         assert!(metadata["revoked_at"].is_null());
         for (method, body) in [
-            ("GET", ""),
             ("POST", r#"{"expected_generation":3}"#),
             ("DELETE", r#"{"expected_generation":3}"#),
         ] {
@@ -2282,8 +2315,7 @@ mod tests {
                     method,
                     &second_key,
                     "/v1/account/api-key",
-                    &serde_json::from_str::<Value>(if body.is_empty() { "null" } else { body })
-                        .unwrap(),
+                    &serde_json::from_str::<Value>(body).unwrap(),
                 ))
                 .await
                 .unwrap();
@@ -2294,13 +2326,24 @@ mod tests {
                 "{method}"
             );
         }
+        // The key route has no read of its own: the account is the resource.
         let key_metadata = app
             .clone()
-            .oneshot(with_session("GET", "/v1/account/api-key", ""))
+            .oneshot(with_session("GET", "/v1/account", ""))
             .await
             .unwrap();
         assert_eq!(key_metadata.status(), StatusCode::OK);
         assert_eq!(json_body(key_metadata).await["generation"], 3);
+        let unknown_field = app
+            .clone()
+            .oneshot(with_session(
+                "POST",
+                "/v1/account/api-key",
+                r#"{"expected_generation":3,"rotate":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown_field.status(), StatusCode::BAD_REQUEST);
 
         let invoice_request = |key: &str| {
             Request::get("/v1/deposit-requests/not-an-id")
@@ -3171,6 +3214,24 @@ mod tests {
             "issuer_email_already_verified"
         );
 
+        // A rename alone never touches the proven mailbox: the update is
+        // partial, so the fields left out keep their values.
+        let renamed = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "PATCH",
+                    KEY,
+                    &format!("/v1/issuers/{id}"),
+                    &json!({"name": "Acme Inc."}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(renamed["name"], "Acme Inc.");
+        assert_eq!(renamed["contact_email"], "billing@acme.example");
+        assert_eq!(renamed["email_verified"], true);
+
         // Moving the mailbox is a new claim, and starts unproven.
         let moved = app
             .clone()
@@ -3178,11 +3239,13 @@ mod tests {
                 "PATCH",
                 KEY,
                 &format!("/v1/issuers/{id}"),
-                &json!({"name": "Acme Inc.", "contact_email": "support@acme.example"}),
+                &json!({"contact_email": "support@acme.example"}),
             ))
             .await
             .unwrap();
-        assert_eq!(json_body(moved).await["email_verified"], false);
+        let moved = json_body(moved).await;
+        assert_eq!(moved["email_verified"], false);
+        assert_eq!(moved["name"], "Acme Inc.");
 
         // Nobody else's identity, listed or fetched.
         let theirs = other_account(&pool, "payday_live_ffffffffffffffffffffffffffffffff").await;
@@ -3503,7 +3566,8 @@ mod tests {
         assert_eq!(fetched["stats"]["collected_base_units"], "0");
         assert_eq!(fetched["stats"]["pending_base_units"], "0");
 
-        // Update replaces every editable field: the omitted email clears.
+        // Update is partial: a field left out keeps its value, and only an
+        // explicit null clears one.
         let updated = app
             .clone()
             .oneshot(json_request(
@@ -3517,9 +3581,39 @@ mod tests {
         assert_eq!(updated.status(), StatusCode::OK);
         let updated = json_body(updated).await;
         assert_eq!(updated["name"], "Globex Corp");
-        assert!(updated["email"].is_null());
+        assert_eq!(
+            updated["email"], created["email"],
+            "an omitted field is kept"
+        );
         assert_eq!(updated["details"], "Net 45");
         assert!(updated["updated_at"].as_str() >= created["updated_at"].as_str());
+        let cleared = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "PATCH",
+                    KEY,
+                    &format!("/v1/customers/{id}"),
+                    &json!({"email": null}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(cleared["email"].is_null(), "an explicit null clears");
+        assert_eq!(cleared["name"], "Globex Corp");
+        assert_eq!(cleared["details"], "Net 45");
+        // The merged record is validated whole.
+        let blank = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                KEY,
+                &format!("/v1/customers/{id}"),
+                &json!({"name": "  "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
 
         let page = app
             .clone()
@@ -3958,7 +4052,16 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(unknown_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unknown_field.status(), StatusCode::BAD_REQUEST);
+        let unknown_field = json_body(unknown_field).await;
+        assert_eq!(unknown_field["error"]["code"], "invalid_request");
+        assert!(
+            unknown_field["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown field `email`"),
+            "{unknown_field}"
+        );
 
         let confirmed = app
             .clone()
@@ -4504,7 +4607,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(extra_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(extra_field.status(), StatusCode::BAD_REQUEST);
 
         let opened = app
             .clone()
@@ -4603,7 +4706,13 @@ mod tests {
         );
         let approved = &events[0].1;
         assert_eq!(approved["type"], "verification.approved");
-        assert_eq!(approved["data"]["deposit_request"]["id"], uuid.to_string());
+        // The webhook names the request exactly as the API does, so a handler
+        // can hand the id straight back to GET /v1/deposit-requests/{id}.
+        assert_eq!(approved["data"]["deposit_request"]["id"], id);
+        assert_eq!(
+            approved["data"]["deposit_request"]["id"],
+            format!("dr_{uuid}")
+        );
         assert_eq!(
             approved["data"]["deposit_request"]["payer_policy_mode"],
             "merchant_session"
@@ -4841,10 +4950,17 @@ mod tests {
             events[2].1["data"]["deposit_request"]["status"],
             "deposited"
         );
+        // Amounts carry the API's units and names: the human decimal under
+        // `received`, the integer under `received_base_units`.
         assert_eq!(
             events[2].1["data"]["deposit_request"]["received"],
+            "1.000000"
+        );
+        assert_eq!(
+            events[2].1["data"]["deposit_request"]["received_base_units"],
             "1000000"
         );
+        assert_eq!(events[2].1["data"]["deposit_request"]["amount"], "1.000000");
         assert_eq!(events[3].1["data"]["deposit_request"]["status"], "settled");
 
         // 8. The proof attests the merchant session; the snapshot carries
@@ -4926,22 +5042,24 @@ mod tests {
     ) {
         let (app, tenant) = app_with_payer_verification(pool.clone()).await;
 
-        // The assertion is required, bounded, and one token.
+        // The assertion is required, bounded, and one token. A body that does
+        // not fit the policy's shape and one that fails its rules answer the
+        // same way: 400 invalid_request.
         for (name, policy, status) in [
             (
                 "missing reference",
                 json!({"mode": "merchant_session"}),
-                StatusCode::UNPROCESSABLE_ENTITY,
+                StatusCode::BAD_REQUEST,
             ),
             (
                 "email on merchant session",
                 json!({"mode": "merchant_session", "payer_reference": "u1", "expected_email": "a@b.co"}),
-                StatusCode::UNPROCESSABLE_ENTITY,
+                StatusCode::BAD_REQUEST,
             ),
             (
                 "reference on permissionless",
                 json!({"mode": "permissionless", "payer_reference": "u1"}),
-                StatusCode::UNPROCESSABLE_ENTITY,
+                StatusCode::BAD_REQUEST,
             ),
             (
                 "blank reference",
@@ -5225,9 +5343,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn pregenerating_a_wallet_asks_the_configured_provider_a_normalized_email(
-        pool: PgPool,
-    ) {
+    async fn pregenerating_a_wallet_asks_the_configured_provider_a_normalized_email(pool: PgPool) {
         let (app, pregenerator) = app_with_pregeneration(pool).await;
         let response = app
             .oneshot(pregenerate_request("  Founder@Example.com  "))
@@ -5389,6 +5505,335 @@ mod tests {
         assert_eq!(
             json_body(refused).await["error"]["code"],
             "deposit_request_not_payable"
+        );
+    }
+
+    /// Webhook endpoints follow the same conventions as every other merchant
+    /// resource: enveloped lists, `404 webhook_not_found` for a missing,
+    /// malformed, or foreign id, `204` on disable, and paged deliveries.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn webhook_routes_follow_the_resource_conventions(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let bad_url = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/webhooks",
+                &json!({"url": "http://8.8.8.8/hook"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad_url.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(bad_url).await["error"]["code"], "invalid_request");
+
+        // Registering resolves the hostname, which a unit test has no
+        // network for, so the endpoint is written the way the route would
+        // write it and the reads are exercised from there.
+        let account = test_account(&pool).await;
+        let endpoint = gateway_db::WebhookRepository::new(pool.clone())
+            .add(
+                account,
+                "https://hooks.example/payday",
+                b"whsec_test",
+                &[1u8; 28],
+            )
+            .await
+            .unwrap();
+        let id = endpoint.id.to_string();
+
+        let listed = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, "/v1/webhooks"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["webhooks"][0]["id"], id);
+        assert!(listed["webhooks"][0].get("secret").is_none());
+        assert!(listed["webhooks"][0]["disabled_at"].is_null());
+        let created_at = listed["webhooks"][0]["created_at"].as_str().unwrap();
+        assert!(
+            created_at.len() == 20 && created_at.ends_with('Z'),
+            "{created_at}"
+        );
+
+        let fetched = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/webhooks/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(fetched["url"], "https://hooks.example/payday");
+        assert!(fetched.get("secret").is_none());
+
+        // A test event is one delivery, listed with its (so far empty) history.
+        let test = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/webhooks/{id}/test"),
+                &json!(null),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(test.status(), StatusCode::ACCEPTED);
+        let delivery_id = json_body(test).await["delivery_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let deliveries = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/webhook-deliveries?endpoint_id={id}&limit=1"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(deliveries["deliveries"][0]["id"], delivery_id);
+        assert_eq!(deliveries["deliveries"][0]["endpoint_id"], id);
+        assert_eq!(deliveries["deliveries"][0]["state"], "pending");
+        assert_eq!(deliveries["deliveries"][0]["attempts"], json!([]));
+        assert!(deliveries["next_cursor"].is_null());
+        for query in [
+            "limit=0".to_owned(),
+            format!("starting_after={}", Uuid::now_v7()),
+            "sort=asc".to_owned(),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(get_request(KEY, &format!("/v1/webhook-deliveries?{query}")))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+
+        // Missing, malformed, and foreign ids all read as not found.
+        const OTHER: &str = "payday_live_webhookother0123456789abcdef012345";
+        other_account(&pool, OTHER).await;
+        for (key, path) in [
+            (KEY, format!("/v1/webhooks/{}", Uuid::now_v7())),
+            (KEY, "/v1/webhooks/not-a-uuid".to_owned()),
+            (OTHER, format!("/v1/webhooks/{id}")),
+        ] {
+            for method in ["GET", "DELETE"] {
+                let response = app
+                    .clone()
+                    .oneshot(json_request(method, key, &path, &json!(null)))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+                assert_eq!(
+                    json_body(response).await["error"]["code"],
+                    "webhook_not_found",
+                    "{method} {path}"
+                );
+            }
+            let test = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    key,
+                    &format!("{path}/test"),
+                    &json!(null),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(test.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let foreign_deliveries = app
+            .clone()
+            .oneshot(get_request(
+                OTHER,
+                &format!("/v1/webhook-deliveries?endpoint_id={id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign_deliveries.status(), StatusCode::NOT_FOUND);
+
+        // Disabling answers 204, is idempotent, drops the endpoint from the
+        // list, refuses further test events, and keeps the history readable.
+        for _ in 0..2 {
+            let disabled = app
+                .clone()
+                .oneshot(json_request(
+                    "DELETE",
+                    KEY,
+                    &format!("/v1/webhooks/{id}"),
+                    &json!(null),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(disabled.status(), StatusCode::NO_CONTENT);
+        }
+        let listed = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, "/v1/webhooks"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["webhooks"], json!([]));
+        let fetched = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/webhooks/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(fetched["disabled_at"].is_string());
+        let refused = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/webhooks/{id}/test"),
+                &json!(null),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        let history = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, "/v1/webhook-deliveries"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(history["deliveries"][0]["id"], delivery_id);
+    }
+
+    /// A request may name saved records instead of retyping them: the
+    /// issuer identity supplies the issuer party and, with a saved payout
+    /// address, the payout address; the customer supplies the payer. What is
+    /// issued is the same snapshot an inline request would have produced.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn create_takes_parties_and_payout_address_from_saved_records(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let customer = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    "/v1/customers",
+                    &json!({"name": "Globex", "email": "ap@globex.example", "details": "Net 30"}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let issuer = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    "/v1/issuers",
+                    &json!({"name": "Acme", "contact_email": "billing@acme.example", "details": "1 Main St"}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let issuer_id = issuer["id"].as_str().unwrap().to_owned();
+        let mut body = json!({
+            "amount": "1",
+            "issuer_id": issuer_id,
+            "customer_id": customer["id"],
+            "payer_policy": {"mode": "permissionless"}
+        });
+
+        // Without a saved payout address there is nowhere to settle.
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "saved-no-address", &body))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(refused).await["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("payout_address")
+        );
+
+        let address = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    KEY,
+                    "/v1/payout-addresses",
+                    &json!({"address": "0x0000000000000000000000000000000000000002", "label": "Ops"}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        app.clone()
+            .oneshot(json_request(
+                "PUT",
+                KEY,
+                &format!("/v1/issuers/{issuer_id}/payout-addresses"),
+                &json!({"payout_address_ids": [address["id"]]}),
+            ))
+            .await
+            .unwrap();
+
+        let issued = app
+            .clone()
+            .oneshot(create_request(KEY, "saved-records", &body))
+            .await
+            .unwrap();
+        assert_eq!(issued.status(), StatusCode::CREATED);
+        let issued = json_body(issued).await;
+        assert_eq!(
+            issued["issuer"],
+            json!({"name": "Acme", "email": "billing@acme.example", "details": "1 Main St"})
+        );
+        assert_eq!(
+            issued["payer"],
+            json!({"name": "Globex", "email": "ap@globex.example", "details": "Net 30"})
+        );
+        assert_eq!(
+            issued["payout_address"],
+            "0x0000000000000000000000000000000000000002"
+        );
+        assert_eq!(issued["issuer_id"], issuer_id);
+        assert_eq!(issued["customer_id"], customer["id"]);
+
+        // An inline party still wins over the saved record it sits beside.
+        body["payer"] = json!({"name": "Globex Holdings"});
+        let inline = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "saved-records-inline", &body))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(inline["payer"]["name"], "Globex Holdings");
+        assert!(inline["payer"].get("email").is_none());
+
+        // With neither an inline party nor a record to take it from, the
+        // request says which field is missing.
+        let bare = app
+            .clone()
+            .oneshot(create_request(
+                KEY,
+                "saved-records-bare",
+                &json!({"amount": "1", "payer_policy": {"mode": "permissionless"},
+                        "payout_address": "0x0000000000000000000000000000000000000002"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bare.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(bare).await["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("issuer is required")
         );
     }
 }

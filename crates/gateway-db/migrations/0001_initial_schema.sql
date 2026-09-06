@@ -960,28 +960,53 @@ RETURNS TEXT LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
     END
 $$;
 
--- The deposit request object shared by every event: the policy mode, the
--- merchant's own payer reference, verification completion, the
--- unsolicited-funding timestamp, and the bound wallet and address; never the
--- expected email or any payer assertion.
+-- Timestamps in webhook payloads take the API's one shape: RFC 3339, UTC,
+-- whole seconds, `Z`. NULL in, NULL out.
+CREATE FUNCTION webhook_rfc3339(at TIMESTAMPTZ) RETURNS TEXT
+LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+$$;
+
+-- A base-unit integer as the API's human decimal string: the token's full
+-- precision, so `1000000` at six decimals is `1.000000`, exactly as
+-- `GET /v1/deposit-requests/{id}` renders `amount`.
+CREATE FUNCTION webhook_decimal_amount(base_units TEXT, decimals SMALLINT) RETURNS TEXT
+LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT round(base_units::numeric / power(10::numeric, decimals), decimals)::text
+$$;
+
+-- The deposit request object shared by every event, a strict subset of the
+-- API's own object under the same names, units, and formats: the `dr_` id,
+-- decimal amounts beside their base units, the policy mode, the merchant's
+-- own payer reference, verification completion, the unsolicited-funding
+-- timestamp, and the bound wallet and address; never the expected email or
+-- any payer assertion. Addresses leave here as lowercase hex; the delivery
+-- worker checksums them (EIP-55) before signing the body.
 CREATE FUNCTION webhook_deposit_request_object(invoice invoices) RETURNS JSONB
 LANGUAGE SQL STABLE AS $$
     SELECT jsonb_build_object(
-        'id', invoice.id,
+        'id', 'dr_' || invoice.id::text,
         'status', webhook_public_status(invoice.status, invoice.confirmed_received, invoice.blocked_reason),
-        'amount', invoice.amount,
-        'received', invoice.confirmed_received,
+        'amount', webhook_decimal_amount(invoice.amount, invoice.token_decimals),
+        'amount_base_units', invoice.amount,
+        'received', webhook_decimal_amount(invoice.confirmed_received, invoice.token_decimals),
+        'received_base_units', invoice.confirmed_received,
+        'heading', invoice.heading,
         'reference', invoice.reference,
         'metadata', invoice.metadata,
+        'customer_id', invoice.customer_id,
+        'issuer_id', invoice.issuer_id,
         'payer_policy_mode', invoice.payer_policy_mode,
         'payer_reference', invoice.payer_reference,
-        'verification_completed_at', invoice.verification_completed_at,
-        'likely_unsolicited_at', invoice.likely_unsolicited_at,
+        'verification_completed_at', webhook_rfc3339(invoice.verification_completed_at),
+        'likely_unsolicited_at', webhook_rfc3339(invoice.likely_unsolicited_at),
         'payer_wallet', CASE WHEN invoice.payer_wallet IS NULL THEN NULL
                              ELSE '0x' || encode(invoice.payer_wallet, 'hex') END,
         'address', CASE WHEN invoice.payment_address IS NULL THEN NULL
                         ELSE '0x' || encode(invoice.payment_address, 'hex') END,
-        'wallet_bound_at', invoice.wallet_bound_at)
+        'wallet_bound_at', webhook_rfc3339(invoice.wallet_bound_at),
+        'expires_at', webhook_rfc3339(to_timestamp(invoice.expiration_timestamp)),
+        'created_at', webhook_rfc3339(invoice.created_at))
 $$;
 
 CREATE FUNCTION enqueue_invoice_webhook_event(
@@ -993,7 +1018,7 @@ BEGIN
   INSERT INTO webhook_events(id, account_id, invoice_id, event_type, payload)
   VALUES (event_uuid, account, invoice, kind,
     jsonb_build_object('version', '2026-08-01', 'id', event_uuid, 'type', kind,
-      'occurred_at', COALESCE(occurred, now()), 'data', data))
+      'occurred_at', webhook_rfc3339(COALESCE(occurred, now())), 'data', data))
   ON CONFLICT (invoice_id, event_type)
     WHERE invoice_id IS NOT NULL AND fanout AND event_type <> 'deposit_request.recovered_funds'
     DO NOTHING;
@@ -1018,7 +1043,7 @@ BEGIN
       PERFORM enqueue_invoice_webhook_event(NEW.account_id, NEW.id, kind, occurred,
         jsonb_build_object('deposit_request', deposit_request ||
           CASE WHEN attention OR NEW.status = 'blocked' THEN jsonb_build_object('attention', jsonb_build_object(
-            'reason_code', NEW.blocked_reason,
+            'code', NEW.blocked_reason,
             'message', 'Automatic payout requires a manual review. Funds remain safe.',
             'action', 'Contact Payday support and provide the deposit request ID.'))
           ELSE '{}'::jsonb END));
@@ -1059,11 +1084,12 @@ BEGIN
       'deposit_request', webhook_deposit_request_object(invoice),
       'recovery', jsonb_build_object(
         'id', NEW.id,
-        'amount', NEW.amount,
+        'amount', webhook_decimal_amount(NEW.amount, invoice.token_decimals),
+        'amount_base_units', NEW.amount,
         'reason', NEW.reason,
         'transaction_hash', '0x' || encode(NEW.transaction_hash, 'hex'),
-        'block_number', NEW.block_number,
-        'recovered_at', NEW.recovered_at)));
+        'block_number', NEW.block_number::text,
+        'recovered_at', webhook_rfc3339(NEW.recovered_at))));
   RETURN NEW;
 END $$;
 

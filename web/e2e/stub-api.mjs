@@ -524,6 +524,9 @@ function verificationDetail(payment) {
 function summary(payment) {
   return {
     id: payment.id,
+    deposit_url: payment.deposit_url,
+    updated_at: payment.updated_at,
+    expires_at: payment.expires_at,
     heading: payment.heading,
     payer_name: payment.payer.name,
     issuer_id: payment.issuer_id ?? null,
@@ -904,7 +907,7 @@ function accountMetadata(record, req) {
  * `/v1/account` and `/v1/account/api-key`. The real API refuses the latter to
  * an API key and takes only a dashboard session; every credential here is a
  * session, so the same bearer check as everything else is enough to exercise
- * the UI end to end.
+ * the UI end to end. The key route has no GET: the account is the resource.
  */
 async function account(req, res, url) {
   if (url.pathname !== "/v1/account" && url.pathname !== "/v1/account/api-key") return false;
@@ -914,8 +917,6 @@ async function account(req, res, url) {
     if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
     return send(res, 200, accountMetadata(record, req));
   }
-
-  if (req.method === "GET") return send(res, 200, accountMetadata(record, req));
 
   if (req.method === "POST") {
     const body = await readJson(req);
@@ -980,16 +981,22 @@ function paginate(items, params) {
   return { page, next };
 }
 
+/**
+ * Create takes the whole body; update is partial like the API's PATCH: a
+ * field left out keeps its value, an explicit null clears it.
+ */
 function customerFrom(body, existing) {
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  if (!name || name.length > 255) throw new Error("name is required");
   const optional = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+  const name =
+    typeof body.name === "string" ? body.name.trim() : existing && !("name" in body) ? existing.name : "";
+  if (!name || name.length > 255) throw new Error("name is required");
+  const field = (key) => (key in body || !existing ? optional(body[key]) : existing[key]);
   const now = new Date().toISOString();
   return {
     id: existing?.id ?? randomUUID(),
     name,
-    email: optional(body.email),
-    details: optional(body.details),
+    email: field("email"),
+    details: field("details"),
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };
@@ -1394,23 +1401,28 @@ async function issuerIdentities(req, res, url) {
 
   if (req.method === "GET") return send(res, 200, shape(row));
   if (req.method === "PATCH") {
+    // Partial, like the API: a field left out keeps its value.
     const body = await readJson(req);
-    const email = String(body.contact_email ?? "")
-      .trim()
-      .toLowerCase();
-    if (!String(body.name ?? "").trim() || !email.includes("@")) {
-      return fail(res, 400, "invalid_request", "name and contact_email are required");
+    const name = "name" in body ? String(body.name ?? "").trim() : row.name;
+    const email =
+      "contact_email" in body
+        ? String(body.contact_email ?? "")
+            .trim()
+            .toLowerCase()
+        : row.contact_email;
+    if (!name || !email.includes("@")) {
+      return fail(res, 400, "invalid_request", "name and contact_email must not be blank");
     }
-    if (nameTaken(world, String(body.name), row.id)) {
+    if (nameTaken(world, name, row.id)) {
       return fail(res, 409, "issuer_name_taken", "Another identity already uses this name");
     }
     if (email !== row.contact_email) {
       row.email_verified = false;
       row.email_verified_at = null;
     }
-    row.name = String(body.name).trim();
+    row.name = name;
     row.contact_email = email;
-    row.details = body.details ?? null;
+    if ("details" in body) row.details = body.details ?? null;
     row.updated_at = new Date().toISOString();
     return send(res, 200, shape(row));
   }
@@ -1646,7 +1658,7 @@ async function payments(req, res, url) {
         return fail(res, 409, "deposit_request_not_settled", "Proof is available once settled");
       return send(res, 200, proofFor(payment));
     case "/transfers":
-      return send(res, 200, payment.transfers);
+      return send(res, 200, { transfers: payment.transfers });
     default:
       return send(res, 200, payment);
   }

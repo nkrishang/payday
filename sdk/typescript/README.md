@@ -10,7 +10,7 @@ npm install @payday/sdk
 import { PaydayClient } from "@payday/sdk";
 
 const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
-const deposit request = await payday.depositRequests.create({
+const depositRequest = await payday.depositRequests.create({
   amount: "10.00",
   payout_address: "0x1111111111111111111111111111111111111111",
   issuer: { name: "Acme LLC", email: "billing@acme.example" },
@@ -21,8 +21,20 @@ const deposit request = await payday.depositRequests.create({
   expires_in: 3600,
 }, crypto.randomUUID()); // caller-supplied idempotency key is mandatory
 
-console.log(await payday.depositRequests.get(deposit request.id));
+console.log(await payday.depositRequests.get(depositRequest.id));
 console.log(await payday.depositRequests.list({ status: "awaiting_deposit", limit: 20 }));
+```
+
+A request may name saved records instead of retyping them: with `issuer_id`,
+`issuer` and `payout_address` may be left out (the identity's name, contact
+address, details, and first saved payout address are snapshotted), and with
+`customer_id`, `payer` may be left out. An inline party still wins:
+
+```ts
+await payday.depositRequests.create(
+  { amount: "10.00", issuer_id: acme.id, customer_id: globex.id, payer_policy: { mode: "permissionless" } },
+  crypto.randomUUID(),
+);
 ```
 
 A deposit request is the document: issuer, payer, one directly specified amount,
@@ -112,9 +124,32 @@ also exposed separately as `attachments.create({ filename })` and
 ## Customers
 
 `customers.create/get/list/update` manage reusable counterparty records
-(`name`, optional `email` and `details`). Pass a customer's `id` as
-`customer_id` when creating a deposit request; the deposit request still stores its own
-immutable `payer` snapshot.
+(`name`, optional `email` and `details`). `update` is partial: a field left
+out keeps its value, and `email: null` or `details: null` clears one. Pass a
+customer's `id` as `customer_id` when creating a deposit request; the deposit
+request still stores its own immutable `payer` snapshot.
+
+## Issuer identities
+
+`issuers.create/get/list/update/remove` manage the party a deposit request is
+issued under, its contact mailbox (proven with `startEmailVerification` and
+`confirmEmailVerification`), and the payout wallets it settles to
+(`payoutAddresses.create/list/remove`, attached with
+`issuers.setPayoutAddresses`). `update` is partial like a customer's; a
+changed `contact_email` clears the verification, so a rename alone never
+touches a proven mailbox.
+
+## Webhooks
+
+`webhooks.add(url)` registers a credential-free public HTTPS endpoint and
+returns its signing `secret` once; `webhooks.list()` answers `{ webhooks }`
+without secrets, `webhooks.get(id)` reads one endpoint, `webhooks.remove(id)`
+disables it (idempotent; its history stays readable), `webhooks.test(id)`
+queues a `webhook.test` event, and `webhooks.deliveries({ endpoint_id, limit,
+starting_after })` pages the delivery history newest first as
+`{ deliveries, next_cursor }`, each delivery with its attempts. A missing,
+malformed, or foreign endpoint id throws `webhook_not_found` (404). See
+[Webhooks](../../docs/webhooks.md) for signatures and payloads.
 
 ## Dashboard sessions
 
@@ -124,7 +159,7 @@ exactly one of the two. This is how the Payday dashboard talks to the API from
 a browser without ever holding a key; the same bearer header carries either
 credential.
 
-The client also provides long polling through `depositRequests.get(id, { waitForChange: true })`, `depositRequests.cancel`, `depositRequests.transfers`, `status`, and `webhooks.add/list/remove/test/deliveries`. API failures throw `PaydayError`, exposing `code`, `status`, and `requestId`.
+The client also provides long polling through `depositRequests.get(id, { waitForChange: true })`, `depositRequests.cancel` (returns the deposit request with `cancellation_requested_at` set), `depositRequests.transfers` (`{ transfers }`), and `status`. API failures throw `PaydayError`, exposing `code`, `status`, `requestId`, and a `message` that names the problem — for a body that does not fit a route, the offending field.
 
 Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never expose an API key in browser-delivered code.
 
@@ -149,11 +184,11 @@ deposit.content_unlocked;     // false while a gated deposit request awaits veri
 deposit.requirements;         // email status and whether the policy is complete
 deposit.remaining_base_units; // exact integer string — the only value to do arithmetic on
 deposit.deposit_uri;          // EIP-681 request for the amount still due, or null
-deposit.deposit request;              // amount, payer, notes, reference, attachment — or null while locked
+deposit.details;              // amount, payer, notes, reference, attachment — or null while locked
 deposit.payable;              // false once the address must stop being shown
 deposit.server_timestamp;     // render the deadline without trusting the payer's clock
 
-payer.deposits.qr(deposit.id, payerSession); // SVG blob for an <img>; 401 while locked, 410 once not payable
+payer.depositRequests.qr(deposit.id, payerSession); // SVG blob for an <img>; 401 while locked, 410 once not payable
 payer.depositRequests.attachment(deposit.id, payerSession); // PDF descriptor; 401 verification_required while locked
 
 // Email verification for a gated deposit request: the code goes to the mailbox the
@@ -170,7 +205,7 @@ const opened = await payer.verification.exchangeClientSecret(deposit.id, clientS
 
 For `permissionless` deposit requests everything is unlocked immediately. For
 `verified_email`, `chain`, `token`, the amounts, `address`, `deposit_uri`, and
-`deposit request` are `null` until the payer's session satisfies the policy; pass the
+`details` are `null` until the payer's session satisfies the policy; pass the
 session token from verification as `payerSession` and it travels in the
 `Payday-Payer-Session` header. The response deliberately carries no merchant
 data — no payout or recovery address, metadata, customer, or policy

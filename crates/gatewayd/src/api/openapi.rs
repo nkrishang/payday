@@ -112,9 +112,16 @@ struct Attribution {
 #[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"payer":{"name":"Globex"},"payer_policy":{"mode":"permissionless"},"expires_in":3600,"reference":"INV-42","metadata":{"customer":"cus_123"}}))]
 struct CreateDepositRequest {
     amount: String,
-    payout_address: String,
-    issuer: Party,
-    payer: Party,
+    /// Where exactly `amount` settles. May be left out when `issuer_id`
+    /// names an identity with a saved payout address; its first one is used.
+    payout_address: Option<String>,
+    /// The issuing party as the document will carry it. May be left out
+    /// when `issuer_id` is given: the identity's name, contact address, and
+    /// details are snapshotted in its place. An inline party always wins.
+    issuer: Option<Party>,
+    /// The paying party. May be left out when `customer_id` is given: the
+    /// customer is snapshotted in its place. An inline party always wins.
+    payer: Option<Party>,
     payer_policy: PayerPolicy,
     chain_id: Option<String>,
     token_address: Option<String>,
@@ -224,12 +231,15 @@ struct DepositRequestPage {
 #[derive(Serialize, ToSchema)]
 struct DepositRequestSummary {
     id: String,
+    deposit_url: String,
     heading: Option<String>,
     payer_name: String,
     reference: Option<String>,
     #[schema(value_type = Object)]
     metadata: serde_json::Value,
     created_at: String,
+    updated_at: String,
+    expires_at: String,
     status: DepositRequestStatus,
     amount: String,
     received: String,
@@ -294,9 +304,15 @@ struct Transfer {
     collected: bool,
 }
 #[derive(Serialize, ToSchema)]
-struct CancelDepositRequest {
-    deposit_request: DepositRequest,
-    advisory: String,
+struct TransferList {
+    transfers: Vec<Transfer>,
+}
+#[derive(Serialize, ToSchema)]
+struct IssuedApiKey {
+    /// Shown once; nothing later can return it again.
+    api_key: String,
+    generation: i64,
+    replaced_previous_key: bool,
 }
 #[derive(Serialize, ToSchema)]
 struct Account {
@@ -346,7 +362,16 @@ struct Webhook {
     id: uuid::Uuid,
     url: String,
     created_at: String,
+    /// Set once disabled: the endpoint is no longer listed and receives
+    /// nothing, but it can still be read and its deliveries stay readable.
+    disabled_at: Option<String>,
+    /// The signing secret, present only on the `201` that created the
+    /// endpoint.
     secret: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+struct WebhookList {
+    webhooks: Vec<Webhook>,
 }
 #[derive(Serialize, ToSchema)]
 struct TestDelivery {
@@ -357,11 +382,28 @@ struct Delivery {
     id: uuid::Uuid,
     event_id: uuid::Uuid,
     endpoint_id: uuid::Uuid,
+    /// `pending`, `delivered`, or `failed` (after the twelfth failed attempt).
     state: String,
     attempt_count: i32,
     next_attempt_at: String,
     delivered_at: Option<String>,
+    created_at: String,
+    /// Immutable per-attempt history, oldest first.
     attempts: Vec<DeliveryAttempt>,
+}
+#[derive(Serialize, ToSchema)]
+struct DeliveryPage {
+    /// Newest first.
+    deliveries: Vec<Delivery>,
+    /// The last delivery id on this page when more exist; pass it as
+    /// `starting_after`.
+    next_cursor: Option<uuid::Uuid>,
+}
+/// Both key mutations take the generation `GET /v1/account` reports, so a
+/// rotation or revocation nobody expected is a `409` rather than a surprise.
+#[derive(Deserialize, ToSchema)]
+struct ApiKeyGeneration {
+    expected_generation: i64,
 }
 #[derive(Serialize, ToSchema)]
 struct DeliveryAttempt {
@@ -371,7 +413,6 @@ struct DeliveryAttempt {
     status: Option<i32>,
     error: Option<String>,
 }
-/// Create and update share this body; update replaces every editable field.
 #[derive(Deserialize, ToSchema)]
 #[schema(example = json!({"name":"Globex","email":"ap@globex.example","details":"Net 30"}))]
 struct CustomerRequest {
@@ -380,6 +421,20 @@ struct CustomerRequest {
     /// 3–254 bytes.
     email: Option<String>,
     /// At most 4000 bytes.
+    details: Option<String>,
+}
+/// A partial update: a field left out keeps its value; `email` or `details`
+/// sent as `null` is cleared. The merged record is validated whole.
+#[derive(Deserialize, ToSchema)]
+#[schema(example = json!({"details":"Net 45"}))]
+struct UpdateCustomerRequest {
+    /// 1–255 bytes.
+    name: Option<String>,
+    /// 3–254 bytes, or `null` to clear.
+    #[schema(nullable)]
+    email: Option<String>,
+    /// At most 4000 bytes, or `null` to clear.
+    #[schema(nullable)]
     details: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
@@ -427,6 +482,20 @@ struct IssuerRequest {
     /// write. Changing it clears the verification.
     contact_email: String,
     /// At most 4000 bytes.
+    details: Option<String>,
+}
+/// A partial update: a field left out keeps its value; `details` sent as
+/// `null` is cleared. A changed `contact_email` clears the verification, so
+/// a rename alone never touches a proven mailbox.
+#[derive(Deserialize, ToSchema)]
+#[schema(example = json!({"name":"Acme Inc."}))]
+struct UpdateIssuerRequest {
+    /// 1–255 bytes, unique among your identities.
+    name: Option<String>,
+    /// 3–254 bytes, lowercased on write.
+    contact_email: Option<String>,
+    /// At most 4000 bytes, or `null` to clear.
+    #[schema(nullable)]
     details: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
@@ -631,9 +700,9 @@ fn create_deposit_request() {}
 fn list_deposit_requests() {}
 #[utoipa::path(get, path="/v1/deposit-requests/{id}", operation_id="getDepositRequest", tag="deposit-requests", params(("id"=String, Path, description="Complete deposit request ID or deposit address"),("wait_for"=Option<String>,Query,description="Set to change for long polling"),("timeout"=Option<u64>,Query,minimum=1,maximum=30)), responses((status=200, body=DepositRequest),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn get_deposit_request() {}
-#[utoipa::path(post, path="/v1/deposit-requests/{id}/cancel", operation_id="cancelDepositRequest", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Presentation-only cancellation; on-chain rules are unchanged",body=CancelDepositRequest),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(post, path="/v1/deposit-requests/{id}/cancel", operation_id="cancelDepositRequest", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="The deposit request with cancellation_requested_at set. Cancellation is presentation only: it cannot disable the address or change the settlement terms it commits to",body=DepositRequest),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn cancel_deposit_request() {}
-#[utoipa::path(get, path="/v1/deposit-requests/{id}/transfers", operation_id="listDepositRequestTransfers", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,body=[Transfer]),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/transfers", operation_id="listDepositRequestTransfers", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Finalized transfer provenance",body=TransferList),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn transfers() {}
 #[utoipa::path(get, path="/v1/deposit-requests/{id}/attachment", operation_id="getDepositRequestAttachment", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Descriptor with a signed download_url valid for PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,description="deposit_request_not_found or attachment_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn deposit_request_attachment() {}
@@ -651,7 +720,7 @@ fn create_customer() {}
 fn list_customers() {}
 #[utoipa::path(get, path="/v1/customers/{id}", operation_id="getCustomer", tag="customers", params(("id"=uuid::Uuid, Path)), responses((status=200,body=CustomerDetail),(status=401,body=ErrorResponse),(status=404,description="customer_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn get_customer() {}
-#[utoipa::path(patch, path="/v1/customers/{id}", operation_id="updateCustomer", tag="customers", params(("id"=uuid::Uuid, Path)), request_body(content=CustomerRequest, description="Replaces every editable field; an omitted or null email or details clears it"), responses((status=200,body=Customer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(patch, path="/v1/customers/{id}", operation_id="updateCustomer", tag="customers", params(("id"=uuid::Uuid, Path)), request_body(content=UpdateCustomerRequest, description="Partial: a field left out keeps its value; email or details sent as null is cleared"), responses((status=200,body=Customer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn update_customer() {}
 #[utoipa::path(post, path="/v1/attachments", operation_id="createAttachment", tag="attachments", request_body=AttachmentRequest, responses((status=201,description="PUT the PDF (at most 5 MiB) to upload_url with exactly the returned headers, If-None-Match: * included; the key is write-once and a repeated PUT gets 412",body=AttachmentUpload),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_attachment() {}
@@ -661,22 +730,22 @@ fn finalize_attachment() {}
 fn account() {}
 #[utoipa::path(get, path="/v1/status", operation_id="getStatus", tag="status", responses((status=200,body=ServiceStatus),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse),(status=503,body=ErrorResponse)), security(("apiKey"=[])))]
 fn status() {}
-#[utoipa::path(post, path="/v1/webhooks", operation_id="createWebhook", tag="webhooks", request_body=WebhookRequest, responses((status=201,description="Secret is returned only once",body=Webhook),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(post, path="/v1/webhooks", operation_id="createWebhook", tag="webhooks", request_body=WebhookRequest, responses((status=201,description="Secret is returned only once",body=Webhook),(status=400,description="invalid_request: not a credential-free public HTTPS URL",body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse),(status=503,description="webhooks_unavailable: the deployment has no webhook encryption key",body=ErrorResponse)), security(("apiKey"=[])))]
 fn add_webhook() {}
-#[utoipa::path(get, path="/v1/webhooks", operation_id="listWebhooks", tag="webhooks", responses((status=200,body=[Webhook]),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/webhooks", operation_id="listWebhooks", tag="webhooks", responses((status=200,description="Active endpoints, without secrets",body=WebhookList),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn list_webhooks() {}
-#[utoipa::path(delete, path="/v1/webhooks/{id}", operation_id="removeWebhook", tag="webhooks", params(("id"=uuid::Uuid,Path)), responses((status=200,description="Endpoint disabled"),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/webhooks/{id}", operation_id="getWebhook", tag="webhooks", params(("id"=uuid::Uuid,Path)), responses((status=200,description="The endpoint, disabled or not, without its secret",body=Webhook),(status=401,body=ErrorResponse),(status=404,description="webhook_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+fn get_webhook() {}
+#[utoipa::path(delete, path="/v1/webhooks/{id}", operation_id="removeWebhook", tag="webhooks", params(("id"=uuid::Uuid,Path)), responses((status=204,description="Endpoint disabled; idempotent, and its delivery history stays readable"),(status=401,body=ErrorResponse),(status=404,description="webhook_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn remove_webhook() {}
-#[utoipa::path(post, path="/v1/webhooks/{id}/test", operation_id="testWebhook", tag="webhooks", params(("id"=uuid::Uuid,Path)), responses((status=202,body=TestDelivery),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(post, path="/v1/webhooks/{id}/test", operation_id="testWebhook", tag="webhooks", params(("id"=uuid::Uuid,Path)), responses((status=202,description="A webhook.test event queued for this endpoint only",body=TestDelivery),(status=401,body=ErrorResponse),(status=404,description="webhook_not_found, including a disabled endpoint",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn test_webhook() {}
-#[utoipa::path(get, path="/v1/webhook-deliveries", operation_id="listWebhookDeliveries", tag="webhooks", responses((status=200,body=[Delivery]),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/webhook-deliveries", operation_id="listWebhookDeliveries", tag="webhooks", params(("endpoint_id"=Option<uuid::Uuid>, Query, description="Only this endpoint's deliveries, disabled or not"),("starting_after"=Option<uuid::Uuid>, Query, description="Delivery id returned as next_cursor"),("limit"=Option<u32>, Query, minimum=1, maximum=100)), responses((status=200,body=DeliveryPage),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,description="webhook_not_found for a foreign endpoint_id",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn deliveries() {}
 
-#[utoipa::path(get, path="/v1/account/api-key", operation_id="getApiKeyMetadata", tag="account", responses((status=200,description="Key metadata",body=Account),(status=401,body=ErrorResponse)), security(("dashboardSession"=[])))]
-fn key_metadata() {}
-#[utoipa::path(post, path="/v1/account/api-key", operation_id="issueApiKey", tag="account", responses((status=200,description="Rotated key"),(status=201,description="First key"),(status=401,description="identity_unauthorized: an API key cannot mint a key; sign in to the dashboard",body=ErrorResponse),(status=409,body=ErrorResponse)), security(("dashboardSession"=[])))]
+#[utoipa::path(post, path="/v1/account/api-key", operation_id="issueApiKey", tag="account", request_body(content=ApiKeyGeneration, description="expected_generation is the generation GET /v1/account reports; a signed-in account exists at generation 1 before it holds any key"), responses((status=200,description="Rotated key; the previous key keeps working for 24 hours",body=IssuedApiKey),(status=201,description="First key",body=IssuedApiKey),(status=400,body=ErrorResponse),(status=401,description="identity_unauthorized: an API key cannot mint a key; sign in to the dashboard",body=ErrorResponse),(status=409,description="api_key_generation_conflict",body=ErrorResponse)), security(("dashboardSession"=[])))]
 fn issue_key() {}
-#[utoipa::path(delete, path="/v1/account/api-key", operation_id="revokeApiKey", tag="account", responses((status=204,description="Revoked"),(status=401,body=ErrorResponse),(status=409,body=ErrorResponse)), security(("dashboardSession"=[])))]
+#[utoipa::path(delete, path="/v1/account/api-key", operation_id="revokeApiKey", tag="account", request_body=ApiKeyGeneration, responses((status=204,description="Current and grace-period keys revoked"),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=409,description="api_key_generation_conflict",body=ErrorResponse)), security(("dashboardSession"=[])))]
 fn revoke_key() {}
 
 #[utoipa::path(post, path="/v1/issuers", operation_id="createIssuer", tag="issuers", request_body=IssuerRequest, responses((status=201,description="Created unverified; send a code to prove the contact address",body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=409,description="issuer_name_taken",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
@@ -685,7 +754,7 @@ fn create_issuer() {}
 fn list_issuers() {}
 #[utoipa::path(get, path="/v1/issuers/{id}", operation_id="getIssuer", tag="issuers", params(("id"=uuid::Uuid, Path)), responses((status=200,body=Issuer),(status=401,body=ErrorResponse),(status=404,description="issuer_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn get_issuer() {}
-#[utoipa::path(patch, path="/v1/issuers/{id}", operation_id="updateIssuer", tag="issuers", params(("id"=uuid::Uuid, Path)), request_body(content=IssuerRequest, description="Replaces every editable field; a different contact_email clears the verification"), responses((status=200,body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="issuer_name_taken",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(patch, path="/v1/issuers/{id}", operation_id="updateIssuer", tag="issuers", params(("id"=uuid::Uuid, Path)), request_body(content=UpdateIssuerRequest, description="Partial: a field left out keeps its value; details sent as null is cleared; a different contact_email clears the verification"), responses((status=200,body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="issuer_name_taken",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn update_issuer() {}
 #[utoipa::path(delete, path="/v1/issuers/{id}", operation_id="deleteIssuer", tag="issuers", params(("id"=uuid::Uuid, Path)), responses((status=204,description="Deleted, with its payout-address associations"),(status=409,description="issuer_in_use: requests were issued under it",body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn delete_issuer() {}
@@ -703,8 +772,8 @@ fn list_payout_addresses() {}
 fn delete_payout_address() {}
 
 #[derive(OpenApi)]
-#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,remove_webhook,test_webhook,deliveries,key_metadata,issue_key,revoke_key),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CancelDepositRequest,CustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,TestDelivery,Delivery,DeliveryAttempt)),
+#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage)),
  modifiers(&Security), tags((name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
@@ -765,10 +834,10 @@ mod tests {
         ("/v1/status", "get"),
         ("/v1/webhooks", "get"),
         ("/v1/webhooks", "post"),
+        ("/v1/webhooks/{id}", "get"),
         ("/v1/webhooks/{id}", "delete"),
         ("/v1/webhooks/{id}/test", "post"),
         ("/v1/webhook-deliveries", "get"),
-        ("/v1/account/api-key", "get"),
         ("/v1/account/api-key", "post"),
         ("/v1/account/api-key", "delete"),
         ("/v1/issuers", "post"),
@@ -830,15 +899,45 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        for field in [
-            "amount",
-            "payout_address",
-            "issuer",
-            "payer",
-            "payer_policy",
-        ] {
+        for field in ["amount", "payer_policy"] {
             assert!(required.contains(&field), "{field} must be required");
         }
+        // The parties and the payout address may come from saved records.
+        for field in ["payout_address", "issuer", "payer"] {
+            assert!(!required.contains(&field), "{field} must be optional");
+            assert!(create["properties"][field].is_object(), "{field}");
+        }
+        let summary = &d["components"]["schemas"]["DepositRequestSummary"]["properties"];
+        for field in ["deposit_url", "updated_at", "expires_at"] {
+            assert!(summary[field].is_object(), "{field}");
+        }
+        // Cancel answers with the deposit request itself; lists are enveloped.
+        assert_eq!(
+            d["paths"]["/v1/deposit-requests/{id}/cancel"]["post"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/DepositRequest"
+        );
+        for (path, schema) in [
+            ("/v1/deposit-requests/{id}/transfers", "TransferList"),
+            ("/v1/webhooks", "WebhookList"),
+            ("/v1/webhook-deliveries", "DeliveryPage"),
+        ] {
+            assert_eq!(
+                d["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["$ref"],
+                format!("#/components/schemas/{schema}"),
+                "{path}"
+            );
+        }
+        assert!(d["paths"]["/v1/webhooks/{id}"]["delete"]["responses"]["204"].is_object());
+        assert!(d["paths"]["/v1/webhooks/{id}"]["delete"]["responses"]["404"].is_object());
+        assert!(d["paths"]["/v1/account/api-key"]["post"]["requestBody"].is_object());
+        assert!(
+            d["components"]["schemas"]["UpdateCustomerRequest"]["required"]
+                .as_array()
+                .is_none_or(|fields| fields.is_empty()),
+            "every update field is optional"
+        );
         assert_eq!(
             d["components"]["schemas"]["PayerPolicyMode"]["enum"]
                 .as_array()

@@ -14,11 +14,14 @@ version/key ID, so retain old key material until it has been re-encrypted; merel
 creating a new Secrets Manager version is not a complete application-level
 rotation.
 
-Endpoint URLs must be credential-free HTTPS URLs. Payday resolves and rejects
-every loopback, private, link-local, and reserved destination both when an
-endpoint is created and immediately before every request. Redirects are never
-followed. `DELETE /v1/webhooks/{id}` disables an endpoint without deleting
-delivery history; the same URL can subsequently be registered with a new secret.
+Endpoint URLs must be credential-free HTTPS URLs with a DNS hostname. Payday
+resolves and rejects every loopback, private, link-local, and reserved
+destination both when an endpoint is created and immediately before every
+request. Redirects are never followed. `DELETE /v1/webhooks/{id}` disables an
+endpoint (`204`) without deleting delivery history, which
+`GET /v1/webhook-deliveries?endpoint_id={id}` keeps paging; the same URL can
+subsequently be registered with a new secret. The routes are listed in the
+[HTTP API reference](api-reference.md#webhooks).
 
 Deliveries contain `Payday-Event-Id`, `Payday-Event-Type`, and
 `Payday-Signature: v1,t=<unix-seconds>,sha256=<hex>`. Verify HMAC-SHA256 with
@@ -53,36 +56,69 @@ or `likely_unsolicited_at`.
 ## Payload
 
 Payloads use the public, versioned `2026-08-01` envelope: `id`, `type`,
-`occurred_at`, and `data`. Every deposit request event carries `data.deposit_request` with the
-public status, `amount`, `received`, `reference`, `metadata`, four policy
-fields: `payer_policy_mode`, `payer_reference`, `verification_completed_at`,
-and `likely_unsolicited_at`, and the binding: `payer_wallet`, `address`, and
-`wallet_bound_at` (all null before `deposit_request.ready`). `payer_reference` is your
-own identifier for the payer on a `merchant_session` deposit (`null`
-otherwise), so a `deposit_request.deposited` or `deposit_request.settled` handler can credit that
-user's ledger directly. The payload never includes the expected email or the
-payer's own data. `deposit_request.needs_attention` adds
-`data.deposit_request.attention`. Lifecycle payloads carry no recovery flag by design:
-a `deposit_request.settled` for an overpaid deposit request is indistinguishable from one for
-an exact deposit, and `deposit_request.recovered_funds` is the recovery signal.
+`occurred_at`, and `data`. Every deposit request event carries
+`data.deposit_request`, a strict subset of the API's own deposit request
+object under the same names, units, and formats — so a handler can hand
+`id` straight to `GET /v1/deposit-requests/{id}`, compare `amount` with the
+API's `amount`, and parse every timestamp the same way:
+
+```json
+{
+  "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "status": "settled",
+  "amount": "10.500000",
+  "amount_base_units": "10500000",
+  "received": "10.500000",
+  "received_base_units": "10500000",
+  "heading": "March retainer",
+  "reference": "INV-1042",
+  "metadata": {"po": "PO-77"},
+  "customer_id": null,
+  "issuer_id": "0198f80c-1111-7dc1-a369-90556a64f700",
+  "payer_policy_mode": "merchant_session",
+  "payer_reference": "user_123",
+  "verification_completed_at": "2026-09-01T11:58:00Z",
+  "likely_unsolicited_at": null,
+  "payer_wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+  "address": "0x2222222222222222222222222222222222222222",
+  "wallet_bound_at": "2026-09-01T11:58:30Z",
+  "expires_at": "2026-09-02T11:57:00Z",
+  "created_at": "2026-09-01T11:57:00Z"
+}
+```
+
+The `dr_` id, the decimal `amount` and `received` beside their
+`_base_units`, EIP-55 addresses, and RFC 3339 UTC timestamps to the second
+are exactly what the API returns. `payer_wallet`, `address`, and
+`wallet_bound_at` are null before `deposit_request.ready`. `payer_reference`
+is your own identifier for the payer on a `merchant_session` deposit (`null`
+otherwise), so a `deposit_request.deposited` or `deposit_request.settled`
+handler can credit that user's ledger directly. The payload never includes
+the expected email or the payer's own data. `deposit_request.needs_attention`
+adds `data.deposit_request.attention {code, message, action}`, the same
+object the API's `attention` field carries. Lifecycle payloads carry no
+recovery flag by design: a `deposit_request.settled` for an overpaid deposit
+request is indistinguishable from one for an exact deposit, and
+`deposit_request.recovered_funds` is the recovery signal.
 
 `deposit_request.recovered_funds` adds `data.recovery`:
 
 ```json
 {
   "id": "…",
-  "amount": "250000",
+  "amount": "0.250000",
+  "amount_base_units": "250000",
   "reason": "overpayment",
   "transaction_hash": "0x…",
-  "block_number": 12345,
+  "block_number": "12345",
   "recovered_at": "2026-09-01T12:00:00Z"
 }
 ```
 
-`amount` is in base units and `reason` is one of `overpayment`, `expired`, or
-`late_transfer`. Returned funds went to the payer's attested wallet on-chain
-in the named transaction; nothing is held by Payday. Use these events to
-explain to a payer where the difference went.
+`reason` is one of `overpayment`, `expired`, or `late_transfer`. Returned
+funds went to the payer's attested wallet on-chain in the named transaction;
+nothing is held by Payday. Use these events to explain to a payer where the
+difference went.
 
 Test events are sent only to the requested endpoint, require no deposit request, and
 cannot consume a real lifecycle event's uniqueness key.

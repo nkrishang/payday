@@ -10,13 +10,13 @@
 //! side: nothing here is surfaced to a merchant, and sign-in does not depend
 //! on it — its own explicit wallet creation is the correctness guarantee.
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use gateway_core::valid_email;
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
+use crate::api::json::Json;
 use crate::pregenerated_wallet::PregenerateError;
 use crate::state::AppState;
 

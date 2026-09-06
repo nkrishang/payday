@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use alloy_primitives::Address;
 use axum::Extension;
-use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::Utc;
+use gateway_core::rfc3339;
 use gateway_db::{
     AccountId, CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbPayoutAddress,
     IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
@@ -36,8 +36,10 @@ use gateway_db::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::customers::patch_field;
 use crate::api::deposit_requests::validate_party_fields;
 use crate::api::error::ApiError;
+use crate::api::json::{Json, Query};
 use crate::state::AppState;
 
 /// One code per identity per minute, matching the payer flow's window. An
@@ -58,6 +60,19 @@ pub struct IssuerRequest {
     contact_email: String,
     #[serde(default)]
     details: Option<String>,
+}
+
+/// A partial update: a field left out keeps its value; `details` sent as
+/// `null` is cleared. A changed `contact_email` starts unproven again.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateIssuerRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    contact_email: Option<String>,
+    #[serde(default, deserialize_with = "patch_field")]
+    details: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,7 +117,7 @@ impl From<DbPayoutAddress> for PayoutAddressResponse {
             id: row.id,
             address: row.address,
             label: row.label,
-            created_at: row.created_at.to_rfc3339(),
+            created_at: rfc3339(row.created_at),
         }
     }
 }
@@ -130,10 +145,10 @@ impl IssuerResponse {
             contact_email: row.contact_email,
             details: row.details,
             email_verified: row.email_verified_at.is_some(),
-            email_verified_at: row.email_verified_at.map(|at| at.to_rfc3339()),
+            email_verified_at: row.email_verified_at.map(rfc3339),
             payout_addresses,
-            created_at: row.created_at.to_rfc3339(),
-            updated_at: row.updated_at.to_rfc3339(),
+            created_at: rfc3339(row.created_at),
+            updated_at: rfc3339(row.updated_at),
         }
     }
 }
@@ -229,7 +244,7 @@ pub async fn list(
                 id: link.id,
                 address: link.address,
                 label: link.label,
-                created_at: link.created_at.to_rfc3339(),
+                created_at: rfc3339(link.created_at),
             });
     }
 
@@ -245,17 +260,25 @@ pub async fn list(
     }))
 }
 
+/// Changes only the fields the body names; the merged identity is validated
+/// whole. Renaming an identity therefore never touches its proven mailbox.
 pub async fn update(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
     Path(id): Path<String>,
-    Json(request): Json<IssuerRequest>,
+    Json(request): Json<UpdateIssuerRequest>,
 ) -> Result<Json<IssuerResponse>, ApiError> {
     let id = issuer_id(&id)?;
-    let contact_email = validate(&request)?;
+    let current = load(&state.issuers, account, id).await?;
+    let merged = IssuerRequest {
+        name: request.name.unwrap_or(current.name),
+        contact_email: request.contact_email.unwrap_or(current.contact_email),
+        details: request.details.unwrap_or(current.details),
+    };
+    let contact_email = validate(&merged)?;
     let row = state
         .issuers
-        .update(account, id, request.name, contact_email, request.details)
+        .update(account, id, merged.name, contact_email, merged.details)
         .await
         .map_err(duplicate_name_or)?
         .ok_or_else(ApiError::issuer_not_found)?;
@@ -316,7 +339,7 @@ pub async fn start_email_verification(
         StatusCode::ACCEPTED,
         Json(StartEmailResponse {
             contact_email: claimed.contact_email,
-            resend_available_at: resend_available_at.to_rfc3339(),
+            resend_available_at: rfc3339(resend_available_at),
         }),
     ))
 }

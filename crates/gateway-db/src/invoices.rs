@@ -2180,9 +2180,14 @@ pub(crate) mod tests {
             "id",
             "status",
             "amount",
+            "amount_base_units",
             "received",
+            "received_base_units",
+            "heading",
             "reference",
             "metadata",
+            "customer_id",
+            "issuer_id",
             "payer_policy_mode",
             "payer_reference",
             "verification_completed_at",
@@ -2190,6 +2195,8 @@ pub(crate) mod tests {
             "payer_wallet",
             "address",
             "wallet_bound_at",
+            "expires_at",
+            "created_at",
         ]
         .into_iter()
         .collect();
@@ -2219,7 +2226,33 @@ pub(crate) mod tests {
                 payment["address"], "0x0606060606060606060606060606060606060606",
                 "{kind}"
             );
+            // The same id, units, and timestamp shape as the API object.
+            assert_eq!(payment["id"], format!("dr_{id}"), "{kind}");
+            assert_eq!(payment["amount"], "1.000000", "{kind}");
+            assert_eq!(payment["amount_base_units"], "1000000", "{kind}");
+            assert_eq!(payment["expires_at"], "2096-10-02T07:06:40Z", "{kind}");
+            let created = payment["created_at"].as_str().unwrap();
+            assert!(
+                created.len() == 20 && created.ends_with('Z'),
+                "{kind}: {created}"
+            );
+            if let Some(bound) = payment["wallet_bound_at"].as_str() {
+                assert!(bound.len() == 20 && bound.ends_with('Z'), "{kind}: {bound}");
+            }
+            assert!(
+                payload["occurred_at"].as_str().unwrap().ends_with('Z'),
+                "{kind}"
+            );
         }
+        let recovery = &events
+            .iter()
+            .find(|(kind, _)| kind == "deposit_request.recovered_funds")
+            .unwrap()
+            .1["data"]["recovery"];
+        assert_eq!(recovery["amount"], "0.000025");
+        assert_eq!(recovery["amount_base_units"], "25");
+        assert_eq!(recovery["block_number"], "7");
+        assert!(recovery["recovered_at"].as_str().unwrap().ends_with('Z'));
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
@@ -2324,7 +2357,7 @@ pub(crate) mod tests {
             "SELECT payload FROM webhook_events WHERE invoice_id=$1 AND event_type='deposit_request.needs_attention'",
         ).bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!(
-            payload["data"]["deposit_request"]["attention"]["reason_code"],
+            payload["data"]["deposit_request"]["attention"]["code"],
             "retries_exhausted"
         );
         assert!(
