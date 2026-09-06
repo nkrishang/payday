@@ -3,6 +3,7 @@ import Image from "next/image";
 import { DepositScene } from "@/components/landing/deposit-scene";
 import { StartBuilding } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
+import { PricingDialog } from "@/components/pricing-dialog";
 
 export const metadata: Metadata = {
   title: "Payday — Make every stablecoin accountable",
@@ -32,9 +33,7 @@ export default function Home() {
             >
               Docs
             </a>
-            <a href="#pricing" className="transition-colors hover:text-brand-white">
-              Pricing
-            </a>
+            <PricingDialog />
           </div>
         </nav>
       </header>
@@ -54,7 +53,9 @@ export default function Home() {
               <StartBuilding />
             </MerchantAuth>
             <a
-              href="mailto:contact@payday.sh?subject=Payday%20demo"
+              href="https://calendar.app.google/dXTDCwAEPpk25xzx8"
+              target="_blank"
+              rel="noopener noreferrer"
               className="flex h-14 items-center justify-center rounded-[8px] border border-brand-green px-5 text-[16px] font-medium text-brand-green transition-colors hover:bg-brand-green/10"
             >
               Request a demo
