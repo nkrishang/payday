@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers. The project is currently
 pre-release software; the `0.1.0` version does not imply a stable public API.
 
+### Added
+
+- A staging environment (`docs/staging.md`): a second, isolated copy of the
+  AWS stack at `api.staging.payday.sh`, on Monad mainnet with real USDC and
+  its own contract generation, database, keys, bucket, and email identity,
+  whose checkout origin is the web app on the operator's machine. `just
+  web-staging` serves the local web app against it (`web/.env.staging`),
+  and `just live-smoke` (`scripts/live-smoke.sh`) runs a real deposit end
+  to end against any live API: issue, wallet attestation signed with
+  `cast`, on-chain transfer, finalized settlement, Proof of Payment. The
+  `Deploy staging` workflow builds and pushes images for every commit that
+  reaches `main` and passes CI, then applies
+  `infra/environments/staging.tfvars` with that tag, assuming a GitHub OIDC
+  role that the staging Terraform creates when `github_repository` is set,
+  and replaces staging's database whenever the migrations directory changed
+  since the deployed commit. `checkout_base_url` accepts a loopback HTTP
+  origin for this.
+
 ## [Unreleased]
 
 ### Changed
@@ -26,8 +44,8 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   as `payment_observations_collected_at_tx_index_non_negative`). Payday is
   pre-release with no data to carry forward, so there is no upgrade path:
   a database that ran the old chain refuses the new set, and every existing
-  environment is recreated empty. Until the first real deposit, schema
-  changes edit the baseline; after it, they append numbered migrations.
+  environment is recreated empty. Until launch, schema changes keep editing
+  the baseline; staging recreates its database when it deploys one.
 - `pay.payday.sh` is gone. It was a second hostname on the API's load
   balancer whose only page, `GET /pay/{id}`, answered a `301` to the checkout
   on `payday.sh`; every `deposit_url` already points at the checkout, so the

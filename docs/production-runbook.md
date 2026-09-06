@@ -595,11 +595,12 @@ deployment after rotating a secret.
 ### Schema changes
 
 Migrations are embedded and run at service startup. Until the first real
-deposit is accepted, keep the schema as the single baseline: edit
-`0001_initial_schema.sql`, recreate the database as in §7, and redeploy.
-Once real data exists, never edit the baseline again; add
-`0002_<name>.sql` and later files, each reviewed for forward and backward
-compatibility with the image that is still running while the new one
+deposit is accepted, the schema stays one baseline file,
+`0001_initial_schema.sql`, edited in place; a schema change recreates every
+database, which the staging deploy does on its own
+([staging.md](staging.md)) and production does as in §7. Once real data
+exists, the baseline is frozen and a change is a new numbered file,
+reviewed for compatibility with the image still running while the new one
 starts.
 
 ### Web

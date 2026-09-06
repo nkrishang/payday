@@ -26,12 +26,13 @@ variable "checkout_base_url" {
   description = <<-EOT
     Origin serving the hosted checkout at /pay/{id}, which is where every
     deposit_url points: the Vercel-hosted site, https://payday.sh in
-    production.
+    production. Staging points at the web app running on the operator's
+    machine, so a loopback HTTP origin is also accepted (docs/staging.md).
   EOT
   type        = string
   validation {
-    condition     = can(regex("^https://[^/?#]+$", var.checkout_base_url))
-    error_message = "checkout_base_url must be an HTTPS origin without a trailing slash, path, query, or fragment."
+    condition     = can(regex("^https://[^/?#]+$", var.checkout_base_url)) || can(regex("^http://(127\\.0\\.0\\.1|localhost)(:[0-9]{1,5})?$", var.checkout_base_url))
+    error_message = "checkout_base_url must be an HTTPS origin (or a loopback HTTP origin) without a trailing slash, path, query, or fragment."
   }
 }
 
@@ -319,5 +320,21 @@ variable "notification_domain_name" {
   validation {
     condition     = endswith(var.notification_from_address, "@${var.notification_domain_name}")
     error_message = "notification_from_address must belong to notification_domain_name."
+  }
+}
+
+variable "github_repository" {
+  description = <<-EOT
+    GitHub repository (owner/name) whose main branch deploys this environment
+    through GitHub Actions. Set only for staging (docs/staging.md): it
+    creates the account's GitHub OIDC provider and a deploy role that the
+    workflow assumes, so at most one environment per AWS account may set it.
+    Empty, as in production, creates nothing and every apply is manual.
+  EOT
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.github_repository == "" || can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    error_message = "github_repository must be owner/name."
   }
 }

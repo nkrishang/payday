@@ -1005,3 +1005,37 @@ resource "aws_cloudwatch_metric_alarm" "db_storage" {
   dimensions          = { DBInstanceIdentifier = aws_db_instance.this.identifier }
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
+
+# Continuous deployment of main from GitHub Actions (docs/staging.md). The
+# OIDC provider is one per AWS account, so only the environment that sets
+# github_repository declares it. The role trusts exactly that repository's
+# main branch; it carries AdministratorAccess because a Terraform apply of
+# this stack touches IAM, KMS, RDS, ECS, S3, and more, which is why the trust
+# policy, not the permissions, is the control.
+resource "aws_iam_openid_connect_provider" "github" {
+  count           = var.github_repository != "" ? 1 : 0
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
+}
+resource "aws_iam_role" "github_deploy" {
+  count = var.github_repository != "" ? 1 : 0
+  name  = "${var.name}-github-deploy"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.github[0].arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
+        StringLike   = { "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:ref:refs/heads/main" }
+      }
+    }]
+  })
+}
+resource "aws_iam_role_policy_attachment" "github_deploy" {
+  count      = var.github_repository != "" ? 1 : 0
+  role       = aws_iam_role.github_deploy[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}

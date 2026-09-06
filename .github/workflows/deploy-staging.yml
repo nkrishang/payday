@@ -1,0 +1,141 @@
+name: Deploy staging
+
+# Every commit that reaches main and passes CI is deployed to the staging
+# stack (docs/staging.md): both images are built and pushed under the
+# commit's immutable git-<sha> tag, then the staging Terraform is applied
+# with that tag. Production is never touched by this workflow; its apply is
+# manual (docs/production-runbook.md).
+#
+# Until the staging stack has been bootstrapped once by hand and the two
+# repository secrets exist, the workflow exits early without doing anything.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA on main to deploy (defaults to the branch head)
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-north-1
+  ENVIRONMENT_NAME: payday-staging
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    environment: staging
+    timeout-minutes: 45
+    steps:
+      - name: Decide whether staging is configured
+        id: gate
+        env:
+          ROLE_ARN: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          RPC_URL: ${{ secrets.STAGING_RPC_URL }}
+        run: |
+          if [[ -z "$ROLE_ARN" || -z "$RPC_URL" ]]; then
+            echo "AWS_STAGING_DEPLOY_ROLE_ARN or STAGING_RPC_URL is not set; staging is not bootstrapped yet, nothing to deploy."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.configured == 'true'
+        with:
+          ref: ${{ github.event.inputs.sha || github.event.workflow_run.head_sha || github.sha }}
+          submodules: recursive
+
+      - name: Refuse anything that is not on main
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          git fetch --no-tags --depth=200 origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "$(git rev-parse HEAD) is not on main; staging only deploys merged commits." >&2
+            exit 1
+          }
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.gate.outputs.configured == 'true'
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Images are pushed before Terraform runs: push-images.sh refuses a
+      # dirty worktree, and terraform init may rewrite the provider lock
+      # file. ECR tags are immutable, so a commit already pushed (a re-run,
+      # or a manual redeploy of an older commit) is not rebuilt.
+      - name: Build and push images
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          api_repo="${registry}/${ENVIRONMENT_NAME}-api"
+          indexer_repo="${registry}/${ENVIRONMENT_NAME}-indexer"
+          tag="git-${sha}"
+          if aws ecr describe-images --repository-name "${ENVIRONMENT_NAME}-api" --image-ids imageTag="$tag" >/dev/null 2>&1 \
+            && aws ecr describe-images --repository-name "${ENVIRONMENT_NAME}-indexer" --image-ids imageTag="$tag" >/dev/null 2>&1; then
+            echo "both images already exist for $tag; skipping the build"
+          else
+            scripts/push-images.sh "$AWS_REGION" "$api_repo" "$indexer_repo" "$tag"
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.gate.outputs.configured == 'true'
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      # The schema is one baseline migration that is edited in place while
+      # Payday is pre-release (docs/staging.md). A database that applied the
+      # old file refuses the new one, so when the migrations directory
+      # changed since the deployed commit, the RDS instance is replaced and
+      # the new tasks create the schema from scratch.
+      - name: Apply the staging stack
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          TF_VAR_rpc_url: ${{ secrets.STAGING_RPC_URL }}
+          TF_IN_AUTOMATION: "true"
+        run: |
+          terraform -chdir=infra init -input=false -backend-config=environments/staging.backend.hcl
+          replace=()
+          deployed="$(terraform -chdir=infra output -raw image_tag 2>/dev/null || true)"
+          old_sha="${deployed#git-}"
+          if [[ "$deployed" =~ ^git-[0-9a-f]{40}$ && "$old_sha" != "$sha" ]]; then
+            git fetch --no-tags --depth=1 origin "$old_sha" 2>/dev/null || true
+            if git cat-file -e "${old_sha}^{commit}" 2>/dev/null; then
+              if git diff --quiet "$old_sha" "$sha" -- crates/gateway-db/migrations; then
+                echo "schema unchanged since $deployed"
+              else
+                echo "schema changed since $deployed; recreating staging's database"
+                replace=(-replace=aws_db_instance.this)
+              fi
+            else
+              echo "cannot fetch $old_sha to compare schemas; assuming unchanged"
+            fi
+          fi
+          terraform -chdir=infra plan -input=false -no-color \
+            -var-file=environments/staging.tfvars -var "image_tag=git-${sha}" \
+            "${replace[@]}" -out=staging.tfplan
+          terraform -chdir=infra apply -input=false -no-color staging.tfplan
+
+      - name: Wait for the services to settle on the new images
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          aws ecs wait services-stable --cluster "$ENVIRONMENT_NAME" --services api indexer
+          curl --fail --silent --show-error "https://api.staging.payday.sh/health"
+          echo "staging is running git-${sha}"

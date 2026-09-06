@@ -23,3 +23,11 @@ output "notification_dkim_records" {
     "${token}._domainkey.${var.notification_domain_name}" => "${token}.dkim.amazonses.com"
   }
 }
+output "github_deploy_role_arn" {
+  description = "Role the deploy-staging workflow assumes; null unless github_repository is set."
+  value       = try(aws_iam_role.github_deploy[0].arn, null)
+}
+output "image_tag" {
+  description = "The git-<sha> tag currently applied; the deploy-staging workflow diffs the migrations directory against it."
+  value       = var.image_tag
+}

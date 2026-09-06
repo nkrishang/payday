@@ -42,6 +42,7 @@ See [web/README.md](web/README.md).
 - [Customer FAQ](docs/faq.md)
 - [Changelog](CHANGELOG.md)
 - [Local development and configuration](docs/local-development.md)
+- [Staging: main, live, driven from your machine](docs/staging.md)
 - [Deposit requests API](docs/deposit-requests-api.md)
 - [Authentication and API keys](docs/authentication.md)
 - [Merchant dashboard](docs/dashboard.md)
