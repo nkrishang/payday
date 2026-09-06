@@ -117,10 +117,6 @@ export function AccountSection({
                 />
                 USDC
               </span>
-              <span className="tabular text-[13px] text-muted">
-                {formatBaseUnits(balances.native, 18, 4)} {config.nativeSymbol}
-                <span className="text-faint"> for gas</span>
-              </span>
               <button
                 type="button"
                 onClick={balances.reload}
@@ -152,14 +148,12 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 type Balances =
   | { status: "loading" }
   | { status: "unavailable"; reload: () => void }
-  | { status: "ready"; usdc: bigint; native: bigint; reload: () => void };
+  | { status: "ready"; usdc: bigint; reload: () => void };
 
-type Reading =
-  | { outcome: "unavailable" }
-  | { outcome: "ready"; usdc: bigint; native: bigint };
+type Reading = { outcome: "unavailable" } | { outcome: "ready"; usdc: bigint };
 
 /**
- * The wallet's USDC and gas balance, read straight from the public RPC this
+ * The wallet's USDC balance, read straight from the public RPC this
  * deployment is configured with — the same endpoint the checkout's wallet
  * button reads through. One shot per wallet and per refresh; a chain that
  * does not answer is reported, not retried forever.
@@ -179,17 +173,15 @@ function useBalances(wallet: string | null): Balances {
     const client = createPublicClient({
       transport: http(config.rpcUrl, { retryCount: 1, timeout: 8_000 }),
     });
-    Promise.all([
-      client.readContract({
+    client
+      .readContract({
         address: config.usdcAddress as `0x${string}`,
         abi: erc20Abi,
         functionName: "balanceOf",
         args: [address],
-      }),
-      client.getBalance({ address }),
-    ])
-      .then(([usdc, native]) => {
-        if (!disposed) setSettled({ request, reading: { outcome: "ready", usdc, native } });
+      })
+      .then((usdc) => {
+        if (!disposed) setSettled({ request, reading: { outcome: "ready", usdc } });
       })
       .catch(() => {
         if (!disposed) setSettled({ request, reading: { outcome: "unavailable" } });
@@ -201,6 +193,6 @@ function useBalances(wallet: string | null): Balances {
 
   if (settled?.request !== request) return { status: "loading" };
   return settled.reading.outcome === "ready"
-    ? { status: "ready", usdc: settled.reading.usdc, native: settled.reading.native, reload }
+    ? { status: "ready", usdc: settled.reading.usdc, reload }
     : { status: "unavailable", reload };
 }

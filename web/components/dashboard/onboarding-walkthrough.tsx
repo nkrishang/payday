@@ -177,7 +177,7 @@ export function OnboardingWalkthrough({
                 </span>
               </Labeled>
               <div className="grid gap-5 sm:grid-cols-2">
-                <Labeled label="Destination" hint="Your Payday wallet, unless you choose another.">
+                <Labeled label="Destination">
                   <div className="flex h-11 flex-col justify-center gap-0.5 rounded-[10px] border border-line-strong bg-surface px-3.5">
                     <span className="truncate text-[13px] font-medium leading-tight">
                       {issuer.name}
