@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { MerchantAuth } from "@/components/merchant-auth";
+import { PricingDialog } from "@/components/pricing-dialog";
 import { HOME_PATH, MerchantGate, useMerchant } from "./session";
 
 /**
@@ -13,7 +14,7 @@ import { HOME_PATH, MerchantGate, useMerchant } from "./session";
  *
  * `dash` carries the landing page's palette and type (globals.css), and the
  * header is the landing page's own: the same wordmark at the same size, the
- * same Docs and Pricing links, on the same 76px rule. There are no section
+ * same Docs link and Pricing dialog, on the same 76px rule. There are no section
  * tabs — everything a merchant does day to day is on `/dashboard` itself, and
  * the pages that remain are details of one record, which the back link and the
  * wordmark both return from.
@@ -63,8 +64,8 @@ function Header() {
         </Link>
 
         <div className="flex items-center text-[15px] text-brand-grey sm:text-[16px]">
-          {/* The landing page's two links keep its spacing; signing out is not
-              one of them, so a rule and a wider gap set it apart. */}
+          {/* The landing page's two nav items keep its spacing; signing out is
+              not one of them, so a rule and a wider gap set it apart. */}
           <div className="flex items-center gap-6 sm:gap-9">
             <a
               href="https://github.com/nkrishang/payday/tree/main/docs"
@@ -72,9 +73,7 @@ function Header() {
             >
               Docs
             </a>
-            <Link href="/#pricing" className="transition-colors hover:text-brand-white">
-              Pricing
-            </Link>
+            <PricingDialog />
           </div>
 
           <span aria-hidden="true" className="mx-5 h-5 w-px bg-brand-grey/25 sm:mx-7" />
