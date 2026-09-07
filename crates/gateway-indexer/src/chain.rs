@@ -11,6 +11,8 @@
 //! EIP-1898 block-hash parameters being supported by the provider.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
@@ -199,7 +201,7 @@ impl ChainError {
         }
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Transient(_) | Self::LogRangeTooLarge(_))
             || matches!(
@@ -545,13 +547,58 @@ pub struct AlloyChainClient {
     wallet: EthereumWallet,
     signer: Address,
     chain_id: u64,
+    pacer: RpcPacer,
+}
+
+/// Spaces outgoing RPC calls at least `min_interval` apart so bursty callers
+/// (the catch-up loop's parallel header fetches over a backlog of blocks)
+/// stay under the provider's requests-per-second budget. Tripping that budget
+/// fails whole indexing ticks with 429s, and during a long catch-up the
+/// re-fetches then cost more requests than the work they complete.
+/// `max_per_second` 0 disables pacing (local Anvil needs none).
+#[derive(Clone)]
+struct RpcPacer {
+    min_interval: Duration,
+    next_slot: Arc<tokio::sync::Mutex<Instant>>,
+}
+
+impl RpcPacer {
+    fn new(max_per_second: u64) -> Self {
+        let min_interval = if max_per_second == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_nanos(1_000_000_000u64.checked_div(max_per_second).unwrap_or(0))
+                .max(Duration::from_millis(1))
+        };
+        Self {
+            min_interval,
+            next_slot: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+        }
+    }
+
+    async fn acquire(&self) {
+        let wait = {
+            let mut next_slot = self.next_slot.lock().await;
+            let now = Instant::now();
+            let slot = (*next_slot).max(now);
+            *next_slot = slot + self.min_interval;
+            slot - now
+        };
+        tokio::time::sleep(wait).await;
+    }
 }
 
 impl AlloyChainClient {
     /// Connect to the RPC endpoint at `rpc_url` (e.g. `http://127.0.0.1:8545`),
     /// signing sweep transactions with `signer` (the backend key). Reads work
     /// the same as an unsigned provider; the wallet only adds send capability.
-    pub async fn connect(rpc_url: &str, wallet: EthereumWallet) -> Result<Self, ChainError> {
+    /// `rpc_max_rps` paces outgoing calls (0 disables pacing).
+    pub async fn connect(
+        rpc_url: &str,
+        wallet: EthereumWallet,
+        rpc_max_rps: u64,
+    ) -> Result<Self, ChainError> {
+        let pacer = RpcPacer::new(rpc_max_rps);
         let signer = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
         let provider = ProviderBuilder::new()
             .wallet(wallet.clone())
@@ -559,6 +606,7 @@ impl AlloyChainClient {
             .await
             .map_err(|error| ChainError::rpc("connect", error))?
             .erased();
+        pacer.acquire().await;
         let chain_id = provider
             .get_chain_id()
             .await
@@ -569,12 +617,14 @@ impl AlloyChainClient {
             wallet,
             signer,
             chain_id,
+            pacer,
         })
     }
 
     /// Fetch the chain ID reported by the node. Used for a startup assertion
     /// that the configured chain matches what the RPC endpoint actually serves.
     pub async fn get_chain_id(&self) -> Result<u64, ChainError> {
+        self.pacer.acquire().await;
         self.provider
             .get_chain_id()
             .await
@@ -587,6 +637,7 @@ impl AlloyChainClient {
         input: Bytes,
         block: Option<u64>,
     ) -> Result<Bytes, TransportError> {
+        self.pacer.acquire().await;
         let tx = TransactionRequest::default().with_to(to).with_input(input);
         let call = self.provider.call(tx);
         match block {
@@ -620,6 +671,7 @@ impl AlloyChainClient {
     }
 
     async fn header(&self, tag: BlockNumberOrTag) -> Result<BlockHeader, ChainError> {
+        self.pacer.acquire().await;
         self.provider
             .get_block_by_number(tag)
             .await
@@ -647,6 +699,7 @@ impl ChainClient for AlloyChainClient {
     }
 
     async fn latest_block_number(&self) -> Result<u64, ChainError> {
+        self.pacer.acquire().await;
         self.provider
             .get_block_number()
             .await
@@ -675,6 +728,7 @@ impl ChainClient for AlloyChainClient {
             .event_signature(signature)
             .from_block(from_block)
             .to_block(to_block);
+        self.pacer.acquire().await;
         let logs = self
             .provider
             .get_logs(&filter)
@@ -821,6 +875,7 @@ impl ChainClient for AlloyChainClient {
         tx_hash: B256,
         batch_sweeper: Address,
     ) -> Result<Option<SweepReceipt>, ChainError> {
+        self.pacer.acquire().await;
         let Some(receipt) = self
             .provider
             .get_transaction_receipt(tx_hash)
@@ -855,6 +910,7 @@ impl ChainClient for AlloyChainClient {
     }
 
     async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError> {
+        self.pacer.acquire().await;
         let count = self.provider.get_transaction_count(self.signer);
         if pending {
             count.pending().await
@@ -865,6 +921,7 @@ impl ChainClient for AlloyChainClient {
     }
 
     async fn signer_balance(&self) -> Result<U256, ChainError> {
+        self.pacer.acquire().await;
         self.provider
             .get_balance(self.signer)
             .await
@@ -872,6 +929,7 @@ impl ChainClient for AlloyChainClient {
     }
 
     async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError> {
+        self.pacer.acquire().await;
         self.provider
             .estimate_eip1559_fees()
             .await
@@ -912,6 +970,7 @@ impl ChainClient for AlloyChainClient {
         &self,
         transaction: &PreparedSweepTransaction,
     ) -> Result<(), ChainError> {
+        self.pacer.acquire().await;
         match self.provider.send_raw_transaction(&transaction.raw).await {
             Ok(pending) if *pending.tx_hash() == transaction.hash => Ok(()),
             Ok(pending) => Err(ChainError::FinalityViolation(format!(
@@ -946,6 +1005,7 @@ impl ChainClient for AlloyChainClient {
         recovery: Address,
         block: u64,
     ) -> Result<FailureProbe, ChainError> {
+        self.pacer.acquire().await;
         let code = self
             .provider
             .get_code_at(payment)
@@ -981,6 +1041,7 @@ impl ChainClient for AlloyChainClient {
     }
 
     async fn code_hash(&self, address: Address) -> Result<B256, ChainError> {
+        self.pacer.acquire().await;
         self.provider
             .get_code_at(address)
             .await

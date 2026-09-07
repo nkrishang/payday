@@ -48,6 +48,14 @@ pub const SWEEP_BACKOFF_CAP_SECS: f64 = 300.0;
 
 /// Warn once the cursor trails finality by this many blocks (~7 minutes on Monad).
 const CURSOR_LAG_WARN_BLOCKS: u64 = 1_000;
+/// Chain reads inside a range are retried with backoff instead of aborting
+/// the tick: an aborted tick discards its uncommitted ranges, and during a
+/// long catch-up those same ranges are then re-fetched next tick against a
+/// provider whose request budget the burst already strained. The retry bound
+/// keeps a permanently failing read from hanging the tick forever.
+const RANGE_RETRY_ATTEMPTS: u32 = 10;
+const RANGE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+const RANGE_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15);
 /// Warn once collectable funds have waited this long.
 const SWEEP_BACKLOG_WARN_SECS: f64 = 900.0;
 /// Emit sweep health telemetry every this many sweep ticks.
@@ -223,19 +231,65 @@ impl Indexer {
     }
 
     /// Highest block whose logs and state this worker treats as irreversible.
-    async fn finality_boundary(&self) -> Result<u64, IndexerError> {
+    async fn finality_boundary(
+        &self,
+        attempt: &mut u32,
+        backoff: &mut Duration,
+    ) -> Result<u64, IndexerError> {
         let anchor = match self.cfg.finality_source {
-            FinalitySource::FinalizedTag => self.chain.finalized_block_number().await?,
-            FinalitySource::Latest => self.chain.latest_block_number().await?,
+            FinalitySource::FinalizedTag => loop {
+                match self.chain.finalized_block_number().await {
+                    Ok(number) => break number,
+                    Err(error) if error.is_retryable() => {
+                        self.back_off_or_fail("eth_getBlockByNumber", attempt, backoff, error)
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            },
+            FinalitySource::Latest => loop {
+                match self.chain.latest_block_number().await {
+                    Ok(number) => break number,
+                    Err(error) if error.is_retryable() => {
+                        self.back_off_or_fail("eth_blockNumber", attempt, backoff, error)
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            },
         };
         Ok(anchor.saturating_sub(self.cfg.finality_confirmations))
+    }
+
+    /// A `block_header` read that backs off and retries throttle-shaped
+    /// failures instead of aborting the work it belongs to.
+    async fn retried_header(
+        &self,
+        number: u64,
+        attempt: &mut u32,
+        backoff: &mut Duration,
+    ) -> Result<BlockHeader, IndexerError> {
+        loop {
+            match self.chain.block_header(number).await {
+                Ok(header) => return Ok(header),
+                Err(error) if error.is_retryable() => {
+                    self.back_off_or_fail("eth_getBlockByNumber", attempt, backoff, error)
+                        .await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Ingest finalized USDC ranges until the cursor reaches the finality
     /// boundary or the per-tick range budget is spent.
     async fn tick(&self) -> Result<(), IndexerError> {
-        let boundary = self.finality_boundary().await?;
-        let boundary_header = self.chain.block_header(boundary).await?;
+        let mut attempt = 0u32;
+        let mut backoff = RANGE_RETRY_BACKOFF;
+        let boundary = self.finality_boundary(&mut attempt, &mut backoff).await?;
+        let boundary_header = self
+            .retried_header(boundary, &mut attempt, &mut backoff)
+            .await?;
         self.cursor
             .record_finalized_head(
                 self.cfg.chain_id.0,
@@ -248,7 +302,9 @@ impl Indexer {
         let mut cursor = self.cursor.get(self.cfg.chain_id.0, self.cfg.usdc).await?;
 
         if let Some(cursor) = cursor {
-            let canonical = self.chain.block_header(cursor.block).await?;
+            let canonical = self
+                .retried_header(cursor.block, &mut attempt, &mut backoff)
+                .await?;
             if canonical.hash != cursor.block_hash {
                 return Err(ChainError::FinalityViolation(format!(
                     "finalized cursor hash mismatch at block {}; refusing to continue",
@@ -286,6 +342,8 @@ impl Indexer {
         from_block: u64,
         boundary: u64,
     ) -> Result<IndexerCursor, IndexerError> {
+        let mut attempt = 0u32;
+        let mut backoff = RANGE_RETRY_BACKOFF;
         loop {
             let range_size = self.current_log_range_size.load(Ordering::Relaxed).max(1);
             let to_block = from_block.saturating_add(range_size - 1).min(boundary);
@@ -293,7 +351,9 @@ impl Indexer {
             // Bracket the log request with the range-end header. If a reorg happens
             // while the provider is producing the response, do not pair old logs
             // with a new canonical cursor; retry the whole uncommitted range.
-            let end = self.chain.block_header(to_block).await?;
+            let end = self
+                .retried_header(to_block, &mut attempt, &mut backoff)
+                .await?;
             let mut transfers = match self
                 .chain
                 .usdc_transfers(self.cfg.usdc, from_block, to_block)
@@ -305,6 +365,14 @@ impl Indexer {
                     self.current_log_range_size
                         .store(smaller, Ordering::Relaxed);
                     warn!(from_block, to_block, smaller, error = %message, "provider rejected USDC log range; splitting it");
+                    continue;
+                }
+                // A throttled or transiently failing read backs off and retries
+                // the same range: aborting the tick here would discard every
+                // uncommitted range of this pass, to no provider's benefit.
+                Err(error) if error.is_retryable() => {
+                    self.back_off_or_fail("eth_getLogs", &mut attempt, &mut backoff, error)
+                        .await?;
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -320,13 +388,28 @@ impl Indexer {
                 .iter()
                 .map(|transfer| transfer.block_number)
                 .collect();
-            let transfer_headers: HashMap<_, _> =
-                stream::iter(transfer_blocks.into_iter().map(|block| async move {
-                    Ok::<_, ChainError>((block, self.chain.block_header(block).await?))
-                }))
-                .buffer_unordered(10)
-                .try_collect()
-                .await?;
+            let transfer_headers: HashMap<_, _> = loop {
+                let fetched: Result<HashMap<_, _>, ChainError> =
+                    stream::iter(transfer_blocks.iter().copied().map(|block| async move {
+                        Ok::<_, ChainError>((block, self.chain.block_header(block).await?))
+                    }))
+                    .buffer_unordered(10)
+                    .try_collect()
+                    .await;
+                match fetched {
+                    Ok(headers) => break headers,
+                    Err(error) if error.is_retryable() => {
+                        self.back_off_or_fail(
+                            "eth_getBlockByNumber",
+                            &mut attempt,
+                            &mut backoff,
+                            error,
+                        )
+                        .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
             for transfer in &transfers {
                 if transfer_headers[&transfer.block_number].hash != transfer.block_hash {
                     return Err(ChainError::Transient(format!(
@@ -336,7 +419,10 @@ impl Indexer {
                     .into());
                 }
             }
-            if self.chain.block_header(to_block).await?.hash != end.hash {
+            let confirmed_end = self
+                .retried_header(to_block, &mut attempt, &mut backoff)
+                .await?;
+            if confirmed_end.hash != end.hash {
                 return Err(ChainError::Transient(format!(
                     "block {to_block} changed while fetching USDC logs and headers"
                 ))
@@ -388,6 +474,31 @@ impl Indexer {
                 block_timestamp: Some(end.timestamp),
             });
         }
+    }
+
+    /// Sleep out one backoff step for a retryable chain-read failure inside a
+    /// range, or fail the tick once the attempts are spent.
+    async fn back_off_or_fail(
+        &self,
+        operation: &'static str,
+        attempt: &mut u32,
+        backoff: &mut Duration,
+        error: ChainError,
+    ) -> Result<(), IndexerError> {
+        *attempt += 1;
+        if *attempt >= RANGE_RETRY_ATTEMPTS {
+            return Err(error.into());
+        }
+        warn!(
+            operation,
+            attempt = *attempt,
+            backoff_ms = backoff.as_millis() as u64,
+            error = %error,
+            "chain read failed inside range; backing off before retrying it"
+        );
+        tokio::time::sleep(*backoff).await;
+        *backoff = (*backoff * 2).min(RANGE_RETRY_BACKOFF_CAP);
+        Ok(())
     }
 
     /// Reconcile the in-flight batch if there is one, otherwise claim and
@@ -471,10 +582,14 @@ impl Indexer {
         if batch.mined != Some(mined) {
             self.repo.record_batch_mined(batch.id, mined).await?;
         }
-        if receipt.block > self.finality_boundary().await? {
+        let mut attempt = 0u32;
+        let mut backoff = RANGE_RETRY_BACKOFF;
+        if receipt.block > self.finality_boundary(&mut attempt, &mut backoff).await? {
             return Ok(());
         }
-        let header = self.chain.block_header(receipt.block).await?;
+        let header = self
+            .retried_header(receipt.block, &mut attempt, &mut backoff)
+            .await?;
         if header.hash != receipt.block_hash {
             self.repo.clear_batch_mined(batch.id).await?;
             warn!(batch_id = %batch.id, %tx_hash, block = receipt.block, "helper transaction receipt is no longer canonical; waiting for a new receipt");
@@ -982,6 +1097,9 @@ pub(crate) mod tests {
         probes: HashMap<Address, FailureProbe>,
         header_requests: usize,
         reorg_on_header_request: Option<usize>,
+        /// Number of `block_header` reads that still fail with a retryable
+        /// error before succeeding; see the range-retry test.
+        failing_header_reads: u32,
         /// Runtime code hashes by address; see [`mock_code_hash`] for the default.
         pub(crate) code_hashes: HashMap<Address, B256>,
         /// Factory each BatchSweeper reports; defaults to the test factory.
@@ -1048,6 +1166,12 @@ pub(crate) mod tests {
         async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError> {
             let mut state = self.state.lock().unwrap();
             state.header_requests += 1;
+            if state.failing_header_reads > 0 {
+                state.failing_header_reads -= 1;
+                return Err(ChainError::Transient(format!(
+                    "block {number} read throttled"
+                )));
+            }
             if number > state.latest {
                 return Err(ChainError::Transient(format!(
                     "block {number} is unavailable"
@@ -1769,6 +1893,31 @@ pub(crate) mod tests {
             worker.current_log_range_size.load(Ordering::Relaxed),
             3,
             "a successful small range should cautiously grow"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn throttled_chain_reads_back_off_and_still_commit_the_range(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(10).with(|state| {
+            // Fail the range-end header read twice before letting it through;
+            // exactly the provider-throttle shape that used to abort the tick.
+            state.failing_header_reads = 2;
+        }));
+        let worker = indexer_with(&pool, chain, config());
+
+        worker
+            .tick()
+            .await
+            .expect("a throttled read should back off and retry, not abort the tick");
+
+        let cursor = CursorRepository::new(pool)
+            .get(CHAIN_ID, usdc())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cursor.block, 10,
+            "the range was committed after the retries"
         );
     }
 

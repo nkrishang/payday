@@ -401,6 +401,9 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
 - `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
 - `PAYDAY_INDEXER_POLL_INTERVAL_MS` — idle interval for both loops, default 2000
+- `PAYDAY_INDEXER_RPC_MAX_RPS` — paces outgoing RPC calls under the provider's
+  requests-per-second budget, default 40; 0 disables pacing (see
+  [quicknode-rpc-limits.md](runbooks/quicknode-rpc-limits.md))
 - `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` — seconds without a receipt before a
   helper transaction is replaced on the same nonce, default 60
 - `PAYDAY_SWEEP_MAX_SUBMISSIONS` — replacements before the sweep worker

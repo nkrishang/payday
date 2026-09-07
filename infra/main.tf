@@ -299,6 +299,26 @@ resource "aws_kms_alias" "attestation" {
   target_key_id = aws_kms_key.attestation.key_id
 }
 
+# Pays the dashboard onboarding walkthrough's one self-issued deposit request
+# per account. Deliberately neither the sweep signer (whose key lives in the
+# indexer's task role, not this one) nor the attestation key (which can never
+# move funds): the demo payer is the one task-role key that broadcasts a
+# transfer, so it is funded by hand with a little gas and USDC.
+resource "aws_kms_key" "onboarding_payer" {
+  description              = "${var.name} onboarding demo payer"
+  key_usage                = "SIGN_VERIFY"
+  customer_master_key_spec = "ECC_SECG_P256K1"
+  deletion_window_in_days  = 30
+  enable_key_rotation      = false
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+resource "aws_kms_alias" "onboarding_payer" {
+  name          = "alias/${var.name}-onboarding-payer"
+  target_key_id = aws_kms_key.onboarding_payer.key_id
+}
+
 resource "aws_ecr_repository" "api" {
   name                 = "${var.name}-api"
   image_tag_mutability = "IMMUTABLE"
@@ -370,6 +390,10 @@ resource "aws_iam_role_policy" "api_ses" {
 resource "aws_iam_role_policy" "api_attestation_kms" {
   role   = aws_iam_role.api_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.attestation.arn }] })
+}
+resource "aws_iam_role_policy" "api_onboarding_payer_kms" {
+  role   = aws_iam_role.api_task.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.onboarding_payer.arn }] })
 }
 resource "aws_iam_role" "indexer_task" {
   name               = "${var.name}-indexer-task"
@@ -640,7 +664,8 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
-      { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
+      { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn },
+      { name = "PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn }
     ], local.payer_environment, local.payer_email_environment, local.identity_environment),
     # The API verifies the deployed contract generation at startup, so it reads
     # the chain through the same RPC secret as the indexer.

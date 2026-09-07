@@ -46,6 +46,28 @@ traffic from catch-up and transfer-header traffic before changing
 `indexer_poll_interval_ms`: the poll interval affects detection latency and idle
 calls, not the request volume required to process a backlog.
 
+Since the 2026-09 livelock (below), the indexer defends itself in two ways:
+
+- `PAYDAY_INDEXER_RPC_MAX_RPS` (default 40) paces every outgoing RPC call so
+  no burst can exceed the plan's requests-per-second budget; 0 disables pacing
+  (the local runner sets it for Anvil, which has no budget to trip).
+- Retryable failures (429, timeouts) inside a tick back off exponentially and
+  retry the same read — up to 10 attempts per range — instead of aborting the
+  tick and discarding its uncommitted ranges.
+
+### The catch-up livelock this replaces
+
+Before that fix, a large backlog (fresh database, new `PAYDAY_USDC_START_BLOCK`)
+made each 5 s tick attempt its whole remaining catch-up at once. The burst
+tripped QuickNode's 50 requests/second budget, the resulting 429 aborted the
+tick, and the next tick re-fetched the same ranges — 4.3M requests in one day
+with the cursor never advancing. Symptoms: `indexer poll failed; retrying next
+tick` every poll interval since startup, no `indexer cursor lagging` warnings
+(a tick that never completes never reaches that check), and provider usage
+climbing while invoice statuses never change. The remedy then was to stop the
+indexer service and deploy the paced build; the structural remedy is the
+pacing and in-range retry above.
+
 ## Fix: switch provider window
 
 To use a provider with a larger window, rotate the RPC secret

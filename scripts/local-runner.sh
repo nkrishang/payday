@@ -162,6 +162,8 @@ load_local_env() {
   export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
   export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
   export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-1000}"
+  # Anvil has no request budget to trip, so the indexer paces nothing locally.
+  export PAYDAY_INDEXER_RPC_MAX_RPS="${PAYDAY_INDEXER_RPC_MAX_RPS:-0}"
   export PAYDAY_SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
   # The web dev server hosts both dashboard and checkout; gatewayd remains on
   # PAYDAY_API_URL and is called cross-origin by the browser.

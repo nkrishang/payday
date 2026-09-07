@@ -8,6 +8,9 @@ const DEFAULT_INDEXER_POLL_INTERVAL_MS: u64 = 2000;
 const DEFAULT_FINALITY_CONFIRMATIONS: u64 = 2;
 const DEFAULT_LOG_RANGE_SIZE: u64 = 100;
 const DEFAULT_MAX_RANGES_PER_TICK: u64 = 20;
+/// Provider request budgets are per second (QuickNode's is 50); pacing below
+/// that keeps catch-up bursts from tripping them. 0 disables pacing.
+const DEFAULT_RPC_MAX_RPS: u64 = 40;
 const DEFAULT_SWEEP_PENDING_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_SWEEP_MAX_SUBMISSIONS: u32 = 5;
 const DEFAULT_SWEEP_MAX_ATTEMPTS: u32 = 8;
@@ -34,6 +37,7 @@ pub struct Config {
     finality_confirmations: u64,
     log_range_size: u64,
     max_ranges_per_tick: u64,
+    rpc_max_rps: u64,
     usdc_start_block: u64,
     factory_address: Address,
     factory_code_hash: B256,
@@ -90,6 +94,7 @@ impl Config {
             max_ranges_per_tick > 0,
             "PAYDAY_INDEXER_MAX_RANGES_PER_TICK must be positive"
         );
+        let rpc_max_rps = parse_u64_env("PAYDAY_INDEXER_RPC_MAX_RPS", DEFAULT_RPC_MAX_RPS);
         // No default: a fresh database with the variable missing must not
         // start a backfill from genesis.
         let usdc_start_block = std::env::var("PAYDAY_USDC_START_BLOCK")
@@ -123,6 +128,7 @@ impl Config {
             finality_confirmations,
             log_range_size,
             max_ranges_per_tick,
+            rpc_max_rps,
             usdc_start_block,
             factory_address,
             factory_code_hash,
@@ -189,6 +195,10 @@ impl Config {
 
     pub fn max_ranges_per_tick(&self) -> u64 {
         self.max_ranges_per_tick
+    }
+
+    pub fn rpc_max_rps(&self) -> u64 {
+        self.rpc_max_rps
     }
 
     pub fn usdc_start_block(&self) -> u64 {

@@ -55,9 +55,10 @@ async fn main() {
     // Connect to the chain and assert the RPC endpoint serves the configured
     // chain — a proven-invariant startup check, so a misconfigured node fails
     // fast instead of silently indexing the wrong chain.
-    let chain_client = chain::AlloyChainClient::connect(config.rpc_url(), wallet)
-        .await
-        .expect("failed to connect to RPC endpoint");
+    let chain_client =
+        chain::AlloyChainClient::connect(config.rpc_url(), wallet, config.rpc_max_rps())
+            .await
+            .expect("failed to connect to RPC endpoint");
     let node_chain_id = chain_client
         .get_chain_id()
         .await
