@@ -62,8 +62,8 @@ export function VerificationGate({
         ) : (
           <>
             <p className="mt-2 text-[13px] leading-relaxed text-muted">
-              The amount, deposit details, and attachment are shown once the payer verifies the
-              email address this deposit request was issued to.
+              Payment details are disclosed on this page once you verify ownership of the expected
+              credentials.
             </p>
 
             {expected_email_hint ? (

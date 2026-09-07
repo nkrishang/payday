@@ -51,9 +51,9 @@ describe("VerificationGate", () => {
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
-  it("explains that the content opens once the expected mailbox is verified", () => {
+  it("explains that the content opens once the expected credentials are verified", () => {
     render(gate(lockedDepositRequest()));
-    expect(screen.getByText(/once the payer verifies the email address/i)).toBeInTheDocument();
+    expect(screen.getByText(/once you verify ownership of the expected credentials/i)).toBeInTheDocument();
     expect(screen.queryByText(/identity/i)).not.toBeInTheDocument();
   });
 

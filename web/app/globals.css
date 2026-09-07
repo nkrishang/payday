@@ -124,6 +124,26 @@
     outline-offset: 2px;
   }
 
+  /*
+   * Clickable things point. Tailwind v4's preflight stopped giving buttons the
+   * pointer hand, so give it back to everything that acts on a click — but
+   * keep the default arrow on anything disabled.
+   */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="radio"]:not([aria-disabled="true"]),
+  [role="checkbox"]:not([aria-disabled="true"]),
+  [role="menuitem"],
+  [role="menuitemradio"],
+  [role="option"],
+  [role="tab"],
+  select:not(:disabled),
+  summary,
+  label:has(> input[type="radio"]),
+  label:has(> input[type="checkbox"]) {
+    cursor: pointer;
+  }
+
   .landing-page {
     position: relative;
     isolation: isolate;

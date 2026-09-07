@@ -167,6 +167,7 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
     if (!draft.billName.trim()) errors.billName = "Required.";
     if (draft.billEmail.trim() && !EMAIL.test(draft.billEmail.trim()))
       errors.billEmail = "Not a valid email address.";
+    if (!draft.heading.trim()) errors.heading = "Required.";
   }
   if (step === 2 && draft.mode !== "permissionless") {
     const expected = draft.expectedEmail.trim();
@@ -590,12 +591,13 @@ export function RequestComposer({
                 </div>
 
                 <div className="grid gap-5 sm:grid-cols-2">
-                  <Labeled label="Reason">
+                  <Labeled label="Reason" required error={shown("heading")}>
                     <input
                       maxLength={200}
                       placeholder="March retainer"
                       value={draft.heading}
                       onChange={(event) => set("heading", event.target.value)}
+                      aria-invalid={shown("heading") ? true : undefined}
                       className={cn(controlStyles, "h-11")}
                     />
                   </Labeled>

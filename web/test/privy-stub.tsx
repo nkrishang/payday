@@ -185,9 +185,26 @@ export function useCreateWallet() {
 }
 
 export function useUser() {
-  // signup-dialog.tsx only reads refreshUser: the stub's identity token
-  // already carries the wallet the instant loginWithCode writes it, so
-  // there is nothing a refresh would ever change.
-  const refreshUser = useCallback(async () => undefined, []);
+  // signup-dialog.tsx reads refreshUser's answer to tell a returning merchant
+  // (wallet already made) from a new one, so it must resolve with the user
+  // the real SDK would return: the freshly written session.
+  const refreshUser = useCallback(async () => {
+    const session = read();
+    if (!session) throw new Error("Not signed in");
+    return {
+      id: session.sub,
+      email: { address: session.email },
+      linkedAccounts: [
+        { type: "email", address: session.email },
+        {
+          type: "wallet",
+          address: session.wallet,
+          chainType: "ethereum",
+          walletClientType: "privy",
+          connectorType: "embedded",
+        },
+      ],
+    };
+  }, []);
   return { refreshUser };
 }

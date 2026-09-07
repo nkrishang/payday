@@ -38,8 +38,7 @@ export function ApiKeySection({
             API key<span className="text-brand-yellow">.</span>
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            The credential your own server calls the API with, separate from the email you sign in
-            here with.
+            Create an API key to use Payday programmatically via the API.
           </p>
         </div>
       </div>

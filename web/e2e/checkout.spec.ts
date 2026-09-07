@@ -213,7 +213,7 @@ test("an unbound request takes the payer's signature before it shows any address
   await expect(page.getByText("Wallet required")).toBeVisible();
   await expect(page.getByText("Amount due")).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 })).toContainText("25.00");
-  await expect(page.getByText(/Only transfers from that wallet count/)).toBeVisible();
+  await expect(page.getByText(/one-time payment destination for the wallet/i)).toBeVisible();
   await expectNoInstructions(page);
   const html = await (await request.get("/pay/dr_unbound")).text();
   expect(html).not.toContain(ADDRESS);
@@ -383,7 +383,7 @@ test("an email-gated deposit request reveals only the issuer, heading, and maske
   await page.goto("/pay/dr_gated-email");
 
   await expectLocked(page, html);
-  await expect(page.getByText(/once the payer verifies the email address/)).toBeVisible();
+  await expect(page.getByText(/once you verify ownership of the expected credentials/)).toBeVisible();
   await expect(page.getByText(/identity/i)).toHaveCount(0);
   expect(errors).toEqual([]);
 });

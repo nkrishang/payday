@@ -370,7 +370,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       label: "Wallet required",
       title: "Sign from the wallet you will pay from",
       detail:
-        "The one-time address is created for your wallet once you sign. Only transfers from that wallet count toward this request, and anything returned goes back to it.",
+        "Payday creates a unique, one-time payment destination for the wallet you intend to pay with.",
       showInstructions: false,
       showWalletStep: true,
       isTerminal: false,

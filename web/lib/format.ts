@@ -86,6 +86,11 @@ export function explorerAddressUrl(explorerUrl: string | null, address: string):
   return explorerUrl ? `${explorerUrl}/address/${address}` : null;
 }
 
+/** A token's own page, where its contract, holders, and transfers live. */
+export function explorerTokenUrl(explorerUrl: string | null, address: string): string | null {
+  return explorerUrl ? `${explorerUrl}/token/${address}` : null;
+}
+
 export function explorerTxUrl(explorerUrl: string | null, hash: string): string | null {
   return explorerUrl ? `${explorerUrl}/tx/${hash}` : null;
 }

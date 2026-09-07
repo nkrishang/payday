@@ -137,8 +137,7 @@ export function WalletAttestation({
       ) : null}
 
       <p className="mt-4 text-[12.5px] leading-relaxed text-faint">
-        Signing costs no gas and moves no funds. It tells the merchant which wallet this deposit
-        will come from; pay from that wallet only.
+        This signature costs no gas and moves no funds.
       </p>
 
       <Problem>{error}</Problem>

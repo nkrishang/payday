@@ -129,7 +129,7 @@ export function DepositTable({
             Deposits<span className="text-brand-yellow">.</span>
           </h1>
           <p className="mt-1.5 text-[13px] text-muted">
-            Every deposit request issued, where its deposit stands, and where its verification stands.
+            Create deposit requests, monitor them and filter them by status.
           </p>
         </div>
       )}

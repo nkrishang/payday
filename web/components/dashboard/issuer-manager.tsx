@@ -47,8 +47,8 @@ export function IssuerManager({
             Issuer identities<span className="text-brand-yellow">.</span>
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            The identity a deposit request is issued under. Deposits settle to your Payday wallet
-            unless an identity&apos;s saved wallet is chosen instead.
+            Manage the identity used to issue deposit requests. By default, deposits settle to your
+            Payday wallet, unless you override this for an identity.
           </p>
         </div>
         <AddButton label="New issuer identity" onClick={onAdd} />

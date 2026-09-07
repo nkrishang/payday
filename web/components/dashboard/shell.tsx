@@ -7,7 +7,8 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { MerchantAuth } from "@/components/merchant-auth";
 import { PricingDialog } from "@/components/pricing-dialog";
-import { HOME_PATH, MerchantGate, useMerchant } from "./session";
+import { DashboardChecking } from "./session-screens";
+import { HOME_PATH, MerchantGate, useOptionalMerchant } from "./session";
 
 /**
  * The frame around every dashboard page.
@@ -18,6 +19,11 @@ import { HOME_PATH, MerchantGate, useMerchant } from "./session";
  * tabs — everything a merchant does day to day is on `/dashboard` itself, and
  * the pages that remain are details of one record, which the back link and the
  * wordmark both return from.
+ *
+ * The header stands outside the session: it renders while Privy is still
+ * restoring the session too, so a reload lands on the skeleton with its
+ * chrome already in place rather than an empty page. Signing out replaces
+ * everything with its own screen (see the gate).
  */
 export function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -25,7 +31,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   return (
     <div className="dash min-h-dvh bg-canvas">
       <MerchantAuth>
-        <MerchantGate>
+        <MerchantGate checking={<Checking pathname={pathname} />}>
           <Header />
           <main className="mx-auto max-w-[1120px] px-5 py-8 sm:px-8">
             {pathname === HOME_PATH ? null : (
@@ -45,8 +51,21 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   );
 }
 
+/** The frame without a session yet: the header, over the page's skeleton. */
+function Checking({ pathname }: { pathname: string }) {
+  return (
+    <>
+      <Header />
+      <DashboardChecking key={pathname} />
+    </>
+  );
+}
+
 function Header() {
-  const { signOut } = useMerchant();
+  // Null while the session is being restored: the header still stands, but
+  // there is nobody to sign out yet.
+  const merchant = useOptionalMerchant();
+  const signOut = merchant?.signOut;
 
   return (
     <header className="border-b border-brand-grey/20">
@@ -81,8 +100,9 @@ function Header() {
           <button
             type="button"
             onClick={signOut}
+            disabled={!signOut}
             aria-label="Sign out"
-            className="inline-flex items-center gap-2 transition-colors hover:text-brand-white"
+            className="inline-flex items-center gap-2 transition-colors hover:text-brand-white disabled:pointer-events-none"
           >
             <LogOut aria-hidden="true" className="size-4" />
             <span className="hidden sm:inline">Sign out</span>

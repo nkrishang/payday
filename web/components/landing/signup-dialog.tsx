@@ -25,6 +25,13 @@ const WALLET_POLL_INTERVAL_MS = 900;
 const WALLET_POLL_TIMEOUT_MS = 30_000;
 
 /**
+ * An account this young is a first sign-up. gatewayd provisions the account
+ * the first time it sees the identity, so `created_at` answers "has this
+ * merchant been here before" without Privy's help.
+ */
+const NEW_ACCOUNT_WINDOW_MS = 5 * 60_000;
+
+/**
  * Confirms gatewayd reports a `wallet_address` for this account.
  *
  * By the time this runs, `signIn` has already explicitly created the wallet
@@ -99,7 +106,7 @@ export function StartBuilding() {
   const [wasOpen, setWasOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
-  const [step, setStep] = useState<"email" | "code" | "wallet">("email");
+  const [step, setStep] = useState<"email" | "code" | "wallet" | "signing-in">("email");
   const [busy, setBusy] = useState(false);
   const { sendCode, loginWithCode } = useLoginWithEmail();
   const { createWallet } = useCreateWallet();
@@ -148,7 +155,7 @@ export function StartBuilding() {
     }
     // Closing here would strand the account mid-setup with no way back in
     // short of signing in again; wait it out instead.
-    if (!next && step === "wallet") return;
+    if (!next && (step === "wallet" || step === "signing-in")) return;
     setOpen(next);
   };
 
@@ -194,24 +201,57 @@ export function StartBuilding() {
     try {
       await loginWithCode({ code: otp.trim() });
       // The code is spent and won't come back, so there is nothing left for
-      // this form to do; stay busy and hold here until there's a wallet to
-      // settle to. Privy's `createOnLogin` never applies to loginWithCode
-      // (see merchant-auth.tsx), so this explicit call is the only thing
-      // that ever asks it to create one — and calling it here, immediately
-      // after the code is verified, starts that clock as early as possible
-      // instead of leaving it to fire later from the dashboard.
-      setStep("wallet");
-      try {
-        await createWallet();
-      } catch {
-        // A returning merchant already has one — createWallet rejects for
-        // an account that's already got an embedded wallet — so there is
-        // nothing left to create either way.
+      // this form to do; stay busy and hold here until the session is fully
+      // usable. refreshUser answers with the user as they are now — the
+      // hook's snapshot is still the one this submission rendered with,
+      // before the code was spent.
+      const current = await refreshUser().catch(() => null);
+      const hasWallet =
+        current?.linkedAccounts.some(
+          (account) =>
+            account.type === "wallet" &&
+            account.walletClientType === "privy" &&
+            account.chainType === "ethereum",
+        ) ?? false;
+      // A wallet already being there proves nothing on its own: a new
+      // account's wallet is pregenerated while the code is in the mail (see
+      // `send`). The account is the honest signal — created moments ago is a
+      // first sign-up, anything older is a merchant coming back.
+      let freshAccount = false;
+      if (hasWallet) {
+        const token = await getIdentityToken().catch(() => null);
+        const account = token
+          ? await createMerchantClient(token)
+              .account.get()
+              .catch(() => null)
+          : null;
+        freshAccount =
+          account !== null && Date.now() - Date.parse(account.created_at) < NEW_ACCOUNT_WINDOW_MS;
       }
-      // Wallet creation isn't documented as a guaranteed identity-token
-      // refresh trigger, so ask directly rather than hope the reactive
-      // token catches up before waitForWallet reads it.
-      await refreshUser().catch(() => {});
+      if (!hasWallet || freshAccount) {
+        // Privy's `createOnLogin` never applies to loginWithCode (see
+        // merchant-auth.tsx), so this explicit call is the only thing that
+        // ever asks it to create one — and calling it here, immediately
+        // after the code is verified, starts that clock as early as
+        // possible instead of leaving it to fire later from the dashboard.
+        setStep("wallet");
+        if (!hasWallet) {
+          try {
+            await createWallet();
+          } catch {
+            // A wallet arrived in the gap between the check and the call, or
+            // creation failed transiently; the dashboard asks again on its own.
+          }
+          // Wallet creation isn't documented as a guaranteed identity-token
+          // refresh trigger, so ask directly rather than hope the reactive
+          // token catches up before waitForWallet reads it.
+          await refreshUser().catch(() => {});
+        }
+      } else {
+        // A returning merchant has nothing to create, and must not be shown
+        // a wallet being made; say signing in instead.
+        setStep("signing-in");
+      }
       await waitForWallet();
       router.push(HOME_PATH);
     } catch (cause) {
@@ -249,7 +289,7 @@ export function StartBuilding() {
             />
             <Dialog.Close
               aria-label="Close"
-              disabled={step === "wallet"}
+              disabled={step === "wallet" || step === "signing-in"}
               className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-brand-grey transition-colors hover:bg-white/[0.06] hover:text-brand-white disabled:pointer-events-none disabled:opacity-30"
             >
               <X className="size-4" />
@@ -257,7 +297,13 @@ export function StartBuilding() {
           </div>
 
           <Dialog.Title className="font-heading mt-5 text-[27px] leading-[1.12] font-medium tracking-[-0.045em]">
-            {step === "email" ? "Start building" : step === "code" ? "Check your email" : "Almost there"}
+            {step === "email"
+              ? "Start building"
+              : step === "code"
+                ? "Check your email"
+                : step === "wallet"
+                  ? "Almost there"
+                  : "Welcome back"}
             <span className="text-brand-yellow">.</span>
           </Dialog.Title>
           <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-[#b0afa9]">
@@ -265,14 +311,16 @@ export function StartBuilding() {
               ? "Enter your email and we'll send a one-time code. No passwords or cards."
               : step === "code"
                 ? `We sent a six-digit code to ${email.trim()}.`
-                : "Setting up your Payday wallet. This only takes a moment."}
+                : step === "wallet"
+                  ? "Setting up your Payday wallet. This only takes a moment."
+                  : "Signing you in. This only takes a moment."}
           </Dialog.Description>
 
-          {step === "wallet" ? (
+          {step === "wallet" || step === "signing-in" ? (
             <div className="mt-8 flex flex-col items-center gap-4 py-4">
               <Loader2 className="size-6 animate-spin text-brand-green" aria-hidden="true" />
               <p role="status" className="text-[13px] text-brand-grey">
-                Creating your wallet…
+                {step === "wallet" ? "Creating your wallet…" : "Signing you in…"}
               </p>
             </div>
           ) : step === "email" ? (
@@ -351,7 +399,7 @@ export function StartBuilding() {
             </form>
           )}
 
-          {step === "wallet" ? null : (
+          {step === "wallet" || step === "signing-in" ? null : (
             <p className="mt-6 border-t border-brand-grey/20 pt-4 text-[12px] leading-relaxed text-brand-grey">
               Already have an account? The same code signs you in. Payday stores no password.
             </p>

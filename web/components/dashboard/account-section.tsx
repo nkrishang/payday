@@ -43,7 +43,7 @@ export function AccountSection({
             Account<span className="text-brand-yellow">.</span>
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            The email you sign in with, and the wallet your deposits settle to.
+            View your account details: sign-up email, Payday wallet and its balance.
           </p>
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={signOut}>

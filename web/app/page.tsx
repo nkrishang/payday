@@ -7,9 +7,9 @@ import { MerchantAuth } from "@/components/merchant-auth";
 import { PricingDialog } from "@/components/pricing-dialog";
 
 export const metadata: Metadata = {
-  title: "Payday — Make every stablecoin accountable",
+  title: "Payday — make every stablecoin accountable.",
   description:
-    "Payday turns stablecoin transfers into verified customer deposits, ready for your application to credit.",
+    "Turn stablecoin transfers into verified customer deposits, ready for your app to credit.",
   alternates: { canonical: "/" },
 };
 
@@ -101,10 +101,16 @@ export default function Home() {
   );
 }
 
+/** Where the footer's social icons go. */
+const SOCIAL_LINKS: Record<string, string> = {
+  X: "https://x.com/paydaydotsh",
+  GitHub: "https://github.com/nkrishang/payday",
+};
+
 function SocialLink({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <a
-      href={label === "GitHub" ? "https://github.com/nkrishang/payday" : "#"}
+      href={SOCIAL_LINKS[label]}
       aria-label={label}
       className="flex size-10 items-center justify-center border border-brand-grey/25 text-brand-white transition-colors hover:border-brand-green hover:text-brand-green [&>svg]:size-[16px]"
     >

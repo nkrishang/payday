@@ -196,6 +196,7 @@ test("the composer keeps a running preview and can be stepped back through", asy
 
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Payer").fill("Globex LLC");
+  await page.getByLabel("Reason").fill("Consulting");
   await expect(preview).toContainText("Globex LLC");
 
   // Back keeps what was typed rather than starting the request over.
@@ -246,6 +247,7 @@ test("a payer becomes a customer, and the next request can pick them", async ({ 
   const billed = `Initech ${Date.now()}`;
   await page.getByLabel("Payer").fill(billed);
   await page.getByLabel("Email").fill("ap@initech.example");
+  await page.getByLabel("Reason").fill("September invoice");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Issue deposit request" }).click();
@@ -378,6 +380,7 @@ test("the payer's view link opens unlocked for the issuing merchant, without ver
   await page.getByLabel("Amount").fill("12");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Payer").fill("Globex LLC");
+  await page.getByLabel("Reason").fill("Consulting");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("radio", { name: "Verified email" }).check();
   await page.getByLabel("Expected payer email").fill("payer@example.com");

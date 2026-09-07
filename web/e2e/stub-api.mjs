@@ -887,7 +887,11 @@ function accountRecord(req) {
       id: `acct_${randomUUID()}`,
       generation: 1,
       keyHint: null,
-      createdAt: null,
+      // Provisioned now, the way gatewayd provisions an account the first
+      // time it sees the identity; signup-dialog.tsx reads this to tell a
+      // first sign-up from a returning merchant. STUB_ACCOUNT_AGE_MS
+      // backdates it, so a test can play a merchant coming back later.
+      createdAt: new Date(Date.now() - Number(process.env.STUB_ACCOUNT_AGE_MS ?? 0)).toISOString(),
       rotatedAt: null,
       previousExpiresAt: null,
       revokedAt: null,

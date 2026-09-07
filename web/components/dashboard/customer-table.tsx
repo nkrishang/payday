@@ -36,7 +36,7 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
             Customers<span className="text-brand-yellow">.</span>
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            Saved counterparties. Editing one never changes a request already issued.
+            Manage customer profiles from your deposit requests.
           </p>
         </div>
         <div className="flex items-center gap-3">

@@ -12,7 +12,7 @@ import { payerClient } from "@/lib/payday";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "DepositRequest",
+  title: "Deposit Request",
   // A deposit link is public, but it is not something search engines should hold.
   robots: { index: false, follow: false },
 };

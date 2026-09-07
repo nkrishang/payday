@@ -102,7 +102,7 @@ describe("checkoutView", () => {
     expect(view.showWalletStep).toBe(true);
     expect(view.showInstructions).toBe(false);
     expect(view.isTerminal).toBe(false);
-    expect(view.detail).toMatch(/Only transfers from that wallet count/);
+    expect(view.detail).toMatch(/one-time payment destination/);
     // The deadline still comes first: an unbound request that closed is closed.
     expect(checkoutView(unboundDepositRequest(), { ...open, secondsRemaining: 0 }).phase).toBe("closing");
     // A bound request never shows the step.
