@@ -22,3 +22,7 @@ auth0/.terraform/
 auth0/*.tfstate*
 auth0/*.tfplan
 auth0/backend.hcl
+
+# Local review scratch space; findings.md is the only tracked artifact.
+.review/*
+!.review/findings.md
