@@ -164,7 +164,11 @@ impl JwksCache {
     async fn refresh_if_needed(&self, kid: &str) -> Result<(), ApiError> {
         {
             let cached = self.keys.read().await;
-            if !refresh_is_due(&cached, kid) {
+            // Backoff must not decide this: a fresh `last_attempt` here means
+            // a refresh is in flight, and the only correct move is to line up
+            // behind it — skipping the wait would judge the stale set for
+            // ourselves and fail closed while the saving refresh completes.
+            if !cache_needs_refresh(&cached, kid) {
                 return Ok(());
             }
         }
@@ -197,9 +201,18 @@ impl JwksCache {
     }
 }
 
+/// The cached set cannot answer for `kid` without a refresh: it is past its
+/// refresh interval or does not name the key the token carries.
+fn cache_needs_refresh(cached: &CachedKeys, kid: &str) -> bool {
+    cached.refreshed_at.elapsed() >= JWKS_CACHE_TTL || !cached.values.contains_key(kid)
+}
+
+/// Whether this caller should attempt a refresh itself. Behind the refresh
+/// lock backoff is meaningful — the last attempt has finished and failed —
+/// but it must never gate the lock-free pre-check, where it only means a
+/// refresh is in flight and waiting for it is the point.
 fn refresh_is_due(cached: &CachedKeys, kid: &str) -> bool {
-    (cached.refreshed_at.elapsed() >= JWKS_CACHE_TTL || !cached.values.contains_key(kid))
-        && cached.last_attempt.elapsed() >= JWKS_RETRY_BACKOFF
+    cache_needs_refresh(cached, kid) && cached.last_attempt.elapsed() >= JWKS_RETRY_BACKOFF
 }
 
 async fn fetch_keys(
@@ -1263,6 +1276,38 @@ mod tests {
         (url, handle)
     }
 
+    /// A JWKS server that parks its one connection after reading the request
+    /// and answers only when released, so a test can have other callers
+    /// arrive while a refresh is provably still in flight.
+    async fn gated_jwks_server(
+        jwk: String,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<usize>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/jwks", listener.local_addr().unwrap());
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            received_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            let body = format!(r#"{{"keys":[{jwk}]}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            1
+        });
+        (url, received_rx, release_tx, handle)
+    }
+
     /// A verifier whose cached key set is a second past its refresh interval.
     fn stale_verifier(jwks_url: String, kid: &str, key: DecodingKey) -> Auth0Verifier {
         Auth0Verifier {
@@ -1339,13 +1384,102 @@ mod tests {
             "https://api.payday.sh/payer",
             u64::MAX,
         );
-        let checks = (0..8).map(|_| {
-            let verifier = verifier.clone();
-            let token = token.clone();
-            tokio::spawn(async move { verifier.verify(&token).await })
-        });
+        // Spawn every caller before awaiting any: awaiting the first handle
+        // before spawning the rest would make the check sequential and blind
+        // to the shared-refresh behaviour under test.
+        let checks: Vec<_> = (0..8)
+            .map(|_| {
+                let verifier = verifier.clone();
+                let token = token.clone();
+                tokio::spawn(async move { verifier.verify(&token).await })
+            })
+            .collect();
         for check in checks {
             assert!(check.await.unwrap().is_ok());
+        }
+        assert_eq!(requests.await.unwrap(), 1);
+    }
+
+    /// The production incident: the cache is past its outage grace, the first
+    /// caller owns a refresh that is still in flight, and everyone else
+    /// arrives meanwhile. Waiting for that refresh's outcome must beat
+    /// judging the stale set, which fails closed at 0 ms.
+    #[tokio::test]
+    async fn burst_during_a_refresh_waits_for_its_outcome() {
+        let (jwk, encoding, decoding) = rsa_key("old-key");
+        let (url, received, release, requests) = gated_jwks_server(jwk).await;
+        let mut verifier = stale_verifier(url, "old-key", decoding);
+        Arc::get_mut(&mut verifier.inner)
+            .unwrap()
+            .jwks
+            .keys
+            .get_mut()
+            .refreshed_at = Instant::now() - JWKS_OUTAGE_GRACE - Duration::from_secs(1);
+        let token = token_with_kid(
+            &encoding,
+            "old-key",
+            "https://issuer.example/",
+            "https://api.payday.sh/payer",
+            u64::MAX,
+        );
+
+        // The first caller owns the refresh, which parks on the gated server.
+        let first = tokio::spawn({
+            let verifier = verifier.clone();
+            let token = token.clone();
+            async move { verifier.verify(&token).await }
+        });
+        received.await.unwrap();
+
+        // Everyone else arrives while that refresh is still in flight.
+        let rest: Vec<_> = (0..8)
+            .map(|_| {
+                let verifier = verifier.clone();
+                let token = token.clone();
+                tokio::spawn(async move { verifier.verify(&token).await })
+            })
+            .collect();
+        release.send(()).unwrap();
+
+        assert!(first.await.unwrap().is_ok());
+        for check in rest {
+            assert!(check.await.unwrap().is_ok());
+        }
+        assert_eq!(requests.await.unwrap(), 1);
+    }
+
+    /// Same burst, but the provider keeps failing and the cache is past its
+    /// grace: every caller fails closed together, on one fetch, instead of
+    /// each requesting one.
+    #[tokio::test]
+    async fn burst_during_a_failing_refresh_fails_closed_on_one_fetch() {
+        let (_, encoding, decoding) = rsa_key("old-key");
+        let (url, requests) = failing_jwks_server().await;
+        let mut verifier = stale_verifier(url, "old-key", decoding);
+        Arc::get_mut(&mut verifier.inner)
+            .unwrap()
+            .jwks
+            .keys
+            .get_mut()
+            .refreshed_at = Instant::now() - JWKS_OUTAGE_GRACE - Duration::from_secs(1);
+        let token = token_with_kid(
+            &encoding,
+            "old-key",
+            "https://issuer.example/",
+            "https://api.payday.sh/payer",
+            u64::MAX,
+        );
+
+        let checks: Vec<_> = (0..8)
+            .map(|_| {
+                let verifier = verifier.clone();
+                let token = token.clone();
+                tokio::spawn(async move { verifier.verify(&token).await })
+            })
+            .collect();
+        for check in checks {
+            let error = check.await.unwrap().unwrap_err();
+            assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         }
         assert_eq!(requests.await.unwrap(), 1);
     }
