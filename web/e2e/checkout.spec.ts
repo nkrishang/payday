@@ -506,10 +506,9 @@ test("the landing page links to public documentation without obsolete environmen
 
   expect(body).not.toContain("sandbox");
   expect(body).not.toContain("quickstart");
-  await expect(page.getByRole("link", { name: "Docs" })).toHaveAttribute(
-    "href",
-    "https://github.com/nkrishang/payday/tree/main/docs",
-  );
+  // Public documentation lives in the app itself at /docs, not the repository
+  // (see "Publish customer documentation at /docs").
+  await expect(page.getByRole("link", { name: "Docs" })).toHaveAttribute("href", "/docs");
 });
 
 test("the deposit carousel advances upward and settles with a bounce", async ({ page }) => {

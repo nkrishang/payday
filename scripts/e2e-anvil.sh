@@ -40,6 +40,10 @@ ATTACHMENT_BUCKET="payday-attachments-local"
 
 export PAYDAY_RPC_URL="$RPC_URL"
 export PAYDAY_API_URL="$API_URL"
+# The binary's EnvFilter defaults to silent when RUST_LOG is unset (production
+# sets it in infra/main.tf). The assertions below read the indexer's log
+# trail, so give every service the same level production runs at.
+export RUST_LOG="${RUST_LOG:-info}"
 export PAYDAY_FACTORY_ADDRESS="$FACTORY"
 export PAYDAY_BATCH_SWEEPER_ADDRESS="$BATCH_SWEEPER"
 export PAYDAY_USDC_ADDRESS="$USDC"
@@ -498,7 +502,7 @@ assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request 
 assert_eq null "$(jq -r .payer_wallet <<<"$exact_issued")" "a freshly issued request already names a payer wallet"
 assert_eq 2 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
 # The payer's wallet, not the merchant, is what turns the request into an address.
-exact_session="$(bind_payer_wallet "$exact_id")"
+bind_payer_wallet "$exact_id" >/dev/null
 exact="$(get_invoice "$exact_id")"
 exact_replay="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
