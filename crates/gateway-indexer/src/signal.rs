@@ -309,6 +309,11 @@ fn is_unsupported_subscription(error: &str) -> bool {
         || error.contains("method not found")
         || error.contains("invalid method")
         || error.contains("unknown method")
+        // Anvil-style nodes that do not know the kind reject the whole
+        // request as invalid params, naming the variant in the message
+        // ("unknown variant `monadLogs`"). A genuine filter problem never
+        // names the subscription method, so this stays narrow.
+        || (error.contains("-32602") && error.contains("unknown variant"))
 }
 
 impl TransferSignal {
@@ -838,6 +843,9 @@ mod tests {
             "method 'monadLogs' does not exist (code -32601)",
             "unknown method: monadLogs",
             "invalid method \"monadLogs\"",
+            // Anvil's rejection, verbatim from its eth_subscribe: the node
+            // does not know the kind and says so in a -32602 message.
+            "server returned an error response: error code -32602: unknown variant `monadLogs`, expected one of `newHeads`, `logs`, `newPendingTransactions`, `syncing`, `transactionReceipts`",
         ] {
             assert!(
                 is_unsupported_subscription(rejection),
@@ -849,6 +857,9 @@ mod tests {
             "connection closed before a response was received",
             "wss://x.quiknode.pro/SECRET/: read timed out",
             "unsupported filter parameter in topics[2]",
+            // A filter problem wrapped in the same invalid-params code: it
+            // never names the subscription kind, so it must not fall back.
+            "server returned an error response: error code -32602: invalid topics filter",
         ] {
             assert!(
                 !is_unsupported_subscription(transient),
