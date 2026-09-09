@@ -143,8 +143,12 @@ Acquisition has two halves that never trust each other:
   block in a lock-free "highest target" cell and nudge the reconciler. A
   node without `monadLogs` (Anvil) gets the standard `logs` subscription,
   which fires at proposal. The signal keeps the socket alive with one
-  `eth_chainId` every 30 s, reconnects with backoff, re-subscribes when the
-  watch list changes (new set first, then unsubscribe the old), and flips a
+  `eth_chainId` every 30 s (verified against the expected chain id), reconnects
+  with backoff, and re-subscribes when the watch list changes by chunk diff:
+  chunks whose address set is unchanged keep their live subscription, added
+  chunks subscribe before removed chunks unsubscribe (Alloy keys a
+  subscription by its request, so an unchanged chunk must never be
+  resubscribed and then unsubscribed), and it flips a
   health flag the reconciler reads to choose its cadence: 60 s while
   connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
 
@@ -168,9 +172,20 @@ For each pass:
    retention.
 7. Commit observations, projections, status changes, and cursor advancement in
    one database transaction per range.
-8. If the pass was a wake whose block lies beyond the boundary the node
-   reported, re-read `finalized` every 300 ms for up to 16 attempts and pass
-   again; Monad finalizes within two blocks, Anvil within two seconds.
+8. If the pass was a wake whose block is not yet indexed — because finality
+   has not reached it, or because the per-pass range budget stopped the pass
+   short of it — re-read and pass again every 300 ms for up to 16 attempts;
+   Monad finalizes within two blocks, Anvil within two seconds. The timer
+   covers whatever the attempts do not.
+
+A trust-boundary note on the range-end header pair: two reads of the same
+hash prove the range end did not move while the logs were in flight, not
+that each returned log belongs to that canonical ancestry. A provider that
+answered with a stale or forked log page between two stable header reads
+would not be rejected here; the pass trusts the finalized-RPC contract
+(QuickNode's `finalized` is irreversible) and keeps the older per-block
+header fan-out out of the request budget. Deep suspicion is served by the
+cursor-hash and finalized-reorg halts, not by more header reads.
 
 The watch list the signal subscribes to is every bound address whose request
 is not `fulfilled`/`recovered`, every address with uncollected funds, and
@@ -194,6 +209,17 @@ and a deposit request bound after that read was disclosed to its payer after
 every block in the range was mined, so no transfer to it can be in the range.
 The signal's list can therefore be stale at worst, which delays detection to
 the next timer pass and nothing more.
+
+The argument covers the supported flow, where the payer learns the address
+only from the API response that follows the binding commit. An address is
+derivable by anyone who can compute the binding inputs — the attestation
+challenge exposes them — so a client that prefunds its own deposit address
+before binding commits can land a transfer in a range that is scanned before
+the request exists. That transfer's recipient matches no request, so it is
+skipped before anything is persisted, and the cursor never rewinds to
+re-read it once the binding commits. Supporting prefunded addresses needs
+registration before derivation inputs are disclosed, or a dedicated
+historical reconciliation path; widening the subscription list cannot fix it.
 
 RPC errors retain method, JSON-RPC code, message, and retryability. QuickNode
 429, `-32007`, `-32012`, limit, unavailable, network, and internal failures are
@@ -441,13 +467,17 @@ Measured facts that decide this (Monad mainnet, September 2026):
 
 ### Owned reconciler plus WebSocket signal — in production
 
-Cost per day, flat with respect to payment volume: 2,880 reconcile passes
-(finalized header + cursor check), 2,880 ranges × 3 calls, 2,880 keepalives,
-and one notification per commit state per payment to us. About 14k calls,
-~13M credits a month. Detection latency is one block of finality. The
-previous fixed-cadence poll with a header read per transfer-bearing block
-cost ~130k calls a day (~117M credits a month) at a 5 s latency, and its
-header fan-out is what tripped the requests-per-second budget.
+Idle baseline, about 14k calls a day and ~13M credits a month: 1,440
+reconcile passes a day at the 60 s cadence (a finalized header plus a cursor
+check each — 2,880 calls), 2,880 ranges × 3 calls, and 2,880 keepalives.
+Payment activity adds wakes on top — each wake is a pass over
+still-unindexed ranges, and a pass that a wake interrupts at a partially
+filled range repeats its range-end headers — so the true spend scales weakly
+with payment volume instead of being flat. It stays far under the previous
+fixed-cadence poll with a header read per transfer-bearing block, which cost
+~130k calls a day (~117M credits a month) at a 5 s latency, and whose header
+fan-out is what tripped the requests-per-second budget. Detection latency is
+one block of finality.
 
 Benefits:
 

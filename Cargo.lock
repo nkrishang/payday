@@ -2580,6 +2580,8 @@ dependencies = [
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-pubsub",
+ "alloy-rpc-client",
  "alloy-rpc-types-eth",
  "alloy-signer-aws",
  "alloy-signer-local",

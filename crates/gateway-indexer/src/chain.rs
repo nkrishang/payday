@@ -146,10 +146,13 @@ impl std::fmt::Display for RpcCode {
     }
 }
 
-/// Replace every `http://` or `https://` URL in `message` with `<rpc-url>`.
+/// Replace every `http://`, `https://`, `ws://`, or `wss://` URL in `message`
+/// with `<rpc-url>`.
 /// Transport errors from reqwest and alloy print the full request URL, and
 /// the RPC URL carries the provider token, so any message derived from one
-/// must pass through here before it reaches a log line or a panic.
+/// must pass through here before it reaches a log line or a panic. The
+/// WebSocket URL carries the same token as the HTTP one, so the `ws` schemes
+/// are redacted too.
 pub(crate) fn redact_urls(message: &str) -> String {
     let mut redacted = String::with_capacity(message.len());
     let mut rest = message;
@@ -167,10 +170,10 @@ pub(crate) fn redact_urls(message: &str) -> String {
 }
 
 fn url_start(message: &str) -> Option<usize> {
-    match (message.find("http://"), message.find("https://")) {
-        (Some(http), Some(https)) => Some(http.min(https)),
-        (http, https) => http.or(https),
-    }
+    ["http://", "https://", "ws://", "wss://"]
+        .iter()
+        .filter_map(|scheme| message.find(scheme))
+        .min()
 }
 
 impl ChainError {
@@ -1148,6 +1151,12 @@ mod tests {
         assert_eq!(
             redact_urls("tried \"https://a.example/T1\" then http://b.example/T2 next"),
             "tried \"<rpc-url>\" then <rpc-url> next"
+        );
+        // The WebSocket endpoint carries the same provider token as the HTTP
+        // one, so both ws schemes are redacted too.
+        assert_eq!(
+            redact_urls("wss://x.quiknode.pro/SECRET/ closed: ws://127.0.0.1:8545 refused"),
+            "<rpc-url> closed: <rpc-url> refused"
         );
         assert_eq!(
             redact_urls("connection reset by peer"),

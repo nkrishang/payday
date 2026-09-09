@@ -553,6 +553,17 @@ detected_in="$(( $(date +%s) - paid_at ))"
   echo "deposit detection took ${detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
   exit 1
 }
+# The elapsed-time bound alone cannot tell the wake path from a well-timed
+# fallback pass, so require the signal's own log trail: the session must have
+# connected, and the deposit must have produced a wake.
+grep -q 'transfer signal connected' "$logs/indexer.log" || {
+  echo "the indexer never connected the transfer signal; the latency bound was met by fallback polling" >&2
+  exit 1
+}
+grep -q 'transfer signal wake' "$logs/indexer.log" || {
+  echo "the deposit did not produce a transfer-signal wake; detection came from the timer backstop" >&2
+  exit 1
+}
 echo "Deposit detected ${detected_in}s after payment through the transfer signal"
 wait_for_status "$exact_id" settled
 assert_eq "$((exact_before + 1500000))" "$(token_balance "$BENEFICIARY_EXACT")" \

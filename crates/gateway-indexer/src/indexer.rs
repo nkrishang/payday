@@ -79,6 +79,22 @@ const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const WAKE_CATCHUP_INTERVAL: Duration = Duration::from_millis(300);
 const WAKE_CATCHUP_ATTEMPTS: u32 = 16;
 
+/// What one reconcile pass accomplished. `indexed` is the highest block whose
+/// USDC activity is in the ledger; `boundary` the finality boundary the pass
+/// read. `indexed < boundary` means the per-pass range budget stopped the pass
+/// with finalized work left in the range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PassSummary {
+    boundary: u64,
+    indexed: u64,
+}
+
+impl PassSummary {
+    fn backlog(&self) -> bool {
+        self.indexed < self.boundary
+    }
+}
+
 /// Errors that can abort a poll pass.
 #[derive(Debug, Error)]
 pub enum IndexerError {
@@ -221,10 +237,26 @@ impl Indexer {
                     "block indexer cadence changed with transfer signal health"
                 );
                 signal_was_connected = connected;
+                if !connected {
+                    // The pass currently scheduled was sized by a healthy
+                    // signal; fall back to the polling cadence now rather
+                    // than waiting it out. `set_connected(false)` wakes this
+                    // loop, so the adjustment is not stranded until the next
+                    // scheduled event.
+                    next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
+                }
             }
             let target = tokio::select! {
                 _ = tokio::time::sleep_until(next_pass) => None,
                 _ = self.signal.notified() => self.signal.take_target(),
+                // A healthy signal dropping is itself a scheduling event:
+                // clamp the deadline now, even if the signal already
+                // reconnected, because the loop-top comparison below would
+                // not see a drop that was healed in between.
+                _ = self.signal.health_changed() => {
+                    next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
+                    continue;
+                }
                 _ = watch_refresh.tick() => {
                     if let Err(error) = self.refresh_watch_list().await {
                         warn!(error = %error, "watch list refresh failed; retrying");
@@ -240,16 +272,24 @@ impl Indexer {
                     continue;
                 }
             };
-            if let Err(error) = self.reconcile(target).await {
-                if error.requires_halt() {
+            let summary = match self.reconcile(target).await {
+                Ok(summary) => Some(summary),
+                Err(error) if error.requires_halt() => {
                     return Err(error);
                 }
-                warn!(error = %error, "indexer pass failed; retrying next pass");
-            }
-            let cadence = if self.signal.is_connected() {
-                self.cfg.reconcile_interval
-            } else {
-                self.cfg.poll_interval
+                Err(error) => {
+                    warn!(error = %error, "indexer pass failed; retrying next pass");
+                    None
+                }
+            };
+            let cadence = match &summary {
+                // The pass stopped inside the boundary with finalized ranges
+                // left: keep passing now. Each pass is still bounded by the
+                // per-pass range budget, so a catch-up backlog drains as fast
+                // as the budget allows without starving the sweep loop.
+                Some(summary) if summary.backlog() => Duration::ZERO,
+                _ if self.signal.is_connected() => self.cfg.reconcile_interval,
+                _ => self.cfg.poll_interval,
             };
             next_pass = Instant::now() + cadence;
         }
@@ -419,31 +459,38 @@ impl Indexer {
     }
 
     /// Reconcile on a timer or on a wake. A wake names the block the signal
-    /// saw a transfer in; if the node's finalized boundary has not reached
-    /// it yet, re-read briefly instead of leaving the payment to the timer.
-    async fn reconcile(&self, target: Option<u64>) -> Result<(), IndexerError> {
-        let mut boundary = self.pass().await?;
+    /// saw a transfer in; it is only covered once finality reaches it *and*
+    /// the cursor has ingested it — a wake consumed while the range budget
+    /// left blocks unindexed would otherwise wait a full cadence for nothing.
+    async fn reconcile(&self, target: Option<u64>) -> Result<PassSummary, IndexerError> {
+        let mut summary = self.pass().await?;
         let Some(target) = target else {
-            return Ok(());
+            return Ok(summary);
         };
         let mut attempts = 0;
-        while boundary < target && attempts < WAKE_CATCHUP_ATTEMPTS {
+        while (summary.boundary < target || summary.indexed < target)
+            && attempts < WAKE_CATCHUP_ATTEMPTS
+        {
             attempts += 1;
             tokio::time::sleep(WAKE_CATCHUP_INTERVAL).await;
-            boundary = self.pass().await?;
+            summary = self.pass().await?;
         }
-        if boundary < target {
+        if summary.indexed < target {
             warn!(
                 target,
-                boundary, "wake target still beyond finality after catch-up; the timer covers it"
+                boundary = summary.boundary,
+                indexed = summary.indexed,
+                "wake target not indexed after catch-up; the timer covers it"
             );
         }
-        Ok(())
+        Ok(summary)
     }
 
     /// Ingest finalized USDC ranges until the cursor reaches the finality
-    /// boundary or the per-pass range budget is spent. Returns the boundary.
-    async fn pass(&self) -> Result<u64, IndexerError> {
+    /// boundary or the per-pass range budget is spent. Reports both the
+    /// boundary and how far the cursor got, so the caller can tell a fully
+    /// ingested boundary from a budget-limited backlog.
+    async fn pass(&self) -> Result<PassSummary, IndexerError> {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
         let boundary_header = self.boundary_header(&mut attempt, &mut backoff).await?;
@@ -490,7 +537,7 @@ impl Indexer {
                 boundary, indexed, "indexer cursor lagging"
             );
         }
-        Ok(boundary)
+        Ok(PassSummary { boundary, indexed })
     }
 
     /// Fetch and commit one bounded range starting at `from_block`.
@@ -1879,6 +1926,30 @@ pub(crate) mod tests {
             2,
             "an idle tick records the finalized head and verifies the cursor hash"
         );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_budget_limited_pass_reports_its_backlog(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(1_000));
+        let mut cfg = config();
+        cfg.log_range_size = 100;
+        cfg.max_ranges_per_tick = 2;
+        let worker = indexer_with(&pool, chain, cfg);
+
+        let summary = worker.pass().await.unwrap();
+        assert_eq!(summary.boundary, 1_000);
+        assert_eq!(summary.indexed, 199, "two of the twenty ranges were spent");
+        assert!(summary.backlog(), "the pass stopped inside the boundary");
+
+        // Successive passes drain the backlog until the cursor reaches the
+        // boundary, which is what the caller's immediate-re-pass cadence
+        // relies on.
+        let mut summary = summary;
+        while summary.backlog() {
+            summary = worker.pass().await.unwrap();
+        }
+        assert_eq!(summary.indexed, 1_000);
+        assert!(!summary.backlog());
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
