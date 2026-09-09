@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use alloy_primitives::{Address, B256, U256};
 use sqlx::PgPool;
+use sqlx::types::chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -262,6 +263,13 @@ impl TryFrom<&DbInvoice> for Invoice {
             issuance_snapshot: row.issuance_snapshot.0.clone(),
         })
     }
+}
+
+/// See [`InvoiceRepository::watch_fingerprint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchFingerprint {
+    pub count: i64,
+    pub newest: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -928,6 +936,69 @@ impl InvoiceRepository {
             .bind(id)
             .fetch_optional(&self.pool)
             .await
+    }
+
+    /// Payment addresses the transfer signal should watch: every open deposit
+    /// request, every address still holding uncollected funds, and every
+    /// address whose request changed since `recent_since` (a late transfer to
+    /// a settled address is forwarded by the sweep worker, so it is worth a
+    /// fast wake-up for a while). Served by the `invoices_watch_*` and
+    /// `invoices_sweep_queue` partial indexes.
+    pub async fn watch_addresses(
+        &self,
+        chain_id: u64,
+        token: Address,
+        recent_since: DateTime<Utc>,
+    ) -> Result<Vec<Address>, sqlx::Error> {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            r#"
+            SELECT payment_address FROM invoices
+            WHERE payment_address IS NOT NULL
+              AND chain_id = $1 AND token_address = $2
+              AND (status NOT IN ('fulfilled', 'recovered')
+                   OR uncollected_count > 0
+                   OR updated_at > $3)
+            ORDER BY payment_address
+            "#,
+        )
+        .bind(chain_id as i64)
+        .bind(token.as_slice())
+        .bind(recent_since)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|bytes| {
+                Address::try_from(bytes.as_slice())
+                    .map_err(|_| sqlx::Error::Decode("invalid payment address length".into()))
+            })
+            .collect()
+    }
+
+    /// A cheap change detector for [`Self::watch_addresses`]: the row count
+    /// and the newest change under the same predicate. Reload the list only
+    /// when this pair moves.
+    pub async fn watch_fingerprint(
+        &self,
+        chain_id: u64,
+        token: Address,
+        recent_since: DateTime<Utc>,
+    ) -> Result<WatchFingerprint, sqlx::Error> {
+        let (count, newest): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+            r#"
+            SELECT count(*), max(updated_at) FROM invoices
+            WHERE payment_address IS NOT NULL
+              AND chain_id = $1 AND token_address = $2
+              AND (status NOT IN ('fulfilled', 'recovered')
+                   OR uncollected_count > 0
+                   OR updated_at > $3)
+            "#,
+        )
+        .bind(chain_id as i64)
+        .bind(token.as_slice())
+        .bind(recent_since)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(WatchFingerprint { count, newest })
     }
 
     pub async fn first_observed_block(&self, invoice_id: Uuid) -> Result<Option<u64>, sqlx::Error> {

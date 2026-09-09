@@ -60,6 +60,10 @@ sol! {
 pub struct UsdcTransfer {
     pub block_number: u64,
     pub block_hash: B256,
+    /// The containing block's timestamp, carried by the log itself
+    /// (`blockTimestamp`, served by Monad and Anvil), so classifying a
+    /// transfer against a deadline costs no header read.
+    pub block_timestamp: u64,
     pub transaction_hash: B256,
     pub transaction_index: u64,
     pub log_index: u64,
@@ -463,8 +467,8 @@ pub trait ChainClient: Send + Sync {
     /// Newest block number the node reports.
     async fn latest_block_number(&self) -> Result<u64, ChainError>;
 
-    /// Block number behind the node's `finalized` tag.
-    async fn finalized_block_number(&self) -> Result<u64, ChainError>;
+    /// Header behind the node's `finalized` tag.
+    async fn finalized_header(&self) -> Result<BlockHeader, ChainError>;
 
     /// Canonical header at an exact height; `Transient` if the node lacks it.
     async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError>;
@@ -706,10 +710,8 @@ impl ChainClient for AlloyChainClient {
             .map_err(|error| ChainError::rpc("eth_blockNumber", error))
     }
 
-    async fn finalized_block_number(&self) -> Result<u64, ChainError> {
-        self.header(BlockNumberOrTag::Finalized)
-            .await
-            .map(|header| header.number)
+    async fn finalized_header(&self) -> Result<BlockHeader, ChainError> {
+        self.header(BlockNumberOrTag::Finalized).await
     }
 
     async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError> {
@@ -767,6 +769,12 @@ impl ChainClient for AlloyChainClient {
                     block_number,
                     block_hash: log.block_hash.ok_or_else(|| {
                         ChainError::Transient("USDC log missing block hash".to_string())
+                    })?,
+                    // The log's own timestamp is the contract this indexer
+                    // relies on; a node that omits it fails loudly here
+                    // instead of silently costing a header read per block.
+                    block_timestamp: log.block_timestamp.ok_or_else(|| {
+                        ChainError::Transient("USDC log missing block timestamp".to_string())
                     })?,
                     transaction_hash: log.transaction_hash.ok_or_else(|| {
                         ChainError::Transient("USDC log missing transaction hash".to_string())

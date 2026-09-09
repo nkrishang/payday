@@ -48,6 +48,11 @@ export PAYDAY_USDC_START_BLOCK="${PAYDAY_USDC_START_BLOCK:-0}"
 export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
 export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
 export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
+# The transfer signal runs against Anvil's WebSocket on the same port (derived
+# from the RPC URL, standard `logs` fallback). The timer backstop is kept
+# deliberately slow here so the flows below prove the wake path works: a
+# deposit that only the timer would catch takes visibly longer.
+export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-15000}"
 export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
@@ -536,7 +541,19 @@ cross_account_status="$(curl --silent --output /dev/null --write-out '%{http_cod
 assert_eq 404 "$cross_account_status" "cross-account invoice lookup leaked an invoice"
 exact_address="$(jq -r .address <<<"$exact")"
 exact_before="$(token_balance "$BENEFICIARY_EXACT")"
+paid_at="$(date +%s)"
 send_usdc "$exact_address" 1500000
+# `cast send` returns once the transfer is mined; Anvil finalizes it two
+# blocks (two seconds) later. The transfer signal must wake the indexer at
+# that point: the timer backstop alone would take up to
+# PAYDAY_INDEXER_RECONCILE_INTERVAL_MS, which this bound sits well inside.
+wait_for_invoice "$exact_id" '.received_base_units == "1500000"' "exact deposit was not detected"
+detected_in="$(( $(date +%s) - paid_at ))"
+[[ "$detected_in" -le 8 ]] || {
+  echo "deposit detection took ${detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
+  exit 1
+}
+echo "Deposit detected ${detected_in}s after payment through the transfer signal"
 wait_for_status "$exact_id" settled
 assert_eq "$((exact_before + 1500000))" "$(token_balance "$BENEFICIARY_EXACT")" \
   "exact payment beneficiary balance mismatch"

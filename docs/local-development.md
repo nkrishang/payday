@@ -44,17 +44,28 @@ the local setup deploys a mintable six-decimal fixture with the same
 
 ## Indexing and finality
 
-The acquisition path uses standard EVM JSON-RPC:
+The acquisition path has two halves over standard EVM JSON-RPC:
 
-- one `eth_getBlockByNumber("finalized")` per poll to anchor the boundary
+- **The reconciler** (the only writer) runs a pass every
+  `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` and immediately on a wake. A pass is
+  one `eth_getBlockByNumber("finalized")` to anchor the boundary
   (`PAYDAY_FINALITY_SOURCE=finalized`, minus `PAYDAY_FINALITY_CONFIRMATIONS`
-  blocks of margin), or `eth_blockNumber` with `PAYDAY_FINALITY_SOURCE=latest`;
-- one `eth_getLogs` per bounded range, filtered to the USDC address and
-  `Transfer` topic, draining up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges
-  per pass so a backlog clears independently of the poll interval;
-- header lookups to verify and persist canonical cursor hashes, plus one lookup
-  for each distinct transfer-bearing block to classify deposits by that
-  block's timestamp. These lookups run concurrently within each bounded range.
+  blocks of margin, 0 on Monad), one header read to verify the stored cursor
+  hash, then per bounded range one range-end header read, one `eth_getLogs`
+  filtered to the USDC address and `Transfer` topic, and a second range-end
+  read that proves nothing moved while the logs were fetched. Deposits are
+  classified by the `blockTimestamp` the log itself carries, so a block with
+  transfers costs no extra request. Up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`
+  ranges drain per pass, so a backlog clears independently of the cadence.
+- **The transfer signal** is a WebSocket `eth_subscribe` on the same node
+  (`PAYDAY_RPC_WS_URL`, derived from `PAYDAY_RPC_URL` when unset) for USDC
+  transfers whose recipient is one of our payment addresses. On Monad it uses
+  `monadLogs` and wakes the reconciler when a matching log reaches the
+  `Finalized` commit state; Anvil lacks `monadLogs`, so the signal falls back
+  to the standard `logs` subscription and the reconciler polls finality for a
+  few seconds until the block is covered. The signal never writes: a missed
+  or duplicated notification costs latency, not correctness, and while the
+  socket is down the reconciler simply runs on `PAYDAY_INDEXER_POLL_INTERVAL_MS`.
 
 Observations, deposit request projections, and the hash-bearing cursor commit
 atomically. Every transfer to a known deposit request address is retained: `credited`
@@ -394,13 +405,23 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   fresh database (the current block at first deployment)
 - `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally; read by
   both services (`gatewayd` uses it for deployment verification)
+- `PAYDAY_RPC_WS_URL` — WebSocket endpoint for the indexer's transfer signal;
+  unset derives it from `PAYDAY_RPC_URL` (`https` → `wss`, `http` → `ws`,
+  same host, path and token), `off` disables the signal
 - `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
   or `latest`
 - `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality
-  anchor; defaults to 2, local Anvil uses 0
+  anchor; defaults to 2 in the binary, 0 on Monad and Anvil where the
+  finalized tag is authoritative
 - `PAYDAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
 - `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
-- `PAYDAY_INDEXER_POLL_INTERVAL_MS` — idle interval for both loops, default 2000
+- `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` — reconcile cadence while the
+  transfer signal is connected, default 60000; the local runner uses 1000
+- `PAYDAY_INDEXER_POLL_INTERVAL_MS` — sweep loop cadence, and the reconcile
+  cadence while the signal is disconnected or disabled, default 2000
+- `PAYDAY_INDEXER_LATE_WATCH_DAYS` — how long a settled address stays in the
+  signal's subscription so a late transfer still wakes the reconciler,
+  default 30 (the reconciler ledgers late transfers to any address forever)
 - `PAYDAY_INDEXER_RPC_MAX_RPS` — paces outgoing RPC calls under the provider's
   requests-per-second budget, default 40; 0 disables pacing (see
   [quicknode-rpc-limits.md](runbooks/quicknode-rpc-limits.md))
