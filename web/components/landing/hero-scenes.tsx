@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowUpRight, Check, Copy, Loader2, Plus, Wallet, X } from "lucide-react";
+import Image from "next/image";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
@@ -595,7 +596,7 @@ function MerchantApp({ t }: { t: number }) {
               minimumFractionDigits: 2,
               maximumFractionDigits: 2,
             })}
-            <span className="text-[15px] font-medium text-brand-subtle">USDC</span>
+            <Token />
           </p>
           <div className="mt-6 grid gap-2.5">
             <span
@@ -622,18 +623,23 @@ function MerchantApp({ t }: { t: number }) {
           <ul className="mt-1 grid text-[14px]">
             {credited ? (
               <li className="landing-scene-line -mx-3 flex items-center gap-3 rounded-[10px] bg-brand-green/[0.18] px-3 py-2.5">
-                <span className="flex size-8 items-center justify-center rounded-full bg-brand-green text-brand-black">
-                  <Check className="size-4" />
-                </span>
+                <Usdc className="size-8" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">Deposit</span>
-                  <span className="block text-[12px] text-brand-subtle">Just now · settled</span>
+                  <span className="flex items-center gap-1.5 text-[12px] whitespace-nowrap text-brand-subtle">
+                    Settled on <Monad className="size-3.5" /> Monad
+                  </span>
                 </span>
                 <span className="tabular font-semibold">+250.00</span>
               </li>
             ) : null}
             <Activity label="Pro plan" when="Yesterday" amount="−49.00" />
-            <Activity label="Deposit" when="Monday" amount="+500.00" />
+            <Activity
+              label="Deposit"
+              when="Monday"
+              amount="+500.00"
+              icon={<Usdc className="size-8" />}
+            />
             {credited ? null : <Activity label="Payout to Maya" when="Aug 28" amount="−120.00" />}
           </ul>
         </div>
@@ -642,9 +648,7 @@ function MerchantApp({ t }: { t: number }) {
       {dialogOpen ? <DepositDialog t={t} leaving={dialogLeaving} /> : null}
       {toast ? (
         <div className="landing-toast absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2.5 rounded-[12px] bg-brand-black px-4 py-2.5 text-[13.5px] font-medium whitespace-nowrap text-[#f6f2ea] shadow-[0_12px_30px_-12px_rgb(0_0_0/0.6)]">
-          <span className="flex size-5 items-center justify-center rounded-full bg-brand-green text-brand-black">
-            <Check className="size-3" />
-          </span>
+          <Usdc className="size-5" />
           +250.00 USDC added to your balance
         </div>
       ) : null}
@@ -652,10 +656,20 @@ function MerchantApp({ t }: { t: number }) {
   );
 }
 
-function Activity({ label, when, amount }: { label: string; when: string; amount: string }) {
+function Activity({
+  label,
+  when,
+  amount,
+  icon,
+}: {
+  label: string;
+  when: string;
+  amount: string;
+  icon?: ReactNode;
+}) {
   return (
     <li className="flex items-center gap-3 py-3 text-brand-black/80">
-      <span className="size-8 rounded-full bg-brand-black/[0.07]" />
+      {icon ?? <span className="size-8 rounded-full bg-brand-black/[0.07]" />}
       <span className="min-w-0 flex-1">
         <span className="block truncate">{label}</span>
         <span className="block text-[12px] text-brand-subtle">{when}</span>
@@ -699,13 +713,16 @@ function DepositDialog({ t, leaving }: { t: number; leaving: boolean }) {
               <Check className="size-6" />
             </span>
             <p className="mt-4 text-[18px] font-semibold tracking-tight">Deposit received</p>
-            <p className="mt-1.5 text-[13.5px] text-brand-subtle">250.00 USDC · settled on Monad</p>
+            <p className="mt-2 flex items-center justify-center gap-1.5 text-[13.5px] text-brand-subtle">
+              <Usdc className="size-4" /> 250.00 USDC · settled on <Monad className="size-4" />{" "}
+              Monad
+            </p>
           </div>
         ) : (
           <>
             <p className="tabular mt-4 flex items-baseline gap-2 text-[36px] leading-none font-semibold tracking-tight">
               250.00
-              <span className="text-[15px] font-medium text-brand-subtle">USDC</span>
+              <Token />
             </p>
             <dl className="mt-4 grid gap-2 text-[13.5px]">
               <div className="flex items-center justify-between gap-3">
@@ -717,7 +734,8 @@ function DepositDialog({ t, leaving }: { t: number; leaving: boolean }) {
               </div>
               <div className="flex items-center justify-between gap-3">
                 <dt className="text-brand-subtle">Network</dt>
-                <dd className="font-medium">
+                <dd className="flex items-center gap-1.5 font-medium">
+                  <Monad className="size-4" />
                   Monad <span className="text-brand-subtle">·</span>{" "}
                   <span className="tabular">
                     expires in {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
@@ -740,11 +758,15 @@ function DepositDialog({ t, leaving }: { t: number; leaving: boolean }) {
               ) : (
                 <Loader2 className="size-4 animate-spin" />
               )}
-              {state === "ready"
-                ? "Pay from wallet"
-                : state === "signing"
-                  ? "Confirm in your wallet…"
-                  : "Confirming on Monad…"}
+              {state === "ready" ? (
+                "Pay from wallet"
+              ) : state === "signing" ? (
+                "Confirm in your wallet…"
+              ) : (
+                <>
+                  Confirming on <Monad className="size-4" /> Monad…
+                </>
+              )}
             </span>
           </>
         )}
@@ -755,5 +777,45 @@ function DepositDialog({ t, leaving }: { t: number; leaving: boolean }) {
         </p>
       </div>
     </>
+  );
+}
+
+/* ------------------------------------------------------------------------ */
+/* Marks                                                                    */
+/* ------------------------------------------------------------------------ */
+
+function Usdc({ className }: { className?: string }) {
+  return (
+    <Image
+      src="/payment-icons/usdc.svg"
+      width={64}
+      height={64}
+      loading="eager"
+      alt=""
+      className={cn("shrink-0 rounded-full", className)}
+    />
+  );
+}
+
+function Monad({ className }: { className?: string }) {
+  return (
+    <Image
+      src="/payment-icons/monad.svg"
+      width={64}
+      height={64}
+      loading="eager"
+      alt=""
+      className={cn("shrink-0", className)}
+    />
+  );
+}
+
+/** "USDC" beside an amount, with its mark. */
+function Token() {
+  return (
+    <span className="flex items-center gap-1.5 text-[15px] font-medium text-brand-subtle">
+      <Usdc className="size-5" />
+      USDC
+    </span>
   );
 }
