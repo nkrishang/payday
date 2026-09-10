@@ -101,7 +101,9 @@ export default function Home() {
 function Highlight({ tone, children }: { tone: "yellow" | "green"; children: React.ReactNode }) {
   return (
     <mark
-      className={tone === "yellow" ? "landing-mark bg-brand-yellow" : "landing-mark bg-brand-green"}
+      className={
+        tone === "yellow" ? "landing-mark landing-mark-yellow" : "landing-mark landing-mark-green"
+      }
     >
       {children}
     </mark>
