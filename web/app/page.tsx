@@ -66,7 +66,7 @@ export default function Home() {
 
       <footer className="landing-reveal landing-delay-4">
         <div className="mx-auto flex max-w-[1320px] flex-col gap-5 px-5 pb-8 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex items-center">
             <Image
               src="/payday-logo-full-light.svg"
               width={2800}
@@ -75,7 +75,6 @@ export default function Home() {
               alt="Payday"
               className="h-auto w-[72px]"
             />
-            <p className="text-[15px] font-medium">Accept stablecoins on your terms.</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

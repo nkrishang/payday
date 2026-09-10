@@ -178,7 +178,7 @@
  * Tailwind's `translate`, which leaves `transform` free for the entrance.
  */
 .landing-dialog {
-  font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   animation: landing-dialog-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
