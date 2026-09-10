@@ -8,10 +8,9 @@ use uuid::Uuid;
 
 use crate::{
     ATTRIBUTION_VERSION, Amount, AttributionError, BeneficiaryAddress, CANONICALIZATION,
-    CanonicalIssuanceSnapshot, ChainId, FactoryAddress, PayerAttestationError,
-    PayerAttestationScope, PayerWalletAttestation, PaymentAddress, RecoveryAddress,
-    SNAPSHOT_SCHEMA, Salt, TokenAddress, derive_attribution, predict_payment_address,
-    recompute_salt, verify_payer_attestation,
+    CanonicalIssuanceSnapshot, ChainId, NetworkTerms, PayerAttestationError, PayerAttestationScope,
+    PayerWalletAttestation, PaymentAddress, RecoveryAddress, SNAPSHOT_SCHEMA, Salt,
+    derive_attribution, predict_payment_address, recompute_salt, verify_payer_attestation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -123,13 +122,17 @@ impl FromStr for InvoiceStatus {
     }
 }
 
-/// The payer's wallet, attested in their session, and everything derived
-/// from it: the recovery term, the salt, and the CREATE3 payment address.
-/// Immutable once set; the address commits to all of it.
+/// The payer's wallet, attested in their session on the network they chose,
+/// and everything derived from both: the recovery term, the salt, and the
+/// CREATE3 payment address. Immutable once set; the address commits to all
+/// of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentBinding {
     pub payer_wallet: Address,
     pub attestation: PayerWalletAttestation,
+    /// The network the payer chose: one of the request's committed
+    /// networks, named by the attestation's EIP-712 domain.
+    pub network: NetworkTerms,
     /// Always the payer's wallet: excess and late funds return to the payer.
     pub recovery: RecoveryAddress,
     pub salt: Salt,
@@ -141,14 +144,14 @@ pub struct PaymentBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: InvoiceId,
-    pub chain_id: ChainId,
-    pub token: TokenAddress,
+    /// Every network the request may be paid on, in canonical order. The
+    /// payer picks one when they bind their wallet.
+    pub networks: Vec<NetworkTerms>,
     pub beneficiary: BeneficiaryAddress,
     pub expiration_timestamp: u64,
-    pub factory: FactoryAddress,
     pub amount: Amount,
-    /// `None` until a payer has attested a wallet; only then does the
-    /// request have an address anyone can pay.
+    /// `None` until a payer has attested a wallet on a network; only then
+    /// does the request have an address anyone can pay.
     pub binding: Option<PaymentBinding>,
     pub status: InvoiceStatus,
     /// Finalized transfers credited toward `amount`, in base units.
@@ -172,17 +175,23 @@ pub struct Invoice {
     pub issuance_snapshot: CanonicalIssuanceSnapshot,
 }
 
+/// Why a binding could not be made for a chain.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BindError {
+    #[error("chain {0} is not one of the request's networks")]
+    UnsupportedChain(ChainId),
+    #[error(transparent)]
+    Attestation(#[from] PayerAttestationError),
+}
+
 impl Invoice {
     /// Issue an invoice: commit to `snapshot` and hash it. The typed
-    /// parameters are the ones the address will be derived from, so the
+    /// parameters are the ones an address will be derived from, so the
     /// snapshot must describe exactly those; otherwise a proof would verify
     /// against terms nobody was paid under. No address exists yet: see
     /// [`Invoice::bind_payer_wallet`].
-    #[allow(clippy::too_many_arguments)]
     pub fn issue(
-        factory: FactoryAddress,
-        chain_id: ChainId,
-        token: TokenAddress,
+        networks: &[NetworkTerms],
         beneficiary: BeneficiaryAddress,
         amount: Amount,
         expiration_timestamp: u64,
@@ -192,60 +201,47 @@ impl Invoice {
             snapshot.issuer.clone(),
             snapshot.bill_to.clone(),
             snapshot.payer_policy.clone(),
-            factory,
-            chain_id,
-            token,
+            networks,
             beneficiary,
             amount,
             expiration_timestamp,
         );
-        for (field, actual, wanted) in [
-            ("schema", &snapshot.schema, SNAPSHOT_SCHEMA),
+        for (field, matches) in [
+            ("schema", snapshot.schema == SNAPSHOT_SCHEMA),
             (
                 "canonicalization",
-                &snapshot.canonicalization,
-                CANONICALIZATION,
+                snapshot.canonicalization == CANONICALIZATION,
             ),
-            ("chain_id", &snapshot.chain_id, &expected.chain_id),
-            (
-                "token_address",
-                &snapshot.token_address,
-                &expected.token_address,
-            ),
+            ("networks", snapshot.networks == expected.networks),
             (
                 "receiver_address",
-                &snapshot.receiver_address,
-                &expected.receiver_address,
-            ),
-            (
-                "factory_address",
-                &snapshot.factory_address,
-                &expected.factory_address,
+                snapshot.receiver_address == expected.receiver_address,
             ),
             (
                 "amount_base_units",
-                &snapshot.amount_base_units,
-                &expected.amount_base_units,
+                snapshot.amount_base_units == expected.amount_base_units,
             ),
             (
                 "expiration_timestamp",
-                &snapshot.expiration_timestamp,
-                &expected.expiration_timestamp,
+                snapshot.expiration_timestamp == expected.expiration_timestamp,
             ),
         ] {
-            if actual != wanted {
+            if !matches {
                 return Err(AttributionError::SnapshotMismatch { field });
             }
+        }
+        if networks.is_empty() {
+            return Err(AttributionError::SnapshotMismatch { field: "networks" });
         }
 
         let attribution = derive_attribution(&snapshot)?;
         Ok(Invoice {
             id: generate_invoice_id(),
-            chain_id,
-            token,
+            networks: expected
+                .networks()
+                .expect("networks rendered from typed terms parse back"),
             beneficiary,
             expiration_timestamp,
-            factory,
             amount,
             binding: None,
             status: InvoiceStatus::Created,
@@ -261,41 +257,64 @@ impl Invoice {
         })
     }
 
-    /// What the payer's attestation must be for: this deployment and this
-    /// request's commitment.
-    pub fn attestation_scope(&self) -> PayerAttestationScope {
-        PayerAttestationScope {
-            chain_id: self.chain_id.0,
-            factory: self.factory.0,
-            attribution_hash: self.attribution_hash,
-        }
+    /// The committed terms for `chain_id`, if the request may be paid there.
+    pub fn network_for(&self, chain_id: ChainId) -> Option<&NetworkTerms> {
+        self.networks
+            .iter()
+            .find(|network| network.chain_id == chain_id)
     }
 
-    /// Derive the binding a verified attestation produces: the payer's wallet
-    /// is the recovery term, the salt commits to the attribution hash and the
-    /// attestation digest, and the address follows from both. The attestation
-    /// is verified here; a binding never exists for a signature that does
-    /// not recover to its wallet.
+    /// The network the payer chose, once a wallet is bound.
+    pub fn network(&self) -> Option<&NetworkTerms> {
+        self.binding.as_ref().map(|binding| &binding.network)
+    }
+
+    /// What the payer's attestation must be for: the chosen network's chain
+    /// and factory, and this request's commitment.
+    pub fn attestation_scope(&self, chain_id: ChainId) -> Option<PayerAttestationScope> {
+        self.network_for(chain_id).map(|network| PayerAttestationScope {
+            chain_id: network.chain_id.0,
+            factory: network.factory.0,
+            attribution_hash: self.attribution_hash,
+        })
+    }
+
+    /// Derive the binding a verified attestation produces on `chain_id`: the
+    /// payer's wallet is the recovery term, the salt commits to the
+    /// attribution hash and the attestation digest, and the address follows
+    /// from both plus the chosen network's token, factory, and chain id. The
+    /// attestation is verified here under that network's domain; a binding
+    /// never exists for a signature that does not recover to its wallet or
+    /// that was made for another chain.
     pub fn bind_payer_wallet(
         &self,
+        chain_id: ChainId,
         attestation: PayerWalletAttestation,
         bound_at: String,
-    ) -> Result<PaymentBinding, PayerAttestationError> {
-        let verified = verify_payer_attestation(&attestation, self.attestation_scope())?;
+    ) -> Result<PaymentBinding, BindError> {
+        let network = *self
+            .network_for(chain_id)
+            .ok_or(BindError::UnsupportedChain(chain_id))?;
+        let scope = self
+            .attestation_scope(chain_id)
+            .expect("network_for succeeded");
+        let verified = verify_payer_attestation(&attestation, scope)?;
         let recovery = RecoveryAddress(verified.wallet);
         let salt = recompute_salt(self.attribution_hash, verified.digest);
         let payment_address = predict_payment_address(
-            self.factory,
-            self.token,
+            network.factory,
+            network.token,
             self.amount,
             self.beneficiary,
             self.expiration_timestamp,
             recovery,
             salt,
+            network.chain_id,
         );
         Ok(PaymentBinding {
             payer_wallet: verified.wallet,
             attestation,
+            network,
             recovery,
             salt,
             payment_address,
@@ -315,13 +334,14 @@ impl Invoice {
     pub fn address_matches_parameters(&self) -> bool {
         self.binding.as_ref().is_none_or(|binding| {
             predict_payment_address(
-                self.factory,
-                self.token,
+                binding.network.factory,
+                binding.network.token,
                 self.amount,
                 self.beneficiary,
                 self.expiration_timestamp,
                 binding.recovery,
                 binding.salt,
+                binding.network.chain_id,
             ) == binding.payment_address
         })
     }
@@ -389,6 +409,8 @@ mod tests {
     use alloy_primitives::{U256, address};
 
     const PAYER_KEY: [u8; 32] = [7u8; 32];
+    const MONAD: ChainId = ChainId(143);
+    const BASE: ChainId = ChainId(8453);
 
     fn party(name: &str) -> Party {
         Party {
@@ -398,11 +420,24 @@ mod tests {
         }
     }
 
+    fn networks() -> Vec<NetworkTerms> {
+        vec![
+            NetworkTerms {
+                chain_id: MONAD,
+                token: TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+                factory: FactoryAddress(address!("0x0000000000000000000000000000000000000001")),
+            },
+            NetworkTerms {
+                chain_id: BASE,
+                token: TokenAddress(address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")),
+                factory: FactoryAddress(address!("0x0000000000000000000000000000000000000001")),
+            },
+        ]
+    }
+
     /// Issue with a minimal permissionless snapshot built from the same terms.
     fn issue(
-        factory: FactoryAddress,
-        chain_id: ChainId,
-        token: TokenAddress,
+        networks: &[NetworkTerms],
         beneficiary: BeneficiaryAddress,
         amount: Amount,
         expiration_timestamp: u64,
@@ -411,53 +446,47 @@ mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
-            factory,
-            chain_id,
-            token,
+            networks,
             beneficiary,
             amount,
             expiration_timestamp,
         );
-        Invoice::issue(
-            factory,
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            expiration_timestamp,
-            snapshot,
-        )
-        .unwrap()
+        Invoice::issue(networks, beneficiary, amount, expiration_timestamp, snapshot).unwrap()
     }
 
     fn sample_invoice() -> Invoice {
         issue(
-            FactoryAddress(address!("0x0000000000000000000000000000000000000001")),
-            ChainId(1),
-            TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6")),
+            &networks(),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
             1_900_000_000,
         )
     }
 
-    /// The attestation a payer's wallet would sign for `invoice` under a
-    /// given session nonce.
-    fn attest(invoice: &Invoice, key: &[u8; 32], nonce: u8) -> PayerWalletAttestation {
+    /// The attestation a payer's wallet would sign for `invoice` on `chain`
+    /// under a given session nonce.
+    fn attest(
+        invoice: &Invoice,
+        chain: ChainId,
+        key: &[u8; 32],
+        nonce: u8,
+    ) -> PayerWalletAttestation {
         let message = PayerAttestation::new(
             invoice.attribution_hash,
             wallet_of(key),
             B256::repeat_byte(nonce),
             invoice.expiration_timestamp,
         );
-        sign_payer_attestation(key, &message, invoice.chain_id.0, invoice.factory.0)
+        let network = invoice.network_for(chain).unwrap();
+        sign_payer_attestation(key, &message, chain.0, network.factory.0)
     }
 
     fn bound_invoice() -> Invoice {
         let mut invoice = sample_invoice();
         let binding = invoice
             .bind_payer_wallet(
-                attest(&invoice, &PAYER_KEY, 0x11),
+                MONAD,
+                attest(&invoice, MONAD, &PAYER_KEY, 0x11),
                 "2026-09-06T00:00:00Z".into(),
             )
             .unwrap();
@@ -507,6 +536,7 @@ mod tests {
         assert_eq!(invoice.status, InvoiceStatus::Created);
         assert_eq!(invoice.binding, None);
         assert_eq!(invoice.payment_address(), None);
+        assert_eq!(invoice.network(), None);
         assert!(invoice.address_matches_parameters());
         assert_eq!(invoice.received, Amount(U256::ZERO));
         assert_eq!(invoice.execute_tx_hash, None);
@@ -521,57 +551,101 @@ mod tests {
     }
 
     #[test]
-    fn new_invoice_stores_all_input_fields() {
-        let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
-        let chain_id = ChainId(1);
-        let token = TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6"));
+    fn new_invoice_stores_all_input_fields_with_networks_in_canonical_order() {
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(100));
         let expiration_timestamp = 1_900_000_000;
+        let mut reversed = networks();
+        reversed.reverse();
 
-        let invoice = issue(
-            factory,
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            expiration_timestamp,
-        );
+        let invoice = issue(&reversed, beneficiary, amount, expiration_timestamp);
 
-        assert_eq!(invoice.factory, factory);
-        assert_eq!(invoice.chain_id, chain_id);
-        assert_eq!(invoice.token, token);
+        assert_eq!(invoice.networks, networks(), "sorted by chain id");
+        assert_eq!(invoice.network_for(MONAD), Some(&networks()[0]));
+        assert_eq!(invoice.network_for(ChainId(1)), None);
         assert_eq!(invoice.beneficiary, beneficiary);
         assert_eq!(invoice.amount, amount);
         assert_eq!(invoice.expiration_timestamp, expiration_timestamp);
     }
 
     #[test]
-    fn binding_derives_recovery_salt_and_address_from_the_attestation() {
+    fn binding_derives_recovery_salt_and_address_from_the_attestation_on_the_chosen_chain() {
         // The integration test that ties derive_attribution, the payer
         // attestation, recompute_salt, and predict_payment_address together.
         let invoice = bound_invoice();
         let binding = invoice.binding.as_ref().unwrap();
         assert_eq!(binding.payer_wallet, wallet_of(&PAYER_KEY));
         assert_eq!(binding.recovery, RecoveryAddress(wallet_of(&PAYER_KEY)));
+        assert_eq!(binding.network, networks()[0]);
+        assert_eq!(invoice.network(), Some(&networks()[0]));
         let digest: B256 = binding.attestation.digest.parse().unwrap();
         assert_eq!(
             binding.salt,
             recompute_salt(invoice.attribution_hash, digest)
         );
         let expected = predict_payment_address(
-            invoice.factory,
-            invoice.token,
+            binding.network.factory,
+            binding.network.token,
             invoice.amount,
             invoice.beneficiary,
             invoice.expiration_timestamp,
             binding.recovery,
             binding.salt,
+            MONAD,
         );
         assert_eq!(binding.payment_address, expected);
         assert_eq!(invoice.payment_address(), Some(expected));
         assert!(invoice.address_matches_parameters());
+    }
+
+    #[test]
+    fn the_chain_the_payer_chooses_is_committed_by_the_attestation_domain() {
+        let invoice = sample_invoice();
+        let on_monad = invoice
+            .bind_payer_wallet(
+                MONAD,
+                attest(&invoice, MONAD, &PAYER_KEY, 0x11),
+                String::new(),
+            )
+            .unwrap();
+        let on_base = invoice
+            .bind_payer_wallet(
+                BASE,
+                attest(&invoice, BASE, &PAYER_KEY, 0x11),
+                String::new(),
+            )
+            .unwrap();
+        assert_eq!(on_monad.network.chain_id, MONAD);
+        assert_eq!(on_base.network.chain_id, BASE);
+        assert_eq!(on_base.network.token, networks()[1].token);
+        // Same wallet, same nonce, another chain: another digest, salt, and address.
+        assert_ne!(on_monad.salt, on_base.salt);
+        assert_ne!(on_monad.payment_address, on_base.payment_address);
+
+        // An attestation signed under one chain's domain cannot bind another.
+        assert_eq!(
+            invoice
+                .bind_payer_wallet(
+                    BASE,
+                    attest(&invoice, MONAD, &PAYER_KEY, 0x11),
+                    String::new()
+                )
+                .unwrap_err(),
+            BindError::Attestation(PayerAttestationError::DomainMismatch)
+        );
+        // A chain the request does not offer is refused before any verification.
+        assert_eq!(
+            invoice
+                .bind_payer_wallet(
+                    ChainId(1),
+                    attest(&invoice, MONAD, &PAYER_KEY, 0x11),
+                    String::new()
+                )
+                .unwrap_err(),
+            BindError::UnsupportedChain(ChainId(1))
+        );
+        assert_eq!(invoice.attestation_scope(ChainId(1)), None);
     }
 
     #[test]
@@ -580,9 +654,7 @@ mod tests {
         let other = sample_invoice();
         assert_eq!(invoice.attribution_hash, other.attribution_hash);
         let mut foreign = issue(
-            invoice.factory,
-            invoice.chain_id,
-            invoice.token,
+            &networks(),
             invoice.beneficiary,
             Amount(U256::from(101)),
             invoice.expiration_timestamp,
@@ -590,17 +662,21 @@ mod tests {
         foreign.binding = None;
         assert_eq!(
             invoice
-                .bind_payer_wallet(attest(&foreign, &PAYER_KEY, 0x11), String::new())
+                .bind_payer_wallet(
+                    MONAD,
+                    attest(&foreign, MONAD, &PAYER_KEY, 0x11),
+                    String::new()
+                )
                 .unwrap_err(),
-            PayerAttestationError::AttributionHashMismatch
+            BindError::Attestation(PayerAttestationError::AttributionHashMismatch)
         );
-        let mut forged = attest(&invoice, &PAYER_KEY, 0x11);
-        forged.signature = attest(&invoice, &[9u8; 32], 0x11).signature;
+        let mut forged = attest(&invoice, MONAD, &PAYER_KEY, 0x11);
+        forged.signature = attest(&invoice, MONAD, &[9u8; 32], 0x11).signature;
         assert_eq!(
             invoice
-                .bind_payer_wallet(forged, String::new())
+                .bind_payer_wallet(MONAD, forged, String::new())
                 .unwrap_err(),
-            PayerAttestationError::SignerMismatch
+            BindError::Attestation(PayerAttestationError::SignerMismatch)
         );
     }
 
@@ -610,6 +686,9 @@ mod tests {
         invoice.beneficiary =
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000009"));
         assert!(!invoice.address_matches_parameters());
+        let mut moved = bound_invoice();
+        moved.binding.as_mut().unwrap().network.chain_id = BASE;
+        assert!(!moved.address_matches_parameters());
     }
 
     #[test]
@@ -619,10 +698,18 @@ mod tests {
         // signs twice for the same request produces two distinct salts.
         let invoice = sample_invoice();
         let a = invoice
-            .bind_payer_wallet(attest(&invoice, &PAYER_KEY, 0x11), String::new())
+            .bind_payer_wallet(
+                MONAD,
+                attest(&invoice, MONAD, &PAYER_KEY, 0x11),
+                String::new(),
+            )
             .unwrap();
         let b = invoice
-            .bind_payer_wallet(attest(&invoice, &PAYER_KEY, 0x12), String::new())
+            .bind_payer_wallet(
+                MONAD,
+                attest(&invoice, MONAD, &PAYER_KEY, 0x12),
+                String::new(),
+            )
             .unwrap();
         assert_ne!(a.salt, b.salt, "salts must differ");
         assert_ne!(
@@ -632,7 +719,11 @@ mod tests {
         // A different wallet moves both the salt (through the digest) and
         // the recovery term.
         let c = invoice
-            .bind_payer_wallet(attest(&invoice, &[9u8; 32], 0x11), String::new())
+            .bind_payer_wallet(
+                MONAD,
+                attest(&invoice, MONAD, &[9u8; 32], 0x11),
+                String::new(),
+            )
             .unwrap();
         assert_ne!(a.salt, c.salt);
         assert_ne!(a.recovery, c.recovery);
@@ -640,30 +731,32 @@ mod tests {
     }
 
     #[test]
-    fn expiration_and_recovery_are_address_parameters() {
+    fn expiration_recovery_and_chain_are_address_parameters() {
         let invoice = bound_invoice();
         let binding = invoice.binding.as_ref().unwrap();
-        let later_expiration = predict_payment_address(
-            invoice.factory,
-            invoice.token,
-            invoice.amount,
-            invoice.beneficiary,
-            invoice.expiration_timestamp + 1,
-            binding.recovery,
-            binding.salt,
-        );
-        let other_recovery = predict_payment_address(
-            invoice.factory,
-            invoice.token,
-            invoice.amount,
-            invoice.beneficiary,
+        let derive = |expiration: u64, recovery: RecoveryAddress, chain: ChainId| {
+            predict_payment_address(
+                binding.network.factory,
+                binding.network.token,
+                invoice.amount,
+                invoice.beneficiary,
+                expiration,
+                recovery,
+                binding.salt,
+                chain,
+            )
+        };
+        let later_expiration = derive(invoice.expiration_timestamp + 1, binding.recovery, MONAD);
+        let other_recovery = derive(
             invoice.expiration_timestamp,
             RecoveryAddress(address!("0x0000000000000000000000000000000000000003")),
-            binding.salt,
+            MONAD,
         );
+        let other_chain = derive(invoice.expiration_timestamp, binding.recovery, BASE);
 
         assert_ne!(binding.payment_address, later_expiration);
         assert_ne!(binding.payment_address, other_recovery);
+        assert_ne!(binding.payment_address, other_chain);
     }
 
     #[test]
@@ -677,7 +770,8 @@ mod tests {
                 .attribution_hash
         );
         assert_eq!(invoice.issuance_snapshot.amount_base_units, "100");
-        assert_eq!(invoice.issuance_snapshot.chain_id, "1");
+        assert_eq!(invoice.issuance_snapshot.networks[0].chain_id, "143");
+        assert_eq!(invoice.issuance_snapshot.networks[1].chain_id, "8453");
         assert_eq!(
             invoice.issuance_snapshot.receiver_address,
             invoice.beneficiary.0.to_checksum(None)
@@ -686,9 +780,6 @@ mod tests {
 
     #[test]
     fn issue_refuses_a_snapshot_that_describes_other_terms() {
-        let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
-        let chain_id = ChainId(1);
-        let token = TokenAddress(address!("0xA0b86a91E6Dc7c5bE5d7B8f9cC2D9eF1a3B4c5D6"));
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(100));
@@ -697,9 +788,7 @@ mod tests {
                 party("Acme"),
                 party("Globex"),
                 PayerPolicy::Permissionless,
-                factory,
-                chain_id,
-                token,
+                &networks(),
                 beneficiary,
                 amount,
                 1_900_000_000,
@@ -718,40 +807,51 @@ mod tests {
             }),
             ("receiver_address", {
                 let mut s = snapshot();
-                s.receiver_address = s.factory_address.clone();
+                s.receiver_address = s.networks[0].factory_address.clone();
                 s
             }),
-            ("token_address", {
+            ("networks", {
                 let mut s = snapshot();
-                s.token_address = s.token_address.to_lowercase();
+                s.networks[0].token_address = s.networks[0].token_address.to_lowercase();
+                s
+            }),
+            ("networks", {
+                let mut s = snapshot();
+                s.networks.pop();
                 s
             }),
             ("schema", {
                 let mut s = snapshot();
-                s.schema = "payday.invoice.v2".into();
+                s.schema = "payday.invoice".into();
                 s
             }),
         ];
         for (field, snapshot) in mismatches {
-            let error = Invoice::issue(
-                factory,
-                chain_id,
-                token,
-                beneficiary,
-                amount,
-                1_900_000_000,
-                snapshot,
-            )
-            .unwrap_err();
+            let error =
+                Invoice::issue(&networks(), beneficiary, amount, 1_900_000_000, snapshot).unwrap_err();
             assert!(
                 matches!(error, AttributionError::SnapshotMismatch { field: f } if f == field),
                 "{field}: {error}"
             );
         }
+        // No network at all is not a request anyone could pay.
+        let empty = CanonicalIssuanceSnapshot::new(
+            party("Acme"),
+            party("Globex"),
+            PayerPolicy::Permissionless,
+            &[],
+            beneficiary,
+            amount,
+            1_900_000_000,
+        );
+        assert!(matches!(
+            Invoice::issue(&[], beneficiary, amount, 1_900_000_000, empty).unwrap_err(),
+            AttributionError::SnapshotMismatch { field: "networks" }
+        ));
     }
 
     #[test]
-    fn address_matches_parameters_uses_stored_salt_only() {
+    fn address_matches_parameters_uses_stored_binding_only() {
         // Attribution metadata is proof material. Losing or corrupting it
         // must never make a funded address look unsafe to sweep.
         let mut invoice = bound_invoice();
@@ -759,6 +859,7 @@ mod tests {
         invoice.issuance_snapshot.notes = Some("rewritten after the fact".into());
         invoice.issuance_snapshot.amount_base_units = "999".into();
         invoice.attribution_version = 7;
+        invoice.networks.clear();
         assert!(invoice.address_matches_parameters());
 
         invoice.binding.as_mut().unwrap().salt = Salt(B256::repeat_byte(0x01));

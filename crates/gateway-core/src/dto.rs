@@ -6,8 +6,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachmentId, CustomerId, Invoice, InvoiceStatus, IssuerId, Party, PayerPolicy,
-    PayerPolicyMode, USDC_DECIMALS,
+    AttachmentId, CustomerId, Invoice, InvoiceStatus, IssuerId, NetworkTerms, Party, PayerPolicy,
+    PayerPolicyMode, USDC_DECIMALS, chain_name, native_symbol,
 };
 
 /// The only attachment type Payday accepts (product plan §4.2).
@@ -21,13 +21,12 @@ pub fn rfc3339(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+/// The payer chooses the network they pay on among the deployment's
+/// supported ones, so a request names no chain or token: only the amount
+/// and where it settles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateDepositRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_address: Option<String>,
     /// Where exactly `amount` settles. Optional when `issuer_id` names an
     /// identity with a saved payout address: the first one is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,8 +152,11 @@ pub struct DepositRequestResponse {
     pub net_amount: String,
     pub net_amount_base_units: String,
     pub status: DepositRequestStatus,
-    pub token: TokenDto,
-    pub chain: ChainDto,
+    /// Every network the payer may pay on; the request commits to all of them.
+    pub networks: Vec<NetworkDto>,
+    /// The network the payer chose, once a wallet is bound; `None` before.
+    pub token: Option<TokenDto>,
+    pub chain: Option<ChainDto>,
     pub settlement_tx_hash: Option<String>,
     pub settlement_explorer_url: Option<String>,
     pub settled_at: Option<String>,
@@ -365,6 +367,9 @@ pub struct PayerDepositRequestResponse {
     /// Safety guidance shown only when payout needs operator attention.
     pub payer_message: Option<String>,
     pub content_unlocked: bool,
+    /// The networks the payer may choose from; gated with the content.
+    pub networks: Option<Vec<NetworkDto>>,
+    /// The chosen network, once a wallet is bound and the content is unlocked.
     pub chain: Option<ChainDto>,
     pub token: Option<TokenDto>,
     pub amount: Option<String>,
@@ -485,11 +490,37 @@ pub struct TokenDto {
 pub struct ChainDto {
     pub id: String,
     pub name: String,
+    /// The gas token's symbol on this chain.
+    pub native_symbol: String,
+}
+/// One network a request can be paid on: the chain and its USDC contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkDto {
+    pub chain: ChainDto,
+    pub token: TokenDto,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfSettlementDto {
+    pub chain_id: String,
     pub factory: String,
     pub salt: String,
+}
+
+impl NetworkDto {
+    pub fn from_terms(network: &NetworkTerms) -> Self {
+        Self {
+            chain: ChainDto {
+                id: network.chain_id.to_string(),
+                name: chain_name(network.chain_id.0).into(),
+                native_symbol: native_symbol(network.chain_id.0).into(),
+            },
+            token: TokenDto {
+                symbol: "USDC".into(),
+                address: network.token.0.to_checksum(None),
+                decimals: USDC_DECIMALS,
+            },
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttentionDto {
@@ -527,6 +558,7 @@ impl DepositRequestResponse {
         let attention = inv.blocked_reason.as_deref().map(attention);
         let snapshot = inv.issuance_snapshot;
         let binding = inv.binding.as_ref();
+        let chosen = binding.map(|b| NetworkDto::from_terms(&b.network));
         Self {
             id: inv.id.to_string(),
             deposit_url: String::new(),
@@ -553,15 +585,9 @@ impl DepositRequestResponse {
             net_amount: human(inv.amount.0),
             net_amount_base_units: inv.amount.0.to_string(),
             status,
-            token: TokenDto {
-                symbol: "USDC".into(),
-                address: inv.token.0.to_checksum(None),
-                decimals: USDC_DECIMALS,
-            },
-            chain: ChainDto {
-                id: inv.chain_id.0.to_string(),
-                name: chain_name(inv.chain_id.0).into(),
-            },
+            networks: inv.networks.iter().map(NetworkDto::from_terms).collect(),
+            token: chosen.as_ref().map(|network| network.token.clone()),
+            chain: chosen.map(|network| network.chain),
             settlement_tx_hash: inv.execute_tx_hash.map(|h| h.to_string()),
             settlement_explorer_url: None,
             settled_at: inv
@@ -569,7 +595,8 @@ impl DepositRequestResponse {
                 .and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0).map(rfc3339)),
             settled_block: inv.resolved_at_block.map(|b| b.to_string()),
             self_settlement: binding.map(|b| SelfSettlementDto {
-                factory: inv.factory.0.to_checksum(None),
+                chain_id: b.network.chain_id.to_string(),
+                factory: b.network.factory.0.to_checksum(None),
                 salt: b.salt.0.to_string(),
             }),
             attention,
@@ -622,15 +649,6 @@ fn payment_status(inv: &Invoice) -> DepositRequestStatus {
         InvoiceStatus::Blocked => DepositRequestStatus::NeedsAttention,
     }
 }
-fn chain_name(id: u64) -> &'static str {
-    match id {
-        1 => "Ethereum",
-        143 => "Monad",
-        10_143 => "Monad Testnet",
-        31_337 => "Local",
-        _ => "Unknown",
-    }
-}
 fn attention(code: &str) -> AttentionDto {
     let (message, action) = match code {
         "beneficiary_blacklisted" => (
@@ -668,6 +686,23 @@ mod tests {
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress,
         PayerAttestation, TokenAddress, sign_payer_attestation, wallet_of,
     };
+
+    const MONAD: ChainId = ChainId(143);
+
+    fn networks() -> Vec<NetworkTerms> {
+        vec![
+            NetworkTerms {
+                chain_id: MONAD,
+                token: TokenAddress(address!("754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+                factory: FactoryAddress(address!("0000000000000000000000000000000000000001")),
+            },
+            NetworkTerms {
+                chain_id: ChainId(8453),
+                token: TokenAddress(address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")),
+                factory: FactoryAddress(address!("0000000000000000000000000000000000000001")),
+            },
+        ]
+    }
     use alloy_primitives::{B256, U256, address};
 
     const PAYER_KEY: [u8; 32] = [7u8; 32];
@@ -681,34 +716,20 @@ mod tests {
     }
 
     fn invoice(policy: PayerPolicy) -> Invoice {
-        let factory = FactoryAddress(address!("0000000000000000000000000000000000000001"));
-        let chain_id = ChainId(143);
-        let token = TokenAddress(address!("754704Bc059F8C67012fEd69BC8A327a5aafb603"));
         let beneficiary = BeneficiaryAddress(address!("70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(1_000_000));
         let mut snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
             policy,
-            factory,
-            chain_id,
-            token,
+            &networks(),
             beneficiary,
             amount,
             1_900_000_000,
         );
         snapshot.heading = Some("March retainer".into());
         snapshot.reference = Some("INV-7".into());
-        Invoice::issue(
-            factory,
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            1_900_000_000,
-            snapshot,
-        )
-        .unwrap()
+        Invoice::issue(&networks(), beneficiary, amount, 1_900_000_000, snapshot).unwrap()
     }
 
     fn bound(mut invoice: Invoice) -> Invoice {
@@ -718,10 +739,10 @@ mod tests {
             B256::repeat_byte(0x11),
             invoice.expiration_timestamp,
         );
-        let attestation =
-            sign_payer_attestation(&PAYER_KEY, &message, invoice.chain_id.0, invoice.factory.0);
+        let factory = invoice.network_for(MONAD).unwrap().factory;
+        let attestation = sign_payer_attestation(&PAYER_KEY, &message, MONAD.0, factory.0);
         let binding = invoice
-            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .bind_payer_wallet(MONAD, attestation, "2026-09-06T00:00:00Z".into())
             .unwrap();
         invoice.binding = Some(binding);
         invoice
@@ -818,6 +839,17 @@ mod tests {
         assert_eq!(json["wallet_bound_at"], "2026-09-06T00:00:00Z");
         assert!(json["address"].is_string());
         assert!(json["self_settlement"]["salt"].is_string());
+        assert_eq!(json["self_settlement"]["chain_id"], "143");
+        assert_eq!(json["chain"]["id"], "143");
+        assert_eq!(json["chain"]["name"], "Monad");
+        assert_eq!(json["chain"]["native_symbol"], "MON");
+        assert_eq!(
+            json["token"]["address"],
+            "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
+        );
+        assert_eq!(json["networks"].as_array().unwrap().len(), 2);
+        assert_eq!(json["networks"][1]["chain"]["name"], "Base");
+        assert_eq!(json["networks"][1]["chain"]["native_symbol"], "ETH");
         assert!(json.get("refund_address").is_none());
 
         // Before a wallet is bound there is no address and nothing to settle.
@@ -828,6 +860,9 @@ mod tests {
         assert!(json["payer_wallet"].is_null());
         assert!(json["recovery_address"].is_null());
         assert!(json["self_settlement"].is_null());
+        assert!(json["chain"].is_null(), "no network until the payer chooses one");
+        assert!(json["token"].is_null());
+        assert_eq!(json["networks"].as_array().unwrap().len(), 2);
         assert_eq!(json["status"], "awaiting_deposit");
         assert_eq!(json["issuer"]["name"], "Acme");
         assert_eq!(json["payer"]["name"], "Globex");
@@ -835,7 +870,7 @@ mod tests {
         assert_eq!(json["heading"], "March retainer");
         assert_eq!(json["reference"], "INV-7");
         assert_eq!(json["payer_policy"]["mode"], "permissionless");
-        assert_eq!(json["attribution"]["version"], 2);
+        assert_eq!(json["attribution"]["version"], 3);
         assert!(
             json["attribution"]["hash"]
                 .as_str()

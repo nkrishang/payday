@@ -21,12 +21,13 @@ contract ExecuteRevertTest is Test {
         bytes32 salt = bytes32(uint256(1));
         uint64 expirationTimestamp = uint64(block.timestamp + 1 days);
         address recovery = address(0xCAFE);
-        address paymentAddress =
-            factory.paymentAddress(address(token), amount, address(0xBEEF), expirationTimestamp, recovery, salt);
+        address paymentAddress = factory.paymentAddress(
+            address(token), amount, address(0xBEEF), expirationTimestamp, recovery, salt, block.chainid
+        );
         token.mint(paymentAddress, amount - 1);
 
         vm.expectRevert(CREATE3.DeploymentFailed.selector);
-        factory.execute(address(token), amount, address(0xBEEF), expirationTimestamp, recovery, salt);
+        factory.execute(address(token), amount, address(0xBEEF), expirationTimestamp, recovery, salt, block.chainid);
 
         assertEq(paymentAddress.code.length, 0);
         assertEq(token.balanceOf(paymentAddress), amount - 1);
@@ -38,14 +39,15 @@ contract ExecuteRevertTest is Test {
         address receiver = address(0xBEEF);
         uint64 expirationTimestamp = uint64(block.timestamp + 1 days);
         address recovery = address(0xCAFE);
-        address paymentAddress =
-            factory.paymentAddress(address(token), amount, receiver, expirationTimestamp, recovery, salt);
+        address paymentAddress = factory.paymentAddress(
+            address(token), amount, receiver, expirationTimestamp, recovery, salt, block.chainid
+        );
         token.mint(paymentAddress, amount);
 
-        factory.execute(address(token), amount, receiver, expirationTimestamp, recovery, salt);
+        factory.execute(address(token), amount, receiver, expirationTimestamp, recovery, salt, block.chainid);
         assertGt(paymentAddress.code.length, 0);
 
         vm.expectRevert(CREATE3.DeploymentFailed.selector);
-        factory.execute(address(token), amount, receiver, expirationTimestamp, recovery, salt);
+        factory.execute(address(token), amount, receiver, expirationTimestamp, recovery, salt, block.chainid);
     }
 }

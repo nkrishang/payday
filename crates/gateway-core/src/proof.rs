@@ -8,11 +8,18 @@
 //! into the address.
 //!
 //! ```text
-//! attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V2" || JCS(snapshot))
+//! attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V3" || JCS(snapshot))
 //! digest           = EIP-712 signing hash of payer_wallet.typed_data
-//! salt             = keccak256("PAYDAY_SALT_V2" || attribution_hash || digest)
-//! payment_address  = CREATE3(factory, token, amount, receiver, deadline, payer_wallet, salt)
+//! salt             = keccak256("PAYDAY_SALT_V3" || attribution_hash || digest)
+//! network          = snapshot.networks[chain_id == payer_wallet.typed_data.domain.chainId]
+//! payment_address  = CREATE3(network.factory, network.token, amount, receiver, deadline,
+//!                            payer_wallet, salt, network.chain_id)
 //! ```
+//!
+//! The request commits to every network it may be paid on; the payer's
+//! attestation domain names the one they chose, and the proof states it as
+//! `chain_id`. A verifier accepts the proof only if that chain is one the
+//! request offered and the proof's factory and token are that network's.
 //!
 //! Offline limits: the hash → attestation → salt → address chain, the
 //! attachment, Payday's attestation, and the transfers' recipient, sender
@@ -31,14 +38,14 @@ use thiserror::Error;
 
 use crate::{
     Amount, AttributionError, BeneficiaryAddress, CANONICALIZATION, CanonicalIssuanceSnapshot,
-    FactoryAddress, PayerAttestationError, PayerAttestationScope, PayerWalletAttestation,
-    RecoveryAddress, SNAPSHOT_SCHEMA, Salt, TokenAddress, attribution_hash, canonical_bytes,
+    ChainId, PayerAttestationError, PayerAttestationScope, PayerWalletAttestation,
+    RecoveryAddress, SNAPSHOT_SCHEMA, Salt, attribution_hash, canonical_bytes,
     predict_payment_address, recompute_salt, verify_payer_attestation,
 };
 
-pub const PROOF_VERSION: &str = "payday.proof.v2";
-pub const ATTESTATION_VERSION: &str = "payday.attestation.v2";
-pub const ATTESTATION_DOMAIN: &[u8] = b"PAYDAY_VERIFICATION_ATTESTATION_V2";
+pub const PROOF_VERSION: &str = "payday.proof.v3";
+pub const ATTESTATION_VERSION: &str = "payday.attestation.v3";
+pub const ATTESTATION_DOMAIN: &[u8] = b"PAYDAY_VERIFICATION_ATTESTATION_V3";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofTransfer {
@@ -65,7 +72,7 @@ pub struct VerificationFact {
     pub at: String,
 }
 
-/// What Payday signs about a verification outcome (`payday.attestation.v2`).
+/// What Payday signs about a verification outcome (`payday.attestation.v3`).
 ///
 /// The issuance commitment is part of the payload because the payment id is
 /// a free-form string a proof holder can set to anything: without the
@@ -83,7 +90,7 @@ pub struct VerificationAttestationPayload {
     pub payment_id: String,
     /// `0x` hex, 32 bytes: the attribution hash of the canonical request.
     pub attribution_hash: String,
-    /// Decimal, as in the canonical issuance snapshot.
+    /// Decimal: the chain the payer chose, one of the snapshot's networks.
     pub chain_id: String,
     /// EIP-55 checksummed CREATE3 payment address.
     pub payment_address: String,
@@ -124,7 +131,10 @@ pub struct ProofOfPayment {
     /// the address's recovery term.
     pub payer_wallet: PayerWalletAttestation,
     pub salt: String,
+    /// Decimal: the network the payer chose among `canonical_issuance_snapshot.networks`.
     pub chain_id: String,
+    /// That network's factory and token, restated so the derivation reads as
+    /// the factory computes it.
     pub factory_address: String,
     pub payment_address: String,
     pub token_address: String,
@@ -170,6 +180,8 @@ pub enum ProofError {
     SaltMismatch,
     #[error("chain parameters disagree with the canonical request")]
     ChainParametersMismatch,
+    #[error("the request does not offer the proof's chain")]
+    ChainNotOffered,
     #[error("recovery address is not the payer's attested wallet")]
     RecoveryAddressMismatch,
     #[error("deposit address is not the CREATE3 address of the request and attestation")]
@@ -242,20 +254,28 @@ pub fn verify_proof(
         return Err(ProofError::AttributionHashMismatch);
     }
 
-    // 2. The payer's wallet attestation: made for this request on this
-    // deployment, and signed by the wallet it names.
-    let factory = FactoryAddress(address("factory_address", &snapshot.factory_address)?);
-    let token = TokenAddress(address("token_address", &snapshot.token_address)?);
-    if proof.chain_id != snapshot.chain_id
-        || address("factory_address", &proof.factory_address)? != factory.0
-        || address("token_address", &proof.token_address)? != token.0
-    {
-        return Err(ProofError::ChainParametersMismatch);
-    }
-    let chain_id: u64 = snapshot
+    // 2. The network the payer chose must be one the request offered, and
+    // the proof's factory and token must be that network's.
+    let chain_id: u64 = proof
         .chain_id
         .parse()
         .map_err(|_| ProofError::Malformed("chain_id"))?;
+    let networks = snapshot
+        .networks()
+        .ok_or(ProofError::Malformed("networks"))?;
+    let network = *networks
+        .iter()
+        .find(|network| network.chain_id == ChainId(chain_id))
+        .ok_or(ProofError::ChainNotOffered)?;
+    if address("factory_address", &proof.factory_address)? != network.factory.0
+        || address("token_address", &proof.token_address)? != network.token.0
+    {
+        return Err(ProofError::ChainParametersMismatch);
+    }
+    let (factory, token) = (network.factory, network.token);
+
+    // 3. The payer's wallet attestation: made for this request on that
+    // chain's factory, and signed by the wallet it names.
     let attested = verify_payer_attestation(
         &proof.payer_wallet,
         PayerAttestationScope {
@@ -265,14 +285,14 @@ pub fn verify_proof(
         },
     )?;
 
-    // 3. Hash and attestation digest -> salt.
+    // 4. Hash and attestation digest -> salt.
     let salt = recompute_salt(hash, attested.digest);
     if salt.0 != word("salt", &proof.salt)? {
         return Err(ProofError::SaltMismatch);
     }
 
-    // 4. Salt, the committed terms, and the wallet as recovery -> CREATE3
-    // address.
+    // 5. Salt, the chosen network, the committed terms, and the wallet as
+    // recovery -> CREATE3 address.
     let recovery = RecoveryAddress(address("recovery_address", &proof.recovery_address)?);
     if recovery.0 != attested.wallet {
         return Err(ProofError::RecoveryAddressMismatch);
@@ -290,13 +310,14 @@ pub fn verify_proof(
             .map_err(|_| ProofError::Malformed("expiration_timestamp"))?,
         recovery,
         salt,
+        network.chain_id,
     )
     .0;
     if payment_address != address("payment_address", &proof.payment_address)? {
         return Err(ProofError::PaymentAddressMismatch);
     }
 
-    // 5. The attachment, when the holder has it.
+    // 6. The attachment, when the holder has it.
     let attachment_verified = match attachment {
         None => false,
         Some(bytes) => {
@@ -315,7 +336,7 @@ pub fn verify_proof(
         }
     };
 
-    // 6. The Payday-attested verification outcome.
+    // 7. The Payday-attested verification outcome.
     let attestation = &proof.verification;
     let digest = attestation_digest(&attestation.payload)?;
     let signature = hex::decode(&attestation.signature)
@@ -367,7 +388,7 @@ pub fn verify_proof(
             "verification.payload.wallet_nonce",
             &attestation.payload.wallet_nonce,
         )? != attested.nonce
-        || attestation.payload.chain_id != snapshot.chain_id
+        || attestation.payload.chain_id != proof.chain_id
     {
         return Err(ProofError::AttestationCommitmentMismatch);
     }
@@ -380,7 +401,7 @@ pub fn verify_proof(
         return Err(ProofError::AttestationWalletFactMissing);
     }
 
-    // 7. The transfers that paid the address, and the transaction that
+    // 8. The transfers that paid the address, and the transaction that
     // settled it. Amounts and hashes are unsigned data, so offline the checks
     // are structural: every transfer went to the payment address from the
     // attested wallet, together they cover the request amount, and the
@@ -446,9 +467,28 @@ mod tests {
 
     use super::*;
     use crate::{
-        AttachmentCommitment, ChainId, Invoice, Party, PayerAttestation, PayerPolicy,
-        PayerPolicyMode, PaymentBinding, derive_attribution, sign_payer_attestation, wallet_of,
+        AttachmentCommitment, FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation,
+        PayerPolicy, PayerPolicyMode, PaymentBinding, TokenAddress, derive_attribution,
+        sign_payer_attestation, wallet_of,
     };
+
+    const MONAD: ChainId = ChainId(143);
+    const BASE: ChainId = ChainId(8453);
+
+    fn networks() -> Vec<NetworkTerms> {
+        vec![
+            NetworkTerms {
+                chain_id: MONAD,
+                token: TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+                factory: FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3")),
+            },
+            NetworkTerms {
+                chain_id: BASE,
+                token: TokenAddress(address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")),
+                factory: FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3")),
+            },
+        ]
+    }
 
     const ATTACHMENT: &[u8] = b"%PDF-1.7 minimal test document";
     const PAYER_KEY: [u8; 32] = [3u8; 32];
@@ -484,7 +524,7 @@ mod tests {
     }
 
     fn issued() -> Invoice {
-        issued_for("Globex", 2_500_000, "alice@example.com", &PAYER_KEY)
+        issued_for("Globex", 2_500_000, "alice@example.com", &PAYER_KEY, MONAD)
     }
 
     fn issued_for(
@@ -492,10 +532,9 @@ mod tests {
         amount_base_units: u64,
         expected_email: &str,
         payer_key: &[u8; 32],
+        chain_id: ChainId,
     ) -> Invoice {
-        let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
-        let chain_id = ChainId(143);
-        let token = TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603"));
+        let networks = networks();
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(amount_base_units));
@@ -505,9 +544,7 @@ mod tests {
             PayerPolicy::VerifiedEmail {
                 expected_email: expected_email.into(),
             },
-            factory,
-            chain_id,
-            token,
+            &networks,
             beneficiary,
             amount,
             1_900_000_000,
@@ -518,25 +555,18 @@ mod tests {
             byte_length: ATTACHMENT.len().to_string(),
             sha256: hex::encode_prefixed(digest),
         });
-        let mut invoice = Invoice::issue(
-            factory,
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            1_900_000_000,
-            snapshot,
-        )
-        .unwrap();
+        let mut invoice =
+            Invoice::issue(&networks, beneficiary, amount, 1_900_000_000, snapshot).unwrap();
         let message = PayerAttestation::new(
             invoice.attribution_hash,
             wallet_of(payer_key),
             B256::repeat_byte(0x11),
             1_900_000_000,
         );
+        let factory = invoice.network_for(chain_id).unwrap().factory;
         let attestation = sign_payer_attestation(payer_key, &message, chain_id.0, factory.0);
         let binding = invoice
-            .bind_payer_wallet(attestation, "2026-09-01T11:59:00Z".into())
+            .bind_payer_wallet(chain_id, attestation, "2026-09-01T11:59:00Z".into())
             .unwrap();
         invoice.binding = Some(binding);
         invoice
@@ -552,7 +582,7 @@ mod tests {
             version: ATTESTATION_VERSION.into(),
             payment_id: invoice.id.to_string(),
             attribution_hash: invoice.attribution_hash.to_string(),
-            chain_id: invoice.chain_id.0.to_string(),
+            chain_id: binding.network.chain_id.to_string(),
             payment_address: binding.payment_address.0.to_checksum(None),
             payer_wallet: binding.payer_wallet.to_checksum(None),
             wallet_nonce: binding.attestation.typed_data.message.nonce.clone(),
@@ -595,10 +625,10 @@ mod tests {
             attribution_hash: invoice.attribution_hash.to_string(),
             payer_wallet: binding.attestation.clone(),
             salt: binding.salt.0.to_string(),
-            chain_id: invoice.chain_id.0.to_string(),
-            factory_address: invoice.factory.0.to_checksum(None),
+            chain_id: binding.network.chain_id.to_string(),
+            factory_address: binding.network.factory.0.to_checksum(None),
             payment_address: binding.payment_address.0.to_checksum(None),
-            token_address: invoice.token.0.to_checksum(None),
+            token_address: binding.network.token.0.to_checksum(None),
             recovery_address: binding.recovery.0.to_checksum(None),
             settlement_transaction_hash: settlement.to_string(),
             transfers: vec![
@@ -702,9 +732,34 @@ mod tests {
             ),
             ProofError::PaymentAddressMismatch
         ));
+        // The chain must be one the request offered, and the factory and
+        // token must be that network's.
         assert!(matches!(
             check(|p| p.chain_id = "1".into(), None),
+            ProofError::ChainNotOffered
+        ));
+        assert!(matches!(
+            check(|p| p.chain_id = "8453".into(), None),
             ProofError::ChainParametersMismatch
+        ));
+        assert!(matches!(
+            check(
+                |p| p.token_address = Address::repeat_byte(0x08).to_checksum(None),
+                None
+            ),
+            ProofError::ChainParametersMismatch
+        ));
+        // Restating Base's token with Base's chain id moves the attestation
+        // domain: the signature was made for Monad.
+        assert!(matches!(
+            check(
+                |p| {
+                    p.chain_id = "8453".into();
+                    p.token_address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into();
+                },
+                None
+            ),
+            ProofError::PayerAttestation(PayerAttestationError::DomainMismatch)
         ));
 
         let mut longer = ATTACHMENT.to_vec();
@@ -857,6 +912,7 @@ mod tests {
             250_000_000_000,
             "mallory@example.com",
             &PAYER_KEY,
+            MONAD,
         );
         let mut transplanted = proof(&fabricated);
         transplanted.payment_id = real.id.to_string();
@@ -871,7 +927,13 @@ mod tests {
         // Same request text, a different payer: the wallet and nonce in the
         // signed payload no longer match the attestation in the proof, and
         // neither does the address.
-        let other_payer = issued_for("Globex", 2_500_000, "alice@example.com", &OTHER_PAYER_KEY);
+        let other_payer = issued_for(
+            "Globex",
+            2_500_000,
+            "alice@example.com",
+            &OTHER_PAYER_KEY,
+            MONAD,
+        );
         assert_eq!(real.attribution_hash, other_payer.attribution_hash);
         let mut swapped = proof(&other_payer);
         swapped.payment_id = real.id.to_string();
@@ -884,11 +946,34 @@ mod tests {
         // Same request terms and attestation elsewhere: the chain id alone is
         // enough to reject the attestation.
         let mut other_chain = proof(&real);
-        other_chain.verification.payload.chain_id = "1".into();
+        other_chain.verification.payload.chain_id = "8453".into();
         other_chain.verification = sign(other_chain.verification.payload);
         assert!(matches!(
             verify_proof(&other_chain, None, &[attestor()]).unwrap_err(),
             ProofError::AttestationCommitmentMismatch
         ));
+    }
+
+    #[test]
+    fn a_request_paid_on_another_of_its_networks_proves_that_network() {
+        // The same request text, paid on Base: the attestation domain, the
+        // token, and the address all follow the payer's choice, and the
+        // proof verifies against the Base entry of the snapshot.
+        let on_base = issued_for("Globex", 2_500_000, "alice@example.com", &PAYER_KEY, BASE);
+        let proof = proof(&on_base);
+        assert_eq!(proof.chain_id, "8453");
+        assert_eq!(
+            proof.token_address,
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        );
+        assert_eq!(proof.payer_wallet.typed_data.domain.chain_id, 8453);
+        let verified = verify_proof(&proof, Some(ATTACHMENT), &[attestor()]).unwrap();
+        assert_eq!(verified.payment_address, binding(&on_base).payment_address.0);
+        let on_monad = issued();
+        assert_eq!(on_monad.attribution_hash, on_base.attribution_hash);
+        assert_ne!(
+            binding(&on_monad).payment_address,
+            binding(&on_base).payment_address
+        );
     }
 }

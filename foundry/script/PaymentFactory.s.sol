@@ -10,6 +10,12 @@ import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 /// `BatchSweeper` bound to it. `Payment.creationCode` is embedded in the
 /// factory, so any `Payment` change is a new generation and both contracts
 /// move together; the services pin the generation by runtime code hash.
+///
+/// The generation must live at the same addresses on every supported chain:
+/// a payer's counterfactual address is only recoverable on a chain they did
+/// not choose if that chain's factory can reproduce it. CREATE addresses
+/// depend on the deployer and its nonce alone, so the script insists on a
+/// fresh deployer key (nonce 0) and the same key is used on every chain.
 contract PaymentFactoryScript is Script {
     PaymentFactory public factory;
     BatchSweeper public batchSweeper;
@@ -19,6 +25,10 @@ contract PaymentFactoryScript is Script {
     function run() public {
         uint256 expectedChainId = vm.envUint("PAYDAY_CHAIN_ID");
         require(block.chainid == expectedChainId, "unexpected deployment chain");
+        (, address deployer,) = vm.readCallers();
+        require(
+            vm.getNonce(deployer) == 0, "deploy each generation from a fresh key so every chain gets the same addresses"
+        );
 
         vm.startBroadcast();
 

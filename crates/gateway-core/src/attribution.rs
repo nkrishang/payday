@@ -3,9 +3,9 @@
 //!
 //! ```text
 //! canonical_bytes    = JCS(canonical_issuance_snapshot)          (RFC 8785)
-//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V2" || canonical_bytes)
+//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V3" || canonical_bytes)
 //! attestation_digest = EIP-712 signing hash of the payer's PayerAttestation
-//! salt               = keccak256("PAYDAY_SALT_V2" || attribution_hash || attestation_digest)
+//! salt               = keccak256("PAYDAY_SALT_V3" || attribution_hash || attestation_digest)
 //! ```
 //!
 //! The salt exists only once a payer has attested a wallet for the request
@@ -25,13 +25,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{Amount, BeneficiaryAddress, ChainId, FactoryAddress, Salt, TokenAddress};
+use crate::{Amount, BeneficiaryAddress, NetworkTerms, Salt};
 
-pub const ATTRIBUTION_VERSION: u16 = 2;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V2";
-pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V2";
+pub const ATTRIBUTION_VERSION: u16 = 3;
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V3";
+pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V3";
 /// `CanonicalIssuanceSnapshot::schema`; a new schema means a new version.
-pub const SNAPSHOT_SCHEMA: &str = "payday.invoice";
+/// v3 commits to the list of networks the request may be paid on instead of
+/// one chain: the payer's attestation selects one of them.
+pub const SNAPSHOT_SCHEMA: &str = "payday.invoice.v3";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
@@ -265,13 +267,46 @@ pub struct AttachmentCommitment {
     pub sha256: String,
 }
 
+/// One network a request may be paid on, in canonical string form: decimal
+/// chain id, EIP-55 token and factory. The list is ordered by chain id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotNetwork {
+    pub chain_id: String,
+    pub token_address: String,
+    pub factory_address: String,
+}
+
+impl From<&NetworkTerms> for SnapshotNetwork {
+    fn from(network: &NetworkTerms) -> Self {
+        Self {
+            chain_id: network.chain_id.0.to_string(),
+            token_address: network.token.0.to_checksum(None),
+            factory_address: network.factory.0.to_checksum(None),
+        }
+    }
+}
+
+impl SnapshotNetwork {
+    /// The typed terms, if every field parses.
+    pub fn terms(&self) -> Option<NetworkTerms> {
+        Some(NetworkTerms {
+            chain_id: crate::ChainId(self.chain_id.parse().ok()?),
+            token: self.token_address.parse().ok()?,
+            factory: self.factory_address.parse().ok()?,
+        })
+    }
+}
+
 /// Everything an issued invoice commits to. Numbers are decimal strings and
 /// addresses are EIP-55 checksummed so the canonical form is unambiguous.
 ///
 /// The recovery address is deliberately absent: it is the payer's attested
 /// wallet, known only after issuance, and it enters the payment address
 /// through the attestation the salt is derived from rather than through
-/// this document.
+/// this document. So is the chain: the request commits to every network it
+/// may be paid on, and the attestation's EIP-712 domain names the one the
+/// payer chose.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalIssuanceSnapshot {
@@ -286,10 +321,8 @@ pub struct CanonicalIssuanceSnapshot {
     pub expiration_timestamp: String,
     pub payer_policy: PayerPolicy,
     pub attachment: Option<AttachmentCommitment>,
-    pub chain_id: String,
-    pub token_address: String,
+    pub networks: Vec<SnapshotNetwork>,
     pub receiver_address: String,
-    pub factory_address: String,
 }
 
 impl CanonicalIssuanceSnapshot {
@@ -297,18 +330,18 @@ impl CanonicalIssuanceSnapshot {
     /// every optional field absent. This is the one place that renders chain
     /// parameters into their canonical string form, so
     /// [`crate::Invoice::issue`] can check a snapshot against the same rules.
-    #[allow(clippy::too_many_arguments)]
+    /// Networks are sorted by chain id whatever order they arrive in.
     pub fn new(
         issuer: Party,
         bill_to: Party,
         payer_policy: PayerPolicy,
-        factory: FactoryAddress,
-        chain_id: ChainId,
-        token: TokenAddress,
+        networks: &[NetworkTerms],
         receiver: BeneficiaryAddress,
         amount: Amount,
         expiration_timestamp: u64,
     ) -> Self {
+        let mut sorted: Vec<&NetworkTerms> = networks.iter().collect();
+        sorted.sort_by_key(|network| network.chain_id);
         Self {
             schema: SNAPSHOT_SCHEMA.into(),
             canonicalization: CANONICALIZATION.into(),
@@ -321,11 +354,16 @@ impl CanonicalIssuanceSnapshot {
             expiration_timestamp: expiration_timestamp.to_string(),
             payer_policy,
             attachment: None,
-            chain_id: chain_id.0.to_string(),
-            token_address: token.0.to_checksum(None),
+            networks: sorted.into_iter().map(SnapshotNetwork::from).collect(),
             receiver_address: receiver.0.to_checksum(None),
-            factory_address: factory.0.to_checksum(None),
         }
+    }
+
+    /// The typed network terms this snapshot commits to, in canonical order.
+    /// `None` when any entry is malformed: a snapshot is never edited after
+    /// issuance, so that is a corrupted row, not a request.
+    pub fn networks(&self) -> Option<Vec<NetworkTerms>> {
+        self.networks.iter().map(SnapshotNetwork::terms).collect()
     }
 }
 
@@ -386,9 +424,24 @@ mod tests {
     use alloy_primitives::{Address, U256, address};
 
     use super::*;
-    use crate::{RecoveryAddress, predict_payment_address};
+    use crate::{ChainId, FactoryAddress, RecoveryAddress, TokenAddress, predict_payment_address};
 
     const WALLET: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
+
+    fn networks() -> Vec<NetworkTerms> {
+        vec![
+            NetworkTerms {
+                chain_id: ChainId(8453),
+                token: TokenAddress(address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")),
+                factory: FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3")),
+            },
+            NetworkTerms {
+                chain_id: ChainId(143),
+                token: TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+                factory: FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3")),
+            },
+        ]
+    }
 
     pub(crate) fn party(name: &str) -> Party {
         Party {
@@ -413,9 +466,7 @@ mod tests {
             PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
             },
-            FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3")),
-            ChainId(143),
-            TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+            &networks(),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")),
             Amount(U256::from(1_000_000)),
             1_900_000_000,
@@ -431,14 +482,16 @@ mod tests {
     }
 
     fn address_for(snapshot: &CanonicalIssuanceSnapshot, salt: Salt) -> alloy_primitives::Address {
+        let network = snapshot.networks().unwrap()[0];
         predict_payment_address(
-            FactoryAddress(snapshot.factory_address.parse().unwrap()),
-            TokenAddress(snapshot.token_address.parse().unwrap()),
+            network.factory,
+            network.token,
             Amount(U256::from_str_radix(&snapshot.amount_base_units, 10).unwrap()),
             BeneficiaryAddress(snapshot.receiver_address.parse().unwrap()),
             snapshot.expiration_timestamp.parse().unwrap(),
             RecoveryAddress(WALLET),
             salt,
+            network.chain_id,
         )
         .0
     }
@@ -449,7 +502,7 @@ mod tests {
         // whitespace, then reversed keys, an escaped character, and the
         // absent party fields spelled out as null.
         let natural = r#"{
-            "schema": "payday.invoice", "canonicalization": "RFC8785",
+            "schema": "payday.invoice.v3", "canonicalization": "RFC8785",
             "issuer": {"name": "Acme Corp", "email": "billing@acme.example"},
             "bill_to": {"name": "Globex", "details": "1 Main St"},
             "amount_base_units": "1000000", "notes": "Thanks", "heading": null,
@@ -457,14 +510,20 @@ mod tests {
             "payer_policy": {"mode": "verified_email", "expected_email": "alice@example.com"},
             "attachment": {"id": "0198f80c-8d2f-7dc1-a369-90556a64f700", "byte_length": "1234",
                 "sha256": "0xabababababababababababababababababababababababababababababababab"},
-            "chain_id": "143",
-            "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-            "receiver_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-            "factory_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+            "networks": [
+                {"chain_id": "143", "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+                 "factory_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"},
+                {"chain_id": "8453", "token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                 "factory_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"}
+            ],
+            "receiver_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
         }"#;
-        let reversed = r#"{"factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            "receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-            "token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603","chain_id":"143",
+        let reversed = r#"{"receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "networks":[
+                {"factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","chain_id":"143",
+                 "token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},
+                {"token_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                 "factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","chain_id":"8453"}],
             "attachment":{"sha256":"0xabababababababababababababababababababababababababababababababab",
                 "byte_length":"1234","id":"0198f80c-8d2f-7dc1-a369-90556a64f700"},
             "payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},
@@ -472,7 +531,7 @@ mod tests {
             "notes":"\u0054hanks","amount_base_units":"1000000",
             "bill_to":{"details":"1 Main St","email":null,"name":"Globex"},
             "issuer":{"details":null,"email":"billing@acme.example","name":"Acme Corp"},
-            "canonicalization":"RFC8785","schema":"payday.invoice"}"#;
+            "canonicalization":"RFC8785","schema":"payday.invoice.v3"}"#;
         let a: CanonicalIssuanceSnapshot = serde_json::from_str(natural).unwrap();
         let b: CanonicalIssuanceSnapshot = serde_json::from_str(reversed).unwrap();
         assert_eq!(a, snapshot());
@@ -492,26 +551,28 @@ mod tests {
             r#""attachment":{"byte_length":"1234","id":"0198f80c-8d2f-7dc1-a369-90556a64f700","#,
             r#""sha256":"0xabababababababababababababababababababababababababababababababab"},"#,
             r#""bill_to":{"details":"1 Main St","name":"Globex"},"#,
-            r#""canonicalization":"RFC8785","chain_id":"143","expiration_timestamp":"1900000000","#,
-            r#""factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","heading":null,"#,
-            r#""issuer":{"email":"billing@acme.example","name":"Acme Corp"},"notes":"Thanks","#,
+            r#""canonicalization":"RFC8785","expiration_timestamp":"1900000000","heading":null,"#,
+            r#""issuer":{"email":"billing@acme.example","name":"Acme Corp"},"#,
+            r#""networks":[{"chain_id":"143","factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","#,
+            r#""token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},"#,
+            r#"{"chain_id":"8453","factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","#,
+            r#""token_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}],"notes":"Thanks","#,
             r#""payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},"#,
             r#""receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","#,
-            r#""reference":"INV-1","schema":"payday.invoice","#,
-            r#""token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"}"#,
+            r#""reference":"INV-1","schema":"payday.invoice.v3"}"#,
         );
         let bytes = canonical_bytes(&snapshot()).unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
         assert_eq!(
             attribution_hash(&bytes).to_string(),
-            "0x14ccb1b38fe0ad72420000e663ab9038998cae46a1b44a726c8ac7fc2f40dfcc"
+            "0x6f71820539f6876e12aa81e36e09d9d5b8d0c87c03c73ba82a464765a9f82235"
         );
         let attestation_digest = B256::repeat_byte(0x11);
         assert_eq!(
             recompute_salt(attribution_hash(&bytes), attestation_digest)
                 .0
                 .to_string(),
-            "0x2868120e96002317dfa45a845647a21e2acfa98f5b044c0b525834a9cb9b5092"
+            "0x2ad64ccc40637d28f2b9a0b4c800254ef46970b20156e444f935900c7689b7ff"
         );
     }
 
@@ -530,6 +591,20 @@ mod tests {
         let salt_b = recompute_salt(b.attribution_hash, digest);
         assert_ne!(salt_a, salt_b);
         assert_ne!(address_for(&original, salt_a), address_for(&edited, salt_b));
+    }
+
+    #[test]
+    fn networks_are_canonicalized_by_chain_id_and_round_trip_as_terms() {
+        // `networks()` above lists Base before Monad; the snapshot sorts.
+        let snapshot = snapshot();
+        assert_eq!(snapshot.networks[0].chain_id, "143");
+        assert_eq!(snapshot.networks[1].chain_id, "8453");
+        let mut terms = networks();
+        terms.sort_by_key(|network| network.chain_id);
+        assert_eq!(snapshot.networks().unwrap(), terms);
+        let mut corrupt = snapshot.clone();
+        corrupt.networks[0].chain_id = "monad".into();
+        assert_eq!(corrupt.networks(), None);
     }
 
     #[test]

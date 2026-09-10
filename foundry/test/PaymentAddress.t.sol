@@ -22,14 +22,15 @@ contract PaymentAddressTest is Test {
         address receiver,
         uint64 expirationTimestamp,
         address recovery,
-        bytes32 salt
+        bytes32 salt,
+        uint64 chainId
     ) public {
         // --- Solidity side ---
-        address expected = factory.paymentAddress(token, amount, receiver, expirationTimestamp, recovery, salt);
+        address expected = factory.paymentAddress(token, amount, receiver, expirationTimestamp, recovery, salt, chainId);
 
         // --- Rust side via vm.ffi ---
         // Uses the pre-built binary. Run `cargo build -p gateway-core --bin derive-address` first.
-        string[] memory inputs = new string[](8);
+        string[] memory inputs = new string[](9);
         inputs[0] = "target/debug/derive-address";
         inputs[1] = vm.toString(address(factory));
         inputs[2] = vm.toString(token);
@@ -38,6 +39,7 @@ contract PaymentAddressTest is Test {
         inputs[5] = vm.toString(expirationTimestamp);
         inputs[6] = vm.toString(recovery);
         inputs[7] = vm.toString(salt);
+        inputs[8] = vm.toString(chainId);
 
         bytes memory result = vm.ffi(inputs);
         // vm.ffi hex-decodes "0x..." stdout output, so result is 20 raw address bytes.
@@ -46,14 +48,15 @@ contract PaymentAddressTest is Test {
         assertEq(expected, actual);
     }
 
-    function test_expiration_and_recovery_change_address() public view {
+    function test_expiration_recovery_and_chain_change_address() public view {
         address token = address(1);
         address receiver = address(2);
         address recovery = address(3);
         bytes32 salt = bytes32(uint256(4));
-        address original = factory.paymentAddress(token, 5, receiver, 100, recovery, salt);
+        address original = factory.paymentAddress(token, 5, receiver, 100, recovery, salt, 143);
 
-        assertNotEq(original, factory.paymentAddress(token, 5, receiver, 101, recovery, salt));
-        assertNotEq(original, factory.paymentAddress(token, 5, receiver, 100, address(6), salt));
+        assertNotEq(original, factory.paymentAddress(token, 5, receiver, 101, recovery, salt, 143));
+        assertNotEq(original, factory.paymentAddress(token, 5, receiver, 100, address(6), salt, 143));
+        assertNotEq(original, factory.paymentAddress(token, 5, receiver, 100, recovery, salt, 8453));
     }
 }
