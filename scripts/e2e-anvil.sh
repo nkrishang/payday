@@ -40,6 +40,10 @@ ATTACHMENT_BUCKET="payday-attachments-local"
 
 export PAYDAY_RPC_URL="$RPC_URL"
 export PAYDAY_API_URL="$API_URL"
+# The binary's EnvFilter defaults to silent when RUST_LOG is unset (production
+# sets it in infra/main.tf). The assertions below read the indexer's log
+# trail, so give every service the same level production runs at.
+export RUST_LOG="${RUST_LOG:-info}"
 export PAYDAY_FACTORY_ADDRESS="$FACTORY"
 export PAYDAY_BATCH_SWEEPER_ADDRESS="$BATCH_SWEEPER"
 export PAYDAY_USDC_ADDRESS="$USDC"
@@ -48,6 +52,11 @@ export PAYDAY_USDC_START_BLOCK="${PAYDAY_USDC_START_BLOCK:-0}"
 export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
 export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
 export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
+# The transfer signal runs against Anvil's WebSocket on the same port (derived
+# from the RPC URL, standard `logs` fallback). The timer backstop is kept
+# deliberately slow here so the flows below prove the wake path works: a
+# deposit that only the timer would catch takes visibly longer.
+export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-15000}"
 export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
@@ -493,7 +502,7 @@ assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request 
 assert_eq null "$(jq -r .payer_wallet <<<"$exact_issued")" "a freshly issued request already names a payer wallet"
 assert_eq 2 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
 # The payer's wallet, not the merchant, is what turns the request into an address.
-exact_session="$(bind_payer_wallet "$exact_id")"
+bind_payer_wallet "$exact_id" >/dev/null
 exact="$(get_invoice "$exact_id")"
 exact_replay="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
@@ -536,7 +545,30 @@ cross_account_status="$(curl --silent --output /dev/null --write-out '%{http_cod
 assert_eq 404 "$cross_account_status" "cross-account invoice lookup leaked an invoice"
 exact_address="$(jq -r .address <<<"$exact")"
 exact_before="$(token_balance "$BENEFICIARY_EXACT")"
+paid_at="$(date +%s)"
 send_usdc "$exact_address" 1500000
+# `cast send` returns once the transfer is mined; Anvil finalizes it two
+# blocks (two seconds) later. The transfer signal must wake the indexer at
+# that point: the timer backstop alone would take up to
+# PAYDAY_INDEXER_RECONCILE_INTERVAL_MS, which this bound sits well inside.
+wait_for_invoice "$exact_id" '.received_base_units == "1500000"' "exact deposit was not detected"
+detected_in="$(( $(date +%s) - paid_at ))"
+[[ "$detected_in" -le 8 ]] || {
+  echo "deposit detection took ${detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
+  exit 1
+}
+# The elapsed-time bound alone cannot tell the wake path from a well-timed
+# fallback pass, so require the signal's own log trail: the session must have
+# connected, and the deposit must have produced a wake.
+grep -q 'transfer signal connected' "$logs/indexer.log" || {
+  echo "the indexer never connected the transfer signal; the latency bound was met by fallback polling" >&2
+  exit 1
+}
+grep -q 'transfer signal wake' "$logs/indexer.log" || {
+  echo "the deposit did not produce a transfer-signal wake; detection came from the timer backstop" >&2
+  exit 1
+}
+echo "Deposit detected ${detected_in}s after payment through the transfer signal"
 wait_for_status "$exact_id" settled
 assert_eq "$((exact_before + 1500000))" "$(token_balance "$BENEFICIARY_EXACT")" \
   "exact payment beneficiary balance mismatch"

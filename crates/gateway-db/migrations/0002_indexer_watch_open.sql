@@ -1,0 +1,24 @@
+-- no-transaction
+-- Serves the open-requests branch of the indexer's watch list: the transfer
+-- signal subscribes to USDC transfers whose recipient is a payment address
+-- still worth watching. The list is fingerprinted on a short timer, so its
+-- predicate must be served by partial indexes rather than a scan of invoice
+-- history. `invoices_sweep_queue` (uncollected_count > 0) already exists;
+-- this and `0003_indexer_watch_recent` cover the other branches.
+--
+-- Built CONCURRENTLY so the build never takes a write lock on the table;
+-- without the no-transaction marker the migrator would wrap the build in a
+-- transaction, which CONCURRENTLY forbids. The cost of that is atomicity: a
+-- failed build leaves an invalid index
+-- behind and does not record the migration version (see the concurrent
+-- index-build note in docs/production-runbook.md). Deliberately without
+-- `IF NOT EXISTS`: a retry after a failed build must fail loudly on the
+-- leftover invalid index, not skip it and record the version with the index
+-- permanently invalid.
+-- One statement per file: the migrator batches a multi-statement file into
+-- one implicit transaction, which CONCURRENTLY also forbids.
+--
+-- Additive only: the previous image, which runs the same queries without
+-- these indexes, keeps working while this applies.
+CREATE INDEX CONCURRENTLY invoices_watch_open ON invoices (chain_id, token_address)
+    WHERE payment_address IS NOT NULL AND status NOT IN ('fulfilled', 'recovered');

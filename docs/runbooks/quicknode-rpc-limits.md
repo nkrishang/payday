@@ -36,15 +36,36 @@ when switching to a provider with a larger window.
 
 ## Fix: request budget
 
-With the 100-block cap and Monad's ~0.4 s blocks, steady-state indexing needs
-about 90 `eth_getLogs` calls per hour, finality and cursor-header calls, and one
-header lookup for each distinct block containing a USDC transfer. Transfer-block
-lookups run concurrently within a range but are still billed RPC requests. If
-the endpoint's request-rate limit is being hit (`429` / `-32007` errors,
-counted by the `payday-indexer-retryable-failures` alarm), distinguish idle-poll
-traffic from catch-up and transfer-header traffic before changing
-`indexer_poll_interval_ms`: the poll interval affects detection latency and idle
-calls, not the request volume required to process a backlog.
+Monad produces a block every ~300 ms (about 288k a day) and QuickNode bills
+every Monad method at 30 credits. Steady-state indexing costs, per day:
+
+| Source | Calls | Notes |
+|--------|-------|-------|
+| Reconcile pass every 60 s: `finalized` header + cursor hash check | 2,880 | `indexer_reconcile_interval_ms` |
+| Ranges at the 100-block cap: two range-end headers + one `eth_getLogs` | 8,640 | fixed by block rate, not cadence |
+| Transfer signal keepalive (`eth_chainId` over the socket every 30 s) | 2,880 | |
+| Transfer signal notifications | ≈ 0 | one per commit state per payment to us |
+
+About 14k calls a day, ~13M credits a month, flat with respect to payment
+volume and to `indexer_poll_interval_ms`. Detection latency does not come
+from the cadence: the WebSocket transfer signal wakes a pass the moment a
+payment finalizes. A block that carries USDC transfers costs nothing extra;
+the log's own `blockTimestamp` classifies the deposit.
+
+If credits climb well above that, check in this order:
+
+1. `transfer signal disconnected` / `connection failed` warnings (the
+   `payday-indexer-transfer-signal-down` alarm). While the socket is down the
+   reconciler runs every `indexer_poll_interval_ms` (5 s), which is the old
+   cost profile: about 3.9M credits a day. Confirm the endpoint's `wss://`
+   URL works (`PAYDAY_RPC_WS_URL` overrides the derivation from
+   `PAYDAY_RPC_URL`).
+2. `indexer cursor lagging`: a backlog is draining at
+   `range × PAYDAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, three calls
+   per range. This is bounded work that ends when the cursor catches up.
+3. `429` / `-32007` errors counted by `payday-indexer-retryable-failures`:
+   the pacing below should make these rare at this call volume; a sustained
+   run means something else shares the endpoint's requests-per-second budget.
 
 Since the 2026-09 livelock (below), the indexer defends itself in two ways:
 

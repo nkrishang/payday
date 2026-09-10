@@ -181,9 +181,9 @@ variable "usdc_start_block" {
 }
 
 variable "finality_confirmations" {
-  description = "Blocks subtracted from the node's finalized tag before a range is committed; a small margin against replica skew behind the provider's load balancer."
+  description = "Blocks subtracted from the node's finalized tag before a range is committed. Monad's finalized tag is irreversible without a hard fork, so the margin is 0: a nonzero value costs a second header read per pass and buys nothing on this chain."
   type        = number
-  default     = 2
+  default     = 0
   validation {
     condition     = var.finality_confirmations >= 0 && var.finality_confirmations <= 10000 && floor(var.finality_confirmations) == var.finality_confirmations
     error_message = "finality_confirmations must be an integer from 0 through 10000."
@@ -200,12 +200,22 @@ variable "log_range_size" {
 }
 
 variable "indexer_poll_interval_ms" {
-  description = "Idle poll interval in milliseconds for both worker loops. Each tick drains every finalized range up to PAYDAY_INDEXER_MAX_RANGES_PER_TICK. Increasing this reduces idle polling but not catch-up traffic: indexing uses about 90 eth_getLogs calls/hour at QuickNode's 100-block cap, plus finality/cursor reads and one header lookup per distinct transfer-bearing block."
+  description = "Sweep worker cadence, and the block indexer's reconcile cadence only while its WebSocket transfer signal is disconnected. While the signal is connected the indexer reconciles every indexer_reconcile_interval_ms and immediately on a wake, so this value no longer sets the request budget."
   type        = number
   default     = 5000
   validation {
     condition     = var.indexer_poll_interval_ms >= 1000 && var.indexer_poll_interval_ms <= 300000 && floor(var.indexer_poll_interval_ms) == var.indexer_poll_interval_ms
     error_message = "indexer_poll_interval_ms must be an integer from 1000 through 300000."
+  }
+}
+
+variable "indexer_reconcile_interval_ms" {
+  description = "Block indexer reconcile cadence while the transfer signal is connected. Payments are detected by the signal within a block of finality regardless; this timer keeps the finalized cursor moving and catches anything the socket missed. Each pass costs one finalized header read, one cursor check, and three calls per 100-block range (two range-end headers and one eth_getLogs), so at 60 s on Monad the indexer runs about 14k calls/day, ~13M QuickNode credits/month, independent of payment volume."
+  type        = number
+  default     = 60000
+  validation {
+    condition     = var.indexer_reconcile_interval_ms >= 1000 && var.indexer_reconcile_interval_ms <= 300000 && floor(var.indexer_reconcile_interval_ms) == var.indexer_reconcile_interval_ms
+    error_message = "indexer_reconcile_interval_ms must be an integer from 1000 through 300000."
   }
 }
 

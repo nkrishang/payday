@@ -110,10 +110,21 @@ delegation is publicly visible.
 - USDC decimals: `6`
 - [Monad full finality](https://docs.monad.xyz/monad-arch/consensus/block-states):
   the node's `finalized` tag is "irreversible without a hard fork", so this
-  stack sets `PAYDAY_FINALITY_SOURCE=finalized` and subtracts
-  `PAYDAY_FINALITY_CONFIRMATIONS=2` more blocks as a margin against replica
-  skew behind the provider's load balancer. `latest` on Monad is the
-  speculatively executed proposed block and is never used for commits.
+  stack sets `PAYDAY_FINALITY_SOURCE=finalized` with
+  `PAYDAY_FINALITY_CONFIRMATIONS=0`: a margin would cost a second header
+  read per pass and buy nothing on this chain. `finalized` trails `latest`
+  by two blocks (about 600 ms). `latest` on Monad is the speculatively
+  executed proposed block and is never used for commits.
+- Detection is push-driven: the indexer holds a WebSocket to the same
+  QuickNode endpoint (`wss://` derived from `PAYDAY_RPC_URL`) subscribed to
+  `monadLogs` for USDC transfers to its own payment addresses, and wakes a
+  finalized range scan the moment one finalizes. The scan also runs every
+  `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s) as the backstop and the only
+  writer; the socket has no ledger authority. Expect an idle baseline of
+  about 14k RPC calls a day (~13M credits/month at 30 credits per Monad
+  call), rising weakly with payment volume as wakes add passes over
+  still-unindexed ranges, and `transfer signal connected` in the indexer log
+  after startup.
 - [Monad RPC differences](https://docs.monad.xyz/reference/rpc-differences):
   QuickNode allows 100 blocks per `eth_getLogs` (`PAYDAY_LOG_RANGE_SIZE`),
   `eth_getTransactionByHash` returns nothing for a transaction still in
@@ -611,6 +622,46 @@ database, which the staging deploy does on its own
 exists, the baseline is frozen and a change is a new numbered file,
 reviewed for compatibility with the image still running while the new one
 starts.
+
+#### Rolling back after a new migration has applied
+
+A migration is additive, but the *previous image* does not know the new
+version number: sqlx fails startup with `VersionMissing(<n>)` when the
+database holds a version the image's embedded set does not contain. Once a
+new migration has applied, a manual rollback to the pre-migration image
+will fail at startup on every task restart, including ECS's own circuit
+breaker. Roll back to an image built from the post-migration commit instead
+(same schema, previous behavior), or build a rollback image from the old
+application commit with the new `crates/gateway-db/migrations/` files added
+to it. Do not delete the row from `_sqlx_migrations` to force the old image
+to start: its notion of the schema is then missing an index it never reads,
+and the next migration to assume the table shape will not be the last thing
+to disagree.
+
+#### Concurrent index builds
+
+A migration that builds an index runs with `-- no-transaction` and
+`CREATE INDEX CONCURRENTLY` so the build never takes a write lock on the
+table (see `0002_indexer_watch_open.sql` and `0003_indexer_watch_recent.sql`).
+The cost of that is atomicity: a failed build leaves an invalid index and
+does not record the version, so every later startup retries the migration
+and fails again — loudly, on purpose: these migrations deliberately omit
+`IF NOT EXISTS` so a retry cannot skip a leftover invalid index and record
+itself as applied. Recover in this order:
+
+1. Confirm no build is still running:
+   `SELECT pid, query FROM pg_stat_activity WHERE query ILIKE '%CREATE INDEX%';`
+2. Find the invalid index:
+   `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;`
+3. Drop it: `DROP INDEX CONCURRENTLY <name>;`
+4. Restart a service; migrations run at startup and rebuild the index.
+
+If a version was ever recorded while its index is invalid (should be
+impossible with these migrations, but check
+`SELECT version, success FROM _sqlx_migrations ORDER BY version;` against
+the invalid index's name), dropping the index is not enough: rebuild it
+manually with the same `CREATE INDEX CONCURRENTLY` statement the migration
+file carries.
 
 ### Web
 

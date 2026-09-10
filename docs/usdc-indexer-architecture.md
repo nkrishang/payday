@@ -14,15 +14,13 @@ emits this log, including transfers initiated inside smart-contract calls,
 `transferFrom`, and relayed authorization flows. Reverted execution leaves no
 logs, so receipts and traces are unnecessary.
 
-This makes the owned acquisition path small enough that QuickNode Streams does
-not currently justify its vendor coupling or per-block cost. Streams would
-outsource polling, retries, ordering, and backfill, but not the business-critical
-work: finality policy, idempotent accounting, hash verification, projection
-updates, correction handling, and irreversible sweep safety.
-
-Use QuickNode Streams instead when multi-chain scale, pathological provider log
-limits, sustained backfill lag, or indexer on-call cost becomes material. If that
-happens, preserve the same durable ledger and finality gate.
+Detection latency comes from a push path, not from the poll cadence: a
+WebSocket `monadLogs` subscription filtered to USDC transfers addressed to our
+own payment addresses wakes the range scan the moment such a transfer
+finalizes. The scan is the only writer and also runs on a slow timer, so the
+request budget is set by the `eth_getLogs` range cap and the block rate, and
+nothing else. See "Acquisition loop" for the two halves and "Build versus
+QuickNode" for why the managed products lose on this chain.
 
 ## What changes from native currency
 
@@ -125,27 +123,78 @@ the next log poll. It sends one BatchSweeper transaction for each claimed group
 of up to 20 deposit requests; the finalized receipt's events determine each deposit request's
 outcome (see "Sweep architecture under USDC").
 
-The finality boundary is the node's `finalized` tag minus a small margin; each
-pass drains every range up to it, so catch-up throughput does not depend on the
-poll interval. State reads that classify outcomes pin a block number whose
-canonical hash was verified first, so nothing relies on EIP-1898 block-hash
-parameters being supported by the provider.
+The finality boundary is the node's `finalized` tag (minus an optional margin,
+0 on Monad where the tag is irreversible without a hard fork); each pass
+drains every range up to it, so catch-up throughput does not depend on the
+cadence. State reads that classify outcomes pin a block number whose canonical
+hash was verified first, so nothing relies on EIP-1898 block-hash parameters
+being supported by the provider.
 
-For each enabled chain/asset:
+Acquisition has two halves that never trust each other:
 
-1. Acquire a PostgreSQL advisory lock for ingestion leadership.
-2. Load the durable finalized cursor `{number, hash, config_version}`.
-3. Query the configured finality boundary.
-4. Verify the stored cursor hash still matches the provider's canonical hash.
-5. Request logs for `cursor + 1 .. finalized_head` in bounded ranges.
-6. Sort results by block number, transaction index, and log index.
-7. Fetch and verify the header of every distinct transfer-bearing block. These
-   bounded lookups run concurrently and provide the timestamp used for expiry.
-8. Decode and validate every log strictly.
-9. Intersect unique recipients with known deposit request addresses in one indexed DB
-   query; status controls projection transitions, not ledger retention.
-10. Commit observations, projections, status changes, and cursor advancement in
+- **The reconciler** is the only writer. It runs a pass every
+  `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s in production) and immediately
+  when the signal wakes it.
+- **The transfer signal** (`signal.rs`) holds a WebSocket to the same node
+  subscribed to `monadLogs` with the USDC address, the `Transfer` topic, and
+  the current payment addresses in `topics[2]` (chunked, 500 per
+  subscription; the node accepts thousands). Every matching log is delivered
+  once per commit state; the `Finalized`/`Verified` deliveries record the
+  block in a lock-free "highest target" cell and nudge the reconciler. A
+  node without `monadLogs` (Anvil) gets the standard `logs` subscription,
+  which fires at proposal. The signal keeps the socket alive with one
+  `eth_chainId` every 30 s (verified against the expected chain id), reconnects
+  with backoff, and re-subscribes when the watch list changes by chunk diff:
+  chunks whose address set is unchanged keep their live subscription, added
+  chunks subscribe before removed chunks unsubscribe (Alloy keys a
+  subscription by its request, so an unchanged chunk must never be
+  resubscribed and then unsubscribed), and it flips a
+  health flag the reconciler reads to choose its cadence: 60 s while
+  connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
+
+For each pass:
+
+1. Acquire a PostgreSQL advisory lock for ingestion leadership (at startup).
+2. Read the `finalized` header; it is the boundary.
+3. Load the durable finalized cursor and verify its hash still matches the
+   provider's canonical header at that height.
+4. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
+   the range-end header, request `eth_getLogs` for the USDC `Transfer`
+   topic, sort by block number, transaction index, and log index, decode and
+   validate strictly, then read the range-end header again and require the
+   same hash (a change while the logs were in flight is a reorg below
+   finality, reported and retried, never committed).
+5. Take each transfer's block timestamp from the log's own `blockTimestamp`
+   (served by Monad and Anvil; its absence is a transient error, never a
+   silent zero). No header is read per transfer-bearing block.
+6. Intersect unique recipients with known deposit request addresses in one
+   indexed DB query; status controls projection transitions, not ledger
+   retention.
+7. Commit observations, projections, status changes, and cursor advancement in
    one database transaction per range.
+8. If the pass was a wake whose block is not yet indexed — because finality
+   has not reached it, or because the per-pass range budget stopped the pass
+   short of it — re-read and pass again every 300 ms for up to 16 attempts;
+   Monad finalizes within two blocks, Anvil within two seconds. The timer
+   covers whatever the attempts do not.
+
+A trust-boundary note on the range-end header pair: two reads of the same
+hash prove the range end did not move while the logs were in flight, not
+that each returned log belongs to that canonical ancestry. A provider that
+answered with a stale or forked log page between two stable header reads
+would not be rejected here; the pass trusts the finalized-RPC contract
+(QuickNode's `finalized` is irreversible) and keeps the older per-block
+header fan-out out of the request budget. Deep suspicion is served by the
+cursor-hash and finalized-reorg halts, not by more header reads.
+
+The watch list the signal subscribes to is every bound address whose request
+is not `fulfilled`/`recovered`, every address with uncollected funds, and
+every address whose request changed within `PAYDAY_INDEXER_LATE_WATCH_DAYS`.
+The reconciler fingerprints that set every two seconds with one indexed
+aggregate (`invoices_watch_open`, `invoices_watch_recent`,
+`invoices_sweep_queue`) and loads the list only when the fingerprint moves.
+The list bounds only the fast path: the reconciler fetches every USDC transfer
+in a range and ledgers a late transfer to any address ever bound.
 
 The implementation uses adaptive range sizing up to a configured ceiling (100
 blocks by default). It grows the range by 25% after success and halves it for
@@ -153,6 +202,24 @@ QuickNode HTTP 413, block-range, response-size, or result-count errors. It never
 treats a provider limit, timeout, malformed response, or suspicious response as
 an empty range. A failure at one block is retried and alerted rather than skipped:
 availability degradation is safer than silently losing a deposit request.
+
+Why the database-side intersection is race-free without a provider-side watch
+list: every block in a range was finalized before the pass read the boundary,
+and a deposit request bound after that read was disclosed to its payer after
+every block in the range was mined, so no transfer to it can be in the range.
+The signal's list can therefore be stale at worst, which delays detection to
+the next timer pass and nothing more.
+
+The argument covers the supported flow, where the payer learns the address
+only from the API response that follows the binding commit. An address is
+derivable by anyone who can compute the binding inputs — the attestation
+challenge exposes them — so a client that prefunds its own deposit address
+before binding commits can land a transfer in a range that is scanned before
+the request exists. That transfer's recipient matches no request, so it is
+skipped before anything is persisted, and the cursor never rewinds to
+re-read it once the binding commits. Supporting prefunded addresses needs
+registration before derivation inputs are disclosed, or a dedicated
+historical reconciliation path; widening the subscription list cannot fix it.
 
 RPC errors retain method, JSON-RPC code, message, and retryability. QuickNode
 429, `-32007`, `-32012`, limit, unavailable, network, and internal failures are
@@ -177,15 +244,15 @@ Filter at the provider by:
 - exact USDC proxy address;
 - exact `Transfer` topic0.
 
-Initially fetch all USDC transfers in each range and intersect recipients in one
-set-based database query. This avoids synchronizing an unbounded dynamic address
-watchlist with the provider.
+The reconciler fetches all USDC transfers in each range and intersects
+recipients in one set-based database query; the call count is fixed by the
+range cap either way, and this keeps the correctness path free of any
+provider-side address list. Measured on Monad mainnet, USDC carries 16–32
+transfers per 100 blocks, so the responses are small.
 
-If USDC log volume becomes a measured bottleneck, maintain the active address set
-locally and split it across OR filters for indexed `topic2`. The database remains
-authoritative, and the indexer must refresh registrations after fetching a range
-but before committing it so an address disclosed after its deposit request commit cannot
-be missed.
+Only the transfer signal's subscription filters by recipient (`topics[2]`),
+because notifications are billed per message; that list is a latency
+optimisation with no ledger authority (see "Acquisition loop").
 
 ## Database model
 
@@ -389,78 +456,72 @@ safe ERC-20 transfer from the Deposit contract over self-approval followed by
 
 ## Build versus QuickNode
 
-### Owned `eth_getLogs` indexer — recommended now
+Measured facts that decide this (Monad mainnet, September 2026):
+
+- Monad produces a block every ~300 ms: ~288k blocks a day, ~8.6M a month.
+- QuickNode bills every Monad method at 30 credits, WebSocket notifications
+  per delivered message, and Streams per block processed.
+- `eth_getLogs` is capped at 100 blocks per call on QuickNode's Monad
+  endpoint; logs carry `blockTimestamp`; `topics[2]` accepts an OR-array.
+- `finalized` trails `latest` by exactly two blocks.
+
+### Owned reconciler plus WebSocket signal — in production
+
+Idle baseline, about 14k calls a day and ~13M credits a month: 1,440
+reconcile passes a day at the 60 s cadence (a finalized header plus a cursor
+check each — 2,880 calls), 2,880 ranges × 3 calls, and 2,880 keepalives.
+Payment activity adds wakes on top — each wake is a pass over
+still-unindexed ranges, and a pass that a wake interrupts at a partially
+filled range repeats its range-end headers — so the true spend scales weakly
+with payment volume instead of being flat. It stays far under the previous
+fixed-cadence poll with a header read per transfer-bearing block, which cost
+~130k calls a day (~117M credits a month) at a 5 s latency, and whose header
+fan-out is what tripped the requests-per-second budget. Detection latency is
+one block of finality.
 
 Benefits:
 
-- few RPC calls because many finalized blocks are queried per range;
-- provider-native filtering by one contract and one event;
-- portable across EVM RPC vendors;
-- exact control over finality and failure policy;
-- no billing for every empty block beyond ordinary RPC usage;
-- small implementation surface for one chain and one asset.
+- the request budget is set by the range cap and the block rate, not by
+  how fast payments must be noticed;
+- provider-native filtering: one contract and one event on the scan, plus
+  the recipient set on the subscription, so idle chains cost nothing extra;
+- exact control over finality and failure policy; the socket has no ledger
+  authority, so its outages degrade latency only;
+- portable: any node with `eth_subscribe("logs")` runs the same code, and
+  `monadLogs` is a per-node upgrade, not a dependency.
 
 Costs:
 
-- adaptive range/retry logic;
-- cursor and provider hash checks;
-- fallback routing and monitoring;
-- backfill throughput and provider-limit operations.
+- adaptive range/retry logic, cursor and provider hash checks;
+- one long-lived socket to keep alive, re-subscribe, and alarm on;
+- backfill throughput bounded by the 100-block cap (a day of backlog is
+  2,880 ranges).
 
-These are bounded concerns now that traces, full blocks, receipts, and balance
-reconciliation are gone.
+### QuickNode Streams — rejected on this chain
 
-### QuickNode Streams — preferred managed upgrade path
+Streams (Logs dataset to a webhook) would outsource polling, ordering,
+retries, and backfill, but it bills per block processed **regardless of
+filtering**: 8.6M Monad blocks a month at 30 or more credits each is
+260M+ credits, an order of magnitude above the owned path, before the
+webhook receiver is built. Its reorg handling is a block delay
+(`keep_distance_from_tip`), not finality, and correction restreams still
+have to be applied idempotently by us. Reconsider only on a chain with a
+slow block rate or if QuickNode changes Streams to bill filtered output.
 
-Use the **Logs** dataset and a server-side filter for only the exact USDC proxy
-and `Transfer` topic. Deliver to an authenticated webhook, not directly into the
-application's projection tables. The webhook must validate HMAC/mTLS, commit the
-ledger and cursor transaction, then return 2xx.
+### QuickNode Webhooks — a weaker version of the signal
 
-Streams provides sequential delivery, configurable batching, historical
-backfill, retries, and reorg correction restreams. Configure `fix_block_reorgs`
-and an appropriate `keep_distance_from_tip`.
+Webhooks bill 30 credits per delivered payload, which is the same cost shape
+as our subscription, but offer template filters only (no dynamic recipient
+list of our own), no backfill, and no finality semantics. Everything they
+could contribute, the `monadLogs` subscription already does with a tighter
+filter and no inbound endpoint to secure.
 
-However:
-
-- filtering does not reduce billing; credits are charged per block processed;
-- `keep_distance_from_tip` is probabilistic, not economic finality;
-- correction ranges and reorg metadata must still be applied idempotently;
-- QuickNode recommends independent hash-continuity verification;
-- webhook failures retry and eventually pause the stream, requiring alerts and
-  operational resume;
-- a QuickNode-side dynamic deposit-address watchlist creates a consistency race,
-  so filter only by USDC and match recipients in our database.
-
-QuickNode documentation:
-
-- [Streams logs and other data sources](https://www.quicknode.com/docs/streams/data-sources)
-- [Streams backfilling](https://www.quicknode.com/docs/streams/backfilling)
-- [Streams reorg handling](https://www.quicknode.com/docs/streams/reorg-handling)
-- [Streams webhook delivery](https://www.quicknode.com/docs/streams/destinations/webhooks)
-- [Streams billing](https://www.quicknode.com/docs/streams/billing)
-
-### QuickNode Webhooks — not a correctness source
-
-QuickNode Webhooks may be economical for low-volume contract-event alerts because
-it bills per delivered payload. It advertises retries and automatic reorg
-handling, but lacks Streams' explicit historical backfill, batching, ordered
-correction protocol, and detailed reorg controls. It is appropriate for
-notifications, not the authoritative deposit ledger.
-
-### When to switch to Streams
-
-Reconsider when any of these become true:
-
-- several chains or USDC assets are supported;
-- a single block can exceed reliable provider log limits;
-- catch-up lag or provider quirks create recurring on-call work;
-- provisional low-latency indexing already requires a reversible block ledger;
-- managed-delivery support/SLA value exceeds Streams' per-block cost;
-- Kafka/object-storage fanout is needed for multiple consumers.
+### If the fast path is ever removed
 
 Switching acquisition does not change the database ledger, event identity,
-finality gate, sweep rules, or halt-on-finalized-reorg invariant.
+finality gate, sweep rules, or halt-on-finalized-reorg invariant: set
+`PAYDAY_RPC_WS_URL=off` and the reconciler runs on
+`PAYDAY_INDEXER_POLL_INTERVAL_MS` alone, at the cost of latency and calls.
 
 ## Verification and operations
 

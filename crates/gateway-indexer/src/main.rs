@@ -2,6 +2,7 @@ mod chain;
 mod config;
 mod deployment;
 mod indexer;
+mod signal;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use alloy_signer_local::PrivateKeySigner;
 use sqlx::PgPool;
 use sqlx::postgres::PgConnection;
 use tokio::sync::watch;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use chain::ChainClient;
@@ -84,7 +86,7 @@ async fn main() {
     .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
     // The finality source must be answerable before any range is committed.
     chain_client
-        .finalized_block_number()
+        .finalized_header()
         .await
         .expect("failed to query the finalized block from RPC");
 
@@ -110,6 +112,8 @@ async fn main() {
             log_range_size: config.log_range_size(),
             max_ranges_per_tick: config.max_ranges_per_tick(),
             poll_interval: config.indexer_poll_interval(),
+            reconcile_interval: config.indexer_reconcile_interval(),
+            late_watch_window: config.late_watch_window(),
             sweep_pending_timeout: config.sweep_pending_timeout(),
             sweep_max_submissions: config.sweep_max_submissions(),
             sweep_max_attempts: config.sweep_max_attempts(),
@@ -118,6 +122,23 @@ async fn main() {
             signer_low_balance_wei: config.signer_low_balance_wei(),
         },
     );
+    // The transfer signal is a latency optimisation with no ledger authority,
+    // so it runs as a detached task: it can never fail the process, and
+    // without it the worker simply reconciles on its polling cadence.
+    match config.rpc_ws_url() {
+        Some(ws_url) => {
+            let signal = signal::TransferSignal::new(
+                ws_url.to_string(),
+                config.chain_id().0,
+                config.usdc_address(),
+            );
+            tokio::spawn(signal.run(worker.watch_list(), worker.signal(), shutdown_rx.clone()));
+        }
+        None => info!(
+            poll_interval_ms = config.indexer_poll_interval().as_millis() as u64,
+            "transfer signal disabled; reconciling on the polling cadence"
+        ),
+    }
     let worker = worker.run(shutdown_rx);
     let lock_monitor = monitor_indexer_lock(&mut lock_connection);
     tokio::pin!(worker, lock_monitor);

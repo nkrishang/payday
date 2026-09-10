@@ -162,6 +162,11 @@ load_local_env() {
   export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
   export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
   export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-1000}"
+  # The transfer signal derives ws://127.0.0.1:8545 from the RPC URL; Anvil
+  # serves subscriptions on the same port and the signal falls back to the
+  # standard `logs` subscription there. The timer backstop stays quick
+  # locally so a test never waits a minute on a missed wake.
+  export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-1000}"
   # Anvil has no request budget to trip, so the indexer paces nothing locally.
   export PAYDAY_INDEXER_RPC_MAX_RPS="${PAYDAY_INDEXER_RPC_MAX_RPS:-0}"
   export PAYDAY_SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"

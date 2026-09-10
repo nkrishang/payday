@@ -8,27 +8,35 @@
 //! -> `recovered`, `SweepRecovered` -> late funds collected, `SweepFailed` ->
 //! classified into a retry or a block.
 //!
+//! The block indexer is a reconciler: each pass scans `cursor + 1 ..=
+//! finalized` in bounded ranges, one `eth_getLogs` per range, and commits
+//! atomically. It runs on a slow timer and immediately on a wake from the
+//! transfer signal (`signal.rs`), so detection latency comes from the push
+//! path while the request budget is set by the range cap, not the cadence.
+//! Neither path trusts the other: the signal never writes, and the timer
+//! never waits for it.
+//!
 //! A fatal block-indexer error ends the process (finalized history no longer
 //! matches; the operator must look). A fatal sweep condition only pauses the
 //! sweep worker, which keeps reporting it every tick until it clears, so
 //! payment detection never stops because a transaction is stuck.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
-use futures::stream::{self, StreamExt, TryStreamExt};
+use chrono::Duration as ChronoDuration;
 use gateway_core::{ChainId, Invoice, InvoiceStatus, PaymentBinding};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
     MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
+    WatchFingerprint,
 };
 use sqlx::types::chrono::Utc;
 use thiserror::Error;
 use tokio::sync::watch;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::chain::{
@@ -36,6 +44,7 @@ use crate::chain::{
     SweepReceipt, SweepRequest, sweep_batch_gas_limit,
 };
 use crate::config::FinalitySource;
+use crate::signal::{SignalState, WatchList};
 
 /// Maximum invoices included in one helper transaction.
 pub const SWEEP_BATCH_LIMIT: i64 = 20;
@@ -58,8 +67,33 @@ const RANGE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const RANGE_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15);
 /// Warn once collectable funds have waited this long.
 const SWEEP_BACKLOG_WARN_SECS: f64 = 900.0;
-/// Emit sweep health telemetry every this many sweep ticks.
-const TELEMETRY_EVERY_TICKS: usize = 30;
+/// Emit sweep health telemetry (one `eth_getBalance`) at most this often.
+const SWEEP_HEALTH_INTERVAL: Duration = Duration::from_secs(300);
+/// How often the signal's recipient list is checked against the database.
+/// The check is one indexed aggregate; the list itself loads only on change.
+const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// A wake names a block the signal saw a transfer in. If the node's
+/// finalized boundary has not reached it yet, re-read the boundary at this
+/// cadence, up to this many times, before leaving it to the timer. Monad
+/// finalizes within two blocks (under a second), so this is generous.
+const WAKE_CATCHUP_INTERVAL: Duration = Duration::from_millis(300);
+const WAKE_CATCHUP_ATTEMPTS: u32 = 16;
+
+/// What one reconcile pass accomplished. `indexed` is the highest block whose
+/// USDC activity is in the ledger; `boundary` the finality boundary the pass
+/// read. `indexed < boundary` means the per-pass range budget stopped the pass
+/// with finalized work left in the range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PassSummary {
+    boundary: u64,
+    indexed: u64,
+}
+
+impl PassSummary {
+    fn backlog(&self) -> bool {
+        self.indexed < self.boundary
+    }
+}
 
 /// Errors that can abort a poll pass.
 #[derive(Debug, Error)]
@@ -95,7 +129,15 @@ pub struct IndexerConfig {
     pub finality_confirmations: u64,
     pub log_range_size: u64,
     pub max_ranges_per_tick: u64,
+    /// Reconcile cadence while the transfer signal is disconnected or
+    /// disabled, and the sweep worker's cadence always.
     pub poll_interval: Duration,
+    /// Reconcile cadence while the transfer signal is connected. Wakes from
+    /// the signal run a pass immediately regardless.
+    pub reconcile_interval: Duration,
+    /// How long after its last change a settled address stays in the
+    /// signal's watch list, so a late transfer still wakes the reconciler.
+    pub late_watch_window: Duration,
     pub sweep_pending_timeout: Duration,
     pub sweep_max_submissions: u32,
     pub sweep_max_attempts: u32,
@@ -112,7 +154,12 @@ pub struct Indexer {
     chain: Arc<dyn ChainClient>,
     cfg: IndexerConfig,
     current_log_range_size: AtomicU64,
-    sweep_ticks: AtomicUsize,
+    /// Wake-ups and health from the transfer signal; see `signal.rs`.
+    signal: Arc<SignalState>,
+    /// The recipient list the signal subscribes to, replaced on change.
+    watch_tx: watch::Sender<WatchList>,
+    watch_fingerprint: Mutex<Option<WatchFingerprint>>,
+    last_health_report: Mutex<Option<Instant>>,
 }
 
 impl Indexer {
@@ -122,14 +169,28 @@ impl Indexer {
         chain: Arc<dyn ChainClient>,
         cfg: IndexerConfig,
     ) -> Self {
+        let (watch_tx, _) = watch::channel(WatchList::default());
         Self {
             repo,
             cursor,
             chain,
             current_log_range_size: AtomicU64::new(cfg.log_range_size),
-            sweep_ticks: AtomicUsize::new(0),
+            signal: SignalState::new(),
+            watch_tx,
+            watch_fingerprint: Mutex::new(None),
+            last_health_report: Mutex::new(None),
             cfg,
         }
+    }
+
+    /// The seam a transfer signal drives: wake-ups and connection health.
+    pub fn signal(&self) -> Arc<SignalState> {
+        Arc::clone(&self.signal)
+    }
+
+    /// The recipient list a transfer signal subscribes to.
+    pub fn watch_list(&self) -> watch::Receiver<WatchList> {
+        self.watch_tx.subscribe()
     }
 
     /// Run both loops until `shutdown` is set to `true`. A fatal block-indexer
@@ -151,29 +212,56 @@ impl Indexer {
         self: Arc<Self>,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), IndexerError> {
-        let mut interval = tokio::time::interval(self.cfg.poll_interval);
-        // If a tick is delayed (e.g. a slow RPC pass), don't fire a burst of
-        // catch-up ticks afterwards; just resume the cadence.
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
         info!(
             chain_id = self.cfg.chain_id.0,
             usdc = %self.cfg.usdc,
             finality_source = ?self.cfg.finality_source,
             finality_confirmations = self.cfg.finality_confirmations,
+            reconcile_interval_ms = self.cfg.reconcile_interval.as_millis() as u64,
             poll_interval_ms = self.cfg.poll_interval.as_millis() as u64,
             "block indexer started"
         );
 
+        let mut watch_refresh = tokio::time::interval(WATCH_REFRESH_INTERVAL);
+        watch_refresh.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // The timer restarts after every pass rather than firing on a fixed
+        // grid, so a slow pass or a wake never queues a burst of catch-up
+        // passes; the cadence is simply "this long after the last pass".
+        let mut next_pass = Instant::now();
+        let mut signal_was_connected = false;
         loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if let Err(error) = self.tick().await {
-                        if error.requires_halt() {
-                            return Err(error);
-                        }
-                        warn!(error = %error, "indexer poll failed; retrying next tick");
+            let connected = self.signal.is_connected();
+            if connected != signal_was_connected {
+                info!(
+                    signal_connected = connected,
+                    "block indexer cadence changed with transfer signal health"
+                );
+                signal_was_connected = connected;
+                if !connected {
+                    // The pass currently scheduled was sized by a healthy
+                    // signal; fall back to the polling cadence now rather
+                    // than waiting it out. `set_connected(false)` wakes this
+                    // loop, so the adjustment is not stranded until the next
+                    // scheduled event.
+                    next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
+                }
+            }
+            let target = tokio::select! {
+                _ = tokio::time::sleep_until(next_pass) => None,
+                _ = self.signal.notified() => self.signal.take_target(),
+                // A healthy signal dropping is itself a scheduling event:
+                // clamp the deadline now, even if the signal already
+                // reconnected, because the loop-top comparison below would
+                // not see a drop that was healed in between.
+                _ = self.signal.health_changed() => {
+                    next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
+                    continue;
+                }
+                _ = watch_refresh.tick() => {
+                    if let Err(error) = self.refresh_watch_list().await {
+                        warn!(error = %error, "watch list refresh failed; retrying");
                     }
+                    continue;
                 }
                 changed = shutdown.changed() => {
                     // `Err` means the sender was dropped -> treat as shutdown.
@@ -181,10 +269,69 @@ impl Indexer {
                         info!("block indexer shutting down");
                         break;
                     }
+                    continue;
                 }
-            }
+            };
+            let summary = match self.reconcile(target).await {
+                Ok(summary) => Some(summary),
+                Err(error) if error.requires_halt() => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    warn!(error = %error, "indexer pass failed; retrying next pass");
+                    None
+                }
+            };
+            let cadence = match &summary {
+                // The pass stopped inside the boundary with finalized ranges
+                // left: keep passing now. Each pass is still bounded by the
+                // per-pass range budget, so a catch-up backlog drains as fast
+                // as the budget allows without starving the sweep loop.
+                Some(summary) if summary.backlog() => Duration::ZERO,
+                _ if self.signal.is_connected() => self.cfg.reconcile_interval,
+                _ => self.cfg.poll_interval,
+            };
+            next_pass = Instant::now() + cadence;
         }
 
+        Ok(())
+    }
+
+    /// Refresh the signal's recipient list when the set of watched invoices
+    /// changed. The fingerprint is one indexed aggregate; the address list
+    /// is loaded, and the signal re-subscribed, only when it moves.
+    async fn refresh_watch_list(&self) -> Result<(), IndexerError> {
+        let since = Utc::now()
+            - ChronoDuration::from_std(self.cfg.late_watch_window)
+                .unwrap_or_else(|_| ChronoDuration::days(30));
+        let fingerprint = self
+            .repo
+            .watch_fingerprint(self.cfg.chain_id.0, self.cfg.usdc, since)
+            .await?;
+        if *self
+            .watch_fingerprint
+            .lock()
+            .expect("watch fingerprint lock")
+            == Some(fingerprint)
+        {
+            return Ok(());
+        }
+        let addresses: WatchList = Arc::new(
+            self.repo
+                .watch_addresses(self.cfg.chain_id.0, self.cfg.usdc, since)
+                .await?,
+        );
+        self.watch_tx.send_if_modified(|current| {
+            if *current == addresses {
+                return false;
+            }
+            *current = addresses;
+            true
+        });
+        *self
+            .watch_fingerprint
+            .lock()
+            .expect("watch fingerprint lock") = Some(fingerprint);
         Ok(())
     }
 
@@ -230,35 +377,59 @@ impl Indexer {
         }
     }
 
-    /// Highest block whose logs and state this worker treats as irreversible.
+    /// Header of the highest block whose logs and state this worker treats
+    /// as irreversible. With the `finalized` tag and no confirmation margin
+    /// (Monad's production setting) this is a single header read.
+    async fn boundary_header(
+        &self,
+        attempt: &mut u32,
+        backoff: &mut Duration,
+    ) -> Result<BlockHeader, IndexerError> {
+        let margin = self.cfg.finality_confirmations;
+        match self.cfg.finality_source {
+            FinalitySource::FinalizedTag => {
+                let finalized = loop {
+                    match self.chain.finalized_header().await {
+                        Ok(header) => break header,
+                        Err(error) if error.is_retryable() => {
+                            self.back_off_or_fail("eth_getBlockByNumber", attempt, backoff, error)
+                                .await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                if margin == 0 {
+                    return Ok(finalized);
+                }
+                self.retried_header(finalized.number.saturating_sub(margin), attempt, backoff)
+                    .await
+            }
+            FinalitySource::Latest => {
+                let latest = loop {
+                    match self.chain.latest_block_number().await {
+                        Ok(number) => break number,
+                        Err(error) if error.is_retryable() => {
+                            self.back_off_or_fail("eth_blockNumber", attempt, backoff, error)
+                                .await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                self.retried_header(latest.saturating_sub(margin), attempt, backoff)
+                    .await
+            }
+        }
+    }
+
+    /// Number of the block [`Self::boundary_header`] describes.
     async fn finality_boundary(
         &self,
         attempt: &mut u32,
         backoff: &mut Duration,
     ) -> Result<u64, IndexerError> {
-        let anchor = match self.cfg.finality_source {
-            FinalitySource::FinalizedTag => loop {
-                match self.chain.finalized_block_number().await {
-                    Ok(number) => break number,
-                    Err(error) if error.is_retryable() => {
-                        self.back_off_or_fail("eth_getBlockByNumber", attempt, backoff, error)
-                            .await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            },
-            FinalitySource::Latest => loop {
-                match self.chain.latest_block_number().await {
-                    Ok(number) => break number,
-                    Err(error) if error.is_retryable() => {
-                        self.back_off_or_fail("eth_blockNumber", attempt, backoff, error)
-                            .await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            },
-        };
-        Ok(anchor.saturating_sub(self.cfg.finality_confirmations))
+        self.boundary_header(attempt, backoff)
+            .await
+            .map(|header| header.number)
     }
 
     /// A `block_header` read that backs off and retries throttle-shaped
@@ -281,15 +452,49 @@ impl Indexer {
         }
     }
 
-    /// Ingest finalized USDC ranges until the cursor reaches the finality
-    /// boundary or the per-tick range budget is spent.
+    /// One reconcile pass without a wake target.
+    #[cfg(test)]
     async fn tick(&self) -> Result<(), IndexerError> {
+        self.pass().await.map(drop)
+    }
+
+    /// Reconcile on a timer or on a wake. A wake names the block the signal
+    /// saw a transfer in; it is only covered once finality reaches it *and*
+    /// the cursor has ingested it — a wake consumed while the range budget
+    /// left blocks unindexed would otherwise wait a full cadence for nothing.
+    async fn reconcile(&self, target: Option<u64>) -> Result<PassSummary, IndexerError> {
+        let mut summary = self.pass().await?;
+        let Some(target) = target else {
+            return Ok(summary);
+        };
+        let mut attempts = 0;
+        while (summary.boundary < target || summary.indexed < target)
+            && attempts < WAKE_CATCHUP_ATTEMPTS
+        {
+            attempts += 1;
+            tokio::time::sleep(WAKE_CATCHUP_INTERVAL).await;
+            summary = self.pass().await?;
+        }
+        if summary.indexed < target {
+            warn!(
+                target,
+                boundary = summary.boundary,
+                indexed = summary.indexed,
+                "wake target not indexed after catch-up; the timer covers it"
+            );
+        }
+        Ok(summary)
+    }
+
+    /// Ingest finalized USDC ranges until the cursor reaches the finality
+    /// boundary or the per-pass range budget is spent. Reports both the
+    /// boundary and how far the cursor got, so the caller can tell a fully
+    /// ingested boundary from a budget-limited backlog.
+    async fn pass(&self) -> Result<PassSummary, IndexerError> {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
-        let boundary = self.finality_boundary(&mut attempt, &mut backoff).await?;
-        let boundary_header = self
-            .retried_header(boundary, &mut attempt, &mut backoff)
-            .await?;
+        let boundary_header = self.boundary_header(&mut attempt, &mut backoff).await?;
+        let boundary = boundary_header.number;
         self.cursor
             .record_finalized_head(
                 self.cfg.chain_id.0,
@@ -332,7 +537,7 @@ impl Indexer {
                 boundary, indexed, "indexer cursor lagging"
             );
         }
-        Ok(())
+        Ok(PassSummary { boundary, indexed })
     }
 
     /// Fetch and commit one bounded range starting at `from_block`.
@@ -384,41 +589,10 @@ impl Indexer {
                     transfer.log_index,
                 )
             });
-            let transfer_blocks: HashSet<_> = transfers
-                .iter()
-                .map(|transfer| transfer.block_number)
-                .collect();
-            let transfer_headers: HashMap<_, _> = loop {
-                let fetched: Result<HashMap<_, _>, ChainError> =
-                    stream::iter(transfer_blocks.iter().copied().map(|block| async move {
-                        Ok::<_, ChainError>((block, self.chain.block_header(block).await?))
-                    }))
-                    .buffer_unordered(10)
-                    .try_collect()
-                    .await;
-                match fetched {
-                    Ok(headers) => break headers,
-                    Err(error) if error.is_retryable() => {
-                        self.back_off_or_fail(
-                            "eth_getBlockByNumber",
-                            &mut attempt,
-                            &mut backoff,
-                            error,
-                        )
-                        .await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            };
-            for transfer in &transfers {
-                if transfer_headers[&transfer.block_number].hash != transfer.block_hash {
-                    return Err(ChainError::Transient(format!(
-                        "USDC transfer block {} changed while indexing",
-                        transfer.block_number
-                    ))
-                    .into());
-                }
-            }
+            // Every block in the range is at or below the finality boundary,
+            // and the log carries its block hash and timestamp, so no
+            // per-block header read is needed: the range-end header read
+            // before and after the log fetch is the reorg-in-flight guard.
             let confirmed_end = self
                 .retried_header(to_block, &mut attempt, &mut backoff)
                 .await?;
@@ -433,7 +607,7 @@ impl Indexer {
                 .map(|transfer| PaymentObservation {
                     block_number: transfer.block_number,
                     block_hash: transfer.block_hash,
-                    block_timestamp: transfer_headers[&transfer.block_number].timestamp,
+                    block_timestamp: transfer.block_timestamp,
                     transaction_hash: transfer.transaction_hash,
                     transaction_index: transfer.transaction_index,
                     log_index: transfer.log_index,
@@ -505,9 +679,14 @@ impl Indexer {
     /// submit the next. The signer owns one nonce stream, so a new batch is
     /// never sent while a prior one is unresolved.
     async fn sweep_tick(&self) -> Result<(), IndexerError> {
-        let tick = self.sweep_ticks.fetch_add(1, Ordering::Relaxed);
-        if tick.is_multiple_of(TELEMETRY_EVERY_TICKS) {
+        let health_due = self
+            .last_health_report
+            .lock()
+            .expect("health report lock")
+            .is_none_or(|at| at.elapsed() >= SWEEP_HEALTH_INTERVAL);
+        if health_due {
             self.report_sweep_health().await?;
+            *self.last_health_report.lock().expect("health report lock") = Some(Instant::now());
         }
         match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
             Some(batch) if batch.broadcast_at.is_none() => self.broadcast_batch(&batch).await,
@@ -1159,8 +1338,11 @@ pub(crate) mod tests {
             Ok(self.state.lock().unwrap().latest)
         }
 
-        async fn finalized_block_number(&self) -> Result<u64, ChainError> {
-            Ok(self.state.lock().unwrap().finalized)
+        async fn finalized_header(&self) -> Result<BlockHeader, ChainError> {
+            // A tag read is a header read: it counts toward `header_requests`
+            // like every other `eth_getBlockByNumber`.
+            let finalized = self.state.lock().unwrap().finalized;
+            self.block_header(finalized).await
         }
 
         async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError> {
@@ -1410,6 +1592,8 @@ pub(crate) mod tests {
             log_range_size: 100,
             max_ranges_per_tick: 20,
             poll_interval: Duration::from_millis(10),
+            reconcile_interval: Duration::from_millis(10),
+            late_watch_window: Duration::from_secs(30 * 24 * 3600),
             sweep_pending_timeout: Duration::from_secs(60),
             sweep_max_submissions: 3,
             sweep_max_attempts: 3,
@@ -1513,6 +1697,7 @@ pub(crate) mod tests {
         UsdcTransfer {
             block_number: block,
             block_hash: block_hash(block),
+            block_timestamp: block_timestamp(block),
             transaction_hash: B256::from(U256::from(
                 block * 1_000_000 + transaction_index * 1000 + log_index + 1,
             )),
@@ -1741,6 +1926,175 @@ pub(crate) mod tests {
             2,
             "an idle tick records the finalized head and verifies the cursor hash"
         );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_budget_limited_pass_reports_its_backlog(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(1_000));
+        let mut cfg = config();
+        cfg.log_range_size = 100;
+        cfg.max_ranges_per_tick = 2;
+        let worker = indexer_with(&pool, chain, cfg);
+
+        let summary = worker.pass().await.unwrap();
+        assert_eq!(summary.boundary, 1_000);
+        assert_eq!(summary.indexed, 199, "two of the twenty ranges were spent");
+        assert!(summary.backlog(), "the pass stopped inside the boundary");
+
+        // Successive passes drain the backlog until the cursor reaches the
+        // boundary, which is what the caller's immediate-re-pass cadence
+        // relies on.
+        let mut summary = summary;
+        while summary.backlog() {
+            summary = worker.pass().await.unwrap();
+        }
+        assert_eq!(summary.indexed, 1_000);
+        assert!(!summary.backlog());
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn transfer_bearing_blocks_cost_no_header_reads(pool: PgPool) {
+        // Fifty transfers in fifty distinct blocks across ten ranges: the
+        // request count must be the range-end reads plus the finality read,
+        // never a read per block that carried a transfer.
+        let invoice = make_invoice(10_000);
+        insert(&pool, &invoice, "key-1").await;
+        let chain = Arc::new(MockChain::new(1_000).with(|state| {
+            state.transfers = (0..50)
+                .map(|i| transfer(payment_address(&invoice), 1, 20 * i + 1, 0))
+                .collect();
+        }));
+        let mut cfg = config();
+        cfg.log_range_size = 100;
+        cfg.max_ranges_per_tick = 10;
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+
+        worker.tick().await.unwrap();
+
+        assert_eq!(
+            chain.state.lock().unwrap().header_requests,
+            1 + 10 * 2,
+            "finality read plus two range-end reads per range"
+        );
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.confirmed_received, "50");
+        let timestamps: Vec<i64> = sqlx::query_scalar(
+            "SELECT block_timestamp FROM payment_observations WHERE invoice_id = $1 ORDER BY block_number LIMIT 2",
+        )
+        .bind(invoice.id.0)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            timestamps,
+            vec![block_timestamp(1) as i64, block_timestamp(21) as i64],
+            "observations carry the log's own block timestamp"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn wake_catches_up_to_the_signalled_block(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
+        // The signal saw the transfer in block 5, which the node has not
+        // finalized when the wake arrives; it finalizes shortly after.
+        let chain = Arc::new(MockChain::new(5).with(|state| {
+            state.finalized = 3;
+            state.transfers = vec![transfer(payment_address(&invoice), 100, 5, 0)];
+        }));
+        let worker = indexer(&pool, chain.clone());
+        let advance = {
+            let chain = chain.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                chain.set(|state| state.finalized = 5);
+            })
+        };
+
+        worker.reconcile(Some(5)).await.unwrap();
+        advance.await.unwrap();
+
+        assert_eq!(
+            fetch(&pool, &invoice).await.status,
+            "funded",
+            "the wake pass polled finality until block 5 was covered"
+        );
+        assert_eq!(
+            CursorRepository::new(pool.clone())
+                .get(CHAIN_ID, usdc())
+                .await
+                .unwrap()
+                .unwrap()
+                .block,
+            5
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn wake_without_a_reachable_target_falls_back_to_the_timer(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(5).with(|state| state.finalized = 3));
+        let worker = indexer(&pool, chain.clone());
+        let started = Instant::now();
+        worker.reconcile(Some(50)).await.unwrap();
+        assert!(
+            started.elapsed() >= WAKE_CATCHUP_INTERVAL * WAKE_CATCHUP_ATTEMPTS,
+            "catch-up is bounded, then the timer takes over"
+        );
+        assert_eq!(
+            CursorRepository::new(pool.clone())
+                .get(CHAIN_ID, usdc())
+                .await
+                .unwrap()
+                .unwrap()
+                .block,
+            3
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn watch_list_follows_open_and_recently_settled_invoices(pool: PgPool) {
+        let open = make_invoice(100);
+        let settled = make_invoice(100);
+        let stale = make_invoice(100);
+        insert(&pool, &open, "a").await;
+        insert(&pool, &settled, "b").await;
+        insert(&pool, &stale, "c").await;
+        let worker = indexer(&pool, Arc::new(MockChain::new(1)));
+        let mut list = worker.watch_list();
+
+        worker.refresh_watch_list().await.unwrap();
+        assert!(list.has_changed().unwrap());
+        let mut expected = vec![
+            payment_address(&open),
+            payment_address(&settled),
+            payment_address(&stale),
+        ];
+        expected.sort();
+        assert_eq!(**list.borrow_and_update(), expected);
+
+        // A settled address stays watched for the late window, then drops.
+        sqlx::query(
+            "UPDATE invoices SET status = 'fulfilled', updated_at = now() - interval '1 day' WHERE id = $1",
+        )
+        .bind(settled.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE invoices SET status = 'recovered', updated_at = now() - interval '40 days' WHERE id = $1",
+        )
+        .bind(stale.id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        worker.refresh_watch_list().await.unwrap();
+        let mut expected = vec![payment_address(&open), payment_address(&settled)];
+        expected.sort();
+        assert_eq!(**list.borrow_and_update(), expected);
+
+        // An unchanged set neither reloads nor re-sends the list.
+        worker.refresh_watch_list().await.unwrap();
+        assert!(!list.has_changed().unwrap());
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -2158,8 +2512,9 @@ pub(crate) mod tests {
         let invoice = make_invoice(100);
         insert_funded(&pool, &invoice, "key-1", 1).await;
         let chain = Arc::new(MockChain::new(7).with(|state| {
-            // First receipt-header read is canonical; the pre-commit recheck changes.
-            state.reorg_on_header_request = Some(2);
+            // After the finality read, the first receipt-header read is
+            // canonical; the pre-commit recheck changes.
+            state.reorg_on_header_request = Some(3);
         }));
         let worker = indexer(&pool, chain);
 

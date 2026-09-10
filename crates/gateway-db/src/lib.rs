@@ -25,7 +25,7 @@ pub use invoices::{
     BindPayerWallet, CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice,
     DbInvoiceError, DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError,
     InvoiceRepository, IssuanceRequest, PaymentObservation, RangeOutcome, ReleasePaymentError,
-    same_issuance,
+    WatchFingerprint, same_issuance,
 };
 pub use issuers::{
     CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,

@@ -44,6 +44,11 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
   name: target,
+  // The dev server compiles each route on the first hit, so a cold suite walk
+  // (the docs specs visit every page) needs minutes on CI's two cores where
+  // the production build serves instantly. Only the timeout differs; the
+  // assertions stay the same for both targets.
+  timeout: target === "dev" ? 180_000 : 30_000,
   use: {
     baseURL: `http://127.0.0.1:${APP_PORT}`,
     trace: "on-first-retry",

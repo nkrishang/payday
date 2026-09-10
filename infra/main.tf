@@ -701,7 +701,8 @@ resource "aws_ecs_task_definition" "indexer" {
       { name = "PAYDAY_FINALITY_SOURCE", value = "finalized" },
       { name = "PAYDAY_FINALITY_CONFIRMATIONS", value = tostring(var.finality_confirmations) },
       { name = "PAYDAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) },
-      { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) }
+      { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
+      { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) }
     ]),
     secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }, { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn }],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
@@ -995,9 +996,14 @@ locals {
       description = "Collectable funds have waited more than fifteen minutes"
     }
     retryable_failures = {
-      pattern     = "?\"sweep pass failed\" ?\"indexer poll failed\""
+      pattern     = "?\"sweep pass failed\" ?\"indexer pass failed\""
       period      = 300
       description = "Sustained retryable RPC or database failures in the worker"
+    }
+    transfer_signal_down = {
+      pattern     = "?\"transfer signal disconnected\" ?\"transfer signal connection failed\""
+      period      = 600
+      description = "The indexer's WebSocket transfer signal keeps failing; payments are still detected on the PAYDAY_INDEXER_POLL_INTERVAL_MS cadence at the old request cost. Check the QuickNode endpoint's WebSocket status"
     }
   }
 }
