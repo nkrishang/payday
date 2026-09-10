@@ -23,25 +23,25 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://payday.sh"),
   title: {
-    default: "Payday — make every stablecoin accountable.",
+    default: "Payday — accept stablecoins on your terms.",
     template: "%s · Payday",
   },
   description:
-    "Turn stablecoin transfers into verified customer deposits, ready for your app to credit.",
+    "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
   openGraph: {
     type: "website",
     siteName: "Payday",
-    title: "Payday — make every stablecoin accountable.",
+    title: "Payday — accept stablecoins on your terms.",
     description:
-      "Turn stablecoin transfers into verified customer deposits, ready for your app to credit.",
+      "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
     url: "https://payday.sh",
   },
   twitter: {
     // Large card on X, which reads these tags ahead of the OpenGraph ones.
     card: "summary_large_image",
-    title: "Payday — make every stablecoin accountable.",
+    title: "Payday — accept stablecoins on your terms.",
     description:
-      "Turn stablecoin transfers into verified customer deposits, ready for your app to credit.",
+      "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
   },
 };
 

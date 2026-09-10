@@ -1,91 +1,88 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
-import { DepositScene } from "@/components/landing/deposit-scene";
-import { StartBuilding } from "@/components/landing/signup-dialog";
+import { GetStarted } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
-import { PricingDialog } from "@/components/pricing-dialog";
 
 export const metadata: Metadata = {
-  title: "Payday — make every stablecoin accountable.",
+  title: "Payday — accept stablecoins on your terms.",
   description:
-    "Turn stablecoin transfers into verified customer deposits, ready for your app to credit.",
+    "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
   alternates: { canonical: "/" },
 };
 
 export default function Home() {
   return (
-    <div className="landing-page min-h-screen overflow-hidden bg-[#070707] text-brand-white">
-      <header className="landing-reveal border-b border-brand-grey/20">
-        <nav className="mx-auto flex h-[76px] max-w-[1240px] items-center justify-between px-5 sm:px-8">
-          <Image
-            src="/payday-logo-full.svg"
-            width={2929}
-            height={1000}
-            priority
-            alt="Payday"
-            className="h-auto w-[116px] sm:w-[140px]"
-          />
-
-          <div className="flex items-center gap-6 text-[15px] text-brand-grey sm:gap-9 sm:text-[16px]">
-            <Link href="/docs" className="transition-colors hover:text-brand-white">
-              Docs
-            </Link>
-            <PricingDialog />
-          </div>
+    <div className="landing flex min-h-screen flex-col bg-brand-white text-brand-black">
+      <header className="landing-reveal">
+        <nav className="mx-auto flex h-[88px] max-w-[1320px] items-center px-5 sm:px-8">
+          <Link href="/" aria-label="Payday" className="rounded-[4px]">
+            <Image
+              src="/payday-logo-full.png"
+              width={2800}
+              height={1000}
+              priority
+              sizes="156px"
+              alt="Payday"
+              className="h-auto w-[132px] sm:w-[156px]"
+            />
+          </Link>
         </nav>
       </header>
 
-      <main>
-        <section className="landing-hero mx-auto flex min-h-[370px] max-w-[1120px] flex-col items-center px-5 pt-[clamp(48px,6vh,64px)] text-center sm:px-8">
-          <h1 className="landing-reveal landing-delay-1 font-heading text-[clamp(38px,5vw,64px)] leading-[1.06] font-medium tracking-[-0.05em] text-balance">
-            Make every stablecoin <span className="text-brand-yellow">accountable.</span>
-          </h1>
-          <p className="landing-reveal landing-delay-2 mt-6 max-w-[610px] text-[16px] leading-[1.7] text-[#b0afa9] sm:text-[18px]">
-            Payday turns stablecoin transfers into{" "}
-            <span className="text-brand-green">verified customer deposits</span>,
-            <br className="hidden sm:block" /> ready for your application to credit.
-          </p>
-          <div className="landing-reveal landing-delay-3 mt-9 flex w-full max-w-[410px] flex-col justify-center gap-3.5 min-[440px]:flex-row">
-            <MerchantAuth>
-              <StartBuilding />
-            </MerchantAuth>
-            <a
-              href="https://calendar.app.google/dXTDCwAEPpk25xzx8"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex h-14 items-center justify-center rounded-[8px] border border-brand-green px-5 text-[16px] font-medium text-brand-green transition-colors hover:bg-brand-green/10"
-            >
-              Request a demo
-            </a>
+      <main className="flex flex-1 flex-col">
+        <section className="mx-auto grid w-full max-w-[1320px] flex-1 items-center gap-12 px-5 pt-8 pb-16 sm:px-8 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)] lg:gap-16 lg:pt-0 lg:pb-[clamp(48px,12vh,180px)]">
+          <div>
+            <h1 className="landing-reveal landing-delay-1 text-[clamp(40px,4.15vw,78px)] leading-[1.12] font-medium tracking-[-0.045em]">
+              Accept <Highlight tone="yellow">stablecoins</Highlight> on
+              <br className="hidden lg:block" /> <Highlight tone="green">your terms.</Highlight>
+            </h1>
+            <p className="landing-reveal landing-delay-2 mt-7 max-w-[600px] text-[18px] leading-[1.55] text-brand-subtle sm:text-[22px]">
+              Create a{" "}
+              <strong className="font-medium text-brand-black">
+                one-time programmable address
+              </strong>{" "}
+              for every deposit. Control who can fund it, when it expires and where it settles.
+            </p>
+            <div className="landing-reveal landing-delay-3 mt-9 flex flex-wrap items-center gap-3.5">
+              <MerchantAuth>
+                <GetStarted />
+              </MerchantAuth>
+              <Link
+                href="/docs"
+                className="flex h-14 items-center justify-center gap-2.5 rounded-[8px] border border-brand-black px-6 text-[17px] font-medium text-brand-black transition-colors hover:bg-brand-black/[0.05]"
+              >
+                <BookIcon />
+                Read Docs
+              </Link>
+            </div>
           </div>
-        </section>
 
-        <section
-          aria-label="Recent deposits"
-          className="landing-reveal landing-delay-4 deposit-stage"
-        >
-          <DepositScene />
+          <div className="landing-reveal landing-delay-4 flex aspect-[774/424] w-full items-center justify-center rounded-[10px] border border-brand-black bg-white text-[clamp(18px,1.6vw,24px)] font-medium">
+            Create deposit request
+          </div>
         </section>
       </main>
 
-      <footer className="bg-[#070707]">
-        <div className="mx-auto flex max-w-[1240px] flex-col gap-4 px-5 py-3.5 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <footer className="landing-reveal landing-delay-4">
+        <div className="mx-auto flex max-w-[1320px] flex-col gap-5 px-5 pb-8 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <Image
-              src="/payday-logo-full.svg"
-              width={2929}
+              src="/payday-logo-full.png"
+              width={2800}
               height={1000}
+              sizes="112px"
               alt="Payday"
-              className="h-auto w-[88px]"
+              className="h-auto w-[112px]"
             />
-            <p className="text-[11px] text-brand-grey">
-              Make every stablecoin <span className="text-brand-yellow">accountable.</span>
-            </p>
+            <p className="text-[15px] font-medium">Accept stablecoins on your terms.</p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <a href="mailto:contact@payday.sh" className="mr-3 text-[12px] text-brand-green">
+          <div className="flex flex-wrap items-center gap-3">
+            <a
+              href="mailto:contact@payday.sh"
+              className="mr-2 text-[15px] text-brand-subtle transition-colors hover:text-brand-black"
+            >
               contact@payday.sh
             </a>
             <SocialLink label="X">
@@ -101,6 +98,17 @@ export default function Home() {
   );
 }
 
+/** A marker-pen block behind a run of the headline. */
+function Highlight({ tone, children }: { tone: "yellow" | "green"; children: React.ReactNode }) {
+  return (
+    <mark
+      className={tone === "yellow" ? "landing-mark bg-brand-yellow" : "landing-mark bg-brand-green"}
+    >
+      {children}
+    </mark>
+  );
+}
+
 /** Where the footer's social icons go. */
 const SOCIAL_LINKS: Record<string, string> = {
   X: "https://x.com/paydaydotsh",
@@ -112,17 +120,30 @@ function SocialLink({ label, children }: { label: string; children: React.ReactN
     <a
       href={SOCIAL_LINKS[label]}
       aria-label={label}
-      className="flex size-10 items-center justify-center border border-brand-grey/25 text-brand-white transition-colors hover:border-brand-green hover:text-brand-green [&>svg]:size-[16px]"
+      className="flex size-8 items-center justify-center rounded-[6px] bg-brand-black text-brand-white transition-colors hover:bg-brand-black/85 [&>svg]:size-[16px]"
     >
       {children}
     </a>
   );
 }
 
+function BookIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-5" fill="none">
+      <path
+        d="M12 6.5c-1.6-1.4-3.6-2-6-2H4v13h2c2.4 0 4.4.6 6 2 1.6-1.4 3.6-2 6-2h2v-13h-2c-2.4 0-4.4.6-6 2Zm0 0v13"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function XIcon() {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
-      <path d="m5 5 14 14M19 5 5 19" stroke="currentColor" strokeWidth="1.5" />
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M17.75 3h3.07l-6.7 7.66L22 21h-6.17l-4.84-6.32L5.46 21H2.39l7.17-8.2L2 3h6.33l4.37 5.78L17.75 3Zm-1.08 16.16h1.7L7.4 4.74H5.57l11.1 14.42Z" />
     </svg>
   );
 }

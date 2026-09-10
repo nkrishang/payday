@@ -14,7 +14,7 @@ const SAVED_WALLET = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
 async function signIn(page: Page, email: string) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(email);
   await dialog.getByRole("button", { name: "Send code" }).click();
@@ -171,7 +171,9 @@ test("a new merchant is put straight to work: identity, contact, first request",
   // Payday itself is there in the customers table, not hidden: a real,
   // reusable counterparty like any other. Scoped to the customer row's own
   // link (by href) since the wordmark in the header is also named "Payday".
-  await expect(page.locator('a[href*="/dashboard/customers/"]', { hasText: "Payday" })).toBeVisible();
+  await expect(
+    page.locator('a[href*="/dashboard/customers/"]', { hasText: "Payday" }),
+  ).toBeVisible();
 });
 
 test("the composer keeps a running preview and can be stepped back through", async ({ page }) => {
@@ -402,7 +404,9 @@ test("the payer's view link opens unlocked for the issuing merchant, without ver
   await merchant.goto(href);
   // Everything a locked link would withhold is visible, from a click alone —
   // no code, no form.
-  await expect(merchant.getByRole("region", { name: "Deposit request", exact: true })).toBeVisible();
+  await expect(
+    merchant.getByRole("region", { name: "Deposit request", exact: true }),
+  ).toBeVisible();
   await expect(merchant.getByText("Verification required")).toHaveCount(0);
   await merchant.context().close();
 

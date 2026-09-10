@@ -18,7 +18,7 @@ const PDF = Buffer.from(
 
 async function signIn(page: Page, email = "merchant@example.com") {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(email);
   await dialog.getByRole("button", { name: "Send code" }).click();
@@ -276,9 +276,7 @@ test("a likely unsolicited deposit shows its flag and every verification attempt
   expect(text).not.toMatch(/SENTINEL|1900-01-01|identity check|identity document|risk/i);
 });
 
-test("the account section shows the signed-in mailbox and the Payday wallet", async ({
-  page,
-}) => {
+test("the account section shows the signed-in mailbox and the Payday wallet", async ({ page }) => {
   await signIn(page, "account-view@example.com");
 
   const section = page.getByRole("region", { name: "Account" });
@@ -324,9 +322,7 @@ test("a merchant can generate, roll, and revoke their API key from the session",
   await expect(section.getByText("Key rolled")).toBeVisible();
   const secondKey = await section.locator("code").innerText();
   expect(secondKey).not.toBe(firstKey);
-  await expect(
-    section.getByText(/previous key keeps working for the next 24 hours/),
-  ).toBeVisible();
+  await expect(section.getByText(/previous key keeps working for the next 24 hours/)).toBeVisible();
   await section.getByRole("button", { name: "Done" }).click();
   await expect(section.getByText(/previous key still works until/)).toBeVisible();
 

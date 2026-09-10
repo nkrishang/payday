@@ -20,7 +20,7 @@ import { SigningOutScreen } from "./session-screens";
 export const HOME_PATH = "/dashboard";
 /**
  * Where anyone without a session goes. There is no dashboard login page: the
- * landing page's "Start Building" is the only way in, and it is the same
+ * landing page's "Get Started" is the only way in, and it is the same
  * exchange, so an expired or absent session lands where a new merchant does.
  */
 export const SIGNED_OUT_PATH = "/";
@@ -125,7 +125,12 @@ export function MerchantGate({
   const value = useMemo<Merchant | null>(
     () =>
       authenticated && identityToken
-        ? { client: createMerchantClient(identityToken), accessToken: identityToken, email, signOut }
+        ? {
+            client: createMerchantClient(identityToken),
+            accessToken: identityToken,
+            email,
+            signOut,
+          }
         : null,
     [authenticated, identityToken, email, signOut],
   );
