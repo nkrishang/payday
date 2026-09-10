@@ -37,6 +37,9 @@ pub struct OnboardingPayerSigner {
     provider: DynProvider,
     backend: Arc<Backend>,
     address: Address,
+    /// The chain the demo pays on and that chain's USDC.
+    chain_id: u64,
+    usdc: Address,
 }
 
 impl OnboardingPayerSigner {
@@ -45,6 +48,7 @@ impl OnboardingPayerSigner {
         sdk_config: &aws_config::SdkConfig,
         rpc_url: &str,
         chain_id: u64,
+        usdc: Address,
     ) -> Result<Self, String> {
         let (address, wallet, backend) = match config {
             OnboardingPayerSignerConfig::Local(key) => {
@@ -81,11 +85,18 @@ impl OnboardingPayerSigner {
             provider,
             backend: Arc::new(backend),
             address,
+            chain_id,
+            usdc,
         })
     }
 
     pub fn address(&self) -> Address {
         self.address
+    }
+
+    /// The chain the demo pays on.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
     /// Sign a raw 32-byte digest (the payer attestation's EIP-712 hash).
@@ -100,12 +111,8 @@ impl OnboardingPayerSigner {
     /// Does not wait for a receipt: the indexer picks the transfer up and
     /// carries the invoice through funding and settlement on its own, exactly
     /// as it would for a payer's own browser-submitted transfer.
-    pub async fn send_usdc(
-        &self,
-        usdc_address: Address,
-        to: Address,
-        amount: U256,
-    ) -> Result<B256, String> {
+    pub async fn send_usdc(&self, to: Address, amount: U256) -> Result<B256, String> {
+        let usdc_address = self.usdc;
         let calldata = transferCall { to, amount }.abi_encode();
         let tx = TransactionRequest::default()
             .with_to(usdc_address)

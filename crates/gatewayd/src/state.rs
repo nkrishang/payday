@@ -1,5 +1,5 @@
 use alloy_primitives::Address;
-use gateway_core::{ChainId, ProofOfPayment};
+use gateway_core::{ChainRegistry, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
     IssuerRepository, OnboardingDemoPaymentRepository, PayerSessionRepository, ProofRepository,
@@ -43,9 +43,8 @@ pub struct AppState {
     /// The payer audience; `None` leaves gated invoices unverifiable and the
     /// email routes answering `verification_unavailable`.
     pub payer_verification: Option<PayerVerification>,
-    pub chain_id: ChainId,
-    pub factory_address: Address,
-    pub usdc_address: Address,
+    /// The networks a deposit request may be paid on.
+    pub networks: Arc<ChainRegistry>,
     pub payer: PayerAccess,
     pub webhooks: WebhookRepository,
     /// 256-bit AEAD key. Webhook APIs remain unavailable when not configured.
@@ -78,9 +77,7 @@ impl AppState {
         repo: InvoiceRepository,
         accounts: AccountRepository,
         merchant_verifier: Option<PrivyVerifier>,
-        chain_id: ChainId,
-        factory_address: Address,
-        usdc_address: Address,
+        networks: Arc<ChainRegistry>,
         payer: PayerAccess,
         api_key_prefix: String,
         webhook_encryption_key: Option<[u8; 32]>,
@@ -104,9 +101,7 @@ impl AppState {
             accounts,
             merchant_verifier,
             payer_verification,
-            chain_id,
-            factory_address,
-            usdc_address,
+            networks,
             payer,
             webhook_encryption_key,
             api_key_prefix,

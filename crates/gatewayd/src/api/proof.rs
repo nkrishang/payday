@@ -137,7 +137,7 @@ pub async fn get_proof(
             // vouches for this invoice and this payer only, not for any
             // proof that reuses its id.
             attribution_hash: invoice.attribution_hash.to_string(),
-            chain_id: invoice.chain_id.0.to_string(),
+            chain_id: binding.network.chain_id.to_string(),
             payment_address: binding.payment_address.0.to_checksum(None),
             payer_wallet: binding.payer_wallet.to_checksum(None),
             wallet_nonce: binding.attestation.typed_data.message.nonce.clone(),
@@ -161,10 +161,10 @@ pub async fn get_proof(
         attribution_hash: invoice.attribution_hash.to_string(),
         payer_wallet: binding.attestation.clone(),
         salt: binding.salt.0.to_string(),
-        chain_id: invoice.chain_id.0.to_string(),
-        factory_address: invoice.factory.0.to_checksum(None),
+        chain_id: binding.network.chain_id.to_string(),
+        factory_address: binding.network.factory.0.to_checksum(None),
         payment_address: binding.payment_address.0.to_checksum(None),
-        token_address: invoice.token.0.to_checksum(None),
+        token_address: binding.network.token.0.to_checksum(None),
         recovery_address: binding.recovery.0.to_checksum(None),
         settlement_transaction_hash,
         transfers,

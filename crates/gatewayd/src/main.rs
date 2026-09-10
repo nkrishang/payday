@@ -70,13 +70,18 @@ async fn main() {
     tracing::info!(address = %attestor.address(), "configured attestation signer");
     // Absent whenever a deployment hasn't deliberately funded and configured
     // this — production may never set it.
+    let onboarding_chain = config
+        .networks()
+        .get(config.onboarding_chain_id())
+        .expect("the onboarding chain is registered");
     let onboarding_payer = match config.onboarding_payer() {
         Some(signer_config) => Some(
             onboarding_payer::OnboardingPayerSigner::from_config(
                 signer_config,
                 &aws,
-                &config.settlement().rpc_url,
-                config.chain_id().0,
+                config.rpc_url(onboarding_chain.chain_id),
+                onboarding_chain.chain_id,
+                onboarding_chain.usdc,
             )
             .await
             .unwrap_or_else(|error| panic!("{error}")),
@@ -84,7 +89,7 @@ async fn main() {
         None => None,
     };
     if let Some(onboarding_payer) = &onboarding_payer {
-        tracing::info!(address = %onboarding_payer.address(), "configured onboarding payer signer");
+        tracing::info!(address = %onboarding_payer.address(), chain_id = onboarding_chain.chain_id, "configured onboarding payer signer");
     }
     // Absent whenever PAYDAY_PRIVY_APP_SECRET isn't set — a latency
     // optimization, not a dependency: sign-in still creates a merchant's
@@ -110,7 +115,12 @@ async fn main() {
     }
     let payer = api::payer::PayerAccess::new(
         config.public_base_url(),
-        config.explorer_base_url().map(str::to_owned),
+        config
+            .networks()
+            .chains()
+            .iter()
+            .filter_map(|chain| Some((chain.chain_id, chain.explorer_base_url.clone()?)))
+            .collect(),
         config.hosted_checkout_origin().map(str::to_owned),
     )
     .expect("invalid payer link configuration");
@@ -146,27 +156,28 @@ async fn main() {
         }
     };
     // Every payment address this service hands out assumes the reviewed
-    // contract generation, so refuse to serve against any other deployment.
-    let settlement = config.settlement();
-    deployment::verify_deployment(
-        &settlement.rpc_url,
-        &deployment::ExpectedDeployment {
-            chain_id: config.chain_id().0,
-            factory: config.factory_address(),
-            factory_code_hash: settlement.factory_code_hash,
-            batch_sweeper: settlement.batch_sweeper_address,
-            batch_sweeper_code_hash: settlement.batch_sweeper_code_hash,
-        },
-    )
+    // contract generation on every chain it offers, so refuse to serve
+    // against any other deployment anywhere. The chains are independent
+    // endpoints, so they are checked together.
+    futures::future::try_join_all(config.networks().chains().iter().map(|chain| {
+        deployment::verify_deployment(
+            config.rpc_url(chain.chain_id),
+            deployment::ExpectedDeployment {
+                chain_id: chain.chain_id,
+                factory: chain.factory,
+                factory_code_hash: chain.factory_code_hash,
+                batch_sweeper: chain.batch_sweeper,
+                batch_sweeper_code_hash: chain.batch_sweeper_code_hash,
+            },
+        )
+    }))
     .await
     .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
     let state = state::AppState::new(
         repo,
         accounts,
         merchant_verifier,
-        config.chain_id(),
-        config.factory_address(),
-        config.usdc_address(),
+        Arc::new(config.networks().clone()),
         payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),

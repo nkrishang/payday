@@ -7,11 +7,10 @@ use crate::{
     state::AppState,
 };
 
+/// One entry per supported network: where its indexer and sweeper stand.
 #[derive(Serialize)]
 pub struct ServiceStatus {
-    chain: ChainStatus,
-    indexer: IndexerStatus,
-    sweeper: SweeperStatus,
+    chains: Vec<ChainStatus>,
 }
 
 #[derive(Serialize)]
@@ -20,6 +19,8 @@ struct ChainStatus {
     name: &'static str,
     finalized_block: Option<String>,
     finalized_at: Option<String>,
+    indexer: IndexerStatus,
+    sweeper: SweeperStatus,
 }
 
 #[derive(Serialize)]
@@ -41,35 +42,29 @@ fn timestamp(value: u64) -> Option<String> {
 
 pub async fn get(State(state): State<AppState>) -> Result<Json<ServiceStatus>, ApiError> {
     let cursors = CursorRepository::new(state.repo.pool().clone());
-    let finalized = cursors
-        .finalized_head(state.chain_id.0, state.usdc_address)
-        .await?;
-    let cursor = cursors.get(state.chain_id.0, state.usdc_address).await?;
-    let queue = state.repo.sweep_queue_stats(state.chain_id.0).await?;
-    let worker = state.repo.sweeper_status(state.chain_id.0).await?;
-    Ok(Json(ServiceStatus {
-        chain: ChainStatus {
-            id: state.chain_id.0.to_string(),
-            name: match state.chain_id.0 {
-                1 => "Ethereum",
-                143 => "Monad",
-                10_143 => "Monad Testnet",
-                31_337 => "Local",
-                _ => "Unknown",
-            },
+    let mut chains = Vec::with_capacity(state.networks.chains().len());
+    for chain in state.networks.chains() {
+        let finalized = cursors.finalized_head(chain.chain_id, chain.usdc).await?;
+        let cursor = cursors.get(chain.chain_id, chain.usdc).await?;
+        let queue = state.repo.sweep_queue_stats(chain.chain_id).await?;
+        let worker = state.repo.sweeper_status(chain.chain_id).await?;
+        chains.push(ChainStatus {
+            id: chain.chain_id.to_string(),
+            name: gateway_core::chain_name(chain.chain_id),
             finalized_block: finalized.map(|value| value.block.to_string()),
             finalized_at: finalized.and_then(|value| value.block_timestamp.and_then(timestamp)),
-        },
-        indexer: IndexerStatus {
-            cursor_block: cursor.map(|value| value.block.to_string()),
-            cursor_at: cursor.and_then(|value| value.block_timestamp.and_then(timestamp)),
-            lag_blocks: finalized
-                .zip(cursor)
-                .map(|(head, indexed)| head.block.saturating_sub(indexed.block)),
-        },
-        sweeper: SweeperStatus {
-            state: worker.map_or_else(|| "degraded".into(), |value| value.state),
-            queued: queue.queued,
-        },
-    }))
+            indexer: IndexerStatus {
+                cursor_block: cursor.map(|value| value.block.to_string()),
+                cursor_at: cursor.and_then(|value| value.block_timestamp.and_then(timestamp)),
+                lag_blocks: finalized
+                    .zip(cursor)
+                    .map(|(head, indexed)| head.block.saturating_sub(indexed.block)),
+            },
+            sweeper: SweeperStatus {
+                state: worker.map_or_else(|| "degraded".into(), |value| value.state),
+                queued: queue.queued,
+            },
+        });
+    }
+    Ok(Json(ServiceStatus { chains }))
 }

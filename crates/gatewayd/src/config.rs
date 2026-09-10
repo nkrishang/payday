@@ -1,8 +1,7 @@
-use std::str::FromStr;
+use std::collections::HashMap;
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
-use gateway_core::ChainId;
+use gateway_core::ChainRegistry;
 
 /// Signed download links live this long unless configured otherwise.
 const DEFAULT_DOWNLOAD_TTL_SECS: u64 = 300;
@@ -16,10 +15,14 @@ pub struct Config {
     /// unaccepted and only API keys authenticate.
     privy: Option<PrivyConfig>,
     dev_identity: bool,
-    chain_id: ChainId,
-    factory_address: Address,
-    usdc_address: Address,
-    settlement: SettlementConfig,
+    /// Every network a deposit request may be paid on, with the contract
+    /// generation deployed on each (`PAYDAY_CHAINS`).
+    networks: ChainRegistry,
+    /// One RPC URL per registered chain (`PAYDAY_RPC_URL_<chain_id>`), read
+    /// at startup to verify the deployment and to pay the onboarding demo.
+    rpc_urls: HashMap<u64, String>,
+    /// The chain the onboarding walkthrough's demo transfer is paid on.
+    onboarding_chain_id: u64,
     attachments: AttachmentConfig,
     attestation: AttestationSignerConfig,
     /// The wallet that pays the onboarding walkthrough's one self-issued
@@ -33,7 +36,6 @@ pub struct Config {
     public_base_url: String,
     /// The one browser origin that may call the verification write routes.
     hosted_checkout_origin: Option<String>,
-    explorer_base_url: Option<String>,
     api_key_prefix: String,
     webhook_encryption_key: Option<[u8; 32]>,
     notification_from_address: Option<String>,
@@ -95,38 +97,19 @@ impl Config {
             ),
         };
 
-        let factory_address =
-            std::env::var("PAYDAY_FACTORY_ADDRESS").expect("PAYDAY_FACTORY_ADDRESS must be set");
-        let factory_address = Address::from_str(&factory_address)
-            .unwrap_or_else(|e| panic!("invalid PAYDAY_FACTORY_ADDRESS '{factory_address}': {e}"));
-
-        let chain_id: u64 = std::env::var("PAYDAY_CHAIN_ID")
-            .expect("PAYDAY_CHAIN_ID must be set")
-            .parse()
-            .unwrap_or_else(|e| panic!("invalid PAYDAY_CHAIN_ID: {e}"));
-
-        let usdc_address =
-            std::env::var("PAYDAY_USDC_ADDRESS").expect("PAYDAY_USDC_ADDRESS must be set");
-        let usdc_address = Address::from_str(&usdc_address)
-            .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_ADDRESS '{usdc_address}': {e}"));
-
+        let networks = ChainRegistry::from_env();
         let required =
             |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
-        let settlement = SettlementConfig {
-            rpc_url: required("PAYDAY_RPC_URL"),
-            batch_sweeper_address: Address::from_str(&required("PAYDAY_BATCH_SWEEPER_ADDRESS"))
-                .unwrap_or_else(|e| panic!("invalid PAYDAY_BATCH_SWEEPER_ADDRESS: {e}")),
-            factory_code_hash: parse_code_hash(
-                "PAYDAY_FACTORY_CODE_HASH",
-                &required("PAYDAY_FACTORY_CODE_HASH"),
-            )
-            .unwrap_or_else(|message| panic!("{message}")),
-            batch_sweeper_code_hash: parse_code_hash(
-                "PAYDAY_BATCH_SWEEPER_CODE_HASH",
-                &required("PAYDAY_BATCH_SWEEPER_CODE_HASH"),
-            )
-            .unwrap_or_else(|message| panic!("{message}")),
-        };
+        let rpc_urls = networks
+            .chains()
+            .iter()
+            .map(|chain| (chain.chain_id, required(&chain.rpc_url_var())))
+            .collect();
+        let onboarding_chain_id = onboarding_chain(
+            &networks,
+            std::env::var("PAYDAY_ONBOARDING_CHAIN_ID").ok().as_deref(),
+        )
+        .unwrap_or_else(|message| panic!("{message}"));
 
         let attachments = AttachmentConfig {
             bucket: required("PAYDAY_ATTACHMENT_BUCKET"),
@@ -181,10 +164,9 @@ impl Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             privy,
             dev_identity,
-            chain_id: ChainId(chain_id),
-            factory_address,
-            usdc_address,
-            settlement,
+            networks,
+            rpc_urls,
+            onboarding_chain_id,
             attachments,
             attestation,
             onboarding_payer,
@@ -194,7 +176,6 @@ impl Config {
             hosted_checkout_origin: std::env::var("PAYDAY_HOSTED_CHECKOUT_ORIGIN")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            explorer_base_url: std::env::var("PAYDAY_EXPLORER_BASE_URL").ok(),
             api_key_prefix,
             webhook_encryption_key,
             notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
@@ -220,21 +201,21 @@ impl Config {
         self.dev_identity
     }
 
-    pub fn chain_id(&self) -> ChainId {
-        self.chain_id
+    /// The networks this service issues addresses against.
+    pub fn networks(&self) -> &ChainRegistry {
+        &self.networks
     }
 
-    pub fn factory_address(&self) -> Address {
-        self.factory_address
+    /// The RPC URL for one registered chain; every registered chain has one.
+    pub fn rpc_url(&self, chain_id: u64) -> &str {
+        self.rpc_urls
+            .get(&chain_id)
+            .map(String::as_str)
+            .expect("every registered chain has an RPC URL")
     }
 
-    pub fn usdc_address(&self) -> Address {
-        self.usdc_address
-    }
-
-    /// The chain deployment this service issues addresses against.
-    pub fn settlement(&self) -> &SettlementConfig {
-        &self.settlement
+    pub fn onboarding_chain_id(&self) -> u64 {
+        self.onboarding_chain_id
     }
 
     /// The attachment bucket.
@@ -267,10 +248,6 @@ impl Config {
     /// URL, which is where `/pay/{id}` links already point.
     pub fn hosted_checkout_origin(&self) -> Option<&str> {
         self.hosted_checkout_origin.as_deref()
-    }
-
-    pub fn explorer_base_url(&self) -> Option<&str> {
-        self.explorer_base_url.as_deref()
     }
 
     pub fn api_key_prefix(&self) -> &str {
@@ -310,11 +287,23 @@ fn payer_email_from(value: Option<String>) -> Result<String, String> {
     }
 }
 
-/// keccak256 of the runtime bytecode `eth_getCode` returns for a contract,
-/// as `cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"` prints it.
-fn parse_code_hash(name: &str, value: &str) -> Result<B256, String> {
-    B256::from_str(value)
-        .map_err(|e| format!("invalid {name} '{value}': expected 0x-prefixed 32-byte hex: {e}"))
+/// The chain the onboarding demo pays on: the first registered chain unless
+/// `PAYDAY_ONBOARDING_CHAIN_ID` names another registered one.
+fn onboarding_chain(networks: &ChainRegistry, value: Option<&str>) -> Result<u64, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(networks.first().chain_id),
+        Some(value) => {
+            let chain_id: u64 = value
+                .parse()
+                .map_err(|_| format!("invalid PAYDAY_ONBOARDING_CHAIN_ID '{value}'"))?;
+            networks
+                .get(chain_id)
+                .map(|chain| chain.chain_id)
+                .ok_or_else(|| {
+                    format!("PAYDAY_ONBOARDING_CHAIN_ID {chain_id} is not one of PAYDAY_CHAINS")
+                })
+        }
+    }
 }
 
 /// Exactly one attestation key source: a raw key locally, KMS in production.
@@ -431,29 +420,35 @@ pub enum OnboardingPayerSignerConfig {
     AwsKms(String),
 }
 
-/// The contracts this build must find on the chain.
-pub struct SettlementConfig {
-    pub rpc_url: String,
-    pub batch_sweeper_address: Address,
-    pub factory_code_hash: B256,
-    pub batch_sweeper_code_hash: B256,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn code_hashes_are_0x_prefixed_32_byte_hex() {
-        let hash = "0x".to_string() + &"ab".repeat(32);
-        assert_eq!(
-            parse_code_hash("PAYDAY_FACTORY_CODE_HASH", &hash).unwrap(),
-            B256::repeat_byte(0xab)
-        );
-        let error = parse_code_hash("PAYDAY_FACTORY_CODE_HASH", "0xabcd").unwrap_err();
-        assert!(error.contains("PAYDAY_FACTORY_CODE_HASH"));
-        assert!(parse_code_hash("PAYDAY_BATCH_SWEEPER_CODE_HASH", "").is_err());
-        assert!(parse_code_hash("PAYDAY_BATCH_SWEEPER_CODE_HASH", &"zz".repeat(32)).is_err());
+    fn onboarding_chain_defaults_to_the_first_registered_chain() {
+        let chain = |id: u64| {
+            serde_json::json!({
+                "chain_id": id,
+                "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+                "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+                "batch_sweeper": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+                "factory_code_hash": format!("0x{}", "ab".repeat(32)),
+                "batch_sweeper_code_hash": format!("0x{}", "cd".repeat(32)),
+                "usdc_start_block": 0,
+                "finality_source": "finalized",
+                "finality_confirmations": 0,
+                "block_time_ms": 300,
+                "log_range_size": 100,
+                "scan": "full"
+            })
+        };
+        let registry =
+            ChainRegistry::parse(&serde_json::json!([chain(143), chain(8453)]).to_string()).unwrap();
+        assert_eq!(onboarding_chain(&registry, None).unwrap(), 143);
+        assert_eq!(onboarding_chain(&registry, Some(" ")).unwrap(), 143);
+        assert_eq!(onboarding_chain(&registry, Some("8453")).unwrap(), 8453);
+        assert!(onboarding_chain(&registry, Some("1")).is_err());
+        assert!(onboarding_chain(&registry, Some("base")).is_err());
     }
 
     #[test]

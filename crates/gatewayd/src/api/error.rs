@@ -115,19 +115,13 @@ impl ApiError {
         }
     }
 
+    /// The chain a payer named is not one the request can be paid on.
     pub fn unsupported_chain() -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "unsupported_chain",
-            message: "This chain is not supported".into(),
-        }
-    }
-
-    pub fn unsupported_token() -> Self {
-        Self {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            code: "unsupported_token",
-            message: "Only the configured Circle-issued USDC token is supported".into(),
+            message: "This deposit request cannot be paid on that chain; choose one of its networks"
+                .into(),
         }
     }
 

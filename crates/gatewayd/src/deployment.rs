@@ -56,8 +56,9 @@ fn url_start(message: &str) -> Option<usize> {
 /// Read the live deployment from `rpc_url` and refuse any mismatch.
 pub async fn verify_deployment(
     rpc_url: &str,
-    expected: &ExpectedDeployment,
+    expected: ExpectedDeployment,
 ) -> Result<(), DeploymentError> {
+    let expected = &expected;
     let provider = ProviderBuilder::new()
         .connect(rpc_url)
         .await

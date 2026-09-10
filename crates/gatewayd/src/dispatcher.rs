@@ -307,14 +307,17 @@ mod tests {
     use alloy_primitives::{U256, address};
     use gateway_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress,
-        InvoiceStatus, Party, PayerPolicy, TokenAddress,
+        InvoiceStatus, NetworkTerms, Party, PayerPolicy, TokenAddress,
     };
 
     use super::*;
 
     fn invoice() -> Invoice {
-        let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
-        let token = TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603"));
+        let networks = vec![NetworkTerms {
+            chain_id: ChainId(143),
+            token: TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+            factory: FactoryAddress(address!("0x0000000000000000000000000000000000000001")),
+        }];
         let beneficiary =
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000002"));
         let amount = Amount(U256::from(1_250_500_000));
@@ -327,30 +330,19 @@ mod tests {
             party("Acme", None),
             party("Globex", Some("payer@example.com")),
             PayerPolicy::Permissionless,
-            factory,
-            ChainId(143),
-            token,
+            &networks,
             beneficiary,
             amount,
             1_788_000_000,
         );
         snapshot.heading = Some("March retainer".into());
         snapshot.reference = Some("INV-001".into());
-        Invoice::issue(
-            factory,
-            ChainId(143),
-            token,
-            beneficiary,
-            amount,
-            1_788_000_000,
-            snapshot,
-        )
-        .unwrap()
+        Invoice::issue(&networks, beneficiary, amount, 1_788_000_000, snapshot).unwrap()
     }
 
     #[test]
     fn composes_the_payer_email_from_the_issued_document() {
-        let access = PayerAccess::new("https://payday.sh/", None, None).unwrap();
+        let access = PayerAccess::new("https://payday.sh/", vec![], None).unwrap();
         let invoice = invoice();
         let email = compose(&invoice, &access);
         assert_eq!(email.issuer_name, "Acme");

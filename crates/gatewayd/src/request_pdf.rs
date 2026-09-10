@@ -145,14 +145,23 @@ fn layout(invoice: &DepositRequestResponse) -> Vec<Line> {
     }
 
     lines.section("Deposit");
-    lines.field(
-        "Chain",
-        &format!("{} ({})", invoice.chain.name, invoice.chain.id),
-    );
-    lines.field(
-        "Token",
-        &format!("{} {}", invoice.token.symbol, invoice.token.address),
-    );
+    match (&invoice.chain, &invoice.token) {
+        (Some(chain), Some(token)) => {
+            lines.field("Network", &format!("{} ({})", chain.name, chain.id));
+            lines.field("Token", &format!("{} {}", token.symbol, token.address));
+        }
+        _ => {
+            // The payer chooses the network when they sign; until then the
+            // document lists every one the request can be paid on.
+            let offered: Vec<String> = invoice
+                .networks
+                .iter()
+                .map(|network| format!("{} ({})", network.chain.name, network.chain.id))
+                .collect();
+            lines.field("Networks", &format!("Payer's choice: {}", offered.join(", ")));
+            lines.field("Token", "Native USDC on the chosen network");
+        }
+    }
     lines.field(
         "Deposit address",
         invoice
@@ -394,7 +403,7 @@ mod tests {
     use alloy_primitives::{B256, U256, address};
     use gateway_core::{
         Amount, AttachmentDescriptor, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId,
-        FactoryAddress, Invoice, Party, PayerAttestation, PayerPolicy, TokenAddress,
+        FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy, TokenAddress,
         sign_payer_attestation, wallet_of,
     };
     use uuid::Uuid;
@@ -403,7 +412,18 @@ mod tests {
 
     fn invoice(notes: Option<&str>) -> DepositRequestResponse {
         let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
-        let token = TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603"));
+        let networks = vec![
+            NetworkTerms {
+                chain_id: ChainId(143),
+                token: TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+                factory,
+            },
+            NetworkTerms {
+                chain_id: ChainId(8453),
+                token: TokenAddress(address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")),
+                factory,
+            },
+        ];
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(1_500_000));
@@ -421,9 +441,7 @@ mod tests {
             PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
             },
-            factory,
-            ChainId(143),
-            token,
+            &networks,
             beneficiary,
             amount,
             1_900_000_000,
@@ -431,16 +449,8 @@ mod tests {
         snapshot.heading = Some("March retainer — “final”".into());
         snapshot.reference = Some("INV-42".into());
         snapshot.notes = notes.map(str::to_owned);
-        let mut invoice = Invoice::issue(
-            factory,
-            ChainId(143),
-            token,
-            beneficiary,
-            amount,
-            1_900_000_000,
-            snapshot,
-        )
-        .unwrap();
+        let mut invoice =
+            Invoice::issue(&networks, beneficiary, amount, 1_900_000_000, snapshot).unwrap();
         let key = [7u8; 32];
         let message = PayerAttestation::new(
             invoice.attribution_hash,
@@ -450,7 +460,7 @@ mod tests {
         );
         let attestation = sign_payer_attestation(&key, &message, 143, factory.0);
         let binding = invoice
-            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .bind_payer_wallet(ChainId(143), attestation, "2026-09-06T00:00:00Z".into())
             .unwrap();
         invoice.binding = Some(binding);
         let mut response = DepositRequestResponse::from_invoice(invoice, None);

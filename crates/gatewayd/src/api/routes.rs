@@ -324,6 +324,33 @@ mod tests {
         VerificationAttestor::local(PrivateKeySigner::from_slice(&[7u8; 32]).unwrap())
     }
 
+    /// The deployment under test offers two networks through one factory:
+    /// chain 1 with the zero token, chain 2 with another.
+    fn test_networks(factory: Address) -> Arc<gateway_core::ChainRegistry> {
+        let chain = |chain_id: u64, usdc: Address| gateway_core::ChainConfig {
+            chain_id,
+            usdc,
+            factory,
+            batch_sweeper: Address::repeat_byte(0x55),
+            factory_code_hash: alloy_primitives::B256::ZERO,
+            batch_sweeper_code_hash: alloy_primitives::B256::ZERO,
+            usdc_start_block: 0,
+            finality_source: gateway_core::FinalitySource::Finalized,
+            finality_confirmations: 0,
+            block_time_ms: 1000,
+            log_range_size: 100,
+            scan: gateway_core::ScanMode::Full,
+            explorer_base_url: None,
+        };
+        Arc::new(
+            gateway_core::ChainRegistry::new(vec![
+                chain(1, Address::ZERO),
+                chain(2, Address::repeat_byte(0x02)),
+            ])
+            .unwrap(),
+        )
+    }
+
     /// The router plus the memory bucket behind it, so a test can play the
     /// uploading client and the malware scanner.
     struct TestApp {
@@ -345,9 +372,7 @@ mod tests {
             InvoiceRepository::new(pool),
             accounts,
             merchant_verifier,
-            ChainId(1),
-            factory,
-            Address::ZERO,
+            test_networks(factory),
             payer_access(),
             "payday_live_".into(),
             Some(WEBHOOK_KEY),
@@ -523,7 +548,7 @@ mod tests {
             .oneshot(payer_post(
                 &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
                 session,
-                Some(&json!({"wallet": wallet.to_checksum(None)})),
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
             ))
             .await
             .unwrap();
@@ -666,7 +691,7 @@ mod tests {
     }
 
     fn payer_access() -> payer::PayerAccess {
-        payer::PayerAccess::new("http://127.0.0.1:3000", None, None).unwrap()
+        payer::PayerAccess::new("http://127.0.0.1:3000", vec![], None).unwrap()
     }
 
     fn unix_now() -> u64 {
@@ -679,8 +704,6 @@ mod tests {
     /// A request body that passes every validation rule; tests override one field.
     fn valid_body() -> Value {
         json!({
-            "chain_id": "1",
-            "token_address": "0x0000000000000000000000000000000000000000",
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
             "expires_in": 3600,
@@ -1063,6 +1086,22 @@ mod tests {
             .await
             .unwrap();
         let id = json_body(created).await["id"].as_str().unwrap().to_owned();
+        // Freshness is per chain, so an unbound request reports none.
+        let unbound = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/v1/deposit-requests/{id}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(unbound["as_of"].is_null());
+        assert!(unbound["indexer_freshness"]["last_indexed_block"].is_null());
+        bind_wallet(&app, &id, None, &PAYER_KEY).await;
         sqlx::query("INSERT INTO indexer_cursor(chain_id,token_address,last_block,last_block_hash,last_block_timestamp) VALUES(1,$1,117,$2,1700000000)")
             .bind(Address::ZERO.as_slice()).bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO indexer_status(chain_id,token_address,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,$1,120,$2,1700000012)")
@@ -1101,15 +1140,23 @@ mod tests {
             .unwrap();
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap();
-        assert_eq!(created["chain"]["id"], "1");
-        assert_eq!(created["token"]["address"], Address::ZERO.to_checksum(None));
+        // No network until the payer chooses one; the offer lists them all.
+        assert!(created["chain"].is_null());
+        assert!(created["token"].is_null());
+        assert_eq!(created["networks"][0]["chain"]["id"], "1");
+        assert_eq!(created["networks"][0]["chain"]["name"], "Ethereum");
+        assert_eq!(
+            created["networks"][0]["token"]["address"],
+            Address::ZERO.to_checksum(None)
+        );
+        assert_eq!(created["networks"][1]["chain"]["id"], "2");
         assert!(created["recovery_address"].is_null());
         assert_eq!(created["reference"], "Order 1234");
         assert!(created.get("memo").is_none());
         assert_eq!(created["issuer"]["name"], "Acme");
         assert_eq!(created["payer"]["name"], "Globex");
         assert_eq!(created["payer_policy"]["mode"], "permissionless");
-        assert_eq!(created["attribution"]["version"], 2);
+        assert_eq!(created["attribution"]["version"], 3);
         assert!(created["attachment"].is_null());
         assert_eq!(created["expires_in"], 86_400);
         // The address exists once the payer binds a wallet, and it is the
@@ -1834,6 +1881,94 @@ mod tests {
         );
     }
 
+    /// The payer, not the merchant, picks the network: the create route
+    /// refuses chain fields, and a challenge on the second network signs
+    /// under that chain's domain and binds the request there.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn the_payer_chooses_the_network(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        for (field, value) in [("chain_id", "1"), ("token_address", "0x0000000000000000000000000000000000000000")] {
+            let mut body = valid_body();
+            body[field] = json!(value);
+            let refused = app
+                .clone()
+                .oneshot(create_request(KEY, "chain-field", &body))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{field}");
+            let error = json_body(refused).await;
+            assert_eq!(error["error"]["code"], "invalid_request");
+            assert!(
+                error["error"]["message"].as_str().unwrap().contains(field),
+                "{error}"
+            );
+        }
+
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "second-network", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        let wallet = gateway_core::wallet_of(&PAYER_KEY);
+        let challenge = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "2"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::OK);
+        let challenge = json_body(challenge).await;
+        assert_eq!(challenge["chain"]["id"], "2");
+        assert_eq!(challenge["typed_data"]["domain"]["chainId"], 2);
+        let session = challenge["payer_session"].as_str().unwrap().to_owned();
+        let signature = sign_challenge(&challenge, &PAYER_KEY);
+        let bound = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/attest"),
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bound.status(), StatusCode::OK);
+        let bound = json_body(bound).await;
+        assert_eq!(bound["chain"]["id"], "2");
+        assert_eq!(
+            bound["token"]["address"],
+            Address::repeat_byte(0x02).to_checksum(None)
+        );
+        assert!(bound["deposit_uri"].as_str().unwrap().contains("@2/transfer"));
+        let merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(merchant["chain"]["id"], "2");
+        assert_eq!(merchant["self_settlement"]["chain_id"], "2");
+
+        // The same document bound on chain 1 lands at another address: the
+        // chain is committed into it like the wallet.
+        let other = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "first-network", &valid_body()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let (on_one, _) = bind_wallet(&app, other["id"].as_str().unwrap(), None, &PAYER_KEY).await;
+        assert_eq!(on_one["chain"]["id"], "1");
+        assert_ne!(on_one["address"], bound["address"]);
+    }
+
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn payer_wallet_binding_derives_the_address_and_is_final(pool: PgPool) {
         let app = app(pool.clone()).await;
@@ -1862,6 +1997,8 @@ mod tests {
         assert!(open["address"].is_null());
         assert!(open["deposit_uri"].is_null());
         assert!(open["payer_wallet"].is_null());
+        assert!(open["chain"].is_null(), "no network until the payer chooses");
+        assert_eq!(open["networks"].as_array().unwrap().len(), 2);
         assert_eq!(open["requirements"]["wallet"], "pending");
         assert_eq!(open["requirements"]["complete"], true);
         let qr = app
@@ -1880,18 +2017,46 @@ mod tests {
         let wallet = gateway_core::wallet_of(&PAYER_KEY);
         let challenge_path = format!("/v1/payer/deposit-requests/{id}/wallet/challenge");
         let attest_path = format!("/v1/payer/deposit-requests/{id}/wallet/attest");
+        // The chain is mandatory and must be one the request offers.
+        for (body, status, code) in [
+            (
+                json!({"wallet": wallet.to_checksum(None)}),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                json!({"wallet": wallet.to_checksum(None), "chain_id": "three"}),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                json!({"wallet": wallet.to_checksum(None), "chain_id": "3"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_chain",
+            ),
+        ] {
+            let refused = app
+                .clone()
+                .oneshot(payer_post(&challenge_path, None, Some(&body)))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), status, "{body}");
+            assert_eq!(json_body(refused).await["error"]["code"], code, "{body}");
+        }
         let challenge = app
             .clone()
             .oneshot(payer_post(
                 &challenge_path,
                 None,
-                Some(&json!({"wallet": wallet.to_checksum(None)})),
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
             ))
             .await
             .unwrap();
         assert_eq!(challenge.status(), StatusCode::OK);
         let challenge = json_body(challenge).await;
         let session = challenge["payer_session"].as_str().unwrap().to_owned();
+        assert_eq!(challenge["chain"]["id"], "1");
+        assert_eq!(challenge["chain"]["name"], "Ethereum");
         assert_eq!(challenge["typed_data"]["primaryType"], "PayerAttestation");
         assert_eq!(challenge["typed_data"]["domain"]["name"], "Payday");
         assert_eq!(challenge["typed_data"]["domain"]["chainId"], 1);
@@ -1955,6 +2120,10 @@ mod tests {
         assert!(address.starts_with("0x"));
         assert_eq!(bound["payer_wallet"], wallet.to_checksum(None));
         assert_eq!(bound["requirements"]["wallet"], "approved");
+        // The chosen network is now the request's network.
+        assert_eq!(bound["chain"]["id"], "1");
+        assert_eq!(bound["token"]["address"], Address::ZERO.to_checksum(None));
+        assert!(bound["deposit_uri"].as_str().unwrap().contains("@1/transfer"));
         assert!(
             bound["deposit_uri"]
                 .as_str()
@@ -1979,6 +2148,8 @@ mod tests {
         assert_eq!(merchant["recovery_address"], wallet.to_checksum(None));
         assert!(merchant["wallet_bound_at"].is_string());
         assert!(merchant["self_settlement"]["salt"].is_string());
+        assert_eq!(merchant["self_settlement"]["chain_id"], "1");
+        assert_eq!(merchant["chain"]["id"], "1");
         let row = InvoiceRepository::new(pool.clone())
             .find_by_id(uuid)
             .await
@@ -1988,6 +2159,7 @@ mod tests {
         let binding = invoice.binding.as_ref().unwrap();
         assert_eq!(binding.payer_wallet, wallet);
         assert_eq!(binding.recovery.0, wallet);
+        assert_eq!(binding.network.chain_id, ChainId(1));
         assert_eq!(binding.payment_address.0.to_checksum(None), address);
         assert!(invoice.address_matches_parameters());
         assert_eq!(
@@ -2028,7 +2200,7 @@ mod tests {
             .oneshot(payer_post(
                 &challenge_path,
                 None,
-                Some(&json!({"wallet": other.to_checksum(None)})),
+                Some(&json!({"wallet": other.to_checksum(None), "chain_id": "2"})),
             ))
             .await
             .unwrap();
@@ -2069,7 +2241,7 @@ mod tests {
             .oneshot(payer_post(
                 &format!("/v1/payer/deposit-requests/{gated_id}/wallet/challenge"),
                 None,
-                Some(&json!({"wallet": wallet.to_checksum(None)})),
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
             ))
             .await
             .unwrap();
