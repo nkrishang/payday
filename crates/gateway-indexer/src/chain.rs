@@ -57,9 +57,11 @@ sol! {
     event Recovered(address indexed recovery, address indexed token, uint256 amount);
 }
 
-/// Recipients per `eth_getLogs` call when the scan is filtered by the watch
-/// list: one OR-array in `topics[2]`. Providers accept thousands; 500 keeps
-/// every request small and matches the signal's subscription chunk.
+/// Recipients per `eth_getLogs` call: one OR-array in `topics[2]`. Every
+/// range scan is filtered by the watch list, so the cost of a range grows
+/// with the addresses Payday watches and never with the chain's USDC volume.
+/// Providers accept thousands; 500 keeps every request small and matches the
+/// signal's subscription chunk.
 pub const LOG_FILTER_CHUNK: usize = 500;
 
 /// A validated USDC `Transfer` log with the metadata needed for durable ordering.
@@ -485,15 +487,15 @@ pub trait ChainClient: Send + Sync {
     /// Canonical header at an exact height; `Transient` if the node lacks it.
     async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError>;
 
-    /// Successful USDC `Transfer` logs in an inclusive block range: every
-    /// one, or only those addressed to `recipients` (chunked into as many
-    /// calls as the list needs).
+    /// Successful USDC `Transfer` logs in an inclusive block range addressed
+    /// to `recipients` (chunked into as many calls as the list needs). An
+    /// empty list fetches nothing.
     async fn usdc_transfers(
         &self,
         token: Address,
         from_block: u64,
         to_block: u64,
-        recipients: Option<&[Address]>,
+        recipients: &[Address],
     ) -> Result<Vec<UsdcTransfer>, ChainError>;
 
     /// Mined receipt for a helper transaction, or `None` while unmined.
@@ -694,29 +696,27 @@ impl AlloyChainClient {
         .into()
     }
 
-    /// One `eth_getLogs` for USDC transfers in the range, optionally only to
-    /// `recipients`, validated but not yet timestamped.
+    /// One `eth_getLogs` for USDC transfers in the range to `recipients`,
+    /// validated but not yet timestamped.
     async fn transfer_logs(
         &self,
         token: Address,
         from_block: u64,
         to_block: u64,
-        recipients: Option<&[Address]>,
+        recipients: &[Address],
     ) -> Result<Vec<Log>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
-        let mut filter = Filter::new()
+        let filter = Filter::new()
             .address(token)
             .event_signature(signature)
             .from_block(from_block)
-            .to_block(to_block);
-        if let Some(recipients) = recipients {
-            filter = filter.topic2(
+            .to_block(to_block)
+            .topic2(
                 recipients
                     .iter()
                     .map(|address| address.into_word())
                     .collect::<Vec<_>>(),
             );
-        }
         self.pacer.acquire().await;
         self.provider
             .get_logs(&filter)
@@ -773,28 +773,18 @@ impl ChainClient for AlloyChainClient {
         token: Address,
         from_block: u64,
         to_block: u64,
-        recipients: Option<&[Address]>,
+        recipients: &[Address],
     ) -> Result<Vec<UsdcTransfer>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
-        let logs = match recipients {
-            None => {
-                self.transfer_logs(token, from_block, to_block, None)
-                    .await?
-            }
-            // An empty list is a scan for nothing; the caller fast-forwards
-            // instead, but answer honestly if asked.
-            Some([]) => Vec::new(),
-            Some(recipients) => {
-                let mut logs = Vec::new();
-                for chunk in recipients.chunks(LOG_FILTER_CHUNK) {
-                    logs.extend(
-                        self.transfer_logs(token, from_block, to_block, Some(chunk))
-                            .await?,
-                    );
-                }
-                logs
-            }
-        };
+        // An empty list is a scan for nothing; the caller fast-forwards
+        // instead, but answer honestly if asked.
+        let mut logs = Vec::new();
+        for chunk in recipients.chunks(LOG_FILTER_CHUNK) {
+            logs.extend(
+                self.transfer_logs(token, from_block, to_block, chunk)
+                    .await?,
+            );
+        }
 
         // Monad and Anvil put the block timestamp on the log itself; nodes
         // that do not (some L2 clients) cost one header read per block that
@@ -847,9 +837,7 @@ impl ChainClient for AlloyChainClient {
                         "RPC returned USDC log from block {block_number} outside requested range {from_block}..={to_block}"
                     )));
                 }
-                if let Some(recipients) = recipients
-                    && !recipients.contains(&Address::from_word(topics[2]))
-                {
+                if !recipients.contains(&Address::from_word(topics[2])) {
                     return Err(ChainError::Transient(
                         "RPC returned a USDC Transfer outside the requested recipient filter"
                             .to_string(),

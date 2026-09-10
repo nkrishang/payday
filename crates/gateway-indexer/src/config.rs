@@ -18,8 +18,10 @@ const DEFAULT_INDEXER_RECONCILE_INTERVAL_MS: u64 = 60_000;
 /// two calls and fast-forwards the cursor, so it only needs to keep the
 /// chain clock (expiry) moving.
 const DEFAULT_INDEXER_IDLE_INTERVAL_MS: u64 = 300_000;
-/// How long a settled address stays in the watch list.
-const DEFAULT_LATE_WATCH_DAYS: u64 = 30;
+/// How long a settled address stays in the watch list, which every range
+/// scan is filtered by. A year: the cost is one `eth_getLogs` per 500
+/// addresses per range, and a late transfer outside the window is invisible.
+const DEFAULT_LATE_WATCH_DAYS: u64 = 365;
 const DEFAULT_MAX_RANGES_PER_TICK: u64 = 20;
 /// Provider request budgets are per second (QuickNode's is 50); pacing below
 /// that keeps catch-up bursts from tripping them. 0 disables pacing.
@@ -32,7 +34,7 @@ const DEFAULT_SWEEP_MAX_ATTEMPTS: u32 = 8;
 const DEFAULT_SIGNER_LOW_BALANCE_WEI: u128 = 50_000_000_000_000_000;
 
 /// One process indexes and sweeps every chain in the registry. What differs
-/// per chain (USDC, contracts, finality, range cap, scan mode) is in the
+/// per chain (USDC, contracts, finality, range cap) is in the
 /// registry; what is operational policy (cadences, sweep limits, the signer)
 /// is shared and lives here.
 pub struct Config {

@@ -48,8 +48,8 @@ step: the request offers every registry network, the challenge names the
 chosen `chain_id`, and the binding writes the chain, token, factory, and
 address together. The local stack runs two chains so that step has a real
 choice: Anvil on 8545 (chain 31337, the Monad-shaped `finalized` path) and
-Anvil on 8546 (chain 31338, the L2-shaped `latest` plus confirmations path
-with a `watched` scan).
+Anvil on 8546 (chain 31338, the L2-shaped `latest` plus confirmations
+path).
 
 ## Indexing and finality
 
@@ -64,8 +64,8 @@ RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal.
   `latest`, minus `finality_confirmations` blocks), one header read to
   verify the stored cursor hash, then, if the chain has anything to watch,
   per bounded range one range-end header read, one `eth_getLogs` filtered
-  to the USDC address and `Transfer` topic (and, with `scan = watched`, to
-  the watched recipients), and a second range-end read that proves nothing
+  to the USDC address, the `Transfer` topic, and the watched recipients
+  (500 per call), and a second range-end read that proves nothing
   moved while the logs were fetched. A chain with nothing to watch
   fast-forwards its cursor instead and sleeps
   `PAYDAY_INDEXER_IDLE_INTERVAL_MS`. Deposits are classified by the
@@ -415,7 +415,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_CHAINS` — the network registry both services read: a JSON array
   of `{chain_id, usdc, factory, batch_sweeper, factory_code_hash,
   batch_sweeper_code_hash, usdc_start_block, finality_source,
-  finality_confirmations, block_time_ms, log_range_size, scan,
+  finality_confirmations, block_time_ms, log_range_size,
   explorer_base_url?}`, in the order the checkout offers networks. The
   code hashes are keccak256 of the runtime bytecode at the two addresses
   (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both
@@ -424,8 +424,8 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   a mismatch. `just dev` and `just e2e` build the two local entries from
   the running Anvils (`build_chain_registry` in `scripts/local-runner.sh`).
   `usdc` is the exact Circle native-USDC proxy in production;
-  `finality_source` is `finalized` or `latest`; `scan` is `full` or
-  `watched` (see `docs/usdc-indexer-architecture.md`)
+  `finality_source` is `finalized` or `latest` (see
+  `docs/usdc-indexer-architecture.md`)
 - `PAYDAY_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
   (QuickNode in production, an Anvil locally); read by both services
   (`gatewayd` uses it for deployment verification)
@@ -448,8 +448,9 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   to watch, whose passes fast-forward the cursor without scanning, default
   300000; the local runner uses 2000
 - `PAYDAY_INDEXER_LATE_WATCH_DAYS` — how long a settled address stays in the
-  signal's subscription so a late transfer still wakes the reconciler,
-  default 30 (the reconciler ledgers late transfers to any address forever)
+  watch list, which the signal subscribes to and every range scan is
+  filtered by, default 365; a late transfer outside the window is not seen
+  and is returned by hand (`docs/runbooks/wrong-network-deposit.md`)
 - `PAYDAY_INDEXER_RPC_MAX_RPS` — paces outgoing RPC calls under the provider's
   requests-per-second budget, default 40; 0 disables pacing (see
   [quicknode-rpc-limits.md](runbooks/quicknode-rpc-limits.md))

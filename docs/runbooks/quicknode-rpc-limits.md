@@ -46,12 +46,15 @@ without `eth_getLogs`, and holds no WebSocket. Per chain, per day:
 | State | Calls | Notes |
 |--------|-------|-------|
 | Idle (empty watch list) | ~900 | 288 passes × 2, plus the signer balance check |
-| Active Monad (`scan = full`, `finalized`) | ~14k | 1,440 passes × 2 + 2,880 ranges at the 100-block cap × 3 + 2,880 keepalives |
-| Active Base or Arbitrum (`scan = watched`, `latest` − N) | ~7–9k | 1,440 passes × 3 + per range two headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`, plus keepalives |
+| Active Monad (`finalized`) | ~14k | 1,440 passes × 2 + 2,880 ranges at the 100-block cap × (2 headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`) + 2,880 keepalives |
+| Active Base or Arbitrum (`latest` − N) | ~7–9k | 1,440 passes × 3 + per range two headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`, plus keepalives |
 | Transfer signal notifications | ≈ 0 | one per commit state per payment to us |
 
-Three idle chains are about 2.6k calls a day. An active chain returns to
-idle as soon as its last watched request leaves the late-watch window.
+Three idle chains are about 2.6k calls a day. Every `eth_getLogs` is
+filtered to the watch list, so a chain's USDC volume never enters the
+budget; only the number of watched addresses does, one extra call per 500
+per range. An active chain returns to idle as soon as its last watched
+request leaves the late-watch window (a year by default).
 Detection latency does not come from the cadence: the WebSocket transfer
 signal wakes a pass the moment a payment finalizes (Monad) or lands
 (`latest` chains, which then wait `finality_confirmations` blocks). A block

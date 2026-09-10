@@ -65,7 +65,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - Both services read one network registry, `PAYDAY_CHAINS` (a JSON array
   of `{chain_id, usdc, factory, batch_sweeper, factory_code_hash,
   batch_sweeper_code_hash, usdc_start_block, finality_source,
-  finality_confirmations, block_time_ms, log_range_size, scan,
+  finality_confirmations, block_time_ms, log_range_size,
   explorer_base_url}`), with one `PAYDAY_RPC_URL_<chain_id>` per chain
   (`PAYDAY_RPC_WS_URL_<chain_id>` to override or disable the signal), in
   place of `PAYDAY_CHAIN_ID`, `PAYDAY_FACTORY_ADDRESS`,
@@ -83,13 +83,16 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes) without `eth_getLogs`
   and holds no WebSocket, so an idle chain costs about two calls every five
   minutes; three idle chains cost less than a fifth of the one
-  always-scanning chain before. Base and Arbitrum One settle on `latest`
-  minus a confirmation depth (their `finalized` tag is L1 finality) with a
-  `watched` scan whose `eth_getLogs` is filtered to the addresses Payday is
-  watching, 500 per call; Monad keeps `finalized` and the unfiltered scan.
-  A wake on an L2 waits `block_time_ms` per block still ahead of the
-  boundary. Unbound requests expire on any chain's clock. The local stack
-  runs two Anvils (31337 `finalized`/`full`, 31338 `latest`/`watched`) and
+  always-scanning chain before. Every range's `eth_getLogs` is filtered to
+  the addresses Payday is watching, 500 per call, on every chain, so RPC
+  spend follows Payday's own activity and never a chain's USDC volume; the
+  late-watch window that bounds the list (`PAYDAY_INDEXER_LATE_WATCH_DAYS`)
+  defaults to a year, and a late transfer outside it is returned by hand.
+  Base and Arbitrum One settle on `latest` minus a confirmation depth
+  (their `finalized` tag is L1 finality); Monad keeps `finalized`. A wake
+  on an L2 waits `block_time_ms` per block still ahead of the boundary.
+  Unbound requests expire on any chain's clock. The local stack runs two
+  Anvils (31337 `finalized`, 31338 `latest` plus confirmations) and
   the end-to-end script settles on the second chain, refuses an unoffered
   chain and a create with `chain_id`, checks the idle fast-forward, and
   rescues a wrong-chain deposit by hand.

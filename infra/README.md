@@ -28,7 +28,7 @@ operator decisions.
 
 The networks a payer may pay on are the `chains` list: one entry per chain
 with its USDC contract, the contract generation's addresses and code hashes,
-finality policy, block time, log range, scan mode, and explorer origin,
+finality policy, block time, log range, and explorer origin,
 passed to both tasks as `PAYDAY_CHAINS`. The paid RPC endpoints are the
 `rpc_urls` map, keyed by chain id (export `TF_VAR_rpc_urls` rather than
 writing them to a file); each becomes its own Secrets Manager secret,

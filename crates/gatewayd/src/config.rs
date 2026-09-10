@@ -438,8 +438,7 @@ mod tests {
                 "finality_source": "finalized",
                 "finality_confirmations": 0,
                 "block_time_ms": 300,
-                "log_range_size": 100,
-                "scan": "full"
+                "log_range_size": 100
             })
         };
         let registry =

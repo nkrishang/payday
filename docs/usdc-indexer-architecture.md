@@ -82,7 +82,6 @@ parsed by `gateway_core::ChainRegistry` with one entry per network:
 | `finality_confirmations` | blocks subtracted from the source; 0 with `finalized`, the accepted reorg margin with `latest` |
 | `block_time_ms` | paces the wake catch-up (below) |
 | `log_range_size` | the `eth_getLogs` range ceiling the provider allows |
-| `scan` | `full` or `watched` (below) |
 | `explorer_base_url` | optional; the API's address and transaction links |
 
 Registry order is the order the checkout offers networks. The RPC endpoints
@@ -210,8 +209,8 @@ For each pass:
    and stop: no `eth_getLogs` is issued.
 6. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
    the range-end header, request `eth_getLogs` for the USDC `Transfer`
-   topic (on a `watched` chain also `topics[2]` = the watch list, 500
-   addresses per call), sort by block number, transaction index, and log
+   topic with `topics[2]` = the watch list (500 addresses per call), sort
+   by block number, transaction index, and log
    index, decode and validate strictly, then read the range-end header
    again and require the same hash (a change while the logs were in flight
    is a reorg below finality, reported and retried, never committed).
@@ -257,16 +256,18 @@ The list decides three things:
 - **The cadence.** Idle: `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes)
   regardless of socket health, and no socket. Active: 60 s while the
   signal is connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
-- **The filter**, by the chain's `scan` mode. `full` (Monad) fetches every
-  USDC transfer in the range and intersects recipients in the database, so
-  a late transfer to any address ever bound is ledgered forever; Monad's
-  USDC carries 16–32 transfers per 100 blocks, so the responses are small.
-  `watched` (Base, Arbitrum) puts the list in `topics[2]`, because USDC
-  volume there would blow the result cap on any usable range; the list is
-  loaded *after* the boundary read so the race-freedom argument below still
-  holds, and a transfer to an address outside the late-watch window is not
-  ledgered automatically (`recover(token)` is permissionless; the
-  wrong-network runbook covers it by hand).
+- **The filter.** Every range fetch puts the list in `topics[2]`, 500
+  addresses per call, on every chain. The cost of a range therefore grows
+  with the addresses Payday watches and never with the chain's USDC volume,
+  which no measurement today can bound for tomorrow (an unfiltered scan on
+  a chain whose USDC volume outgrew the provider's result cap would shrink
+  to one-block ranges and multiply the call count by the range cap). The
+  list is loaded *after* the boundary read so the race-freedom argument
+  below still holds. The trade is that a transfer to an address outside
+  the late-watch window (`PAYDAY_INDEXER_LATE_WATCH_DAYS`, a year by
+  default) is not ledgered automatically: `recover(token)` is permissionless
+  and the wrong-network runbook covers it by hand. Widening the window
+  costs one call per 500 addresses per range.
 
 The implementation uses adaptive range sizing up to a configured ceiling (100
 blocks by default). It grows the range by 25% after success and halves it for
@@ -316,16 +317,16 @@ Filter at the provider by:
 - exact USDC proxy address;
 - exact `Transfer` topic0.
 
-On a `full` chain the reconciler fetches all USDC transfers in each range
-and intersects recipients in one set-based database query; the call count
-is fixed by the range cap either way, and this keeps the correctness path
-free of any provider-side address list. On a `watched` chain the same
-recipient list the signal subscribes to is added as `topics[2]`, ≤500
-addresses per call (see "Demand-driven scanning").
+- the watch list in `topics[2]`, ≤500 addresses per call (see
+  "Demand-driven scanning").
 
-The transfer signal's subscription always filters by recipient
-(`topics[2]`), because notifications are billed per message; that list is a
-latency optimisation with no ledger authority (see "Acquisition loop").
+The reconciler still intersects returned recipients with known deposit
+request addresses in one set-based database query and rejects a log whose
+recipient is outside the filter it asked for, so a provider that ignored
+the filter would be caught rather than trusted. The transfer signal's
+subscription uses the same list, because notifications are billed per
+message; that list is a latency optimisation with no ledger authority (see
+"Acquisition loop").
 
 ## Database model
 
@@ -548,8 +549,8 @@ Per chain and per day (QuickNode calls):
 | State | Per pass | Per day |
 |---|---|---|
 | Idle (empty watch list), 5 min cadence | 2 (boundary + cursor check) | ~576, plus ~288 signer-balance checks: ~0.9k |
-| Active Monad (`full`, `finalized`), 60 s cadence | 2 + 3 per 100-block range | ~14k (2,880 passes-and-checks, 8,640 range calls, 2,880 keepalives) |
-| Active Base or Arbitrum (`watched`, `latest` − N), 60 s cadence | 3 (latest, boundary, cursor) + per range 2 headers + ⌈watched ÷ 500⌉ `eth_getLogs` | ~7–9k, plus 2,880 keepalives while a socket is up |
+| Active Monad (`finalized`), 60 s cadence | 2 + per 100-block range 2 headers + ⌈watched ÷ 500⌉ `eth_getLogs` | ~14k with under 500 watched addresses (2,880 passes-and-checks, 8,640 range calls, 2,880 keepalives) |
+| Active Base or Arbitrum (`latest` − N), 60 s cadence | 3 (latest, boundary, cursor) + per range 2 headers + ⌈watched ÷ 500⌉ `eth_getLogs` | ~7–9k, plus 2,880 keepalives while a socket is up |
 | Signal notifications | one per transfer to us | ≈ 0 |
 
 Three idle chains cost ~2.6k calls a day, against ~14k for the one
@@ -567,9 +568,9 @@ Benefits:
 
 - the request budget is set by the range cap and the block rate, not by
   how fast payments must be noticed;
-- provider-native filtering: one contract and one event on the scan (plus
-  the recipient set on `watched` chains and on every subscription), and an
-  idle chain issues no scan and holds no socket;
+- provider-native filtering: one contract, one event, and our own recipient
+  set on every scan and subscription, so spend follows Payday's activity and
+  not the chain's, and an idle chain issues no scan and holds no socket;
 - exact control over finality and failure policy; the socket has no ledger
   authority, so its outages degrade latency only;
 - portable: any node with `eth_subscribe("logs")` runs the same code, and
@@ -619,7 +620,7 @@ Required tests:
 - same-block and cross-block partial deposit, exact deposit, and overpayment;
 - wrong token, bridged USDC, wrong chain, and fake `Transfer` emitter ignored;
 - an idle chain fast-forwards without scanning and never holds a socket;
-- a `watched` chain filters by the list loaded after the boundary read;
+- every range fetch filters by the list loaded after the boundary read;
 - a wrong-chain `Payment` deployment routes nothing and `recover(token)`
   returns the balance to the wallet (forge and the two-Anvil e2e);
 - duplicate range replay and crashes around every cursor transaction boundary;

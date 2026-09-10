@@ -225,7 +225,6 @@ async fn connect_chain(
             finality_source: chain.finality_source,
             finality_confirmations: chain.finality_confirmations,
             block_time: Duration::from_millis(chain.block_time_ms),
-            scan: chain.scan,
             log_range_size: chain.log_range_size,
             max_ranges_per_tick: config.max_ranges_per_tick(),
             poll_interval: config.indexer_poll_interval(),

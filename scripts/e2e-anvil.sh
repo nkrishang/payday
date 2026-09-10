@@ -5,7 +5,7 @@
 # `finalized` tag advances on its own (finalized = latest - 2, one block per
 # second), which is the finality source the indexer uses on Monad. The second
 # Anvil (chain 31338) is indexed the way an L2 is: `latest` minus two
-# confirmations and a scan filtered by the watch list. The payer chooses the
+# confirmations. The payer chooses the
 # chain when they sign; the same request can be paid on either.
 # Transactions wait for the next interval block, exactly like a real chain.
 # Every flow below is exercised through the public or operator API; PostgreSQL
@@ -198,10 +198,10 @@ tag_object_scanned() {
 # the same on every Anvil (account #0's first CREATE addresses), and both
 # services compare the deployed runtime bytecode with the hashes at startup
 # and refuse to start on a mismatch, so the hashes are always read from the
-# running chain. `scan` and `finality` are per chain so the second local chain
-# exercises the L2-shaped path (`latest` plus confirmations, a filtered scan).
+# running chain. Finality is per chain so the second local chain exercises
+# the L2-shaped path (`latest` plus confirmations).
 chain_entry() {
-  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 scan=$5 factory_code sweeper_code
+  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 factory_code sweeper_code
   factory_code="$(cast code "$FACTORY" --rpc-url "$rpc_url")"
   sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$rpc_url")"
   [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
@@ -215,11 +215,11 @@ chain_entry() {
   jq -cn --argjson chain_id "$chain_id" --arg usdc "$USDC" --arg factory "$FACTORY" \
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
-    --argjson confirmations "$confirmations" --arg scan "$scan" \
+    --argjson confirmations "$confirmations" \
     '{chain_id: $chain_id, usdc: $usdc, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
       usdc_start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
-      block_time_ms: 1000, log_range_size: 100, scan: $scan}'
+      block_time_ms: 1000, log_range_size: 100}'
 }
 
 # gatewayd and the indexer read PAYDAY_CHAINS and refuse to start unless the
@@ -227,8 +227,8 @@ chain_entry() {
 # the registry is built from the freshly bootstrapped chains.
 build_chain_registry() {
   local first second
-  first="$(chain_entry "$CHAIN_ID" "$RPC_URL" finalized 0 full)"
-  second="$(chain_entry "$SECOND_CHAIN_ID" "$SECOND_RPC_URL" latest 2 watched)"
+  first="$(chain_entry "$CHAIN_ID" "$RPC_URL" finalized 0)"
+  second="$(chain_entry "$SECOND_CHAIN_ID" "$SECOND_RPC_URL" latest 2)"
   PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
   export PAYDAY_CHAINS
 }
@@ -836,8 +836,7 @@ assert_eq "$((second_before + 750000))" "$(token_balance "$BENEFICIARY_EXACT" "$
   "second-network settlement balance mismatch"
 assert_payment_deployed_and_empty "$second_address" "$SECOND_RPC_URL"
 assert_eq "$(token_balance "$second_address")" 0 "the first chain saw funds for a second-chain address"
-# The second chain scans filtered by its watch list, and idle chains scan
-# nothing at all: the log trail says so.
+# Idle chains scan nothing at all: the log trail says so.
 grep -q 'nothing watched; cursor fast-forwarded without scanning' "$logs/indexer.log" || {
   echo "the indexer never fast-forwarded an idle chain" >&2
   exit 1

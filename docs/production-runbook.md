@@ -122,7 +122,6 @@ in that order. USDC has six decimals on all of them.
 | `finality_source` / `finality_confirmations` | `finalized` / `0` | `latest` / `10` | `latest` / `40` |
 | `block_time_ms` | `300` | `2000` | `250` |
 | `log_range_size` | `100` | `10000` | `10000` |
-| `scan` | `full` | `watched` | `watched` |
 | Explorer | `https://monadvision.com` | `https://basescan.org` | `https://arbiscan.io` |
 
 - [Monad full finality](https://docs.monad.xyz/monad-arch/consensus/block-states):
@@ -135,9 +134,9 @@ in that order. USDC has six decimals on all of them.
   (about 20 and 10 seconds): their `finalized` tag means L1 finality, ten
   to twenty minutes behind, and the product decision is to trust the
   sequencer's ordering, as exchange deposits do, with the margin absorbing
-  the sequencer's own reorgs. USDC volume on both is far too high for an
-  unfiltered scan, so they run `scan = watched`: `eth_getLogs` is filtered
-  to the addresses Payday is watching, 500 per call.
+  the sequencer's own reorgs. On every chain `eth_getLogs` is filtered to
+  the addresses Payday is watching, 500 per call, so RPC spend follows
+  Payday's activity and not the chain's USDC volume.
 - Detection is push-driven on every chain: while a chain has something to
   watch, the indexer holds a WebSocket to that chain's QuickNode endpoint
   (`wss://` derived from `PAYDAY_RPC_URL_<chain_id>`) subscribed to USDC

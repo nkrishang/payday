@@ -51,7 +51,6 @@ chains = [
     finality_confirmations  = 0
     block_time_ms           = 300
     log_range_size          = 100
-    scan                    = "full"
     explorer_base_url       = "https://monadvision.com"
   },
   {
@@ -66,7 +65,6 @@ chains = [
     finality_confirmations  = 10
     block_time_ms           = 2000
     log_range_size          = 10000
-    scan                    = "watched"
     explorer_base_url       = "https://basescan.org"
   },
   {
@@ -81,7 +79,6 @@ chains = [
     finality_confirmations  = 40
     block_time_ms           = 250
     log_range_size          = 10000
-    scan                    = "watched"
     explorer_base_url       = "https://arbiscan.io"
   },
 ]

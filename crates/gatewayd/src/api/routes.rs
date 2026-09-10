@@ -339,7 +339,6 @@ mod tests {
             finality_confirmations: 0,
             block_time_ms: 1000,
             log_range_size: 100,
-            scan: gateway_core::ScanMode::Full,
             explorer_base_url: None,
         };
         Arc::new(

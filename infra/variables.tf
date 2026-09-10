@@ -154,10 +154,10 @@ variable "chains" {
     a mismatch. usdc is Circle's native USDC proxy on that chain, never a
     bridged variant. finality_source is "finalized" (Monad: irreversible) or
     "latest" with finality_confirmations blocks of margin (Base, Arbitrum:
-    seconds, trusting the sequencer). scan is "full" (every USDC transfer in a
-    range; Monad's 100-block cap keeps that small) or "watched" (only transfers
-    to the watch list; the high-volume L2s). Set usdc_start_block to the chain's
-    block just before the services first run there.
+    seconds, trusting the sequencer). Every range scan is filtered to the
+    addresses Payday watches, so log_range_size is only the provider's cap.
+    Set usdc_start_block to the chain's block just before the services first
+    run there.
   EOT
   type = list(object({
     chain_id                = number
@@ -171,7 +171,6 @@ variable "chains" {
     finality_confirmations  = number
     block_time_ms           = number
     log_range_size          = number
-    scan                    = string
     explorer_base_url       = optional(string)
   }))
   validation {
@@ -196,10 +195,9 @@ variable "chains" {
       && c.finality_confirmations >= 0 && c.finality_confirmations <= 10000
       && c.block_time_ms >= 1
       && c.log_range_size >= 1 && c.log_range_size <= 10000
-      && contains(["full", "watched"], c.scan)
       && (c.explorer_base_url == null || can(regex("^https://[^/?#]+/?$", c.explorer_base_url)))
     ])
-    error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, scan full|watched, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any."
+    error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any."
   }
 }
 

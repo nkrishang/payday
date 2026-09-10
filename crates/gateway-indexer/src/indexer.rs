@@ -9,8 +9,8 @@
 //! classified into a retry or a block.
 //!
 //! The block indexer is a reconciler: each pass scans `cursor + 1 ..=
-//! finalized` in bounded ranges, one `eth_getLogs` per range, and commits
-//! atomically. It runs on a slow timer and immediately on a wake from the
+//! finalized` in bounded ranges, one `eth_getLogs` per range per 500 watched
+//! addresses, and commits atomically. It runs on a slow timer and immediately on a wake from the
 //! transfer signal (`signal.rs`), so detection latency comes from the push
 //! path while the request budget is set by the range cap, not the cadence.
 //! Neither path trusts the other: the signal never writes, and the timer
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use chrono::Duration as ChronoDuration;
-use gateway_core::{ChainId, FinalitySource, Invoice, InvoiceStatus, PaymentBinding, ScanMode};
+use gateway_core::{ChainId, FinalitySource, Invoice, InvoiceStatus, PaymentBinding};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
     MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
@@ -128,9 +128,6 @@ pub struct IndexerConfig {
     pub finality_confirmations: u64,
     /// The chain's block interval; paces the catch-up after a wake.
     pub block_time: Duration,
-    /// Whether a range scan fetches every USDC transfer or only those to
-    /// the watch list.
-    pub scan: ScanMode,
     pub log_range_size: u64,
     pub max_ranges_per_tick: u64,
     /// Reconcile cadence while the chain is watched and the transfer signal
@@ -142,8 +139,10 @@ pub struct IndexerConfig {
     /// Reconcile cadence while nothing is watched: each pass costs two calls
     /// and only fast-forwards the cursor.
     pub idle_interval: Duration,
-    /// How long after its last change a settled address stays in the
-    /// signal's watch list, so a late transfer still wakes the reconciler.
+    /// How long after its last change a settled address stays in the watch
+    /// list, which is both what the signal subscribes to and what every
+    /// range scan is filtered by: a late transfer to an address outside the
+    /// window is not seen (`recover(token)` returns it by hand).
     pub late_watch_window: Duration,
     pub sweep_pending_timeout: Duration,
     pub sweep_max_submissions: u32,
@@ -529,8 +528,10 @@ impl Indexer {
     ///
     /// The scan is demand-driven: with nothing on the watch list there is
     /// nothing a range could contain for us, so the cursor is fast-forwarded
-    /// to the boundary in one commit and no `eth_getLogs` is spent. The watch
-    /// list is (re)loaded after the boundary is read, which is what keeps a
+    /// to the boundary in one commit and no `eth_getLogs` is spent. Every
+    /// range fetch is filtered by that list, so the cost of a range follows
+    /// the addresses Payday watches, never the chain's USDC volume. The list
+    /// is (re)loaded after the boundary is read, which is what keeps the
     /// filtered scan race-free: a request bound after that read was disclosed
     /// after every block in the range was mined.
     async fn pass(&self) -> Result<PassSummary, IndexerError> {
@@ -599,10 +600,7 @@ impl Indexer {
                 indexed: boundary,
             });
         }
-        let recipients = match self.cfg.scan {
-            ScanMode::Full => None,
-            ScanMode::Watched => Some(watched.as_slice()),
-        };
+        let recipients = watched.as_slice();
 
         for _ in 0..self.cfg.max_ranges_per_tick {
             let from_block = cursor
@@ -628,14 +626,14 @@ impl Indexer {
         Ok(PassSummary { boundary, indexed })
     }
 
-    /// Fetch and commit one bounded range starting at `from_block`, every
-    /// USDC transfer or only those to `recipients`.
+    /// Fetch and commit one bounded range starting at `from_block`: the USDC
+    /// transfers to `recipients`.
     async fn index_range(
         &self,
         cursor: Option<IndexerCursor>,
         from_block: u64,
         boundary: u64,
-        recipients: Option<&[Address]>,
+        recipients: &[Address],
     ) -> Result<IndexerCursor, IndexerError> {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
@@ -1353,7 +1351,7 @@ pub(crate) mod tests {
         max_log_range: Option<u64>,
         /// Every `eth_getLogs` the worker made: the range and the recipient
         /// filter it carried.
-        log_requests: Vec<(u64, u64, Option<Vec<Address>>)>,
+        log_requests: Vec<(u64, u64, Vec<Address>)>,
         /// Hash overrides to simulate a reorg at a height.
         hashes: HashMap<u64, B256>,
         receipts: HashMap<B256, SweepReceipt>,
@@ -1481,7 +1479,7 @@ pub(crate) mod tests {
             _token: Address,
             from_block: u64,
             to_block: u64,
-            recipients: Option<&[Address]>,
+            recipients: &[Address],
         ) -> Result<Vec<UsdcTransfer>, ChainError> {
             let mut state = self.state.lock().unwrap();
             let requested = to_block - from_block + 1;
@@ -1493,14 +1491,12 @@ pub(crate) mod tests {
             }
             state
                 .log_requests
-                .push((from_block, to_block, recipients.map(<[Address]>::to_vec)));
+                .push((from_block, to_block, recipients.to_vec()));
             Ok(state
                 .transfers
                 .iter()
                 .filter(|transfer| (from_block..=to_block).contains(&transfer.block_number))
-                .filter(|transfer| {
-                    recipients.is_none_or(|recipients| recipients.contains(&transfer.recipient))
-                })
+                .filter(|transfer| recipients.contains(&transfer.recipient))
                 .cloned()
                 .collect())
         }
@@ -1696,7 +1692,6 @@ pub(crate) mod tests {
             finality_source: FinalitySource::Finalized,
             finality_confirmations: 0,
             block_time: Duration::from_millis(25),
-            scan: ScanMode::Full,
             log_range_size: 100,
             max_ranges_per_tick: 20,
             poll_interval: Duration::from_millis(10),
@@ -2242,14 +2237,15 @@ pub(crate) mod tests {
         assert!(!worker.idle());
         assert_eq!(fetch(&pool, &invoice).await.status, "funded");
         let requests = chain.state.lock().unwrap().log_requests.clone();
-        assert_eq!(requests, vec![(501, 510, None)]);
+        assert_eq!(requests, vec![(501, 510, vec![payment_address(&invoice)])]);
         assert_eq!(worker.cadence(None), config().poll_interval);
     }
 
-    /// In `watched` mode the range fetch names the watch list, loaded after
-    /// the boundary was read, so a high-volume token costs one small call.
+    /// Every range fetch names the watch list, loaded after the boundary was
+    /// read, so a high-volume token costs one small call and a transfer to
+    /// a stranger is never even requested.
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn watched_scan_filters_logs_by_the_watch_list(pool: PgPool) {
+    async fn range_scan_filters_logs_by_the_watch_list(pool: PgPool) {
         let invoice = make_invoice(100);
         insert(&pool, &invoice, "key-1").await;
         let stranger = Address::repeat_byte(0x99);
@@ -2259,17 +2255,12 @@ pub(crate) mod tests {
                 transfer(payment_address(&invoice), 100, 2, 0),
             ];
         }));
-        let mut cfg = config();
-        cfg.scan = ScanMode::Watched;
-        let worker = indexer_with(&pool, chain.clone(), cfg);
+        let worker = indexer(&pool, chain.clone());
 
         worker.tick().await.unwrap();
         assert_eq!(fetch(&pool, &invoice).await.status, "funded");
         let requests = chain.state.lock().unwrap().log_requests.clone();
-        assert_eq!(
-            requests,
-            vec![(0, 3, Some(vec![payment_address(&invoice)]))]
-        );
+        assert_eq!(requests, vec![(0, 3, vec![payment_address(&invoice)])]);
     }
 
     /// A request nobody has bound belongs to no chain, so this chain's

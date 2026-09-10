@@ -148,7 +148,7 @@ load_local_env() {
   # Two local chains, so the checkout's network step has a real choice and
   # the indexer runs one worker per chain: Anvil on 8545 (chain 31337, the
   # Monad-shaped `finalized` path) and Anvil on 8546 (chain 31338, the
-  # L2-shaped `latest` plus confirmations path with a filtered scan). The
+  # L2-shaped `latest` plus confirmations path). The
   # services read PAYDAY_CHAINS and PAYDAY_RPC_URL_<chain_id>; PAYDAY_RPC_URL
   # names the first chain for the scripts' own cast calls.
   export PAYDAY_CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
@@ -214,10 +214,10 @@ load_local_env() {
 # the same on every Anvil (account #0's first CREATE addresses), and both
 # services compare the deployed runtime bytecode with the hashes at startup
 # and refuse to start on a mismatch, so the hashes are always read from the
-# running chain. `scan` and `finality` are per chain so the second local chain
-# exercises the L2-shaped path (`latest` plus confirmations, a filtered scan).
+# running chain. Finality is per chain so the second local chain exercises
+# the L2-shaped path (`latest` plus confirmations).
 chain_entry() {
-  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 scan=$5 factory_code sweeper_code
+  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 factory_code sweeper_code
   factory_code="$(cast code "$FACTORY" --rpc-url "$rpc_url")"
   sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$rpc_url")"
   [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
@@ -231,18 +231,18 @@ chain_entry() {
   jq -cn --argjson chain_id "$chain_id" --arg usdc "$USDC" --arg factory "$FACTORY" \
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
-    --argjson confirmations "$confirmations" --arg scan "$scan" \
+    --argjson confirmations "$confirmations" \
     '{chain_id: $chain_id, usdc: $usdc, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
       usdc_start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
-      block_time_ms: 1000, log_range_size: 100, scan: $scan}'
+      block_time_ms: 1000, log_range_size: 100}'
 }
 
 # The registry both services read, built from the two bootstrapped chains.
 build_chain_registry() {
   local first second
-  first="$(chain_entry "$PAYDAY_CHAIN_ID" "$PAYDAY_RPC_URL" finalized 0 full)"
-  second="$(chain_entry "$PAYDAY_SECOND_CHAIN_ID" "$PAYDAY_SECOND_RPC_URL" latest 2 watched)"
+  first="$(chain_entry "$PAYDAY_CHAIN_ID" "$PAYDAY_RPC_URL" finalized 0)"
+  second="$(chain_entry "$PAYDAY_SECOND_CHAIN_ID" "$PAYDAY_SECOND_RPC_URL" latest 2)"
   PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
   export PAYDAY_CHAINS
   echo "[bootstrap] PAYDAY_CHAINS=$PAYDAY_CHAINS"

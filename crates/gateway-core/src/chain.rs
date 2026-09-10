@@ -42,19 +42,6 @@ pub enum FinalitySource {
     Latest,
 }
 
-/// How the reconciler fetches USDC transfers for a range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ScanMode {
-    /// Every USDC transfer in the range, intersected with the database. For
-    /// chains whose range cap keeps responses small (Monad: 100 blocks,
-    /// 16–32 transfers), this keeps every address ever bound covered.
-    Full,
-    /// Only transfers to the current watch list (`topics[2]`), chunked. For
-    /// chains where USDC volume would blow the provider's result cap.
-    Watched,
-}
-
 /// One supported chain as `PAYDAY_CHAINS` describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +63,6 @@ pub struct ChainConfig {
     pub block_time_ms: u64,
     /// `eth_getLogs` range ceiling the provider accepts on this chain.
     pub log_range_size: u64,
-    pub scan: ScanMode,
     #[serde(default)]
     pub explorer_base_url: Option<String>,
 }
@@ -227,7 +213,6 @@ mod tests {
             "finality_confirmations": 0,
             "block_time_ms": 300,
             "log_range_size": 100,
-            "scan": "full",
             "explorer_base_url": "https://monadvision.com"
         })
     }
