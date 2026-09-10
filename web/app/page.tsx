@@ -32,9 +32,9 @@ export default function Home() {
       </header>
 
       <main className="flex flex-1 flex-col">
-        <section className="mx-auto grid w-full max-w-[1320px] flex-1 items-center gap-12 px-5 pt-8 pb-16 sm:px-8 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)] lg:gap-16 lg:pt-0 lg:pb-[clamp(48px,12vh,180px)]">
+        <section className="mx-auto grid w-full max-w-[1320px] flex-1 items-center gap-12 px-5 pt-8 pb-16 sm:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16 lg:pt-0 lg:pb-[clamp(48px,12vh,180px)]">
           <div>
-            <h1 className="landing-reveal landing-delay-1 text-[clamp(40px,4.15vw,78px)] leading-[1.12] font-medium tracking-[-0.045em]">
+            <h1 className="landing-reveal landing-delay-1 text-[clamp(40px,3.95vw,76px)] leading-[1.12] font-medium tracking-[-0.045em]">
               Accept <Highlight tone="yellow">stablecoins</Highlight> on
               <br className="hidden lg:block" /> <Highlight tone="green">your terms.</Highlight>
             </h1>

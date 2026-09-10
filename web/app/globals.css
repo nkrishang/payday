@@ -333,6 +333,30 @@
   animation: landing-toast 3600ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* The stage's track: three panels side by side, slid to the one in view. */
+.landing-track {
+  transition: transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.landing-dialog-in {
+  animation: landing-dialog-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.landing-dialog-out {
+  animation: landing-dialog-out 240ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
+}
+
+@keyframes landing-dialog-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
 @keyframes landing-stage-fade-in {
   from {
     opacity: 0;

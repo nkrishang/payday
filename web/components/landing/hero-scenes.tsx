@@ -7,18 +7,19 @@ import { cn } from "@/lib/cn";
 /**
  * The hero's picture of the product: Payday inside a merchant's own app.
  *
- * One composition, on a loop. The left half is the merchant's backend — an
- * editor whose tabs follow the story: the call that creates a deposit
- * request, the events Payday sends back while the user pays, the webhook
- * handler that credits them. The right half is the merchant's app as their
- * user sees it: a wallet page, an add-funds sheet that Payday powers, a
- * balance that goes up. Nothing here is Payday's own UI; the point is that
- * the merchant's app never has to leave itself.
+ * One stage, three panels on a track, one in view at a time and each filling
+ * the stage, so every part of the story is read at size. The merchant's app
+ * sits in the middle. To its right is the backend call that creates a
+ * deposit request; to its left, the webhook handler that credits the user.
+ * The story slides from the app to the call and back, then from the app to
+ * the handler and back, and the app is the one thing that persists: its
+ * user taps Add funds, pays from a wallet in a dialog Payday powers, and
+ * watches their balance go up.
  *
  * Everything is a pure function of one clock: every element reads `t`,
- * milliseconds into the loop, and derives what is typed, which tab is open,
- * where the cursor is. Nothing is scheduled, so a tab that sleeps and wakes
- * picks up mid-story rather than firing a backlog of timers.
+ * milliseconds into the loop, and derives what is typed, which panel is in
+ * view, where the cursor is. Nothing is scheduled, so a tab that sleeps and
+ * wakes picks up mid-story rather than firing a backlog of timers.
  *
  * The stage has a fixed size and scales to the card, so the composition
  * never reflows on a phone.
@@ -26,21 +27,16 @@ import { cn } from "@/lib/cn";
 
 const STAGE = { width: 640, height: 400 } as const;
 
-const CHAPTERS = [
-  { title: "Create the request", from: 0 },
-  { title: "Your user pays in-app", from: 9_500 },
-  { title: "Credit off the webhook", from: 19_000 },
-] as const;
+/** The three panels, left to right, and which one the track shows at rest. */
+const PANELS = ["handler", "app", "call"] as const;
+type Panel = (typeof PANELS)[number];
 
-const TOTAL_MS = 27_500;
+const TOTAL_MS = 27_000;
 
 /** The last beat of the loop, in which the whole stage fades before it starts over. */
 const LOOP_FADE_MS = 400;
 
-const PAYER_WALLET = "0x7099…79C8";
 const DEPOSIT_ADDRESS = "0x9a3F…A0c2";
-const PAYOUT_WALLET = "0x3C44…93BC";
-const TX_HASH = "0x8f3a…5b8f";
 
 const BALANCE_BEFORE = 1_240;
 const DEPOSIT = 250;
@@ -51,31 +47,44 @@ const DEPOSIT = 250;
 
 /** Every beat of the story, in milliseconds into the loop. */
 const AT = {
-  // Chapter 1: the app's user asks to add funds; the backend creates a request.
-  toAddFunds: 900,
-  addFunds: 1_500,
-  codeTyped: 1_700,
-  response: 5_000,
-  sheetUp: 5_700,
+  // Chapter 1: the user asks to add funds; the backend creates a request.
+  toAddFunds: 500,
+  addFunds: 1_300,
+  toCall: 1_800,
+  codeTyped: 2_500,
+  response: 6_300,
+  backToApp: 7_400,
   // Chapter 2: they pay from their wallet without leaving the app.
-  eventsTab: 9_500,
-  ready: 9_900,
-  toPay: 10_600,
-  pay: 11_400,
+  dialogUp: 7_900,
+  toPay: 9_000,
+  pay: 9_800,
   /** The user signs in their wallet; the transfer is sent. */
-  confirm: 12_800,
-  deposited: 13_600,
-  settled: 15_400,
-  received: 15_500,
-  sheetDown: 17_000,
+  confirm: 11_200,
+  received: 13_600,
+  dialogDown: 15_400,
   // Chapter 3: the webhook lands and the app credits the balance.
-  webhookTab: 19_000,
-  inbound: 19_600,
-  runFrom: 20_000,
-  credit: 22_000,
-  countTo: 23_000,
-  responded: 23_400,
+  toHandler: 16_400,
+  inbound: 17_000,
+  runFrom: 17_400,
+  credit: 19_400,
+  responded: 20_000,
+  backToWallet: 20_800,
+  countFrom: 21_400,
+  countTo: 22_400,
 } as const;
+
+const CHAPTERS = [
+  { title: "Create the request", from: 0 },
+  { title: "Your user pays in-app", from: AT.dialogUp - 400 },
+  { title: "Credit off the webhook", from: AT.toHandler },
+] as const;
+
+/** Which panel the track shows at `t`. */
+function panelAt(t: number): Panel {
+  if (t >= AT.toCall && t < AT.backToApp) return "call";
+  if (t >= AT.toHandler && t < AT.backToWallet) return "handler";
+  return "app";
+}
 
 /** The first characters of `text` for a typist starting at `start`. */
 function typed(t: number, text: string, start: number, perChar: number): string {
@@ -169,15 +178,15 @@ function useReducedMotion(): boolean {
 export function HeroScenes() {
   const reduced = useReducedMotion();
   const pinned = usePinnedMoment();
-  // Without motion, hold the moment the request exists on both sides: the
-  // code that made it and the sheet it opened.
-  const frozenAt = pinned ?? (reduced ? 8_000 : null);
+  // Without motion, hold the dialog the backend just opened in the app.
+  const frozenAt = pinned ?? (reduced ? 8_600 : null);
   const t = useLoopClock(TOTAL_MS, frozenAt);
 
   const chapter = CHAPTERS.reduce(
     (current, entry, index) => (t >= entry.from ? index : current),
     0,
   );
+  const panel = panelAt(t);
   const fading = frozenAt === null && t >= TOTAL_MS - LOOP_FADE_MS;
 
   const [scale, setScale] = useState(1);
@@ -211,14 +220,27 @@ export function HeroScenes() {
         )}
         style={{ width: STAGE.width, height: STAGE.height, transform: `scale(${scale})` }}
       >
-        {/* A quiet green glow behind the app: the product's "go" colour, faded almost to nothing. */}
+        {/* A quiet green glow behind the stage: the product's "go" colour, faded almost to nothing. */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute top-[-140px] right-[-120px] size-[420px] rounded-full bg-brand-green/[0.09] blur-[90px]"
+          className="pointer-events-none absolute top-[-160px] right-[-140px] size-[460px] rounded-full bg-brand-green/[0.09] blur-[90px]"
         />
 
-        <Backend t={t} chapter={chapter} />
-        <MerchantApp t={t} />
+        <div
+          className="landing-track absolute inset-x-0 top-0 bottom-[52px] flex"
+          style={{ transform: `translateX(${-PANELS.indexOf(panel) * STAGE.width}px)` }}
+        >
+          <Slot>
+            <WebhookHandler t={t} />
+          </Slot>
+          <Slot>
+            <MerchantApp t={t} />
+          </Slot>
+          <Slot>
+            <CreateCall t={t} />
+          </Slot>
+        </div>
+
         <Cursor target={cursorTarget(t)} pressed={cursorPressed(t)} />
         <Chapters t={t} chapter={chapter} />
       </div>
@@ -226,9 +248,18 @@ export function HeroScenes() {
   );
 }
 
+/** One stage-width cell of the track, with the panel inset from its edges. */
+function Slot({ children }: { children: ReactNode }) {
+  return (
+    <div className="relative h-full shrink-0 p-5 pb-0" style={{ width: STAGE.width }}>
+      {children}
+    </div>
+  );
+}
+
 /** Where the pointer is heading, if anywhere. */
 function cursorTarget(t: number): string | null {
-  if (within(t, AT.toAddFunds, AT.addFunds + 500 - AT.toAddFunds)) return "add-funds";
+  if (within(t, AT.toAddFunds, AT.addFunds + 400 - AT.toAddFunds)) return "add-funds";
   if (within(t, AT.toPay, AT.pay + 500 - AT.toPay)) return "pay";
   return null;
 }
@@ -240,7 +271,7 @@ function cursorPressed(t: number): boolean {
 /** The three chapters along the foot of the stage, with the current one filling. */
 function Chapters({ t, chapter }: { t: number; chapter: number }) {
   return (
-    <ol className="absolute inset-x-0 bottom-0 grid grid-cols-3 gap-5 px-6 pb-4">
+    <ol className="absolute inset-x-0 bottom-0 grid grid-cols-3 gap-5 px-5 pb-4">
       {CHAPTERS.map((entry, index) => {
         const next = CHAPTERS[index + 1]?.from ?? TOTAL_MS;
         const fraction =
@@ -255,7 +286,7 @@ function Chapters({ t, chapter }: { t: number; chapter: number }) {
             </span>
             <span
               className={cn(
-                "mt-2 block truncate text-[10.5px] font-medium transition-colors duration-300",
+                "mt-2 block truncate text-[12px] font-medium transition-colors duration-300",
                 index === chapter ? "text-[#f6f2ea]" : "text-[#8b8780]",
               )}
             >
@@ -306,7 +337,7 @@ function Cursor({ target, pressed }: { target: string | null; pressed: boolean }
           aria-hidden="true"
           viewBox="0 0 24 24"
           className={cn(
-            "landing-cursor pointer-events-none absolute top-0 left-0 z-30 size-5 drop-shadow-[0_2px_4px_rgb(0_0_0/0.5)]",
+            "landing-cursor pointer-events-none absolute top-0 left-0 z-30 size-6 drop-shadow-[0_2px_4px_rgb(0_0_0/0.5)]",
             target ? "opacity-100" : "opacity-0",
           )}
           style={{ transform: `translate(${at.x}px, ${at.y}px) scale(${pressed ? 0.8 : 1})` }}
@@ -327,8 +358,6 @@ function Cursor({ target, pressed }: { target: string | null; pressed: boolean }
 /* ------------------------------------------------------------------------ */
 /* The backend                                                              */
 /* ------------------------------------------------------------------------ */
-
-const TABS = ["server.ts", "events", "webhook.ts"] as const;
 
 const CREATE_COMMENT = "// POST /wallet/add-funds";
 
@@ -363,143 +392,70 @@ function runningLine(t: number): number | null {
   if (t < AT.runFrom + 500) return 1;
   if (t < AT.runFrom + 1_000) return 3;
   if (t < AT.runFrom + 1_500) return 4;
-  if (t < AT.credit + 1_000) return CREDIT_LINE;
+  if (t < AT.credit + 400) return CREDIT_LINE;
   if (t < AT.responded) return 9;
   return null;
 }
 
-const EVENTS = [
-  {
-    at: AT.ready,
-    time: "12:04:07",
-    type: "deposit_request.ready",
-    note: `wallet ${PAYER_WALLET} bound · Monad`,
-  },
-  {
-    at: AT.deposited,
-    time: "12:04:31",
-    type: "deposit_request.deposited",
-    note: `250.00 USDC seen · ${TX_HASH}`,
-  },
-  {
-    at: AT.settled,
-    time: "12:04:33",
-    type: "deposit_request.settled",
-    note: `250.00 USDC → ${PAYOUT_WALLET}`,
-  },
-] as const;
-
-function Backend({ t, chapter }: { t: number; chapter: number }) {
-  const tab = chapter;
-
+/** An editor panel: a file's name up top, its lines, and a footer for what came back. */
+function Editor({
+  file,
+  footer,
+  children,
+}: {
+  file: string;
+  footer: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <div className="absolute top-6 bottom-[58px] left-6 flex w-[350px] flex-col overflow-hidden rounded-[12px] border border-white/[0.08] bg-[#161614]">
-      <div className="flex items-center gap-1 border-b border-white/[0.08] px-2 pt-2">
-        {TABS.map((entry, index) => (
-          <span
-            key={entry}
-            className={cn(
-              "rounded-t-[6px] px-2.5 pt-1.5 pb-2 font-mono text-[10.5px] whitespace-nowrap transition-colors duration-300",
-              index === tab
-                ? "-mb-px border border-b-0 border-white/[0.08] bg-[#0f0f0e] text-[#f6f2ea]"
-                : "text-[#8b8780]",
-            )}
-          >
-            {entry}
-            {index === 1 && chapter === 1 && t >= AT.ready ? (
-              <span className="ml-1.5 inline-block size-1.5 rounded-full bg-brand-green align-middle" />
-            ) : null}
-          </span>
-        ))}
-        <span className="ml-auto pr-1.5 pb-1 font-mono text-[10px] whitespace-nowrap text-[#8b8780]">
-          your backend
+    <div className="flex h-full flex-col overflow-hidden rounded-[14px] border border-white/[0.08] bg-[#161614]">
+      <div className="flex items-center gap-3 border-b border-white/[0.08] px-4 py-2.5 font-mono text-[12.5px]">
+        <span className="flex gap-1.5" aria-hidden="true">
+          <span className="size-2.5 rounded-full bg-white/15" />
+          <span className="size-2.5 rounded-full bg-white/15" />
+          <span className="size-2.5 rounded-full bg-white/15" />
         </span>
+        <span className="text-[#f6f2ea]">{file}</span>
+        <span className="ml-auto text-[#8b8780]">your backend</span>
       </div>
-
-      <div key={tab} className="landing-scene-step relative min-h-0 flex-1 bg-[#0f0f0e]">
-        {tab === 0 ? (
-          <CreateCall t={t} />
-        ) : tab === 1 ? (
-          <EventStream t={t} />
-        ) : (
-          <WebhookHandler t={t} />
-        )}
+      <pre className="min-h-0 flex-1 overflow-hidden px-5 py-4 font-mono text-[14px] leading-[1.6] tracking-[-0.02em] text-[#d8d2c6]">
+        {children}
+      </pre>
+      <div className="flex min-h-[46px] items-center gap-3 border-t border-white/[0.08] px-5 font-mono text-[13px]">
+        {footer}
       </div>
     </div>
   );
 }
 
 function CreateCall({ t }: { t: number }) {
-  const code = typed(t, CREATE_CODE, AT.codeTyped, 13);
-  const typing = within(t, AT.codeTyped, CREATE_CODE.length * 13 + 400);
+  const code = typed(t, CREATE_CODE, AT.codeTyped, 16);
+  const typing = within(t, AT.codeTyped, CREATE_CODE.length * 16 + 300);
   const responded = t >= AT.response;
 
   return (
-    <div className="flex h-full flex-col">
-      <pre className="min-h-0 flex-1 overflow-hidden px-3 py-3 font-mono text-[10px] leading-[1.65] tracking-[-0.02em] text-[#d8d2c6]">
-        <span className="block text-[#7a766f]">{CREATE_COMMENT}</span>
-        {code ? <Highlighted code={code} /> : null}
-        {typing || !code ? <Caret /> : null}
-      </pre>
-      {responded ? (
-        <div className="landing-scene-line border-t border-white/[0.08] px-3 py-2.5 font-mono text-[10.5px] leading-[1.7]">
-          <p className="flex items-center gap-2 text-brand-green">
-            <span className="size-1.5 rounded-full bg-brand-green" />
-            201 Created
-          </p>
-          <dl className="mt-1 grid grid-cols-[92px_1fr] text-[#d8d2c6]">
-            <dt className="text-[#8b8780]">id</dt>
-            <dd>dr_0198f80c…f700</dd>
-            <dt className="text-[#8b8780]">client_secret</dt>
-            <dd>cs_v6Kq…9dQ</dd>
-            <dt className="text-[#8b8780]">status</dt>
-            <dd>awaiting_deposit</dd>
-          </dl>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function EventStream({ t }: { t: number }) {
-  const shown = EVENTS.filter((event) => t >= event.at);
-  return (
-    <div className="flex h-full flex-col px-3 py-3 font-mono text-[10.5px] leading-[1.6]">
-      <p className="text-[#8b8780]">
-        <span className="text-[#d8d2c6]">payday</span> events --follow
-        <span className="ml-1.5 text-brand-green">dr_0198f80c…f700</span>
-      </p>
-      <ol className="mt-2 grid gap-2">
-        {shown.map((event, index) => (
-          <li key={event.type} className="landing-scene-line grid grid-cols-[62px_1fr] gap-x-3">
-            <span className="tabular text-[#8b8780]">{event.time}</span>
-            <span className="min-w-0">
-              <span
-                className={cn(
-                  "block truncate",
-                  index === shown.length - 1 && event.type.endsWith("settled")
-                    ? "text-brand-green"
-                    : "text-[#f6f2ea]",
-                )}
-              >
-                {event.type}
-              </span>
-              <span className="block truncate text-[#8b8780]">{event.note}</span>
+    <Editor
+      file="server.ts"
+      footer={
+        responded ? (
+          <span className="landing-scene-line flex min-w-0 items-center gap-3">
+            <span className="flex shrink-0 items-center gap-2 text-brand-green">
+              <span className="size-2 rounded-full bg-brand-green" />
+              201 Created
             </span>
-          </li>
-        ))}
-      </ol>
-      {shown.length < EVENTS.length ? (
-        <p className="mt-3 flex items-center gap-2 text-[#8b8780]">
-          <span className="size-1.5 animate-pulse rounded-full bg-brand-yellow" />
-          {shown.length === 0
-            ? "waiting for the user"
-            : shown.length === 1
-              ? "waiting for the transfer"
-              : "awaiting finality"}
-        </p>
-      ) : null}
-    </div>
+            <span className="truncate text-[#d8d2c6]">
+              dr_0198f80c…f700 <span className="text-[#8b8780]">·</span> awaiting_deposit
+            </span>
+          </span>
+        ) : (
+          <span className="text-[#8b8780]">{t >= AT.toCall ? "…" : ""}</span>
+        )
+      }
+    >
+      <span className="block text-[#7a766f]">{CREATE_COMMENT}</span>
+      {code ? <Highlighted code={code} /> : null}
+      {typing || !code ? <Caret /> : null}
+    </Editor>
   );
 }
 
@@ -510,44 +466,46 @@ function WebhookHandler({ t }: { t: number }) {
   const lines = WEBHOOK_CODE.split("\n");
 
   return (
-    <div className="flex h-full flex-col">
-      <pre className="relative min-h-0 flex-1 overflow-hidden px-3 py-3 font-mono text-[10px] leading-[1.65] tracking-[-0.02em] text-[#d8d2c6]">
-        {lines.map((line, index) => (
-          <span
-            key={index}
-            className={cn(
-              "-mx-3 block px-3 transition-colors duration-200",
-              running === index && "bg-brand-green/[0.12]",
-              index === CREDIT_LINE && t >= AT.credit && "text-brand-green",
-            )}
-          >
-            <Highlighted code={line} />
-            {line === "" ? " " : null}
-          </span>
-        ))}
-      </pre>
-      <div className="flex items-center gap-2 border-t border-white/[0.08] px-3 py-2.5 font-mono text-[10.5px]">
-        {inbound ? (
-          <span className="landing-scene-line flex min-w-0 items-center gap-2 text-[#d8d2c6]">
-            <span className="rounded-[4px] bg-brand-yellow px-1.5 py-px text-[10px] font-semibold text-brand-black">
-              POST
+    <Editor
+      file="webhook.ts"
+      footer={
+        <>
+          {inbound ? (
+            <span className="landing-scene-line flex min-w-0 items-center gap-2.5 text-[#d8d2c6]">
+              <span className="rounded-[5px] bg-brand-yellow px-1.5 py-0.5 text-[11px] font-semibold text-brand-black">
+                POST
+              </span>
+              <span className="truncate">
+                /payday/webhook <span className="text-[#8b8780]">·</span>{" "}
+                <span className="text-brand-yellow">deposit_request.settled</span>
+              </span>
             </span>
-            <span className="truncate">
-              /payday/webhook <span className="text-[#8b8780]">·</span>{" "}
-              <span className="text-brand-yellow">deposit_request.settled</span>
+          ) : (
+            <span className="text-[#8b8780]">listening on :3000</span>
+          )}
+          {responded ? (
+            <span className="landing-scene-line ml-auto flex shrink-0 items-center gap-2 text-brand-green">
+              <span className="size-2 rounded-full bg-brand-green" />
+              200 OK
             </span>
-          </span>
-        ) : (
-          <span className="text-[#8b8780]">listening on :3000</span>
-        )}
-        {responded ? (
-          <span className="landing-scene-line ml-auto flex shrink-0 items-center gap-1.5 text-brand-green">
-            <span className="size-1.5 rounded-full bg-brand-green" />
-            200
-          </span>
-        ) : null}
-      </div>
-    </div>
+          ) : null}
+        </>
+      }
+    >
+      {lines.map((line, index) => (
+        <span
+          key={index}
+          className={cn(
+            "-mx-5 block px-5 transition-colors duration-200",
+            running === index && "bg-brand-green/[0.14]",
+            index === CREDIT_LINE && t >= AT.credit && "text-brand-green",
+          )}
+        >
+          <Highlighted code={line} />
+          {line === "" ? " " : null}
+        </span>
+      ))}
+    </Editor>
   );
 }
 
@@ -596,7 +554,7 @@ function Caret() {
   return (
     <span
       aria-hidden="true"
-      className="landing-caret ml-px inline-block h-[1.15em] w-[6px] bg-[#f6f2ea]/80 align-text-bottom"
+      className="landing-caret ml-px inline-block h-[1.15em] w-[8px] bg-[#f6f2ea]/80 align-text-bottom"
     />
   );
 }
@@ -606,81 +564,88 @@ function Caret() {
 /* ------------------------------------------------------------------------ */
 
 function MerchantApp({ t }: { t: number }) {
-  const sheetOpen = t >= AT.sheetUp && t < AT.sheetDown + 350;
-  const sheetLeaving = t >= AT.sheetDown;
-  const credited = t >= AT.credit;
-  const balance = BALANCE_BEFORE + DEPOSIT * easeOut(progress(t, AT.credit, AT.countTo));
-  const toast = within(t, AT.credit + 300, 3_600);
+  const dialogOpen = t >= AT.dialogUp && t < AT.dialogDown + 320;
+  const dialogLeaving = t >= AT.dialogDown;
+  const credited = t >= AT.countFrom;
+  const balance = BALANCE_BEFORE + DEPOSIT * easeOut(progress(t, AT.countFrom, AT.countTo));
+  const toast = within(t, AT.countFrom + 500, 3_800);
 
   return (
-    <div className="absolute top-6 right-6 bottom-[58px] w-[230px] overflow-hidden rounded-[14px] bg-[#f6f2ea] text-brand-black shadow-[0_24px_60px_-24px_rgb(0_0_0/0.8)]">
-      <div className="flex items-center gap-2 border-b border-brand-black/[0.08] px-4 py-2.5">
-        <span className="flex size-5 items-center justify-center rounded-[6px] bg-brand-black text-[10px] font-bold text-[#f6f2ea]">
+    <div className="relative h-full overflow-hidden rounded-[14px] bg-[#f6f2ea] text-brand-black shadow-[0_24px_60px_-24px_rgb(0_0_0/0.8)]">
+      <div className="flex items-center gap-2.5 border-b border-brand-black/[0.08] px-5 py-3">
+        <span className="flex size-6 items-center justify-center rounded-[7px] bg-brand-black text-[12px] font-bold text-[#f6f2ea]">
           A
         </span>
-        <span className="text-[12px] font-semibold tracking-tight">Acme</span>
-        <span className="ml-auto flex size-6 items-center justify-center rounded-full bg-brand-yellow text-[10px] font-semibold">
+        <span className="text-[15px] font-semibold tracking-tight">Acme</span>
+        <span className="ml-6 text-[13px] text-brand-subtle">Dashboard</span>
+        <span className="text-[13px] font-medium">Wallet</span>
+        <span className="text-[13px] text-brand-subtle">Settings</span>
+        <span className="ml-auto flex size-7 items-center justify-center rounded-full bg-brand-yellow text-[11px] font-semibold">
           JD
         </span>
       </div>
 
-      <div className="px-4 pt-3.5">
-        <p className="text-[10px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
-          Wallet
-        </p>
-        <p className="tabular mt-1 flex items-baseline gap-1.5 text-[26px] leading-none font-semibold tracking-tight">
-          {balance.toLocaleString("en-US", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })}
-          <span className="text-[12px] font-medium text-brand-subtle">USDC</span>
-        </p>
-        <div className="mt-3.5 grid grid-cols-2 gap-2">
-          <span
-            data-cursor="add-funds"
-            className={cn(
-              "flex h-8 items-center justify-center gap-1.5 rounded-[8px] bg-brand-black text-[12px] font-medium text-[#f6f2ea] transition-transform",
-              within(t, AT.addFunds - 60, 160) && "scale-[0.97]",
-            )}
-          >
-            <Plus className="size-3.5" />
-            Add funds
-          </span>
-          <span className="flex h-8 items-center justify-center gap-1.5 rounded-[8px] border border-brand-black/20 text-[12px] font-medium">
-            <ArrowUpRight className="size-3.5" />
-            Withdraw
-          </span>
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] gap-8 px-6 pt-6">
+        <div>
+          <p className="text-[11px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
+            Balance
+          </p>
+          <p className="tabular mt-2 flex items-baseline gap-2 text-[38px] leading-none font-semibold tracking-tight">
+            {balance.toLocaleString("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}
+            <span className="text-[15px] font-medium text-brand-subtle">USDC</span>
+          </p>
+          <div className="mt-6 grid gap-2.5">
+            <span
+              data-cursor="add-funds"
+              className={cn(
+                "flex h-11 items-center justify-center gap-2 rounded-[10px] bg-brand-black text-[14px] font-medium text-[#f6f2ea] transition-transform",
+                within(t, AT.addFunds - 60, 160) && "scale-[0.97]",
+              )}
+            >
+              <Plus className="size-4" />
+              Add funds
+            </span>
+            <span className="flex h-11 items-center justify-center gap-2 rounded-[10px] border border-brand-black/20 text-[14px] font-medium">
+              <ArrowUpRight className="size-4" />
+              Withdraw
+            </span>
+          </div>
         </div>
 
-        <p className="mt-4 text-[10px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
-          Activity
-        </p>
-        <ul className="mt-1.5 grid text-[12px]">
-          {credited ? (
-            <li className="landing-scene-line -mx-2 flex items-center gap-2.5 rounded-[8px] bg-brand-green/[0.16] px-2 py-2">
-              <span className="flex size-6 items-center justify-center rounded-full bg-brand-green text-brand-black">
-                <Check className="size-3" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-medium">Deposit</span>
-                <span className="block text-[10.5px] text-brand-subtle">Just now · settled</span>
-              </span>
-              <span className="tabular font-medium">+250.00</span>
-            </li>
-          ) : null}
-          <Activity label="Pro plan" when="Yesterday" amount="−49.00" />
-          <Activity label="Deposit" when="Mon" amount="+500.00" />
-          <Activity label="Payout to Maya" when="Aug 28" amount="−120.00" />
-        </ul>
+        <div>
+          <p className="text-[11px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
+            Activity
+          </p>
+          <ul className="mt-1 grid text-[14px]">
+            {credited ? (
+              <li className="landing-scene-line -mx-3 flex items-center gap-3 rounded-[10px] bg-brand-green/[0.18] px-3 py-2.5">
+                <span className="flex size-8 items-center justify-center rounded-full bg-brand-green text-brand-black">
+                  <Check className="size-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">Deposit</span>
+                  <span className="block text-[12px] text-brand-subtle">Just now · settled</span>
+                </span>
+                <span className="tabular font-semibold">+250.00</span>
+              </li>
+            ) : null}
+            <Activity label="Pro plan" when="Yesterday" amount="−49.00" />
+            <Activity label="Deposit" when="Monday" amount="+500.00" />
+            {credited ? null : <Activity label="Payout to Maya" when="Aug 28" amount="−120.00" />}
+          </ul>
+        </div>
       </div>
 
-      {sheetOpen ? <DepositSheet t={t} leaving={sheetLeaving} /> : null}
+      {dialogOpen ? <DepositDialog t={t} leaving={dialogLeaving} /> : null}
       {toast ? (
-        <div className="landing-toast absolute inset-x-3 bottom-3 flex items-center gap-2 rounded-[10px] bg-brand-black px-3 py-2 text-[11.5px] font-medium text-[#f6f2ea] shadow-[0_12px_30px_-12px_rgb(0_0_0/0.6)]">
-          <span className="flex size-4 items-center justify-center rounded-full bg-brand-green text-brand-black">
-            <Check className="size-2.5" />
+        <div className="landing-toast absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2.5 rounded-[12px] bg-brand-black px-4 py-2.5 text-[13.5px] font-medium whitespace-nowrap text-[#f6f2ea] shadow-[0_12px_30px_-12px_rgb(0_0_0/0.6)]">
+          <span className="flex size-5 items-center justify-center rounded-full bg-brand-green text-brand-black">
+            <Check className="size-3" />
           </span>
-          +250.00 USDC added to balance
+          +250.00 USDC added to your balance
         </div>
       ) : null}
     </div>
@@ -689,11 +654,11 @@ function MerchantApp({ t }: { t: number }) {
 
 function Activity({ label, when, amount }: { label: string; when: string; amount: string }) {
   return (
-    <li className="flex items-center gap-2.5 py-2 text-brand-black/80">
-      <span className="size-6 rounded-full bg-brand-black/[0.07]" />
+    <li className="flex items-center gap-3 py-3 text-brand-black/80">
+      <span className="size-8 rounded-full bg-brand-black/[0.07]" />
       <span className="min-w-0 flex-1">
         <span className="block truncate">{label}</span>
-        <span className="block text-[10.5px] text-brand-subtle">{when}</span>
+        <span className="block text-[12px] text-brand-subtle">{when}</span>
       </span>
       <span className="tabular">{amount}</span>
     </li>
@@ -701,70 +666,69 @@ function Activity({ label, when, amount }: { label: string; when: string; amount
 }
 
 /**
- * The add-funds sheet the app opens over its own page, powered by Payday:
+ * The add-funds dialog the app opens over its own page, powered by Payday:
  * the request the backend just created, paid from the user's own wallet.
  */
-function DepositSheet({ t, leaving }: { t: number; leaving: boolean }) {
+function DepositDialog({ t, leaving }: { t: number; leaving: boolean }) {
   const state =
     t < AT.pay ? "ready" : t < AT.confirm ? "signing" : t < AT.received ? "confirming" : "received";
-  const seconds = 3_598 - Math.floor((t - AT.sheetUp) / 1000);
+  const seconds = 3_598 - Math.floor((t - AT.dialogUp) / 1000);
 
   return (
     <>
       <div
         className={cn(
-          "absolute inset-0 bg-brand-black/30",
+          "absolute inset-0 bg-brand-black/35",
           leaving ? "landing-scrim-out" : "landing-scrim-in",
         )}
       />
       <div
         className={cn(
-          "absolute inset-x-0 bottom-0 rounded-t-[14px] bg-white px-4 pt-3.5 pb-4 shadow-[0_-12px_40px_-16px_rgb(0_0_0/0.35)]",
-          leaving ? "landing-sheet-down" : "landing-sheet-up",
+          "absolute top-1/2 left-1/2 w-[400px] -translate-x-1/2 -translate-y-1/2 rounded-[16px] bg-white px-6 pt-5 pb-5 shadow-[0_30px_80px_-24px_rgb(0_0_0/0.5)]",
+          leaving ? "landing-dialog-out" : "landing-dialog-in",
         )}
       >
         <div className="flex items-center justify-between">
-          <p className="text-[13px] font-semibold tracking-tight">Add funds</p>
-          <X className="size-3.5 text-brand-subtle" />
+          <p className="text-[16px] font-semibold tracking-tight">Add funds</p>
+          <X className="size-4 text-brand-subtle" />
         </div>
 
         {state === "received" ? (
-          <div className="landing-scene-line py-5 text-center">
-            <span className="mx-auto flex size-9 items-center justify-center rounded-full bg-brand-green text-brand-black">
-              <Check className="size-4" />
+          <div className="landing-scene-line py-6 text-center">
+            <span className="mx-auto flex size-12 items-center justify-center rounded-full bg-brand-green text-brand-black">
+              <Check className="size-6" />
             </span>
-            <p className="mt-3 text-[13px] font-semibold tracking-tight">Deposit received</p>
-            <p className="mt-1 text-[11px] text-brand-subtle">250.00 USDC · settled on Monad</p>
+            <p className="mt-4 text-[18px] font-semibold tracking-tight">Deposit received</p>
+            <p className="mt-1.5 text-[13.5px] text-brand-subtle">250.00 USDC · settled on Monad</p>
           </div>
         ) : (
           <>
-            <p className="tabular mt-3 flex items-baseline gap-1.5 text-[24px] leading-none font-semibold tracking-tight">
+            <p className="tabular mt-4 flex items-baseline gap-2 text-[36px] leading-none font-semibold tracking-tight">
               250.00
-              <span className="text-[12px] font-medium text-brand-subtle">USDC</span>
+              <span className="text-[15px] font-medium text-brand-subtle">USDC</span>
             </p>
-            <dl className="mt-3 grid gap-1.5 text-[11px]">
-              <div className="flex items-center justify-between gap-3">
-                <dt className="text-brand-subtle">Network</dt>
-                <dd className="font-medium">Monad</dd>
-              </div>
+            <dl className="mt-4 grid gap-2 text-[13.5px]">
               <div className="flex items-center justify-between gap-3">
                 <dt className="text-brand-subtle">One-time address</dt>
-                <dd className="flex items-center gap-1.5 font-mono">
+                <dd className="flex items-center gap-2 font-mono">
                   {DEPOSIT_ADDRESS}
-                  <Copy className="size-3 text-brand-subtle" />
+                  <Copy className="size-3.5 text-brand-subtle" />
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <dt className="text-brand-subtle">Expires in</dt>
-                <dd className="tabular font-medium">
-                  {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
+                <dt className="text-brand-subtle">Network</dt>
+                <dd className="font-medium">
+                  Monad <span className="text-brand-subtle">·</span>{" "}
+                  <span className="tabular">
+                    expires in {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
+                  </span>
                 </dd>
               </div>
             </dl>
             <span
               data-cursor="pay"
               className={cn(
-                "mt-3.5 flex h-9 items-center justify-center gap-2 rounded-[8px] text-[12px] font-medium transition-[transform,background-color]",
+                "mt-5 flex h-12 items-center justify-center gap-2.5 rounded-[10px] text-[14.5px] font-medium transition-[transform,background-color]",
                 state === "ready"
                   ? "bg-brand-black text-[#f6f2ea]"
                   : "bg-brand-black/[0.08] text-brand-subtle",
@@ -772,21 +736,21 @@ function DepositSheet({ t, leaving }: { t: number; leaving: boolean }) {
               )}
             >
               {state === "ready" ? (
-                <Wallet className="size-3.5" />
+                <Wallet className="size-4" />
               ) : (
-                <Loader2 className="size-3.5 animate-spin" />
+                <Loader2 className="size-4 animate-spin" />
               )}
               {state === "ready"
                 ? "Pay from wallet"
                 : state === "signing"
                   ? "Confirm in your wallet…"
-                  : "Confirming on-chain…"}
+                  : "Confirming on Monad…"}
             </span>
           </>
         )}
 
-        <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-brand-subtle">
-          <span className="size-1.5 rounded-full bg-brand-green" />
+        <p className="mt-4 flex items-center justify-center gap-2 text-[12px] text-brand-subtle">
+          <span className="size-2 rounded-full bg-brand-green" />
           Secured by Payday
         </p>
       </div>
