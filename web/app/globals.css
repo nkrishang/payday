@@ -164,8 +164,8 @@
    * and repeated per line if the run ever wraps.
    *
    * The block is a background image, not a colour, so its width can move:
-   * it fills in from the left edge, holds, drains out towards the right edge
-   * like a health bar, rests empty, and goes again. While the block is full
+   * it fills in from the left edge, barely pauses, drains out towards the
+   * right edge like a health bar, and goes again almost at once. While full
    * the anchor swaps from the left edge to the right one; at full width the
    * two are the same rectangle, so the swap never shows.
    */
@@ -180,7 +180,7 @@
     background-position: 0% 50%;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
-    animation: landing-mark-sweep 7s ease-in-out infinite both;
+    animation: landing-mark-sweep 4s ease-in-out infinite both;
   }
 
   .landing-mark-yellow {
@@ -190,7 +190,7 @@
 
   .landing-mark-green {
     --mark: #a3d277;
-    animation-delay: 1000ms;
+    animation-delay: 900ms;
   }
 }
 
@@ -276,17 +276,17 @@
     background-position: 0% 50%;
     animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   }
-  15% {
+  35% {
     background-size: 100% 100%;
     background-position: 0% 50%;
     animation-timing-function: linear;
   }
-  57% {
+  42% {
     background-size: 100% 100%;
     background-position: 100% 50%;
     animation-timing-function: cubic-bezier(0.55, 0, 0.8, 0.4);
   }
-  72%,
+  77%,
   100% {
     background-size: 0% 100%;
     background-position: 100% 50%;
