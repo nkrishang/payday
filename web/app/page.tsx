@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
+import { HeroScenes } from "@/components/landing/hero-scenes";
 import { GetStarted } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
 
@@ -58,8 +59,8 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="landing-reveal landing-delay-4 flex aspect-[774/424] w-full items-center justify-center rounded-[10px] border border-brand-black bg-white text-[clamp(18px,1.6vw,24px)] font-medium">
-            Create deposit request
+          <div className="landing-reveal landing-delay-4">
+            <HeroScenes />
           </div>
         </section>
       </main>

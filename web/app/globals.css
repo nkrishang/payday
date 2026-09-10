@@ -270,6 +270,151 @@
   animation-delay: 300ms;
 }
 
+/*
+ * The hero's scenes. They sit in a white card on a page that is light in
+ * either colour scheme, so the theme tokens the real components read are
+ * pinned to a light set here, the way `.dash` pins them dark. `--inverse` is
+ * the page's black, so the composer's and checkout's primary buttons match
+ * the Get Started button beside them.
+ */
+.landing-scene {
+  color-scheme: light;
+  color: var(--ink);
+  --canvas: #faf8f4;
+  --surface: #ffffff;
+  --raised: #f4f1ea;
+  --ink: #0f0f0e;
+  --muted: #504b4b;
+  --faint: #8b8780;
+  --line: #e8e3da;
+  --line-strong: #d3cdc0;
+  --inverse: #0f0f0e;
+  --inverse-ink: #f6f2ea;
+  --success: #2f8a47;
+  --warning: #b45309;
+  --danger: #b91c1c;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-inverse: var(--inverse);
+  --color-inverse-ink: var(--inverse-ink);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+}
+
+.landing-scene-enter {
+  animation: landing-scene-enter 450ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.landing-scene-leave {
+  animation: landing-scene-leave 450ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
+}
+
+/* A composer step arrives the way it does on the dashboard. */
+.landing-scene-step {
+  animation: landing-scene-step 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* A line of the event, a ledger row, a response: each rises into place. */
+.landing-scene-line {
+  animation: landing-scene-line 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.landing-sheet-enter {
+  animation: landing-sheet-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.landing-sheet-leave {
+  animation: landing-sheet-leave 250ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
+}
+
+.landing-cursor {
+  transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.landing-caret {
+  animation: landing-caret 900ms steps(2, start) infinite;
+}
+
+@keyframes landing-scene-enter {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes landing-scene-leave {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
+@keyframes landing-scene-step {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes landing-scene-line {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes landing-sheet-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes landing-sheet-leave {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+
+@keyframes landing-caret {
+  to {
+    visibility: hidden;
+  }
+}
+
 @keyframes landing-mark-sweep {
   0% {
     background-size: 0% 100%;
