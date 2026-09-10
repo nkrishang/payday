@@ -313,10 +313,14 @@ fn is_unsupported_subscription(error: &str) -> bool {
         || error.contains("invalid method")
         || error.contains("unknown method")
         // Anvil-style nodes that do not know the kind reject the whole
-        // request as invalid params, naming the variant in the message
-        // ("unknown variant `monadLogs`"). A genuine filter problem never
-        // names the subscription method, so this stays narrow.
-        || (error.contains("-32602") && error.contains("unknown variant"))
+        // request as invalid params: either naming the variant ("unknown
+        // variant `monadLogs`") or, when the filter carries a recipient
+        // list, failing to match the request against any call it knows
+        // ("did not match any variant of untagged enum EthRpcCall"). A
+        // genuine filter problem is reported by the handler, never as a
+        // request that parses into nothing, so this stays narrow.
+        || (error.contains("-32602")
+            && (error.contains("unknown variant") || error.contains("did not match any variant")))
 }
 
 impl TransferSignal {
@@ -876,6 +880,9 @@ mod tests {
             // Anvil's rejection, verbatim from its eth_subscribe: the node
             // does not know the kind and says so in a -32602 message.
             "server returned an error response: error code -32602: unknown variant `monadLogs`, expected one of `newHeads`, `logs`, `newPendingTransactions`, `syncing`, `transactionReceipts`",
+            // The same node's rejection when the filter carries a recipient
+            // list: the request parses into no call it knows at all.
+            "server returned an error response: error code -32602: data did not match any variant of untagged enum EthRpcCall",
         ] {
             assert!(
                 is_unsupported_subscription(rejection),

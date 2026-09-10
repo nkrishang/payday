@@ -138,7 +138,7 @@ echo "issued $id -> $(jq -r .deposit_url <<<"$created")"
 # 2. Bind the payer wallet: challenge, sign the EIP-712 typed data with cast
 #    as a wallet would, attest.
 challenge="$(payer_post "/v1/payer/deposit-requests/$id/wallet/challenge" \
-  "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet}')")"
+  "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')")"
 session="$(jq -er .payer_session <<<"$challenge")"
 typed="$logs/typed.json"
 jq -c .typed_data <<<"$challenge" >"$typed"
