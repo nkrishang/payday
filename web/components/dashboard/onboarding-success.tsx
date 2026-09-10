@@ -133,7 +133,7 @@ export function OnboardingSuccess({
             alt=""
             className="size-4 shrink-0 rounded-full"
           />
-          {payment.token.symbol}
+          {payment.currency}
         </span>{" "}
         from {payment.payer.name}
       </p>

@@ -138,20 +138,15 @@ export const STATUS_GROUP: EndpointGroup = {
       method: "GET",
       path: "/v1/status",
       auth: "key",
-      summary: "Reports chain, indexer, and settlement-queue position.",
+      summary: "Reports every network's finalized position, indexer cursor, and settlement queue.",
       response: {
         fields: [
           {
-            name: "chain",
-            type: "object",
-            description: "{ id, name, finalized_block, finalized_at }.",
+            name: "chains",
+            type: "array",
+            description:
+              "One entry per supported network: { id, name, finalized_block, finalized_at, indexer: { cursor_block, cursor_at, lag_blocks }, sweeper: { state, queued } }.",
           },
-          {
-            name: "indexer",
-            type: "object",
-            description: "{ cursor_block, cursor_at, lag_blocks }.",
-          },
-          { name: "sweeper", type: "object", description: "{ state, queued }." },
         ],
       },
       answers: [{ status: 503, when: "State unreadable." }],
@@ -159,9 +154,23 @@ export const STATUS_GROUP: EndpointGroup = {
         curl: `curl -fsS "$API/v1/status" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
         ts: `const status = await payday.status();`,
         response: `{
-  "chain": { "id": "143", "name": "Monad", "finalized_block": "98765432", "finalized_at": "2026-09-06T12:00:00Z" },
-  "indexer": { "cursor_block": "98765430", "cursor_at": "2026-09-06T12:00:01Z", "lag_blocks": 2 },
-  "sweeper": { "state": "idle", "queued": 0 }
+  "chains": [
+    {
+      "id": "143", "name": "Monad", "finalized_block": "98765432", "finalized_at": "2026-09-06T12:00:00Z",
+      "indexer": { "cursor_block": "98765430", "cursor_at": "2026-09-06T12:00:01Z", "lag_blocks": 2 },
+      "sweeper": { "state": "idle", "queued": 0 }
+    },
+    {
+      "id": "8453", "name": "Base", "finalized_block": "35012345", "finalized_at": "2026-09-06T12:00:00Z",
+      "indexer": { "cursor_block": "35012345", "cursor_at": "2026-09-06T11:58:30Z", "lag_blocks": 0 },
+      "sweeper": { "state": "idle", "queued": 0 }
+    },
+    {
+      "id": "42161", "name": "Arbitrum One", "finalized_block": "380123456", "finalized_at": "2026-09-06T12:00:00Z",
+      "indexer": { "cursor_block": "380123456", "cursor_at": "2026-09-06T11:58:30Z", "lag_blocks": 0 },
+      "sweeper": { "state": "idle", "queued": 0 }
+    }
+  ]
 }`,
       },
     },

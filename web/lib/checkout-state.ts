@@ -1,4 +1,4 @@
-import type { Chain, PayerDepositRequest, DepositRequestStatus, Token } from "@payday/sdk";
+import type { Chain, Network, PayerDepositRequest, DepositRequestStatus, Token } from "@payday/sdk";
 import { formatDisplayAmount } from "./format";
 
 /**
@@ -19,9 +19,10 @@ import { formatDisplayAmount } from "./format";
  *    gateway says the content is unlocked. The API withholds the fields; this
  *    module turns their absence into a phase so no component ever reaches for
  *    a null amount or address.
- * 4. An unlocked request has no address until its payer attests the wallet
- *    they will pay from. That is a phase of its own (`wallet_required`), and
- *    the address, QR, and wallet button exist only past it.
+ * 4. An unlocked request has no address until its payer chooses a network and
+ *    attests the wallet they will pay from. That is a phase of its own
+ *    (`wallet_required`), and the chain, address, QR, and wallet button exist
+ *    only past it.
  */
 export type CheckoutPhase =
   | "verification_required"
@@ -73,12 +74,12 @@ export interface CheckoutView {
 /**
  * A payer-facing deposit request whose content is present. The API nulls every one of
  * these together while a gated request is locked, so components that render
- * an amount take this type and never see a null. The address is separate:
- * it exists only once a wallet is bound (see `ReadyPayerDepositRequest`).
+ * an amount take this type and never see a null. The chain and address are
+ * separate: they exist only once the payer has chosen a network and bound a
+ * wallet (see `ReadyPayerDepositRequest`); until then `networks` lists the choice.
  */
 export type UnlockedPayerDepositRequest = PayerDepositRequest & {
-  chain: Chain;
-  token: Token;
+  networks: Network[];
   amount: string;
   amount_base_units: string;
   received: string;
@@ -88,10 +89,13 @@ export type UnlockedPayerDepositRequest = PayerDepositRequest & {
 };
 
 /**
- * An unlocked deposit request whose payer wallet is bound, so the one-time address
- * exists. Everything that shows or uses the address takes this type.
+ * An unlocked deposit request whose payer wallet is bound on a chosen network,
+ * so the one-time address exists. Everything that shows or uses the address,
+ * the chain, or the token takes this type.
  */
 export type ReadyPayerDepositRequest = UnlockedPayerDepositRequest & {
+  chain: Chain;
+  token: Token;
   address: string;
   payer_wallet: string;
 };
@@ -105,8 +109,7 @@ export type ReadyPayerDepositRequest = UnlockedPayerDepositRequest & {
 export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPayerDepositRequest | null {
   if (!payment.content_unlocked) return null;
   const {
-    chain,
-    token,
+    networks,
     amount,
     amount_base_units,
     received,
@@ -115,8 +118,7 @@ export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPa
     remaining_base_units,
   } = payment;
   if (
-    chain === null ||
-    token === null ||
+    networks === null ||
     amount === null ||
     amount_base_units === null ||
     received === null ||
@@ -128,8 +130,7 @@ export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPa
   }
   return {
     ...payment,
-    chain,
-    token,
+    networks,
     amount,
     amount_base_units,
     received,
@@ -140,14 +141,24 @@ export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPa
 }
 
 /**
- * Narrows further to a deposit request with an address. The API sets `address` and
- * `payer_wallet` together when the binding exists; one without the other is
- * treated as unbound rather than rendered with a hole.
+ * Narrows further to a deposit request with an address. The API sets `chain`,
+ * `token`, `address`, and `payer_wallet` together when the binding exists;
+ * any one without the others is treated as unbound rather than rendered with
+ * a hole.
  */
 export function readyDepositRequest(payment: UnlockedPayerDepositRequest): ReadyPayerDepositRequest | null {
-  const { address, payer_wallet } = payment;
-  if (address === null || payer_wallet === null) return null;
-  return { ...payment, address, payer_wallet };
+  const { chain, token, address, payer_wallet } = payment;
+  if (chain === null || token === null || address === null || payer_wallet === null) return null;
+  return { ...payment, chain, token, address, payer_wallet };
+}
+
+/**
+ * The token's symbol for an unlocked request: the chosen network's once a
+ * wallet is bound, otherwise the offer's. Every offered network carries the
+ * same asset (native USDC), so before the choice any entry names it.
+ */
+export function tokenSymbol(payment: UnlockedPayerDepositRequest): string {
+  return payment.token?.symbol ?? payment.networks[0]?.token.symbol ?? "USDC";
 }
 
 const TERMINAL: ReadonlySet<DepositRequestStatus> = new Set<DepositRequestStatus>([
@@ -360,17 +371,19 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
     };
   }
 
-  // No address yet: the payer signs from the wallet they will pay from, and
-  // the address is derived from that signature. This comes before anything
-  // this browser may have sent, because nothing can have been sent.
-  if (readyDepositRequest(payment) === null) {
+  // No address yet: the payer chooses the network they will pay on and signs
+  // from the wallet they will pay from, and the address is derived from both.
+  // This comes before anything this browser may have sent, because nothing
+  // can have been sent.
+  const ready = readyDepositRequest(payment);
+  if (ready === null) {
     return {
       phase: "wallet_required",
       tone: "neutral",
       label: "Wallet required",
-      title: "Sign from the wallet you will pay from",
+      title: "Choose a network and sign from the wallet you will pay from",
       detail:
-        "Payday creates a unique, one-time payment destination for the wallet you intend to pay with.",
+        "Payday creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
       showInstructions: false,
       showWalletStep: true,
       isTerminal: false,
@@ -396,7 +409,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       phase: "partial",
       tone: "progress",
       label: "Partially deposited",
-      title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${payment.token.symbol}`,
+      title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${ready.token.symbol}`,
       detail:
         "Transfers accumulate. If the total is still short at the deadline, the balance goes back to the wallet you signed with.",
       showInstructions: true,
@@ -410,7 +423,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
     tone: "neutral",
     label: "Awaiting deposit",
     title: "Amount due",
-    detail: `Send exactly this amount of ${payment.token.symbol} on ${payment.chain.name}, from the wallet you signed with.`,
+    detail: `Send exactly this amount of ${ready.token.symbol} on ${ready.chain.name}, from the wallet you signed with.`,
     showInstructions: true,
     showWalletStep: false,
     isTerminal: false,

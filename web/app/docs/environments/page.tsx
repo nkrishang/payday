@@ -6,7 +6,7 @@ import { Callout, DocsPage, H2, Table } from "@/components/docs/prose";
 export const metadata: Metadata = {
   title: "Environments",
   description:
-    "Production and sandbox: the base URLs, the chain and USDC contract each one settles on, and how the two differ.",
+    "Production and sandbox: the base URLs, the networks and USDC contracts each one settles on, and how the two differ.",
 };
 
 const SANDBOX = `curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/dr_…" \\
@@ -22,7 +22,7 @@ export default function EnvironmentsPage() {
     <DocsPage
       eyebrow="Using Payday"
       title="Environments"
-      lead="Two isolated services with the same API. Production settles real USDC on Monad; the sandbox settles Circle's test USDC on Monad testnet, with its own accounts, keys, and database."
+      lead="Two isolated services with the same API. Production settles real USDC on Monad, Base, and Arbitrum One; the sandbox settles Circle's test USDC on their testnets, with its own accounts, keys, and database."
     >
       <Table>
         <thead>
@@ -52,14 +52,14 @@ export default function EnvironmentsPage() {
             </td>
           </tr>
           <tr>
-            <td>Chain</td>
-            <td>Monad mainnet (chain id 143)</td>
-            <td>Monad testnet (chain id 10143)</td>
+            <td>Networks</td>
+            <td>Monad (143), Base (8453), Arbitrum One (42161)</td>
+            <td>Monad testnet (10143), Base Sepolia (84532), Arbitrum Sepolia (421614)</td>
           </tr>
           <tr>
             <td>Token</td>
-            <td>Circle-issued native USDC</td>
-            <td>Circle test USDC</td>
+            <td>Circle-issued native USDC on each network</td>
+            <td>Circle test USDC on each network</td>
           </tr>
           <tr>
             <td>Funds</td>
@@ -84,10 +84,11 @@ export default function EnvironmentsPage() {
       </Table>
 
       <p>
-        Every deposit request reports the <code>chain</code> and <code>token</code> it accepts. Read
-        them from the response rather than hard-coding them, and show them to the payer: a matching
-        symbol is not enough, and USDC on another network, bridged USDC, and look-alike tokens do
-        not count.
+        Every deposit request lists the <code>networks</code> it may be paid on, each with its
+        exact USDC contract. The payer picks one on the hosted checkout before signing, and from
+        then on <code>chain</code> and <code>token</code> name the choice. Read them from the
+        response rather than hard-coding them, and show them to the payer: a matching symbol is not
+        enough, and USDC on another network, bridged USDC, and look-alike tokens do not count.
       </p>
 
       <H2 id="sandbox">Using the sandbox</H2>
@@ -115,8 +116,8 @@ export default function EnvironmentsPage() {
           reach its database.
         </li>
         <li>
-          <code>GET /v1/status</code>, with a key, reports the chain&apos;s finalized position, the
-          indexer&apos;s cursor and lag, and the settlement queue. See{" "}
+          <code>GET /v1/status</code>, with a key, reports each network&apos;s finalized position,
+          the indexer&apos;s cursor and lag there, and its settlement queue. See{" "}
           <Link href="/docs/api/account#get-status">Account and status</Link>.
         </li>
         <li>

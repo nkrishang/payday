@@ -10,10 +10,10 @@ export const metadata: Metadata = {
 };
 
 const PROOF = `{
-  "version": "payday.proof.v2",
+  "version": "payday.proof.v3",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": {
-    "schema": "payday.invoice",
+    "schema": "payday.invoice.v3",
     "canonicalization": "RFC8785",
     "issuer": { "name": "Acme LLC", "email": "billing@acme.example" },
     "bill_to": { "name": "Customer Inc" },
@@ -24,10 +24,12 @@ const PROOF = `{
     "expiration_timestamp": "1757160000",
     "payer_policy": { "mode": "verified_email", "expected_email": "alice@customer.example" },
     "attachment": { "id": "0198f80c-…", "byte_length": "48211", "sha256": "0x9f…" },
-    "chain_id": "143",
-    "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-    "receiver_address": "0x1111111111111111111111111111111111111111",
-    "factory_address": "0x…"
+    "networks": [
+      { "chain_id": "143", "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "factory_address": "0x…" },
+      { "chain_id": "8453", "token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "factory_address": "0x…" },
+      { "chain_id": "42161", "token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "factory_address": "0x…" }
+    ],
+    "receiver_address": "0x1111111111111111111111111111111111111111"
   },
   "canonicalization": "RFC8785",
   "attribution_hash": "0x…",
@@ -104,8 +106,8 @@ export default function ProofPage() {
         is the identity facts: that the mailbox code was exchanged, or that your server&apos;s
         secret was redeemed, and that the wallet&apos;s nonce was issued only after the policy
         passed. Those facts are listed in the proof and signed by Payday together with the document
-        hash, the chain, the address, the wallet, and the nonce, so the statement belongs to this
-        request and this payer alone and cannot be transplanted onto another.
+        hash, the chosen chain, the address, the wallet, and the nonce, so the statement belongs to
+        this request and this payer alone and cannot be transplanted onto another.
       </p>
 
       <Figure caption="What a verifier recomputes: the hash from the document, the signature's validity and digest, the salt from both, and the address from the salt and the terms. Then it checks the transfers on-chain.">
@@ -126,7 +128,8 @@ export default function ProofPage() {
             <td>
               The exact document that was hashed at issuance, in canonical form: parties, amount in
               base units, heading, reference, notes, deadline, policy, the attachment&apos;s length
-              and SHA-256, chain, token, your payout address, and the factory.
+              and SHA-256, your payout address, and every network offered, each with its USDC
+              contract and factory.
             </td>
           </tr>
           <tr>
@@ -141,12 +144,22 @@ export default function ProofPage() {
             </td>
           </tr>
           <tr>
+            <td>chain_id, token_address, factory_address</td>
+            <td>
+              The network the payer chose. It must be one of the snapshot&apos;s networks, with that
+              entry&apos;s token and factory, and the typed data&apos;s domain must name it.
+            </td>
+          </tr>
+          <tr>
             <td>salt</td>
             <td>Derived from the attribution hash and the attestation digest.</td>
           </tr>
           <tr>
             <td>payment_address</td>
-            <td>The one-time address, recomputable from the factory, the salt, and the terms.</td>
+            <td>
+              The one-time address, recomputable from the factory, the salt, the chain id, and the
+              terms.
+            </td>
           </tr>
           <tr>
             <td>recovery_address</td>

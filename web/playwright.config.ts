@@ -14,11 +14,24 @@ const publicEnv = {
   NEXT_PUBLIC_PAYDAY_API_URL: `http://127.0.0.1:${STUB_PORT}`,
   NEXT_PUBLIC_PRIVY_APP_ID: "privy-stub-app",
   PAYDAY_PRIVY_STUB: "1",
-  NEXT_PUBLIC_CHAIN_ID: "143",
-  NEXT_PUBLIC_CHAIN_NAME: "Monad",
-  NEXT_PUBLIC_RPC_URL: "http://127.0.0.1:8545",
-  NEXT_PUBLIC_USDC_ADDRESS: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-  NEXT_PUBLIC_EXPLORER_BASE_URL: "https://monadvision.com",
+  NEXT_PUBLIC_CHAINS: JSON.stringify([
+    {
+      id: 143,
+      name: "Monad",
+      rpcUrl: "http://127.0.0.1:8545",
+      usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+      explorerUrl: "https://monadvision.com",
+      confirmation: "Credited within seconds",
+    },
+    {
+      id: 8453,
+      name: "Base",
+      rpcUrl: "http://127.0.0.1:8546",
+      usdcAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      explorerUrl: "https://basescan.org",
+      confirmation: "Credited within a minute",
+    },
+  ]),
   NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: "",
 };
 

@@ -83,8 +83,10 @@ resend cooldown is driven by Playwright's clock rather than waited out.
 ## Configuration
 
 Every variable is `NEXT_PUBLIC_` and therefore inlined into the browser bundle.
-Nothing secret belongs here — in particular `NEXT_PUBLIC_RPC_URL` must be a
-public endpoint, never the operator RPC the gateway reads from Secrets Manager.
+Nothing secret belongs here — in particular every `rpcUrl` in
+`NEXT_PUBLIC_CHAINS` (the networks the checkout offers, mirroring gatewayd's
+`PAYDAY_CHAINS`) must be a public endpoint, never the operator RPC the
+gateway reads from Secrets Manager.
 See [`.env.example`](.env.example). Missing values fail loudly at startup rather
 than degrading silently, matching the gateway's own configuration convention.
 

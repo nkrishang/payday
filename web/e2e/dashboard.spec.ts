@@ -245,7 +245,7 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("payday.proof.v2");
+  expect(body.version).toBe("payday.proof.v3");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
   expect(body.recovery_address).toBe(body.payer_wallet.address);
   expect(body.payment_id).toBe("dr_seed-settled");
@@ -291,7 +291,9 @@ test("the account section shows the signed-in mailbox and the Payday wallet", as
   expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
   await expect(section).toContainText(wallet);
   await expect(section.getByRole("button", { name: /Copy wallet address/ })).toBeVisible();
-  await expect(section.getByText(/Balance unavailable/)).toBeVisible({ timeout: 20_000 });
+  // One balance per network the deployment offers, each read on its own.
+  await expect(section.getByText(/Balance unavailable — Monad/)).toBeVisible({ timeout: 20_000 });
+  await expect(section.getByText(/Balance unavailable — Base/)).toBeVisible({ timeout: 20_000 });
 });
 
 test("a merchant can generate, roll, and revoke their API key from the session", async ({

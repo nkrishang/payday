@@ -42,7 +42,7 @@ export default function ApiIntroductionPage() {
             <th>Environment</th>
             <th>Base URL</th>
             <th>Key prefix</th>
-            <th>Chain</th>
+            <th>Networks</th>
           </tr>
         </thead>
         <tbody>
@@ -54,7 +54,7 @@ export default function ApiIntroductionPage() {
             <td>
               <code>payday_live_</code>
             </td>
-            <td>Monad, 143</td>
+            <td>Monad 143 · Base 8453 · Arbitrum One 42161</td>
           </tr>
           <tr>
             <td>Sandbox</td>
@@ -64,7 +64,7 @@ export default function ApiIntroductionPage() {
             <td>
               <code>payday_test_</code>
             </td>
-            <td>Monad testnet, 10143</td>
+            <td>Monad testnet 10143 · Base Sepolia 84532 · Arbitrum Sepolia 421614</td>
           </tr>
         </tbody>
       </Table>

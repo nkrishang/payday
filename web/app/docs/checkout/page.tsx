@@ -29,16 +29,24 @@ const WALLET_STEP = `import { createWalletClient, custom } from "viem";
 const wallet = createWalletClient({ transport: custom(window.ethereum) });
 const [account] = await wallet.getAddresses();
 
-// 1. Ask Payday for the document to sign. A permissionless request with no
-//    session yet gets one here; a gated request needs the session that
-//    satisfied its policy.
-const challenge = await payer.wallet.challenge(request.id, account, { payerSession });
+// 1. The payer picks one of the request's networks. The choice is final once
+//    signed: the address will exist on that chain only.
+const network = request.networks.find((n) => n.chain.id === chosenChainId);
+await wallet.switchChain({ id: Number(network.chain.id) });
 
-// 2. The wallet shows the typed data in full and signs it. No transaction.
+// 2. Ask Payday for the document to sign on that chain. A permissionless
+//    request with no session yet gets one here; a gated request needs the
+//    session that satisfied its policy.
+const challenge = await payer.wallet.challenge(request.id, account, network.chain.id, {
+  payerSession,
+});
+
+// 3. The wallet shows the typed data in full and signs it. No transaction.
+//    Its domain names the chosen chain, so a wallet on another one refuses.
 const signature = await wallet.signTypedData({ account, ...challenge.typed_data });
 
-// 3. Hand the signature back. The response is the unlocked request with
-//    \`address\` and \`payer_wallet\` set.
+// 4. Hand the signature back. The response is the unlocked request with
+//    \`chain\`, \`token\`, \`address\`, and \`payer_wallet\` set.
 const ready = await payer.wallet.attest(request.id, account, signature, challenge.payer_session);`;
 
 const EMAIL_STEP = `// The code goes to the mailbox the merchant asserted; the payer only types it.
@@ -64,8 +72,13 @@ export default function CheckoutPage() {
           name, notes, and the attached PDF through a short-lived link.
         </li>
         <li>
-          <strong>The instructions</strong>: the amount still due, the network and the exact token
-          contract, the one-time address, and a QR code encoding the same request.
+          <strong>The network step</strong>: the networks the request may be paid on (Monad, Base,
+          Arbitrum One), each with its gas token and rough confirmation time. Choosing one is
+          mandatory before the wallet step, and the choice is final once signed.
+        </li>
+        <li>
+          <strong>The instructions</strong>: the amount still due, the chosen network and the exact
+          token contract there, the one-time address, and a QR code encoding the same request.
         </li>
         <li>
           <strong>The clock</strong>: a countdown to the deadline, driven by Payday&apos;s clock,
@@ -80,8 +93,8 @@ export default function CheckoutPage() {
       <p>
         For a gated request only the issuer name and heading show until the payer&apos;s session
         satisfies the policy; see <Link href="/docs/payer-verification">Verifying the payer</Link>.
-        For every request, the address, the QR, and the pay button appear only after the wallet
-        step.
+        For every request, the address, the QR, and the pay button appear only after the network
+        and wallet steps.
       </p>
 
       <H2 id="three-ways-to-pay">Three ways to pay</H2>
@@ -97,7 +110,8 @@ export default function CheckoutPage() {
             <td>Connected wallet</td>
             <td>
               The page discovers installed browser wallets and, with WalletConnect, phone wallets.
-              It checks the chain and the token contract, then sends a plain USDC transfer of the
+              It switches the wallet to the chosen chain, checks the token contract, then sends a
+              plain USDC transfer of the
               amount still due, re-read at the moment of signing. No approval, no contract call. It
               refuses to send from any wallet but the attested one.
             </td>
@@ -124,9 +138,11 @@ export default function CheckoutPage() {
       </p>
 
       <Callout tone="warning" title="What the payer must get right">
-        Exactly the displayed amount, of the exact USDC contract, on the displayed chain, from the
-        wallet they signed with, and not at the deadline boundary. Bridged USDC, look-alike tokens,
-        another network, and native gas do not count and may be unrecoverable. The checkout says all
+        Exactly the displayed amount, of the exact USDC contract, on the network they chose, from
+        the wallet they signed with, and not at the deadline boundary. Bridged USDC, look-alike
+        tokens, another network, and native gas do not count. The address refuses to settle on any
+        other chain, so a wrong-network deposit is not lost, but returning it is a manual
+        support case. The checkout says all
         of this; if you build your own, repeat it.
       </Callout>
 
@@ -158,8 +174,9 @@ export default function CheckoutPage() {
 
       <H3 id="wallet-step">The wallet step</H3>
       <p>
-        Every request, gated or not, takes this step before it has an address. The typed data comes
-        from Payday and goes to the wallet verbatim.
+        Every request, gated or not, takes this step before it has an address. The payer chooses a
+        network first; the typed data comes from Payday for that chain and goes to the wallet
+        verbatim.
       </p>
       <CodeBlock code={WALLET_STEP} lang="ts" />
       <p>

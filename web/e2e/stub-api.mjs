@@ -29,8 +29,25 @@ Date.prototype.toISOString = function toSecondISOString() {
 const PORT = Number(process.env.STUB_PORT ?? 4010);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
+const BASE_TOKEN = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";
 const FACTORY = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+/** The networks every stub request offers, as the API lists them. */
+const MONAD = { id: "143", name: "Monad", native_symbol: "MON" };
+const BASE = { id: "8453", name: "Base", native_symbol: "ETH" };
+const NETWORKS = [
+  { chain: MONAD, token: { symbol: "USDC", address: TOKEN, decimals: 6 } },
+  { chain: BASE, token: { symbol: "USDC", address: BASE_TOKEN, decimals: 6 } },
+];
+/** The chosen network's own fields, once a payer has bound a wallet on `chainId`. */
+function chosen(chainId = "143") {
+  const network = NETWORKS.find((entry) => entry.chain.id === chainId) ?? NETWORKS[0];
+  return {
+    chain: network.chain,
+    token: network.token,
+    deposit_uri: `ethereum:${network.token.address}@${network.chain.id}/transfer?address=${ADDRESS}&uint256=25000000`,
+  };
+}
 /** The wallet the stub's payers attest; the address commits to it, and excess funds return to it. */
 const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const PAYOUT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -114,8 +131,8 @@ function base(overrides = {}) {
     settlement_explorer_url: null,
     payer_message: null,
     content_unlocked: true,
-    chain: { id: "143", name: "Monad" },
-    token: { symbol: "USDC", address: TOKEN, decimals: 6 },
+    networks: NETWORKS,
+    ...chosen(),
     amount: "25.000000",
     amount_base_units: "25000000",
     received: "0",
@@ -125,7 +142,6 @@ function base(overrides = {}) {
     payer_wallet: PAYER_WALLET,
     address: ADDRESS,
     address_explorer_url: null,
-    deposit_uri: `ethereum:${TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
     details: {
       amount: "25.000000",
       amount_base_units: "25000000",
@@ -138,9 +154,11 @@ function base(overrides = {}) {
   };
 }
 
-/** An unlocked request whose payer has not signed yet: content, no address. */
+/** An unlocked request whose payer has not signed yet: content, no chain, no address. */
 const UNBOUND = {
   requirements: requirements("permissionless", false, false),
+  chain: null,
+  token: null,
   payer_wallet: null,
   address: null,
   address_explorer_url: null,
@@ -225,6 +243,7 @@ function projectForPayer(payment, session) {
     return {
       ...shared,
       content_unlocked: false,
+      networks: null,
       chain: null,
       token: null,
       amount: null,
@@ -244,6 +263,7 @@ function projectForPayer(payment, session) {
     ...shared,
     content_unlocked: true,
     payer_wallet: payment.payer_wallet,
+    networks: payment.networks,
     chain: payment.chain,
     token: payment.token,
     amount: payment.amount,
@@ -254,7 +274,9 @@ function projectForPayer(payment, session) {
     remaining_base_units: payment.remaining_base_units,
     address: payment.address,
     address_explorer_url: payment.address_explorer_url ?? null,
-    deposit_uri: `ethereum:${payment.token.address}@${payment.chain.id}/transfer?address=${payment.address}&uint256=${payment.remaining_base_units}`,
+    deposit_uri: payment.chain
+      ? `ethereum:${payment.token.address}@${payment.chain.id}/transfer?address=${payment.address}&uint256=${payment.remaining_base_units}`
+      : null,
     details: {
       amount: payment.amount,
       amount_base_units: payment.amount_base_units,
@@ -275,6 +297,7 @@ function locked(mode, facts = requirements(mode)) {
     },
     requirements: facts,
     content_unlocked: false,
+    networks: null,
     chain: null,
     token: null,
     amount: null,
@@ -333,9 +356,10 @@ const scenarios = {
       },
     }),
   "gated-email": (id, session) => gatedFor("verified_email", session),
-  // No wallet signed yet: the page must ask for the signature before it
-  // shows any address, and show the address once this session has signed.
-  unbound: (id, session) => (session?.walletBound ? base() : base(UNBOUND)),
+  // No wallet signed yet: the page must ask for a network and the signature
+  // before it shows any address, and show the address on the chosen network
+  // once this session has signed.
+  unbound: (id, session) => (session?.walletBound ? base(chosen(session.chainId)) : base(UNBOUND)),
   // Opened by the merchant's app with a client secret in the fragment; the
   // bare link stays locked with nothing for the payer to do here.
   "gated-merchant": (id, session) => gatedFor("merchant_session", session),
@@ -381,8 +405,13 @@ const scenarios = {
     reads.set(id, seen);
     return seen <= 1 ? base() : base(PARTIAL);
   },
-  // A different chain, to prove the wallet button refuses to sign for it.
-  "other-chain": () => base({ chain: { id: "1", name: "Ethereum" } }),
+  // Bound on a chain this checkout is not configured for, to prove the
+  // wallet button refuses to pay on it while the address stays usable.
+  "other-chain": () =>
+    base({
+      networks: [...NETWORKS, { chain: { id: "1", name: "Ethereum", native_symbol: "ETH" }, token: NETWORKS[0].token }],
+      chain: { id: "1", name: "Ethereum", native_symbol: "ETH" },
+    }),
 };
 
 function scenarioFor(id) {
@@ -468,13 +497,14 @@ function merchantDepositRequest(input, extra = {}) {
     net_amount: fromBaseUnits(amountUnits),
     net_amount_base_units: amountUnits,
     status: "awaiting_deposit",
+    networks: NETWORKS,
     token: { symbol: "USDC", address: TOKEN, decimals: 6 },
-    chain: { id: "143", name: "Monad" },
+    chain: MONAD,
     settlement_tx_hash: null,
     settlement_explorer_url: null,
     settled_at: null,
     settled_block: null,
-    self_settlement: { factory: FACTORY, salt: hex32(`salt:${id}`) },
+    self_settlement: { chain_id: "143", factory: FACTORY, salt: hex32(`salt:${id}`) },
     attention: null,
     issuer: input.issuer,
     payer: input.payer,
@@ -566,10 +596,10 @@ function proofFor(payment) {
     }));
   const gated = GATED.has(payment.payer_policy.mode);
   return {
-    version: "payday.proof.v2",
+    version: "payday.proof.v3",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
-      schema: "payday.invoice",
+      schema: "payday.invoice.v3",
       canonicalization: "RFC8785",
       issuer: payment.issuer,
       payer: payment.payer,
@@ -586,10 +616,12 @@ function proofFor(payment) {
             sha256: payment.attachment.sha256,
           }
         : null,
-      chain_id: "143",
-      token_address: TOKEN,
+      networks: NETWORKS.map((network) => ({
+        chain_id: network.chain.id,
+        token_address: network.token.address,
+        factory_address: FACTORY,
+      })),
       receiver_address: payment.payout_address,
-      factory_address: FACTORY,
     },
     canonicalization: "RFC8785",
     attribution_hash: payment.attribution.hash,
@@ -610,7 +642,7 @@ function proofFor(payment) {
     transfers,
     verification: {
       payload: {
-        version: "payday.attestation.v2",
+        version: "payday.attestation.v3",
         payment_id: payment.id,
         attribution_hash: payment.attribution.hash,
         chain_id: "143",
@@ -629,10 +661,10 @@ function proofFor(payment) {
   };
 }
 
-/** `PayerAttestation::typed_data`: the EIP-712 document a payer's wallet signs. */
-function typedData(attributionHash, wallet, nonce) {
+/** `PayerAttestation::typed_data`: the EIP-712 document a payer's wallet signs, under the chosen chain's domain. */
+function typedData(attributionHash, wallet, nonce, chainId = 143) {
   return {
-    domain: { name: "Payday", version: "1", chainId: 143, verifyingContract: FACTORY },
+    domain: { name: "Payday", version: "1", chainId, verifyingContract: FACTORY },
     primaryType: "PayerAttestation",
     types: {
       EIP712Domain: [
@@ -1124,6 +1156,13 @@ async function payer(req, res, url) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(String(body.wallet ?? ""))) {
       return fail(res, 400, "invalid_request", "wallet must be a 20-byte EVM address");
     }
+    if (!/^[0-9]+$/.test(String(body.chain_id ?? ""))) {
+      return fail(res, 400, "invalid_request", "chain_id must be a decimal chain id string");
+    }
+    const network = (payment.networks ?? NETWORKS).find((entry) => entry.chain.id === body.chain_id);
+    if (!network) {
+      return fail(res, 422, "unsupported_chain", "This deposit request cannot be paid on that chain");
+    }
     if (payment.address) {
       return fail(res, 409, "wallet_already_bound", `Already bound to ${payment.payer_wallet}`);
     }
@@ -1132,10 +1171,17 @@ async function payer(req, res, url) {
     }
     let token = session ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
     if (!session) sessions.set(token, { id, emailVerified: false, walletBound: false });
+    sessions.get(token).chainId = network.chain.id;
     return send(res, 200, {
       payer_session: token,
       expires_at: new Date(Date.now() + 600 * 1000).toISOString(),
-      typed_data: typedData(hex32(`attribution:${id}`), body.wallet, hex32(`nonce:${token}`)),
+      chain: network.chain,
+      typed_data: typedData(
+        hex32(`attribution:${id}`),
+        body.wallet,
+        hex32(`nonce:${token}`),
+        Number(network.chain.id),
+      ),
     });
   }
 

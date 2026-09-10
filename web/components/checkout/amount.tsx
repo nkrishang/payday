@@ -1,4 +1,4 @@
-import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
+import { tokenSymbol, type UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { formatDisplayAmount, receivedPercent } from "@/lib/format";
 
 /**
@@ -17,7 +17,7 @@ export function AmountDue({ payment }: { payment: UnlockedPayerDepositRequest })
       </p>
       <h1 className="tabular mt-2 flex items-baseline gap-2 text-[40px] leading-none font-semibold tracking-tight">
         {formatDisplayAmount(shown)}
-        <span className="text-base font-medium text-muted">{payment.token.symbol}</span>
+        <span className="text-base font-medium text-muted">{tokenSymbol(payment)}</span>
       </h1>
     </div>
   );
@@ -47,7 +47,7 @@ export function ReceivedProgress({ payment }: { payment: UnlockedPayerDepositReq
       </div>
       <p className="tabular mt-2 text-[13px] text-muted">
         {formatDisplayAmount(payment.received)} of {formatDisplayAmount(payment.amount)}{" "}
-        {payment.token.symbol} received
+        {tokenSymbol(payment)} received
       </p>
     </div>
   );

@@ -18,6 +18,7 @@ const LOCKED = `{
   "settlement_explorer_url": null,
   "payer_message": null,
   "content_unlocked": false,
+  "networks": null,
   "chain": null,
   "token": null,
   "amount": null,
@@ -47,6 +48,11 @@ const UNLOCKED = `{
   "settlement_explorer_url": null,
   "payer_message": null,
   "content_unlocked": true,
+  "networks": [
+    { "chain": { "id": "143", "name": "Monad" }, "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 } },
+    { "chain": { "id": "8453", "name": "Base" }, "token": { "symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 } },
+    { "chain": { "id": "42161", "name": "Arbitrum One" }, "token": { "symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6 } }
+  ],
   "chain": { "id": "143", "name": "Monad" },
   "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 },
   "amount": "10.500000",
@@ -88,11 +94,12 @@ export const PAYER: EndpointGroup = {
       body: (
         <>
           <p>
-            Gated modes: <code>chain</code>, <code>token</code>, amounts, <code>details</code>, and{" "}
+            Gated modes: <code>networks</code>, amounts, <code>details</code>, and{" "}
             <code>settlement_tx_hash</code> are null until the session satisfies the policy.
-            Permissionless: present immediately. <code>payer_wallet</code>, <code>address</code>,{" "}
-            <code>address_explorer_url</code>, and <code>deposit_uri</code> are null until a wallet
-            is bound; <code>deposit_uri</code> returns to null when <code>payable</code> is false.
+            Permissionless: present immediately. <code>chain</code>, <code>token</code>,{" "}
+            <code>payer_wallet</code>, <code>address</code>, <code>address_explorer_url</code>, and{" "}
+            <code>deposit_uri</code> are null until a wallet is bound on a chosen network;{" "}
+            <code>deposit_uri</code> returns to null when <code>payable</code> is false.
           </p>
           <p>
             With a session, <code>requirements</code> reflects that session. Without one, it
@@ -128,14 +135,20 @@ export const PAYER: EndpointGroup = {
           },
           { name: "content_unlocked", type: "boolean", description: "" },
           {
-            name: "chain, token, amount, received, remaining",
+            name: "networks, amount, received, remaining",
             type: "| null",
-            description: "Gated. Base-unit counterparts included.",
+            description:
+              "Gated. networks lists the chains the payer may choose, each with its USDC contract. Base-unit counterparts included.",
+          },
+          {
+            name: "chain, token",
+            type: "object | null",
+            description: "The chosen network and its USDC contract. Present once bound.",
           },
           {
             name: "payer_wallet, address, address_explorer_url, deposit_uri",
             type: "string | null",
-            description: "Present once bound. deposit_uri is EIP-681 for remaining.",
+            description: "Present once bound. deposit_uri is EIP-681 for remaining, on the chosen chain.",
           },
           {
             name: "details",
@@ -364,25 +377,35 @@ Cache-Control: no-store`,
       body: (
         <p>
           Required for every request before an address exists. Gated modes require a session that
-          satisfies the policy; permissionless requests without a session receive one. Pass{" "}
-          <code>typed_data</code> to <code>eth_signTypedData_v4</code> unmodified. Challenge
-          validity: ten minutes.
+          satisfies the policy; permissionless requests without a session receive one. The payer
+          chooses the network here: <code>chain_id</code> must be one of the request&apos;s{" "}
+          <code>networks</code>, and the typed data&apos;s domain names that chain and its factory,
+          so the wallet must be on it to sign. The attestation binds the wallet to that chain and
+          the address exists only there. Pass <code>typed_data</code> to{" "}
+          <code>eth_signTypedData_v4</code> unmodified. Challenge validity: ten minutes.
         </p>
       ),
       headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
       pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       bodyFields: [
         { name: "wallet", type: "string", required: true, description: "Paying wallet." },
+        {
+          name: "chain_id",
+          type: "string",
+          required: true,
+          description: "The chosen network. One of the request's networks[].chain.id.",
+        },
       ],
       response: {
         fields: [
           { name: "payer_session", type: "string", description: "" },
           { name: "expires_at", type: "timestamp", description: "" },
+          { name: "chain", type: "object", description: "{ id, name }. The chosen network." },
           {
             name: "typed_data",
             type: "object",
             description:
-              'Domain { name: "Payday", version: "1", chainId, verifyingContract }. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
+              'Domain { name: "Payday", version: "1", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
           },
         ],
       },
@@ -394,17 +417,19 @@ Cache-Control: no-store`,
         },
         { status: 409, code: "wallet_already_bound", when: "Message names the bound wallet." },
         { status: 410, code: "deposit_request_not_payable", when: "" },
+        { status: 422, code: "unsupported_chain", when: "chain_id is not one of the request's networks." },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/wallet/challenge" \\
   -H "Payday-Payer-Session: $PAYER_SESSION" \\
   -H "Content-Type: application/json" \\
-  -d '{ "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed" }'`,
-        ts: `const challenge = await payer.wallet.challenge(id, account, { payerSession });
+  -d '{ "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "chain_id": "143" }'`,
+        ts: `const challenge = await payer.wallet.challenge(id, account, "143", { payerSession });
 const signature = await wallet.signTypedData({ account, ...challenge.typed_data });`,
         response: `{
   "payer_session": "…",
   "expires_at": "2026-09-06T12:15:00Z",
+  "chain": { "id": "143", "name": "Monad" },
   "typed_data": {
     "domain": { "name": "Payday", "version": "1", "chainId": 143, "verifyingContract": "0x…" },
     "primaryType": "PayerAttestation",

@@ -1,7 +1,7 @@
 "use client";
 
 import type { PayerDepositRequest } from "@payday/sdk";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { checkoutView, readyDepositRequest, unlockedDepositRequest } from "@/lib/checkout-state";
 import { takePreviewSession, usePayerSession } from "@/lib/payer-session";
 import { StatusDot } from "@/components/ui/status-dot";
@@ -12,6 +12,7 @@ import { Countdown } from "./countdown";
 import { CheckoutFrame } from "./frame";
 import { RequestDetails } from "./request-details";
 import { ClientSecretExchange, type ClientSecretStatus } from "./merchant-session";
+import { NetworkSelect } from "./network-select";
 import { WalletProviders } from "./providers";
 import { QrPanel } from "./qr-panel";
 import { Resolved } from "./resolved";
@@ -35,6 +36,56 @@ export function Checkout({
   );
 }
 
+/** Components reading a chosen network through the hook, told when it changes. */
+const networkListeners = new Set<() => void>();
+
+function subscribeNetwork(listener: () => void): () => void {
+  networkListeners.add(listener);
+  return () => {
+    networkListeners.delete(listener);
+  };
+}
+
+/** The choices made in this page, for browsers whose storage is unavailable. */
+const chosenNetworks = new Map<string, string>();
+
+function readChosenNetwork(key: string): string | null {
+  try {
+    return window.sessionStorage.getItem(key) ?? chosenNetworks.get(key) ?? null;
+  } catch {
+    return chosenNetworks.get(key) ?? null;
+  }
+}
+
+/**
+ * The network the payer picked for this request, remembered in this tab so a
+ * reload between choosing and signing does not lose it. Server rendering and
+ * hydration see no choice, so the markup agrees on both sides; the client
+ * then reads the tab's storage. Nothing about it is trusted: the API only
+ * ever binds the chain the challenge was minted for.
+ */
+function useChosenNetwork(id: string): [string | null, (chainId: string) => void] {
+  const key = `payday:network:${id}`;
+  const chosen = useSyncExternalStore(
+    subscribeNetwork,
+    () => readChosenNetwork(key),
+    () => null,
+  );
+  const choose = useCallback(
+    (chainId: string) => {
+      chosenNetworks.set(key, chainId);
+      try {
+        window.sessionStorage.setItem(key, chainId);
+      } catch {
+        // Storage may be unavailable; the choice then lives in memory only.
+      }
+      for (const listener of networkListeners) listener();
+    },
+    [key],
+  );
+  return [chosen, choose];
+}
+
 function CheckoutBody({
   initial,
   embedded,
@@ -51,6 +102,7 @@ function CheckoutBody({
     payerSession,
   );
   const [emailCodeSent, setEmailCodeSent] = useState(false);
+  const [chosenChain, chooseChain] = useChosenNetwork(initial.id);
   const updateSession = useCallback(
     (token: string | null) => {
       if (token === null) setEmailCodeSent(false);
@@ -91,6 +143,9 @@ function CheckoutBody({
   // payer's wallet is bound and the address exists.
   const unlocked = unlockedDepositRequest(payment);
   const ready = unlocked === null ? null : readyDepositRequest(unlocked);
+  // The chosen network, if it is one the request offers.
+  const chosenNetwork =
+    unlocked?.networks.find((network) => network.chain.id === chosenChain) ?? null;
 
   return (
     <CheckoutFrame
@@ -142,8 +197,17 @@ function CheckoutBody({
               <p className="mt-2 text-[13px] leading-relaxed text-muted">{view.detail}</p>
 
               <div className="mt-6">
+                <NetworkSelect
+                  networks={unlocked.networks}
+                  selected={chosenNetwork?.chain.id ?? null}
+                  onSelect={chooseChain}
+                />
+              </div>
+
+              <div className="mt-5">
                 <WalletAttestation
                   payment={unlocked}
+                  network={chosenNetwork}
                   payerSession={payerSession}
                   onSession={updateSession}
                   onBound={refresh}

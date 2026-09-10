@@ -60,11 +60,8 @@ jobs:
       # Build-time values only. Everything here is public by definition: it is
       # inlined into the browser bundle. Production values live in Vercel.
       NEXT_PUBLIC_PAYDAY_API_URL: https://api.payday.sh
-      NEXT_PUBLIC_CHAIN_ID: "143"
-      NEXT_PUBLIC_CHAIN_NAME: Monad
-      NEXT_PUBLIC_RPC_URL: https://rpc.monad.xyz
-      NEXT_PUBLIC_USDC_ADDRESS: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
-      NEXT_PUBLIC_EXPLORER_BASE_URL: https://monadvision.com
+      # The networks the checkout offers, with public RPCs for wallet reads.
+      NEXT_PUBLIC_CHAINS: '[{"id":143,"name":"Monad","rpcUrl":"https://rpc.monad.xyz","usdcAddress":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603","explorerUrl":"https://monadvision.com","confirmation":"Credited within seconds"},{"id":8453,"name":"Base","rpcUrl":"https://mainnet.base.org","usdcAddress":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","explorerUrl":"https://basescan.org","confirmation":"Credited within a minute"},{"id":42161,"name":"Arbitrum One","rpcUrl":"https://arb1.arbitrum.io/rpc","usdcAddress":"0xaf88d065e77c8cC2239327C5EDb3A432268e5831","explorerUrl":"https://arbiscan.io","confirmation":"Credited within a minute"}]'
       # The landing page prerenders the sign-in dialog, which needs an app id
       # at build time; Privy app ids are public, and this is the development
       # app. The browser suite swaps Privy for its stub regardless.

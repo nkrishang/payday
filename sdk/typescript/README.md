@@ -210,13 +210,16 @@ const opened = await payer.verification.exchangeClientSecret(deposit.id, clientS
 ```
 
 For `permissionless` deposit requests everything is unlocked immediately. For
-`verified_email`, `chain`, `token`, the amounts, `address`, `deposit_uri`, and
-`details` are `null` until the payer's session satisfies the policy; pass the
+`verified_email`, `networks`, the amounts, `address`, `deposit_uri`, and
+`details` are `null` until the payer's session satisfies the policy; `chain`
+and `token` are `null` until the payer has chosen a network and bound their
+wallet (`payer.wallet.challenge(id, wallet, chainId, options)`, then
+`attest`); pass the
 session token from verification as `payerSession` and it travels in the
 `Payday-Payer-Session` header. The response deliberately carries no merchant
 data — no payout or recovery address, metadata, customer, or policy
 assertions; only a masked `expected_email_hint`. Pass an `AbortSignal` to
 cancel a poll. If you build your own checkout, reproduce the guidance in
 [Deposit safety](../../docs/deposit-safety.md): payers must send the exact
-amount of the exact token on the exact chain, and must not pay at the deadline
-boundary.
+amount of the exact token on the network they chose, and must not pay at
+the deadline boundary.

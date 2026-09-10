@@ -235,7 +235,7 @@ function MockCard({
           </div>
           <div className="flex flex-col gap-2 text-[12px]">
             <Row k="Amount" v={locked ? null : "25.00 USDC"} />
-            <Row k="Network" v={locked ? null : "Monad · native USDC"} />
+            <Row k="Network" v={locked ? null : "Base · native USDC"} />
             <Row k="Address" v={locked ? null : "0x8f3C…a1D2"} mono />
             <Row k="Deadline" v="in 23h 41m" />
             {locked ? null : (
@@ -290,9 +290,9 @@ export function DisclosureTable() {
   const rows: Array<[string, boolean, boolean, boolean]> = [
     ["Issuer name and heading", true, true, true],
     ["Status, deadline, whether it is payable", true, true, true],
-    ["Amount, remaining, chain, token", false, true, true],
+    ["Amount, remaining, the networks offered", false, true, true],
     ["Payer name, notes, reference, PDF", false, true, true],
-    ["One-time address, QR, wallet button", false, false, true],
+    ["Chosen chain and token, one-time address, QR, wallet button", false, false, true],
   ];
   return (
     <table className="w-full text-[13.5px]">

@@ -58,8 +58,13 @@ const CREATE_RESPONSE = `{
   "address": null,
   "payer_wallet": null,
   "payout_address": "0x1111111111111111111111111111111111111111",
-  "chain": { "id": "143", "name": "Monad" },
-  "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 },
+  "networks": [
+    { "chain": { "id": "143", "name": "Monad" }, "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 } },
+    { "chain": { "id": "8453", "name": "Base" }, "token": { "symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 } },
+    { "chain": { "id": "42161", "name": "Arbitrum One" }, "token": { "symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6 } }
+  ],
+  "chain": null,
+  "token": null,
   "expires_at": "2026-09-06T13:00:00Z",
   "created_at": "2026-09-06T12:00:00Z",
   "...": "…"
@@ -147,9 +152,9 @@ export default function QuickstartPage() {
           <p>
             Send <code>deposit_url</code> to the payer. If the request carried a{" "}
             <code>payer.email</code>, Payday has already emailed it to them. The hosted checkout
-            shows the request, the network and exact token, the amount still due, the one-time
-            address and QR once the payer has signed, a deadline countdown, and live finalized
-            status. It can also send the transfer from a connected wallet in the page.
+            shows the request, the networks it may be paid on, the amount still due, the exact
+            token and one-time address and QR once the payer has chosen a network and signed, a
+            deadline countdown, and live finalized status. It can also send the transfer from a connected wallet in the page.
           </p>
           <p>
             The link is open by design: anyone holding it can read the request and pay it. It

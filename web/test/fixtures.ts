@@ -3,6 +3,12 @@ import type { ReadyPayerDepositRequest, UnlockedPayerDepositRequest } from "@/li
 
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";
 const TOKEN = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
+const BASE_TOKEN = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+/** The networks a fixture request can be paid on: Monad first, Base second. */
+export const NETWORKS = [
+  { chain: { id: "143", name: "Monad", native_symbol: "MON" }, token: { symbol: "USDC", address: TOKEN, decimals: 6 } },
+  { chain: { id: "8453", name: "Base", native_symbol: "ETH" }, token: { symbol: "USDC", address: BASE_TOKEN, decimals: 6 } },
+];
 /** The wallet the fixture payer attested; the address above commits to it. */
 export const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
@@ -24,7 +30,8 @@ const READY: ReadyPayerDepositRequest = {
   settlement_explorer_url: null,
   payer_message: null,
   content_unlocked: true,
-  chain: { id: "143", name: "Monad" },
+  networks: NETWORKS,
+  chain: { id: "143", name: "Monad", native_symbol: "MON" },
   token: { symbol: "USDC", address: TOKEN, decimals: 6 },
   amount: "25.00",
   amount_base_units: "25000000",
@@ -65,6 +72,8 @@ export function unboundDepositRequest(
       merchant_session: "not_required",
       complete: true,
     },
+    chain: null,
+    token: null,
     payer_wallet: null,
     address: null,
     address_explorer_url: null,
@@ -83,6 +92,7 @@ export function lockedDepositRequest(overrides: Partial<PayerDepositRequest> = {
     payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
     requirements: { email: "pending", wallet: "pending", merchant_session: "not_required", complete: false },
     content_unlocked: false,
+    networks: null,
     chain: null,
     token: null,
     amount: null,

@@ -274,7 +274,7 @@ export default function RecipesPage() {
       <H2 id="test-in-the-sandbox">Test in the sandbox first</H2>
       <p>
         Point the client at <code>https://api.sandbox.payday.sh</code> with a{" "}
-        <code>payday_test_</code> key and run the same code against Monad testnet and Circle&apos;s
+        <code>payday_test_</code> key and run the same code against the testnets and Circle&apos;s
         test USDC. The sandbox runs real indexing and finality rather than a fake &quot;mark
         paid&quot; button, so what you see there is what production does. See{" "}
         <Link href="/docs/environments">Environments</Link>.

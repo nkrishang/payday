@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
-import { config } from "@/lib/config";
+import { chainById } from "@/lib/config";
 import { saveBlob, saveJson } from "@/lib/download";
 import {
   explorerAddressUrl,
@@ -87,6 +87,8 @@ function Loaded({ payment }: { payment: DepositRequest }) {
   // A live request past its deadline is waiting on the sweep, not on a payer.
   const overdue = new Date(payment.expires_at).getTime() < now;
 
+  // Explorer links follow the network the payer chose; none until then.
+  const explorer = chainById(payment.chain?.id)?.explorerUrl ?? null;
   return (
     <div className="grid min-w-0 gap-4 px-4 pt-4 pb-5">
       {/* How much has arrived, its status, and its milestones: the picture a
@@ -103,7 +105,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
               <span className="tabular font-medium">{formatDisplayAmount(payment.received)}</span>
               <span className="text-faint">
                 {" "}
-                of {formatDisplayAmount(payment.amount)} {payment.token.symbol} received
+                of {formatDisplayAmount(payment.amount)} {payment.currency} received
               </span>
             </span>
           </span>
@@ -203,7 +205,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
                 address={payment.address}
                 href={
                   payment.address_explorer_url ??
-                  explorerAddressUrl(config.explorerUrl, payment.address)
+                  explorerAddressUrl(explorer, payment.address)
                 }
               />
             ) : (
@@ -216,7 +218,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
             <Fact label="Payer wallet">
               <AddressLink
                 address={payment.payer_wallet}
-                href={explorerAddressUrl(config.explorerUrl, payment.payer_wallet)}
+                href={explorerAddressUrl(explorer, payment.payer_wallet)}
               />
               {payment.wallet_bound_at ? (
                 <span className="block text-[12px] text-faint">
@@ -229,11 +231,17 @@ function Loaded({ payment }: { payment: DepositRequest }) {
           <Fact label="Settles to">
             <AddressLink
               address={payment.payout_address}
-              href={explorerAddressUrl(config.explorerUrl, payment.payout_address)}
+              href={explorerAddressUrl(explorer, payment.payout_address)}
             />
           </Fact>
           <Fact label="Network">
-            {payment.chain.name} · {payment.token.symbol}
+            {payment.chain && payment.token ? (
+              `${payment.chain.name} · ${payment.token.symbol}`
+            ) : (
+              <span className="text-muted">
+                Payer&apos;s choice: {payment.networks.map((network) => network.chain.name).join(", ")}
+              </span>
+            )}
           </Fact>
           {payment.deposited_at ? <Fact label="Deposited">{formatDate(payment.deposited_at)}</Fact> : null}
           {payment.settlement_tx_hash ? (
