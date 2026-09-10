@@ -1,154 +1,105 @@
 "use client";
 
-import { ArrowRight, Check, Loader2, Wallet } from "lucide-react";
-import Image from "next/image";
+import { ArrowUpRight, Check, Copy, Loader2, Plus, Wallet, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { AmountDue } from "@/components/checkout/amount";
-import { Countdown } from "@/components/checkout/countdown";
-import { RequestDetails } from "@/components/checkout/request-details";
-import { Resolved } from "@/components/checkout/resolved";
-import { Labeled } from "@/components/dashboard/labeled";
-import { Button } from "@/components/ui/button";
-import { controlStyles } from "@/components/ui/field";
-import { StatusDot } from "@/components/ui/status-dot";
-import type { CheckoutView, ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
-import { formatDisplayAmount, truncateAddress } from "@/lib/format";
 
 /**
- * The hero's picture of the product: three scenes, one after another, on a
- * loop. A merchant issues a deposit request from the dashboard's composer, the
- * payer funds it from the hosted checkout, and the merchant's own app credits
- * it off the webhook. Each scene is built from the components the real pages
- * use — the composer's fields and step bar, the checkout's request document,
- * amount, address and outcome — driven by a clock instead of a person.
+ * The hero's picture of the product: Payday inside a merchant's own app.
  *
- * Everything is a pure function of the clock: a scene reads `t`, its own
- * milliseconds since it began, and derives what is typed, which step is
- * open, where the cursor is. Nothing is scheduled, so a tab that sleeps and
- * wakes picks up mid-scene rather than firing a backlog of timers.
+ * One composition, on a loop. The left half is the merchant's backend — an
+ * editor whose tabs follow the story: the call that creates a deposit
+ * request, the events Payday sends back while the user pays, the webhook
+ * handler that credits them. The right half is the merchant's app as their
+ * user sees it: a wallet page, an add-funds sheet that Payday powers, a
+ * balance that goes up. Nothing here is Payday's own UI; the point is that
+ * the merchant's app never has to leave itself.
  *
- * The scenes are laid out on a fixed stage and scaled to whatever width the
- * card gets, so the composition never reflows on a phone.
+ * Everything is a pure function of one clock: every element reads `t`,
+ * milliseconds into the loop, and derives what is typed, which tab is open,
+ * where the cursor is. Nothing is scheduled, so a tab that sleeps and wakes
+ * picks up mid-story rather than firing a backlog of timers.
+ *
+ * The stage has a fixed size and scales to the card, so the composition
+ * never reflows on a phone.
  */
 
-const STAGE = { width: 640, height: 384 } as const;
+const STAGE = { width: 640, height: 400 } as const;
 
-const SCENES = [
-  { title: "Issue a deposit request", duration: 11_000 },
-  { title: "The payer deposits", duration: 10_000 },
-  { title: "Your app credits it", duration: 8_500 },
+const CHAPTERS = [
+  { title: "Create the request", from: 0 },
+  { title: "Your user pays in-app", from: 9_500 },
+  { title: "Credit off the webhook", from: 19_000 },
 ] as const;
 
-/** A beat between scenes, in which the old one leaves and the new one arrives. */
-const CROSSFADE_MS = 450;
+const TOTAL_MS = 27_500;
 
-const TOTAL_MS = SCENES.reduce((sum, scene) => sum + scene.duration, 0);
+/** The last beat of the loop, in which the whole stage fades before it starts over. */
+const LOOP_FADE_MS = 400;
 
-function sceneAt(index: number): (typeof SCENES)[number] {
-  return SCENES[index] ?? SCENES[0];
+const PAYER_WALLET = "0x7099…79C8";
+const DEPOSIT_ADDRESS = "0x9a3F…A0c2";
+const PAYOUT_WALLET = "0x3C44…93BC";
+const TX_HASH = "0x8f3a…5b8f";
+
+const BALANCE_BEFORE = 1_240;
+const DEPOSIT = 250;
+
+/* ------------------------------------------------------------------------ */
+/* Timing                                                                   */
+/* ------------------------------------------------------------------------ */
+
+/** Every beat of the story, in milliseconds into the loop. */
+const AT = {
+  // Chapter 1: the app's user asks to add funds; the backend creates a request.
+  toAddFunds: 900,
+  addFunds: 1_500,
+  codeTyped: 1_700,
+  response: 5_000,
+  sheetUp: 5_700,
+  // Chapter 2: they pay from their wallet without leaving the app.
+  eventsTab: 9_500,
+  ready: 9_900,
+  toPay: 10_600,
+  pay: 11_400,
+  walletIn: 11_700,
+  toConfirm: 12_400,
+  confirm: 13_300,
+  walletOut: 13_900,
+  deposited: 14_200,
+  settled: 16_200,
+  received: 16_300,
+  sheetDown: 17_700,
+  // Chapter 3: the webhook lands and the app credits the balance.
+  webhookTab: 19_000,
+  inbound: 19_600,
+  runFrom: 20_000,
+  credit: 22_000,
+  countTo: 23_000,
+  responded: 23_400,
+} as const;
+
+/** The first characters of `text` for a typist starting at `start`. */
+function typed(t: number, text: string, start: number, perChar: number): string {
+  if (t < start) return "";
+  return text.slice(0, Math.min(text.length, Math.floor((t - start) / perChar)));
 }
 
-const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
-const DEPOSIT_ADDRESS = "0x9a3F5c18B0e4A7d2C9f6E1b3a8D4c7F2E5b9A0c2";
-const TOKEN_ADDRESS = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
-const SETTLEMENT_TX = "0x8f3a2c9e1b7d4f60a5c3e8d2b9f14a7c6e0d3b5f2a8c1e9d7b4f6a3c0e2d5b8f";
+/** True for the `hold` milliseconds after `at`. */
+function within(t: number, at: number, hold: number): boolean {
+  return t >= at && t < at + hold;
+}
 
-/**
- * The request as the payer route would return it once the wallet is bound:
- * the shape the checkout's components take, with the same story's numbers.
- */
-const REQUEST: ReadyPayerDepositRequest = {
-  id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-  issuer_name: "Acme Corp",
-  heading: "March retainer",
-  payer_policy: { mode: "verified_email", expected_email_hint: "c***@globex.com" },
-  requirements: {
-    email: "approved",
-    wallet: "approved",
-    merchant_session: "not_required",
-    complete: true,
-  },
-  status: "awaiting_deposit",
-  payable: true,
-  expires_at: "2026-09-02T11:57:00Z",
-  server_timestamp: "1788000000",
-  settlement_tx_hash: null,
-  settlement_explorer_url: null,
-  payer_message: null,
-  content_unlocked: true,
-  networks: [
-    {
-      chain: { id: "143", name: "Monad", native_symbol: "MON" },
-      token: { symbol: "USDC", address: TOKEN_ADDRESS, decimals: 6 },
-    },
-  ],
-  chain: { id: "143", name: "Monad", native_symbol: "MON" },
-  token: { symbol: "USDC", address: TOKEN_ADDRESS, decimals: 6 },
-  amount: "10.50",
-  amount_base_units: "10500000",
-  received: "0",
-  received_base_units: "0",
-  remaining: "10.50",
-  remaining_base_units: "10500000",
-  payer_wallet: PAYER_WALLET,
-  address: DEPOSIT_ADDRESS,
-  address_explorer_url: null,
-  deposit_uri: `ethereum:${TOKEN_ADDRESS}@143/transfer?address=${DEPOSIT_ADDRESS}&uint256=10500000`,
-  details: {
-    amount: "10.50",
-    amount_base_units: "10500000",
-    payer: { name: "Globex LLC" },
-    notes: null,
-    reference: null,
-    attachment: null,
-  },
-};
+/** Progress from `from` to `to`, clamped to 0-1. */
+function progress(t: number, from: number, to: number): number {
+  if (t <= from) return 0;
+  if (t >= to) return 1;
+  return (t - from) / (to - from);
+}
 
-const SETTLED: ReadyPayerDepositRequest = {
-  ...REQUEST,
-  status: "settled",
-  received: "10.50",
-  received_base_units: "10500000",
-  remaining: "0",
-  remaining_base_units: "0",
-  settlement_tx_hash: SETTLEMENT_TX,
-};
-
-/** The checkout's own words for the states the scene passes through. */
-const VIEWS: Record<"awaiting" | "confirming" | "settled", CheckoutView> = {
-  awaiting: {
-    phase: "awaiting",
-    tone: "neutral",
-    label: "Awaiting deposit",
-    title: "Send the deposit",
-    detail:
-      "Pay from the wallet you signed with. The deposit is credited once it is final on-chain.",
-    showInstructions: true,
-    showWalletStep: false,
-    isTerminal: false,
-  },
-  confirming: {
-    phase: "confirming",
-    tone: "progress",
-    label: "Confirming",
-    title: "Transaction confirmed on-chain",
-    detail: "Payday is settling the deposit to the merchant.",
-    showInstructions: false,
-    showWalletStep: false,
-    isTerminal: false,
-  },
-  settled: {
-    phase: "settled",
-    tone: "success",
-    label: "Settled",
-    title: "Deposit complete",
-    detail: "Exactly the requested amount reached the merchant. You can close this page.",
-    showInstructions: false,
-    showWalletStep: false,
-    isTerminal: true,
-  },
-};
+function easeOut(fraction: number): number {
+  return 1 - Math.pow(1 - fraction, 3);
+}
 
 /* ------------------------------------------------------------------------ */
 /* The clock                                                                */
@@ -157,7 +108,7 @@ const VIEWS: Record<"awaiting" | "confirming" | "settled", CheckoutView> = {
 /**
  * Milliseconds into the loop, advancing with the frame rate and wrapping at
  * the end. A frame after a long pause counts as a short one, so a background
- * tab does not skip a scene when it comes back.
+ * tab does not skip a chapter when it comes back.
  */
 function useLoopClock(total: number, frozenAt: number | null): number {
   const [t, setT] = useState(0);
@@ -172,8 +123,7 @@ function useLoopClock(total: number, frozenAt: number | null): number {
       const dt = Math.min(now - last, 100);
       last = now;
       elapsed = (elapsed + dt) % total;
-      // Thirty frames a second is plenty for typing and a moving cursor, and
-      // half the renders of a full-rate loop.
+      // Thirty frames a second is plenty for typing and a moving cursor.
       if (Math.abs(elapsed - shown) >= 33 || elapsed < shown) {
         shown = elapsed;
         setT(elapsed);
@@ -197,7 +147,6 @@ function usePinnedMoment(): number | null {
   useEffect(() => {
     const raw = new URLSearchParams(window.location.search).get("scene");
     const at = raw === null ? Number.NaN : Number(raw);
-    // Deferred, like every other client-only read here.
     void Promise.resolve().then(() => setPinned(Number.isFinite(at) ? at % TOTAL_MS : null));
   }, []);
   return pinned;
@@ -215,44 +164,23 @@ function useReducedMotion(): boolean {
   return reduced;
 }
 
-/** The first `n` characters of `text` for a typist starting at `start`. */
-function typed(t: number, text: string, start: number, perChar = 70): string {
-  if (t < start) return "";
-  return text.slice(0, Math.min(text.length, Math.floor((t - start) / perChar)));
-}
-
-/** True for the `hold` milliseconds after `at`. */
-function within(t: number, at: number, hold: number): boolean {
-  return t >= at && t < at + hold;
-}
-
-/** Linear progress from `from` to `to`, clamped to 0-1. */
-function progress(t: number, from: number, to: number): number {
-  if (t <= from) return 0;
-  if (t >= to) return 1;
-  return (t - from) / (to - from);
-}
-
 /* ------------------------------------------------------------------------ */
-/* The director                                                             */
+/* The stage                                                                */
 /* ------------------------------------------------------------------------ */
 
 export function HeroScenes() {
   const reduced = useReducedMotion();
   const pinned = usePinnedMoment();
-  // Without motion, hold the checkout at its settled state: the one frame
-  // that says the most on its own.
-  const frozenAt = pinned ?? (reduced ? SCENES[0].duration + 9_000 : null);
+  // Without motion, hold the moment the request exists on both sides: the
+  // code that made it and the sheet it opened.
+  const frozenAt = pinned ?? (reduced ? 8_000 : null);
   const t = useLoopClock(TOTAL_MS, frozenAt);
 
-  let index = 0;
-  let local = t;
-  while (index < SCENES.length - 1 && local >= sceneAt(index).duration) {
-    local -= sceneAt(index).duration;
-    index += 1;
-  }
-  const scene = sceneAt(index);
-  const leaving = !reduced && local >= scene.duration - CROSSFADE_MS;
+  const chapter = CHAPTERS.reduce(
+    (current, entry, index) => (t >= entry.from ? index : current),
+    0,
+  );
+  const fading = frozenAt === null && t >= TOTAL_MS - LOOP_FADE_MS;
 
   const [scale, setScale] = useState(1);
   const frameRef = useRef<HTMLDivElement>(null);
@@ -273,51 +201,77 @@ export function HeroScenes() {
   return (
     <div
       ref={frameRef}
-      className="landing-scene relative w-full overflow-hidden rounded-[10px] border border-brand-black bg-surface"
-      style={{ aspectRatio: `${STAGE.width} / ${STAGE.height}` }}
-      aria-label={`How Payday works: ${SCENES.map((entry) => entry.title).join(", ")}`}
       role="img"
+      aria-label="Payday inside a merchant's app: the backend creates a deposit request, the user pays from a wallet without leaving the app, and a webhook credits their balance."
+      className="relative w-full overflow-hidden rounded-[18px] bg-[#0f0f0e] text-[#f6f2ea]"
+      style={{ aspectRatio: `${STAGE.width} / ${STAGE.height}` }}
     >
       <div
-        className="absolute top-0 left-0 origin-top-left"
+        className={cn(
+          "absolute top-0 left-0 origin-top-left",
+          fading ? "landing-stage-fade-out" : "landing-stage-fade-in",
+        )}
         style={{ width: STAGE.width, height: STAGE.height, transform: `scale(${scale})` }}
       >
+        {/* A quiet green glow behind the app: the product's "go" colour, faded almost to nothing. */}
         <div
-          key={index}
-          className={cn(
-            "absolute inset-0",
-            leaving ? "landing-scene-leave" : "landing-scene-enter",
-          )}
-        >
-          {index === 0 ? <ComposerScene t={local} /> : null}
-          {index === 1 ? <CheckoutScene t={local} /> : null}
-          {index === 2 ? <CreditScene t={local} /> : null}
-        </div>
+          aria-hidden="true"
+          className="pointer-events-none absolute top-[-140px] right-[-120px] size-[420px] rounded-full bg-brand-green/[0.09] blur-[90px]"
+        />
 
-        <SceneStrip index={index} progress={progress(local, 0, scene.duration)} />
+        <Backend t={t} chapter={chapter} />
+        <MerchantApp t={t} />
+        <Cursor target={cursorTarget(t)} pressed={cursorPressed(t)} />
+        <Chapters t={t} chapter={chapter} />
       </div>
     </div>
   );
 }
 
-/** Which scene is playing, with its progress, along the foot of the card. */
-function SceneStrip({ index, progress: fraction }: { index: number; progress: number }) {
+/** Where the pointer is heading, if anywhere. */
+function cursorTarget(t: number): string | null {
+  if (within(t, AT.toAddFunds, AT.addFunds + 500 - AT.toAddFunds)) return "add-funds";
+  if (within(t, AT.toPay, AT.walletIn + 400 - AT.toPay)) return "pay";
+  if (within(t, AT.toConfirm, AT.walletOut - AT.toConfirm)) return "confirm";
+  return null;
+}
+
+function cursorPressed(t: number): boolean {
   return (
-    <ol className="absolute inset-x-0 bottom-0 flex items-center gap-4 border-t border-line bg-surface px-4 py-2.5">
-      {SCENES.map((scene, at) => (
-        <li key={scene.title} className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="h-[3px] w-full overflow-hidden rounded-full bg-line">
+    within(t, AT.addFunds - 60, 160) ||
+    within(t, AT.pay - 60, 160) ||
+    within(t, AT.confirm - 60, 160)
+  );
+}
+
+/** The three chapters along the foot of the stage, with the current one filling. */
+function Chapters({ t, chapter }: { t: number; chapter: number }) {
+  return (
+    <ol className="absolute inset-x-0 bottom-0 grid grid-cols-3 gap-5 px-6 pb-4">
+      {CHAPTERS.map((entry, index) => {
+        const next = CHAPTERS[index + 1]?.from ?? TOTAL_MS;
+        const fraction =
+          index < chapter ? 1 : index === chapter ? progress(t, entry.from, next) : 0;
+        return (
+          <li key={entry.title} className="min-w-0">
+            <span className="block h-[2px] w-full overflow-hidden rounded-full bg-white/10">
+              <span
+                className="block h-full origin-left rounded-full bg-brand-green"
+                style={{ transform: `scaleX(${fraction})` }}
+              />
+            </span>
             <span
-              className="block h-full origin-left rounded-full bg-brand-green"
-              style={{ transform: `scaleX(${at < index ? 1 : at === index ? fraction : 0})` }}
-            />
-          </span>
-        </li>
-      ))}
-      <li className="shrink-0 text-[11px] font-medium text-muted">
-        <span className="tabular">{index + 1}</span>
-        <span className="ml-1.5">{sceneAt(index).title}</span>
-      </li>
+              className={cn(
+                "mt-2 block truncate text-[10.5px] font-medium transition-colors duration-300",
+                index === chapter ? "text-[#f6f2ea]" : "text-[#8b8780]",
+              )}
+            >
+              <span className="tabular mr-1.5 text-[#8b8780]">0{index + 1}</span>
+              {entry.title}
+            </span>
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -328,13 +282,11 @@ function SceneStrip({ index, progress: fraction }: { index: number; progress: nu
 
 /**
  * A pointer that glides to whatever element carries `data-cursor={target}`
- * and presses when told. It measures the target in the stage's own space, so
- * the layout is free to be whatever the components make it.
+ * and presses when told. The anchor is always in the tree, so the stage is
+ * its parent from the first layout effect on; it measures the target in the
+ * stage's own space, so the layout is free to be whatever it is.
  */
 function Cursor({ target, pressed }: { target: string | null; pressed: boolean }) {
-  // The anchor is always in the tree, so the stage is its parent from the
-  // first layout effect on; a ref on the stage itself would still be
-  // unattached when a scene mounts with a target already chosen.
   const anchorRef = useRef<HTMLSpanElement>(null);
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
 
@@ -348,8 +300,8 @@ function Cursor({ target, pressed }: { target: string | null; pressed: boolean }
     const rect = element.getBoundingClientRect();
     const scale = box.width / STAGE.width;
     setAt({
-      x: (rect.left - box.left + rect.width * 0.62) / scale,
-      y: (rect.top - box.top + rect.height * 0.58) / scale,
+      x: (rect.left - box.left + rect.width * 0.6) / scale,
+      y: (rect.top - box.top + rect.height * 0.6) / scale,
     });
   }, [target]);
 
@@ -360,13 +312,16 @@ function Cursor({ target, pressed }: { target: string | null; pressed: boolean }
         <svg
           aria-hidden="true"
           viewBox="0 0 24 24"
-          className="landing-cursor pointer-events-none absolute top-0 left-0 z-20 size-5 drop-shadow-[0_1px_2px_rgb(0_0_0/0.35)]"
-          style={{ transform: `translate(${at.x}px, ${at.y}px) scale(${pressed ? 0.82 : 1})` }}
+          className={cn(
+            "landing-cursor pointer-events-none absolute top-0 left-0 z-30 size-5 drop-shadow-[0_2px_4px_rgb(0_0_0/0.5)]",
+            target ? "opacity-100" : "opacity-0",
+          )}
+          style={{ transform: `translate(${at.x}px, ${at.y}px) scale(${pressed ? 0.8 : 1})` }}
         >
           <path
             d="M5.5 3.2 19 12.1l-6.1 1.3 3.3 6.3-2.6 1.3-3.3-6.3L5.5 19.3Z"
-            fill="#0f0f0e"
-            stroke="#f6f2ea"
+            fill="#f6f2ea"
+            stroke="#0f0f0e"
             strokeWidth="1.4"
             strokeLinejoin="round"
           />
@@ -377,631 +332,538 @@ function Cursor({ target, pressed }: { target: string | null; pressed: boolean }
 }
 
 /* ------------------------------------------------------------------------ */
-/* Scene 1: the composer                                                    */
+/* The backend                                                              */
 /* ------------------------------------------------------------------------ */
 
-const STEPS = ["Amount", "Billing", "Verification", "Review"] as const;
+const TABS = ["server.ts", "events", "webhook.ts"] as const;
 
-/** When each beat of the first scene lands, in milliseconds. */
-const S1 = {
-  amountTyped: 500,
-  toBilling: 2_100,
-  payerTyped: 2_700,
-  reasonTyped: 3_900,
-  toVerification: 5_500,
-  emailChosen: 6_100,
-  emailTyped: 6_500,
-  toReview: 8_100,
-  issue: 9_300,
-  issued: 10_000,
-} as const;
+const CREATE_COMMENT = "// POST /wallet/add-funds";
 
-function ComposerScene({ t }: { t: number }) {
-  const step = t < S1.toBilling ? 0 : t < S1.toVerification ? 1 : t < S1.toReview ? 2 : 3;
-  const amount = typed(t, "10.50", S1.amountTyped, 160);
-  const payer = typed(t, "Globex LLC", S1.payerTyped);
-  const reason = typed(t, "March retainer", S1.reasonTyped);
-  const verified = t >= S1.emailChosen;
-  const email = typed(t, "cfo@globex.com", S1.emailTyped);
-  const issuing = within(t, S1.issue, S1.issued - S1.issue);
-  const issued = t >= S1.issued;
+const CREATE_CODE = `const deposit = await payday.depositRequests.create({
+  amount: "250.00",
+  payer: { name: user.displayName },
+  payer_policy: {
+    mode: "merchant_session",
+    payer_reference: user.id,
+  },
+  expires_in: 3600,
+});`;
 
-  const target =
-    t < S1.toBilling - 300
-      ? null
-      : step === 0
-        ? "continue"
-        : step === 1
-          ? t < S1.toVerification - 300
-            ? null
-            : "continue"
-          : step === 2
-            ? t < S1.emailChosen - 300
-              ? null
-              : t < S1.emailTyped
-                ? "verified"
-                : t < S1.toReview - 300
-                  ? null
-                  : "continue"
-            : t < S1.issue - 400
-              ? null
-              : "issue";
-  const pressed =
-    within(t, S1.toBilling - 120, 140) ||
-    within(t, S1.toVerification - 120, 140) ||
-    within(t, S1.emailChosen - 120, 140) ||
-    within(t, S1.toReview - 120, 140) ||
-    within(t, S1.issue - 120, 140);
+const WEBHOOK_CODE = `app.post("/payday/webhook", async (req, res) => {
+  const event = verify(req, WEBHOOK_SECRET);
+
+  if (event.type === "deposit_request.settled") {
+    const { payer_reference, amount } =
+      event.data.deposit_request;
+    await ledger.credit(payer_reference, amount);
+  }
+
+  res.status(200).end();
+});`;
+
+/** The line that credits the user, lit once it has run. */
+const CREDIT_LINE = 6;
+
+/** Which line of the handler is running, as the event moves through it. */
+function runningLine(t: number): number | null {
+  if (t < AT.runFrom) return null;
+  if (t < AT.runFrom + 500) return 1;
+  if (t < AT.runFrom + 1_000) return 3;
+  if (t < AT.runFrom + 1_500) return 4;
+  if (t < AT.credit + 1_000) return CREDIT_LINE;
+  if (t < AT.responded) return 9;
+  return null;
+}
+
+const EVENTS = [
+  {
+    at: AT.ready,
+    time: "12:04:07",
+    type: "deposit_request.ready",
+    note: `wallet ${PAYER_WALLET} bound · Monad`,
+  },
+  {
+    at: AT.deposited,
+    time: "12:04:31",
+    type: "deposit_request.deposited",
+    note: `250.00 USDC seen · ${TX_HASH}`,
+  },
+  {
+    at: AT.settled,
+    time: "12:04:33",
+    type: "deposit_request.settled",
+    note: `250.00 USDC → ${PAYOUT_WALLET}`,
+  },
+] as const;
+
+function Backend({ t, chapter }: { t: number; chapter: number }) {
+  const tab = chapter;
 
   return (
-    <div className="absolute inset-0 px-6 pt-4 pb-12">
-      <Cursor target={target} pressed={pressed} />
-
-      <div className="flex items-start justify-between gap-4">
-        <h2 className="text-[17px] leading-tight font-medium tracking-[-0.03em]">
-          New deposit request<span className="text-brand-yellow">.</span>
-        </h2>
-        <span className="text-[12px] font-medium text-muted">Cancel</span>
+    <div className="absolute top-6 bottom-[58px] left-6 flex w-[350px] flex-col overflow-hidden rounded-[12px] border border-white/[0.08] bg-[#161614]">
+      <div className="flex items-center gap-1 border-b border-white/[0.08] px-2 pt-2">
+        {TABS.map((entry, index) => (
+          <span
+            key={entry}
+            className={cn(
+              "rounded-t-[6px] px-2.5 pt-1.5 pb-2 font-mono text-[10.5px] whitespace-nowrap transition-colors duration-300",
+              index === tab
+                ? "-mb-px border border-b-0 border-white/[0.08] bg-[#0f0f0e] text-[#f6f2ea]"
+                : "text-[#8b8780]",
+            )}
+          >
+            {entry}
+            {index === 1 && chapter === 1 && t >= AT.ready ? (
+              <span className="ml-1.5 inline-block size-1.5 rounded-full bg-brand-green align-middle" />
+            ) : null}
+          </span>
+        ))}
+        <span className="ml-auto pr-1.5 pb-1 font-mono text-[10px] whitespace-nowrap text-[#8b8780]">
+          your backend
+        </span>
       </div>
 
-      <ol className="mt-2.5 flex gap-2">
-        {STEPS.map((entry, index) => (
-          <li key={entry} className="flex-1">
-            <span className="block h-[3px] overflow-hidden rounded-full bg-line">
-              <span
-                className={cn(
-                  "block h-full origin-left rounded-full bg-brand-green transition-transform duration-500 ease-out",
-                  index <= step ? "scale-x-100" : "scale-x-0",
-                )}
-              />
-            </span>
-            <span
-              className={cn(
-                "mt-1.5 block text-[11px] font-medium transition-colors",
-                index === step ? "text-ink" : "text-faint",
-              )}
-            >
-              <span className="tabular">{index + 1}</span>
-              <span className="ml-1.5">{entry}</span>
-            </span>
-          </li>
-        ))}
-      </ol>
-
-      <div className="mt-3.5 grid grid-cols-[minmax(0,1fr)_200px] items-start gap-5">
-        <div className="min-w-0">
-          <div key={step} className="landing-scene-step">
-            {step === 0 ? (
-              <Labeled label="Amount" required>
-                <span className="relative block">
-                  <span
-                    className={cn(
-                      controlStyles,
-                      "tabular flex h-12 items-center pr-[70px] text-[22px] font-medium tracking-tight",
-                      amount ? "text-ink" : "text-faint",
-                    )}
-                  >
-                    {amount || "0.00"}
-                    {within(t, S1.amountTyped - 400, 1_300) ? <Caret /> : null}
-                  </span>
-                  <span
-                    aria-hidden="true"
-                    className="absolute top-1/2 right-3.5 flex -translate-y-1/2 items-center gap-1.5 text-[12px] text-faint"
-                  >
-                    <Usdc className="size-4" />
-                    USDC
-                  </span>
-                </span>
-              </Labeled>
-            ) : null}
-
-            {step === 1 ? (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-                <Labeled label="Payer" required>
-                  <FakeInput
-                    value={payer}
-                    placeholder="Globex LLC"
-                    typing={within(t, S1.payerTyped - 300, 1_200)}
-                  />
-                </Labeled>
-                <Labeled label="Email">
-                  <FakeInput value="cfo@globex.com" placeholder="" />
-                </Labeled>
-                <Labeled label="Reason" required>
-                  <FakeInput
-                    value={reason}
-                    placeholder="March retainer"
-                    typing={within(t, S1.reasonTyped - 300, 1_400)}
-                  />
-                </Labeled>
-                <Labeled label="Reference">
-                  <FakeInput value="INV-1042" placeholder="" mono />
-                </Labeled>
-              </div>
-            ) : null}
-
-            {step === 2 ? (
-              <div className="grid gap-3">
-                <div role="radiogroup" aria-label="Payer policy" className="grid grid-cols-2 gap-2">
-                  <Policy
-                    label="Permissionless"
-                    description="Anyone holding the link can view and fund it."
-                    checked={!verified}
-                  />
-                  <Policy
-                    cursor="verified"
-                    label="Verified email"
-                    description="The payer proves the expected mailbox first."
-                    checked={verified}
-                  />
-                </div>
-                {verified ? (
-                  <Labeled label="Expected payer email" required>
-                    <FakeInput
-                      value={email}
-                      placeholder=""
-                      typing={within(t, S1.emailTyped - 200, 1_300)}
-                    />
-                  </Labeled>
-                ) : null}
-              </div>
-            ) : null}
-
-            {step === 3 ? (
-              <dl
-                aria-label="Request summary"
-                className="grid gap-2 rounded-[12px] border border-line bg-surface px-3.5 py-3 text-[12.5px]"
-              >
-                <Row label="Amount">
-                  <span className="tabular inline-flex items-center gap-1">
-                    10.50 <Usdc className="size-3.5" /> USDC
-                  </span>
-                </Row>
-                <Row label="Issued by">Acme Corp</Row>
-                <Row label="Payer">
-                  Globex LLC <span className="text-muted">· cfo@globex.com</span>
-                </Row>
-                <Row label="Verification">Verified email</Row>
-                <Row label="Expires in">24 hours</Row>
-              </dl>
-            ) : null}
-          </div>
-
-          <div className="mt-3.5 flex items-center justify-end gap-3">
-            {issued ? (
-              <span className="flex items-center gap-2 text-[13px] font-medium text-success">
-                <span className="flex size-5 items-center justify-center rounded-full border border-success/40">
-                  <Check className="size-3" />
-                </span>
-                Issued · link emailed to cfo@globex.com
-              </span>
-            ) : step === 3 ? (
-              <Button data-cursor="issue" type="button" disabled={issuing}>
-                {issuing ? <Loader2 className="size-4 animate-spin" /> : null}
-                Issue deposit request
-              </Button>
-            ) : (
-              <Button data-cursor="continue" type="button">
-                Continue
-                <ArrowRight className="size-4" />
-              </Button>
-            )}
-          </div>
-        </div>
-
-        <aside className="min-w-0 rounded-[14px] border border-line bg-surface p-4">
-          <p className="text-[10px] tracking-[0.12em] text-faint uppercase">Deposit request</p>
-          <p className="mt-2 flex items-center gap-1.5">
-            <span
-              className={cn(
-                "tabular text-[26px] leading-none font-medium tracking-[-0.03em] transition-colors",
-                amount ? "text-ink" : "text-faint/50",
-              )}
-            >
-              {amount ? formatDisplayAmount(amount) : "0.00"}
-            </span>
-            <span className="flex items-center gap-1 text-[12px] text-faint">
-              <Usdc className="size-3.5" />
-              USDC
-            </span>
-          </p>
-          {reason ? <p className="mt-1 text-[12px] text-muted">{reason}</p> : null}
-          <dl className="mt-3 grid gap-2 border-t border-line pt-3 text-[12px]">
-            <Line label="From" value="Acme Corp" />
-            <Line label="To" value={payer} />
-            <Line label="Verification" value={verified ? "Verified email" : ""} />
-            <Line label="Expires in" value="24 hours" />
-            <Line
-              label="Settles to"
-              value={truncateAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")}
-              mono
-            />
-          </dl>
-        </aside>
+      <div key={tab} className="landing-scene-step relative min-h-0 flex-1 bg-[#0f0f0e]">
+        {tab === 0 ? (
+          <CreateCall t={t} />
+        ) : tab === 1 ? (
+          <EventStream t={t} />
+        ) : (
+          <WebhookHandler t={t} />
+        )}
       </div>
     </div>
   );
 }
 
-/** A control with a value the clock typed, in the composer's own field style. */
-function FakeInput({
-  value,
-  placeholder,
-  typing = false,
-  mono = false,
-}: {
-  value: string;
-  placeholder: string;
-  typing?: boolean;
-  mono?: boolean;
-}) {
+function CreateCall({ t }: { t: number }) {
+  const code = typed(t, CREATE_CODE, AT.codeTyped, 13);
+  const typing = within(t, AT.codeTyped, CREATE_CODE.length * 13 + 400);
+  const responded = t >= AT.response;
+
   return (
-    <span
-      className={cn(
-        controlStyles,
-        "flex h-10 items-center",
-        mono && "font-mono text-[12.5px]",
-        value ? "text-ink" : "text-faint",
-      )}
-    >
-      {value || placeholder}
-      {typing ? <Caret /> : null}
-    </span>
+    <div className="flex h-full flex-col">
+      <pre className="min-h-0 flex-1 overflow-hidden px-3 py-3 font-mono text-[10px] leading-[1.65] tracking-[-0.02em] text-[#d8d2c6]">
+        <span className="block text-[#7a766f]">{CREATE_COMMENT}</span>
+        {code ? <Highlighted code={code} /> : null}
+        {typing || !code ? <Caret /> : null}
+      </pre>
+      {responded ? (
+        <div className="landing-scene-line border-t border-white/[0.08] px-3 py-2.5 font-mono text-[10.5px] leading-[1.7]">
+          <p className="flex items-center gap-2 text-brand-green">
+            <span className="size-1.5 rounded-full bg-brand-green" />
+            201 Created
+          </p>
+          <dl className="mt-1 grid grid-cols-[92px_1fr] text-[#d8d2c6]">
+            <dt className="text-[#8b8780]">id</dt>
+            <dd>dr_0198f80c…f700</dd>
+            <dt className="text-[#8b8780]">client_secret</dt>
+            <dd>cs_v6Kq…9dQ</dd>
+            <dt className="text-[#8b8780]">status</dt>
+            <dd>awaiting_deposit</dd>
+          </dl>
+        </div>
+      ) : null}
+    </div>
   );
+}
+
+function EventStream({ t }: { t: number }) {
+  const shown = EVENTS.filter((event) => t >= event.at);
+  return (
+    <div className="flex h-full flex-col px-3 py-3 font-mono text-[10.5px] leading-[1.6]">
+      <p className="text-[#8b8780]">
+        <span className="text-[#d8d2c6]">payday</span> events --follow
+        <span className="ml-1.5 text-brand-green">dr_0198f80c…f700</span>
+      </p>
+      <ol className="mt-2 grid gap-2">
+        {shown.map((event, index) => (
+          <li key={event.type} className="landing-scene-line grid grid-cols-[62px_1fr] gap-x-3">
+            <span className="tabular text-[#8b8780]">{event.time}</span>
+            <span className="min-w-0">
+              <span
+                className={cn(
+                  "block truncate",
+                  index === shown.length - 1 && event.type.endsWith("settled")
+                    ? "text-brand-green"
+                    : "text-[#f6f2ea]",
+                )}
+              >
+                {event.type}
+              </span>
+              <span className="block truncate text-[#8b8780]">{event.note}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      {shown.length < EVENTS.length ? (
+        <p className="mt-3 flex items-center gap-2 text-[#8b8780]">
+          <span className="size-1.5 animate-pulse rounded-full bg-brand-yellow" />
+          {shown.length === 0
+            ? "waiting for the user"
+            : shown.length === 1
+              ? "waiting for the transfer"
+              : "awaiting finality"}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function WebhookHandler({ t }: { t: number }) {
+  const running = runningLine(t);
+  const inbound = t >= AT.inbound;
+  const responded = t >= AT.responded;
+  const lines = WEBHOOK_CODE.split("\n");
+
+  return (
+    <div className="flex h-full flex-col">
+      <pre className="relative min-h-0 flex-1 overflow-hidden px-3 py-3 font-mono text-[10px] leading-[1.65] tracking-[-0.02em] text-[#d8d2c6]">
+        {lines.map((line, index) => (
+          <span
+            key={index}
+            className={cn(
+              "-mx-3 block px-3 transition-colors duration-200",
+              running === index && "bg-brand-green/[0.12]",
+              index === CREDIT_LINE && t >= AT.credit && "text-brand-green",
+            )}
+          >
+            <Highlighted code={line} />
+            {line === "" ? " " : null}
+          </span>
+        ))}
+      </pre>
+      <div className="flex items-center gap-2 border-t border-white/[0.08] px-3 py-2.5 font-mono text-[10.5px]">
+        {inbound ? (
+          <span className="landing-scene-line flex min-w-0 items-center gap-2 text-[#d8d2c6]">
+            <span className="rounded-[4px] bg-brand-yellow px-1.5 py-px text-[10px] font-semibold text-brand-black">
+              POST
+            </span>
+            <span className="truncate">
+              /payday/webhook <span className="text-[#8b8780]">·</span>{" "}
+              <span className="text-brand-yellow">deposit_request.settled</span>
+            </span>
+          </span>
+        ) : (
+          <span className="text-[#8b8780]">listening on :3000</span>
+        )}
+        {responded ? (
+          <span className="landing-scene-line ml-auto flex shrink-0 items-center gap-1.5 text-brand-green">
+            <span className="size-1.5 rounded-full bg-brand-green" />
+            200
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** Enough of a highlighter for a dozen lines: strings, keywords, calls, punctuation. */
+function Highlighted({ code }: { code: string }) {
+  const pattern =
+    /("(?:[^"\\]|\\.)*"?)|\b(const|await|async|if|return)\b|([A-Za-z_$][\w$]*)(?=\()|([{}()[\],;.]|=>|===|=)|([A-Za-z_$][\w$]*)|(\d+(?:\.\d+)?)|(\s+)|(.)/g;
+  const parts: ReactNode[] = [];
+  for (const match of code.matchAll(pattern)) {
+    const [text, string, keyword, call, punctuation, word] = match;
+    const key = parts.length;
+    if (string) {
+      parts.push(
+        <span key={key} className="text-brand-yellow">
+          {text}
+        </span>,
+      );
+    } else if (keyword) {
+      parts.push(
+        <span key={key} className="text-brand-green">
+          {text}
+        </span>,
+      );
+    } else if (call) {
+      parts.push(
+        <span key={key} className="text-[#f6f2ea]">
+          {text}
+        </span>,
+      );
+    } else if (punctuation) {
+      parts.push(
+        <span key={key} className="text-[#7a766f]">
+          {text}
+        </span>,
+      );
+    } else if (word) {
+      parts.push(<span key={key}>{text}</span>);
+    } else {
+      parts.push(text);
+    }
+  }
+  return <>{parts}</>;
 }
 
 function Caret() {
   return (
     <span
       aria-hidden="true"
-      className="landing-caret ml-px inline-block h-[1.1em] w-px bg-ink align-middle"
-    />
-  );
-}
-
-function Policy({
-  label,
-  description,
-  checked,
-  cursor,
-}: {
-  label: string;
-  description: string;
-  checked: boolean;
-  cursor?: string;
-}) {
-  return (
-    <span
-      data-cursor={cursor}
-      className={cn(
-        "flex gap-2.5 rounded-[12px] border px-3 py-2.5 transition-colors",
-        checked ? "border-brand-green/60 bg-brand-green/[0.07]" : "border-line bg-surface",
-      )}
-    >
-      <span
-        aria-hidden="true"
-        className={cn(
-          "mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-full border transition-colors",
-          checked ? "border-brand-green bg-brand-green" : "border-line-strong",
-        )}
-      >
-        {checked ? <span className="size-1.5 rounded-full bg-brand-black" /> : null}
-      </span>
-      <span>
-        <span className="block text-[12.5px] font-medium">{label}</span>
-        <span className="mt-0.5 block text-[11px] leading-snug text-muted">{description}</span>
-      </span>
-    </span>
-  );
-}
-
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-4">
-      <dt className="text-faint">{label}</dt>
-      <dd className="min-w-0 truncate text-right">{children}</dd>
-    </div>
-  );
-}
-
-function Line({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-faint">{label}</dt>
-      <dd
-        className={cn(
-          "min-w-0 truncate text-right",
-          mono && "font-mono text-[11.5px]",
-          !value && "text-faint",
-        )}
-      >
-        {value || "—"}
-      </dd>
-    </div>
-  );
-}
-
-function Usdc({ className }: { className?: string }) {
-  return (
-    <Image
-      src="/payment-icons/usdc.svg"
-      width={64}
-      height={64}
-      alt=""
-      className={cn("shrink-0 rounded-full", className)}
+      className="landing-caret ml-px inline-block h-[1.15em] w-[6px] bg-[#f6f2ea]/80 align-text-bottom"
     />
   );
 }
 
 /* ------------------------------------------------------------------------ */
-/* Scene 2: the checkout                                                    */
+/* The merchant's app                                                       */
 /* ------------------------------------------------------------------------ */
 
-const S2 = {
-  toPay: 1_600,
-  walletOpen: 1_900,
-  confirm: 3_600,
-  walletClosed: 4_300,
-  confirming: 6_000,
-  settled: 7_200,
-} as const;
-
-function CheckoutScene({ t }: { t: number }) {
-  const detailsRef = useRef<HTMLDivElement>(null);
-  const [detailsHeight, setDetailsHeight] = useState(0);
-  // Once the deposit is in, the card scrolls the request document out of
-  // the way so the outcome stands where the amount stood.
-  useLayoutEffect(() => {
-    setDetailsHeight(detailsRef.current?.offsetHeight ?? 0);
-  }, []);
-
-  const phase = t < S2.confirming ? "awaiting" : t < S2.settled ? "confirming" : "settled";
-  const view = VIEWS[phase];
-  const sent = t >= S2.confirm;
-  const signing = within(t, S2.walletOpen, S2.confirm - S2.walletOpen);
-  const walletOpen = within(t, S2.walletOpen, S2.walletClosed - S2.walletOpen);
-  const leaving = t >= S2.walletClosed - 250 && t < S2.walletClosed;
-  const seconds = 86_321 - Math.floor(t / 1000);
-
-  const target =
-    t < S2.toPay - 500
-      ? null
-      : t < S2.walletOpen + 700
-        ? "pay"
-        : t < S2.walletClosed
-          ? "confirm"
-          : null;
-  const pressed = within(t, S2.toPay + 160, 140) || within(t, S2.confirm - 120, 140);
+function MerchantApp({ t }: { t: number }) {
+  const sheetOpen = t >= AT.sheetUp && t < AT.sheetDown + 350;
+  const sheetLeaving = t >= AT.sheetDown;
+  const credited = t >= AT.credit;
+  const balance = BALANCE_BEFORE + DEPOSIT * easeOut(progress(t, AT.credit, AT.countTo));
+  const toast = within(t, AT.credit + 300, 3_600);
 
   return (
-    <div className="absolute inset-0 bg-canvas pb-10">
-      <Cursor target={target} pressed={pressed} />
-
-      <div
-        className="absolute top-3 left-1/2 w-[380px] origin-top"
-        style={{ transform: "translateX(-50%) scale(0.8)" }}
-      >
-        <div className="overflow-hidden rounded-[16px] border border-line bg-surface">
-          <div className="relative z-10 flex items-center justify-between gap-3 border-b border-line bg-surface px-5 py-3">
-            <span className="flex items-center gap-2 text-[13px] font-medium">
-              <StatusDot tone={view.tone} pulse={!view.isTerminal} />
-              {view.label}
-            </span>
-            {view.showInstructions ? <Countdown seconds={seconds} /> : null}
-          </div>
-
-          <div
-            className="transition-transform duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]"
-            style={{
-              transform: phase === "awaiting" ? "none" : `translateY(-${detailsHeight}px)`,
-            }}
-          >
-            <div ref={detailsRef}>
-              <RequestDetails payment={REQUEST} />
-            </div>
-
-            {phase === "awaiting" ? (
-              <section aria-label={view.title} className="px-5 py-5">
-                <AmountDue payment={REQUEST} />
-                <div className="mt-5">
-                  <Button data-cursor="pay" size="lg" disabled={sent}>
-                    {sent ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Wallet className="size-4" />
-                    )}
-                    {sent
-                      ? "Waiting for confirmation…"
-                      : signing
-                        ? "Confirm in your wallet…"
-                        : "Pay 10.50 USDC"}
-                  </Button>
-                </div>
-              </section>
-            ) : (
-              <Resolved
-                payment={phase === "settled" ? SETTLED : REQUEST}
-                view={view}
-                pendingTxHash={phase === "settled" ? null : SETTLEMENT_TX}
-              />
-            )}
-          </div>
-        </div>
+    <div className="absolute top-6 right-6 bottom-[58px] w-[230px] overflow-hidden rounded-[14px] bg-[#f6f2ea] text-brand-black shadow-[0_24px_60px_-24px_rgb(0_0_0/0.8)]">
+      <div className="flex items-center gap-2 border-b border-brand-black/[0.08] px-4 py-2.5">
+        <span className="flex size-5 items-center justify-center rounded-[6px] bg-brand-black text-[10px] font-bold text-[#f6f2ea]">
+          A
+        </span>
+        <span className="text-[12px] font-semibold tracking-tight">Acme</span>
+        <span className="ml-auto flex size-6 items-center justify-center rounded-full bg-brand-yellow text-[10px] font-semibold">
+          JD
+        </span>
       </div>
 
-      {walletOpen ? <WalletSheet leaving={leaving} confirmed={sent} /> : null}
+      <div className="px-4 pt-3.5">
+        <p className="text-[10px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
+          Wallet
+        </p>
+        <p className="tabular mt-1 flex items-baseline gap-1.5 text-[26px] leading-none font-semibold tracking-tight">
+          {balance.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}
+          <span className="text-[12px] font-medium text-brand-subtle">USDC</span>
+        </p>
+        <div className="mt-3.5 grid grid-cols-2 gap-2">
+          <span
+            data-cursor="add-funds"
+            className={cn(
+              "flex h-8 items-center justify-center gap-1.5 rounded-[8px] bg-brand-black text-[12px] font-medium text-[#f6f2ea] transition-transform",
+              within(t, AT.addFunds - 60, 160) && "scale-[0.97]",
+            )}
+          >
+            <Plus className="size-3.5" />
+            Add funds
+          </span>
+          <span className="flex h-8 items-center justify-center gap-1.5 rounded-[8px] border border-brand-black/20 text-[12px] font-medium">
+            <ArrowUpRight className="size-3.5" />
+            Withdraw
+          </span>
+        </div>
+
+        <p className="mt-4 text-[10px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
+          Activity
+        </p>
+        <ul className="mt-1.5 grid text-[12px]">
+          {credited ? (
+            <li className="landing-scene-line -mx-2 flex items-center gap-2.5 rounded-[8px] bg-brand-green/[0.16] px-2 py-2">
+              <span className="flex size-6 items-center justify-center rounded-full bg-brand-green text-brand-black">
+                <Check className="size-3" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium">Deposit</span>
+                <span className="block text-[10.5px] text-brand-subtle">Just now · settled</span>
+              </span>
+              <span className="tabular font-medium">+250.00</span>
+            </li>
+          ) : null}
+          <Activity label="Pro plan" when="Yesterday" amount="−49.00" />
+          <Activity label="Deposit" when="Mon" amount="+500.00" />
+          <Activity label="Payout to Maya" when="Aug 28" amount="−120.00" />
+        </ul>
+      </div>
+
+      {sheetOpen ? <DepositSheet t={t} leaving={sheetLeaving} /> : null}
+      {toast ? (
+        <div className="landing-toast absolute inset-x-3 bottom-3 flex items-center gap-2 rounded-[10px] bg-brand-black px-3 py-2 text-[11.5px] font-medium text-[#f6f2ea] shadow-[0_12px_30px_-12px_rgb(0_0_0/0.6)]">
+          <span className="flex size-4 items-center justify-center rounded-full bg-brand-green text-brand-black">
+            <Check className="size-2.5" />
+          </span>
+          +250.00 USDC added to balance
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** The payer's wallet asking for the transfer, in a plain wallet's clothes. */
-function WalletSheet({ leaving, confirmed }: { leaving: boolean; confirmed: boolean }) {
+function Activity({ label, when, amount }: { label: string; when: string; amount: string }) {
+  return (
+    <li className="flex items-center gap-2.5 py-2 text-brand-black/80">
+      <span className="size-6 rounded-full bg-brand-black/[0.07]" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{label}</span>
+        <span className="block text-[10.5px] text-brand-subtle">{when}</span>
+      </span>
+      <span className="tabular">{amount}</span>
+    </li>
+  );
+}
+
+/**
+ * The add-funds sheet the app opens over its own page, powered by Payday:
+ * the request the backend just created, paid from the user's own wallet.
+ */
+function DepositSheet({ t, leaving }: { t: number; leaving: boolean }) {
+  const state =
+    t < AT.pay ? "ready" : t < AT.confirm ? "signing" : t < AT.received ? "confirming" : "received";
+  const walletOpen = within(t, AT.walletIn, AT.walletOut - AT.walletIn);
+  const walletLeaving = t >= AT.walletOut - 220;
+  const confirmed = t >= AT.confirm;
+  const seconds = 3_598 - Math.floor((t - AT.sheetUp) / 1000);
+
+  return (
+    <>
+      <div
+        className={cn(
+          "absolute inset-0 bg-brand-black/30",
+          leaving ? "landing-scrim-out" : "landing-scrim-in",
+        )}
+      />
+      <div
+        className={cn(
+          "absolute inset-x-0 bottom-0 rounded-t-[14px] bg-white px-4 pt-3.5 pb-4 shadow-[0_-12px_40px_-16px_rgb(0_0_0/0.35)]",
+          leaving ? "landing-sheet-down" : "landing-sheet-up",
+        )}
+      >
+        <div className="flex items-center justify-between">
+          <p className="text-[13px] font-semibold tracking-tight">Add funds</p>
+          <X className="size-3.5 text-brand-subtle" />
+        </div>
+
+        {state === "received" ? (
+          <div className="landing-scene-line py-5 text-center">
+            <span className="mx-auto flex size-9 items-center justify-center rounded-full bg-brand-green text-brand-black">
+              <Check className="size-4" />
+            </span>
+            <p className="mt-3 text-[13px] font-semibold tracking-tight">Deposit received</p>
+            <p className="mt-1 text-[11px] text-brand-subtle">250.00 USDC · settled on Monad</p>
+          </div>
+        ) : (
+          <>
+            <p className="tabular mt-3 flex items-baseline gap-1.5 text-[24px] leading-none font-semibold tracking-tight">
+              250.00
+              <span className="text-[12px] font-medium text-brand-subtle">USDC</span>
+            </p>
+            <dl className="mt-3 grid gap-1.5 text-[11px]">
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-brand-subtle">Network</dt>
+                <dd className="font-medium">Monad</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-brand-subtle">One-time address</dt>
+                <dd className="flex items-center gap-1.5 font-mono">
+                  {DEPOSIT_ADDRESS}
+                  <Copy className="size-3 text-brand-subtle" />
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-brand-subtle">Expires in</dt>
+                <dd className="tabular font-medium">
+                  {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
+                </dd>
+              </div>
+            </dl>
+            <span
+              data-cursor="pay"
+              className={cn(
+                "mt-3.5 flex h-9 items-center justify-center gap-2 rounded-[8px] text-[12px] font-medium transition-[transform,background-color]",
+                state === "ready"
+                  ? "bg-brand-black text-[#f6f2ea]"
+                  : "bg-brand-black/[0.08] text-brand-subtle",
+                within(t, AT.pay - 60, 160) && "scale-[0.97]",
+              )}
+            >
+              {state === "ready" ? (
+                <Wallet className="size-3.5" />
+              ) : (
+                <Loader2 className="size-3.5 animate-spin" />
+              )}
+              {state === "ready"
+                ? "Pay from wallet"
+                : state === "signing"
+                  ? "Confirm in your wallet…"
+                  : "Confirming on-chain…"}
+            </span>
+          </>
+        )}
+
+        <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-brand-subtle">
+          <span className="size-1.5 rounded-full bg-brand-green" />
+          Secured by Payday
+        </p>
+      </div>
+
+      {walletOpen ? (
+        <WalletPrompt
+          leaving={walletLeaving}
+          confirmed={confirmed}
+          pressed={within(t, AT.confirm - 60, 160)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** The user's own wallet asking for the transfer, in a plain wallet's clothes. */
+function WalletPrompt({
+  leaving,
+  confirmed,
+  pressed,
+}: {
+  leaving: boolean;
+  confirmed: boolean;
+  pressed: boolean;
+}) {
   return (
     <div
       className={cn(
-        "absolute right-6 bottom-14 w-[224px] rounded-[14px] border border-line-strong bg-surface p-4 shadow-[0_18px_40px_-16px_rgb(15_15_14/0.35)]",
+        "absolute inset-x-5 top-[72px] rounded-[12px] border border-brand-black/10 bg-white p-3.5 shadow-[0_20px_50px_-16px_rgb(0_0_0/0.45)]",
         leaving ? "landing-sheet-leave" : "landing-sheet-enter",
       )}
     >
       <div className="flex items-center gap-2">
-        <span className="flex size-6 items-center justify-center rounded-full bg-brand-black text-brand-white">
-          <Wallet className="size-3" />
+        <span className="flex size-5 items-center justify-center rounded-full bg-brand-black text-[#f6f2ea]">
+          <Wallet className="size-2.5" />
         </span>
-        <span className="text-[12px] font-medium">Transfer request</span>
+        <span className="text-[11.5px] font-semibold">Send 250.00 USDC</span>
       </div>
-      <p className="tabular mt-3 text-[22px] leading-none font-semibold tracking-tight">
-        10.50 <span className="text-[13px] font-medium text-muted">USDC</span>
-      </p>
-      <dl className="mt-3 grid gap-1 text-[11px]">
+      <dl className="mt-2.5 grid gap-1 text-[10.5px]">
         <div className="flex justify-between gap-3">
-          <dt className="text-faint">From</dt>
-          <dd className="font-mono">{truncateAddress(PAYER_WALLET)}</dd>
+          <dt className="text-brand-subtle">From</dt>
+          <dd className="font-mono">{PAYER_WALLET}</dd>
         </div>
         <div className="flex justify-between gap-3">
-          <dt className="text-faint">To</dt>
-          <dd className="font-mono">{truncateAddress(DEPOSIT_ADDRESS)}</dd>
+          <dt className="text-brand-subtle">To</dt>
+          <dd className="font-mono">{DEPOSIT_ADDRESS}</dd>
         </div>
         <div className="flex justify-between gap-3">
-          <dt className="text-faint">Network</dt>
-          <dd>Monad</dd>
+          <dt className="text-brand-subtle">Network fee</dt>
+          <dd className="tabular">0.0004 MON</dd>
         </div>
       </dl>
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <Button variant="secondary" size="sm" disabled={confirmed}>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-[11.5px] font-medium">
+        <span className="flex h-8 items-center justify-center rounded-[8px] border border-brand-black/15">
           Reject
-        </Button>
-        <Button data-cursor="confirm" size="sm" disabled={confirmed}>
+        </span>
+        <span
+          data-cursor="confirm"
+          className={cn(
+            "flex h-8 items-center justify-center gap-1.5 rounded-[8px] bg-brand-black text-[#f6f2ea] transition-transform",
+            pressed && "scale-[0.97]",
+          )}
+        >
           {confirmed ? <Check className="size-3.5" /> : null}
           {confirmed ? "Sent" : "Confirm"}
-        </Button>
+        </span>
       </div>
     </div>
   );
-}
-
-/* ------------------------------------------------------------------------ */
-/* Scene 3: the merchant's app                                              */
-/* ------------------------------------------------------------------------ */
-
-const S3 = {
-  linesFrom: 300,
-  perLine: 170,
-  delivered: 3_000,
-  credited: 3_500,
-  countTo: 4_400,
-} as const;
-
-const EVENT_LINES = [
-  `{`,
-  `  "id": "evt_0198f80c-4444-7dc1",`,
-  `  "type": "deposit_request.settled",`,
-  `  "data": {`,
-  `    "deposit_request": {`,
-  `      "id": "dr_0198f80c-8d2f-7dc1",`,
-  `      "status": "settled",`,
-  `      "amount": "10.500000",`,
-  `      "reference": "INV-1042",`,
-  `      "payer_reference": "user_123"`,
-  `    }`,
-  `  }`,
-  `}`,
-] as const;
-
-const BALANCE_BEFORE = 240;
-const BALANCE_AFTER = 250.5;
-
-function CreditScene({ t }: { t: number }) {
-  const shown = Math.min(
-    EVENT_LINES.length,
-    Math.max(0, Math.floor((t - S3.linesFrom) / S3.perLine) + 1),
-  );
-  const delivered = t >= S3.delivered;
-  const credited = t >= S3.credited;
-  const balance =
-    BALANCE_BEFORE + (BALANCE_AFTER - BALANCE_BEFORE) * ease(progress(t, S3.credited, S3.countTo));
-
-  return (
-    <div className="absolute inset-0 grid grid-cols-[minmax(0,1fr)_248px] gap-5 bg-canvas px-6 pt-5 pb-12">
-      <div className="relative min-w-0 overflow-hidden rounded-[14px] border border-line bg-[#0f0f0e] text-[#f6f2ea]">
-        <div className="grid gap-1 border-b border-white/10 px-4 py-2.5 font-mono text-[11px]">
-          <span className="flex items-center gap-2.5">
-            <span className="rounded-[5px] bg-brand-green px-1.5 py-0.5 font-semibold text-brand-black">
-              POST
-            </span>
-            <span className="truncate text-white/80">/payday/webhook</span>
-          </span>
-          <span className="flex items-center gap-1.5 whitespace-nowrap text-white/50">
-            <span>Payday-Event-Type:</span>
-            <span className="text-brand-yellow">deposit_request.settled</span>
-          </span>
-        </div>
-        <pre className="px-4 py-3 font-mono text-[11.5px] leading-[1.55]">
-          {EVENT_LINES.slice(0, shown).map((line, index) => (
-            <span key={index} className="landing-scene-line block whitespace-pre">
-              {line}
-            </span>
-          ))}
-        </pre>
-        {delivered ? (
-          <div className="landing-scene-line absolute right-3 bottom-3 flex items-center gap-2 rounded-full border border-brand-green/40 bg-brand-green/10 px-2.5 py-1 font-mono text-[11px] text-brand-green">
-            <span className="size-1.5 rounded-full bg-brand-green" />
-            200 OK · 41 ms
-          </div>
-        ) : null}
-      </div>
-
-      <div className="min-w-0 rounded-[14px] border border-line bg-surface p-4">
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-7 items-center justify-center rounded-full bg-brand-yellow text-[12px] font-semibold text-brand-black">
-            G
-          </span>
-          <span className="min-w-0">
-            <span className="block truncate text-[13px] font-medium">Globex LLC</span>
-            <span className="block text-[11px] text-faint">user_123 · your app</span>
-          </span>
-        </div>
-
-        <p className="mt-4 text-[10px] font-medium tracking-[0.14em] text-faint uppercase">
-          Balance
-        </p>
-        <p className="tabular mt-1 flex items-baseline gap-1.5 text-[28px] leading-none font-semibold tracking-tight">
-          {balance.toFixed(2)}
-          <span className="text-[13px] font-medium text-muted">USDC</span>
-        </p>
-
-        <ul className="mt-4 grid gap-2 border-t border-line pt-3 text-[12px]">
-          {credited ? (
-            <li className="landing-scene-line flex items-center justify-between gap-3 rounded-[10px] border border-success/30 bg-success/[0.06] px-3 py-2">
-              <span className="flex min-w-0 items-center gap-2">
-                <StatusDot tone="success" />
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">Deposit credited</span>
-                  <span className="block font-mono text-[10.5px] text-faint">dr_0198f80c…f700</span>
-                </span>
-              </span>
-              <span className="tabular shrink-0 font-medium text-success">+10.50</span>
-            </li>
-          ) : null}
-          <li className="flex items-center justify-between gap-3 px-3 py-1.5 text-muted">
-            <span className="flex items-center gap-2">
-              <StatusDot tone="neutral" />
-              Subscription
-            </span>
-            <span className="tabular">−12.00</span>
-          </li>
-          <li className="flex items-center justify-between gap-3 px-3 py-1.5 text-muted">
-            <span className="flex items-center gap-2">
-              <StatusDot tone="neutral" />
-              Deposit credited
-            </span>
-            <span className="tabular">+52.00</span>
-          </li>
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-function ease(fraction: number): number {
-  return 1 - Math.pow(1 - fraction, 3);
 }

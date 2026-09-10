@@ -270,43 +270,13 @@
   animation-delay: 300ms;
 }
 
-/*
- * The hero's scenes. They sit in a white card on a page that is light in
- * either colour scheme, so the theme tokens the real components read are
- * pinned to a light set here, the way `.dash` pins them dark. `--inverse` is
- * the page's black, so the composer's and checkout's primary buttons match
- * the Get Started button beside them.
- */
-.landing-scene {
-  color-scheme: light;
-  color: var(--ink);
-  --canvas: #faf8f4;
-  --surface: #ffffff;
-  --raised: #f4f1ea;
-  --ink: #0f0f0e;
-  --muted: #504b4b;
-  --faint: #8b8780;
-  --line: #e8e3da;
-  --line-strong: #d3cdc0;
-  --inverse: #0f0f0e;
-  --inverse-ink: #f6f2ea;
-  --success: #2f8a47;
-  --warning: #b45309;
-  --danger: #b91c1c;
+/* The hero's stage: one composition, faded out for a beat at the end of its loop. */
+.landing-stage-fade-in {
+  animation: landing-stage-fade-in 400ms ease-out both;
+}
 
-  --color-canvas: var(--canvas);
-  --color-surface: var(--surface);
-  --color-raised: var(--raised);
-  --color-ink: var(--ink);
-  --color-muted: var(--muted);
-  --color-faint: var(--faint);
-  --color-line: var(--line);
-  --color-line-strong: var(--line-strong);
-  --color-inverse: var(--inverse);
-  --color-inverse-ink: var(--inverse-ink);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-danger: var(--danger);
+.landing-stage-fade-out {
+  animation: landing-stage-fade-out 400ms ease-in both;
 }
 
 .landing-scene-enter {
@@ -341,6 +311,96 @@
 
 .landing-caret {
   animation: landing-caret 900ms steps(2, start) infinite;
+}
+
+.landing-sheet-up {
+  animation: landing-sheet-up 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.landing-sheet-down {
+  animation: landing-sheet-down 320ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
+}
+
+.landing-scrim-in {
+  animation: landing-scrim-in 320ms ease-out both;
+}
+
+.landing-scrim-out {
+  animation: landing-scrim-out 320ms ease-in both;
+}
+
+.landing-toast {
+  animation: landing-toast 3600ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes landing-stage-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes landing-stage-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes landing-sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes landing-sheet-down {
+  from {
+    transform: none;
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes landing-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes landing-scrim-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes landing-toast {
+  0% {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  8%,
+  88% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
 }
 
 @keyframes landing-scene-enter {
