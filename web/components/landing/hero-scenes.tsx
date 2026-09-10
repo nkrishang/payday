@@ -278,7 +278,7 @@ function Chapters({ t, chapter }: { t: number; chapter: number }) {
           index < chapter ? 1 : index === chapter ? progress(t, entry.from, next) : 0;
         return (
           <li key={entry.title} className="min-w-0">
-            <span className="block h-[2px] w-full overflow-hidden rounded-full bg-white/10">
+            <span className="block h-[2px] w-full overflow-hidden rounded-full bg-brand-white/10">
               <span
                 className="block h-full origin-left rounded-full bg-brand-green"
                 style={{ transform: `scaleX(${fraction})` }}
@@ -411,9 +411,9 @@ function Editor({
     <div className="flex h-full flex-col overflow-hidden rounded-[14px] border border-white/[0.08] bg-[#161614]">
       <div className="flex items-center gap-3 border-b border-white/[0.08] px-4 py-2.5 font-mono text-[12.5px]">
         <span className="flex gap-1.5" aria-hidden="true">
-          <span className="size-2.5 rounded-full bg-white/15" />
-          <span className="size-2.5 rounded-full bg-white/15" />
-          <span className="size-2.5 rounded-full bg-white/15" />
+          <span className="size-2.5 rounded-full bg-brand-white/15" />
+          <span className="size-2.5 rounded-full bg-brand-white/15" />
+          <span className="size-2.5 rounded-full bg-brand-white/15" />
         </span>
         <span className="text-[#f6f2ea]">{file}</span>
         <span className="ml-auto text-[#8b8780]">your backend</span>
@@ -571,7 +571,7 @@ function MerchantApp({ t }: { t: number }) {
   const toast = within(t, AT.countFrom + 500, 3_800);
 
   return (
-    <div className="relative h-full overflow-hidden rounded-[14px] bg-[#f6f2ea] text-brand-black shadow-[0_24px_60px_-24px_rgb(0_0_0/0.8)]">
+    <div className="relative h-full overflow-hidden rounded-[14px] bg-brand-white text-brand-black shadow-[0_24px_60px_-24px_rgb(0_0_0/0.8)]">
       <div className="flex items-center gap-2.5 border-b border-brand-black/[0.08] px-5 py-3">
         <span className="flex size-6 items-center justify-center rounded-[7px] bg-brand-black text-[12px] font-bold text-[#f6f2ea]">
           A
@@ -684,7 +684,7 @@ function DepositDialog({ t, leaving }: { t: number; leaving: boolean }) {
       />
       <div
         className={cn(
-          "absolute top-1/2 left-1/2 w-[400px] -translate-x-1/2 -translate-y-1/2 rounded-[16px] bg-white px-6 pt-5 pb-5 shadow-[0_30px_80px_-24px_rgb(0_0_0/0.5)]",
+          "absolute top-1/2 left-1/2 w-[400px] -translate-x-1/2 -translate-y-1/2 rounded-[16px] bg-brand-white px-6 pt-5 pb-5 shadow-[0_30px_80px_-24px_rgb(0_0_0/0.5)]",
           leaving ? "landing-dialog-out" : "landing-dialog-in",
         )}
       >
