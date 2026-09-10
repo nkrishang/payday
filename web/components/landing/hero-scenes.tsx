@@ -62,14 +62,12 @@ const AT = {
   ready: 9_900,
   toPay: 10_600,
   pay: 11_400,
-  walletIn: 11_700,
-  toConfirm: 12_400,
-  confirm: 13_300,
-  walletOut: 13_900,
-  deposited: 14_200,
-  settled: 16_200,
-  received: 16_300,
-  sheetDown: 17_700,
+  /** The user signs in their wallet; the transfer is sent. */
+  confirm: 12_800,
+  deposited: 13_600,
+  settled: 15_400,
+  received: 15_500,
+  sheetDown: 17_000,
   // Chapter 3: the webhook lands and the app credits the balance.
   webhookTab: 19_000,
   inbound: 19_600,
@@ -231,17 +229,12 @@ export function HeroScenes() {
 /** Where the pointer is heading, if anywhere. */
 function cursorTarget(t: number): string | null {
   if (within(t, AT.toAddFunds, AT.addFunds + 500 - AT.toAddFunds)) return "add-funds";
-  if (within(t, AT.toPay, AT.walletIn + 400 - AT.toPay)) return "pay";
-  if (within(t, AT.toConfirm, AT.walletOut - AT.toConfirm)) return "confirm";
+  if (within(t, AT.toPay, AT.pay + 500 - AT.toPay)) return "pay";
   return null;
 }
 
 function cursorPressed(t: number): boolean {
-  return (
-    within(t, AT.addFunds - 60, 160) ||
-    within(t, AT.pay - 60, 160) ||
-    within(t, AT.confirm - 60, 160)
-  );
+  return within(t, AT.addFunds - 60, 160) || within(t, AT.pay - 60, 160);
 }
 
 /** The three chapters along the foot of the stage, with the current one filling. */
@@ -714,9 +707,6 @@ function Activity({ label, when, amount }: { label: string; when: string; amount
 function DepositSheet({ t, leaving }: { t: number; leaving: boolean }) {
   const state =
     t < AT.pay ? "ready" : t < AT.confirm ? "signing" : t < AT.received ? "confirming" : "received";
-  const walletOpen = within(t, AT.walletIn, AT.walletOut - AT.walletIn);
-  const walletLeaving = t >= AT.walletOut - 220;
-  const confirmed = t >= AT.confirm;
   const seconds = 3_598 - Math.floor((t - AT.sheetUp) / 1000);
 
   return (
@@ -800,70 +790,6 @@ function DepositSheet({ t, leaving }: { t: number; leaving: boolean }) {
           Secured by Payday
         </p>
       </div>
-
-      {walletOpen ? (
-        <WalletPrompt
-          leaving={walletLeaving}
-          confirmed={confirmed}
-          pressed={within(t, AT.confirm - 60, 160)}
-        />
-      ) : null}
     </>
-  );
-}
-
-/** The user's own wallet asking for the transfer, in a plain wallet's clothes. */
-function WalletPrompt({
-  leaving,
-  confirmed,
-  pressed,
-}: {
-  leaving: boolean;
-  confirmed: boolean;
-  pressed: boolean;
-}) {
-  return (
-    <div
-      className={cn(
-        "absolute inset-x-5 top-[72px] rounded-[12px] border border-brand-black/10 bg-white p-3.5 shadow-[0_20px_50px_-16px_rgb(0_0_0/0.45)]",
-        leaving ? "landing-sheet-leave" : "landing-sheet-enter",
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <span className="flex size-5 items-center justify-center rounded-full bg-brand-black text-[#f6f2ea]">
-          <Wallet className="size-2.5" />
-        </span>
-        <span className="text-[11.5px] font-semibold">Send 250.00 USDC</span>
-      </div>
-      <dl className="mt-2.5 grid gap-1 text-[10.5px]">
-        <div className="flex justify-between gap-3">
-          <dt className="text-brand-subtle">From</dt>
-          <dd className="font-mono">{PAYER_WALLET}</dd>
-        </div>
-        <div className="flex justify-between gap-3">
-          <dt className="text-brand-subtle">To</dt>
-          <dd className="font-mono">{DEPOSIT_ADDRESS}</dd>
-        </div>
-        <div className="flex justify-between gap-3">
-          <dt className="text-brand-subtle">Network fee</dt>
-          <dd className="tabular">0.0004 MON</dd>
-        </div>
-      </dl>
-      <div className="mt-3 grid grid-cols-2 gap-2 text-[11.5px] font-medium">
-        <span className="flex h-8 items-center justify-center rounded-[8px] border border-brand-black/15">
-          Reject
-        </span>
-        <span
-          data-cursor="confirm"
-          className={cn(
-            "flex h-8 items-center justify-center gap-1.5 rounded-[8px] bg-brand-black text-[#f6f2ea] transition-transform",
-            pressed && "scale-[0.97]",
-          )}
-        >
-          {confirmed ? <Check className="size-3.5" /> : null}
-          {confirmed ? "Sent" : "Confirm"}
-        </span>
-      </div>
-    </div>
   );
 }
