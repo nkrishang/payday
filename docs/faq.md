@@ -45,10 +45,14 @@ with payers or auditors at your discretion; it is not a public link.
 
 ## Which asset and networks can pay?
 
-Each deployment accepts one exact Circle-issued native USDC contract on one EVM
-chain. Use the `chain` and `token` returned with the deposit request. A matching symbol
-is not enough: bridged USDC, USDC on another chain, look-alike tokens, and the
-chain's gas currency do not count and may be unrecoverable.
+Circle-issued native USDC on Monad, Base, or Arbitrum One (their testnets in
+the sandbox). The payer chooses the network on the hosted checkout before
+signing; the merchant does not. Read `networks` from the deposit request,
+then `chain` and `token` once the payer has chosen. A matching symbol is not
+enough: bridged USDC, look-alike tokens, and the chain's gas currency do not
+count and may be unrecoverable. USDC sent to the address on a different
+supported network is refused by the contract and returned to the payer by
+hand.
 
 ## What is the deposit address?
 
@@ -61,9 +65,9 @@ being the payer's own wallet. Never reuse it for another order.
 
 ## What should I give the payer?
 
-Prefer the returned `deposit_url`. It shows the deposit request, network, token,
-remaining amount, address, QR/wallet request, deadline, and finalized live
-status — after verification, for a gated deposit request. Send it to the payer. If
+Prefer the returned `deposit_url`. It shows the deposit request, the network
+step, the chosen token, remaining amount, address, QR/wallet request,
+deadline, and finalized live status — after verification, for a gated deposit request. Send it to the payer. If
 integrating your own UI, reproduce all safety guidance in
 [Deposit safety](deposit-safety.md).
 
@@ -151,8 +155,9 @@ shown only at issuance. See [Authentication and API keys](authentication.md).
 
 ## What is available in sandbox?
 
-`https://api.sandbox.payday.sh` is an isolated Monad testnet service with test
-USDC and `payday_test_…` credentials. It exercises real indexing/finality rather than a
+`https://api.sandbox.payday.sh` is an isolated service on Monad testnet, Base
+Sepolia, and Arbitrum Sepolia with test USDC and `payday_test_…`
+credentials. It exercises real indexing/finality rather than a
 fake “mark deposited” endpoint. See [Sandbox](sandbox.md).
 
 ## Where can I get help?

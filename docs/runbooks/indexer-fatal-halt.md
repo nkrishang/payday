@@ -16,7 +16,8 @@ A stuck *sweep* is not fatal: the sweep worker pauses on its own and raises
 | `FinalityViolation` / `cursor hash mismatch` | A finalized block changed hash (reorg). The cursor no longer matches the canonical chain. |
 | `RPC error (…)` marked permanent (HTTP 400/401/403/404/413) | The provider rejected the request outright; usually a rotated or exhausted endpoint. |
 | `sweep transaction … targeted …, not configured BatchSweeper` | A recorded helper transaction hash points at a foreign transaction; the database was edited. |
-| Deployment verification failure at startup (factory or BatchSweeper code hash differs from `PAYDAY_FACTORY_CODE_HASH` / `PAYDAY_BATCH_SWEEPER_CODE_HASH`, or `BatchSweeper.factory()` is not `PAYDAY_FACTORY_ADDRESS`) | The chain does not carry the contract generation this build was configured for; see step 2a. `gatewayd` refuses to start on the same check. |
+| Deployment verification failure at startup (factory or BatchSweeper code hash differs from that chain's `factory_code_hash` / `batch_sweeper_code_hash` in `PAYDAY_CHAINS`, or `BatchSweeper.factory()` is not its `factory`) | That chain does not carry the contract generation this build was configured for; see step 2a. `gatewayd` refuses to start on the same check, for every chain. |
+| Any one chain's worker halts | The process exits and ECS restarts it; every chain's worker restarts. The halting chain's `chain_id` is on the fatal log line. |
 | `exclusive indexer database lock` failure | Another indexer process is running or the lock is stuck. |
 | `indexer fatal` | Generic fatal error from the poll loop. |
 
@@ -32,15 +33,17 @@ aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
 This means the block at the cursor's `last_block` has a different hash than
 when it was originally processed. The indexer refuses to continue because
 observations paired with the old hash may be invalid. With
-`PAYDAY_FINALITY_SOURCE=finalized` this should never happen on Monad without a
-hard fork; a provider serving a different chain or a database restored from a
-different environment is the likelier explanation.
+`finality_source = "finalized"` this should never happen on Monad without a
+hard fork; on Base and Arbitrum (`latest` minus `finality_confirmations`) a
+deep sequencer reorg could, in principle, reach the cursor, and the halt is
+the intended response. A provider serving a different chain or a database
+restored from a different environment is the likelier explanation.
 
 1. Check the current canonical hash at the cursor's block:
 
    ```bash
    # Find the cursor block (requires DB access — see db-access.md)
-   # SELECT last_block, encode(last_block_hash, 'hex') FROM indexer_cursor WHERE chain_id = 143;
+   # SELECT chain_id, last_block, encode(last_block_hash, 'hex') FROM indexer_cursor;
 
    # Then check the current hash at that block:
    cast block <CURSOR_BLOCK> --rpc-url "$MONAD_RPC_URL" --json \
@@ -55,9 +58,11 @@ different environment is the likelier explanation.
 
 ## Step 2a: Deployment verification refused
 
-Both services compare the runtime bytecode at `PAYDAY_FACTORY_ADDRESS` and
-`PAYDAY_BATCH_SWEEPER_ADDRESS` with the configured code hashes and check that
-the sweeper is bound to the configured factory before doing anything else. A
+Both services compare, on every chain in `PAYDAY_CHAINS`, the runtime
+bytecode at that entry's `factory` and `batch_sweeper` with its code hashes
+and check that the sweeper is bound to the configured factory before doing
+anything else. The generation is deployed at the same addresses on every
+chain, so the hashes are normally identical across entries. A
 refusal means the configuration and the chain disagree: a wrong address or
 RPC (another network, a provider serving a different chain), a hash recorded
 from the wrong build, or a factory pointed at an old sweeper. Recompute from

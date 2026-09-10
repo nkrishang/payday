@@ -9,7 +9,7 @@ output "attestation_kms_key_arn" { value = aws_kms_key.attestation.arn }
 output "attestation_signer_note" { value = "Derive the attestor address from this key with AWS_KMS_KEY_ID=<arn> cast wallet address --aws, verify it independently, and publish it as the trusted attestor merchants verify proofs against; only the API task role can sign with it and it never holds funds." }
 output "attachment_bucket_name" { value = aws_s3_bucket.attachments.id }
 output "database_url_secret_arn" { value = aws_secretsmanager_secret.database_url.arn }
-output "rpc_url_secret_arn" { value = aws_secretsmanager_secret.rpc_url.arn }
+output "rpc_url_secret_arns" { value = { for id, secret in aws_secretsmanager_secret.rpc_url : id => secret.arn } }
 output "webhook_encryption_key_secret_arn" { value = aws_secretsmanager_secret.webhook_encryption_key.arn }
 output "admin_bearer_secret_arn" { value = aws_secretsmanager_secret.admin_bearer.arn }
 output "ecs_cluster_name" { value = aws_ecs_cluster.this.name }

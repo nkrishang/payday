@@ -180,7 +180,7 @@ echo "settled in $(jq -r .settlement_tx_hash <<<"$settled")"
 # 5. The Proof of Payment names this wallet, this address, and the settlement.
 proof="$(merchant GET "/v1/deposit-requests/$id/proof")"
 jq -e --arg payer "$(lower "$PAYER")" --arg address "$(lower "$address")" \
-  '.version == "payday.proof.v2"
+  '.version == "payday.proof.v3"
    and (.payment_address | ascii_downcase) == $address
    and (.payer_wallet.address | ascii_downcase) == $payer
    and .payer_wallet.typed_data.primaryType == "PayerAttestation"

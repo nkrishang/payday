@@ -156,11 +156,13 @@ attested wallet, not the sending one.
 
 ## Proof of Payment
 
-A settled deposit request can be exported as a Proof of Payment (`payday.proof.v2`):
-the canonical issuance snapshot, the canonicalization version, the attribution
-hash, the payer's wallet attestation (the exact EIP-712 document the wallet
-signed, its digest, and the signature), the salt, the chain, factory, token,
-deposit, and recovery addresses, the credited USDC transfers, the fulfilment
+A settled deposit request can be exported as a Proof of Payment (`payday.proof.v3`):
+the canonical issuance snapshot (which lists every network the request
+offered, each with its USDC contract and factory), the canonicalization
+version, the attribution hash, the payer's wallet attestation (the exact
+EIP-712 document the wallet signed, its digest, and the signature), the salt,
+the chain the payer chose with its factory and token, the deposit and
+recovery addresses, the credited USDC transfers, the fulfilment
 transaction that executed the deposit contract, the attachment's hash, and a
 Payday-signed attestation of the verification facts. From it anyone —
 merchant, payer, or auditor — can recompute the hash, verify the wallet
@@ -187,9 +189,11 @@ stand behind. The proof is available to the merchant
 
 ## Safety boundaries
 
-- Only the exact `token.address` on the returned `chain.id` is monitored.
-  Bridged USDC, look-alike tokens, another network's USDC, and native gas do not
-  count and may be unrecoverable.
+- Only the exact `token.address` on the chosen `chain.id` is monitored.
+  Bridged USDC, look-alike tokens, and native gas do not count and may be
+  unrecoverable. The address commits to its chain: on any other supported
+  network the contract refuses to settle, and the funds are returned to the
+  payer's wallet by hand (`runbooks/wrong-network-deposit.md`).
 - A deposit link grants read access to the deposit page. Share it with the
   payer. It never exposes merchant data or policy assertions.
 - `needs_attention` pauses automatic settlement and recovery, including later

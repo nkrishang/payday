@@ -44,10 +44,12 @@ jobs:
         id: gate
         env:
           ROLE_ARN: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
-          RPC_URL: ${{ secrets.STAGING_RPC_URL }}
+          # A JSON object of paid RPC endpoints keyed by chain id, one per
+          # entry of `chains` in the staging tfvars (docs/staging.md).
+          RPC_URLS: ${{ secrets.STAGING_RPC_URLS }}
         run: |
-          if [[ -z "$ROLE_ARN" || -z "$RPC_URL" ]]; then
-            echo "AWS_STAGING_DEPLOY_ROLE_ARN or STAGING_RPC_URL is not set; staging is not bootstrapped yet, nothing to deploy."
+          if [[ -z "$ROLE_ARN" || -z "$RPC_URLS" ]]; then
+            echo "AWS_STAGING_DEPLOY_ROLE_ARN or STAGING_RPC_URLS is not set; staging is not bootstrapped yet, nothing to deploy."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -108,7 +110,7 @@ jobs:
       - name: Apply the staging stack
         if: steps.gate.outputs.configured == 'true'
         env:
-          TF_VAR_rpc_url: ${{ secrets.STAGING_RPC_URL }}
+          TF_VAR_rpc_urls: ${{ secrets.STAGING_RPC_URLS }}
           TF_VAR_resend_api_key: ${{ secrets.STAGING_RESEND_API_KEY }}
           TF_IN_AUTOMATION: "true"
         run: |

@@ -17,8 +17,10 @@ indexer only scans forward.
 
 ## Step 1: Find the target block
 
-Pick a block to reset to. This should be a few blocks before the earliest
-unprocessed USDC transfer you care about.
+Every chain has its own cursor row (`chain_id`); reset only the chain that
+is behind, against that chain's endpoint. Pick a block to reset to. This
+should be a few blocks before the earliest unprocessed USDC transfer you
+care about.
 
 ```bash
 CURRENT=$(cast block-number --rpc-url "$MONAD_RPC_URL")
@@ -46,6 +48,8 @@ with a Postgres image to run SQL inside the VPC. See [db-access.md](db-access.md
 for the full procedure. The SQL is:
 
 ```sql
+-- 143 and Monad's USDC here; use the chain id and that chain's USDC
+-- address (the `usdc` of its PAYDAY_CHAINS entry) for Base or Arbitrum.
 INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash)
 VALUES (
   143,

@@ -127,7 +127,6 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `attachment_id` | Optional `att_` id of a finalized attachment; one PDF per deposit request |
 | `expires_in` | Optional lifetime in seconds |
 | `expires_at` | Optional RFC 3339 deadline; mutually exclusive with `expires_in` |
-| `chain_id`, `token_address` | Optional deployment overrides; otherwise configured chain/native USDC |
 | `metadata` | JSON object, at most 16 keys and 512 encoded bytes per value; merchant-only |
 
 Payer policy shapes:
@@ -172,8 +171,9 @@ after issuance. Expiry defaults to 24 hours and must be 10 minutes to 366 days
 ahead. A first request returns `201`; an identical retry returns the original
 deposit with `200` and `Idempotency-Replayed: true`. Reuse with any changed
 immutable field — parties, amount, notes, heading, reference, metadata,
-customer, policy mode or assertions, expiry intent, chain parameters (chain,
-token, and factory), or the attachment's ID, length, or SHA-256 — returns
+customer, policy mode or assertions, expiry intent, the networks offered
+(each chain with its token and factory), or the attachment's ID, length, or
+SHA-256 — returns
 `409 idempotency_conflict`; the original must then be fetched with `GET`.
 Relative-expiry retries retain the original resolved deadline. Deposit request creation
 also requires the account to have a verified support email from a recent login.
@@ -280,7 +280,7 @@ verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/deposit-requests/{reference}/proof`
 
-Returns the Proof of Payment JSON (`payday.proof.v2`) for a settled deposit request
+Returns the Proof of Payment JSON (`payday.proof.v3`) for a settled deposit request
 (`payment_id` is the `dr_` id; inside `canonical_issuance_snapshot`, `attachment.id`
 is the raw UUID behind the API's `att_` id, since that document is the hashed
 commitment and its schema is frozen);
@@ -290,8 +290,10 @@ no proof can then claim the attested wallet paid. The proof carries the
 canonical issuance snapshot, canonicalization version, attribution hash,
 `payer_wallet {address, typed_data, digest, signature, method}` (the exact
 EIP-712 document the payer's wallet signed, its signing digest, and the
-signature), salt, chain, factory, token, deposit, and recovery addresses
-(the recovery address is the attested wallet), every credited USDC transfer
+signature), salt, the chosen chain with its factory and token (one of the
+`networks` the snapshot offered, whose entry must match), deposit and
+recovery addresses (the recovery address is the attested wallet), every
+credited USDC transfer
 into the deposit address, and `settlement_transaction_hash`: the fulfilment
 transaction that executed the `Payment` contract — the same hash the
 `DepositRequest` object reports as `settlement_tx_hash`, whether Payday's batch or a
@@ -317,12 +319,16 @@ shared at the merchant's discretion; it is not a public link.
 The full deposit request response contains:
 
 - identity and instructions: `id`, `deposit_url`, `address`, optional
-  `address_explorer_url`, `chain`, `token`, `currency`, `payout_address`,
-  `payer_wallet`, `recovery_address`, `wallet_bound_at`, and `expires_at`.
+  `address_explorer_url`, `networks`, `chain`, `token`, `currency`,
+  `payout_address`, `payer_wallet`, `recovery_address`, `wallet_bound_at`,
+  and `expires_at`. `networks` lists every chain the payer may pay on, each
+  as `{chain: {id, name}, token: {symbol, address, decimals}}`, in the order
+  the checkout offers them; the merchant does not choose. `chain`, `token`,
   `address`, `payer_wallet`, `recovery_address`, and `wallet_bound_at` are
-  `null` until the payer's wallet is bound; `recovery_address` then always
-  equals `payer_wallet`, the wallet overpayment remainders, expired balances,
-  and late transfers return to;
+  `null` until the payer's wallet is bound, which also fixes the network:
+  `chain` and `token` then name the payer's choice, and `recovery_address`
+  always equals `payer_wallet`, the wallet overpayment remainders, expired
+  balances, and late transfers return to;
 - accounting: `amount`, `received`, `remaining`, `fee_amount`, and `net_amount`,
   each with a corresponding `_base_units` field; current fees are zero;
 - state: `status`, `deposited_at`, `deposited_at_block`, `settled_at`, `settled_block`,
@@ -476,9 +482,10 @@ The SDK's `attachments.upload` performs the whole exchange.
   `null` until the first session that carried one), key hint, generation,
   creation/rotation timestamps, previous-key grace expiry, and revocation
   timestamp.
-- `GET /v1/status` uses an API key and returns chain finalized position,
-  indexer cursor/lag, and sweeper state/queue. It may return 503 when status
-  data cannot be read.
+- `GET /v1/status` uses an API key and returns `{chains: [...]}`, one entry
+  per supported network with its finalized position, indexer cursor/lag,
+  and sweeper state/queue. It may return 503 when status data cannot be
+  read.
 - `GET /health` is unauthenticated readiness: plain `ok` on 200 or
   `database unavailable` on 503.
 
@@ -557,12 +564,12 @@ The payer response discloses progressively. It always carries `id`,
 alone), `status`, `payable`, `expires_at`, `server_timestamp`,
 `settlement_tx_hash`, `settlement_explorer_url`, `payer_message`, and
 `content_unlocked`. For a `permissionless` deposit request `content_unlocked` is true
-and the response includes `chain`, `token`, `amount`, `received`, `remaining`
+and the response includes `networks`, `amount`, `received`, `remaining`
 (each with base units), and
 `details {amount, amount_base_units, payer, notes, reference, attachment}`.
-`payer_wallet`, `address`, `address_explorer_url`, and `deposit_uri` are
-present only once the payer's wallet is bound: until then the request has no
-address to show. For the gated modes every one of those fields — and
+`chain`, `token`, `payer_wallet`, `address`, `address_explorer_url`, and
+`deposit_uri` are present only once the payer's wallet is bound on a chosen
+network: until then the request has no chain and no address to show. For the gated modes every one of those fields — and
 `settlement_tx_hash` and `settlement_explorer_url`, since a settlement
 transaction would reveal the amount and payout address the gate withholds —
 is `null` until the payer's session satisfies the policy; the hint masks the
@@ -610,26 +617,34 @@ terminal content, and receipt re-authentication never makes the deposit request 
 ### Wallet attestation
 
 ```text
-POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…"}
+POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…", "chain_id": "143"}
 POST /v1/payer/deposit-requests/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
 ```
 
-Every request, gated or not, takes this step before it has an address.
-`challenge` mints a one-time nonce on the payer's session (a permissionless
-request without a session gets one here, returned as `payer_session`; a gated
-request needs the session that satisfied its policy, else
-`401 payer_session_invalid` or `401 verification_required`) and answers
-`{payer_session, expires_at, typed_data}`, where `typed_data` is the EIP-712
-document to hand to `eth_signTypedData_v4` verbatim: domain
-`{name: "Payday", version: "1", chainId, verifyingContract: factory}`,
-primary type `PayerAttestation`, message `{statement, attributionHash,
-wallet, nonce, expiresAt}`. The challenge is void after ten minutes. `attest`
-takes the wallet and its 65-byte signature; the API rebuilds the document
-from its own record, requires the signature to recover to `wallet`
+Every request, gated or not, takes this step before it has an address, and
+it is where the payer chooses the network: `chain_id` must be one of the
+request's `networks` (else `422 unsupported_chain`). `challenge` mints a
+one-time nonce on the payer's session (a permissionless request without a
+session gets one here, returned as `payer_session`; a gated request needs
+the session that satisfied its policy, else `401 payer_session_invalid` or
+`401 verification_required`) and answers `{payer_session, expires_at, chain,
+typed_data}`, where `typed_data` is the EIP-712 document to hand to
+`eth_signTypedData_v4` verbatim: domain `{name: "Payday", version: "1",
+chainId, verifyingContract: factory}` for the chosen chain and its factory,
+so a wallet on another network refuses to sign it; primary type
+`PayerAttestation`, message `{statement, attributionHash, wallet, nonce,
+expiresAt}`. The challenge is void after ten minutes. `attest` takes the
+wallet and its 65-byte signature; the API rebuilds the document from its own
+record, under the chain the challenge was minted for (the client cannot swap
+chains between the two calls), requires the signature to recover to `wallet`
 (externally owned accounts only for now; `401 wallet_signature_invalid`
-otherwise), and binds: the salt, the recovery term (the wallet), and the
-deposit address are written together, once, and the unlocked payer deposit
-is returned with `address` and `payer_wallet` set. A request already bound
+otherwise), and binds: the chain, its token and factory, the salt, the
+recovery term (the wallet), and the deposit address are written together,
+once, and the unlocked payer deposit is returned with `chain`, `token`,
+`address`, and `payer_wallet` set. The address commits to the chain: the
+`Payment` contract refuses to settle on any other network, so USDC sent to
+it elsewhere is refused rather than lost and is returned by hand
+(`docs/runbooks/wrong-network-deposit.md`). A request already bound
 to another wallet answers `409 wallet_already_bound` naming it; attesting
 without an outstanding challenge answers `409 wallet_challenge_required`;
 a request past `created` or past its deadline answers
@@ -714,7 +729,7 @@ limited to 8 KiB.
 | `idempotency_conflict` | 409 | Key reused with any different immutable deposit request field, including the attachment hash; fetch the original with `GET` |
 | `invalid_request` | 400 | Invalid field, query, JSON, or request shape — malformed JSON, a missing or unknown field, a wrong type, a missing JSON content type, control characters in a text field — with the problem named in the message |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
-| `unsupported_chain`, `unsupported_token` | 422 | Deployment does not support requested asset context |
+| `unsupported_chain` | 422 | Wallet challenge named a chain the request does not offer |
 | `deposit_request_not_found` | 404 | Missing or cross-account deposit request |
 | `customer_not_found` | 404 | Missing or cross-account customer |
 | `issuer_not_found` | 404 | Missing or cross-account issuer identity |

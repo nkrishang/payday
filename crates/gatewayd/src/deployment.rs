@@ -19,7 +19,7 @@ sol! {
     function factory() view returns (address);
 }
 
-/// Transport errors print the full request URL, and `PAYDAY_RPC_URL` carries
+/// Transport errors print the full request URL, and `PAYDAY_RPC_URL_<chain_id>` carries
 /// the provider token, so the message is redacted before it can reach a log
 /// line or the startup panic.
 fn rpc_error(operation: &'static str, error: impl std::fmt::Display) -> DeploymentError {
@@ -163,7 +163,7 @@ mod tests {
         assert!(!message.contains("quiknode"), "{message}");
         assert!(!message.contains("SECRET"), "{message}");
         assert!(
-            message.contains("eth_getCode failed against PAYDAY_RPC_URL: "),
+            message.contains("eth_getCode failed against the chain's RPC URL: "),
             "{message}"
         );
         assert!(message.contains("<rpc-url>"), "{message}");
@@ -187,7 +187,7 @@ mod tests {
                 actual: 1
             }
         ));
-        assert!(error.to_string().contains("PAYDAY_CHAIN_ID"));
+        assert!(error.to_string().contains("PAYDAY_CHAINS entry is chain"));
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
             DeploymentError::FactoryCodeHash { address, .. } if address == FACTORY
         ));
         let message = error.to_string();
-        assert!(message.contains("PAYDAY_FACTORY_CODE_HASH"));
+        assert!(message.contains("factory_code_hash"));
         assert!(message.contains(&B256::repeat_byte(0xF1).to_string()));
         assert!(message.contains(&B256::repeat_byte(0x01).to_string()));
     }
@@ -214,7 +214,7 @@ mod tests {
             error,
             DeploymentError::BatchSweeperCodeHash { address, .. } if address == SWEEPER
         ));
-        assert!(error.to_string().contains("PAYDAY_BATCH_SWEEPER_CODE_HASH"));
+        assert!(error.to_string().contains("batch_sweeper_code_hash"));
     }
 
     #[test]

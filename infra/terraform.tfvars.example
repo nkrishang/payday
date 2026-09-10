@@ -16,20 +16,60 @@ admin_reviewer_id = "reviewer@example.com"
 route53_zone_id  = "Z0123456789EXAMPLE"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
 alarm_email      = "operator@example.com"
-chain_id         = 143
-# PaymentFactory and BatchSweeper are deployed together as one generation.
-# Record both addresses from the deployment script, then pin their runtime
-# bytecode: cast keccak "$(cast code <ADDRESS> --rpc-url "$MONAD_RPC_URL")".
-# Zero hashes must not be deployed; both services refuse to start on a mismatch.
-factory_address  = "0x0000000000000000000000000000000000000001"
-batch_sweeper_address = "0x0000000000000000000000000000000000000002"
-factory_code_hash       = "0x0000000000000000000000000000000000000000000000000000000000000000"
-batch_sweeper_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-usdc_address     = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
-explorer_base_url = "https://monadvision.com"
-# Set this to the current Monad block immediately before the first deployment;
-# deposit requests cannot predate the service, so historical USDC logs are unnecessary.
-usdc_start_block      = 98700000
-finality_confirmations = 2
-# Prefer TF_VAR_rpc_url from a secure environment rather than placing this in a file.
-# rpc_url = "https://provider.example/v2/secret"
+# Every network a payer may pay on, in the order the checkout offers them.
+# PaymentFactory and BatchSweeper are one generation deployed at the same
+# addresses on every chain (docs/production-runbook.md §2). Record the
+# addresses from the deployment script, then pin their runtime bytecode per
+# chain: cast keccak "$(cast code <ADDRESS> --rpc-url "$RPC_URL")". Zero hashes
+# are refused. Set each usdc_start_block to that chain's block immediately
+# before the first deployment; deposit requests cannot predate the service.
+chains = [
+  {
+    chain_id                = 143
+    usdc                    = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
+    factory                 = "0x0000000000000000000000000000000000000001"
+    batch_sweeper           = "0x0000000000000000000000000000000000000002"
+    factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+    batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+    usdc_start_block        = 98700000
+    finality_source         = "finalized"
+    finality_confirmations  = 0
+    block_time_ms           = 300
+    log_range_size          = 100
+    scan                    = "full"
+    explorer_base_url       = "https://monadvision.com"
+  },
+  {
+    chain_id                = 8453
+    usdc                    = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    factory                 = "0x0000000000000000000000000000000000000001"
+    batch_sweeper           = "0x0000000000000000000000000000000000000002"
+    factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+    batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+    usdc_start_block        = 40000000
+    finality_source         = "latest"
+    finality_confirmations  = 10
+    block_time_ms           = 2000
+    log_range_size          = 10000
+    scan                    = "watched"
+    explorer_base_url       = "https://basescan.org"
+  },
+  {
+    chain_id                = 42161
+    usdc                    = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    factory                 = "0x0000000000000000000000000000000000000001"
+    batch_sweeper           = "0x0000000000000000000000000000000000000002"
+    factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+    batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+    usdc_start_block        = 400000000
+    finality_source         = "latest"
+    finality_confirmations  = 40
+    block_time_ms           = 250
+    log_range_size          = 10000
+    scan                    = "watched"
+    explorer_base_url       = "https://arbiscan.io"
+  },
+]
+# One paid endpoint per chain, keyed by chain id. Prefer TF_VAR_rpc_urls from a
+# secure environment rather than placing them in a file:
+# export TF_VAR_rpc_urls='{"143":"https://…","8453":"https://…","42161":"https://…"}'

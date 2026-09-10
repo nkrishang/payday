@@ -15,8 +15,9 @@ due and stop being offered the moment the deposit request is no longer payable.
 ## What the payer must send
 
 - Send **exactly the displayed amount** of **Circle-issued native USDC** on the
-  **displayed chain** to the displayed deposit address, **from the wallet that
-  signed the attestation**. Money from any other wallet still counts toward the
+  **network they chose** to the displayed deposit address, **from the wallet
+  that signed the attestation**. The choice is made before signing and is
+  final: the address exists on that chain only. Money from any other wallet still counts toward the
   amount and settles, but the deposit request is flagged `likely_unsolicited`, no Proof
   of Deposit is issued for it, and anything returned goes to the attested
   wallet, not the sending one.
@@ -31,9 +32,12 @@ due and stop being offered the moment the deposit request is no longer payable.
   checkout countdown do not guarantee that settlement will occur before
   expiry; confirmation and sweeping can take additional time.
 
-Wrong assets or deposits on the wrong network may be unrecoverable. Do not
-promise recovery unless the relevant wallet or token is demonstrably under
-your control.
+Wrong assets may be unrecoverable. A deposit of native USDC to the address
+on another *supported* network is refused by the contract rather than
+settled, and Payday's operator can return it to the payer's attested wallet
+by hand (`runbooks/wrong-network-deposit.md`); treat that as a support case,
+not a feature. Do not promise recovery of anything else unless the relevant
+wallet or token is demonstrably under your control.
 
 ## How amounts are routed
 

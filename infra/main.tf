@@ -7,14 +7,15 @@ locals {
   checkout_base_url = var.checkout_base_url
 
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
+  # The chain registry both services read: every network a payer may pay
+  # on, with the contract generation deployed there. The RPC URL for each
+  # is a secret (PAYDAY_RPC_URL_<chain_id>), never part of this JSON.
   common_environment = [
-    { name = "PAYDAY_CHAIN_ID", value = tostring(var.chain_id) },
-    { name = "PAYDAY_FACTORY_ADDRESS", value = var.factory_address },
-    { name = "PAYDAY_BATCH_SWEEPER_ADDRESS", value = var.batch_sweeper_address },
-    { name = "PAYDAY_FACTORY_CODE_HASH", value = var.factory_code_hash },
-    { name = "PAYDAY_BATCH_SWEEPER_CODE_HASH", value = var.batch_sweeper_code_hash },
-    { name = "PAYDAY_USDC_ADDRESS", value = var.usdc_address },
+    { name = "PAYDAY_CHAINS", value = jsonencode(var.chains) },
     { name = "RUST_LOG", value = "info" }
+  ]
+  rpc_url_secrets = [for id, secret in aws_secretsmanager_secret.rpc_url :
+    { name = "PAYDAY_RPC_URL_${id}", valueFrom = secret.arn }
   ]
   # Payer email verification needs its own Auth0 API and application (see
   # docs/authentication.md). Until both identifiers exist the settings are
@@ -180,10 +181,18 @@ resource "aws_secretsmanager_secret_version" "database_url" {
   secret_id     = aws_secretsmanager_secret.database_url.id
   secret_string = "postgresql://gateway:${random_password.db.result}@${aws_db_instance.this.address}:5432/gateway?sslmode=verify-full&sslrootcert=/usr/local/share/ca-certificates/aws-rds-global-bundle.pem"
 }
-resource "aws_secretsmanager_secret" "rpc_url" { name = "${var.name}/rpc-url" }
+# One RPC secret per chain, keyed by chain id. The keys come from the
+# non-sensitive `chains` list (a sensitive map cannot drive for_each); the
+# precondition on the indexer task definition requires rpc_urls to cover
+# every one of them.
+resource "aws_secretsmanager_secret" "rpc_url" {
+  for_each = toset([for c in var.chains : tostring(c.chain_id)])
+  name     = "${var.name}/rpc-url-${each.key}"
+}
 resource "aws_secretsmanager_secret_version" "rpc_url" {
-  secret_id     = aws_secretsmanager_secret.rpc_url.id
-  secret_string = var.rpc_url
+  for_each      = toset([for c in var.chains : tostring(c.chain_id)])
+  secret_id     = aws_secretsmanager_secret.rpc_url[each.key].id
+  secret_string = var.rpc_urls[each.key]
 }
 
 # Webhook signing secrets need to be recoverable across worker restarts while
@@ -387,11 +396,11 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], aws_secretsmanager_secret.resend_api_key[*].arn, aws_secretsmanager_secret.privy_app_secret[*].arn) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.resend_api_key[*].arn, aws_secretsmanager_secret.privy_app_secret[*].arn) }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.rpc_url.arn] }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn) }] })
 }
 
 resource "aws_iam_role" "api_task" {
@@ -682,20 +691,18 @@ resource "aws_ecs_task_definition" "api" {
       { name = "PAYDAY_PRIVY_APP_ID", value = var.privy_app_id },
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
       { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
-      { name = "PAYDAY_EXPLORER_BASE_URL", value = var.explorer_base_url },
       { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
       { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn },
       { name = "PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn }
     ], local.payer_environment, local.payer_email_environment, local.identity_environment),
-    # The API verifies the deployed contract generation at startup, so it reads
-    # the chain through the same RPC secret as the indexer.
+    # The API verifies the deployed contract generation on every chain at
+    # startup, so it reads each chain through the same RPC secrets as the indexer.
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
-      { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
-    ], local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets),
+    ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 }
@@ -718,16 +725,20 @@ resource "aws_ecs_task_definition" "indexer" {
     stopTimeout            = 120,
     environment = concat(local.common_environment, [
       { name = "PAYDAY_KMS_KEY_ID", value = aws_kms_key.signer.arn },
-      { name = "PAYDAY_USDC_START_BLOCK", value = tostring(var.usdc_start_block) },
-      { name = "PAYDAY_FINALITY_SOURCE", value = "finalized" },
-      { name = "PAYDAY_FINALITY_CONFIRMATIONS", value = tostring(var.finality_confirmations) },
-      { name = "PAYDAY_LOG_RANGE_SIZE", value = tostring(var.log_range_size) },
       { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
-      { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) }
+      { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
+      { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
     ]),
-    secrets          = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }, { name = "PAYDAY_RPC_URL", valueFrom = aws_secretsmanager_secret.rpc_url.arn }],
+    secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
   }])
+
+  lifecycle {
+    precondition {
+      condition     = alltrue([for c in var.chains : contains(keys(var.rpc_urls), tostring(c.chain_id))])
+      error_message = "rpc_urls must carry an endpoint for every chain in chains, keyed by decimal chain id."
+    }
+  }
 }
 
 resource "aws_lb" "api" {

@@ -15,25 +15,63 @@ notification_from_address = "alerts@sandbox.payday.sh"
 privy_app_id     = "your-sandbox-privy-app-id"
 auth0_issuer     = "https://your-sandbox-tenant.us.auth0.com/"
 route53_zone_id  = "Z0123456789EXAMPLE"
-explorer_base_url = "https://monadvision.com"
 image_tag        = "git-0123456789abcdef0123456789abcdef01234567"
 alarm_email      = "operator@example.com"
 
-# Monad testnet and Circle test USDC.
-chain_id         = 10143
-usdc_address     = "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea"
-# Fill these from the sandbox contract deployment output; zero/guessed addresses
-# and hashes must not be deployed. The factory and sweeper are one generation:
-# cast keccak "$(cast code <ADDRESS> --rpc-url "$TESTNET_RPC_URL")".
-factory_address         = "0x0000000000000000000000000000000000000001"
-batch_sweeper_address   = "0x0000000000000000000000000000000000000002"
-factory_code_hash       = "0x0000000000000000000000000000000000000000000000000000000000000000"
-batch_sweeper_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-# Set to the Monad testnet block immediately before deploying the services.
-usdc_start_block      = 0
-finality_confirmations = 2
+# The testnets behind production's three networks, with Circle's test USDC on
+# each. Fill the addresses and hashes from the sandbox contract deployment
+# output (one generation, same addresses on every chain); zero or guessed
+# values are refused. Set each usdc_start_block to the chain's block
+# immediately before deploying the services.
+chains = [
+  {
+    chain_id                = 10143
+    usdc                    = "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea"
+    factory                 = "0x0000000000000000000000000000000000000001"
+    batch_sweeper           = "0x0000000000000000000000000000000000000002"
+    factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+    batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+    usdc_start_block        = 0
+    finality_source         = "finalized"
+    finality_confirmations  = 0
+    block_time_ms           = 300
+    log_range_size          = 100
+    scan                    = "full"
+    explorer_base_url       = "https://testnet.monadvision.com"
+  },
+  {
+    chain_id                = 84532
+    usdc                    = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    factory                 = "0x0000000000000000000000000000000000000001"
+    batch_sweeper           = "0x0000000000000000000000000000000000000002"
+    factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+    batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+    usdc_start_block        = 0
+    finality_source         = "latest"
+    finality_confirmations  = 10
+    block_time_ms           = 2000
+    log_range_size          = 10000
+    scan                    = "watched"
+    explorer_base_url       = "https://sepolia.basescan.org"
+  },
+  {
+    chain_id                = 421614
+    usdc                    = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
+    factory                 = "0x0000000000000000000000000000000000000001"
+    batch_sweeper           = "0x0000000000000000000000000000000000000002"
+    factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+    batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+    usdc_start_block        = 0
+    finality_source         = "latest"
+    finality_confirmations  = 40
+    block_time_ms           = 250
+    log_range_size          = 10000
+    scan                    = "watched"
+    explorer_base_url       = "https://sepolia.arbiscan.io"
+  },
+]
 
 # Keep the sandbox inexpensive while retaining the same architecture.
 db_multi_az            = false
 db_deletion_protection = true
-# Supply TF_VAR_rpc_url securely; do not commit it here.
+# Supply TF_VAR_rpc_urls securely ({"10143":…,"84532":…,"421614":…}); do not commit it here.

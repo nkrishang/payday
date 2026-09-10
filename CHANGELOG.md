@@ -26,6 +26,74 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed
+
+- The payer chooses the network. A deposit request no longer carries a
+  chain: `POST /v1/deposit-requests` rejects `chain_id` and
+  `token_address`, the request offers every supported network as
+  `networks` (`[{chain, token}]`, Monad, Base, and Arbitrum One in
+  production; their testnets in the sandbox), and `chain` and `token` are
+  `null` until the payer picks one. The hosted checkout gains a mandatory
+  network step before the wallet step; the choice rides in
+  `POST …/wallet/challenge` as `chain_id` (`422 unsupported_chain` for a
+  chain the request does not offer) and in the EIP-712 domain the wallet
+  signs (`chainId` and that chain's factory as `verifyingContract`), so
+  the wallet is switched to the chosen network before signing and the
+  attestation binds the chain, its USDC, its factory, the salt, and the
+  address together. The SDK's `wallet.challenge` takes the chain id;
+  `WalletChallenge` reports `chain`. `GET /v1/status` answers
+  `{chains: [...]}`, one entry per network. The merchant never picks a
+  network; the dashboard shows the Payday wallet's USDC and gas balance on
+  every network, and a deposit's network once the payer has chosen.
+- A new contract generation: `Payment` takes the chain id, refuses to
+  route anything when `block.chainid` differs (emitting `WrongChain`), and
+  its permissionless `recover(address token)` names the token to return;
+  `PaymentFactory.paymentAddress` and `execute` take the chain id, which
+  is part of the deployment salt, and `BatchSweeper.Sweep` carries it. The
+  deployment script requires a fresh deployer (nonce 0) so the generation
+  lands at identical addresses on every chain, which is what makes a
+  deposit sent on the wrong network returnable by hand
+  (`docs/runbooks/wrong-network-deposit.md`).
+- Canonical issuance snapshot `payday.invoice.v3` (`networks: [{chain_id,
+  token_address, factory_address}]` sorted by chain id, in place of the
+  top-level chain, token, and factory), attribution and salt domains v3,
+  Proof of Payment `payday.proof.v3`: the proof's `chain_id`, `token_address`,
+  and `factory_address` name the payer's choice, which `verify_proof`
+  requires to be one of the snapshot's networks. Pre-release: no earlier
+  proof or database is carried forward; migration `0004` makes the invoice
+  chain columns part of the binding and adds the challenge's chain.
+- Both services read one network registry, `PAYDAY_CHAINS` (a JSON array
+  of `{chain_id, usdc, factory, batch_sweeper, factory_code_hash,
+  batch_sweeper_code_hash, usdc_start_block, finality_source,
+  finality_confirmations, block_time_ms, log_range_size, scan,
+  explorer_base_url}`), with one `PAYDAY_RPC_URL_<chain_id>` per chain
+  (`PAYDAY_RPC_WS_URL_<chain_id>` to override or disable the signal), in
+  place of `PAYDAY_CHAIN_ID`, `PAYDAY_FACTORY_ADDRESS`,
+  `PAYDAY_BATCH_SWEEPER_ADDRESS`, the two code-hash variables,
+  `PAYDAY_USDC_ADDRESS`, `PAYDAY_USDC_START_BLOCK`, `PAYDAY_RPC_URL`,
+  `PAYDAY_RPC_WS_URL`, `PAYDAY_FINALITY_SOURCE`,
+  `PAYDAY_FINALITY_CONFIRMATIONS`, `PAYDAY_LOG_RANGE_SIZE`, and
+  `PAYDAY_EXPLORER_BASE_URL`. Terraform takes `chains` and a sensitive
+  `rpc_urls` map (`TF_VAR_rpc_urls`), one Secrets Manager secret per
+  chain; the staging workflow reads `STAGING_RPC_URLS`. The web app takes
+  `NEXT_PUBLIC_CHAINS` in place of the five single-chain variables.
+  Deployment verification runs on every chain at startup.
+- The indexer runs one worker per chain in one process and scans on
+  demand: a chain with nothing to watch fast-forwards its cursor every
+  `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes) without `eth_getLogs`
+  and holds no WebSocket, so an idle chain costs about two calls every five
+  minutes; three idle chains cost less than a fifth of the one
+  always-scanning chain before. Base and Arbitrum One settle on `latest`
+  minus a confirmation depth (their `finalized` tag is L1 finality) with a
+  `watched` scan whose `eth_getLogs` is filtered to the addresses Payday is
+  watching, 500 per call; Monad keeps `finalized` and the unfiltered scan.
+  A wake on an L2 waits `block_time_ms` per block still ahead of the
+  boundary. Unbound requests expire on any chain's clock. The local stack
+  runs two Anvils (31337 `finalized`/`full`, 31338 `latest`/`watched`) and
+  the end-to-end script settles on the second chain, refuses an unoffered
+  chain and a create with `chain_id`, checks the idle fast-forward, and
+  rescues a wrong-chain deposit by hand.
+
 ### Added
 
 - Customer documentation at `payday.sh/docs` (`web/app/docs`), in the web
