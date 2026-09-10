@@ -279,7 +279,7 @@ export function GetStarted() {
         >
           <div className="flex items-start justify-between gap-4">
             <Image
-              src="/payday-logo-full.png"
+              src="/payday-logo-full-light.svg"
               width={2800}
               height={1000}
               alt="Payday"

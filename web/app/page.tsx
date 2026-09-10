@@ -18,7 +18,7 @@ export default function Home() {
         <nav className="mx-auto flex h-[88px] max-w-[1320px] items-center px-5 sm:px-8">
           <Link href="/" aria-label="Payday" className="rounded-[4px]">
             <Image
-              src="/payday-logo-full.png"
+              src="/payday-logo-full-light.svg"
               width={2800}
               height={1000}
               priority
@@ -68,7 +68,7 @@ export default function Home() {
         <div className="mx-auto flex max-w-[1320px] flex-col gap-5 px-5 pb-8 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <Image
-              src="/payday-logo-full.png"
+              src="/payday-logo-full-light.svg"
               width={2800}
               height={1000}
               sizes="72px"
