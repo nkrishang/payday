@@ -44,7 +44,9 @@ not affect existing Payday API keys.
 ### Step 1: Update the secret
 
 ```bash
-RPC_SECRET_ARN="$(terraform -chdir=infra output -raw rpc_url_secret_arn)"
+# One secret per chain, keyed by decimal chain id (output rpc_url_secret_arns).
+CHAIN_ID=143
+RPC_SECRET_ARN="$(terraform -chdir=infra output -json rpc_url_secret_arns | jq -r --arg id "$CHAIN_ID" '.[$id]')"
 
 aws secretsmanager put-secret-value \
   --secret-id "$RPC_SECRET_ARN" \
@@ -52,10 +54,19 @@ aws secretsmanager put-secret-value \
   --region "$AWS_REGION"
 ```
 
-### Step 2: Restart the indexer
+If `PAYDAY_RPC_WS_URL_<chain_id>` is set for the chain, rotate that override
+the same way; when it is unset, restarting the indexer (Step 2) re-derives the
+WebSocket URL from the new HTTP endpoint automatically.
+
+### Step 2: Restart both services
+
+Both tasks read the secret (the API's onboarding payer and the indexer both
+hold a provider for every chain), so restart both:
 
 ```bash
 aws ecs update-service --cluster payday --service indexer \
+  --force-new-deployment --region "$AWS_REGION"
+aws ecs update-service --cluster payday --service api \
   --force-new-deployment --region "$AWS_REGION"
 ```
 

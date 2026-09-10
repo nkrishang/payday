@@ -98,6 +98,16 @@ pub enum ChainRegistryError {
     Duplicate(u64),
     #[error("PAYDAY_CHAINS chain {chain_id}: {field} must be positive")]
     NotPositive { chain_id: u64, field: &'static str },
+    #[error(
+        "PAYDAY_CHAINS chain {chain_id}: factory {actual} differs from chain {first_chain_id}'s {expected}; \
+         wrong-chain rescue only works when every chain deploys the factory at the same address"
+    )]
+    FactoryMismatch {
+        chain_id: u64,
+        first_chain_id: u64,
+        expected: Address,
+        actual: Address,
+    },
 }
 
 /// The ordered set of supported chains. Order is the order the checkout
@@ -127,6 +137,23 @@ impl ChainRegistry {
                         field,
                     });
                 }
+            }
+        }
+        // A payment address derives from the factory, and wrong-chain rescue
+        // returns funds only because the factory sits at the *same* address
+        // everywhere. Deployment procedure (one fresh deployer key, nonce 0)
+        // is what makes that true; a registry that would accept different
+        // factory addresses per chain lets a procedural slip break recovery
+        // silently, so refuse to serve such a configuration at all.
+        let first = &chains[0];
+        for chain in &chains[1..] {
+            if chain.factory != first.factory {
+                return Err(ChainRegistryError::FactoryMismatch {
+                    chain_id: chain.chain_id,
+                    first_chain_id: first.chain_id,
+                    expected: first.factory,
+                    actual: chain.factory,
+                });
             }
         }
         Ok(Self { chains })
@@ -240,6 +267,29 @@ mod tests {
         assert_eq!(networks[0].chain_id, ChainId(143));
         assert_eq!(networks[1].chain_id, ChainId(8453));
         assert_eq!(networks[0].token.0, registry.first().usdc);
+    }
+
+    #[test]
+    fn registry_rejects_factories_that_differ_across_chains() {
+        // Wrong-chain rescue depends on every chain deploying the factory at
+        // the same address; a registry that would mix them must not serve.
+        let mut other = chain(8453);
+        other["factory"] = serde_json::json!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512");
+        assert_eq!(
+            ChainRegistry::parse(&serde_json::json!([chain(143), other]).to_string()).unwrap_err(),
+            ChainRegistryError::FactoryMismatch {
+                chain_id: 8453,
+                first_chain_id: 143,
+                expected: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+                    .parse()
+                    .unwrap(),
+                actual: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+                    .parse()
+                    .unwrap(),
+            }
+        );
+        // The same factory on every chain is still accepted.
+        ChainRegistry::parse(&serde_json::json!([chain(143), chain(8453)]).to_string()).unwrap();
     }
 
     #[test]

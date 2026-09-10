@@ -18,14 +18,15 @@ use gateway_core::{
     CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
     DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, IssuerId,
     OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
-    PayerPolicyMode, SnapshotNetwork, TransferDto, TransferListResponse, USDC_DECIMALS,
-    parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
+    PayerPolicyMode, PaymentBinding, SnapshotNetwork, TransferDto, TransferListResponse,
+    USDC_DECIMALS, parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
 };
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
 use crate::api::json::{Json, Query};
 use crate::attachments::{AttachmentError, StorageError, content_disposition};
+use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::request_pdf::render_request_pdf;
 use crate::state::AppState;
 use gateway_db::{
@@ -707,6 +708,28 @@ pub async fn list_deposit_requests(
     }))
 }
 
+/// The onboarding signer pays on exactly one chain with that chain's USDC. A
+/// binding names the network the payer chose; paying it from here on any other
+/// chain would send real funds to an address no indexer of that chain is
+/// watching, so every broadcast path must pass this guard first.
+fn ensure_onboarding_network(
+    signer: &OnboardingPayerSigner,
+    binding: &PaymentBinding,
+    payment_id: Uuid,
+) -> Result<(), ApiError> {
+    let chain = ChainId(signer.chain_id());
+    if binding.network.chain_id != chain || binding.network.token.0 != signer.usdc() {
+        tracing::error!(
+            %payment_id,
+            bound_chain = binding.network.chain_id.0,
+            signer_chain = chain.0,
+            "onboarding demo payment is bound to a network the onboarding signer does not pay on"
+        );
+        return Err(ApiError::onboarding_deposit_not_eligible());
+    }
+    Ok(())
+}
+
 fn full_deposit_request_id(value: &str) -> Result<Uuid, ApiError> {
     let suffix = value.strip_prefix("dr_").ok_or_else(|| {
         ApiError::invalid_request("starting_after must be a complete dr_ deposit request ID")
@@ -773,6 +796,14 @@ pub async fn onboarding_deposit(
         return Err(ApiError::onboarding_deposit_not_eligible());
     }
 
+    // The onboarding signer pays on exactly one chain with that chain's USDC.
+    // A request already bound on another network is not payable by it; refuse
+    // before the claim below consumes the account's one-shot demo payment, so
+    // an operator fixing the binding can still re-run the walkthrough.
+    if let Some(binding) = &invoice.binding {
+        ensure_onboarding_network(&signer, binding, row.id)?;
+    }
+
     let claim = state
         .onboarding_demo_payments
         .claim(account, row.id)
@@ -817,8 +848,8 @@ pub async fn onboarding_deposit(
     // challenge on the session for the demo chain, the EIP-712 signature,
     // the binding. A retry finds the binding already in place.
     let chain = ChainId(signer.chain_id());
-    let payment_address = match &invoice.binding {
-        Some(binding) => binding.payment_address,
+    let binding = match &invoice.binding {
+        Some(binding) => binding.clone(),
         None => {
             let network = *invoice
                 .network_for(chain)
@@ -856,16 +887,26 @@ pub async fn onboarding_deposit(
                 .bind_payer_wallet(row.id, session.id, &binding, now)
                 .await?
             {
-                BindPayerWallet::Bound(_) => binding.payment_address,
+                BindPayerWallet::Bound(_) => binding,
+                // A concurrent caller won the binding, possibly on another
+                // network than the one this signer pays on: keep the winner's
+                // whole binding so the network check below applies to it too.
                 BindPayerWallet::AlreadyBound(bound) => Invoice::try_from(&bound)?
-                    .payment_address()
-                    .ok_or_else(|| ApiError::internal("bound invoice has no address"))?,
+                    .binding
+                    .ok_or_else(|| ApiError::internal("bound invoice has no binding"))?,
                 BindPayerWallet::NotBindable(_) => {
                     return Err(ApiError::deposit_request_not_payable());
                 }
             }
         }
     };
+    // The guard above ran before the claim for a pre-existing binding; this
+    // one covers a binding a concurrent call just won, possibly on another
+    // network than the one this signer pays on. Paying either from here on
+    // any other chain would send real funds to an address no indexer of that
+    // chain is watching.
+    ensure_onboarding_network(&signer, &binding, row.id)?;
+    let payment_address = binding.payment_address;
 
     let tx_hash = match claim {
         OnboardingClaim::AlreadySubmitted(tx_hash) => tx_hash,

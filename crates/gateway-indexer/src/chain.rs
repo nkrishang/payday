@@ -531,15 +531,21 @@ pub trait ChainClient: Send + Sync {
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
 
-    /// Transaction that created and drained `Payment`, with the amounts its
-    /// events carried, searched only through the finalized block whose hash
-    /// the caller verified.
+    /// The earliest transaction that created or drained `Payment` in
+    /// `from_block..=to_block`, with the amounts its events carried, searched
+    /// only through the finalized block whose hash the caller verified.
+    /// `token` is the chain's USDC: `recover()` is permissionless and
+    /// forwards *any* token, so `Recovered` events for other tokens are
+    /// noise, never ledgered amounts. `None` when the range holds no
+    /// settlement event at all, so the caller can scan a long history in
+    /// provider-sized chunks.
     async fn payment_settlement_tx(
         &self,
         payment: Address,
+        token: Address,
         from_block: u64,
         to_block: u64,
-    ) -> Result<SettlementEvent, ChainError>;
+    ) -> Result<Option<SettlementEvent>, ChainError>;
 
     /// Read the token facts that distinguish a transient failure from a
     /// permanent one, at a block whose hash the caller verified.
@@ -875,9 +881,11 @@ impl ChainClient for AlloyChainClient {
     async fn payment_settlement_tx(
         &self,
         payment: Address,
+        token: Address,
         from_block: u64,
         to_block: u64,
-    ) -> Result<SettlementEvent, ChainError> {
+    ) -> Result<Option<SettlementEvent>, ChainError> {
+        self.pacer.acquire().await;
         let settled = Settled::SIGNATURE_HASH;
         let recovered = Recovered::SIGNATURE_HASH;
         let filter = Filter::new()
@@ -900,17 +908,64 @@ impl ChainClient for AlloyChainClient {
             })
             .collect::<Vec<_>>();
         logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
+        // Decode up front and drop `Recovered` events for tokens that are not
+        // this chain's USDC: `recover()` is permissionless and forwards *any*
+        // token, so those are noise. They must be dropped before the
+        // deployment transaction is chosen — the earliest remaining event —
+        // or a foreign token's recovery could stand in for a settlement that
+        // lies outside the searched range. A log whose mined metadata is
+        // missing is malformed provider output and an error: returning `None`
+        // here would let the caller advance past a settlement it never saw.
+        enum Amount {
+            Settled(U256),
+            Recovered(U256),
+        }
+        let mut events = Vec::with_capacity(logs.len());
+        for log in &logs {
+            let transaction_hash = log.transaction_hash.ok_or_else(|| {
+                ChainError::Transient("settlement log is missing its transaction hash".to_string())
+            })?;
+            let block_number = log.block_number.ok_or_else(|| {
+                ChainError::Transient("settlement log is missing its block number".to_string())
+            })?;
+            let block_hash = log.block_hash.ok_or_else(|| {
+                ChainError::Transient("settlement log is missing its block hash".to_string())
+            })?;
+            if log.topics()[0] == settled {
+                let event = Settled::decode_log(&log.inner).map_err(|error| {
+                    ChainError::Transient(format!(
+                        "malformed Settled event in {transaction_hash}: {error}"
+                    ))
+                })?;
+                events.push((
+                    transaction_hash,
+                    block_number,
+                    block_hash,
+                    Amount::Settled(event.data.amount),
+                ));
+            } else {
+                let event = Recovered::decode_log(&log.inner).map_err(|error| {
+                    ChainError::Transient(format!(
+                        "malformed Recovered event in {transaction_hash}: {error}"
+                    ))
+                })?;
+                if event.data.token != token {
+                    continue;
+                }
+                events.push((
+                    transaction_hash,
+                    block_number,
+                    block_hash,
+                    Amount::Recovered(event.data.amount),
+                ));
+            }
+        }
         // The constructor always emits at least one of the two events, so the
         // earliest is the deployment; an overpaid live deployment emits both
         // in that one transaction and the ledger needs both amounts.
-        let (transaction_hash, block_number, block_hash) = logs
-            .first()
-            .and_then(|log| Some((log.transaction_hash?, log.block_number?, log.block_hash?)))
-            .ok_or_else(|| {
-                ChainError::Transient(format!(
-                    "payment {payment} is deployed but has no finalized settlement event in blocks {from_block}..={to_block}"
-                ))
-            })?;
+        let Some(&(transaction_hash, block_number, block_hash, _)) = events.first() else {
+            return Ok(None);
+        };
         let malformed = |event: &str| {
             ChainError::Transient(format!(
                 "malformed settlement transaction {transaction_hash} for payment {payment}: duplicate {event} event"
@@ -918,43 +973,36 @@ impl ChainClient for AlloyChainClient {
         };
         let mut settled_amount = None;
         let mut recovered_amount = None;
-        for log in logs
+        for (_, _, _, amount) in events
             .iter()
-            .filter(|log| log.transaction_hash == Some(transaction_hash))
+            .take_while(|(hash, ..)| *hash == transaction_hash)
         {
-            if log.topics()[0] == settled {
-                let event = Settled::decode_log(&log.inner).map_err(|error| {
-                    ChainError::Transient(format!(
-                        "malformed Settled event in {transaction_hash}: {error}"
-                    ))
-                })?;
-                if settled_amount.replace(event.data.amount).is_some() {
-                    return Err(malformed("Settled"));
+            match amount {
+                Amount::Settled(amount) => {
+                    if settled_amount.replace(*amount).is_some() {
+                        return Err(malformed("Settled"));
+                    }
                 }
-            } else {
-                let event = Recovered::decode_log(&log.inner).map_err(|error| {
-                    ChainError::Transient(format!(
-                        "malformed Recovered event in {transaction_hash}: {error}"
-                    ))
-                })?;
                 // `recover()` is intentionally callable more than once. A
                 // deployment and a later recovery can therefore emit several
                 // Recovered logs in one transaction; all are ledgered.
-                recovered_amount = Some(
-                    recovered_amount
-                        .unwrap_or(U256::ZERO)
-                        .checked_add(event.data.amount)
-                        .ok_or_else(|| malformed("Recovered amount overflow"))?,
-                );
+                Amount::Recovered(amount) => {
+                    recovered_amount = Some(
+                        recovered_amount
+                            .unwrap_or(U256::ZERO)
+                            .checked_add(*amount)
+                            .ok_or_else(|| malformed("Recovered amount overflow"))?,
+                    );
+                }
             }
         }
-        Ok(SettlementEvent {
+        Ok(Some(SettlementEvent {
             transaction_hash,
             block_number,
             block_hash,
             settled: settled_amount,
             recovered: recovered_amount.unwrap_or(U256::ZERO),
-        })
+        }))
     }
 
     async fn sweep_receipt(

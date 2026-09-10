@@ -40,8 +40,8 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::chain::{
-    BlockHeader, ChainClient, ChainError, FeeEstimate, PreparedSweepTransaction, SweepOutcome,
-    SweepReceipt, SweepRequest, sweep_batch_gas_limit,
+    BlockHeader, ChainClient, ChainError, FeeEstimate, PreparedSweepTransaction, SettlementEvent,
+    SweepOutcome, SweepReceipt, SweepRequest, sweep_batch_gas_limit,
 };
 use crate::signal::{SignalState, WatchList};
 
@@ -647,6 +647,26 @@ impl Indexer {
             let end = self
                 .retried_header(to_block, &mut attempt, &mut backoff)
                 .await?;
+
+            // The pass verified the cursor before its first range, but a reorg
+            // may have replaced it since. Re-read that block only after the
+            // range-end header above: both reads are then taken from the same
+            // branch, so if the cursor block no longer carries the hash the
+            // cursor committed, this chain's history has diverged underneath a
+            // committed cursor and must halt, not silently adopt the new
+            // branch.
+            if let Some(cursor) = cursor {
+                let previous = self
+                    .retried_header(cursor.block, &mut attempt, &mut backoff)
+                    .await?;
+                if previous.hash != cursor.block_hash {
+                    return Err(ChainError::FinalityViolation(format!(
+                        "cursor block {} changed while scanning from it; refusing to continue",
+                        cursor.block
+                    ))
+                    .into());
+                }
+            }
             let mut transfers = match self
                 .chain
                 .usdc_transfers(self.cfg.usdc, from_block, to_block, recipients)
@@ -975,18 +995,77 @@ impl Indexer {
                     .first_observed_block(row.id)
                     .await?
                     .unwrap_or(self.cfg.usdc_start_block);
-                let settlement = self
-                    .chain
-                    .payment_settlement_tx(payment, from_block, header.number)
-                    .await?;
-                let settlement_header = self.chain.block_header(settlement.block_number).await?;
-                if settlement_header.hash != settlement.block_hash {
-                    return Err(ChainError::FinalityViolation(format!(
-                        "settlement event block {} changed during classification",
-                        settlement.block_number
-                    ))
-                    .into());
-                }
+                let (settlement, settlement_timestamp) = if invoice.status.is_terminal()
+                    && row.settlement_tx_hash.is_some()
+                {
+                    // The settlement was ledgered when the invoice resolved:
+                    // `finalize_batch` only backfills these fields behind
+                    // COALESCE, and this branch discards the discovered
+                    // recovery amount for a terminal invoice anyway. Searching
+                    // logs for them would reach from the first observation to
+                    // now — arbitrarily far past any provider's range cap —
+                    // so the stored settlement stands. A legacy row without a
+                    // stored hash still goes through the discovery below
+                    // rather than mislabeling this drain as the settlement.
+                    let settlement = SettlementEvent {
+                        transaction_hash: tx_hash,
+                        block_number: header.number,
+                        block_hash: header.hash,
+                        settled: None,
+                        recovered: U256::ZERO,
+                    };
+                    (settlement, header.timestamp)
+                } else {
+                    // A third party deployed the contract, and its settlement
+                    // can sit anywhere between the first observation and now:
+                    // search in provider-sized chunks, never one unbounded
+                    // `eth_getLogs`. A range the provider rejects splits in
+                    // half, exactly like the scan ranges do.
+                    let mut found: Option<SettlementEvent> = None;
+                    let mut start = from_block;
+                    while found.is_none() && start <= header.number {
+                        let chunk = self.current_log_range_size.load(Ordering::Relaxed).max(1);
+                        let end = start.saturating_add(chunk - 1).min(header.number);
+                        found = match self
+                            .chain
+                            .payment_settlement_tx(payment, self.cfg.usdc, start, end)
+                            .await
+                        {
+                            Ok(found) => found,
+                            Err(ChainError::LogRangeTooLarge(message)) if chunk > 1 => {
+                                let smaller = (chunk / 2).max(1);
+                                self.current_log_range_size
+                                    .store(smaller, Ordering::Relaxed);
+                                warn!(
+                                    from_block = start,
+                                    to_block = end,
+                                    smaller,
+                                    error = %message,
+                                    "provider rejected settlement log range; splitting it"
+                                );
+                                continue;
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                        start = end.saturating_add(1);
+                    }
+                    let settlement = found.ok_or_else(|| {
+                        ChainError::Transient(format!(
+                            "payment {payment} is deployed but has no finalized settlement event in blocks {from_block}..={}",
+                            header.number
+                        ))
+                    })?;
+                    let settlement_header =
+                        self.chain.block_header(settlement.block_number).await?;
+                    if settlement_header.hash != settlement.block_hash {
+                        return Err(ChainError::FinalityViolation(format!(
+                            "settlement event block {} changed during classification",
+                            settlement.block_number
+                        ))
+                        .into());
+                    }
+                    (settlement, settlement_header.timestamp)
+                };
                 // A terminal invoice's settlement was ledgered when it resolved
                 // (or predates the ledger). An open one was deployed by someone
                 // else, and whatever that deployment sent to the recovery
@@ -1004,7 +1083,7 @@ impl Indexer {
                     execute_tx: false,
                     settlement_tx_hash: settlement.transaction_hash,
                     settlement_block: settlement.block_number,
-                    settlement_timestamp: settlement_header.timestamp,
+                    settlement_timestamp,
                     settlement_recovered,
                     recovered: recovered(*amount, RecoveryReason::LateTransfer),
                 })
@@ -1370,6 +1449,10 @@ pub(crate) mod tests {
         balance: U256,
         settled: HashMap<Address, bool>,
         settlement_events: HashMap<Address, SettlementEvent>,
+        /// Blocks from which each payment's settlement event exists: ranges
+        /// ending before the block return no settlement, so classification
+        /// has to page through chunks to find it.
+        settlement_appears_at: HashMap<Address, u64>,
         probes: HashMap<Address, FailureProbe>,
         header_requests: usize,
         reorg_on_header_request: Option<usize>,
@@ -1614,12 +1697,23 @@ pub(crate) mod tests {
         async fn payment_settlement_tx(
             &self,
             payment: Address,
+            _token: Address,
             from_block: u64,
-            _to_block: u64,
-        ) -> Result<SettlementEvent, ChainError> {
+            to_block: u64,
+        ) -> Result<Option<SettlementEvent>, ChainError> {
             let state = self.state.lock().unwrap();
+            // A settlement the mock says exists only from some block onward is
+            // invisible to ranges that end below it, exactly like a real
+            // provider answering for a range without the deployment.
+            if state
+                .settlement_appears_at
+                .get(&payment)
+                .is_some_and(|appears_at| to_block < *appears_at)
+            {
+                return Ok(None);
+            }
             if let Some(event) = state.settlement_events.get(&payment) {
-                return Ok(*event);
+                return Ok(Some(*event));
             }
             // Without an override the deployment was this worker's own exact
             // settlement, whose amount the mock finds among its submissions.
@@ -1629,13 +1723,13 @@ pub(crate) mod tests {
                 .flat_map(|submission| &submission.sweeps)
                 .find(|sweep| payment_address_of(sweep) == payment)
                 .map_or(U256::ZERO, |sweep| sweep.amount);
-            Ok(SettlementEvent {
+            Ok(Some(SettlementEvent {
                 transaction_hash: B256::repeat_byte(0xCC),
                 block_number: from_block,
                 block_hash: block_hash(from_block),
                 settled: Some(settled),
                 recovered: U256::ZERO,
-            })
+            }))
         }
 
         async fn probe_failure(
@@ -2115,8 +2209,8 @@ pub(crate) mod tests {
 
         assert_eq!(
             chain.state.lock().unwrap().header_requests,
-            1 + 10 * 2,
-            "finality read plus two range-end reads per range"
+            1 + 10 * 2 + 9,
+            "finality read plus two range-end reads per range, plus one cursor re-check per range after the first (the first range has no previous cursor)"
         );
         let row = fetch(&pool, &invoice).await;
         assert_eq!(row.confirmed_received, "50");
@@ -3060,6 +3154,111 @@ pub(crate) mod tests {
                 block_timestamp(3) as i64
             )],
             "the remainder is keyed by the third party's transaction and an empty recover() adds nothing"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn third_party_settlement_is_found_by_paging_through_chunks(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.settlement_events.insert(
+                payment_address(&invoice),
+                SettlementEvent {
+                    transaction_hash: B256::repeat_byte(0xA3),
+                    block_number: 3,
+                    block_hash: block_hash(3),
+                    settled: Some(U256::from(100)),
+                    recovered: U256::from(25),
+                },
+            );
+            // The settlement exists from block 3; ranges ending below it
+            // answer empty, so a scan that stopped at the first empty chunk
+            // would miss it entirely.
+            state
+                .settlement_appears_at
+                .insert(payment_address(&invoice), 3);
+            state.next_outcomes.insert(
+                payment_address(&invoice),
+                SweepOutcome::Collected { amount: U256::ZERO },
+            );
+        }));
+        let mut cfg = config();
+        cfg.log_range_size = 2;
+        let worker = indexer_with(&pool, chain, cfg);
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
+        assert_eq!(row.settlement_tx_hash, Some(vec![0xA3; 32]));
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "25".to_string(),
+                "overpayment".to_string(),
+                vec![0xA3; 32],
+                3,
+                block_timestamp(3) as i64
+            )],
+            "the discovery paged 1..=2, 3..=4 and found the settlement in the second chunk"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn terminal_row_without_a_stored_settlement_still_finds_its_settlement(pool: PgPool) {
+        // A legacy row whose settlement predates the ledger carries no stored
+        // hash: the late drain transaction must not stand in for it, so its
+        // classification still runs the settlement discovery.
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "fulfilled");
+
+        sqlx::query("UPDATE invoices SET settlement_tx_hash = NULL WHERE id = $1")
+            .bind(invoice.id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A repeat payment lands after settlement; `recover()` forwards it.
+        chain.set(|state| {
+            state.latest = 9;
+            state.finalized = 9;
+            state.mine_at = Some(9);
+            state
+                .transfers
+                .push(transfer(payment_address(&invoice), 30, 8, 0));
+            state.next_outcomes.insert(
+                payment_address(&invoice),
+                SweepOutcome::Collected {
+                    amount: U256::from(30),
+                },
+            );
+        });
+        worker.tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+
+        let row = fetch(&pool, &invoice).await;
+        assert_eq!(row.status, "fulfilled");
+        assert_eq!(
+            row.settlement_tx_hash,
+            Some(vec![0xCC; 32]),
+            "the discovered settlement tx backfills the legacy row, never the late drain"
+        );
+        assert_eq!(
+            ledger(&pool, &invoice).await,
+            vec![(
+                "30".to_string(),
+                "late_transfer".to_string(),
+                chain.submissions()[1].tx_hash.to_vec(),
+                9,
+                block_timestamp(9) as i64
+            )]
         );
     }
 

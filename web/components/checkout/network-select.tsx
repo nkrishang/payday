@@ -17,11 +17,16 @@ export function NetworkSelect({
   networks,
   selected,
   onSelect,
+  disabled,
 }: {
   networks: Network[];
   /** The chosen `chain.id`, or null while the payer has not picked one. */
   selected: string | null;
   onSelect: (chainId: string) => void;
+  /** True while a signature or submission is in flight: the choice is
+   * committed at signing time, so the visible selection must not move
+   * underneath an operation that is still completing for the old one. */
+  disabled?: boolean;
 }) {
   return (
     <fieldset>
@@ -38,7 +43,7 @@ export function NetworkSelect({
               type="button"
               role="radio"
               aria-checked={checked}
-              disabled={configured === null}
+              disabled={disabled || configured === null}
               onClick={() => onSelect(network.chain.id)}
               className={cn(
                 "flex w-full items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3 text-left transition-colors",

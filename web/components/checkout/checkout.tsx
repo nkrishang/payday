@@ -103,6 +103,11 @@ function CheckoutBody({
   );
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [chosenChain, chooseChain] = useChosenNetwork(initial.id);
+  // True while a wallet switch, signature, or attestation submission is in
+  // flight: the signature commits the network it started for, so the selector
+  // must not move to another chain mid-operation.
+  const [attesting, setAttesting] = useState(false);
+  const onAttestBusyChange = useCallback((busy: boolean) => setAttesting(busy), []);
   const updateSession = useCallback(
     (token: string | null) => {
       if (token === null) setEmailCodeSent(false);
@@ -201,6 +206,7 @@ function CheckoutBody({
                   networks={unlocked.networks}
                   selected={chosenNetwork?.chain.id ?? null}
                   onSelect={chooseChain}
+                  disabled={attesting}
                 />
               </div>
 
@@ -211,6 +217,7 @@ function CheckoutBody({
                   payerSession={payerSession}
                   onSession={updateSession}
                   onBound={refresh}
+                  onBusyChange={onAttestBusyChange}
                 />
               </div>
             </section>

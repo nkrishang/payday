@@ -182,6 +182,10 @@ variable "chains" {
     error_message = "chains must not list a chain id twice."
   }
   validation {
+    condition     = length(distinct([for c in var.chains : lower(c.factory)])) == 1
+    error_message = "Every chain must name the same factory address: wrong-chain rescue only works when the factory deploys at the identical address everywhere."
+  }
+  validation {
     condition = alltrue([for c in var.chains :
       c.chain_id > 0 && floor(c.chain_id) == c.chain_id
       && can(regex("^0x[0-9a-fA-F]{40}$", c.usdc))
@@ -190,14 +194,15 @@ variable "chains" {
       && can(regex("^0x[0-9a-fA-F]{64}$", c.factory_code_hash))
       && can(regex("^0x[0-9a-fA-F]{64}$", c.batch_sweeper_code_hash))
       && c.factory_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
-      && c.usdc_start_block >= 0
+      && c.batch_sweeper_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
+      && c.usdc_start_block >= 0 && floor(c.usdc_start_block) == c.usdc_start_block
       && contains(["finalized", "latest"], c.finality_source)
-      && c.finality_confirmations >= 0 && c.finality_confirmations <= 10000
-      && c.block_time_ms >= 1
-      && c.log_range_size >= 1 && c.log_range_size <= 10000
+      && c.finality_confirmations >= 0 && c.finality_confirmations <= 10000 && floor(c.finality_confirmations) == c.finality_confirmations
+      && c.block_time_ms >= 1 && floor(c.block_time_ms) == c.block_time_ms
+      && c.log_range_size >= 1 && c.log_range_size <= 10000 && floor(c.log_range_size) == c.log_range_size
       && (c.explorer_base_url == null || can(regex("^https://[^/?#]+/?$", c.explorer_base_url)))
     ])
-    error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any."
+    error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, integral whole-number block counts and times, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any. Both services also require every chain to name the same factory address; wrong-chain rescue only works when it deploys identically everywhere."
   }
 }
 

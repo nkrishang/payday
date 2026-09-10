@@ -99,6 +99,11 @@ impl OnboardingPayerSigner {
         self.chain_id
     }
 
+    /// That chain's USDC.
+    pub fn usdc(&self) -> Address {
+        self.usdc
+    }
+
     /// Sign a raw 32-byte digest (the payer attestation's EIP-712 hash).
     pub async fn sign_hash(&self, digest: &B256) -> Result<Signature, alloy_signer::Error> {
         match &*self.backend {

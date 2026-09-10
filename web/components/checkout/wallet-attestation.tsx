@@ -3,7 +3,7 @@
 import { PaydayError, type Network } from "@payday/sdk";
 import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, PenLine, Wallet } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAccount, useDisconnect, useSignTypedData, useSwitchChain } from "wagmi";
 import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
@@ -37,6 +37,7 @@ export function WalletAttestation({
   payerSession,
   onSession,
   onBound,
+  onBusyChange,
 }: {
   payment: UnlockedPayerDepositRequest;
   /** The network the payer chose, or null while they have not. */
@@ -44,6 +45,9 @@ export function WalletAttestation({
   payerSession: string | null;
   onSession: (token: string | null) => void;
   onBound: () => void;
+  /** Told while a switch, signature, or submission is in flight, so the
+   * network selector can hold the payer's choice until it completes. */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const { address, isConnected, chainId } = useAccount();
   const { disconnect } = useDisconnect();
@@ -96,6 +100,11 @@ export function WalletAttestation({
   ]);
 
   const busy = switching || signing || submitting;
+
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
+
   const label = (() => {
     if (!network) return "Choose a network first";
     if (!isConnected) return "Connect the wallet you will pay from";
