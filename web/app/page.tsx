@@ -37,7 +37,7 @@ export default function Home() {
               Accept <Highlight tone="yellow">stablecoins</Highlight> on
               <br className="hidden lg:block" /> <Highlight tone="green">your terms.</Highlight>
             </h1>
-            <p className="landing-reveal landing-delay-2 mt-7 max-w-[600px] text-[18px] leading-[1.55] text-brand-subtle sm:text-[22px]">
+            <p className="landing-reveal landing-delay-2 mt-7 max-w-[560px] text-[16px] leading-[1.6] text-brand-subtle sm:text-[18px]">
               Create a{" "}
               <strong className="font-medium text-brand-black">
                 one-time programmable address
