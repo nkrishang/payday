@@ -589,6 +589,42 @@ impl TransferSignal {
         }
     }
 
+    /// Wake the reconciler right after this session's subscriptions became
+    /// live. A subscription only covers transfers from the moment the node
+    /// accepted it: a payment that raced the session's establishment (an
+    /// indexer restart with requests already bound), a socket drop, or a
+    /// watch-list refresh that just added a freshly bound address was never
+    /// notified, and without help it would sit unnoticed until the
+    /// reconciler's timer. Read the provider's tip and wake with it: the
+    /// reconciler's catch-up keeps passing until the cursor covers that
+    /// block, and every transfer the subscription could have missed is at or
+    /// below it. A failed read only costs latency — the timer covers the
+    /// gap — so it warns rather than fails the session.
+    async fn wake_unnotified_history(&self, client: &RpcClient, state: &SignalState) {
+        let read = tokio::time::timeout(
+            KEEPALIVE_TIMEOUT,
+            client.request::<(), U64>("eth_blockNumber", ()),
+        )
+        .await;
+        match read {
+            Ok(Ok(tip)) => {
+                let block = tip.to::<u64>();
+                info!(
+                    block,
+                    "transfer signal subscriptions are live; waking the reconciler to cover any transfer they could have missed"
+                );
+                state.wake(block);
+            }
+            Ok(Err(error)) => warn!(
+                error = %redact_urls(&error.to_string()),
+                "could not read the tip after subscribing; the reconciler's timer covers any earlier transfer"
+            ),
+            Err(_) => warn!(
+                "reading the tip after subscribing timed out; the reconciler's timer covers any earlier transfer"
+            ),
+        }
+    }
+
     /// One connection's lifetime: subscribe, forward wakes, keep the socket
     /// alive, follow watch-list changes. Returns when the socket dies or the
     /// process shuts down.
@@ -618,6 +654,9 @@ impl TransferSignal {
             subscriptions = active.chunks.len(),
             "transfer signal connected"
         );
+        if !list.is_empty() {
+            self.wake_unnotified_history(&client, state).await;
+        }
 
         let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -753,6 +792,10 @@ impl TransferSignal {
                     }
                     self.unsubscribe_all(&client, removed_ids).await;
                     info!(watched_addresses = next.len(), subscriptions = active.chunks.len(), removed_subscriptions = removed, "transfer signal watch list updated");
+                    // The addresses this refresh just subscribed were not
+                    // covered by any subscription while the request was being
+                    // bound; a payment in that window was never notified.
+                    self.wake_unnotified_history(&client, state).await;
                     list = next;
                 }
                 changed = shutdown.changed() => {

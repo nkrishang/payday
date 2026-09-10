@@ -618,12 +618,19 @@ detected_in="$(( $(date +%s) - paid_at ))"
 }
 # The elapsed-time bound alone cannot tell the wake path from a well-timed
 # fallback pass, so require the signal's own log trail: the session must have
-# connected, and the deposit must have produced a wake.
+# connected, and detection must have come from a wake. A wake is either the
+# transfer notification itself, or — when the payment landed in the window
+# before the subscription went live (an indexer restart with the request
+# already bound, or a race this tight that CI can lose by milliseconds) — the
+# session's own wake at subscription time, whose catch-up covers everything
+# the subscription could have missed. Only the timer backstop produces
+# neither; with the timer at PAYDAY_INDEXER_RECONCILE_INTERVAL_MS the latency
+# bound above already fails that case, so this is the corroborating trail.
 grep -q 'transfer signal connected' "$logs/indexer.log" || {
   echo "the indexer never connected the transfer signal; the latency bound was met by fallback polling" >&2
   exit 1
 }
-grep -q 'transfer signal wake' "$logs/indexer.log" || {
+grep -qE 'transfer signal wake|transfer signal subscriptions are live' "$logs/indexer.log" || {
   echo "the deposit did not produce a transfer-signal wake; detection came from the timer backstop" >&2
   exit 1
 }
@@ -650,9 +657,15 @@ partial="$(create_invoice 1 "$BENEFICIARY_PARTIAL" 3600 "partial-payment-$run_id
 partial_id="$(jq -r .id <<<"$partial")"
 partial_address="$(jq -r .address <<<"$partial")"
 partial_before="$(token_balance "$BENEFICIARY_PARTIAL")"
+partial_paid_at="$(date +%s)"
 send_usdc "$partial_address" 400000
 assert_eq 400000 "$(token_balance "$partial_address")" "first partial payment was not retained"
 wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "partially_deposited"' "partial credit visible while still open"
+partial_detected_in="$(( $(date +%s) - partial_paid_at ))"
+[[ "$partial_detected_in" -le 8 ]] || {
+  echo "partial deposit detection took ${partial_detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
+  exit 1
+}
 send_usdc "$partial_address" 600000
 wait_for_status "$partial_id" settled
 assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL")" \
