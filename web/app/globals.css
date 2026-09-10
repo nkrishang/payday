@@ -357,6 +357,29 @@
   }
 }
 
+/* Logos drifting past under the hero: one copy's width per cycle, both directions. */
+.landing-marquee {
+  animation: landing-marquee 48s linear infinite;
+}
+
+.landing-marquee-reverse {
+  animation-direction: reverse;
+}
+
+.landing-marquee-fade {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+  mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+}
+
+@keyframes landing-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(-50% - 6px));
+  }
+}
+
 @keyframes landing-stage-fade-in {
   from {
     opacity: 0;

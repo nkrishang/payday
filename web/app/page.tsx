@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { HeroScenes } from "@/components/landing/hero-scenes";
+import { ProofPoints } from "@/components/landing/proof-points";
 import { GetStarted } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
 
@@ -32,7 +33,7 @@ export default function Home() {
       </header>
 
       <main className="flex flex-1 flex-col">
-        <section className="mx-auto grid w-full max-w-[1320px] flex-1 items-center gap-12 px-5 pt-8 pb-16 sm:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16 lg:pt-0 lg:pb-[clamp(48px,12vh,180px)]">
+        <section className="mx-auto grid w-full max-w-[1320px] items-center gap-12 px-5 pt-6 pb-12 sm:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16 lg:pt-2 lg:pb-14">
           <div>
             <h1 className="landing-reveal landing-delay-1 text-[clamp(40px,3.95vw,76px)] leading-[1.12] font-medium tracking-[-0.045em]">
               Accept <Highlight tone="yellow">stablecoins</Highlight> on
@@ -63,6 +64,10 @@ export default function Home() {
             <HeroScenes />
           </div>
         </section>
+
+        <div className="landing-reveal landing-delay-4 pb-14">
+          <ProofPoints />
+        </div>
       </main>
 
       <footer className="landing-reveal landing-delay-4">
