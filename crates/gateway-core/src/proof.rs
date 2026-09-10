@@ -38,9 +38,9 @@ use thiserror::Error;
 
 use crate::{
     Amount, AttributionError, BeneficiaryAddress, CANONICALIZATION, CanonicalIssuanceSnapshot,
-    ChainId, PayerAttestationError, PayerAttestationScope, PayerWalletAttestation,
-    RecoveryAddress, SNAPSHOT_SCHEMA, Salt, attribution_hash, canonical_bytes,
-    predict_payment_address, recompute_salt, verify_payer_attestation,
+    ChainId, PayerAttestationError, PayerAttestationScope, PayerWalletAttestation, RecoveryAddress,
+    SNAPSHOT_SCHEMA, Salt, attribution_hash, canonical_bytes, predict_payment_address,
+    recompute_salt, verify_payer_attestation,
 };
 
 pub const PROOF_VERSION: &str = "payday.proof.v3";
@@ -968,7 +968,10 @@ mod tests {
         );
         assert_eq!(proof.payer_wallet.typed_data.domain.chain_id, 8453);
         let verified = verify_proof(&proof, Some(ATTACHMENT), &[attestor()]).unwrap();
-        assert_eq!(verified.payment_address, binding(&on_base).payment_address.0);
+        assert_eq!(
+            verified.payment_address,
+            binding(&on_base).payment_address.0
+        );
         let on_monad = issued();
         assert_eq!(on_monad.attribution_hash, on_base.attribution_hash);
         assert_ne!(

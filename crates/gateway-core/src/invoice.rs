@@ -272,11 +272,12 @@ impl Invoice {
     /// What the payer's attestation must be for: the chosen network's chain
     /// and factory, and this request's commitment.
     pub fn attestation_scope(&self, chain_id: ChainId) -> Option<PayerAttestationScope> {
-        self.network_for(chain_id).map(|network| PayerAttestationScope {
-            chain_id: network.chain_id.0,
-            factory: network.factory.0,
-            attribution_hash: self.attribution_hash,
-        })
+        self.network_for(chain_id)
+            .map(|network| PayerAttestationScope {
+                chain_id: network.chain_id.0,
+                factory: network.factory.0,
+                attribution_hash: self.attribution_hash,
+            })
     }
 
     /// Derive the binding a verified attestation produces on `chain_id`: the
@@ -451,7 +452,14 @@ mod tests {
             amount,
             expiration_timestamp,
         );
-        Invoice::issue(networks, beneficiary, amount, expiration_timestamp, snapshot).unwrap()
+        Invoice::issue(
+            networks,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+            snapshot,
+        )
+        .unwrap()
     }
 
     fn sample_invoice() -> Invoice {
@@ -827,8 +835,8 @@ mod tests {
             }),
         ];
         for (field, snapshot) in mismatches {
-            let error =
-                Invoice::issue(&networks(), beneficiary, amount, 1_900_000_000, snapshot).unwrap_err();
+            let error = Invoice::issue(&networks(), beneficiary, amount, 1_900_000_000, snapshot)
+                .unwrap_err();
             assert!(
                 matches!(error, AttributionError::SnapshotMismatch { field: f } if f == field),
                 "{field}: {error}"

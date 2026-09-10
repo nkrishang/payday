@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use alloy_eips::eip2718::Encodable2718;
@@ -40,6 +41,7 @@ sol! {
         uint64 expirationTimestamp;
         address recovery;
         bytes32 salt;
+        uint256 chainId;
     }
 
     function executeBatch(Sweep[] sweeps);
@@ -52,8 +54,13 @@ sol! {
     event SweepFailed(address indexed paymentAddress, address indexed token, bytes revertData);
     event SweepRecovered(address indexed paymentAddress, address indexed token, uint256 amount);
     event Settled(address indexed receiver, uint256 amount);
-    event Recovered(address indexed recovery, uint256 amount);
+    event Recovered(address indexed recovery, address indexed token, uint256 amount);
 }
+
+/// Recipients per `eth_getLogs` call when the scan is filtered by the watch
+/// list: one OR-array in `topics[2]`. Providers accept thousands; 500 keeps
+/// every request small and matches the signal's subscription chunk.
+pub const LOG_FILTER_CHUNK: usize = 500;
 
 /// A validated USDC `Transfer` log with the metadata needed for durable ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +280,8 @@ pub struct SweepRequest {
     pub expiration_timestamp: u64,
     pub recovery: Address,
     pub salt: B256,
+    /// The chain the payer chose; part of the address like every other field.
+    pub chain_id: u64,
 }
 
 /// What one helper-transaction item did to its payment address, decoded from
@@ -476,12 +485,15 @@ pub trait ChainClient: Send + Sync {
     /// Canonical header at an exact height; `Transient` if the node lacks it.
     async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError>;
 
-    /// Successful USDC `Transfer` logs in an inclusive block range.
+    /// Successful USDC `Transfer` logs in an inclusive block range: every
+    /// one, or only those addressed to `recipients` (chunked into as many
+    /// calls as the list needs).
     async fn usdc_transfers(
         &self,
         token: Address,
         from_block: u64,
         to_block: u64,
+        recipients: Option<&[Address]>,
     ) -> Result<Vec<UsdcTransfer>, ChainError>;
 
     /// Mined receipt for a helper transaction, or `None` while unmined.
@@ -555,6 +567,9 @@ pub struct AlloyChainClient {
     signer: Address,
     chain_id: u64,
     pacer: RpcPacer,
+    /// Whether this node has been seen omitting `blockTimestamp` from logs,
+    /// so the header fallback is announced once rather than per range.
+    timestamp_fallback_logged: AtomicBool,
 }
 
 /// Spaces outgoing RPC calls at least `min_interval` apart so bursty callers
@@ -625,6 +640,7 @@ impl AlloyChainClient {
             signer,
             chain_id,
             pacer,
+            timestamp_fallback_logged: AtomicBool::new(false),
         })
     }
 
@@ -670,11 +686,42 @@ impl AlloyChainClient {
                     expirationTimestamp: sweep.expiration_timestamp,
                     recovery: sweep.recovery,
                     salt: sweep.salt,
+                    chainId: U256::from(sweep.chain_id),
                 })
                 .collect(),
         }
         .abi_encode()
         .into()
+    }
+
+    /// One `eth_getLogs` for USDC transfers in the range, optionally only to
+    /// `recipients`, validated but not yet timestamped.
+    async fn transfer_logs(
+        &self,
+        token: Address,
+        from_block: u64,
+        to_block: u64,
+        recipients: Option<&[Address]>,
+    ) -> Result<Vec<Log>, ChainError> {
+        let signature = keccak256("Transfer(address,address,uint256)");
+        let mut filter = Filter::new()
+            .address(token)
+            .event_signature(signature)
+            .from_block(from_block)
+            .to_block(to_block);
+        if let Some(recipients) = recipients {
+            filter = filter.topic2(
+                recipients
+                    .iter()
+                    .map(|address| address.into_word())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        self.pacer.acquire().await;
+        self.provider
+            .get_logs(&filter)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getLogs", error))
     }
 
     async fn header(&self, tag: BlockNumberOrTag) -> Result<BlockHeader, ChainError> {
@@ -726,19 +773,52 @@ impl ChainClient for AlloyChainClient {
         token: Address,
         from_block: u64,
         to_block: u64,
+        recipients: Option<&[Address]>,
     ) -> Result<Vec<UsdcTransfer>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
-        let filter = Filter::new()
-            .address(token)
-            .event_signature(signature)
-            .from_block(from_block)
-            .to_block(to_block);
-        self.pacer.acquire().await;
-        let logs = self
-            .provider
-            .get_logs(&filter)
-            .await
-            .map_err(|error| ChainError::rpc("eth_getLogs", error))?;
+        let logs = match recipients {
+            None => {
+                self.transfer_logs(token, from_block, to_block, None)
+                    .await?
+            }
+            // An empty list is a scan for nothing; the caller fast-forwards
+            // instead, but answer honestly if asked.
+            Some([]) => Vec::new(),
+            Some(recipients) => {
+                let mut logs = Vec::new();
+                for chunk in recipients.chunks(LOG_FILTER_CHUNK) {
+                    logs.extend(
+                        self.transfer_logs(token, from_block, to_block, Some(chunk))
+                            .await?,
+                    );
+                }
+                logs
+            }
+        };
+
+        // Monad and Anvil put the block timestamp on the log itself; nodes
+        // that do not (some L2 clients) cost one header read per block that
+        // carries a transfer to us, which the recipient filter keeps rare.
+        let mut timestamps: HashMap<u64, u64> = HashMap::new();
+        for log in &logs {
+            if log.block_timestamp.is_some() {
+                continue;
+            }
+            let Some(number) = log.block_number else {
+                continue;
+            };
+            if timestamps.contains_key(&number) {
+                continue;
+            }
+            if !self.timestamp_fallback_logged.swap(true, Ordering::AcqRel) {
+                tracing::warn!(
+                    chain_id = self.chain_id,
+                    "node omits blockTimestamp from logs; reading a header per transfer-bearing block"
+                );
+            }
+            let header = self.header(BlockNumberOrTag::Number(number)).await?;
+            timestamps.insert(number, header.timestamp);
+        }
 
         logs.into_iter()
             .map(|log| {
@@ -767,18 +847,26 @@ impl ChainClient for AlloyChainClient {
                         "RPC returned USDC log from block {block_number} outside requested range {from_block}..={to_block}"
                     )));
                 }
+                if let Some(recipients) = recipients
+                    && !recipients.contains(&Address::from_word(topics[2]))
+                {
+                    return Err(ChainError::Transient(
+                        "RPC returned a USDC Transfer outside the requested recipient filter"
+                            .to_string(),
+                    ));
+                }
 
                 Ok(UsdcTransfer {
                     block_number,
                     block_hash: log.block_hash.ok_or_else(|| {
                         ChainError::Transient("USDC log missing block hash".to_string())
                     })?,
-                    // The log's own timestamp is the contract this indexer
-                    // relies on; a node that omits it fails loudly here
-                    // instead of silently costing a header read per block.
-                    block_timestamp: log.block_timestamp.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing block timestamp".to_string())
-                    })?,
+                    block_timestamp: log
+                        .block_timestamp
+                        .or_else(|| timestamps.get(&block_number).copied())
+                        .ok_or_else(|| {
+                            ChainError::Transient("USDC log missing block timestamp".to_string())
+                        })?,
                     transaction_hash: log.transaction_hash.ok_or_else(|| {
                         ChainError::Transient("USDC log missing transaction hash".to_string())
                     })?,
@@ -1194,10 +1282,12 @@ mod tests {
             expiration_timestamp: 1_900_000_000,
             recovery,
             salt,
+            chain_id: 8453,
         }]);
 
         let decoded = executeBatchCall::abi_decode(&calldata).unwrap();
         assert_eq!(decoded.sweeps.len(), 1);
+        assert_eq!(decoded.sweeps[0].chainId, U256::from(8453));
         assert_eq!(decoded.sweeps[0].token, token);
         assert_eq!(decoded.sweeps[0].amount, U256::from(5));
         assert_eq!(decoded.sweeps[0].receiver, receiver);
@@ -1245,6 +1335,7 @@ mod tests {
             PAYMENT,
             Recovered {
                 recovery: RECOVERY,
+                token: address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"),
                 amount: U256::from(amount),
             }
             .encode_log_data(),

@@ -158,7 +158,10 @@ fn layout(invoice: &DepositRequestResponse) -> Vec<Line> {
                 .iter()
                 .map(|network| format!("{} ({})", network.chain.name, network.chain.id))
                 .collect();
-            lines.field("Networks", &format!("Payer's choice: {}", offered.join(", ")));
+            lines.field(
+                "Networks",
+                &format!("Payer's choice: {}", offered.join(", ")),
+            );
             lines.field("Token", "Native USDC on the chosen network");
         }
     }

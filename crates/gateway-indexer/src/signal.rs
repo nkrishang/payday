@@ -206,6 +206,9 @@ fn transfer_filter(token: Address, recipients: &[Address]) -> Filter {
 enum SessionEnd {
     Shutdown,
     Failed(String),
+    /// The watch list emptied: nothing to subscribe to, so the socket is
+    /// closed rather than kept alive for nothing. Not a failure: no backoff.
+    Idle,
 }
 
 /// One chunk's forwarded notifications. `Ended` is sent when the
@@ -341,9 +344,28 @@ impl TransferSignal {
             if *shutdown.borrow() {
                 return;
             }
+            // No socket while there is nothing to watch: a chain with no open
+            // bound request costs no keepalives and no notifications. The
+            // reconciler keeps its own (idle) cadence meanwhile.
+            if watch_list.borrow_and_update().is_empty() {
+                tokio::select! {
+                    changed = watch_list.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    _ = shutdown.changed() => return,
+                }
+            }
             let connected_at = tokio::time::Instant::now();
             match self.session(&mut watch_list, &state, &mut shutdown).await {
                 SessionEnd::Shutdown => return,
+                SessionEnd::Idle => {
+                    state.set_connected(false);
+                    backoff = RECONNECT_BACKOFF_BASE;
+                    info!("transfer signal closed: nothing to watch");
+                }
                 SessionEnd::Failed(reason) => {
                     let was_connected = state.is_connected();
                     state.set_connected(false);
@@ -657,6 +679,14 @@ impl TransferSignal {
                     let next = watch_list.borrow_and_update().clone();
                     if next == list {
                         continue;
+                    }
+                    if next.is_empty() {
+                        let ids: Vec<B256> = active.chunks.iter().map(|chunk| chunk.id).collect();
+                        for chunk in &active.chunks {
+                            chunk.task.abort();
+                        }
+                        self.unsubscribe_all(&client, ids).await;
+                        return SessionEnd::Idle;
                     }
                     // Diff by chunk, and never subscribe-then-unsubscribe an
                     // unchanged chunk: Alloy keys a subscription by its full

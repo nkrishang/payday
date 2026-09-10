@@ -860,7 +860,10 @@ mod tests {
         assert!(json["payer_wallet"].is_null());
         assert!(json["recovery_address"].is_null());
         assert!(json["self_settlement"].is_null());
-        assert!(json["chain"].is_null(), "no network until the payer chooses one");
+        assert!(
+            json["chain"].is_null(),
+            "no network until the payer chooses one"
+        );
         assert!(json["token"].is_null());
         assert_eq!(json["networks"].as_array().unwrap().len(), 2);
         assert_eq!(json["status"], "awaiting_deposit");

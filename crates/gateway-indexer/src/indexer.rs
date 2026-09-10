@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use chrono::Duration as ChronoDuration;
-use gateway_core::{ChainId, Invoice, InvoiceStatus, PaymentBinding};
+use gateway_core::{ChainId, FinalitySource, Invoice, InvoiceStatus, PaymentBinding, ScanMode};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
     MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
@@ -43,7 +43,6 @@ use crate::chain::{
     BlockHeader, ChainClient, ChainError, FeeEstimate, PreparedSweepTransaction, SweepOutcome,
     SweepReceipt, SweepRequest, sweep_batch_gas_limit,
 };
-use crate::config::FinalitySource;
 use crate::signal::{SignalState, WatchList};
 
 /// Maximum invoices included in one helper transaction.
@@ -72,11 +71,11 @@ const SWEEP_HEALTH_INTERVAL: Duration = Duration::from_secs(300);
 /// How often the signal's recipient list is checked against the database.
 /// The check is one indexed aggregate; the list itself loads only on change.
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-/// A wake names a block the signal saw a transfer in. If the node's
-/// finalized boundary has not reached it yet, re-read the boundary at this
-/// cadence, up to this many times, before leaving it to the timer. Monad
-/// finalizes within two blocks (under a second), so this is generous.
-const WAKE_CATCHUP_INTERVAL: Duration = Duration::from_millis(300);
+/// A wake names a block the signal saw a transfer in. If the boundary has
+/// not reached it yet, wait the block times the boundary is behind by and
+/// pass again, up to this many times, before leaving it to the timer. Monad
+/// finalizes within two blocks (under a second); an L2 on `latest + N`
+/// needs N blocks, which the first sleep covers in one go.
 const WAKE_CATCHUP_ATTEMPTS: u32 = 16;
 
 /// What one reconcile pass accomplished. `indexed` is the highest block whose
@@ -127,14 +126,22 @@ pub struct IndexerConfig {
     pub usdc_start_block: u64,
     pub finality_source: FinalitySource,
     pub finality_confirmations: u64,
+    /// The chain's block interval; paces the catch-up after a wake.
+    pub block_time: Duration,
+    /// Whether a range scan fetches every USDC transfer or only those to
+    /// the watch list.
+    pub scan: ScanMode,
     pub log_range_size: u64,
     pub max_ranges_per_tick: u64,
-    /// Reconcile cadence while the transfer signal is disconnected or
-    /// disabled, and the sweep worker's cadence always.
+    /// Reconcile cadence while the chain is watched and the transfer signal
+    /// is disconnected or disabled, and the sweep worker's cadence always.
     pub poll_interval: Duration,
-    /// Reconcile cadence while the transfer signal is connected. Wakes from
-    /// the signal run a pass immediately regardless.
+    /// Reconcile cadence while the chain is watched and the transfer signal
+    /// is connected. Wakes from the signal run a pass immediately regardless.
     pub reconcile_interval: Duration,
+    /// Reconcile cadence while nothing is watched: each pass costs two calls
+    /// and only fast-forwards the cursor.
+    pub idle_interval: Duration,
     /// How long after its last change a settled address stays in the
     /// signal's watch list, so a late transfer still wakes the reconciler.
     pub late_watch_window: Duration,
@@ -193,6 +200,24 @@ impl Indexer {
         self.watch_tx.subscribe()
     }
 
+    /// Whether the chain has nothing to watch: no open bound request, no
+    /// uncollected funds, nothing settled within the late window. An idle
+    /// chain is neither scanned nor subscribed to.
+    fn idle(&self) -> bool {
+        self.watch_tx.borrow().is_empty()
+    }
+
+    /// The cadence after a pass: keep going while finalized ranges are left,
+    /// crawl while idle, and otherwise follow the signal's health.
+    fn cadence(&self, summary: Option<&PassSummary>) -> Duration {
+        match summary {
+            Some(summary) if summary.backlog() => Duration::ZERO,
+            _ if self.idle() => self.cfg.idle_interval,
+            _ if self.signal.is_connected() => self.cfg.reconcile_interval,
+            _ => self.cfg.poll_interval,
+        }
+    }
+
     /// Run both loops until `shutdown` is set to `true`. A fatal block-indexer
     /// error is returned so the process supervisor cannot mistake a halted
     /// payment worker for a healthy one; the sweep loop never fails the process.
@@ -229,20 +254,23 @@ impl Indexer {
         // passes; the cadence is simply "this long after the last pass".
         let mut next_pass = Instant::now();
         let mut signal_was_connected = false;
+        let mut was_idle = false;
         loop {
             let connected = self.signal.is_connected();
             if connected != signal_was_connected {
                 info!(
+                    chain_id = self.cfg.chain_id.0,
                     signal_connected = connected,
                     "block indexer cadence changed with transfer signal health"
                 );
                 signal_was_connected = connected;
-                if !connected {
+                if !connected && !self.idle() {
                     // The pass currently scheduled was sized by a healthy
                     // signal; fall back to the polling cadence now rather
                     // than waiting it out. `set_connected(false)` wakes this
                     // loop, so the adjustment is not stranded until the next
-                    // scheduled event.
+                    // scheduled event. An idle chain's signal closes on
+                    // purpose and keeps the idle cadence.
                     next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
                 }
             }
@@ -254,13 +282,21 @@ impl Indexer {
                 // reconnected, because the loop-top comparison below would
                 // not see a drop that was healed in between.
                 _ = self.signal.health_changed() => {
-                    next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
+                    if !self.idle() {
+                        next_pass = next_pass.min(Instant::now() + self.cfg.poll_interval);
+                    }
                     continue;
                 }
                 _ = watch_refresh.tick() => {
                     if let Err(error) = self.refresh_watch_list().await {
                         warn!(error = %error, "watch list refresh failed; retrying");
                     }
+                    // Something to watch appeared on an idle chain: pass now
+                    // rather than at the end of the idle interval.
+                    if was_idle && !self.idle() {
+                        next_pass = Instant::now();
+                    }
+                    was_idle = self.idle();
                     continue;
                 }
                 changed = shutdown.changed() => {
@@ -282,16 +318,12 @@ impl Indexer {
                     None
                 }
             };
-            let cadence = match &summary {
-                // The pass stopped inside the boundary with finalized ranges
-                // left: keep passing now. Each pass is still bounded by the
-                // per-pass range budget, so a catch-up backlog drains as fast
-                // as the budget allows without starving the sweep loop.
-                Some(summary) if summary.backlog() => Duration::ZERO,
-                _ if self.signal.is_connected() => self.cfg.reconcile_interval,
-                _ => self.cfg.poll_interval,
-            };
-            next_pass = Instant::now() + cadence;
+            // A pass with a backlog keeps passing now. Each pass is still
+            // bounded by the per-pass range budget, so a catch-up backlog
+            // drains as fast as the budget allows without starving the sweep
+            // loop.
+            was_idle = self.idle();
+            next_pass = Instant::now() + self.cadence(summary.as_ref());
         }
 
         Ok(())
@@ -387,7 +419,7 @@ impl Indexer {
     ) -> Result<BlockHeader, IndexerError> {
         let margin = self.cfg.finality_confirmations;
         match self.cfg.finality_source {
-            FinalitySource::FinalizedTag => {
+            FinalitySource::Finalized => {
                 let finalized = loop {
                     match self.chain.finalized_header().await {
                         Ok(header) => break header,
@@ -462,6 +494,9 @@ impl Indexer {
     /// saw a transfer in; it is only covered once finality reaches it *and*
     /// the cursor has ingested it — a wake consumed while the range budget
     /// left blocks unindexed would otherwise wait a full cadence for nothing.
+    /// Each wait is sized by how far the boundary trails the target, so a
+    /// chain that finalizes N blocks behind the tip is passed about twice,
+    /// not once per block.
     async fn reconcile(&self, target: Option<u64>) -> Result<PassSummary, IndexerError> {
         let mut summary = self.pass().await?;
         let Some(target) = target else {
@@ -472,7 +507,8 @@ impl Indexer {
             && attempts < WAKE_CATCHUP_ATTEMPTS
         {
             attempts += 1;
-            tokio::time::sleep(WAKE_CATCHUP_INTERVAL).await;
+            let behind = target.saturating_sub(summary.boundary).clamp(1, 1_000);
+            tokio::time::sleep(self.cfg.block_time * behind as u32).await;
             summary = self.pass().await?;
         }
         if summary.indexed < target {
@@ -490,6 +526,13 @@ impl Indexer {
     /// boundary or the per-pass range budget is spent. Reports both the
     /// boundary and how far the cursor got, so the caller can tell a fully
     /// ingested boundary from a budget-limited backlog.
+    ///
+    /// The scan is demand-driven: with nothing on the watch list there is
+    /// nothing a range could contain for us, so the cursor is fast-forwarded
+    /// to the boundary in one commit and no `eth_getLogs` is spent. The watch
+    /// list is (re)loaded after the boundary is read, which is what keeps a
+    /// filtered scan race-free: a request bound after that read was disclosed
+    /// after every block in the range was mined.
     async fn pass(&self) -> Result<PassSummary, IndexerError> {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
@@ -519,6 +562,48 @@ impl Indexer {
             }
         }
 
+        // An unbound request belongs to no chain, so any chain's finalized
+        // clock may close it; the update is idempotent across chains.
+        for invoice_id in self.repo.expire_unbound(boundary_header.timestamp).await? {
+            info!(%invoice_id, block_timestamp = boundary_header.timestamp, "unbound invoice expired");
+        }
+
+        self.refresh_watch_list().await?;
+        let watched: WatchList = self.watch_tx.borrow().clone();
+        if watched.is_empty() {
+            let behind = cursor.is_none_or(|cursor| cursor.block < boundary);
+            if behind {
+                let outcome = self
+                    .repo
+                    .apply_finalized_usdc_range(
+                        self.cfg.chain_id.0,
+                        self.cfg.usdc,
+                        cursor,
+                        boundary,
+                        boundary_header.hash,
+                        boundary_header.timestamp,
+                        &[],
+                    )
+                    .await?;
+                for invoice_id in &outcome.expired {
+                    info!(%invoice_id, block = boundary, block_timestamp = boundary_header.timestamp, "invoice expired");
+                }
+                info!(
+                    from = cursor.map_or(self.cfg.usdc_start_block, |cursor| cursor.block + 1),
+                    to = boundary,
+                    "nothing watched; cursor fast-forwarded without scanning"
+                );
+            }
+            return Ok(PassSummary {
+                boundary,
+                indexed: boundary,
+            });
+        }
+        let recipients = match self.cfg.scan {
+            ScanMode::Full => None,
+            ScanMode::Watched => Some(watched.as_slice()),
+        };
+
         for _ in 0..self.cfg.max_ranges_per_tick {
             let from_block = cursor
                 .map(|cursor| cursor.block.saturating_add(1))
@@ -526,7 +611,10 @@ impl Indexer {
             if from_block > boundary {
                 break;
             }
-            cursor = Some(self.index_range(cursor, from_block, boundary).await?);
+            cursor = Some(
+                self.index_range(cursor, from_block, boundary, recipients)
+                    .await?,
+            );
         }
 
         let indexed = cursor.map_or(self.cfg.usdc_start_block, |cursor| cursor.block);
@@ -540,12 +628,14 @@ impl Indexer {
         Ok(PassSummary { boundary, indexed })
     }
 
-    /// Fetch and commit one bounded range starting at `from_block`.
+    /// Fetch and commit one bounded range starting at `from_block`, every
+    /// USDC transfer or only those to `recipients`.
     async fn index_range(
         &self,
         cursor: Option<IndexerCursor>,
         from_block: u64,
         boundary: u64,
+        recipients: Option<&[Address]>,
     ) -> Result<IndexerCursor, IndexerError> {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
@@ -561,7 +651,7 @@ impl Indexer {
                 .await?;
             let mut transfers = match self
                 .chain
-                .usdc_transfers(self.cfg.usdc, from_block, to_block)
+                .usdc_transfers(self.cfg.usdc, from_block, to_block, recipients)
                 .await
             {
                 Ok(transfers) => transfers,
@@ -926,7 +1016,7 @@ impl Indexer {
                 let probe = self
                     .chain
                     .probe_failure(
-                        invoice.token.0,
+                        binding.network.token.0,
                         payment,
                         invoice.beneficiary.0,
                         binding.recovery.0,
@@ -1071,10 +1161,14 @@ impl Indexer {
                 }
             };
             // The address commits every parameter, so a row that no longer
-            // derives its own address would sweep an address nobody paid.
-            if invoice.factory.0 != self.cfg.factory
-                || invoice.token.0 != self.cfg.usdc
-                || !invoice.address_matches_parameters()
+            // derives its own address would sweep an address nobody paid,
+            // and a row bound to another network is another chain's to sweep.
+            let network = invoice.network().copied();
+            if network.is_none_or(|network| {
+                network.chain_id != self.cfg.chain_id
+                    || network.factory.0 != self.cfg.factory
+                    || network.token.0 != self.cfg.usdc
+            }) || !invoice.address_matches_parameters()
             {
                 self.repo
                     .block_invoice(row.id, "parameters_mismatch")
@@ -1168,12 +1262,13 @@ fn bound(invoice: &Invoice) -> Result<&PaymentBinding, IndexerError> {
 fn sweep_request(invoice: &Invoice) -> Result<SweepRequest, IndexerError> {
     let binding = bound(invoice)?;
     Ok(SweepRequest {
-        token: invoice.token.0,
+        token: binding.network.token.0,
         amount: invoice.amount.0,
         receiver: invoice.beneficiary.0,
         expiration_timestamp: invoice.expiration_timestamp,
         recovery: binding.recovery.0,
         salt: binding.salt.0,
+        chain_id: binding.network.chain_id.0,
     })
 }
 
@@ -1188,8 +1283,8 @@ pub(crate) mod tests {
     use async_trait::async_trait;
     use gateway_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        Party, PayerAttestation, PayerPolicy, RecoveryAddress, TokenAddress, USDC_DECIMALS,
-        sign_payer_attestation, wallet_of,
+        NetworkTerms, Party, PayerAttestation, PayerPolicy, RecoveryAddress, TokenAddress,
+        USDC_DECIMALS, sign_payer_attestation, wallet_of,
     };
     use sqlx::PgPool;
 
@@ -1235,6 +1330,7 @@ pub(crate) mod tests {
             sweep.expiration_timestamp,
             RecoveryAddress(sweep.recovery),
             gateway_core::Salt(sweep.salt),
+            ChainId(sweep.chain_id),
         )
         .0
     }
@@ -1255,6 +1351,9 @@ pub(crate) mod tests {
         finalized: u64,
         transfers: Vec<UsdcTransfer>,
         max_log_range: Option<u64>,
+        /// Every `eth_getLogs` the worker made: the range and the recipient
+        /// filter it carried.
+        log_requests: Vec<(u64, u64, Option<Vec<Address>>)>,
         /// Hash overrides to simulate a reorg at a height.
         hashes: HashMap<u64, B256>,
         receipts: HashMap<B256, SweepReceipt>,
@@ -1382,8 +1481,9 @@ pub(crate) mod tests {
             _token: Address,
             from_block: u64,
             to_block: u64,
+            recipients: Option<&[Address]>,
         ) -> Result<Vec<UsdcTransfer>, ChainError> {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
             let requested = to_block - from_block + 1;
             if state.max_log_range.is_some_and(|max| requested > max) {
                 return Err(ChainError::LogRangeTooLarge(format!(
@@ -1391,10 +1491,16 @@ pub(crate) mod tests {
                     state.max_log_range.unwrap()
                 )));
             }
+            state
+                .log_requests
+                .push((from_block, to_block, recipients.map(<[Address]>::to_vec)));
             Ok(state
                 .transfers
                 .iter()
                 .filter(|transfer| (from_block..=to_block).contains(&transfer.block_number))
+                .filter(|transfer| {
+                    recipients.is_none_or(|recipients| recipients.contains(&transfer.recipient))
+                })
                 .cloned()
                 .collect())
         }
@@ -1587,12 +1693,15 @@ pub(crate) mod tests {
             batch_sweeper: batch_sweeper(),
             usdc: usdc(),
             usdc_start_block: 0,
-            finality_source: FinalitySource::FinalizedTag,
+            finality_source: FinalitySource::Finalized,
             finality_confirmations: 0,
+            block_time: Duration::from_millis(25),
+            scan: ScanMode::Full,
             log_range_size: 100,
             max_ranges_per_tick: 20,
             poll_interval: Duration::from_millis(10),
             reconcile_interval: Duration::from_millis(10),
+            idle_interval: Duration::from_millis(10),
             late_watch_window: Duration::from_secs(30 * 24 * 3600),
             sweep_pending_timeout: Duration::from_secs(60),
             sweep_max_submissions: 3,
@@ -1636,11 +1745,25 @@ pub(crate) mod tests {
         invoice.payment_address().expect("test invoice is bound").0
     }
 
-    /// Issue with a minimal permissionless snapshot and bind the test payer's
-    /// wallet in memory; the document is not what the indexer is exercising.
-    /// `insert` writes the same binding to the row.
-    fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
-        let token = TokenAddress(usdc());
+    /// A second network every test request offers and nobody pays on.
+    const OTHER_CHAIN: ChainId = ChainId(84_532);
+
+    /// Issue with a minimal permissionless snapshot offering the test chain
+    /// and another, unbound: what a request looks like before its payer
+    /// signs. The document is not what the indexer is exercising.
+    fn issue_unbound(amount: u64, expiration: u64) -> Invoice {
+        let networks = vec![
+            NetworkTerms {
+                chain_id: ChainId(CHAIN_ID),
+                token: TokenAddress(usdc()),
+                factory: factory(),
+            },
+            NetworkTerms {
+                chain_id: OTHER_CHAIN,
+                token: TokenAddress(address!("0x036CbD53842c5426634e7929541eC2318f3dCF7e")),
+                factory: factory(),
+            },
+        ];
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01"));
         let amount = Amount(U256::from(amount));
@@ -1653,23 +1776,18 @@ pub(crate) mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
-            factory(),
-            chain_id,
-            token,
+            &networks,
             beneficiary,
             amount,
             expiration,
         );
-        let mut invoice = Invoice::issue(
-            factory(),
-            chain_id,
-            token,
-            beneficiary,
-            amount,
-            expiration,
-            snapshot,
-        )
-        .unwrap();
+        Invoice::issue(&networks, beneficiary, amount, expiration, snapshot).unwrap()
+    }
+
+    /// Issue and bind the test payer's wallet on `chain_id` in memory;
+    /// `insert` writes the same binding to the row.
+    fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
+        let mut invoice = issue_unbound(amount, expiration);
         // A fresh nonce per invoice keeps identical requests at distinct
         // addresses, as a session's challenge would.
         let nonce = keccak256(invoice.id.0.as_bytes());
@@ -1677,7 +1795,7 @@ pub(crate) mod tests {
             PayerAttestation::new(invoice.attribution_hash, payer_wallet(), nonce, expiration);
         let attestation = sign_payer_attestation(&PAYER_KEY, &message, chain_id.0, factory().0);
         let binding = invoice
-            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .bind_payer_wallet(chain_id, attestation, "2026-09-06T00:00:00Z".into())
             .unwrap();
         invoice.binding = Some(binding);
         invoice
@@ -1707,6 +1825,32 @@ pub(crate) mod tests {
             recipient,
             amount: U256::from(amount),
         }
+    }
+
+    /// Insert an issued invoice without binding a wallet to it.
+    async fn insert_unbound(pool: &PgPool, invoice: &Invoice, key: &str) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let account_id = uuid::Uuid::from_u128(1);
+        sqlx::query(
+            r#"INSERT INTO accounts (id, api_key_hash, api_key_hint)
+               VALUES ($1, $2, 'test') ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(account_id)
+        .bind([1_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect("test account should be inserted");
+        let input = CreateInvoiceInput::from_invoice(
+            invoice,
+            gateway_db::AccountId(account_id),
+            key.to_string(),
+            USDC_DECIMALS,
+            invoice.expiration_timestamp,
+            format!("at:{}", invoice.expiration_timestamp),
+        );
+        repo.insert_issued(&input, None)
+            .await
+            .expect("insert should succeed");
     }
 
     async fn insert(pool: &PgPool, invoice: &Invoice, key: &str) {
@@ -1897,6 +2041,8 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn one_tick_drains_many_ranges_up_to_its_budget(pool: PgPool) {
+        // A bound request keeps the chain watched, so every range is scanned.
+        insert(&pool, &make_invoice(100), "watched").await;
         let chain = Arc::new(MockChain::new(1_000));
         let mut cfg = config();
         cfg.log_range_size = 100;
@@ -1930,6 +2076,7 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn a_budget_limited_pass_reports_its_backlog(pool: PgPool) {
+        insert(&pool, &make_invoice(100), "watched").await;
         let chain = Arc::new(MockChain::new(1_000));
         let mut cfg = config();
         cfg.log_range_size = 100;
@@ -2032,12 +2179,16 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn wake_without_a_reachable_target_falls_back_to_the_timer(pool: PgPool) {
+        // Something to watch, or the pass would not scan at all.
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
         let chain = Arc::new(MockChain::new(5).with(|state| state.finalized = 3));
         let worker = indexer(&pool, chain.clone());
         let started = Instant::now();
-        worker.reconcile(Some(50)).await.unwrap();
+        worker.reconcile(Some(5)).await.unwrap();
+        // Each attempt waits the two block times the boundary trails by.
         assert!(
-            started.elapsed() >= WAKE_CATCHUP_INTERVAL * WAKE_CATCHUP_ATTEMPTS,
+            started.elapsed() >= config().block_time * 2 * WAKE_CATCHUP_ATTEMPTS,
             "catch-up is bounded, then the timer takes over"
         );
         assert_eq!(
@@ -2049,6 +2200,100 @@ pub(crate) mod tests {
                 .block,
             3
         );
+    }
+
+    /// The scan is demand-driven: a chain with nothing on its watch list
+    /// spends no `eth_getLogs` and fast-forwards its cursor to the boundary.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn idle_chain_fast_forwards_without_scanning(pool: PgPool) {
+        let stranger = Address::repeat_byte(0x99);
+        let chain = Arc::new(MockChain::new(500).with(|state| {
+            state.transfers = vec![transfer(stranger, 1, 250, 0)];
+        }));
+        let worker = indexer(&pool, chain.clone());
+        assert!(worker.idle(), "nothing is bound yet");
+
+        worker.tick().await.unwrap();
+        let cursor = CursorRepository::new(pool.clone())
+            .get(CHAIN_ID, usdc())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.block, 500, "the cursor jumps to the boundary");
+        assert_eq!(cursor.block_timestamp, Some(block_timestamp(500)));
+        assert!(
+            chain.state.lock().unwrap().log_requests.is_empty(),
+            "an idle chain fetches no logs"
+        );
+        assert_eq!(worker.cadence(None), config().idle_interval);
+
+        // A bound request appears: the next pass scans from where the cursor
+        // stands, and the wake-up found the transfer in the new range.
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
+        chain.set(|state| {
+            state.latest = 510;
+            state.finalized = 510;
+            state
+                .transfers
+                .push(transfer(payment_address(&invoice), 100, 505, 0));
+        });
+        worker.tick().await.unwrap();
+        assert!(!worker.idle());
+        assert_eq!(fetch(&pool, &invoice).await.status, "funded");
+        let requests = chain.state.lock().unwrap().log_requests.clone();
+        assert_eq!(requests, vec![(501, 510, None)]);
+        assert_eq!(worker.cadence(None), config().poll_interval);
+    }
+
+    /// In `watched` mode the range fetch names the watch list, loaded after
+    /// the boundary was read, so a high-volume token costs one small call.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn watched_scan_filters_logs_by_the_watch_list(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert(&pool, &invoice, "key-1").await;
+        let stranger = Address::repeat_byte(0x99);
+        let chain = Arc::new(MockChain::new(3).with(|state| {
+            state.transfers = vec![
+                transfer(stranger, 5, 1, 0),
+                transfer(payment_address(&invoice), 100, 2, 0),
+            ];
+        }));
+        let mut cfg = config();
+        cfg.scan = ScanMode::Watched;
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &invoice).await.status, "funded");
+        let requests = chain.state.lock().unwrap().log_requests.clone();
+        assert_eq!(
+            requests,
+            vec![(0, 3, Some(vec![payment_address(&invoice)]))]
+        );
+    }
+
+    /// A request nobody has bound belongs to no chain, so this chain's
+    /// finalized clock closes it like any other.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn unbound_invoices_expire_on_this_chains_clock(pool: PgPool) {
+        let expiring = issue_unbound(100, block_timestamp(2) + 5);
+        let live = issue_unbound(100, FAR_EXPIRY);
+        insert_unbound(&pool, &expiring, "a").await;
+        insert_unbound(&pool, &live, "b").await;
+        let chain = Arc::new(MockChain::new(2));
+        let worker = indexer(&pool, chain.clone());
+
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &expiring).await.status, "created");
+
+        chain.set(|state| {
+            state.latest = 3;
+            state.finalized = 3;
+        });
+        worker.tick().await.unwrap();
+        assert_eq!(fetch(&pool, &expiring).await.status, "expired");
+        assert_eq!(fetch(&pool, &live).await.status, "created");
+        assert!(fetch(&pool, &expiring).await.chain_id.is_none());
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -2229,6 +2474,7 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn oversized_log_ranges_are_split_and_then_grow(pool: PgPool) {
+        insert(&pool, &make_invoice(100), "watched").await;
         let chain = Arc::new(MockChain::new(10).with(|state| state.max_log_range = Some(2)));
         let mut cfg = config();
         cfg.log_range_size = 8;
@@ -2277,7 +2523,7 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn ignores_invoices_on_other_chains(pool: PgPool) {
-        let invoice = issue(ChainId(1), 100, FAR_EXPIRY); // not CHAIN_ID
+        let invoice = issue(OTHER_CHAIN, 100, FAR_EXPIRY); // not CHAIN_ID
         insert(&pool, &invoice, "key-1").await;
 
         let chain =
@@ -3525,7 +3771,7 @@ pub(crate) mod tests {
     async fn sweep_ignores_invoices_that_are_not_ready(pool: PgPool) {
         let created = make_invoice(100);
         let partial = make_invoice(100);
-        let other_chain = issue(ChainId(1), 100, FAR_EXPIRY);
+        let other_chain = issue(OTHER_CHAIN, 100, FAR_EXPIRY);
         insert(&pool, &created, "a").await;
         insert(&pool, &partial, "b").await;
         insert(&pool, &other_chain, "c").await;

@@ -1058,7 +1058,10 @@ mod tests {
         assert!(chain["indexer"].is_object());
         assert!(chain["sweeper"].is_object());
         let create = &d["components"]["schemas"]["CreateDepositRequest"]["properties"];
-        assert!(create.get("chain_id").is_none(), "the payer chooses the network");
+        assert!(
+            create.get("chain_id").is_none(),
+            "the payer chooses the network"
+        );
         assert!(create.get("token_address").is_none());
         let deposit_request = &d["components"]["schemas"]["DepositRequest"]["properties"];
         assert!(deposit_request["networks"].is_object());

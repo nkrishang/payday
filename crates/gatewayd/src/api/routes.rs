@@ -1887,7 +1887,13 @@ mod tests {
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn the_payer_chooses_the_network(pool: PgPool) {
         let app = app(pool.clone()).await;
-        for (field, value) in [("chain_id", "1"), ("token_address", "0x0000000000000000000000000000000000000000")] {
+        for (field, value) in [
+            ("chain_id", "1"),
+            (
+                "token_address",
+                "0x0000000000000000000000000000000000000000",
+            ),
+        ] {
             let mut body = valid_body();
             body[field] = json!(value);
             let refused = app
@@ -1944,7 +1950,12 @@ mod tests {
             bound["token"]["address"],
             Address::repeat_byte(0x02).to_checksum(None)
         );
-        assert!(bound["deposit_uri"].as_str().unwrap().contains("@2/transfer"));
+        assert!(
+            bound["deposit_uri"]
+                .as_str()
+                .unwrap()
+                .contains("@2/transfer")
+        );
         let merchant = json_body(
             app.clone()
                 .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
@@ -1997,7 +2008,10 @@ mod tests {
         assert!(open["address"].is_null());
         assert!(open["deposit_uri"].is_null());
         assert!(open["payer_wallet"].is_null());
-        assert!(open["chain"].is_null(), "no network until the payer chooses");
+        assert!(
+            open["chain"].is_null(),
+            "no network until the payer chooses"
+        );
         assert_eq!(open["networks"].as_array().unwrap().len(), 2);
         assert_eq!(open["requirements"]["wallet"], "pending");
         assert_eq!(open["requirements"]["complete"], true);
@@ -2123,7 +2137,12 @@ mod tests {
         // The chosen network is now the request's network.
         assert_eq!(bound["chain"]["id"], "1");
         assert_eq!(bound["token"]["address"], Address::ZERO.to_checksum(None));
-        assert!(bound["deposit_uri"].as_str().unwrap().contains("@1/transfer"));
+        assert!(
+            bound["deposit_uri"]
+                .as_str()
+                .unwrap()
+                .contains("@1/transfer")
+        );
         assert!(
             bound["deposit_uri"]
                 .as_str()

@@ -443,7 +443,8 @@ mod tests {
             })
         };
         let registry =
-            ChainRegistry::parse(&serde_json::json!([chain(143), chain(8453)]).to_string()).unwrap();
+            ChainRegistry::parse(&serde_json::json!([chain(143), chain(8453)]).to_string())
+                .unwrap();
         assert_eq!(onboarding_chain(&registry, None).unwrap(), 143);
         assert_eq!(onboarding_chain(&registry, Some(" ")).unwrap(), 143);
         assert_eq!(onboarding_chain(&registry, Some("8453")).unwrap(), 8453);

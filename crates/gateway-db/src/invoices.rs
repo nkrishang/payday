@@ -248,14 +248,14 @@ impl TryFrom<&DbInvoice> for Invoice {
             }
         };
 
-        let networks = row
-            .issuance_snapshot
-            .0
-            .networks()
-            .ok_or(DbInvoiceError::InvalidSnapshot {
-                id: row.id,
-                field: "networks",
-            })?;
+        let networks =
+            row.issuance_snapshot
+                .0
+                .networks()
+                .ok_or(DbInvoiceError::InvalidSnapshot {
+                    id: row.id,
+                    field: "networks",
+                })?;
 
         Ok(Invoice {
             id: InvoiceId(row.id),

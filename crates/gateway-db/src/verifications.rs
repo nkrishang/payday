@@ -977,7 +977,10 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(first.nonce, second.nonce, "each challenge is fresh");
-        assert_eq!(second.chain_id, 8453, "the challenge pins the chain it was minted for");
+        assert_eq!(
+            second.chain_id, 8453,
+            "the challenge pins the chain it was minted for"
+        );
         let found = repo
             .find_active(&session.token, row.id)
             .await

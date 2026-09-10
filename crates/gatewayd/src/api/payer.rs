@@ -191,7 +191,11 @@ pub(crate) fn payer_response(
         .filter(|_| unlocked && payable)
         .map(|binding| deposit_uri(binding, remaining));
     let chain_id = invoice.network().map(|network| network.chain_id.0);
-    let networks: Vec<NetworkDto> = invoice.networks.iter().map(NetworkDto::from_terms).collect();
+    let networks: Vec<NetworkDto> = invoice
+        .networks
+        .iter()
+        .map(NetworkDto::from_terms)
+        .collect();
     let payer_message = invoice.blocked_reason.as_ref().map(|_| {
         "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.".into()
     });

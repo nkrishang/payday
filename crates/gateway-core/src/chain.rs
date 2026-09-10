@@ -147,8 +147,8 @@ impl ChainRegistry {
     }
 
     pub fn parse(json: &str) -> Result<Self, ChainRegistryError> {
-        let chains: Vec<ChainConfig> =
-            serde_json::from_str(json).map_err(|error| ChainRegistryError::Json(error.to_string()))?;
+        let chains: Vec<ChainConfig> = serde_json::from_str(json)
+            .map_err(|error| ChainRegistryError::Json(error.to_string()))?;
         Self::new(chains)
     }
 
@@ -173,7 +173,8 @@ impl ChainRegistry {
 
     /// The terms every new deposit request commits to, in canonical order.
     pub fn networks(&self) -> Vec<NetworkTerms> {
-        let mut networks: Vec<NetworkTerms> = self.chains.iter().map(ChainConfig::network).collect();
+        let mut networks: Vec<NetworkTerms> =
+            self.chains.iter().map(ChainConfig::network).collect();
         networks.sort_by_key(|network| network.chain_id);
         networks
     }
@@ -237,13 +238,19 @@ mod tests {
         let registry = ChainRegistry::parse(&json).unwrap();
         assert_eq!(registry.chains().len(), 2);
         assert_eq!(registry.first().chain_id, 143);
-        assert_eq!(registry.get(8453).unwrap().rpc_url_var(), "PAYDAY_RPC_URL_8453");
+        assert_eq!(
+            registry.get(8453).unwrap().rpc_url_var(),
+            "PAYDAY_RPC_URL_8453"
+        );
         assert_eq!(
             registry.get(8453).unwrap().rpc_ws_url_var(),
             "PAYDAY_RPC_WS_URL_8453"
         );
         assert_eq!(registry.get(1), None);
-        assert_eq!(registry.explorer_base_url(143), Some("https://monadvision.com"));
+        assert_eq!(
+            registry.explorer_base_url(143),
+            Some("https://monadvision.com")
+        );
         let networks = registry.networks();
         assert_eq!(networks[0].chain_id, ChainId(143));
         assert_eq!(networks[1].chain_id, ChainId(8453));

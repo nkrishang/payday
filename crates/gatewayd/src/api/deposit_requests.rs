@@ -403,8 +403,14 @@ pub async fn create_deposit_request(
     snapshot.heading = req.heading.clone();
     snapshot.reference = req.reference.clone();
     snapshot.attachment = requested.attachment.cloned();
-    let invoice = Invoice::issue(&networks, beneficiary, amount, expiration_timestamp, snapshot)
-        .map_err(|error| {
+    let invoice = Invoice::issue(
+        &networks,
+        beneficiary,
+        amount,
+        expiration_timestamp,
+        snapshot,
+    )
+    .map_err(|error| {
         tracing::error!(error = %error, "invoice issuance failed");
         ApiError::internal("failed to issue the invoice")
     })?;

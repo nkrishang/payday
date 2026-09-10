@@ -120,8 +120,9 @@ impl ApiError {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "unsupported_chain",
-            message: "This deposit request cannot be paid on that chain; choose one of its networks"
-                .into(),
+            message:
+                "This deposit request cannot be paid on that chain; choose one of its networks"
+                    .into(),
         }
     }
 
