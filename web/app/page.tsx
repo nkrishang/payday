@@ -22,9 +22,9 @@ export default function Home() {
               width={2800}
               height={1000}
               priority
-              sizes="156px"
+              sizes="100px"
               alt="Payday"
-              className="h-auto w-[132px] sm:w-[156px]"
+              className="h-auto w-[88px] sm:w-[100px]"
             />
           </Link>
         </nav>
@@ -71,9 +71,9 @@ export default function Home() {
               src="/payday-logo-full.png"
               width={2800}
               height={1000}
-              sizes="112px"
+              sizes="72px"
               alt="Payday"
-              className="h-auto w-[112px]"
+              className="h-auto w-[72px]"
             />
             <p className="text-[15px] font-medium">Accept stablecoins on your terms.</p>
           </div>
