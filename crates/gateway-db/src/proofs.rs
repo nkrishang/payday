@@ -79,7 +79,7 @@ mod tests {
                       recipient_address, invoice_id, amount, disposition, disposition_reason)
                    VALUES (1, '\x{token}', {block}, '\x{hash}', 1800000000, '\x{tx}', {index}, 0,
                       '\x{sender}', '\x{recipient}', '{invoice}', '{amount}', '{disposition}', {reason})"#,
-                token = hex_bytes(&issued.token_address),
+                token = hex_bytes(issued.token_address.as_ref().unwrap()),
                 hash = "11".repeat(32),
                 tx = format!("{:02x}", block).repeat(32),
                 sender = "f3".repeat(20),
