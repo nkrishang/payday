@@ -1,33 +1,50 @@
 import { render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { payment } from "@/test/fixtures";
 
+const WITH_EXPLORER = JSON.stringify([
+  {
+    id: 143,
+    name: "Monad",
+    rpcUrl: "https://rpc.example.test",
+    usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+    explorerUrl: "https://monadvision.com",
+  },
+]);
+const WITHOUT_EXPLORER = JSON.stringify([
+  {
+    id: 143,
+    name: "Monad",
+    rpcUrl: "https://rpc.example.test",
+    usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+  },
+]);
+
 /**
- * The explorer is read from the env at import time (lib/config), so each case
- * re-imports the component under its own env.
+ * The chains, with their explorers, are read from the env at import time
+ * (lib/config), so each case re-imports the component under its own env.
  */
-async function importAssetNotice() {
+async function importAssetNotice(chains: string) {
   vi.resetModules();
+  process.env.NEXT_PUBLIC_CHAINS = chains;
   return import("./asset-notice");
 }
 
 describe("AssetNotice", () => {
-  beforeEach(() => {
-    delete process.env.NEXT_PUBLIC_EXPLORER_BASE_URL;
-  });
+  const original = process.env.NEXT_PUBLIC_CHAINS;
 
   afterEach(() => {
     vi.resetModules();
-    delete process.env.NEXT_PUBLIC_EXPLORER_BASE_URL;
+    process.env.NEXT_PUBLIC_CHAINS = original;
   });
 
-  it("keeps the warning to the one sentence, and links the token contract to the explorer's token page", async () => {
-    process.env.NEXT_PUBLIC_EXPLORER_BASE_URL = "https://monadvision.com";
-    const { AssetNotice } = await importAssetNotice();
+  it("keeps the warning to the one sentence, and links the token contract to the chosen chain's explorer", async () => {
+    const { AssetNotice } = await importAssetNotice(WITH_EXPLORER);
 
     render(<AssetNotice payment={payment()} />);
 
     expect(screen.queryByText(/A matching symbol/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/the network you chose/i)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /0x754704/i });
     expect(link).toHaveAttribute(
       "href",
@@ -36,8 +53,8 @@ describe("AssetNotice", () => {
     expect(link).toHaveAttribute("target", "_blank");
   });
 
-  it("shows the bare address when no explorer is configured", async () => {
-    const { AssetNotice } = await importAssetNotice();
+  it("shows the bare address when the chosen chain has no explorer", async () => {
+    const { AssetNotice } = await importAssetNotice(WITHOUT_EXPLORER);
 
     render(<AssetNotice payment={payment()} />);
 

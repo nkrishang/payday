@@ -21,12 +21,21 @@ struct ErrorResponse {
 struct Chain {
     id: String,
     name: String,
+    /// The gas token's symbol on this chain (`MON`, `ETH`).
+    native_symbol: String,
 }
 #[derive(Serialize, ToSchema)]
 struct Token {
     symbol: String,
     address: String,
     decimals: u8,
+}
+/// One network a deposit request can be paid on: the chain and the exact
+/// native USDC contract there.
+#[derive(Serialize, ToSchema)]
+struct Network {
+    chain: Chain,
+    token: Token,
 }
 #[derive(Serialize, ToSchema)]
 struct AsOf {
@@ -35,6 +44,8 @@ struct AsOf {
 }
 #[derive(Serialize, ToSchema)]
 struct SelfSettlement {
+    /// The chain the payer chose; `factory` is the PaymentFactory there.
+    chain_id: String,
     factory: String,
     salt: String,
 }
@@ -123,8 +134,6 @@ struct CreateDepositRequest {
     /// customer is snapshotted in its place. An inline party always wins.
     payer: Option<Party>,
     payer_policy: PayerPolicy,
-    chain_id: Option<String>,
-    token_address: Option<String>,
     /// A `cus_` id of one of your customers.
     customer_id: Option<String>,
     /// The `iss_` id of the saved issuer identity this is issued under.
@@ -149,9 +158,13 @@ struct DepositRequest {
     id: String,
     deposit_url: String,
     status: DepositRequestStatus,
-    chain: Chain,
+    /// Every network the payer may pay on; the request commits to all of
+    /// them and the payer picks one when they sign.
+    networks: Vec<Network>,
+    /// The network the payer chose; null until a wallet is bound.
+    chain: Option<Chain>,
     currency: String,
-    token: Token,
+    token: Option<Token>,
     /// The one-time deposit address; null until the payer attests the
     /// wallet they will pay from, which the address commits to.
     address: Option<String>,
@@ -337,6 +350,8 @@ struct StatusChain {
     name: String,
     finalized_block: Option<String>,
     finalized_at: Option<String>,
+    indexer: StatusIndexer,
+    sweeper: StatusSweeper,
 }
 #[derive(Serialize, ToSchema)]
 struct StatusIndexer {
@@ -349,11 +364,10 @@ struct StatusSweeper {
     state: String,
     queued: i64,
 }
+/// One entry per supported network.
 #[derive(Serialize, ToSchema)]
 struct ServiceStatus {
-    chain: StatusChain,
-    indexer: StatusIndexer,
-    sweeper: StatusSweeper,
+    chains: Vec<StatusChain>,
 }
 #[derive(Deserialize, ToSchema)]
 struct WebhookRequest {
@@ -594,9 +608,15 @@ struct CanonicalIssuanceSnapshot {
     expiration_timestamp: String,
     payer_policy: PayerPolicy,
     attachment: Option<AttachmentCommitment>,
+    /// Every network the request may be paid on, ordered by chain id.
+    networks: Vec<SnapshotNetwork>,
+    receiver_address: String,
+}
+/// One committed network: decimal chain id, EIP-55 USDC and factory.
+#[derive(Serialize, ToSchema)]
+struct SnapshotNetwork {
     chain_id: String,
     token_address: String,
-    receiver_address: String,
     factory_address: String,
 }
 /// EIP-712 typed data as a wallet signs it (`eth_signTypedData_v4`).
@@ -613,9 +633,9 @@ struct PayerAttestationTypedData {
 }
 /// The payer's wallet attestation: the exact typed data the wallet signed
 /// (`{statement, attributionHash, wallet, nonce, expiresAt}` under the
-/// Payday domain), its EIP-712 digest, and the signature. The proof's salt
-/// is `keccak256("PAYDAY_SALT_V2" || attribution_hash || digest)` and the
-/// wallet is the address's recovery term.
+/// Payday domain of the chain the payer chose), its EIP-712 digest, and the
+/// signature. The proof's salt is `keccak256("PAYDAY_SALT_V3" ||
+/// attribution_hash || digest)` and the wallet is the address's recovery term.
 #[derive(Serialize, ToSchema)]
 struct PayerWalletAttestation {
     address: String,
@@ -664,7 +684,7 @@ struct VerificationAttestationPayload {
 }
 /// Payday-attested, not address-committed: verification happens after
 /// issuance. `signature` recovers to `signer` over
-/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V2" || JCS(payload))`.
+/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V3" || JCS(payload))`.
 #[derive(Serialize, ToSchema)]
 struct SignedVerificationAttestation {
     payload: VerificationAttestationPayload,
@@ -680,6 +700,8 @@ struct ProofOfPayment {
     attribution_hash: String,
     payer_wallet: PayerWalletAttestation,
     salt: String,
+    /// The network the payer chose among the snapshot's `networks`; the
+    /// factory and token are that network's.
     chain_id: String,
     factory_address: String,
     payment_address: String,
@@ -1030,8 +1052,19 @@ mod tests {
         let status = &d["components"]["schemas"]["ServiceStatus"]["properties"];
         assert_eq!(
             status.as_object().unwrap().keys().collect::<Vec<_>>(),
-            ["chain", "indexer", "sweeper"]
+            ["chains"]
         );
+        let chain = &d["components"]["schemas"]["StatusChain"]["properties"];
+        assert!(chain["indexer"].is_object());
+        assert!(chain["sweeper"].is_object());
+        let create = &d["components"]["schemas"]["CreateDepositRequest"]["properties"];
+        assert!(
+            create.get("chain_id").is_none(),
+            "the payer chooses the network"
+        );
+        assert!(create.get("token_address").is_none());
+        let deposit_request = &d["components"]["schemas"]["DepositRequest"]["properties"];
+        assert!(deposit_request["networks"].is_object());
         assert_eq!(
             d["paths"]["/v1/deposit-requests"]["post"]["responses"]["200"]["headers"]["Idempotency-Replayed"]
                 ["schema"]["type"],

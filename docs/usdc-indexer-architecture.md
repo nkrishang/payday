@@ -2,10 +2,18 @@
 
 ## Decision
 
-Support only Circle-issued native USDC and own a **confirmation-gated ERC-20 log
-indexer**. Use a QuickNode standard EVM endpoint as the primary JSON-RPC
-provider. Add an independent fallback provider when production availability or
+Support only Circle-issued native USDC, on every network a payer may choose
+(Monad, Base, Arbitrum One), and own a **confirmation-gated ERC-20 log
+indexer** that runs one worker per chain in one process. Use a QuickNode
+standard EVM endpoint per chain as the primary JSON-RPC provider. Add an
+independent fallback provider when production availability or
 cross-provider verification requirements justify it.
+
+A chain is scanned only while it has something to watch. A deposit request
+has no chain until its payer picks one at the wallet step, so a network
+nobody is paying on costs two calls every five minutes and nothing else;
+the request budget follows demand, not the number of chains supported. See
+"Chain registry" and "Demand-driven scanning".
 
 Do not ingest full blocks. Query contiguous block ranges with `eth_getLogs`,
 filtered by the exact USDC proxy address and
@@ -15,12 +23,13 @@ emits this log, including transfers initiated inside smart-contract calls,
 logs, so receipts and traces are unnecessary.
 
 Detection latency comes from a push path, not from the poll cadence: a
-WebSocket `monadLogs` subscription filtered to USDC transfers addressed to our
-own payment addresses wakes the range scan the moment such a transfer
-finalizes. The scan is the only writer and also runs on a slow timer, so the
-request budget is set by the `eth_getLogs` range cap and the block rate, and
-nothing else. See "Acquisition loop" for the two halves and "Build versus
-QuickNode" for why the managed products lose on this chain.
+WebSocket log subscription (`monadLogs` on Monad, `logs` elsewhere)
+filtered to USDC transfers addressed to our own payment addresses wakes the
+range scan the moment such a transfer finalizes. The scan is the only writer
+and also runs on a slow timer, so on an active chain the request budget is
+set by the `eth_getLogs` range cap and the block rate, and nothing else. See
+"Acquisition loop" for the two halves and "Build versus QuickNode" for why
+the managed products lose on these chains.
 
 ## What changes from native currency
 
@@ -57,25 +66,46 @@ implementation address. Circle publishes a different authoritative native-USDC
 address per chain. Bridged assets such as `USDC.e` are not interchangeable with
 Circle-issued native USDC.
 
-Keep a reviewed chain/asset registry containing:
+### Chain registry
 
-- chain ID and genesis hash;
-- Circle native-USDC proxy address;
-- USDC deployment/start block;
-- expected decimals (`6`), verified on-chain at onboarding and startup;
-- PaymentFactory address and expected code identity;
-- BatchSweeper address and expected code identity;
-- finality policy;
-- enabled/halted state and configuration version.
+Both services read one reviewed registry, `PAYDAY_CHAINS`, a JSON array
+parsed by `gateway_core::ChainRegistry` with one entry per network:
+
+| Field | Meaning |
+|---|---|
+| `chain_id` | EVM chain id; the entry's identity and the `PAYDAY_RPC_URL_<chain_id>` secret it reads |
+| `usdc` | Circle's native-USDC proxy on that chain |
+| `factory`, `batch_sweeper` | the contract generation, at the same addresses on every chain |
+| `factory_code_hash`, `batch_sweeper_code_hash` | keccak256 of the runtime bytecode, verified at startup on every chain |
+| `usdc_start_block` | where a fresh database starts indexing |
+| `finality_source` | `finalized` (Monad: the tag is irreversible) or `latest` (Base, Arbitrum: the sequencer's head) |
+| `finality_confirmations` | blocks subtracted from the source; 0 with `finalized`, the accepted reorg margin with `latest` |
+| `block_time_ms` | paces the wake catch-up (below) |
+| `log_range_size` | the `eth_getLogs` range ceiling the provider allows |
+| `explorer_base_url` | optional; the API's address and transaction links |
+
+Registry order is the order the checkout offers networks. The RPC endpoints
+stay out of the registry: `PAYDAY_RPC_URL_<chain_id>` per chain, with
+`PAYDAY_RPC_WS_URL_<chain_id>` overriding the derived WebSocket URL or
+`off` disabling the signal on that chain. Chain display names and native
+gas symbols are a table in `gateway_core::chain`, not configuration.
+
+Every deposit request is issued against the whole registry: its canonical
+snapshot lists each network's chain id, USDC, and factory. The payer's
+chain choice enters the EIP-712 domain (`chainId`, `verifyingContract` =
+that chain's factory) and the CREATE3 deployment salt, and the `Payment`
+constructor refuses to route funds on any other `block.chainid`, so one
+address can never settle on an unintended network.
 
 USDC is upgradeable. Calls execute through a proxy and logs remain emitted from
 the stable proxy address, so implementation upgrades do not require changing the
 log filter. Monitor the proxy's `Upgraded` event and halt at an unreviewed upgrade
 until its transfer/log invariants have been checked.
 
-The API should either remove `token_address` from deposit request creation or require it
-to equal the configured native-USDC proxy exactly. Parse and display six decimal
-places while storing and comparing only integer atomic units.
+Deposit request creation carries no token or chain field; the payer chooses
+among the registry's networks and the token is always that chain's
+native-USDC proxy. Parse and display six decimal places while storing and
+comparing only integer atomic units.
 
 Authoritative references:
 
@@ -115,7 +145,12 @@ unique.
 
 ## Acquisition loop
 
-Block acquisition and sweeping run as independently scheduled workers. The
+One `Indexer` runs per registry chain, in one process, each with its own
+RPC client, transfer signal, cursor row, advisory lock
+(`INDEXER_ADVISORY_LOCK_ID ^ chain_id`), and sweep signer nonce stream (the
+same KMS key, so the same address, on every chain). Any worker's fatal halt
+ends the process and ECS restarts it. Within a chain, block acquisition and
+sweeping run as independently scheduled workers. The
 deposit request table is their durable queue: the acquisition worker atomically commits
 finalized observations, `funded` transitions, and `expired` transitions by
 block timestamp, while the sweep worker claims eligible rows without delaying
@@ -123,10 +158,13 @@ the next log poll. It sends one BatchSweeper transaction for each claimed group
 of up to 20 deposit requests; the finalized receipt's events determine each deposit request's
 outcome (see "Sweep architecture under USDC").
 
-The finality boundary is the node's `finalized` tag (minus an optional margin,
-0 on Monad where the tag is irreversible without a hard fork); each pass
-drains every range up to it, so catch-up throughput does not depend on the
-cadence. State reads that classify outcomes pin a block number whose canonical
+The finality boundary is the chain's `finality_source` minus
+`finality_confirmations`: the node's `finalized` tag with no margin on
+Monad, where the tag is irreversible without a hard fork, and `latest`
+minus a confirmation depth on Base and Arbitrum, whose `finalized` tag
+waits for L1 finality (many minutes) while the sequencer's ordering is
+what the product accepts. Each pass drains every range up to the
+boundary, so catch-up throughput does not depend on the cadence. State reads that classify outcomes pin a block number whose canonical
 hash was verified first, so nothing relies on EIP-1898 block-hash parameters
 being supported by the provider.
 
@@ -141,8 +179,11 @@ Acquisition has two halves that never trust each other:
   subscription; the node accepts thousands). Every matching log is delivered
   once per commit state; the `Finalized`/`Verified` deliveries record the
   block in a lock-free "highest target" cell and nudge the reconciler. A
-  node without `monadLogs` (Anvil) gets the standard `logs` subscription,
-  which fires at proposal. The signal keeps the socket alive with one
+  node without `monadLogs` (Base, Arbitrum, Anvil) gets the standard `logs`
+  subscription, which fires at proposal; the reconciler then waits for the
+  block to fall behind the boundary. While the watch list is empty the
+  signal holds no socket at all (keepalives are the largest idle cost) and
+  connects when the list becomes non-empty. The signal keeps the socket alive with one
   `eth_chainId` every 30 s (verified against the expected chain id), reconnects
   with backoff, and re-subscribes when the watch list changes by chunk diff:
   chunks whose address set is unchanged keep their live subscription, added
@@ -155,28 +196,39 @@ Acquisition has two halves that never trust each other:
 For each pass:
 
 1. Acquire a PostgreSQL advisory lock for ingestion leadership (at startup).
-2. Read the `finalized` header; it is the boundary.
+2. Read the boundary header (`finalized`, or `latest` then the header
+   `finality_confirmations` below it).
 3. Load the durable finalized cursor and verify its hash still matches the
    provider's canonical header at that height.
-4. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
+4. Expire every unbound `created` request whose deadline the boundary's
+   timestamp has passed (a request without a chain has no chain clock, so
+   any chain's pass may expire it; idempotent, indexed).
+5. Load the chain's watch list (below). If it is empty, fast-forward the
+   cursor to the boundary through the same atomic commit with no
+   observations, so expiry transitions and the chain clock still advance,
+   and stop: no `eth_getLogs` is issued.
+6. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
    the range-end header, request `eth_getLogs` for the USDC `Transfer`
-   topic, sort by block number, transaction index, and log index, decode and
-   validate strictly, then read the range-end header again and require the
-   same hash (a change while the logs were in flight is a reorg below
-   finality, reported and retried, never committed).
-5. Take each transfer's block timestamp from the log's own `blockTimestamp`
-   (served by Monad and Anvil; its absence is a transient error, never a
-   silent zero). No header is read per transfer-bearing block.
-6. Intersect unique recipients with known deposit request addresses in one
+   topic with `topics[2]` = the watch list (500 addresses per call), sort
+   by block number, transaction index, and log
+   index, decode and validate strictly, then read the range-end header
+   again and require the same hash (a change while the logs were in flight
+   is a reorg below finality, reported and retried, never committed).
+7. Take each transfer's block timestamp from the log's own `blockTimestamp`
+   (served by Monad and Anvil). A node that omits it costs one header read
+   per distinct transfer-bearing block in the range, cached across the
+   range and warned about once per chain; never a silent zero.
+8. Intersect unique recipients with known deposit request addresses in one
    indexed DB query; status controls projection transitions, not ledger
    retention.
-7. Commit observations, projections, status changes, and cursor advancement in
+9. Commit observations, projections, status changes, and cursor advancement in
    one database transaction per range.
-8. If the pass was a wake whose block is not yet indexed — because finality
-   has not reached it, or because the per-pass range budget stopped the pass
-   short of it — re-read and pass again every 300 ms for up to 16 attempts;
-   Monad finalizes within two blocks, Anvil within two seconds. The timer
-   covers whatever the attempts do not.
+10. If the pass was a wake whose block is not yet indexed — because finality
+    has not reached it, or because the per-pass range budget stopped the pass
+    short of it — sleep `block_time_ms × blocks still ahead` (at least one
+    block time) and pass again, up to 16 attempts; Monad finalizes within
+    two blocks, an L2 after `finality_confirmations` of its blocks. The timer
+    covers whatever the attempts do not.
 
 A trust-boundary note on the range-end header pair: two reads of the same
 hash prove the range end did not move while the logs were in flight, not
@@ -187,14 +239,35 @@ would not be rejected here; the pass trusts the finalized-RPC contract
 header fan-out out of the request budget. Deep suspicion is served by the
 cursor-hash and finalized-reorg halts, not by more header reads.
 
-The watch list the signal subscribes to is every bound address whose request
-is not `fulfilled`/`recovered`, every address with uncollected funds, and
-every address whose request changed within `PAYDAY_INDEXER_LATE_WATCH_DAYS`.
-The reconciler fingerprints that set every two seconds with one indexed
-aggregate (`invoices_watch_open`, `invoices_watch_recent`,
-`invoices_sweep_queue`) and loads the list only when the fingerprint moves.
-The list bounds only the fast path: the reconciler fetches every USDC transfer
-in a range and ledgers a late transfer to any address ever bound.
+### Demand-driven scanning
+
+The watch list, per chain, is every address bound on that chain whose
+request is not `fulfilled`/`recovered`, every address with uncollected
+funds, and every address whose request changed within
+`PAYDAY_INDEXER_LATE_WATCH_DAYS`. The reconciler fingerprints that set every
+two seconds with one indexed aggregate (`invoices_watch_open`,
+`invoices_watch_recent`, `invoices_sweep_queue`) and loads the list only
+when the fingerprint moves.
+
+The list decides three things:
+
+- **Whether to scan.** Empty list: the pass fast-forwards the cursor
+  (step 5) and the chain is *idle*.
+- **The cadence.** Idle: `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes)
+  regardless of socket health, and no socket. Active: 60 s while the
+  signal is connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
+- **The filter.** Every range fetch puts the list in `topics[2]`, 500
+  addresses per call, on every chain. The cost of a range therefore grows
+  with the addresses Payday watches and never with the chain's USDC volume,
+  which no measurement today can bound for tomorrow (an unfiltered scan on
+  a chain whose USDC volume outgrew the provider's result cap would shrink
+  to one-block ranges and multiply the call count by the range cap). The
+  list is loaded *after* the boundary read so the race-freedom argument
+  below still holds. The trade is that a transfer to an address outside
+  the late-watch window (`PAYDAY_INDEXER_LATE_WATCH_DAYS`, a year by
+  default) is not ledgered automatically: `recover(token)` is permissionless
+  and the wrong-network runbook covers it by hand. Widening the window
+  costs one call per 500 addresses per range.
 
 The implementation uses adaptive range sizing up to a configured ceiling (100
 blocks by default). It grows the range by 25% after success and halves it for
@@ -244,15 +317,16 @@ Filter at the provider by:
 - exact USDC proxy address;
 - exact `Transfer` topic0.
 
-The reconciler fetches all USDC transfers in each range and intersects
-recipients in one set-based database query; the call count is fixed by the
-range cap either way, and this keeps the correctness path free of any
-provider-side address list. Measured on Monad mainnet, USDC carries 16–32
-transfers per 100 blocks, so the responses are small.
+- the watch list in `topics[2]`, ≤500 addresses per call (see
+  "Demand-driven scanning").
 
-Only the transfer signal's subscription filters by recipient (`topics[2]`),
-because notifications are billed per message; that list is a latency
-optimisation with no ledger authority (see "Acquisition loop").
+The reconciler still intersects returned recipients with known deposit
+request addresses in one set-based database query and rejects a log whose
+recipient is outside the filter it asked for, so a provider that ignored
+the filter would be caught rather than trusted. The transfer signal's
+subscription uses the same list, because notifications are billed per
+message; that list is a latency optimisation with no ledger authority (see
+"Acquisition loop").
 
 ## Database model
 
@@ -331,14 +405,17 @@ confirmation depth. It has no unconfirmed projection and never sweeps from the
 tip. This is portable across QuickNode-supported EVM chains, but the depth must
 be reviewed for each chain and is not equivalent to economic finality.
 
-Finality is chain-specific:
+Finality is chain-specific and set per registry entry:
 
-- Prefer a meaningful RPC `finalized` tag in a future chain-specific finality
-  adapter where it is reliably supported.
+- Monad: `finalized`, no margin. The tag is irreversible without a hard
+  fork and trails `latest` by two blocks.
+- Base and Arbitrum One: `latest` minus `finality_confirmations` (10 and
+  40 blocks: about 20 and 10 seconds). Their `finalized` tag means L1
+  finality, ten to twenty minutes behind, and the product decision
+  (2026-09-10) is to trust the sequencer's ordering the way every exchange
+  deposit does; the margin absorbs the sequencer's own reorgs. A deeper
+  reorg reaches the cursor hash check and halts the chain.
 - Do not treat `safe` as finality for an irreversible sweep.
-- For an L2, define whether settlement requires sequencer confirmation, L1
-  inclusion, or L1 finalization. The chain's business risk policy—not a generic
-  block count—chooses the boundary.
 - If the product needs faster UX, add a separate `payment_detected` provisional
   projection. It must be reversible and must not authorize sweeping.
 
@@ -467,13 +544,21 @@ Measured facts that decide this (Monad mainnet, September 2026):
 
 ### Owned reconciler plus WebSocket signal — in production
 
-Idle baseline, about 14k calls a day and ~13M credits a month: 1,440
-reconcile passes a day at the 60 s cadence (a finalized header plus a cursor
-check each — 2,880 calls), 2,880 ranges × 3 calls, and 2,880 keepalives.
-Payment activity adds wakes on top — each wake is a pass over
-still-unindexed ranges, and a pass that a wake interrupts at a partially
-filled range repeats its range-end headers — so the true spend scales weakly
-with payment volume instead of being flat. It stays far under the previous
+Per chain and per day (QuickNode calls):
+
+| State | Per pass | Per day |
+|---|---|---|
+| Idle (empty watch list), 5 min cadence | 2 (boundary + cursor check) | ~576, plus ~288 signer-balance checks: ~0.9k |
+| Active Monad (`finalized`), 60 s cadence | 2 + per 100-block range 2 headers + ⌈watched ÷ 500⌉ `eth_getLogs` | ~14k with under 500 watched addresses (2,880 passes-and-checks, 8,640 range calls, 2,880 keepalives) |
+| Active Base or Arbitrum (`latest` − N), 60 s cadence | 3 (latest, boundary, cursor) + per range 2 headers + ⌈watched ÷ 500⌉ `eth_getLogs` | ~7–9k, plus 2,880 keepalives while a socket is up |
+| Signal notifications | one per transfer to us | ≈ 0 |
+
+Three idle chains cost ~2.6k calls a day, against ~14k for the one
+always-scanning chain this replaced. Payment activity adds wakes on top —
+each wake is a pass over still-unindexed ranges, and a pass that a wake
+interrupts at a partially filled range repeats its range-end headers — so
+the true spend scales with how many chains are in use and weakly with
+payment volume, never with the number of chains supported. It stays far under the previous
 fixed-cadence poll with a header read per transfer-bearing block, which cost
 ~130k calls a day (~117M credits a month) at a 5 s latency, and whose header
 fan-out is what tripped the requests-per-second budget. Detection latency is
@@ -483,8 +568,9 @@ Benefits:
 
 - the request budget is set by the range cap and the block rate, not by
   how fast payments must be noticed;
-- provider-native filtering: one contract and one event on the scan, plus
-  the recipient set on the subscription, so idle chains cost nothing extra;
+- provider-native filtering: one contract, one event, and our own recipient
+  set on every scan and subscription, so spend follows Payday's activity and
+  not the chain's, and an idle chain issues no scan and holds no socket;
 - exact control over finality and failure policy; the socket has no ledger
   authority, so its outages degrade latency only;
 - portable: any node with `eth_subscribe("logs")` runs the same code, and
@@ -520,8 +606,9 @@ filter and no inbound endpoint to secure.
 
 Switching acquisition does not change the database ledger, event identity,
 finality gate, sweep rules, or halt-on-finalized-reorg invariant: set
-`PAYDAY_RPC_WS_URL=off` and the reconciler runs on
-`PAYDAY_INDEXER_POLL_INTERVAL_MS` alone, at the cost of latency and calls.
+`PAYDAY_RPC_WS_URL_<chain_id>=off` and that chain's reconciler runs on
+`PAYDAY_INDEXER_POLL_INTERVAL_MS` alone while active, at the cost of latency
+and calls.
 
 ## Verification and operations
 
@@ -532,6 +619,10 @@ Required tests:
 - multiple USDC logs in one transaction;
 - same-block and cross-block partial deposit, exact deposit, and overpayment;
 - wrong token, bridged USDC, wrong chain, and fake `Transfer` emitter ignored;
+- an idle chain fast-forwards without scanning and never holds a socket;
+- every range fetch filters by the list loaded after the boundary read;
+- a wrong-chain `Payment` deployment routes nothing and `recover(token)`
+  returns the balance to the wallet (forge and the two-Anvil e2e);
 - duplicate range replay and crashes around every cursor transaction boundary;
 - adaptive range shrinking, provider failover, and provider disagreement;
 - deposit request creation concurrent with range ingestion;

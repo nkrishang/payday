@@ -1,8 +1,10 @@
-# Deployment runbook (Vercel + AWS + Monad)
+# Deployment runbook (Vercel + AWS + Monad, Base, Arbitrum One)
 
 This is the deployment path for one operator: the web app on Vercel, every
 backend service on AWS through the Terraform in `infra/`, the Auth0 tenant
-through the Terraform in `auth0/`, and the two contracts on Monad mainnet.
+through the Terraform in `auth0/`, and the two contracts, at the same
+addresses, on each network a payer may choose: Monad, Base, and Arbitrum
+One.
 Docker images contain the Rust services; AWS KMS owns the non-exportable
 sweep key and Proof of Payment attestation key. Do not accept a real deposit
 until the final end-to-end test in this runbook succeeds.
@@ -12,8 +14,8 @@ database accordingly: the schema ships as one baseline migration and there
 is no upgrade path from any earlier pre-release database. Every existing
 environment is recreated empty (§7).
 
-One thing Payday holds and two it never does: the sweep signer holds only MON
-for gas; the requested amount moves directly from the deposit address to the
+One thing Payday holds and two it never does: the sweep signer holds only
+gas (MON on Monad, ETH on Base and Arbitrum One); the requested amount moves directly from the deposit address to the
 merchant; and overpayment remainders, expired balances, and late transfers
 go back on-chain to the payer's own attested wallet, which is every deposit
 address's recovery term. Payday custodies no USDC.
@@ -24,7 +26,7 @@ address's recovery term. Payday custodies no USDC.
 |---|---|---|---|
 | Landing page, hosted checkout (`/pay/{id}`), merchant dashboard (`/dashboard`) | Vercel project rooted at `web/` | `payday.sh`, `www.payday.sh` | `web/` |
 | Merchant and payer API (`gatewayd`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gatewayd` |
-| USDC indexer and sweep worker | ECS Fargate service `indexer`, one task, no inbound access | none | `crates/gateway-indexer` |
+| USDC indexer and sweep worker | ECS Fargate service `indexer`, one task running one worker per network, no inbound access | none | `crates/gateway-indexer` |
 | Database | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA | none | `crates/gateway-db/migrations` |
 | Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
 | Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
@@ -32,8 +34,8 @@ address's recovery term. Payday custodies no USDC.
 | Payer deposit request email | Resend, with the API's own key (`resend_api_key`) | `contact@payday.sh` | `infra/` |
 | Merchant sign-in | Privy app (email code, embedded wallet, identity token) | | `docs/authentication.md` |
 | Payer and issuer-mailbox codes | Auth0 tenant (Terraform in `auth0/`) sending through Resend | | `auth0/README.md` |
-| Contracts | `PaymentFactory` + `BatchSweeper`, one generation, on Monad mainnet | | `foundry/` |
-| Monad RPC | QuickNode paid endpoint, stored in Secrets Manager | | |
+| Contracts | `PaymentFactory` + `BatchSweeper`, one generation, at the same addresses on Monad, Base, and Arbitrum One | | `foundry/` |
+| RPC | One QuickNode paid endpoint per network, each its own Secrets Manager secret | | |
 | DNS | `payday.sh` at Vercel DNS; a Route53 public hosted zone for `api.payday.sh` delegated from it | | `infra/` |
 
 The `api` service runs the `gatewayd` image and the `indexer` service runs
@@ -51,17 +53,23 @@ tagged `git-<full SHA>`.
    DNS is hosted. Only `api.payday.sh` is delegated to a Route53 hosted zone
    (§5); everything else, including the SES DKIM records, is a record in
    Vercel DNS.
-4. **QuickNode account** with a paid Monad Mainnet HTTPS endpoint. The
-   indexer needs `eth_blockNumber`, `eth_getLogs`, block lookup, call,
-   transaction submission, and receipt methods.
+4. **QuickNode account** with a paid HTTPS endpoint for each of Monad
+   Mainnet, Base Mainnet, and Arbitrum One. The indexer needs
+   `eth_blockNumber`, `eth_getLogs`, block lookup, call, transaction
+   submission, receipt methods, and `eth_subscribe("logs")` over the
+   derived `wss://` URL.
 5. **GitHub repository.** This repository already satisfies that
    requirement; GitHub Actions runs CI.
-6. **A Monad deployment wallet with MON**, preferably a hardware wallet. A
-   separate encrypted Foundry keystore is acceptable for the ownerless
-   factory's one-time deployment. The KMS sweep signer also needs a
-   deliberately small MON balance after deployment.
-7. **A wallet with a small amount of native Monad USDC** for the production
-   smoke deposit. USDC can come from a supported exchange or bridge.
+6. **A fresh deployment wallet**, funded with a little MON on Monad and a
+   little ETH on Base and on Arbitrum One. It must have sent no transaction
+   on any of the three chains (nonce 0 everywhere) so the generation lands
+   at the same addresses on each (§2); an encrypted Foundry keystore
+   created for this purpose is the simplest way to guarantee that. The KMS
+   sweep signer also needs a deliberately small gas balance on each chain
+   after deployment.
+7. **A wallet with a small amount of native USDC** on each network for the
+   production smoke deposits. USDC can come from a supported exchange or
+   bridge.
 8. **A Privy app** for merchant sign-in, an **Auth0 tenant**, and a **Resend
    account** for the embedded passwordless email code that payers and issuer
    mailboxes prove themselves with, all configured as described in
@@ -101,47 +109,67 @@ Wait until `dig NS api.payday.sh` returns the Route53 nameservers before the
 full Terraform apply, because ACM cannot validate the certificate until the
 delegation is publicly visible.
 
-## Fixed Monad values
+## Fixed values per network
 
-- Chain ID: `143`
-- Native gas token: `MON`
-- [Circle native USDC](https://www.circle.com/multi-chain-usdc/monad):
-  `0x754704Bc059F8C67012fEd69BC8A327a5aafb603`
-- USDC decimals: `6`
+The `chains` list in the tfvars carries these; the payer sees the networks
+in that order. USDC has six decimals on all of them.
+
+| | Monad | Base | Arbitrum One |
+|---|---|---|---|
+| Chain ID | `143` | `8453` | `42161` |
+| Gas token | `MON` | `ETH` | `ETH` |
+| Circle native USDC | `0x754704Bc059F8C67012fEd69BC8A327a5aafb603` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
+| `finality_source` / `finality_confirmations` | `finalized` / `0` | `latest` / `10` | `latest` / `40` |
+| `block_time_ms` | `300` | `2000` | `250` |
+| `log_range_size` | `100` | `10000` | `10000` |
+| Explorer | `https://monadvision.com` | `https://basescan.org` | `https://arbiscan.io` |
+
 - [Monad full finality](https://docs.monad.xyz/monad-arch/consensus/block-states):
-  the node's `finalized` tag is "irreversible without a hard fork", so this
-  stack sets `PAYDAY_FINALITY_SOURCE=finalized` with
-  `PAYDAY_FINALITY_CONFIRMATIONS=0`: a margin would cost a second header
-  read per pass and buy nothing on this chain. `finalized` trails `latest`
-  by two blocks (about 600 ms). `latest` on Monad is the speculatively
+  the node's `finalized` tag is "irreversible without a hard fork", so
+  Monad uses it with no margin: a margin would cost a second header read
+  per pass and buy nothing on this chain. `finalized` trails `latest` by
+  two blocks (about 600 ms). `latest` on Monad is the speculatively
   executed proposed block and is never used for commits.
-- Detection is push-driven: the indexer holds a WebSocket to the same
-  QuickNode endpoint (`wss://` derived from `PAYDAY_RPC_URL`) subscribed to
-  `monadLogs` for USDC transfers to its own payment addresses, and wakes a
-  finalized range scan the moment one finalizes. The scan also runs every
-  `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s) as the backstop and the only
-  writer; the socket has no ledger authority. Expect an idle baseline of
-  about 14k RPC calls a day (~13M credits/month at 30 credits per Monad
-  call), rising weakly with payment volume as wakes add passes over
-  still-unindexed ranges, and `transfer signal connected` in the indexer log
-  after startup.
+- Base and Arbitrum One settle on `latest` minus a confirmation depth
+  (about 20 and 10 seconds): their `finalized` tag means L1 finality, ten
+  to twenty minutes behind, and the product decision is to trust the
+  sequencer's ordering, as exchange deposits do, with the margin absorbing
+  the sequencer's own reorgs. On every chain `eth_getLogs` is filtered to
+  the addresses Payday is watching, 500 per call, so RPC spend follows
+  Payday's activity and not the chain's USDC volume.
+- Detection is push-driven on every chain: while a chain has something to
+  watch, the indexer holds a WebSocket to that chain's QuickNode endpoint
+  (`wss://` derived from `PAYDAY_RPC_URL_<chain_id>`) subscribed to USDC
+  transfers to its own payment addresses (`monadLogs` on Monad, `logs`
+  elsewhere), and wakes a range scan the moment one lands. The scan also
+  runs every `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s) as the backstop
+  and the only writer; the socket has no ledger authority. A chain with
+  nothing to watch holds no socket and only advances its cursor every
+  `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (5 min). Expect about 0.9k calls a day
+  per idle chain, ~14k for an active Monad and ~7–9k for an active L2
+  (`docs/runbooks/quicknode-rpc-limits.md`), and `transfer signal
+  connected` with the `chain_id` in the indexer log once a chain becomes
+  active.
 - [Monad RPC differences](https://docs.monad.xyz/reference/rpc-differences):
-  QuickNode allows 100 blocks per `eth_getLogs` (`PAYDAY_LOG_RANGE_SIZE`),
+  QuickNode allows 100 blocks per `eth_getLogs` (`log_range_size`),
   `eth_getTransactionByHash` returns nothing for a transaction still in
   flight, and the `pending` tag reads like `latest`. The sweep worker
   therefore treats a helper transaction without a receipt after
   `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
   detects a consumed nonce from the signer's mined transaction count.
 - Monad bills the gas *limit*: every helper transaction reserves
-  `100k + 400k × items` gas of MON from the sweep signer.
+  `100k + 400k × items` gas of MON from the sweep signer. Base and
+  Arbitrum bill gas used plus the L1 data fee.
 
-Reconfirm the USDC address against Circle's official contract-address page
+Reconfirm every USDC address against
+[Circle's official contract-address page](https://developers.circle.com/stablecoins/usdc-contract-addresses)
 before every new production environment.
 
 ## Order of operations
 
 1. Install operator tools and verify the AWS account.
-2. Deploy `PaymentFactory` and `BatchSweeper` to Monad.
+2. Deploy `PaymentFactory` and `BatchSweeper` to each network, from one
+   fresh key.
 3. Configure Privy, Resend, and Auth0.
 4. Create Terraform state storage.
 5. Delegate `api.payday.sh` to Route53 (already done for the current
@@ -172,12 +200,22 @@ aws sts get-caller-identity
 Never run production Terraform while authenticated to an account you have not
 explicitly verified.
 
-## 2. Deploy PaymentFactory and BatchSweeper to Monad
+## 2. Deploy PaymentFactory and BatchSweeper to each network
 
 `PaymentFactory` and its immutable `BatchSweeper` helper have no owner or
 privileged administrative key. Use a dedicated deployment wallet rather than
 the KMS sweep key, and retain its transaction record even though it has no
 post-deployment authority.
+
+The generation must sit at the **same addresses on every chain**. A deposit
+address commits to the chain the payer chose, and the `Payment` contract
+refuses to route funds anywhere else; if a payer nevertheless sends USDC to
+that address on another network, it can be returned only by deploying the
+`Payment` there through a factory at the identical address
+(`runbooks/wrong-network-deposit.md`). The deployment script enforces the
+precondition: the deployer must have nonce 0 on the target chain, so the
+factory lands at its nonce-0 CREATE address and the sweeper at nonce 1.
+Use one fresh key and run the script once per chain, in any order.
 
 Every counterfactual deposit address is derived from the factory address, so
 a factory can never be replaced once a real deposit request exists: deploy the
@@ -199,35 +237,46 @@ For an encrypted Foundry keystore:
 cast wallet import payday-deployer --interactive
 ```
 
-Fund the displayed address with enough MON for two contract deployments. Then:
+Fund the displayed address with enough gas for two contract deployments on
+each chain (MON, ETH, ETH). Confirm it is fresh everywhere, then deploy
+chain by chain:
 
 ```bash
-export PAYDAY_CHAIN_ID=143
-export MONAD_RPC_URL='https://your-quicknode-endpoint'
+export MONAD_RPC_URL='https://your-quicknode-monad-endpoint'
+export BASE_RPC_URL='https://your-quicknode-base-endpoint'
+export ARBITRUM_RPC_URL='https://your-quicknode-arbitrum-endpoint'
+for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
+  cast nonce "$(cast wallet address --account payday-deployer)" --rpc-url "$rpc"   # must print 0
+done
 
-forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
-  --rpc-url "$MONAD_RPC_URL" \
-  --account payday-deployer \
-  --broadcast
+PAYDAY_CHAIN_ID=143 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
+  --rpc-url "$MONAD_RPC_URL" --account payday-deployer --broadcast
+PAYDAY_CHAIN_ID=8453 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
+  --rpc-url "$BASE_RPC_URL" --account payday-deployer --broadcast
+PAYDAY_CHAIN_ID=42161 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
+  --rpc-url "$ARBITRUM_RPC_URL" --account payday-deployer --broadcast
 ```
 
-The script aborts if the RPC chain ID is not 143. Save both resulting
-addresses, both deployment transactions, and both code hashes from the script
-output. Verify that code exists at each address and recompute the hashes from
-the chain, which is what the services will compare against:
+The script aborts if the RPC chain ID is not `PAYDAY_CHAIN_ID` or the
+deployer's nonce is not 0. Save both resulting addresses, the deployment
+transactions, and both code hashes from each run; the addresses must be
+identical across the three chains, and the code hashes normally are too.
+Verify that code exists at each address on each chain and recompute the
+hashes from the chain, which is what the services will compare against:
 
 ```bash
-cast code <FACTORY_ADDRESS> --rpc-url "$MONAD_RPC_URL"
-cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$MONAD_RPC_URL"
-cast keccak "$(cast code <FACTORY_ADDRESS> --rpc-url "$MONAD_RPC_URL")"
-cast keccak "$(cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$MONAD_RPC_URL")"
-cast call <BATCH_SWEEPER_ADDRESS> 'factory()(address)' --rpc-url "$MONAD_RPC_URL"
+for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
+  cast keccak "$(cast code <FACTORY_ADDRESS> --rpc-url "$rpc")"
+  cast keccak "$(cast code <BATCH_SWEEPER_ADDRESS> --rpc-url "$rpc")"
+  cast call <BATCH_SWEEPER_ADDRESS> 'factory()(address)' --rpc-url "$rpc"
+done
 ```
 
 An empty `0x` result means deployment verification failed; stop there. The
 `factory()` call must return the factory you just deployed. Configure the
-addresses as `factory_address` and `batch_sweeper_address` and the hashes as
-`factory_code_hash` and `batch_sweeper_code_hash` in Terraform.
+addresses as `factory` and `batch_sweeper` and the hashes as
+`factory_code_hash` and `batch_sweeper_code_hash` in each entry of the
+`chains` list in Terraform.
 
 ## 3. Configure Privy, Resend, and Auth0
 
@@ -286,15 +335,18 @@ names.
 
 ## 6. Choose the first index block and configure Terraform
 
-Immediately before the first deployment, record the current block:
+Immediately before the first deployment, record the current block on each
+chain:
 
 ```bash
 cast block-number --rpc-url "$MONAD_RPC_URL"
+cast block-number --rpc-url "$BASE_RPC_URL"
+cast block-number --rpc-url "$ARBITRUM_RPC_URL"
 ```
 
-Use that value as `usdc_start_block`. No deposit requests can predate the
-first launch, so scanning older USDC transfers would waste RPC requests
-without finding a payable deposit request.
+Use each value as that entry's `usdc_start_block`. No deposit requests can
+predate the first launch, so scanning older USDC transfers would waste RPC
+requests without finding a payable deposit request.
 
 ```bash
 cp infra/terraform.tfvars.example infra/terraform.tfvars
@@ -306,18 +358,21 @@ Replace every placeholder in `terraform.tfvars`, including:
 - `route53_zone_id`, the `api.payday.sh` zone from §5
 - `checkout_base_url = "https://payday.sh"`, the Vercel-hosted site
 - `image_tag = "git-<full commit SHA>"` of the commit you will build in §7
-- deployed `factory_address` and `batch_sweeper_address`, with their
-  `factory_code_hash` and `batch_sweeper_code_hash` from §2
-- current `usdc_start_block`
+- the `chains` list: one entry per network with the deployed `factory`
+  and `batch_sweeper`, their `factory_code_hash` and
+  `batch_sweeper_code_hash` from §2, that chain's `usdc_start_block`, and
+  the fixed values from the table above
 - `privy_app_id`, `auth0_issuer`, `payer_auth0_audience`, and
   `payer_auth0_client_id` from §3
 - `admin_reviewer_id`, who operator decisions are recorded against
 
 `notification_domain_name` and `notification_from_address` default to
-`payday.sh` and `alerts@payday.sh`. Supply the RPC URL without writing it to the tfvars file:
+`payday.sh` and `alerts@payday.sh`. Supply the RPC URLs, one per chain id,
+without writing them to the tfvars file; Terraform stores each as its own
+Secrets Manager secret and injects it as `PAYDAY_RPC_URL_<chain_id>`:
 
 ```bash
-export TF_VAR_rpc_url="$MONAD_RPC_URL"
+export TF_VAR_rpc_urls='{"143":"'"$MONAD_RPC_URL"'","8453":"'"$BASE_RPC_URL"'","42161":"'"$ARBITRUM_RPC_URL"'"}'
 export TF_VAR_resend_api_key="$RESEND_API_KEY"
 ```
 
@@ -426,9 +481,11 @@ export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw kms_key_arn)"
 cast wallet address --aws
 ```
 
-The two addresses must match. Fund it with only enough MON for expected
-sweeps; the worker alarms below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. The signer
-does not custody USDC; it pays gas to invoke the permissionless factory.
+The two addresses must match. It is one address on every chain, and it
+sweeps on every chain, so fund it on each: only enough MON on Monad and ETH
+on Base and Arbitrum One for expected sweeps. The worker alarms per chain
+below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. The signer does not custody USDC; it
+pays gas to invoke the permissionless factory.
 
 ### Attestation signer
 
@@ -455,8 +512,9 @@ The dashboard's onboarding walkthrough can pay one self-issued deposit
 request per account from a Payday-funded wallet. Terraform does not
 provision that key; the endpoint is disabled unless `gatewayd` is given
 `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
-with, funded with a little MON and USDC). Leave it off for launch unless the
-walkthrough is wanted.
+with, funded with a little gas and USDC on the onboarding chain:
+`PAYDAY_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
+it off for launch unless the walkthrough is wanted.
 
 ## 9. Deploy the web app to Vercel
 
@@ -481,18 +539,14 @@ Vercel and a changed value needs a redeploy.
    | Variable | Production value |
    |---|---|
    | `NEXT_PUBLIC_PAYDAY_API_URL` | `https://api.payday.sh` |
-   | `NEXT_PUBLIC_CHAIN_ID` | `143` |
-   | `NEXT_PUBLIC_CHAIN_NAME` | `Monad` |
-   | `NEXT_PUBLIC_RPC_URL` | a public Monad RPC such as `https://rpc.monad.xyz`, never the QuickNode endpoint |
-   | `NEXT_PUBLIC_USDC_ADDRESS` | `0x754704Bc059F8C67012fEd69BC8A327a5aafb603` |
-   | `NEXT_PUBLIC_EXPLORER_BASE_URL` | `https://monadvision.com` |
+   | `NEXT_PUBLIC_CHAINS` | the same three networks as `chains`, as a JSON array of `{id, name, rpcUrl, usdcAddress, explorerUrl, confirmation}` with *public* RPCs (`https://rpc.monad.xyz`, `https://mainnet.base.org`, `https://arb1.arbitrum.io/rpc`), never the QuickNode endpoints; `web/.env.staging` has the exact value |
    | `NEXT_PUBLIC_PRIVY_APP_ID` | the production Privy app ID from §3 |
    | `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` | `https://<attachment_bucket_name>.s3.<region>.amazonaws.com`, from `terraform -chdir=infra output -raw attachment_bucket_name` |
    | `NEXT_PUBLIC_PAYER_APPEAL_EMAIL` | a monitored support address |
    | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | optional; empty offers injected wallets only |
 
-   Do not set `NEXT_PUBLIC_NATIVE_SYMBOL` (it defaults to MON) or
-   `PAYDAY_PRIVY_STUB` (test-only; it replaces Privy with a fake).
+   Do not set `PAYDAY_PRIVY_STUB` (test-only; it replaces Privy with a
+   fake).
 3. Deploy `main`. The first production deployment must be the same commit as
    the images pushed in §7, or a later one whose API contract they still
    satisfy.
@@ -575,12 +629,15 @@ curl --fail -sS "https://api.payday.sh/v1/deposit-requests" \
        "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
-The response's `address` is null until a wallet is bound. Open the returned
-`deposit_url` (on `payday.sh`) in a browser, connect the wallet you will pay
-from, and sign the attestation; `GET /v1/deposit-requests/{id}` then carries
+The response's `chain`, `token`, and `address` are null until a wallet is
+bound, and `networks` lists the three chains. Open the returned
+`deposit_url` (on `payday.sh`) in a browser, choose a network, connect the
+wallet you will pay from (the page switches it to that chain), and sign the
+attestation; `GET /v1/deposit-requests/{id}` then carries `chain`, `token`,
 `address`, `payer_wallet`, and `recovery_address` (the same wallet), and a
 `deposit_request.ready` webhook fires. Pay exactly 0.01 native USDC to that
-address from that wallet. Confirm that:
+address from that wallet on that chain. Repeat once per network before
+accepting real deposits. Confirm that:
 
 1. `GET /v1/deposit-requests/{id}` progresses `awaiting_deposit → deposited →
    settled`, with `received_base_units`, `settlement_tx_hash`, `settled_at`,
@@ -675,19 +732,20 @@ value is inlined at build time.
 A change to `DepositRequest`, `PaymentFactory`, or `BatchSweeper` is a new
 generation, not an update: existing deposit requests are committed to the
 old factory and would never match the new one. Deploy the factory and
-sweeper together (§2), record the new addresses and code hashes, recreate
-the database, update `factory_address`, `batch_sweeper_address`,
-`factory_code_hash`, and `batch_sweeper_code_hash` together, and apply. A
+sweeper together on every chain from a new fresh key (§2), record the new
+addresses and code hashes, recreate the database, update every `chains`
+entry's `factory`, `batch_sweeper`, `factory_code_hash`, and
+`batch_sweeper_code_hash` together, and apply. A
 build configured for one generation refuses to start against another, so a
 half-updated configuration fails closed rather than settling against the
 wrong contracts.
 
 ## Sandbox
 
-The same stack can be instantiated a second time against Monad testnet, see
-[sandbox.md](sandbox.md) and `infra/terraform.sandbox.tfvars.example`. It
-needs its own Terraform state key, `name`, Privy app, Auth0 tenant, RPC
-endpoint, Route53 zone (`api.sandbox.payday.sh`, delegated from Vercel DNS
+The same stack can be instantiated a second time against the testnets
+(Monad testnet, Base Sepolia, Arbitrum Sepolia), see [sandbox.md](sandbox.md)
+and `infra/terraform.sandbox.tfvars.example`. It needs its own Terraform
+state key, `name`, Privy app, Auth0 tenant, RPC endpoints, Route53 zone (`api.sandbox.payday.sh`, delegated from Vercel DNS
 like production's), and Vercel project (for `sandbox.payday.sh`), and it
 sends merchant email from `sandbox.payday.sh` so its SES identity and DKIM
 records never collide with production's. Never plan sandbox variables

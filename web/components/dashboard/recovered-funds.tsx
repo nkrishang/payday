@@ -18,7 +18,9 @@ export function RecoveredFunds({ payment }: { payment: DepositRequest }) {
 
   if (remainder === 0n && returned === 0n && late.length === 0) return null;
 
-  const symbol = payment.token.symbol;
+  const symbol = payment.currency;
+  // Every offered network carries the same six-decimal asset.
+  const decimals = payment.token?.decimals ?? payment.networks[0]?.token.decimals ?? 6;
 
   return (
     <section
@@ -43,7 +45,7 @@ export function RecoveredFunds({ payment }: { payment: DepositRequest }) {
           <li className="flex items-baseline justify-between gap-3 py-2">
             <span className="text-muted">Overpayment remainder at settlement</span>
             <span className="tabular font-medium whitespace-nowrap">
-              {formatBaseUnits(remainder, payment.token.decimals)} {symbol}
+              {formatBaseUnits(remainder, decimals)} {symbol}
             </span>
           </li>
         ) : null}

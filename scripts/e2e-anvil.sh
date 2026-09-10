@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# End-to-end run of the deposit gateway against a local Anvil node.
+# End-to-end run of the deposit gateway against two local Anvil nodes.
 #
 # Anvil is started with one-slot epochs and interval mining so the node's
 # `finalized` tag advances on its own (finalized = latest - 2, one block per
-# second), which is the finality source the indexer uses in production.
+# second), which is the finality source the indexer uses on Monad. The second
+# Anvil (chain 31338) is indexed the way an L2 is: `latest` minus two
+# confirmations. The payer chooses the
+# chain when they sign; the same request can be paid on either.
 # Transactions wait for the next interval block, exactly like a real chain.
 # Every flow below is exercised through the public or operator API; PostgreSQL
 # is consulted only for test-only ledger and queue invariants.
 set -euo pipefail
 
 RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
+CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
+SECOND_RPC_URL="${PAYDAY_SECOND_RPC_URL:-http://127.0.0.1:8546}"
+SECOND_CHAIN_ID="${PAYDAY_SECOND_CHAIN_ID:-31338}"
 API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
 FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
 BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
@@ -44,14 +50,12 @@ export PAYDAY_API_URL="$API_URL"
 # sets it in infra/main.tf). The assertions below read the indexer's log
 # trail, so give every service the same level production runs at.
 export RUST_LOG="${RUST_LOG:-info}"
-export PAYDAY_FACTORY_ADDRESS="$FACTORY"
-export PAYDAY_BATCH_SWEEPER_ADDRESS="$BATCH_SWEEPER"
-export PAYDAY_USDC_ADDRESS="$USDC"
-export PAYDAY_CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
-export PAYDAY_USDC_START_BLOCK="${PAYDAY_USDC_START_BLOCK:-0}"
-export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
-export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
+export "PAYDAY_RPC_URL_${CHAIN_ID}=$RPC_URL"
+export "PAYDAY_RPC_URL_${SECOND_CHAIN_ID}=$SECOND_RPC_URL"
 export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
+# An idle chain fast-forwards its cursor on this cadence; the expiry flow
+# below relies on the chain clock moving within a few seconds.
+export PAYDAY_INDEXER_IDLE_INTERVAL_MS="${PAYDAY_INDEXER_IDLE_INTERVAL_MS:-2000}"
 # The transfer signal runs against Anvil's WebSocket on the same port (derived
 # from the RPC URL, standard `logs` fallback). The timer backstop is kept
 # deliberately slow here so the flows below prove the wake path works: a
@@ -128,13 +132,14 @@ done
 }
 
 wait_for_rpc() {
+  local rpc_url=${1:-$RPC_URL}
   for _ in {1..100}; do
-    if cast chain-id --rpc-url "$RPC_URL" >/dev/null 2>&1; then
+    if cast chain-id --rpc-url "$rpc_url" >/dev/null 2>&1; then
       return
     fi
     sleep 0.1
   done
-  echo "Anvil did not become ready" >&2
+  echo "Anvil at $rpc_url did not become ready" >&2
   return 1
 }
 
@@ -188,24 +193,44 @@ tag_object_scanned() {
     'GuardDutyMalwareScanStatus=NO_THREATS_FOUND' >/dev/null
 }
 
-# gatewayd and the indexer refuse to start unless the deployed runtime bytecode
-# hashes to these values, so they are computed from the freshly bootstrapped
-# chain rather than trusted from the environment.
-pin_deployment_code_hashes() {
-  local factory_code sweeper_code
-  factory_code="$(cast code "$FACTORY" --rpc-url "$RPC_URL")"
-  sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$RPC_URL")"
+
+# One PAYDAY_CHAINS entry for a bootstrapped Anvil: the fixture addresses are
+# the same on every Anvil (account #0's first CREATE addresses), and both
+# services compare the deployed runtime bytecode with the hashes at startup
+# and refuse to start on a mismatch, so the hashes are always read from the
+# running chain. Finality is per chain so the second local chain exercises
+# the L2-shaped path (`latest` plus confirmations).
+chain_entry() {
+  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 factory_code sweeper_code
+  factory_code="$(cast code "$FACTORY" --rpc-url "$rpc_url")"
+  sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$rpc_url")"
   [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
-    echo "no code at PaymentFactory $FACTORY after the bootstrap" >&2
+    echo "no code at PaymentFactory $FACTORY on chain $chain_id; the bootstrap did not deploy it" >&2
     return 1
   }
   [[ -n "$sweeper_code" && "$sweeper_code" != 0x ]] || {
-    echo "no code at BatchSweeper $BATCH_SWEEPER after the bootstrap" >&2
+    echo "no code at BatchSweeper $BATCH_SWEEPER on chain $chain_id; the bootstrap did not deploy it" >&2
     return 1
   }
-  PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$factory_code")"
-  PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$sweeper_code")"
-  export PAYDAY_FACTORY_CODE_HASH PAYDAY_BATCH_SWEEPER_CODE_HASH
+  jq -cn --argjson chain_id "$chain_id" --arg usdc "$USDC" --arg factory "$FACTORY" \
+    --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
+    --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
+    --argjson confirmations "$confirmations" \
+    '{chain_id: $chain_id, usdc: $usdc, factory: $factory, batch_sweeper: $sweeper,
+      factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
+      usdc_start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
+      block_time_ms: 1000, log_range_size: 100}'
+}
+
+# gatewayd and the indexer read PAYDAY_CHAINS and refuse to start unless the
+# deployed runtime bytecode on each chain hashes to the registry's values, so
+# the registry is built from the freshly bootstrapped chains.
+build_chain_registry() {
+  local first second
+  first="$(chain_entry "$CHAIN_ID" "$RPC_URL" finalized 0)"
+  second="$(chain_entry "$SECOND_CHAIN_ID" "$SECOND_RPC_URL" latest 2)"
+  PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
+  export PAYDAY_CHAINS
 }
 
 # Issue a permissionless request and bind the payer's wallet to it, so the
@@ -232,13 +257,14 @@ issue_invoice() {
     "$API_URL/v1/deposit-requests"
 }
 
-# The payer's wallet step, as the hosted checkout performs it: a challenge
-# for the payer's wallet, signed with cast exactly as a wallet signs EIP-712
-# typed data, then attested. A session may be passed for a gated request
+# The payer's wallet step, as the hosted checkout performs it: the payer
+# names the chain they will pay on, asks for a challenge for their wallet,
+# signs it with cast exactly as a wallet signs EIP-712 typed data (under that
+# chain's domain), then attests. A session may be passed for a gated request
 # (one that has verified its mailbox); a permissionless request gets one
 # from the challenge. Prints the session the binding was made in.
 bind_payer_wallet() {
-  local id=$1 session=${2:-} challenge typed signature
+  local id=$1 session=${2:-} chain_id=${3:-$CHAIN_ID} challenge typed signature
   local -a session_header=()
   if [[ -n "$session" ]]; then
     session_header=(--header "Payday-Payer-Session: $session")
@@ -246,9 +272,12 @@ bind_payer_wallet() {
   challenge="$(curl --fail --silent --request POST \
     --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
     ${session_header[@]+"${session_header[@]}"} \
-    --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet}')" \
+    --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$chain_id" '{wallet: $wallet, chain_id: $chain}')" \
     "$API_URL/v1/payer/deposit-requests/$id/wallet/challenge")"
   session="$(jq -er .payer_session <<<"$challenge")"
+  assert_eq "$chain_id" "$(jq -r .chain.id <<<"$challenge")" "the challenge is not for the chosen chain"
+  assert_eq "$chain_id" "$(jq -r .typed_data.domain.chainId <<<"$challenge")" \
+    "the typed data's domain does not name the chosen chain"
   typed="$logs/typed-${id#dr_}.json"
   jq -c .typed_data <<<"$challenge" >"$typed"
   signature="$(cast wallet sign --private-key "$PAYER_KEY" --data --from-file "$typed")"
@@ -299,13 +328,17 @@ wait_for_sql() {
   return 1
 }
 
+# Balances and transfers default to the first chain; pass an RPC URL as the
+# last argument for the second.
 token_balance() {
-  cast call "$USDC" 'balanceOf(address)(uint256)' "$1" --rpc-url "$RPC_URL" | awk '{print $1}'
+  local rpc_url=${2:-$RPC_URL}
+  cast call "$USDC" 'balanceOf(address)(uint256)' "$1" --rpc-url "$rpc_url" | awk '{print $1}'
 }
 
 send_usdc() {
+  local rpc_url=${3:-$RPC_URL}
   cast send "$USDC" 'transfer(address,uint256)' "$1" "$2" \
-    --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
+    --private-key "$PAYER_KEY" --rpc-url "$rpc_url" >/dev/null
 }
 
 set_paused() {
@@ -318,15 +351,16 @@ set_blacklisted() {
 }
 
 # Raw request body for POST /v1/deposit-requests; built with jq so no shell quoting
-# is involved (bash 3.2 brace-expands nested quotes inside "$(...)"). Recovery
-# is not a request field: the platform stamps its own wallet on every deposit request.
-# The document fields are the minimum a deposit request carries: two parties and an
-# open payer policy.
+# is involved (bash 3.2 brace-expands nested quotes inside "$(...)"). Neither
+# recovery nor the chain is a request field: recovery is the payer's attested
+# wallet, and the payer chooses the network when they sign. The document
+# fields are the minimum a deposit request carries: two parties and an open
+# payer policy.
 invoice_body() {
   local amount=$1 beneficiary=$2 expires_in=$3
-  jq -cn --arg chain "$PAYDAY_CHAIN_ID" --arg token "$USDC" --arg beneficiary "$beneficiary" \
+  jq -cn --arg beneficiary "$beneficiary" \
     --arg amount "$amount" --argjson expires_in "$expires_in" \
-    '{chain_id: $chain, token_address: $token, payout_address: $beneficiary,
+    '{payout_address: $beneficiary,
       amount: $amount, expires_in: $expires_in,
       issuer: {name: "Payday E2E Issuer"}, payer: {name: "Payday E2E Customer"},
       payer_policy: {mode: "permissionless"}}'
@@ -421,9 +455,9 @@ assert_eq() {
 }
 
 assert_payment_deployed_and_empty() {
-  local address=$1
-  assert_eq 0 "$(token_balance "$address")" "payment address was not emptied"
-  [[ "$(cast code "$address" --rpc-url "$RPC_URL")" != "0x" ]] || {
+  local address=$1 rpc_url=${2:-$RPC_URL}
+  assert_eq 0 "$(token_balance "$address" "$rpc_url")" "payment address was not emptied"
+  [[ "$(cast code "$address" --rpc-url "$rpc_url")" != "0x" ]] || {
     echo "Payment was not deployed at $address" >&2
     return 1
   }
@@ -437,15 +471,22 @@ assert_process_alive() {
   fi
 }
 
-echo "Starting Anvil (finalized = latest - 2, one block per second) and deploying local fixtures"
-anvil --chain-id "$PAYDAY_CHAIN_ID" --slots-in-an-epoch 1 --block-time 1 --silent \
+echo "Starting two Anvils (finalized = latest - 2, one block per second) and deploying local fixtures on both"
+anvil --chain-id "$CHAIN_ID" --port "${RPC_URL##*:}" --slots-in-an-epoch 1 --block-time 1 --silent \
   >"$logs/anvil.log" 2>&1 &
 anvil_pid=$!
 pids+=("$anvil_pid")
-wait_for_rpc
-forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
-  --rpc-url "$RPC_URL" --private-key "$SIGNER_KEY" --broadcast >/dev/null
-pin_deployment_code_hashes
+anvil --chain-id "$SECOND_CHAIN_ID" --port "${SECOND_RPC_URL##*:}" --slots-in-an-epoch 1 --block-time 1 --silent \
+  >"$logs/anvil-second.log" 2>&1 &
+second_anvil_pid=$!
+pids+=("$second_anvil_pid")
+wait_for_rpc "$RPC_URL"
+wait_for_rpc "$SECOND_RPC_URL"
+for rpc_url in "$RPC_URL" "$SECOND_RPC_URL"; do
+  forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
+    --rpc-url "$rpc_url" --private-key "$SIGNER_KEY" --broadcast >/dev/null
+done
+build_chain_registry
 
 echo "Starting MinIO as the local attachment store"
 start_minio
@@ -485,6 +526,12 @@ zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 36
 assert_eq 400 "$(api_status_code "$zero_beneficiary")" "a zero beneficiary was accepted"
 valid="$(invoice_body 1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 201 "$(api_status_code "$valid")" "a valid request was rejected"
+# The payer, not the merchant, chooses the network: chain fields are unknown
+# to the create route.
+with_chain="$(jq -c --arg chain "$CHAIN_ID" '. + {chain_id: $chain}' <<<"$valid")"
+assert_eq 400 "$(api_status_code "$with_chain")" "a request naming a chain was accepted"
+with_token="$(jq -c --arg token "$USDC" '. + {token_address: $token}' <<<"$valid")"
+assert_eq 400 "$(api_status_code "$with_token")" "a request naming a token was accepted"
 # Merchants do not choose where recovered funds go; the field is unknown to
 # the API and must fail like any other unknown field. The exact code is the
 # API's decision, so only the class is asserted.
@@ -500,7 +547,17 @@ exact_issued="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_
 exact_id="$(jq -er .id <<<"$exact_issued")"
 assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request already has an address"
 assert_eq null "$(jq -r .payer_wallet <<<"$exact_issued")" "a freshly issued request already names a payer wallet"
-assert_eq 2 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
+assert_eq 3 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
+# No network until the payer chooses; the offer lists both local chains.
+assert_eq null "$(jq -r .chain <<<"$exact_issued")" "a freshly issued request already names a chain"
+assert_eq "$CHAIN_ID $SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$exact_issued")" \
+  "the issued request does not offer both networks"
+# A chain the request does not offer is refused before any signature.
+assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet, chain_id: "999"}')" \
+  "$API_URL/v1/payer/deposit-requests/$exact_id/wallet/challenge")" \
+  "a challenge was minted for a chain the request does not offer"
 # The payer's wallet, not the merchant, is what turns the request into an address.
 bind_payer_wallet "$exact_id" >/dev/null
 exact="$(get_invoice "$exact_id")"
@@ -512,6 +569,8 @@ assert_eq "$(lowercase "$PAYER")" "$(jq -r '.payer_wallet | ascii_downcase' <<<"
   "invoice does not name the attested payer wallet"
 assert_eq "$(lowercase "$PAYER")" "$(jq -r '.recovery_address | ascii_downcase' <<<"$exact")" \
   "the recovery term is not the payer's wallet"
+assert_eq "$CHAIN_ID" "$(jq -r .chain.id <<<"$exact")" "the bound request does not name the chosen chain"
+assert_eq "$CHAIN_ID" "$(jq -r .self_settlement.chain_id <<<"$exact")" "self-settlement does not name the chain"
 [[ "$(jq -r .wallet_bound_at <<<"$exact")" != null ]] || {
   echo "the bound request does not record when its wallet was bound" >&2
   exit 1
@@ -522,7 +581,7 @@ wait_for_sql 1 "SELECT count(*) FROM webhook_events
 # The address is final: another wallet cannot take the request.
 assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-  --data "$(jq -cn --arg wallet "$STRANGER" '{wallet: $wallet}')" \
+  --data "$(jq -cn --arg wallet "$STRANGER" --arg chain "$SECOND_CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$exact_id/wallet/challenge")" \
   "a second wallet was offered a challenge on a bound request"
 # The payer page shows the address to anyone with the link, with the wallet it is for.
@@ -559,12 +618,19 @@ detected_in="$(( $(date +%s) - paid_at ))"
 }
 # The elapsed-time bound alone cannot tell the wake path from a well-timed
 # fallback pass, so require the signal's own log trail: the session must have
-# connected, and the deposit must have produced a wake.
+# connected, and detection must have come from a wake. A wake is either the
+# transfer notification itself, or — when the payment landed in the window
+# before the subscription went live (an indexer restart with the request
+# already bound, or a race this tight that CI can lose by milliseconds) — the
+# session's own wake at subscription time, whose catch-up covers everything
+# the subscription could have missed. Only the timer backstop produces
+# neither; with the timer at PAYDAY_INDEXER_RECONCILE_INTERVAL_MS the latency
+# bound above already fails that case, so this is the corroborating trail.
 grep -q 'transfer signal connected' "$logs/indexer.log" || {
   echo "the indexer never connected the transfer signal; the latency bound was met by fallback polling" >&2
   exit 1
 }
-grep -q 'transfer signal wake' "$logs/indexer.log" || {
+grep -qE 'transfer signal wake|transfer signal subscriptions are live' "$logs/indexer.log" || {
   echo "the deposit did not produce a transfer-signal wake; detection came from the timer backstop" >&2
   exit 1
 }
@@ -591,9 +657,15 @@ partial="$(create_invoice 1 "$BENEFICIARY_PARTIAL" 3600 "partial-payment-$run_id
 partial_id="$(jq -r .id <<<"$partial")"
 partial_address="$(jq -r .address <<<"$partial")"
 partial_before="$(token_balance "$BENEFICIARY_PARTIAL")"
+partial_paid_at="$(date +%s)"
 send_usdc "$partial_address" 400000
 assert_eq 400000 "$(token_balance "$partial_address")" "first partial payment was not retained"
 wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "partially_deposited"' "partial credit visible while still open"
+partial_detected_in="$(( $(date +%s) - partial_paid_at ))"
+[[ "$partial_detected_in" -le 8 ]] || {
+  echo "partial deposit detection took ${partial_detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
+  exit 1
+}
 send_usdc "$partial_address" 600000
 wait_for_status "$partial_id" settled
 assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL")" \
@@ -685,8 +757,8 @@ third_salt="$(jq -r .self_settlement.salt <<<"$third")"
 third_expiration="$(jq -r '.expires_at | fromdateiso8601' <<<"$third")"
 send_usdc "$third_address" 2000000
 third_party_tx="$(cast send "$FACTORY" \
-  'execute(address,uint256,address,uint64,address,bytes32)' \
-  "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$third_expiration" "$PAYER" "$third_salt" \
+  'execute(address,uint256,address,uint64,address,bytes32,uint256)' \
+  "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$third_expiration" "$PAYER" "$third_salt" "$CHAIN_ID" \
   --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" --json | jq -r .transactionHash)"
 wait_for_status "$third_id" settled
 assert_eq "$third_party_tx" "$(get_invoice "$third_id" | jq -r .settlement_tx_hash)" \
@@ -751,6 +823,69 @@ assert_eq 0 "$(token_balance "$expired_address")" "late completion stranded at t
 wait_for_sql 1 "$(recovery_ledger_query "$expired_id" late_transfer 600000)" \
   "late completion was not recorded in the recovery ledger"
 
+echo "Testing a request paid on the second network"
+second_issued="$(issue_invoice 0.75 "$BENEFICIARY_EXACT" 3600 "second-network-$run_id")"
+second_id="$(jq -er .id <<<"$second_issued")"
+bind_payer_wallet "$second_id" "" "$SECOND_CHAIN_ID" >/dev/null
+second="$(get_invoice "$second_id")"
+second_address="$(jq -er .address <<<"$second")"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$second")" "the request does not name the second chain"
+[[ "$(jq -r .deposit_uri <<<"$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$second_id")")" == *"@${SECOND_CHAIN_ID}/"* ]] || {
+  echo "the deposit URI does not name the second chain" >&2
+  exit 1
+}
+# The same document bound on the first chain lands elsewhere: the chain is
+# committed into the address like the wallet.
+[[ "$second_address" != "$exact_address" ]] || {
+  echo "the same address was derived for two chains" >&2
+  exit 1
+}
+second_before="$(token_balance "$BENEFICIARY_EXACT" "$SECOND_RPC_URL")"
+paid_at="$(date +%s)"
+send_usdc "$second_address" 750000 "$SECOND_RPC_URL"
+wait_for_status "$second_id" settled
+echo "Second-network deposit settled $(( $(date +%s) - paid_at ))s after payment"
+assert_eq "$((second_before + 750000))" "$(token_balance "$BENEFICIARY_EXACT" "$SECOND_RPC_URL")" \
+  "second-network settlement balance mismatch"
+assert_payment_deployed_and_empty "$second_address" "$SECOND_RPC_URL"
+assert_eq "$(token_balance "$second_address")" 0 "the first chain saw funds for a second-chain address"
+# Idle chains scan nothing at all: the log trail says so.
+grep -q 'nothing watched; cursor fast-forwarded without scanning' "$logs/indexer.log" || {
+  echo "the indexer never fast-forwarded an idle chain" >&2
+  exit 1
+}
+
+echo "Testing that a payment on the wrong chain never settles and can be returned by hand"
+wrong="$(create_invoice 0.5 "$BENEFICIARY_PARTIAL" 3600 "wrong-chain-$run_id")"
+wrong_id="$(jq -er .id <<<"$wrong")"
+wrong_address="$(jq -er .address <<<"$wrong")"
+wrong_salt="$(jq -er .self_settlement.salt <<<"$wrong")"
+wrong_expiration="$(jq -r '.expires_at | fromdateiso8601' <<<"$wrong")"
+assert_eq "$CHAIN_ID" "$(jq -r .chain.id <<<"$wrong")" "the request is not bound to the first chain"
+payer_second_before="$(token_balance "$PAYER" "$SECOND_RPC_URL")"
+# The payer sends the second chain's USDC to an address bound to the first.
+send_usdc "$wrong_address" 500000 "$SECOND_RPC_URL"
+sleep 4
+assert_eq awaiting_deposit "$(get_invoice "$wrong_id" | jq -r .status)" "a wrong-chain transfer was credited"
+assert_eq 0 "$(get_invoice "$wrong_id" | jq -r .received_base_units)" "a wrong-chain transfer counted toward the request"
+# docs/runbooks/wrong-network-deposit.md: the factory sits at the same
+# address on every chain, so the operator deploys the Payment there (the
+# constructor refuses to route anything) and forwards that chain's USDC to
+# the payer's own wallet through the permissionless recover(token).
+cast send "$FACTORY" 'execute(address,uint256,address,uint64,address,bytes32,uint256)' \
+  "$USDC" 500000 "$BENEFICIARY_PARTIAL" "$wrong_expiration" "$PAYER" "$wrong_salt" "$CHAIN_ID" \
+  --private-key "$SIGNER_KEY" --rpc-url "$SECOND_RPC_URL" >/dev/null
+assert_eq false "$(cast call "$wrong_address" 'settled()(bool)' --rpc-url "$SECOND_RPC_URL")" \
+  "a wrong-chain deployment recorded a settlement"
+assert_eq 500000 "$(token_balance "$wrong_address" "$SECOND_RPC_URL")" "the wrong-chain constructor moved funds"
+cast send "$wrong_address" 'recover(address)' "$USDC" --private-key "$SIGNER_KEY" --rpc-url "$SECOND_RPC_URL" >/dev/null
+assert_eq "$payer_second_before" "$(token_balance "$PAYER" "$SECOND_RPC_URL")" \
+  "the wrong-chain balance did not return to the payer's wallet"
+assert_eq 0 "$(token_balance "$BENEFICIARY_PARTIAL" "$SECOND_RPC_URL")" "the receiver was paid on the wrong chain"
+# The request itself is untouched and still payable on the chain it chose.
+send_usdc "$wrong_address" 500000
+wait_for_status "$wrong_id" settled
+
 echo "Checking that every helper transaction batch resolved"
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM sweep_batches WHERE resolved_at IS NULL
@@ -808,7 +943,7 @@ documented_id="$(jq -er .id <<<"$documented")"
 assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
   "issued invoice does not carry the attachment commitment"
 assert_eq "$customer_id" "$(jq -r .customer_id <<<"$documented")" "issued invoice lost its customer"
-assert_eq 2 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
+assert_eq 3 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
 descriptor="$(api_json GET "/v1/deposit-requests/$documented_id/attachment")"
 downloaded="$logs/downloaded.pdf"
 curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"
@@ -858,7 +993,7 @@ gated_before="$(token_balance "$BENEFICIARY_EXACT")"
 # No session, no wallet step: the identity policy comes first.
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-  --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet}')" \
+  --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$gated_id/wallet/challenge")" \
   "a gated request offered a wallet challenge without a verified session"
 gated_session="$(verify_payer_email "$gated_id")"
@@ -927,7 +1062,8 @@ api_json GET "/v1/deposit-requests/$documented_id/request.pdf" "" --output "$inv
 assert_eq "%PDF-" "$(head -c 5 "$invoice_pdf")" "invoice document is not a PDF"
 
 proof="$(api_json GET "/v1/deposit-requests/$exact_id/proof")"
-jq -e '.version == "payday.proof.v2" and .payment_address != null and .salt != null
+jq -e '.version == "payday.proof.v3" and .payment_address != null and .salt != null
+  and .chain_id == $chain and (.canonical_issuance_snapshot.networks | length) == 2
   and .attribution_hash != null and .payer_wallet.signature != null
   and .payer_wallet.typed_data.primaryType == "PayerAttestation"
   and .recovery_address == .payer_wallet.address
@@ -937,7 +1073,7 @@ jq -e '.version == "payday.proof.v2" and .payment_address != null and .salt != n
   and .verification.payload.payer_wallet == $payer
   and (.verification.payload.facts | map(.kind) | index("wallet") != null)
   and .verification.signer == "0x976EA74026E726554dB657fA54763abd0C3a0aa9"' \
-  --arg payer "$PAYER" <<<"$proof" >/dev/null || {
+  --arg payer "$PAYER" --arg chain "$CHAIN_ID" <<<"$proof" >/dev/null || {
   echo "Proof of Payment is incomplete: $(jq -c . <<<"$proof")" >&2
   exit 1
 }
@@ -964,6 +1100,7 @@ assert_eq attachment_rejected "$(api_error_code POST "/v1/attachments/$rejected_
   "rejected upload reported the wrong error"
 
 assert_process_alive Anvil "$anvil_pid"
+assert_process_alive "second Anvil" "$second_anvil_pid"
 assert_process_alive gatewayd "$gatewayd_pid"
 assert_process_alive gateway-indexer "$indexer_pid"
 

@@ -33,8 +33,10 @@ term (`recovery_address`), where overpayment remainders, expired balances,
 and late transfers return on-chain. The binding raises a `deposit_request.ready`
 webhook. Recovery is never a request field, so a request carrying
 `refund_address` is rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
-both for a 24-hour lifetime. `chain_id` and `token_address` default to the
-configured chain and USDC contract.
+both for a 24-hour lifetime. There is no chain or token field: the request
+offers every supported network (`networks`), and the payer chooses one on
+the hosted checkout when they sign; `chain` and `token` are `null` until
+then.
 
 Every immutable field, including the attachment's hash, takes part in
 idempotency: reusing a key with a different document returns

@@ -2,10 +2,11 @@
 //!
 //! Called by Foundry's `vm.ffi` in `PaymentAddress.t.sol`.
 //!
-//! Usage: `derive-address <factory> <token> <amount> <receiver> <expiration> <recovery> <salt>`
+//! Usage: `derive-address <factory> <token> <amount> <receiver> <expiration> <recovery> <salt> <chain-id>`
 //!
-//! All arguments are hex strings (0x-prefixed), except `<amount>` which is a
-//! decimal string (matching Solidity's `vm.toString(uint256)` output).
+//! All arguments are hex strings (0x-prefixed), except `<amount>` and
+//! `<chain-id>` which are decimal strings (matching Solidity's
+//! `vm.toString(uint256)` output).
 //! Prints the derived payment address as a 0x-prefixed hex string to stdout.
 
 use std::io::Write;
@@ -14,14 +15,15 @@ use alloy_primitives::{Address, B256, U256};
 
 use gateway_core::predict_payment_address;
 use gateway_core::{
-    Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
+    Amount, BeneficiaryAddress, ChainId, FactoryAddress, PaymentAddress, RecoveryAddress, Salt,
+    TokenAddress,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 8 {
+    if args.len() != 9 {
         eprintln!(
-            "Usage: derive-address <factory> <token> <amount> <receiver> <expiration> <recovery> <salt>"
+            "Usage: derive-address <factory> <token> <amount> <receiver> <expiration> <recovery> <salt> <chain-id>"
         );
         std::process::exit(1);
     }
@@ -47,6 +49,9 @@ fn main() {
     let salt: B256 = args[7]
         .parse()
         .unwrap_or_else(|e| panic!("invalid salt '{}': {e}", args[7]));
+    let chain_id: u64 = args[8]
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid chain id '{}': {e}", args[8]));
 
     let payment_address: PaymentAddress = predict_payment_address(
         FactoryAddress(factory),
@@ -56,6 +61,7 @@ fn main() {
         expiration_timestamp,
         RecoveryAddress(recovery),
         Salt(salt),
+        ChainId(chain_id),
     );
 
     // Use write! (no trailing newline) so vm.ffi output is clean for vm.parseAddress.

@@ -14,8 +14,8 @@ import {
   useWriteContract,
 } from "wagmi";
 import { Button } from "@/components/ui/button";
-import { paydayChain } from "@/lib/chain";
-import { config } from "@/lib/config";
+import { wagmiChain } from "@/lib/chain";
+import { chainById } from "@/lib/config";
 import { formatBaseUnits, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { ConnectSheet } from "./connect-sheet";
 import { walletErrorMessage } from "./wallet-errors";
@@ -26,14 +26,15 @@ const ZERO = "0x0000000000000000000000000000000000000000" as const;
  * Paying in the page is a plain ERC-20 transfer to the deposit request's one-time
  * address — no approval, no contract call, nothing that can redirect funds.
  *
- * Two invariants are enforced here rather than trusted:
+ * Three invariants are enforced here rather than trusted:
  *
  * 1. The amount is `remaining_base_units` read straight off the newest deposit request
  *    at the moment of signing. It is never re-derived from the display string
  *    and never taken from a stale render.
- * 2. The chain and token contract are checked against this deployment's
- *    configured values before the button will do anything, so a wrong or
- *    tampered response cannot get a signature for an unexpected token.
+ * 2. The chain the payer chose and its token contract are checked against
+ *    this deployment's configured values before the button will do anything,
+ *    so a wrong or tampered response cannot get a signature for an
+ *    unexpected token, and the wallet is switched to that chain first.
  * 3. The connected wallet must be the one the payer attested. The address
  *    commits to that wallet and the indexer credits only its transfers, so
  *    the button refuses to send from any other rather than let money arrive
@@ -55,9 +56,12 @@ export function WalletPay({
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<Hex | null>(null);
 
-  const chainMatches = payment.chain.id === String(config.chainId);
-  const tokenMatches = payment.token.address.toLowerCase() === config.usdcAddress;
-  const supported = chainMatches && tokenMatches;
+  const configured = chainById(payment.chain.id);
+  const target = wagmiChain(payment.chain.id);
+  const tokenMatches =
+    configured !== null && payment.token.address.toLowerCase() === configured.usdcAddress;
+  const supported = configured !== null && target !== null && tokenMatches;
+  const targetId = target?.id ?? 0;
   const walletMatches =
     !isConnected || !address || address.toLowerCase() === payment.payer_wallet.toLowerCase();
 
@@ -66,20 +70,20 @@ export function WalletPay({
     abi: erc20Abi,
     functionName: "balanceOf",
     args: [address ?? ZERO],
-    chainId: paydayChain.id,
+    chainId: targetId,
     query: { enabled: Boolean(address) && supported },
   });
 
   const gas = useBalance({
     address,
-    chainId: paydayChain.id,
+    chainId: targetId,
     query: { enabled: Boolean(address) && supported },
   });
 
   const receipt = useWaitForTransactionReceipt({
     hash: txHash ?? undefined,
-    chainId: paydayChain.id,
-    query: { enabled: txHash !== null },
+    chainId: targetId,
+    query: { enabled: txHash !== null && supported },
   });
 
   const confirmed = txHash !== null && receipt.data?.status === "success";
@@ -101,6 +105,7 @@ export function WalletPay({
   const pay = useCallback(async () => {
     setError(null);
 
+    if (!target) return;
     if (!isConnected) {
       setConnectOpen(true);
       return;
@@ -110,8 +115,8 @@ export function WalletPay({
     try {
       setTxHash(null);
 
-      if (chainId !== paydayChain.id) {
-        await switchChainAsync({ chainId: paydayChain.id });
+      if (chainId !== target.id) {
+        await switchChainAsync({ chainId: target.id });
       }
 
       // Re-read the outstanding amount at signing time: a partial deposit may
@@ -120,7 +125,7 @@ export function WalletPay({
       if (amount <= 0n) return;
 
       const hash = await writeContractAsync({
-        chainId: paydayChain.id,
+        chainId: target.id,
         address: payment.token.address as Hex,
         abi: erc20Abi,
         functionName: "transfer",
@@ -137,26 +142,27 @@ export function WalletPay({
     payment.remaining_base_units,
     payment.token.address,
     switchChainAsync,
+    target,
     walletMatches,
     writeContractAsync,
   ]);
 
-  if (!supported) {
+  if (!supported || !target || !configured) {
     return (
       <p className="rounded-[10px] border border-line px-3.5 py-3 text-[13px] leading-relaxed text-muted">
-        This checkout is configured for {config.chainName}, but the deposit request asks for{" "}
-        {payment.chain.name} and {truncateAddress(payment.token.address)}. Pay by scanning the code
-        or copying the address instead.
+        This checkout cannot pay on {payment.chain.name} with {truncateAddress(payment.token.address)}
+        {configured ? " (the token contract does not match its configuration)" : ""}. Pay by
+        scanning the code or copying the address instead, on {payment.chain.name}.
       </p>
     );
   }
 
   const label = (() => {
     if (!isConnected) return "Pay with wallet";
-    if (switching) return `Switching to ${paydayChain.name}…`;
+    if (switching) return `Switching to ${target.name}…`;
     if (signing) return "Confirm in your wallet…";
     if (waiting) return "Waiting for confirmation…";
-    if (chainId !== paydayChain.id) return `Switch to ${paydayChain.name} and pay`;
+    if (chainId !== target.id) return `Switch to ${target.name} and pay`;
     return `Pay ${formatDisplayAmount(payment.remaining)} ${payment.token.symbol}`;
   })();
 
@@ -201,13 +207,14 @@ export function WalletPay({
       {isConnected && walletMatches && !holdsEnough && usdc.data !== undefined ? (
         <p className="mt-2.5 text-center text-[13px] text-warning">
           This wallet holds {formatBaseUnits(usdc.data, payment.token.decimals)}{" "}
-          {payment.token.symbol}, less than the {formatDisplayAmount(payment.remaining)} due.
+          {payment.token.symbol} on {target.name}, less than the{" "}
+          {formatDisplayAmount(payment.remaining)} due.
         </p>
       ) : null}
 
       {isConnected && walletMatches && holdsEnough && !hasGas ? (
         <p className="mt-2.5 text-center text-[13px] text-warning">
-          This wallet has no {config.nativeSymbol} to pay for gas on {paydayChain.name}.
+          This wallet has no {configured.nativeSymbol} to pay for gas on {target.name}.
         </p>
       ) : null}
 

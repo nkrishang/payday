@@ -39,6 +39,19 @@ function origin(url: string | undefined): string[] {
   }
 }
 
+/** Every configured chain's public RPC origin: the wallet reads through each. */
+function rpcOrigins(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const chains = JSON.parse(raw) as Array<{ rpcUrl?: unknown }>;
+    return chains.flatMap((chain) =>
+      typeof chain.rpcUrl === "string" ? origin(chain.rpcUrl) : [],
+    );
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Merchant sign-in and the embedded wallet are Privy's. Its SDK talks to
  * `auth.privy.io`, hosts the wallet's key material in an iframe from the
@@ -56,7 +69,7 @@ function policy(nonce: string | null, isDev: boolean): string {
   const connect = [
     "'self'",
     ...api,
-    ...origin(process.env.NEXT_PUBLIC_RPC_URL),
+    ...rpcOrigins(process.env.NEXT_PUBLIC_CHAINS),
     ...WALLETCONNECT,
     ...PRIVY_CONNECT,
     // The dashboard PUTs attachment bytes to the presigned upload origin

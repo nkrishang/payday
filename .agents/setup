@@ -130,14 +130,15 @@ create_dev_env() {
     db_user="$(id -un)"
     cat >.env <<EOF
 DATABASE_URL=postgresql:///gateway?user=$db_user
+# The two local Anvils; scripts/local-runner.sh builds PAYDAY_CHAINS from
+# them after the bootstrap and derives PAYDAY_RPC_URL_<chain_id>.
 PAYDAY_CHAIN_ID=31337
-PAYDAY_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
-PAYDAY_USDC_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
 PAYDAY_RPC_URL=http://127.0.0.1:8545
-PAYDAY_USDC_START_BLOCK=0
-# Local Anvil mines deterministically; production chains should set a reviewed
-# chain-specific confirmation depth when using a QuickNode HTTPS RPC URL.
-PAYDAY_FINALITY_CONFIRMATIONS=0
+PAYDAY_SECOND_CHAIN_ID=31338
+PAYDAY_SECOND_RPC_URL=http://127.0.0.1:8546
+PAYDAY_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+PAYDAY_BATCH_SWEEPER_ADDRESS=0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
+PAYDAY_USDC_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
 # Anvil's public development account #0; never use this key on a real network.
 PAYDAY_SIGNER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 EOF

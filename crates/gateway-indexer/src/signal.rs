@@ -206,6 +206,9 @@ fn transfer_filter(token: Address, recipients: &[Address]) -> Filter {
 enum SessionEnd {
     Shutdown,
     Failed(String),
+    /// The watch list emptied: nothing to subscribe to, so the socket is
+    /// closed rather than kept alive for nothing. Not a failure: no backoff.
+    Idle,
 }
 
 /// One chunk's forwarded notifications. `Ended` is sent when the
@@ -310,10 +313,14 @@ fn is_unsupported_subscription(error: &str) -> bool {
         || error.contains("invalid method")
         || error.contains("unknown method")
         // Anvil-style nodes that do not know the kind reject the whole
-        // request as invalid params, naming the variant in the message
-        // ("unknown variant `monadLogs`"). A genuine filter problem never
-        // names the subscription method, so this stays narrow.
-        || (error.contains("-32602") && error.contains("unknown variant"))
+        // request as invalid params: either naming the variant ("unknown
+        // variant `monadLogs`") or, when the filter carries a recipient
+        // list, failing to match the request against any call it knows
+        // ("did not match any variant of untagged enum EthRpcCall"). A
+        // genuine filter problem is reported by the handler, never as a
+        // request that parses into nothing, so this stays narrow.
+        || (error.contains("-32602")
+            && (error.contains("unknown variant") || error.contains("did not match any variant")))
 }
 
 impl TransferSignal {
@@ -341,9 +348,28 @@ impl TransferSignal {
             if *shutdown.borrow() {
                 return;
             }
+            // No socket while there is nothing to watch: a chain with no open
+            // bound request costs no keepalives and no notifications. The
+            // reconciler keeps its own (idle) cadence meanwhile.
+            if watch_list.borrow_and_update().is_empty() {
+                tokio::select! {
+                    changed = watch_list.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    _ = shutdown.changed() => return,
+                }
+            }
             let connected_at = tokio::time::Instant::now();
             match self.session(&mut watch_list, &state, &mut shutdown).await {
                 SessionEnd::Shutdown => return,
+                SessionEnd::Idle => {
+                    state.set_connected(false);
+                    backoff = RECONNECT_BACKOFF_BASE;
+                    info!("transfer signal closed: nothing to watch");
+                }
                 SessionEnd::Failed(reason) => {
                     let was_connected = state.is_connected();
                     state.set_connected(false);
@@ -563,6 +589,42 @@ impl TransferSignal {
         }
     }
 
+    /// Wake the reconciler right after this session's subscriptions became
+    /// live. A subscription only covers transfers from the moment the node
+    /// accepted it: a payment that raced the session's establishment (an
+    /// indexer restart with requests already bound), a socket drop, or a
+    /// watch-list refresh that just added a freshly bound address was never
+    /// notified, and without help it would sit unnoticed until the
+    /// reconciler's timer. Read the provider's tip and wake with it: the
+    /// reconciler's catch-up keeps passing until the cursor covers that
+    /// block, and every transfer the subscription could have missed is at or
+    /// below it. A failed read only costs latency — the timer covers the
+    /// gap — so it warns rather than fails the session.
+    async fn wake_unnotified_history(&self, client: &RpcClient, state: &SignalState) {
+        let read = tokio::time::timeout(
+            KEEPALIVE_TIMEOUT,
+            client.request::<(), U64>("eth_blockNumber", ()),
+        )
+        .await;
+        match read {
+            Ok(Ok(tip)) => {
+                let block = tip.to::<u64>();
+                info!(
+                    block,
+                    "transfer signal subscriptions are live; waking the reconciler to cover any transfer they could have missed"
+                );
+                state.wake(block);
+            }
+            Ok(Err(error)) => warn!(
+                error = %redact_urls(&error.to_string()),
+                "could not read the tip after subscribing; the reconciler's timer covers any earlier transfer"
+            ),
+            Err(_) => warn!(
+                "reading the tip after subscribing timed out; the reconciler's timer covers any earlier transfer"
+            ),
+        }
+    }
+
     /// One connection's lifetime: subscribe, forward wakes, keep the socket
     /// alive, follow watch-list changes. Returns when the socket dies or the
     /// process shuts down.
@@ -592,6 +654,9 @@ impl TransferSignal {
             subscriptions = active.chunks.len(),
             "transfer signal connected"
         );
+        if !list.is_empty() {
+            self.wake_unnotified_history(&client, state).await;
+        }
 
         let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -658,6 +723,14 @@ impl TransferSignal {
                     if next == list {
                         continue;
                     }
+                    if next.is_empty() {
+                        let ids: Vec<B256> = active.chunks.iter().map(|chunk| chunk.id).collect();
+                        for chunk in &active.chunks {
+                            chunk.task.abort();
+                        }
+                        self.unsubscribe_all(&client, ids).await;
+                        return SessionEnd::Idle;
+                    }
                     // Diff by chunk, and never subscribe-then-unsubscribe an
                     // unchanged chunk: Alloy keys a subscription by its full
                     // request, so a replacement chunk identical to the old
@@ -719,6 +792,10 @@ impl TransferSignal {
                     }
                     self.unsubscribe_all(&client, removed_ids).await;
                     info!(watched_addresses = next.len(), subscriptions = active.chunks.len(), removed_subscriptions = removed, "transfer signal watch list updated");
+                    // The addresses this refresh just subscribed were not
+                    // covered by any subscription while the request was being
+                    // bound; a payment in that window was never notified.
+                    self.wake_unnotified_history(&client, state).await;
                     list = next;
                 }
                 changed = shutdown.changed() => {
@@ -846,6 +923,9 @@ mod tests {
             // Anvil's rejection, verbatim from its eth_subscribe: the node
             // does not know the kind and says so in a -32602 message.
             "server returned an error response: error code -32602: unknown variant `monadLogs`, expected one of `newHeads`, `logs`, `newPendingTransactions`, `syncing`, `transactionReceipts`",
+            // The same node's rejection when the filter carries a recipient
+            // list: the request parses into no call it knows at all.
+            "server returned an error response: error code -32602: data did not match any variant of untagged enum EthRpcCall",
         ] {
             assert!(
                 is_unsupported_subscription(rejection),

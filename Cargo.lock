@@ -2626,6 +2626,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "futures",
  "gateway-core",
  "gateway-db",
  "hex",

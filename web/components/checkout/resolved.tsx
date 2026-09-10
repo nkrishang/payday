@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowUpRight, Check, Clock, Loader2 } from "lucide-react";
-import type { CheckoutView, UnlockedPayerDepositRequest } from "@/lib/checkout-state";
+import { tokenSymbol, type CheckoutView, type UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
-import { config } from "@/lib/config";
+import { chainById } from "@/lib/config";
 import { explorerTxUrl, formatDisplayAmount, truncateHash } from "@/lib/format";
 
 const icons = {
@@ -33,8 +33,9 @@ export function Resolved({
   const spinning = view.phase === "deposited" || view.phase === "confirming";
 
   const txHash = pendingTxHash ?? payment.settlement_tx_hash;
+  const explorer = chainById(payment.chain?.id)?.explorerUrl ?? null;
   const txUrl =
-    (pendingTxHash ? explorerTxUrl(config.explorerUrl, pendingTxHash) : null) ??
+    (pendingTxHash ? explorerTxUrl(explorer, pendingTxHash) : null) ??
     payment.settlement_explorer_url;
 
   const received = BigInt(payment.received_base_units) > 0n;
@@ -63,7 +64,7 @@ export function Resolved({
             <div className="flex items-baseline justify-between gap-3">
               <dt className="text-faint">Received</dt>
               <dd className="tabular font-medium">
-                {formatDisplayAmount(payment.received)} {payment.token.symbol}
+                {formatDisplayAmount(payment.received)} {tokenSymbol(payment)}
               </dd>
             </div>
           ) : null}

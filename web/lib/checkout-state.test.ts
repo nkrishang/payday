@@ -275,7 +275,8 @@ describe("unlockedDepositRequest", () => {
   it("returns the mechanics when the gateway unlocked them", () => {
     const unlocked = unlockedDepositRequest(payment());
     expect(unlocked?.address).toBe("0x9a3f0000000000000000000000000000000000c2");
-    expect(unlocked?.token.symbol).toBe("USDC");
+    expect(unlocked?.token?.symbol).toBe("USDC");
+    expect(unlocked?.networks.map((network) => network.chain.name)).toEqual(["Monad", "Base"]);
   });
 
   it("treats a locked response as locked regardless of status", () => {
@@ -285,7 +286,7 @@ describe("unlockedDepositRequest", () => {
   it("treats a response that claims to be unlocked but lacks a mechanic as locked", () => {
     // The API nulls every gated field together; a response that disagrees with
     // its own flag must not be rendered with holes.
-    expect(unlockedDepositRequest(payment({ token: null } as never))).toBeNull();
+    expect(unlockedDepositRequest(payment({ networks: null } as never))).toBeNull();
     expect(unlockedDepositRequest(payment({ amount: null } as never))).toBeNull();
   });
 

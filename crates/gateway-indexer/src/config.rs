@@ -1,20 +1,27 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256, U256};
-use gateway_core::ChainId;
+use alloy_primitives::U256;
+use gateway_core::{ChainConfig, ChainRegistry};
 
 /// Default indexer poll interval when `PAYDAY_INDEXER_POLL_INTERVAL_MS` is unset.
-/// This is the reconcile cadence only while the transfer signal is down.
+/// This is the reconcile cadence only while a chain is watched and its
+/// transfer signal is down.
 const DEFAULT_INDEXER_POLL_INTERVAL_MS: u64 = 2000;
-/// Reconcile cadence while the transfer signal is connected. The signal
-/// wakes a pass the moment a payment finalizes; this timer is the backstop
-/// that keeps the finalized cursor moving and catches anything the socket
-/// missed, so it can be slow.
+/// Reconcile cadence while a chain is watched and its transfer signal is
+/// connected. The signal wakes a pass the moment a payment lands; this timer
+/// is the backstop that keeps the cursor moving and catches anything the
+/// socket missed, so it can be slow.
 const DEFAULT_INDEXER_RECONCILE_INTERVAL_MS: u64 = 60_000;
-/// How long a settled address stays in the signal's watch list.
-const DEFAULT_LATE_WATCH_DAYS: u64 = 30;
-const DEFAULT_FINALITY_CONFIRMATIONS: u64 = 2;
-const DEFAULT_LOG_RANGE_SIZE: u64 = 100;
+/// Reconcile cadence while a chain has nothing to watch: no open bound
+/// request, nothing uncollected, nothing recently settled. A pass then costs
+/// two calls and fast-forwards the cursor, so it only needs to keep the
+/// chain clock (expiry) moving.
+const DEFAULT_INDEXER_IDLE_INTERVAL_MS: u64 = 300_000;
+/// How long a settled address stays in the watch list, which every range
+/// scan is filtered by. A year: the cost is one `eth_getLogs` per 500
+/// addresses per range, and a late transfer outside the window is invisible.
+const DEFAULT_LATE_WATCH_DAYS: u64 = 365;
 const DEFAULT_MAX_RANGES_PER_TICK: u64 = 20;
 /// Provider request budgets are per second (QuickNode's is 50); pacing below
 /// that keeps catch-up bursts from tripping them. 0 disables pacing.
@@ -22,40 +29,27 @@ const DEFAULT_RPC_MAX_RPS: u64 = 40;
 const DEFAULT_SWEEP_PENDING_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_SWEEP_MAX_SUBMISSIONS: u32 = 5;
 const DEFAULT_SWEEP_MAX_ATTEMPTS: u32 = 8;
-/// 0.05 native tokens: roughly a hundred batches at Monad's fee levels.
+/// 0.05 native tokens: roughly a hundred batches at Monad's fee levels, and
+/// far more at an L2's.
 const DEFAULT_SIGNER_LOW_BALANCE_WEI: u128 = 50_000_000_000_000_000;
 
-/// Which chain reading anchors the finality boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FinalitySource {
-    /// The node's `finalized` block tag. Monad maps it to "irreversible
-    /// without a hard fork"; this is the production setting.
-    FinalizedTag,
-    /// The latest block. Only for chains or local nodes without a meaningful
-    /// `finalized` tag, combined with a reviewed confirmation depth.
-    Latest,
-}
-
+/// One process indexes and sweeps every chain in the registry. What differs
+/// per chain (USDC, contracts, finality, range cap) is in the
+/// registry; what is operational policy (cadences, sweep limits, the signer)
+/// is shared and lives here.
 pub struct Config {
     database_url: String,
-    chain_id: ChainId,
-    rpc_url: String,
-    /// WebSocket endpoint for the transfer signal; `None` disables it.
-    rpc_ws_url: Option<String>,
+    networks: ChainRegistry,
+    /// `PAYDAY_RPC_URL_<chain_id>`, one per registered chain.
+    rpc_urls: HashMap<u64, String>,
+    /// WebSocket endpoint for each chain's transfer signal; absent disables it.
+    rpc_ws_urls: HashMap<u64, String>,
     indexer_poll_interval: Duration,
     indexer_reconcile_interval: Duration,
+    indexer_idle_interval: Duration,
     late_watch_window: Duration,
-    finality_source: FinalitySource,
-    finality_confirmations: u64,
-    log_range_size: u64,
     max_ranges_per_tick: u64,
     rpc_max_rps: u64,
-    usdc_start_block: u64,
-    factory_address: Address,
-    factory_code_hash: B256,
-    batch_sweeper_address: Address,
-    batch_sweeper_code_hash: B256,
-    usdc_address: Address,
     sweep_pending_timeout: Duration,
     sweep_max_submissions: u32,
     sweep_max_attempts: u32,
@@ -64,7 +58,8 @@ pub struct Config {
 }
 
 /// Sweep signer selected at startup. Local keys keep Anvil fully self-contained;
-/// production uses a non-exportable AWS KMS key through the ECS task role.
+/// production uses a non-exportable AWS KMS key through the ECS task role. The
+/// same key signs on every chain: one address, one nonce stream per chain.
 pub enum SignerConfig {
     Local(String),
     AwsKms(String),
@@ -72,32 +67,31 @@ pub enum SignerConfig {
 
 impl Config {
     pub fn from_env() -> Self {
-        let chain_id: u64 = std::env::var("PAYDAY_CHAIN_ID")
-            .expect("PAYDAY_CHAIN_ID must be set")
-            .parse()
-            .unwrap_or_else(|e| panic!("invalid PAYDAY_CHAIN_ID: {e}"));
+        let networks = ChainRegistry::from_env();
+        let required =
+            |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+        let rpc_urls: HashMap<u64, String> = networks
+            .chains()
+            .iter()
+            .map(|chain| (chain.chain_id, required(&chain.rpc_url_var())))
+            .collect();
+        // QuickNode and Anvil serve WebSocket on the HTTP URL's host and
+        // path, so the signal needs no second secret; `off` disables it and
+        // an explicit URL overrides the derivation.
+        let rpc_ws_urls = networks
+            .chains()
+            .iter()
+            .filter_map(|chain| {
+                let derived = derive_ws_url(&rpc_urls[&chain.chain_id]);
+                let url = match std::env::var(chain.rpc_ws_url_var()) {
+                    Ok(value) if value.is_empty() || value.eq_ignore_ascii_case("off") => None,
+                    Ok(value) => Some(value),
+                    Err(_) => derived,
+                };
+                url.map(|url| (chain.chain_id, url))
+            })
+            .collect();
 
-        let usdc_address = parse_address_env("PAYDAY_USDC_ADDRESS");
-        let factory_address = parse_address_env("PAYDAY_FACTORY_ADDRESS");
-        let batch_sweeper_address = parse_address_env("PAYDAY_BATCH_SWEEPER_ADDRESS");
-        // keccak256 of the runtime bytecode `eth_getCode` returns for each
-        // contract: the deployed generation this build was reviewed against.
-        let factory_code_hash = parse_b256_env("PAYDAY_FACTORY_CODE_HASH");
-        let batch_sweeper_code_hash = parse_b256_env("PAYDAY_BATCH_SWEEPER_CODE_HASH");
-
-        let finality_source = match std::env::var("PAYDAY_FINALITY_SOURCE").as_deref() {
-            Ok("finalized") | Err(_) => FinalitySource::FinalizedTag,
-            Ok("latest") => FinalitySource::Latest,
-            Ok(other) => {
-                panic!("invalid PAYDAY_FINALITY_SOURCE '{other}': expected finalized or latest")
-            }
-        };
-        let finality_confirmations = parse_u64_env(
-            "PAYDAY_FINALITY_CONFIRMATIONS",
-            DEFAULT_FINALITY_CONFIRMATIONS,
-        );
-        let log_range_size = parse_u64_env("PAYDAY_LOG_RANGE_SIZE", DEFAULT_LOG_RANGE_SIZE);
-        assert!(log_range_size > 0, "PAYDAY_LOG_RANGE_SIZE must be positive");
         let max_ranges_per_tick = parse_u64_env(
             "PAYDAY_INDEXER_MAX_RANGES_PER_TICK",
             DEFAULT_MAX_RANGES_PER_TICK,
@@ -107,12 +101,6 @@ impl Config {
             "PAYDAY_INDEXER_MAX_RANGES_PER_TICK must be positive"
         );
         let rpc_max_rps = parse_u64_env("PAYDAY_INDEXER_RPC_MAX_RPS", DEFAULT_RPC_MAX_RPS);
-        // No default: a fresh database with the variable missing must not
-        // start a backfill from genesis.
-        let usdc_start_block = std::env::var("PAYDAY_USDC_START_BLOCK")
-            .expect("PAYDAY_USDC_START_BLOCK must be set")
-            .parse()
-            .unwrap_or_else(|e| panic!("invalid PAYDAY_USDC_START_BLOCK: {e}"));
 
         let signer = match (
             std::env::var("PAYDAY_SIGNER_KEY").ok(),
@@ -128,21 +116,11 @@ impl Config {
             }
         };
 
-        let rpc_url = std::env::var("PAYDAY_RPC_URL").expect("PAYDAY_RPC_URL must be set");
-        // QuickNode and Anvil serve WebSocket on the HTTP URL's host and
-        // path, so the signal needs no second secret; `off` disables it and
-        // an explicit URL overrides the derivation.
-        let rpc_ws_url = match std::env::var("PAYDAY_RPC_WS_URL") {
-            Ok(value) if value.is_empty() || value.eq_ignore_ascii_case("off") => None,
-            Ok(value) => Some(value),
-            Err(_) => derive_ws_url(&rpc_url),
-        };
-
         Config {
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
-            chain_id: ChainId(chain_id),
-            rpc_url,
-            rpc_ws_url,
+            networks,
+            rpc_urls,
+            rpc_ws_urls,
             indexer_poll_interval: Duration::from_millis(parse_u64_env(
                 "PAYDAY_INDEXER_POLL_INTERVAL_MS",
                 DEFAULT_INDEXER_POLL_INTERVAL_MS,
@@ -151,21 +129,16 @@ impl Config {
                 "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS",
                 DEFAULT_INDEXER_RECONCILE_INTERVAL_MS,
             )),
+            indexer_idle_interval: Duration::from_millis(parse_u64_env(
+                "PAYDAY_INDEXER_IDLE_INTERVAL_MS",
+                DEFAULT_INDEXER_IDLE_INTERVAL_MS,
+            )),
             late_watch_window: Duration::from_secs(
                 parse_u64_env("PAYDAY_INDEXER_LATE_WATCH_DAYS", DEFAULT_LATE_WATCH_DAYS)
                     .saturating_mul(24 * 3600),
             ),
-            finality_source,
-            finality_confirmations,
-            log_range_size,
             max_ranges_per_tick,
             rpc_max_rps,
-            usdc_start_block,
-            factory_address,
-            factory_code_hash,
-            batch_sweeper_address,
-            batch_sweeper_code_hash,
-            usdc_address,
             sweep_pending_timeout: Duration::from_secs(parse_u64_env(
                 "PAYDAY_SWEEP_PENDING_TIMEOUT_SECS",
                 DEFAULT_SWEEP_PENDING_TIMEOUT_SECS,
@@ -200,16 +173,16 @@ impl Config {
         &self.database_url
     }
 
-    pub fn chain_id(&self) -> ChainId {
-        self.chain_id
+    pub fn chains(&self) -> &[ChainConfig] {
+        self.networks.chains()
     }
 
-    pub fn rpc_url(&self) -> &str {
-        &self.rpc_url
+    pub fn rpc_url(&self, chain_id: u64) -> &str {
+        &self.rpc_urls[&chain_id]
     }
 
-    pub fn rpc_ws_url(&self) -> Option<&str> {
-        self.rpc_ws_url.as_deref()
+    pub fn rpc_ws_url(&self, chain_id: u64) -> Option<&str> {
+        self.rpc_ws_urls.get(&chain_id).map(String::as_str)
     }
 
     pub fn indexer_poll_interval(&self) -> Duration {
@@ -220,20 +193,12 @@ impl Config {
         self.indexer_reconcile_interval
     }
 
+    pub fn indexer_idle_interval(&self) -> Duration {
+        self.indexer_idle_interval
+    }
+
     pub fn late_watch_window(&self) -> Duration {
         self.late_watch_window
-    }
-
-    pub fn finality_source(&self) -> FinalitySource {
-        self.finality_source
-    }
-
-    pub fn finality_confirmations(&self) -> u64 {
-        self.finality_confirmations
-    }
-
-    pub fn log_range_size(&self) -> u64 {
-        self.log_range_size
     }
 
     pub fn max_ranges_per_tick(&self) -> u64 {
@@ -242,30 +207,6 @@ impl Config {
 
     pub fn rpc_max_rps(&self) -> u64 {
         self.rpc_max_rps
-    }
-
-    pub fn usdc_start_block(&self) -> u64 {
-        self.usdc_start_block
-    }
-
-    pub fn usdc_address(&self) -> Address {
-        self.usdc_address
-    }
-
-    pub fn factory_address(&self) -> Address {
-        self.factory_address
-    }
-
-    pub fn factory_code_hash(&self) -> B256 {
-        self.factory_code_hash
-    }
-
-    pub fn batch_sweeper_address(&self) -> Address {
-        self.batch_sweeper_address
-    }
-
-    pub fn batch_sweeper_code_hash(&self) -> B256 {
-        self.batch_sweeper_code_hash
     }
 
     pub fn sweep_pending_timeout(&self) -> Duration {
@@ -300,20 +241,6 @@ fn derive_ws_url(rpc_url: &str) -> Option<String> {
                 .strip_prefix("http://")
                 .map(|rest| format!("ws://{rest}"))
         })
-}
-
-fn parse_address_env(name: &str) -> Address {
-    std::env::var(name)
-        .unwrap_or_else(|_| panic!("{name} must be set"))
-        .parse()
-        .unwrap_or_else(|error| panic!("invalid {name}: {error}"))
-}
-
-fn parse_b256_env(name: &str) -> B256 {
-    std::env::var(name)
-        .unwrap_or_else(|_| panic!("{name} must be set"))
-        .parse()
-        .unwrap_or_else(|error| panic!("invalid {name}: expected 0x-prefixed 32-byte hex: {error}"))
 }
 
 fn parse_u64_env(name: &str, default: u64) -> u64 {

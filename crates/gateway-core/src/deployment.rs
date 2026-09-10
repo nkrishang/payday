@@ -22,15 +22,15 @@ pub struct ObservedDeployment {
 
 #[derive(Debug, Error)]
 pub enum DeploymentError {
-    #[error("{operation} failed against PAYDAY_RPC_URL: {message}")]
+    #[error("{operation} failed against the chain's RPC URL: {message}")]
     Rpc {
         operation: &'static str,
         message: String,
     },
-    #[error("PAYDAY_RPC_URL serves chain {actual}, but PAYDAY_CHAIN_ID is {expected}")]
+    #[error("the RPC URL serves chain {actual}, but its PAYDAY_CHAINS entry is chain {expected}")]
     ChainId { expected: u64, actual: u64 },
     #[error(
-        "PaymentFactory at {address} has runtime code hash {actual}, but PAYDAY_FACTORY_CODE_HASH is {expected}; the configured factory is not the reviewed generation"
+        "PaymentFactory at {address} has runtime code hash {actual}, but the chain's factory_code_hash is {expected}; the configured factory is not the reviewed generation"
     )]
     FactoryCodeHash {
         address: Address,
@@ -38,7 +38,7 @@ pub enum DeploymentError {
         actual: B256,
     },
     #[error(
-        "BatchSweeper at {address} has runtime code hash {actual}, but PAYDAY_BATCH_SWEEPER_CODE_HASH is {expected}; the configured sweeper is not the reviewed generation"
+        "BatchSweeper at {address} has runtime code hash {actual}, but the chain's batch_sweeper_code_hash is {expected}; the configured sweeper is not the reviewed generation"
     )]
     BatchSweeperCodeHash {
         address: Address,
@@ -46,7 +46,7 @@ pub enum DeploymentError {
         actual: B256,
     },
     #[error(
-        "BatchSweeper at {batch_sweeper} is bound to PaymentFactory {actual}, not the configured PAYDAY_FACTORY_ADDRESS {expected}"
+        "BatchSweeper at {batch_sweeper} is bound to PaymentFactory {actual}, not the chain's configured factory {expected}"
     )]
     BoundFactory {
         batch_sweeper: Address,

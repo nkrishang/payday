@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, U256};
@@ -5,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use gateway_core::{
-    AttachmentDescriptor, DepositRequestResponse, Invoice, InvoiceId, InvoiceStatus,
+    AttachmentDescriptor, DepositRequestResponse, Invoice, InvoiceId, InvoiceStatus, NetworkDto,
     PayerDepositRequestDetails, PayerDepositRequestResponse, PayerPolicyResponse, PaymentBinding,
     VerificationFacts, VerificationRequirementsResponse, deposit_request_id, masked_email,
 };
@@ -28,13 +29,14 @@ pub struct PayerAccess {
     /// The hosted checkout's origin: the only browser origin the payer
     /// verification writes answer to. Defaults to the public base URL.
     checkout_origin: HeaderValue,
-    explorer_base_url: Option<String>,
+    /// One block explorer per chain that has one.
+    explorers: HashMap<u64, String>,
 }
 
 impl PayerAccess {
     pub fn new(
         public_base_url: impl Into<String>,
-        explorer_base_url: Option<String>,
+        explorers: Vec<(u64, String)>,
         hosted_checkout_origin: Option<String>,
     ) -> Result<Self, String> {
         let public_base_url = validate_base_url(public_base_url.into(), "public base URL", true)?;
@@ -49,14 +51,17 @@ impl PayerAccess {
             }
             None => origin.clone(),
         };
-        let explorer_base_url = explorer_base_url
-            .map(|url| validate_base_url(url, "explorer base URL", false))
-            .transpose()?;
+        let explorers = explorers
+            .into_iter()
+            .map(|(chain_id, url)| {
+                validate_base_url(url, "explorer base URL", false).map(|url| (chain_id, url))
+            })
+            .collect::<Result<_, _>>()?;
         Ok(Self {
             public_base_url,
             origin,
             checkout_origin,
-            explorer_base_url,
+            explorers,
         })
     }
 
@@ -85,15 +90,16 @@ impl PayerAccess {
         Ok(self.checkout_url(&invoice.id))
     }
 
-    pub fn address_url(&self, address: &str) -> Option<String> {
-        self.explorer_base_url
-            .as_ref()
+    /// An explorer link for an address on `chain_id`, if that chain has one.
+    pub fn address_url(&self, chain_id: u64, address: &str) -> Option<String> {
+        self.explorers
+            .get(&chain_id)
             .map(|base| format!("{base}/address/{address}"))
     }
 
-    pub fn transaction_url(&self, hash: &str) -> Option<String> {
-        self.explorer_base_url
-            .as_ref()
+    pub fn transaction_url(&self, chain_id: u64, hash: &str) -> Option<String> {
+        self.explorers
+            .get(&chain_id)
             .map(|base| format!("{base}/tx/{hash}"))
     }
 }
@@ -121,11 +127,11 @@ fn validate_base_url(
     Ok(value)
 }
 
-fn deposit_uri(invoice: &Invoice, binding: &PaymentBinding, amount: U256) -> String {
+fn deposit_uri(binding: &PaymentBinding, amount: U256) -> String {
     format!(
         "ethereum:{}@{}/transfer?address={}&uint256={}",
-        invoice.token.0.to_checksum(None),
-        invoice.chain_id.0,
+        binding.network.token.0.to_checksum(None),
+        binding.network.chain_id.0,
         binding.payment_address.0.to_checksum(None),
         amount,
     )
@@ -183,7 +189,13 @@ pub(crate) fn payer_response(
         .binding
         .as_ref()
         .filter(|_| unlocked && payable)
-        .map(|binding| deposit_uri(&invoice, binding, remaining));
+        .map(|binding| deposit_uri(binding, remaining));
+    let chain_id = invoice.network().map(|network| network.chain_id.0);
+    let networks: Vec<NetworkDto> = invoice
+        .networks
+        .iter()
+        .map(NetworkDto::from_terms)
+        .collect();
     let payer_message = invoice.blocked_reason.as_ref().map(|_| {
         "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.".into()
     });
@@ -197,7 +209,8 @@ pub(crate) fn payer_response(
     let settlement_tx_hash = settlement_tx_hash.filter(|_| unlocked);
     let settlement_explorer_url = settlement_tx_hash
         .as_deref()
-        .and_then(|hash| state.payer.transaction_url(hash));
+        .zip(chain_id)
+        .and_then(|(hash, chain_id)| state.payer.transaction_url(chain_id, hash));
     let gated = |value: String| unlocked.then_some(value);
     PayerDepositRequestResponse {
         id: response.id,
@@ -213,8 +226,9 @@ pub(crate) fn payer_response(
         settlement_explorer_url,
         payer_message,
         content_unlocked: unlocked,
-        chain: unlocked.then_some(response.chain),
-        token: unlocked.then_some(response.token),
+        networks: unlocked.then_some(networks),
+        chain: response.chain.filter(|_| unlocked),
+        token: response.token.filter(|_| unlocked),
         amount: gated(response.amount.clone()),
         amount_base_units: gated(response.amount_base_units.clone()),
         received: gated(response.received),
@@ -226,7 +240,8 @@ pub(crate) fn payer_response(
             .address
             .as_deref()
             .filter(|_| unlocked)
-            .and_then(|address| state.payer.address_url(address)),
+            .zip(chain_id)
+            .and_then(|(address, chain_id)| state.payer.address_url(chain_id, address)),
         address: response.address.filter(|_| unlocked),
         deposit_uri,
         details: unlocked.then(|| PayerDepositRequestDetails {
@@ -340,7 +355,7 @@ pub async fn qr(
     if !payable {
         return Err(ApiError::deposit_request_not_payable());
     }
-    let svg = QrCode::new(deposit_uri(&access.invoice, binding, remaining).as_bytes())
+    let svg = QrCode::new(deposit_uri(binding, remaining).as_bytes())
         .map_err(|error| ApiError::internal(format!("failed to render deposit QR: {error}")))?
         .render::<svg::Color>()
         .min_dimensions(224, 224)
@@ -383,7 +398,8 @@ mod tests {
     use alloy_primitives::{B256, U256, address};
     use gateway_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        Party, PayerAttestation, PayerPolicy, TokenAddress, sign_payer_attestation, wallet_of,
+        NetworkTerms, Party, PayerAttestation, PayerPolicy, TokenAddress, sign_payer_attestation,
+        wallet_of,
     };
 
     use super::*;
@@ -392,7 +408,11 @@ mod tests {
 
     fn invoice() -> Invoice {
         let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
-        let token = TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603"));
+        let networks = vec![NetworkTerms {
+            chain_id: ChainId(143),
+            token: TokenAddress(address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603")),
+            factory,
+        }];
         let beneficiary =
             BeneficiaryAddress(address!("0x0000000000000000000000000000000000000002"));
         let amount = Amount(U256::from(1_500_000));
@@ -405,23 +425,13 @@ mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
-            factory,
-            ChainId(143),
-            token,
+            &networks,
             beneficiary,
             amount,
             u64::MAX / 2,
         );
-        let mut invoice = Invoice::issue(
-            factory,
-            ChainId(143),
-            token,
-            beneficiary,
-            amount,
-            u64::MAX / 2,
-            snapshot,
-        )
-        .unwrap();
+        let mut invoice =
+            Invoice::issue(&networks, beneficiary, amount, u64::MAX / 2, snapshot).unwrap();
         let message = PayerAttestation::new(
             invoice.attribution_hash,
             wallet_of(&PAYER_KEY),
@@ -430,7 +440,7 @@ mod tests {
         );
         let attestation = sign_payer_attestation(&PAYER_KEY, &message, 143, factory.0);
         let binding = invoice
-            .bind_payer_wallet(attestation, "2026-09-06T00:00:00Z".into())
+            .bind_payer_wallet(ChainId(143), attestation, "2026-09-06T00:00:00Z".into())
             .unwrap();
         invoice.binding = Some(binding);
         invoice
@@ -440,7 +450,7 @@ mod tests {
     fn payment_url_is_tokenless_and_payment_uri_is_eip_681() {
         let access = PayerAccess::new(
             "https://payday.sh/",
-            Some("https://monadvision.com/".into()),
+            vec![(143, "https://monadvision.com/".into())],
             None,
         )
         .unwrap();
@@ -452,12 +462,18 @@ mod tests {
         assert_eq!(access.origin_header(), "https://payday.sh");
         let binding = invoice.binding.as_ref().unwrap();
         assert_eq!(
-            deposit_uri(&invoice, binding, invoice.amount.0),
+            deposit_uri(binding, invoice.amount.0),
             format!(
                 "ethereum:0x754704Bc059F8C67012fEd69BC8A327a5aafb603@143/transfer?address={}&uint256=1500000",
                 binding.payment_address.0.to_checksum(None)
             )
         );
+        // Explorer links are per chain: only chains with one get a link.
+        assert_eq!(
+            access.address_url(143, "0xabc").as_deref(),
+            Some("https://monadvision.com/address/0xabc")
+        );
+        assert_eq!(access.transaction_url(8453, "0xdef"), None);
     }
 
     #[test]
@@ -468,7 +484,7 @@ mod tests {
         assert_eq!(remaining, U256::from(1_000_000));
         assert!(payable);
         let binding = invoice.binding.clone().unwrap();
-        assert!(deposit_uri(&invoice, &binding, remaining).ends_with("uint256=1000000"));
+        assert!(deposit_uri(&binding, remaining).ends_with("uint256=1000000"));
 
         assert!(!payment_state(&invoice, invoice.expiration_timestamp + 1).1);
         invoice.status = InvoiceStatus::Funded;
@@ -477,14 +493,14 @@ mod tests {
 
     #[test]
     fn configuration_rejects_insecure_remote_urls() {
-        assert!(PayerAccess::new("http://payday.sh", None, None).is_err());
-        assert!(PayerAccess::new("https://payday.sh/base", None, None).is_err());
-        assert!(PayerAccess::new("https://user@payday.sh", None, None).is_err());
-        assert!(PayerAccess::new("http://127.0.0.1:3000", None, None).is_ok());
+        assert!(PayerAccess::new("http://payday.sh", vec![], None).is_err());
+        assert!(PayerAccess::new("https://payday.sh/base", vec![], None).is_err());
+        assert!(PayerAccess::new("https://user@payday.sh", vec![], None).is_err());
+        assert!(PayerAccess::new("http://127.0.0.1:3000", vec![], None).is_ok());
         assert!(
             PayerAccess::new(
                 "https://payday.sh",
-                Some("http://monadvision.com".into()),
+                vec![(143, "http://monadvision.com".into())],
                 None,
             )
             .is_err()
@@ -492,20 +508,20 @@ mod tests {
         assert!(
             PayerAccess::new(
                 "https://payday.sh",
-                None,
+                vec![],
                 Some("http://checkout.payday.sh".into()),
             )
             .is_err()
         );
         let split = PayerAccess::new(
             "https://api.payday.sh",
-            None,
+            vec![],
             Some("https://payday.sh/".into()),
         )
         .unwrap();
         assert_eq!(split.checkout_origin_header(), "https://payday.sh");
         assert_eq!(split.origin_header(), "https://api.payday.sh");
-        let same = PayerAccess::new("https://payday.sh", None, None).unwrap();
+        let same = PayerAccess::new("https://payday.sh", vec![], None).unwrap();
         assert_eq!(same.checkout_origin_header(), "https://payday.sh");
     }
 }

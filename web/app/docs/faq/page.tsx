@@ -32,10 +32,12 @@ export default function FaqPage() {
 
       <H2 id="which-asset">Which asset and network can pay?</H2>
       <p>
-        One exact Circle-issued USDC contract on one chain per environment: Monad mainnet in
-        production, Monad testnet in the sandbox. Read <code>chain</code> and <code>token</code>{" "}
-        from the request. Bridged USDC, look-alike tokens, another network&apos;s USDC, and gas
-        tokens do not count and may be unrecoverable. See{" "}
+        Circle-issued native USDC on Monad, Base, or Arbitrum One in production, and on their
+        testnets in the sandbox. The payer chooses the network on the hosted checkout before
+        signing; you do not. Read <code>networks</code> from the request, then{" "}
+        <code>chain</code> and <code>token</code> once the payer has chosen. Bridged USDC,
+        look-alike tokens, and gas tokens do not count and may be unrecoverable; USDC sent to the
+        address on a different network is refused by the address and returned by hand. See{" "}
         <Link href="/docs/environments">Environments</Link>.
       </p>
 
@@ -129,7 +131,8 @@ export default function FaqPage() {
       <H2 id="sandbox">Is there a sandbox?</H2>
       <p>
         Yes: <code>https://api.sandbox.payday.sh</code> with <code>payday_test_</code> keys, on
-        Monad testnet with Circle&apos;s test USDC and the same real indexing and finality. See{" "}
+        Monad testnet, Base Sepolia, and Arbitrum Sepolia with Circle&apos;s test USDC and the same
+        real indexing and finality. See{" "}
         <Link href="/docs/environments">Environments</Link>.
       </p>
 

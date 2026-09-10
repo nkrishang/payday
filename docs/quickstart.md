@@ -62,8 +62,10 @@ curl -fsS "$API/v1/deposit-requests" \
   choose it, and Payday never holds them.
 - Expiry defaults to 24 hours. Use `expires_in` in seconds or an RFC 3339
   `expires_at`. The allowed window is 10 minutes to 366 days.
-- The deployment chooses the chain and exact Circle-issued native USDC contract.
-  Hidden chain/token overrides are intended for controlled deployments only.
+- You do not choose a network. The request offers every supported one
+  (`networks`, each with its exact Circle-issued native USDC contract) and
+  the payer picks where to pay when they sign; `chain` and `token` are set
+  from then on.
 
 The response includes a `dr_…` ID, one-time address, amount, deadline, current
 status, and a `deposit_url`.
@@ -76,8 +78,8 @@ different body under the same key is `409 idempotency_conflict`.
 
 Send the returned `deposit_url` to the payer. The hosted checkout displays the
 deposit request (issuer, payer, heading, reference, attached PDF), the remaining
-amount, network, exact token, one-time address, QR code, deadline, and live
-finalized status, and lets the payer pay from a connected wallet in the page.
+amount, the network step, then the exact token, one-time address, QR code,
+deadline, and live finalized status, and lets the payer pay from a connected wallet in the page.
 For a verified payer mode it shows only the issuer name and heading until the
 payer completes verification. The link is deliberately open: anyone holding it
 can read the deposit request and fulfil it, which is what makes it shareable. It

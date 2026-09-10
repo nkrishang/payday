@@ -71,7 +71,10 @@ curl -sf "$PAYDAY_API_URL/health" && echo " OK" || echo " FAIL"
 
 ## 6. Check indexer cursor lag
 
-Compare the indexer's last-processed block against the chain's finalized head:
+Compare each chain's indexer cursor against its finality boundary. The
+`chains` array of `GET /v1/status` reports both per network; by hand, for
+Monad (Base and Arbitrum use `latest` minus their `finality_confirmations`
+instead of `finalized`):
 
 ```bash
 # Finalized Monad block
@@ -79,17 +82,24 @@ cast block finalized --rpc-url "$MONAD_RPC_URL" --field number
 
 # Indexer cursor (requires DB access — see db-access.md)
 # After connecting to the DB:
-#   SELECT last_block FROM indexer_cursor WHERE chain_id = 143;
+#   SELECT chain_id, last_block FROM indexer_cursor;
 ```
 
-A small lag (a few blocks) is normal. The worker drains up to
+A small lag (a few blocks) is normal. A chain with nothing to watch
+fast-forwards its cursor once per `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five
+minutes) without scanning, so an idle chain's cursor legitimately trails by
+up to that long; the `lag_blocks` in `/v1/status` is measured at the last
+pass. The worker drains up to
 `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges per pass, so a backlog after an
 outage clears on its own; a lag that keeps growing means the provider is
 rejecting requests — see [quicknode-rpc-limits.md](quicknode-rpc-limits.md).
 
-## 7. Check KMS signer MON balance
+## 7. Check the KMS signer's gas balance on every chain
 
-The sweep signer needs MON for gas. Monad bills the gas *limit* of every
+The sweep signer is one KMS key, so one address, on every chain, and needs
+gas on each: MON on Monad, ETH on Base, ETH on Arbitrum One. The indexer
+warns per chain below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. On Monad the sweep
+signer needs MON for gas. Monad bills the gas *limit* of every
 helper transaction (`100k + 400k × items`), so a full batch reserves about
 8.1M gas worth of MON. If the balance runs out, submissions fail and deposit requests
 wait in the queue; the `payday-indexer-signer-low-balance` alarm fires first.
@@ -100,6 +110,8 @@ SIGNER_ADDR=$(aws logs tail /ecs/payday/indexer --since 24h --region "$AWS_REGIO
   | grep "configured sweep signer" | grep -oE '0x[0-9a-fA-F]{40}' | head -1)
 
 cast balance "$SIGNER_ADDR" --rpc-url "$MONAD_RPC_URL"
+cast balance "$SIGNER_ADDR" --rpc-url "$BASE_RPC_URL"
+cast balance "$SIGNER_ADDR" --rpc-url "$ARBITRUM_RPC_URL"
 ```
 
-Fund it with more MON if the balance is low.
+Fund whichever chain is low with its gas token.

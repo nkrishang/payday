@@ -1,14 +1,13 @@
 "use client";
 
-import { PaydayError } from "@payday/sdk";
+import { PaydayError, type Network } from "@payday/sdk";
 import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, PenLine, Wallet } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAccount, useDisconnect, useSignTypedData, useSwitchChain } from "wagmi";
 import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
-import { paydayChain } from "@/lib/chain";
-import { config } from "@/lib/config";
+import { wagmiChain } from "@/lib/chain";
 import { truncateAddress } from "@/lib/format";
 import { payerAttestationDefinition } from "@/lib/payer-attestation";
 import { payerClient } from "@/lib/payday";
@@ -17,27 +16,38 @@ import { walletErrorMessage } from "./wallet-errors";
 
 /**
  * The wallet step: the payer connects the wallet they will pay from and signs
- * the request's attestation with it. The signature is what creates the
- * one-time address (the API derives it from the request and this signature)
- * and it is what the indexer later holds transfers against: money from any
- * other wallet is not credited as the payer's.
+ * the request's attestation with it, on the network they chose. The signature
+ * is what creates the one-time address (the API derives it from the request,
+ * the chosen chain, and this signature) and it is what the indexer later
+ * holds transfers against: money from any other wallet, or on any other
+ * chain, is not credited as the payer's.
  *
  * Nothing the payer signs is composed here. The API mints the document
- * (`wallet.challenge`) for the connected address, the wallet renders it, and
- * only the signature goes back. The session the challenge belongs to is
- * handed up and stored like the email verification's, so the tab keeps its
- * standing across a reload.
+ * (`wallet.challenge`) for the connected address under the chosen chain's
+ * domain, the wallet renders it, and only the signature goes back. Wallets
+ * refuse typed data whose domain names another chain than the one they are
+ * on, so the wallet is switched to the chosen network first; that switch is
+ * the payer's own confirmation of the choice. The session the challenge
+ * belongs to is handed up and stored like the email verification's, so the
+ * tab keeps its standing across a reload.
  */
 export function WalletAttestation({
   payment,
+  network,
   payerSession,
   onSession,
   onBound,
+  onBusyChange,
 }: {
   payment: UnlockedPayerDepositRequest;
+  /** The network the payer chose, or null while they have not. */
+  network: Network | null;
   payerSession: string | null;
   onSession: (token: string | null) => void;
   onBound: () => void;
+  /** Told while a switch, signature, or submission is in flight, so the
+   * network selector can hold the payer's choice until it completes. */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const { address, isConnected, chainId } = useAccount();
   const { disconnect } = useDisconnect();
@@ -47,22 +57,21 @@ export function WalletAttestation({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const chainMatches = payment.chain.id === String(config.chainId);
+  const target = network ? wagmiChain(network.chain.id) : null;
 
   const attest = useCallback(async () => {
     setError(null);
+    if (!network || !target) return;
     if (!isConnected || !address) {
       setConnectOpen(true);
       return;
     }
     setSubmitting(true);
     try {
-      // Wallets refuse typed data whose domain names another chain than the
-      // one they are on, so line the wallet up first.
-      if (chainId !== paydayChain.id) {
-        await switchChainAsync({ chainId: paydayChain.id });
+      if (chainId !== target.id) {
+        await switchChainAsync({ chainId: target.id });
       }
-      const challenge = await payerClient.wallet.challenge(payment.id, address, {
+      const challenge = await payerClient.wallet.challenge(payment.id, address, network.chain.id, {
         ...(payerSession === null ? {} : { payerSession }),
       });
       onSession(challenge.payer_session);
@@ -80,38 +89,36 @@ export function WalletAttestation({
     address,
     chainId,
     isConnected,
+    network,
     onBound,
     onSession,
     payerSession,
     payment.id,
     signTypedDataAsync,
     switchChainAsync,
+    target,
   ]);
 
-  if (!chainMatches) {
-    return (
-      <p className="rounded-[10px] border border-line px-3.5 py-3 text-[13px] leading-relaxed text-muted">
-        This checkout is configured for {config.chainName}, but the deposit request asks for{" "}
-        {payment.chain.name}. It cannot take the wallet signature here; ask the merchant for a
-        link on the right network.
-      </p>
-    );
-  }
-
   const busy = switching || signing || submitting;
+
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
+
   const label = (() => {
+    if (!network) return "Choose a network first";
     if (!isConnected) return "Connect the wallet you will pay from";
-    if (switching) return `Switching to ${paydayChain.name}…`;
+    if (switching) return `Switching to ${target?.name ?? network.chain.name}…`;
     if (signing) return "Sign in your wallet…";
     if (submitting) return "Creating your address…";
-    return "Sign to get your deposit address";
+    return `Sign to get your deposit address on ${network.chain.name}`;
   })();
 
   return (
     <div>
       <ConnectSheet open={connectOpen} onOpenChange={setConnectOpen} />
 
-      <Button size="lg" onClick={attest} disabled={busy}>
+      <Button size="lg" onClick={attest} disabled={busy || network === null || target === null}>
         {busy ? (
           <Loader2 className="size-4 animate-spin" />
         ) : isConnected ? (
@@ -137,7 +144,8 @@ export function WalletAttestation({
       ) : null}
 
       <p className="mt-4 text-[12.5px] leading-relaxed text-faint">
-        This signature costs no gas and moves no funds.
+        This signature costs no gas and moves no funds. Your wallet is switched to the network you
+        chose before signing; the address it creates is only payable there.
       </p>
 
       <Problem>{error}</Problem>
@@ -154,6 +162,8 @@ function describe(cause: unknown): string {
         return "The signature did not come from the connected wallet. Smart-contract wallets are not supported yet; sign with a regular wallet.";
       case "wallet_challenge_required":
         return "The signing window closed. Try again.";
+      case "unsupported_chain":
+        return "This request cannot be paid on that network. Choose another.";
       case "payer_session_invalid":
       case "verification_required":
         return "This tab's verification session expired. Reload the page and verify again.";

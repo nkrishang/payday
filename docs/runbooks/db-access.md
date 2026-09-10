@@ -150,7 +150,7 @@ The indexer image is minimal (no psql), but you can install it:
 
 ```sh
 apk add --no-cache postgresql-client
-psql "$DB_URL" -c "SELECT last_block FROM indexer_cursor WHERE chain_id = 143;"
+psql "$DB_URL" -c "SELECT chain_id, last_block FROM indexer_cursor;"
 ```
 
 Note: ECS Exec requires the Session Manager plugin. On macOS:
@@ -184,6 +184,8 @@ LIMIT 10;
 ```
 
 ### Reset cursor (use with caution — see indexer-cursor-reset.md)
+
+One row per chain; the example is Monad.
 
 ```sql
 INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash)

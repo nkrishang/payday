@@ -9,17 +9,22 @@ import {Payment} from "foundry/src/Payment.sol";
 import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
 contract PaymentDeployer {
-    function deploy(address token, uint256 amount, address receiver, uint64 expirationTimestamp, address recovery)
-        external
-        returns (Payment)
-    {
-        return new Payment(token, amount, receiver, expirationTimestamp, recovery);
+    function deploy(
+        address token,
+        uint256 amount,
+        address receiver,
+        uint64 expirationTimestamp,
+        address recovery,
+        uint256 chainId
+    ) external returns (Payment) {
+        return new Payment(token, amount, receiver, expirationTimestamp, recovery, chainId);
     }
 }
 
 contract PaymentTest is Test {
     event Settled(address indexed receiver, uint256 amount);
-    event Recovered(address indexed recovery, uint256 amount);
+    event Recovered(address indexed recovery, address indexed token, uint256 amount);
+    event WrongChain(uint256 expectedChainId, uint256 actualChainId);
 
     MockUSDC public token;
     PaymentFactory public factory;
@@ -38,7 +43,7 @@ contract PaymentTest is Test {
 
         vm.expectEmit(true, true, true, true, paymentAddress);
         emit Settled(RECEIVER, 10e6);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(token.balanceOf(RECEIVER), 10e6);
         assertEq(token.balanceOf(RECOVERY), 0);
@@ -56,8 +61,8 @@ contract PaymentTest is Test {
         vm.expectEmit(true, true, true, true, paymentAddress);
         emit Settled(RECEIVER, 10e6);
         vm.expectEmit(true, true, true, true, paymentAddress);
-        emit Recovered(RECOVERY, 2e6);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        emit Recovered(RECOVERY, address(token), 2e6);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(token.balanceOf(RECEIVER), 10e6);
         assertEq(token.balanceOf(RECOVERY), 2e6);
@@ -74,8 +79,8 @@ contract PaymentTest is Test {
         vm.expectEmit(true, true, true, true, paymentAddress);
         emit Settled(RECEIVER, amount);
         vm.expectEmit(true, true, true, true, paymentAddress);
-        emit Recovered(RECOVERY, remainder);
-        factory.execute(address(token), amount, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        emit Recovered(RECOVERY, address(token), remainder);
+        factory.execute(address(token), amount, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(token.balanceOf(RECEIVER), amount, "the receiver never takes more than the invoice amount");
         assertEq(token.balanceOf(RECOVERY), remainder, "every unit above the invoice amount is recovered");
@@ -87,7 +92,7 @@ contract PaymentTest is Test {
         token.mint(paymentAddress, 10e6 - 1);
 
         vm.expectRevert(CREATE3.DeploymentFailed.selector);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(paymentAddress.code.length, 0, "a failed deployment must leave the address usable for the invoice");
         assertEq(token.balanceOf(paymentAddress), 10e6 - 1, "a partial payment stays put until completed or expired");
@@ -104,7 +109,7 @@ contract PaymentTest is Test {
         token.mint(predicted, 10e6 - 1);
 
         vm.expectRevert(abi.encodeWithSelector(Payment.InsufficientTokenBalance.selector, 10e6 - 1, 10e6));
-        deployer.deploy(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY);
+        deployer.deploy(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, block.chainid);
 
         assertEq(predicted.code.length, 0);
         assertEq(token.balanceOf(predicted), 10e6 - 1, "a partial payment stays put until completed or expired");
@@ -115,7 +120,7 @@ contract PaymentTest is Test {
         token.mint(paymentAddress, 10e6);
 
         vm.recordLogs();
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         // The token logs its own transfers, so only count what the Payment emitted.
@@ -138,7 +143,7 @@ contract PaymentTest is Test {
         token.setBlacklisted(RECOVERY, true);
 
         vm.expectRevert(CREATE3.DeploymentFailed.selector);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(token.balanceOf(RECEIVER), 0, "the receiver leg must roll back with the recovery leg");
         assertEq(token.balanceOf(RECOVERY), 0);
@@ -154,8 +159,8 @@ contract PaymentTest is Test {
 
         vm.warp(expirationTimestamp + 1);
         vm.expectEmit(true, true, true, true, paymentAddress);
-        emit Recovered(RECOVERY, 4e6);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        emit Recovered(RECOVERY, address(token), 4e6);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(token.balanceOf(RECEIVER), 0);
         assertEq(token.balanceOf(RECOVERY), 4e6);
@@ -172,7 +177,7 @@ contract PaymentTest is Test {
 
         vm.warp(expirationTimestamp + 1);
         vm.recordLogs();
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         // The token logs its own transfers, so only count what the Payment emitted.
@@ -182,6 +187,7 @@ contract PaymentTest is Test {
             paymentLogs++;
             assertEq(logs[i].topics[0], Recovered.selector, "an expired deployment must never report settlement");
             assertEq(logs[i].topics[1], bytes32(uint256(uint160(RECOVERY))));
+            assertEq(logs[i].topics[2], bytes32(uint256(uint160(address(token)))));
             assertEq(abi.decode(logs[i].data, (uint256)), 12e6, "the whole balance is recovered, not a remainder");
         }
         assertEq(paymentLogs, 1, "an expired deployment must emit exactly one event");
@@ -197,7 +203,7 @@ contract PaymentTest is Test {
         token.mint(paymentAddress, 10e6);
 
         vm.warp(expirationTimestamp);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         assertEq(token.balanceOf(RECEIVER), 10e6);
         assertEq(token.balanceOf(RECOVERY), 0);
@@ -207,16 +213,16 @@ contract PaymentTest is Test {
     function test_recover_forwards_late_funds_to_recovery_from_any_caller(address caller) public {
         (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 3);
         token.mint(paymentAddress, 10e6);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
         assertEq(token.balanceOf(RECEIVER), 10e6);
 
         // A repeat payment after settlement can no longer reach the receiver;
         // anyone may forward it to the Payday recovery wallet.
         token.mint(paymentAddress, 3e6);
         vm.expectEmit(true, true, true, true, paymentAddress);
-        emit Recovered(RECOVERY, 3e6);
+        emit Recovered(RECOVERY, address(token), 3e6);
         vm.prank(caller);
-        assertEq(Payment(paymentAddress).recover(), 3e6);
+        assertEq(Payment(paymentAddress).recover(address(token)), 3e6);
 
         assertEq(token.balanceOf(paymentAddress), 0, "late funds must not be stranded");
         assertEq(token.balanceOf(RECOVERY), 3e6);
@@ -226,10 +232,10 @@ contract PaymentTest is Test {
     function test_recover_with_nothing_to_collect_is_a_noop() public {
         (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 4);
         token.mint(paymentAddress, 10e6);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
         vm.recordLogs();
-        assertEq(Payment(paymentAddress).recover(), 0);
+        assertEq(Payment(paymentAddress).recover(address(token)), 0);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 0, "an empty recovery must not emit");
         assertEq(token.balanceOf(RECOVERY), 0);
@@ -241,14 +247,14 @@ contract PaymentTest is Test {
         (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 5);
         token.mint(paymentAddress, 4e6);
         vm.warp(expirationTimestamp + 1);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
         assertEq(token.balanceOf(RECOVERY), 4e6);
 
         token.mint(paymentAddress, 6e6);
         vm.expectRevert(CREATE3.DeploymentFailed.selector);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
-        assertEq(Payment(paymentAddress).recover(), 6e6);
+        assertEq(Payment(paymentAddress).recover(address(token)), 6e6);
         assertEq(token.balanceOf(RECOVERY), 10e6);
         assertEq(token.balanceOf(paymentAddress), 0);
         assertEq(token.balanceOf(RECEIVER), 0);
@@ -257,15 +263,88 @@ contract PaymentTest is Test {
     function test_recover_reverts_when_the_token_rejects_the_transfer() public {
         (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 6);
         token.mint(paymentAddress, 10e6);
-        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
         token.mint(paymentAddress, 1e6);
 
         token.setPaused(true);
         vm.expectRevert();
-        Payment(paymentAddress).recover();
+        Payment(paymentAddress).recover(address(token));
 
         token.setPaused(false);
-        assertEq(Payment(paymentAddress).recover(), 1e6);
+        assertEq(Payment(paymentAddress).recover(address(token)), 1e6);
+    }
+
+    /// @notice The factory lives at the same address on every chain, so the
+    /// same arguments name the same address everywhere. Deploying on a chain
+    /// the payer did not choose must never route funds: it touches no token,
+    /// records no settlement, and leaves the balance for `recover`.
+    function test_wrong_chain_deployment_routes_nothing_and_is_recoverable() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 8);
+        token.mint(paymentAddress, 10e6);
+
+        vm.chainId(block.chainid + 1);
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit WrongChain(block.chainid - 1, block.chainid);
+        // The committed token is whatever address the chosen chain's USDC has;
+        // here it is a contract, but the constructor must not depend on that.
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid - 1);
+
+        assertGt(paymentAddress.code.length, 0);
+        assertFalse(Payment(paymentAddress).settled(), "a wrong-chain deployment never settles");
+        assertEq(token.balanceOf(RECEIVER), 0, "the receiver is never paid on the wrong chain");
+        assertEq(token.balanceOf(RECOVERY), 0, "the constructor moves nothing on the wrong chain");
+        assertEq(token.balanceOf(paymentAddress), 10e6);
+
+        // The rescue names this chain's token explicitly and returns it to the payer's wallet.
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit Recovered(RECOVERY, address(token), 10e6);
+        assertEq(Payment(paymentAddress).recover(address(token)), 10e6);
+        assertEq(token.balanceOf(RECOVERY), 10e6);
+        assertEq(token.balanceOf(paymentAddress), 0);
+    }
+
+    /// @notice On the wrong chain the committed token address may hold no code
+    /// at all; deployment must still succeed so the rescue path exists.
+    function test_wrong_chain_deployment_succeeds_when_the_committed_token_has_no_code() public {
+        uint64 expirationTimestamp = uint64(block.timestamp + 1 hours);
+        bytes32 salt = bytes32(uint256(9));
+        address missingToken = address(0xD00D);
+        address paymentAddress =
+            factory.paymentAddress(missingToken, 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, 999);
+
+        // This chain's own USDC was sent to the address by mistake.
+        token.mint(paymentAddress, 5e6);
+        factory.execute(missingToken, 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, 999);
+
+        assertGt(paymentAddress.code.length, 0);
+        assertFalse(Payment(paymentAddress).settled());
+        assertEq(Payment(paymentAddress).recover(address(token)), 5e6);
+        assertEq(token.balanceOf(RECOVERY), 5e6);
+    }
+
+    /// @notice The chain id is an address parameter: the same terms on another
+    /// chain are another address, so a payer's choice is committed like the wallet.
+    function test_chain_id_changes_the_address() public view {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 10);
+        address elsewhere = factory.paymentAddress(
+            address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid + 1
+        );
+        assertNotEq(paymentAddress, elsewhere);
+    }
+
+    /// @notice Any token that lands here goes back to the payer's wallet the same way.
+    function test_recover_forwards_any_token_to_recovery() public {
+        (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 11);
+        token.mint(paymentAddress, 10e6);
+        factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
+
+        MockUSDC other = new MockUSDC();
+        other.mint(paymentAddress, 2e6);
+        vm.expectEmit(true, true, true, true, paymentAddress);
+        emit Recovered(RECOVERY, address(other), 2e6);
+        assertEq(Payment(paymentAddress).recover(address(other)), 2e6);
+        assertEq(other.balanceOf(RECOVERY), 2e6);
+        assertEq(token.balanceOf(RECEIVER), 10e6);
     }
 
     function test_mock_usdc_has_six_decimals() public view {
@@ -279,6 +358,8 @@ contract PaymentTest is Test {
     {
         expirationTimestamp = uint64(block.timestamp + 1 hours);
         salt = bytes32(saltSeed);
-        paymentAddress = factory.paymentAddress(address(token), amount, RECEIVER, expirationTimestamp, RECOVERY, salt);
+        paymentAddress = factory.paymentAddress(
+            address(token), amount, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid
+        );
     }
 }

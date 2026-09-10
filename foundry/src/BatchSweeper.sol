@@ -9,7 +9,8 @@ import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 /// An item whose `Payment` does not exist yet is deployed through the factory,
 /// which settles or recovers the balance present at deployment. An item whose
 /// `Payment` already exists (a previous batch, a third party, or an expiry
-/// recovery) has any later balance forwarded through `Payment.recover`; the
+/// recovery) has any later balance of its token forwarded through
+/// `Payment.recover`; the
 /// CREATE2 collision that a second `execute` would hit burns every unit of gas
 /// forwarded to it, so it is never attempted. A failed item cannot roll back
 /// its siblings; the caller reconciles from the emitted events.
@@ -21,6 +22,7 @@ contract BatchSweeper {
         uint64 expirationTimestamp;
         address recovery;
         bytes32 salt;
+        uint256 chainId;
     }
 
     /// @notice `factory.execute` (fresh deployment) or `Payment.recover` reverted with `revertData`.
@@ -39,12 +41,18 @@ contract BatchSweeper {
         for (uint256 i; i < sweeps.length; ++i) {
             Sweep calldata sweep = sweeps[i];
             address paymentAddress = factory.paymentAddress(
-                sweep.token, sweep.amount, sweep.receiver, sweep.expirationTimestamp, sweep.recovery, sweep.salt
+                sweep.token,
+                sweep.amount,
+                sweep.receiver,
+                sweep.expirationTimestamp,
+                sweep.recovery,
+                sweep.salt,
+                sweep.chainId
             );
 
             if (paymentAddress.code.length != 0) {
                 // Only the factory can deploy at this address, so the code is a Payment.
-                try Payment(paymentAddress).recover() returns (uint256 amount) {
+                try Payment(paymentAddress).recover(sweep.token) returns (uint256 amount) {
                     emit SweepRecovered(paymentAddress, sweep.token, amount);
                 } catch (bytes memory revertData) {
                     emit SweepFailed(paymentAddress, sweep.token, revertData);
@@ -53,7 +61,13 @@ contract BatchSweeper {
             }
 
             try factory.execute(
-                sweep.token, sweep.amount, sweep.receiver, sweep.expirationTimestamp, sweep.recovery, sweep.salt
+                sweep.token,
+                sweep.amount,
+                sweep.receiver,
+                sweep.expirationTimestamp,
+                sweep.recovery,
+                sweep.salt,
+                sweep.chainId
             ) {}
             catch (bytes memory revertData) {
                 emit SweepFailed(paymentAddress, sweep.token, revertData);

@@ -1,5 +1,5 @@
 import type { Party } from "@payday/sdk";
-import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
+import { tokenSymbol, type UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { formatDisplayAmount } from "@/lib/format";
 import { AttachmentLink } from "./attachment-link";
 
@@ -48,7 +48,7 @@ export function RequestDetails({
 
             <dt className="text-faint">Amount</dt>
             <dd className="tabular font-medium">
-              {formatDisplayAmount(details.amount)} {payment.token.symbol}
+              {formatDisplayAmount(details.amount)} {tokenSymbol(payment)}
             </dd>
           </>
         ) : null}

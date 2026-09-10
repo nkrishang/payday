@@ -287,9 +287,46 @@ contract BatchSweeperTest is Test {
         assertEq(token.balanceOf(paymentAddress), 1e6);
     }
 
+    /// @notice An item committed to another chain deploys (the guard is in the
+    /// constructor) but moves nothing; its siblings settle. The item is then a
+    /// deployed `Payment` whose balance the next batch forwards with `recover`.
+    function test_item_for_another_chain_moves_nothing_and_settles_siblings() public {
+        BatchSweeper.Sweep[] memory sweeps = new BatchSweeper.Sweep[](2);
+        sweeps[0] = _sweep(10e6, address(0xF4), bytes32(uint256(1)));
+        sweeps[1] = _sweep(20e6, address(0xF5), bytes32(uint256(2)));
+        sweeps[0].chainId = block.chainid + 1;
+        address wrongChain = _paymentAddress(sweeps[0]);
+        token.mint(wrongChain, 10e6);
+        token.mint(_paymentAddress(sweeps[1]), 20e6);
+
+        vm.recordLogs();
+        batchSweeper.executeBatch(sweeps);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != SweepFailed.selector, "a wrong-chain item is not a failure");
+        }
+
+        assertGt(wrongChain.code.length, 0);
+        assertFalse(Payment(wrongChain).settled());
+        assertEq(token.balanceOf(address(0xF4)), 0, "a wrong-chain item never pays its receiver");
+        assertEq(token.balanceOf(wrongChain), 10e6);
+        assertEq(token.balanceOf(address(0xF5)), 20e6);
+
+        vm.expectEmit(true, true, false, true, address(batchSweeper));
+        emit SweepRecovered(wrongChain, address(token), 10e6);
+        batchSweeper.executeBatch(sweeps);
+        assertEq(token.balanceOf(address(0xCAFE)), 10e6, "the rescue returns the balance to the payer's wallet");
+    }
+
     function _execute(BatchSweeper.Sweep memory sweep) private {
         factory.execute(
-            sweep.token, sweep.amount, sweep.receiver, sweep.expirationTimestamp, sweep.recovery, sweep.salt
+            sweep.token,
+            sweep.amount,
+            sweep.receiver,
+            sweep.expirationTimestamp,
+            sweep.recovery,
+            sweep.salt,
+            sweep.chainId
         );
     }
 
@@ -300,13 +337,20 @@ contract BatchSweeperTest is Test {
             receiver: receiver,
             expirationTimestamp: uint64(block.timestamp + 1 days),
             recovery: address(0xCAFE),
-            salt: salt
+            salt: salt,
+            chainId: block.chainid
         });
     }
 
     function _paymentAddress(BatchSweeper.Sweep memory sweep) private view returns (address) {
         return factory.paymentAddress(
-            sweep.token, sweep.amount, sweep.receiver, sweep.expirationTimestamp, sweep.recovery, sweep.salt
+            sweep.token,
+            sweep.amount,
+            sweep.receiver,
+            sweep.expirationTimestamp,
+            sweep.recovery,
+            sweep.salt,
+            sweep.chainId
         );
     }
 }

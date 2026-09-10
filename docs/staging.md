@@ -2,8 +2,8 @@
 
 Staging is the middle ground between `just dev` and production: a second,
 fully separate copy of the production stack that always runs the newest
-commit on `main`, on Monad mainnet with real USDC, that you drive from your
-own machine. The web app runs locally against it, `curl` and the SDK reach it
+commit on `main`, on Monad, Base, and Arbitrum One with real USDC, that you
+drive from your own machine. The web app runs locally against it, `curl` and the SDK reach it
 with a key you mint in that local dashboard, and the deposits it settles are
 real transfers of a few cents through real RPC, real finality, real KMS
 signing, real S3 scanning, and real email.
@@ -12,7 +12,7 @@ signing, real S3 scanning, and real email.
 |---|---|---|---|
 | Code | your working tree | every commit on `main` that passes CI | the `image_tag` in the production tfvars, applied by hand |
 | API, indexer, database | on this machine | AWS, `api.staging.payday.sh` | AWS, `api.payday.sh` |
-| Chain and USDC | Anvil, mock USDC | Monad mainnet, Circle USDC | Monad mainnet, Circle USDC |
+| Chains and USDC | two Anvils, mock USDC | Monad, Base, Arbitrum One; Circle USDC | Monad, Base, Arbitrum One; Circle USDC |
 | Contracts | bootstrapped on Anvil each run | staging's own `PaymentFactory` generation | production's generation |
 | Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `payday.sh` |
 | Merchant sign-in | development Privy app | development Privy app | production Privy app |
@@ -45,8 +45,9 @@ Open the dashboard, sign in with an emailed code (the development Privy app,
 so the same mailbox you use locally), and mint an API key in the API key
 section. It is a `payday_test_` key that only staging accepts. Issue a
 deposit request from the dashboard, open its link in the same browser,
-connect a wallet holding a little USDC and MON, and pay it; everything from
-the wallet attestation to the Proof of Payment happens on the live stack.
+choose a network, connect a wallet holding a little USDC and gas there,
+and pay it; everything from the wallet attestation to the Proof of Payment
+happens on the live stack.
 
 Scripts and the SDK use the staging origin and that key:
 
@@ -61,10 +62,14 @@ In the SDK, pass `baseUrl: "https://api.staging.payday.sh"` to `PaydayClient`.
 The scripted end-to-end check is a real deposit that costs only gas:
 
 ```bash
-export PAYDAY_RPC_URL='https://your-quicknode-endpoint'   # any HTTPS Monad RPC
-export PAYER_KEY='0x...'      # a wallet holding at least 0.01 USDC and some MON
+export PAYDAY_CHAIN_ID=143    # the network to pay on: 143, 8453, or 42161
+export PAYDAY_RPC_URL='https://your-rpc-endpoint'   # any HTTPS RPC for that chain
+export PAYDAY_USDC_ADDRESS=0x754704Bc059F8C67012fEd69BC8A327a5aafb603   # that chain's USDC
+export PAYER_KEY='0x...'      # a wallet holding at least 0.01 USDC and some gas there
 just live-smoke
 ```
+
+Run it once per network; only the three exports change.
 
 It issues a permissionless request paid out to the paying wallet itself,
 binds that wallet with an EIP-712 attestation signed by `cast` exactly as
@@ -98,7 +103,7 @@ checks `/health`. Nothing in it can reach the production state or account
 role.
 
 Before the stack exists, the workflow does nothing: it exits early until
-the `AWS_STAGING_DEPLOY_ROLE_ARN` and `STAGING_RPC_URL` secrets are set
+the `AWS_STAGING_DEPLOY_ROLE_ARN` and `STAGING_RPC_URLS` secrets are set
 (bootstrap, below).
 
 To redeploy an older commit that is on `main`, run the workflow by hand
@@ -146,14 +151,16 @@ Payday AWS account.
    `infra/environments/staging.tfvars` as `route53_zone_id`. Wait for
    `dig NS api.staging.payday.sh` to return the Route53 names.
 2. **Contracts.** Deploy a `PaymentFactory` and `BatchSweeper` generation
-   for staging on Monad mainnet exactly as in the production runbook §2,
-   from a deployment wallet with a little MON, and record the two
-   addresses and the two runtime code hashes in the tfvars. Never point
-   staging at production's contracts: every deposit address is derived from
-   its factory, and the two databases must not share one.
-3. **Start block.** `cast block-number` immediately before the first apply,
-   into `usdc_start_block`.
-4. **State and images.** With `TF_VAR_rpc_url` exported:
+   for staging on Monad, Base, and Arbitrum One exactly as in the
+   production runbook §2, from one fresh deployment wallet with a little
+   gas on each chain so the addresses match everywhere, and record the
+   addresses and runtime code hashes in each `chains` entry of the tfvars.
+   Never point staging at production's contracts: every deposit address is
+   derived from its factory, and the two databases must not share one.
+3. **Start blocks.** `cast block-number` on each chain immediately before
+   the first apply, into that entry's `usdc_start_block`.
+4. **State and images.** With `TF_VAR_rpc_urls` exported (a JSON object of
+   endpoints keyed by chain id, as in the production runbook §6):
 
    ```bash
    terraform -chdir=infra init -reconfigure -backend-config=environments/staging.backend.hcl
@@ -170,8 +177,9 @@ Payday AWS account.
    Review the plan as for production. Because `infra/.terraform` is shared,
    run `terraform init -reconfigure -backend-config=backend.hcl` before the
    next production command.
-5. **Signers.** Derive and fund the sweep signer with a little MON, and
-   derive the attestation signer, as in the production runbook §8; note
+5. **Signers.** Derive and fund the sweep signer with a little MON on
+   Monad and ETH on Base and Arbitrum One, and derive the attestation
+   signer, as in the production runbook §8; note
    staging's attestor address in the team's records, since proofs from
    staging are signed by it and `PAYDAY_ATTESTOR` in the smoke test checks
    it.
@@ -184,7 +192,8 @@ Payday AWS account.
    environment named `staging` and two repository secrets:
    `AWS_STAGING_DEPLOY_ROLE_ARN`, from
    `terraform -chdir=infra output -raw github_deploy_role_arn`, and
-   `STAGING_RPC_URL`, the same endpoint you exported as `TF_VAR_rpc_url`.
+   `STAGING_RPC_URLS`, the same JSON object you exported as
+   `TF_VAR_rpc_urls`.
    A third, `STAGING_RESEND_API_KEY`, is optional: with it, staging emails
    payers their deposit requests through Resend; without it, those emails
    queue unsent.
@@ -198,7 +207,8 @@ Payday AWS account.
 
 Staging is billed like a small production: one Fargate task each for the
 API and indexer, a single-AZ `db.t4g.small`, the ALB, WAF, and the public
-IPs. Its sweep signer needs only a few MON. Keep only what a test needs in
+IPs. Its sweep signer needs only a little gas on each chain, and idle
+chains cost the indexer two RPC calls every five minutes. Keep only what a test needs in
 the payer wallet; the payout defaults to that same wallet, so a smoke run
 costs gas alone.
 

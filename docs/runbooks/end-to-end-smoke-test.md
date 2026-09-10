@@ -6,7 +6,9 @@ and confirm the funds reach the beneficiary.
 ## Prerequisites
 
 - API key, `curl`, and `jq` configured (see [README.md](README.md) prerequisites)
-- A wallet with USDC on Monad and its private key
+- A wallet with USDC on the network you will test and its private key (the
+  commands below use Monad; substitute the chain's endpoint and USDC address
+  for Base or Arbitrum One, and choose that network on the checkout)
 - The indexer running and caught up (see [daily-monitoring.md](daily-monitoring.md))
 
 ## Step 1: Create a deposit request

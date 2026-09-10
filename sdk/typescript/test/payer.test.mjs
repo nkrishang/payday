@@ -27,7 +27,8 @@ const payerPayment = {
   settlement_explorer_url: null,
   payer_message: null,
   content_unlocked: true,
-  chain: { id: "143", name: "Monad" },
+  networks: [{ chain: { id: "143", name: "Monad", native_symbol: "MON" }, token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 } }],
+  chain: { id: "143", name: "Monad", native_symbol: "MON" },
   token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 },
   amount: "25.00", amount_base_units: "25000000",
   received: "0", received_base_units: "0",
@@ -57,7 +58,7 @@ const lockedPayment = {
   settlement_explorer_url: null,
   payer_message: null,
   content_unlocked: false,
-  chain: null, token: null,
+  networks: null, chain: null, token: null,
   amount: null, amount_base_units: null,
   received: null, received_base_units: null,
   remaining: null, remaining_base_units: null,
@@ -95,7 +96,7 @@ test("a locked gated deposit request carries null mechanics and no invoice conte
   assert.equal(payment.payer_policy.expected_email_hint, "a****@e***.com");
   assert.equal(payment.requirements.complete, false);
   for (const field of [
-    "chain", "token", "amount", "amount_base_units", "received", "received_base_units",
+    "networks", "chain", "token", "amount", "amount_base_units", "received", "received_base_units",
     "remaining", "remaining_base_units", "address", "address_explorer_url", "deposit_uri", "details",
   ]) {
     assert.equal(payment[field], null, `${field} must be withheld while locked`);

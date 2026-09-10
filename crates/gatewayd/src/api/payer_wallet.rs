@@ -1,16 +1,19 @@
 //! The payer's wallet attestation (product plan §4.6, §5.4).
 //!
 //! ```text
-//! POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…"}
+//! POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…", "chain_id": "8453"}
 //! POST /v1/payer/deposit-requests/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
 //! ```
 //!
 //! Once a session satisfies the request's policy (immediately, for a
 //! permissionless request), it may ask for a challenge: a one-time nonce
-//! wrapped in the EIP-712 document the payer's wallet must sign. The
-//! signature binds that wallet to the request, and only then does the
+//! wrapped in the EIP-712 document the payer's wallet must sign, under the
+//! domain of the network the payer chose to pay on. The signature binds
+//! that wallet and that network to the request, and only then does the
 //! request have a payment address. The address commits to the attestation,
-//! so a second wallet cannot be bound afterwards.
+//! so neither a second wallet nor another network can be bound afterwards.
+//! The chain is recorded with the challenge, so the attestation is rebuilt
+//! under the same domain whatever the attest call claims.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -21,8 +24,9 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use gateway_core::{
-    Invoice, InvoiceStatus, PayerAttestation, PayerAttestationError, PayerAttestationTypedData,
-    PayerDepositRequestResponse, payer_wallet_attestation, rfc3339,
+    BindError, ChainDto, ChainId, Invoice, InvoiceStatus, NetworkDto, PayerAttestation,
+    PayerAttestationError, PayerAttestationTypedData, PayerDepositRequestResponse,
+    payer_wallet_attestation, rfc3339,
 };
 use gateway_db::{BindPayerWallet, DbInvoice, DbPayerSession, PAYER_SESSION_TTL};
 use serde::{Deserialize, Serialize};
@@ -42,6 +46,8 @@ pub const WALLET_CHALLENGE_TTL: Duration = Duration::from_secs(10 * 60);
 #[serde(deny_unknown_fields)]
 pub struct ChallengeRequest {
     pub wallet: String,
+    /// The network the payer will pay on: one of the request's `networks`.
+    pub chain_id: String,
 }
 
 #[derive(Serialize)]
@@ -50,6 +56,8 @@ pub struct ChallengeResponse {
     /// for a permissionless request that had none.
     pub payer_session: String,
     pub expires_at: String,
+    /// The network the challenge is for; the typed data's domain names it.
+    pub chain: ChainDto,
     /// Exactly what to pass to `eth_signTypedData_v4`.
     pub typed_data: PayerAttestationTypedData,
 }
@@ -60,6 +68,20 @@ pub struct AttestRequest {
     pub wallet: String,
     /// `0x` hex, 65 bytes.
     pub signature: String,
+}
+
+/// The chain the payer named, if the request may be paid there. A chain
+/// this deployment knows nothing about and one the request does not offer
+/// are the same refusal: the request's own list is what the checkout shows.
+fn parse_chain(invoice: &Invoice, value: &str) -> Result<ChainId, ApiError> {
+    let chain_id: u64 = value
+        .trim()
+        .parse()
+        .map_err(|_| ApiError::invalid_request("chain_id must be a decimal chain id string"))?;
+    invoice
+        .network_for(ChainId(chain_id))
+        .map(|network| network.chain_id)
+        .ok_or_else(ApiError::unsupported_chain)
 }
 
 fn parse_wallet(value: &str) -> Result<Address, ApiError> {
@@ -112,6 +134,8 @@ pub async fn challenge(
             &binding.payer_wallet.to_checksum(None),
         ));
     }
+    let chain = parse_chain(&invoice, &request.chain_id)?;
+    let network = *invoice.network_for(chain).expect("parse_chain checked");
     let gated = invoice.issuance_snapshot.payer_policy.mode().is_gated();
     let (session, token) = match session_token(&headers) {
         Some(token) => {
@@ -143,7 +167,7 @@ pub async fn challenge(
     }
     let challenge = state
         .payer_sessions
-        .issue_wallet_challenge(session.id, WALLET_CHALLENGE_TTL)
+        .issue_wallet_challenge(session.id, chain.0, WALLET_CHALLENGE_TTL)
         .await?;
     let message = PayerAttestation::new(
         invoice.attribution_hash,
@@ -156,7 +180,8 @@ pub async fn challenge(
         Json(ChallengeResponse {
             payer_session: token,
             expires_at: rfc3339(challenge.expires_at),
-            typed_data: message.typed_data(invoice.chain_id.0, invoice.factory.0),
+            chain: NetworkDto::from_terms(&network).chain,
+            typed_data: message.typed_data(network.chain_id.0, network.factory.0),
         }),
     )
         .into_response())
@@ -190,7 +215,12 @@ pub async fn attest(
         .ok_or_else(ApiError::wallet_challenge_required)?;
     // Rebuild the document the wallet was asked to sign from what this
     // service issued, never from the request body: only the wallet and the
-    // signature come from the payer.
+    // signature come from the payer. The chain is the challenge's: a
+    // request whose networks no longer include it cannot be bound there.
+    let chain = ChainId(challenge.chain_id);
+    let network = *invoice
+        .network_for(chain)
+        .ok_or_else(ApiError::unsupported_chain)?;
     let message = PayerAttestation::new(
         invoice.attribution_hash,
         wallet,
@@ -198,13 +228,13 @@ pub async fn attest(
         challenge.expires_at.timestamp().max(0) as u64,
     );
     let attestation =
-        payer_wallet_attestation(&message, invoice.chain_id.0, invoice.factory.0, &signature);
+        payer_wallet_attestation(&message, network.chain_id.0, network.factory.0, &signature);
     let binding = invoice
-        .bind_payer_wallet(attestation, rfc3339(now))
+        .bind_payer_wallet(chain, attestation, rfc3339(now))
         .map_err(|error| match error {
-            PayerAttestationError::SignatureInvalid | PayerAttestationError::SignerMismatch => {
-                ApiError::wallet_signature_invalid()
-            }
+            BindError::Attestation(
+                PayerAttestationError::SignatureInvalid | PayerAttestationError::SignerMismatch,
+            ) => ApiError::wallet_signature_invalid(),
             other => {
                 tracing::error!(payment_id = %row.id, error = %other, "attestation built by this service failed to verify");
                 ApiError::internal("failed to verify the wallet attestation")
@@ -216,7 +246,7 @@ pub async fn attest(
         .await?
     {
         BindPayerWallet::Bound(_) => {
-            tracing::info!(payment_id = %row.id, wallet = %wallet, "payer wallet bound; payment address derived");
+            tracing::info!(payment_id = %row.id, wallet = %wallet, chain_id = chain.0, "payer wallet bound; payment address derived");
         }
         // The same wallet signing again (another tab, a retry) finds its own
         // binding; a different one learns which wallet holds the request.

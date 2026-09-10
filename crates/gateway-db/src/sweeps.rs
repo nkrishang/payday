@@ -825,8 +825,8 @@ mod tests {
 
     use alloy_primitives::{U256, address};
     use gateway_core::{
-        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        Party, PayerPolicy, TokenAddress, USDC_DECIMALS,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, Invoice, Party, PayerPolicy,
+        USDC_DECIMALS,
     };
     use sqlx::PgPool;
 
@@ -856,8 +856,7 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let factory = FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"));
-        let token = TokenAddress(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"));
+        let networks = crate::invoices::tests::test_networks(CHAIN_ID);
         let beneficiary =
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"));
         let amount = Amount(U256::from(amount));
@@ -870,23 +869,13 @@ mod tests {
             party("Acme"),
             party("Globex"),
             policy,
-            factory,
-            ChainId(CHAIN_ID),
-            token,
+            &networks,
             beneficiary,
             amount,
             1_900_000_000,
         );
-        let invoice = Invoice::issue(
-            factory,
-            ChainId(CHAIN_ID),
-            token,
-            beneficiary,
-            amount,
-            1_900_000_000,
-            snapshot,
-        )
-        .unwrap();
+        let invoice =
+            Invoice::issue(&networks, beneficiary, amount, 1_900_000_000, snapshot).unwrap();
         let input = CreateInvoiceInput::from_invoice(
             &invoice,
             AccountId(account_id),
@@ -1006,7 +995,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.chain_id, CHAIN_ID as i64);
-        assert_eq!(row.token_address, member.token.0.to_vec());
+        assert_eq!(
+            row.token_address,
+            member.network().unwrap().token.0.to_vec()
+        );
         assert_eq!(row.transaction_hash, TX_HASH.to_vec());
         assert_eq!(row.block_number, BLOCK as i64);
         assert_eq!(row.amount, "50");

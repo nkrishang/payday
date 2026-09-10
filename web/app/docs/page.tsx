@@ -122,8 +122,9 @@ export default function IntroductionPage() {
           itemised breakdown; Payday stores and hashes it but never parses it.
         </li>
         <li>
-          <strong>Not multi-asset.</strong> Each environment accepts one exact Circle-issued USDC
-          contract on one chain. Bridged USDC, look-alike tokens, and other networks do not count.
+          <strong>Not multi-asset.</strong> Each environment accepts Circle-issued native USDC on
+          its supported networks, and the payer picks one. Bridged USDC, look-alike tokens, and
+          other networks do not count.
         </li>
       </ul>
 

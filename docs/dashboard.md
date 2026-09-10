@@ -79,8 +79,10 @@ into setup.
 The foot of `/dashboard` is the account itself. The **Account** section shows
 the mailbox the merchant signed in with and their Payday wallet — the
 embedded EVM wallet Privy created for the account — in full, ready to copy or
-open in the explorer, with its USDC and gas balance on the deployment's chain
-read straight from the public RPC (`NEXT_PUBLIC_RPC_URL`), and a Sign out. A
+open in each network's explorer, with its USDC and gas balance on every
+supported network read straight from the public RPCs (`NEXT_PUBLIC_CHAINS`),
+and a Sign out. The wallet is the same address on every chain, so a settled
+deposit lands there on whichever network the payer chose. A
 wallet that Privy is still creating shows as such with a *Check again*; the
 API records it as soon as a session carries it. The **API key** section
 below it generates, rolls, and revokes the key the merchant's own server uses,
@@ -245,10 +247,11 @@ merchant came for:
   attempt the payer made, with its status (code sent, approved, or abandoned)
   and time. The payer's session and the code itself are never shown, because
   the API never sends them;
-- *Deposit*: the one-time address, the payout address, network and token, the
+- *Deposit*: the one-time address, the payout address, the network and token
+  (the networks offered until the payer chooses, then the chosen one), the
   funded time, the settlement transaction, and any operator attention message.
-  Addresses and the settlement hash are shown in full and link to the
-  configured explorer (`NEXT_PUBLIC_EXPLORER_BASE_URL`) — the whole address is
+  Addresses and the settlement hash are shown in full and link to the chosen
+  chain's explorer (`explorerUrl` in `NEXT_PUBLIC_CHAINS`) — the whole address is
   what a merchant compares against a wallet, so a column too narrow for it
   breaks the line rather than hiding characters. A deployment without an
   explorer, such as a local chain, renders them as plain text rather than as

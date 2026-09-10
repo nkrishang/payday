@@ -30,36 +30,47 @@ allows, independent of plan:
 | Ankr | 1,000 |
 | Alchemy | 1,000 blocks / 10,000 logs |
 
-`PAYDAY_LOG_RANGE_SIZE` (`log_range_size` in Terraform) defaults to 100 for
-that reason. Raising it on QuickNode only produces rejections; it is useful
+Monad's `log_range_size` (per entry of `chains` in Terraform, and of
+`PAYDAY_CHAINS`) is 100 for that reason; Base and Arbitrum One allow 10,000. Raising it on QuickNode only produces rejections; it is useful
 when switching to a provider with a larger window.
 
 ## Fix: request budget
 
-Monad produces a block every ~300 ms (about 288k a day) and QuickNode bills
-every Monad method at 30 credits. Steady-state indexing costs, per day:
+The indexer runs one worker per chain in `PAYDAY_CHAINS`, and each worker
+scans only while it has something to watch (an open bound request,
+uncollected funds, or a request settled within `PAYDAY_INDEXER_LATE_WATCH_DAYS`).
+An idle chain costs two calls (boundary header and cursor check) every
+`PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes), fast-forwards its cursor
+without `eth_getLogs`, and holds no WebSocket. Per chain, per day:
 
-| Source | Calls | Notes |
+| State | Calls | Notes |
 |--------|-------|-------|
-| Reconcile pass every 60 s: `finalized` header + cursor hash check | 2,880 | `indexer_reconcile_interval_ms` |
-| Ranges at the 100-block cap: two range-end headers + one `eth_getLogs` | 8,640 | fixed by block rate, not cadence |
-| Transfer signal keepalive (`eth_chainId` over the socket every 30 s) | 2,880 | |
+| Idle (empty watch list) | ~900 | 288 passes × 2, plus the signer balance check |
+| Active Monad (`finalized`) | ~14k | 1,440 passes × 2 + 2,880 ranges at the 100-block cap × (2 headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`) + 2,880 keepalives |
+| Active Base or Arbitrum (`latest` − N) | ~7–9k | 1,440 passes × 3 + per range two headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`, plus keepalives |
 | Transfer signal notifications | ≈ 0 | one per commit state per payment to us |
 
-About 14k calls a day, ~13M credits a month, flat with respect to payment
-volume and to `indexer_poll_interval_ms`. Detection latency does not come
-from the cadence: the WebSocket transfer signal wakes a pass the moment a
-payment finalizes. A block that carries USDC transfers costs nothing extra;
-the log's own `blockTimestamp` classifies the deposit.
+Three idle chains are about 2.6k calls a day. Every `eth_getLogs` is
+filtered to the watch list, so a chain's USDC volume never enters the
+budget; only the number of watched addresses does, one extra call per 500
+per range. An active chain returns to idle as soon as its last watched
+request leaves the late-watch window (a year by default).
+Detection latency does not come from the cadence: the WebSocket transfer
+signal wakes a pass the moment a payment finalizes (Monad) or lands
+(`latest` chains, which then wait `finality_confirmations` blocks). A block
+that carries USDC transfers costs nothing extra when the log carries
+`blockTimestamp`; a node that omits it costs one header per distinct block.
 
 If credits climb well above that, check in this order:
 
 1. `transfer signal disconnected` / `connection failed` warnings (the
-   `payday-indexer-transfer-signal-down` alarm). While the socket is down the
-   reconciler runs every `indexer_poll_interval_ms` (5 s), which is the old
-   cost profile: about 3.9M credits a day. Confirm the endpoint's `wss://`
-   URL works (`PAYDAY_RPC_WS_URL` overrides the derivation from
-   `PAYDAY_RPC_URL`).
+   `payday-indexer-transfer-signal-down` alarm; every log line names its
+   `chain_id`). While the socket is down on an active chain the reconciler
+   runs every `indexer_poll_interval_ms` (5 s), which is the old cost
+   profile: about 3.9M credits a day on Monad. Confirm that chain's `wss://`
+   URL works (`PAYDAY_RPC_WS_URL_<chain_id>` overrides the derivation from
+   `PAYDAY_RPC_URL_<chain_id>`). An idle chain holds no socket and never
+   raises this.
 2. `indexer cursor lagging`: a backlog is draining at
    `range × PAYDAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, three calls
    per range. This is bounded work that ends when the cursor catches up.
@@ -78,7 +89,7 @@ Since the 2026-09 livelock (below), the indexer defends itself in two ways:
 
 ### The catch-up livelock this replaces
 
-Before that fix, a large backlog (fresh database, new `PAYDAY_USDC_START_BLOCK`)
+Before that fix, a large backlog (fresh database, new `usdc_start_block`)
 made each 5 s tick attempt its whole remaining catch-up at once. The burst
 tripped QuickNode's 50 requests/second budget, the resulting 429 aborted the
 tick, and the next tick re-fetched the same ranges — 4.3M requests in one day
@@ -97,9 +108,12 @@ and apply the task definition:
 
 ```bash
 cd infra
-export TF_VAR_rpc_url="$MONAD_RPC_URL"
+export TF_VAR_rpc_urls='{"143":"'"$MONAD_RPC_URL"'","8453":"'"$BASE_RPC_URL"'","42161":"'"$ARBITRUM_RPC_URL"'"}'
 terraform apply -target=aws_ecs_task_definition.indexer -auto-approve
 ```
+
+`log_range_size` is per entry of `chains`; change the chain that was
+rejected.
 
 Then update the ECS service to use the new task definition revision and
 restart — see [service-restart.md](service-restart.md).

@@ -36,15 +36,6 @@ variable "checkout_base_url" {
   }
 }
 
-variable "explorer_base_url" {
-  description = "Explorer origin for the configured chain; Monad production uses MonadVision."
-  type        = string
-  default     = "https://monadvision.com"
-  validation {
-    condition     = can(regex("^https://[^/?#]+/?$", var.explorer_base_url))
-    error_message = "explorer_base_url must be an HTTPS origin without a path, query, or fragment."
-  }
-}
 
 variable "privy_app_id" {
   description = <<-EOT
@@ -111,93 +102,14 @@ variable "image_tag" {
   }
 }
 
-variable "chain_id" {
-  type = number
-  validation {
-    condition     = var.chain_id > 0 && floor(var.chain_id) == var.chain_id
-    error_message = "chain_id must be a positive integer."
-  }
-}
 
-variable "factory_address" {
-  type = string
-  validation {
-    condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.factory_address))
-    error_message = "factory_address must be a 20-byte 0x-prefixed EVM address."
-  }
-}
 
-variable "batch_sweeper_address" {
-  type = string
-  validation {
-    condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.batch_sweeper_address))
-    error_message = "batch_sweeper_address must be a 20-byte 0x-prefixed EVM address."
-  }
-}
 
-variable "factory_code_hash" {
-  description = <<-EOT
-    keccak256 of the runtime bytecode deployed at factory_address, computed
-    with: cast keccak "$(cast code <factory_address> --rpc-url <rpc_url>)".
-    PaymentFactory and BatchSweeper are deployed together as one contract
-    generation; both services compare the live code with this hash at startup
-    and refuse to start on a mismatch.
-  EOT
-  type        = string
-  validation {
-    condition     = can(regex("^0x[0-9a-fA-F]{64}$", var.factory_code_hash))
-    error_message = "factory_code_hash must be a 32-byte 0x-prefixed keccak256 hash."
-  }
-}
 
-variable "batch_sweeper_code_hash" {
-  description = <<-EOT
-    keccak256 of the runtime bytecode deployed at batch_sweeper_address,
-    computed with: cast keccak "$(cast code <batch_sweeper_address> --rpc-url <rpc_url>)".
-    Deploy the sweeper with the factory it is bound to, as one generation;
-    never point a new factory at an old sweeper.
-  EOT
-  type        = string
-  validation {
-    condition     = can(regex("^0x[0-9a-fA-F]{64}$", var.batch_sweeper_code_hash))
-    error_message = "batch_sweeper_code_hash must be a 32-byte 0x-prefixed keccak256 hash."
-  }
-}
 
-variable "usdc_address" {
-  type = string
-  validation {
-    condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.usdc_address))
-    error_message = "usdc_address must be a 20-byte 0x-prefixed EVM address."
-  }
-}
 
-variable "usdc_start_block" {
-  type = number
-  validation {
-    condition     = var.usdc_start_block >= 0 && floor(var.usdc_start_block) == var.usdc_start_block
-    error_message = "usdc_start_block must be a non-negative integer."
-  }
-}
 
-variable "finality_confirmations" {
-  description = "Blocks subtracted from the node's finalized tag before a range is committed. Monad's finalized tag is irreversible without a hard fork, so the margin is 0: a nonzero value costs a second header read per pass and buys nothing on this chain."
-  type        = number
-  default     = 0
-  validation {
-    condition     = var.finality_confirmations >= 0 && var.finality_confirmations <= 10000 && floor(var.finality_confirmations) == var.finality_confirmations
-    error_message = "finality_confirmations must be an integer from 0 through 10000."
-  }
-}
 
-variable "log_range_size" {
-  type    = number
-  default = 100
-  validation {
-    condition     = var.log_range_size >= 1 && var.log_range_size <= 10000 && floor(var.log_range_size) == var.log_range_size
-    error_message = "log_range_size must be an integer from 1 through 10000."
-  }
-}
 
 variable "indexer_poll_interval_ms" {
   description = "Sweep worker cadence, and the block indexer's reconcile cadence only while its WebSocket transfer signal is disconnected. While the signal is connected the indexer reconciles every indexer_reconcile_interval_ms and immediately on a wake, so this value no longer sets the request budget."
@@ -210,7 +122,7 @@ variable "indexer_poll_interval_ms" {
 }
 
 variable "indexer_reconcile_interval_ms" {
-  description = "Block indexer reconcile cadence while the transfer signal is connected. Payments are detected by the signal within a block of finality regardless; this timer keeps the finalized cursor moving and catches anything the socket missed. Each pass costs one finalized header read, one cursor check, and three calls per 100-block range (two range-end headers and one eth_getLogs), so at 60 s on Monad the indexer runs about 14k calls/day, ~13M QuickNode credits/month, independent of payment volume."
+  description = "Block indexer reconcile cadence, per chain, while the chain has something to watch and its transfer signal is connected. Payments are detected by the signal within a block of finality regardless; this timer keeps the cursor moving and catches anything the socket missed. Each pass costs one boundary read, one cursor check, and three calls per range (two range-end headers and one eth_getLogs), so at 60 s an active Monad chain runs about 14k calls/day. A chain with nothing to watch uses indexer_idle_interval_ms instead."
   type        = number
   default     = 60000
   validation {
@@ -219,13 +131,88 @@ variable "indexer_reconcile_interval_ms" {
   }
 }
 
-variable "rpc_url" {
-  description = "Paid HTTPS JSON-RPC endpoint. WARNING: sensitive values remain in Terraform state."
-  type        = string
+
+variable "indexer_idle_interval_ms" {
+  description = "Block indexer cadence, per chain, while the chain has nothing to watch (no open bound request, nothing uncollected, nothing recently settled). Such a pass costs two calls and fast-forwards the cursor without scanning, so three idle chains at five minutes cost under 2k calls/day between them."
+  type        = number
+  default     = 300000
+  validation {
+    condition     = var.indexer_idle_interval_ms >= 1000 && var.indexer_idle_interval_ms <= 3600000 && floor(var.indexer_idle_interval_ms) == var.indexer_idle_interval_ms
+    error_message = "indexer_idle_interval_ms must be an integer from 1000 through 3600000."
+  }
+}
+
+variable "chains" {
+  description = <<-EOT
+    Every network a payer may pay on, in the order the checkout offers them,
+    each with the contract generation deployed there. Becomes PAYDAY_CHAINS on
+    both services. The factory and sweeper are one generation deployed at the
+    same addresses on every chain (foundry/script/PaymentFactory.s.sol insists
+    on a fresh deployer key); the code hashes are keccak256 of the runtime
+    bytecode, cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)", and
+    both services compare them with the chain at startup and refuse to start on
+    a mismatch. usdc is Circle's native USDC proxy on that chain, never a
+    bridged variant. finality_source is "finalized" (Monad: irreversible) or
+    "latest" with finality_confirmations blocks of margin (Base, Arbitrum:
+    seconds, trusting the sequencer). Every range scan is filtered to the
+    addresses Payday watches, so log_range_size is only the provider's cap.
+    Set usdc_start_block to the chain's block just before the services first
+    run there.
+  EOT
+  type = list(object({
+    chain_id                = number
+    usdc                    = string
+    factory                 = string
+    batch_sweeper           = string
+    factory_code_hash       = string
+    batch_sweeper_code_hash = string
+    usdc_start_block        = number
+    finality_source         = string
+    finality_confirmations  = number
+    block_time_ms           = number
+    log_range_size          = number
+    explorer_base_url       = optional(string)
+  }))
+  validation {
+    condition     = length(var.chains) > 0
+    error_message = "chains must list at least one network."
+  }
+  validation {
+    condition     = length(distinct([for c in var.chains : c.chain_id])) == length(var.chains)
+    error_message = "chains must not list a chain id twice."
+  }
+  validation {
+    condition     = length(distinct([for c in var.chains : lower(c.factory)])) == 1
+    error_message = "Every chain must name the same factory address: wrong-chain rescue only works when the factory deploys at the identical address everywhere."
+  }
+  validation {
+    condition = alltrue([for c in var.chains :
+      c.chain_id > 0 && floor(c.chain_id) == c.chain_id
+      && can(regex("^0x[0-9a-fA-F]{40}$", c.usdc))
+      && can(regex("^0x[0-9a-fA-F]{40}$", c.factory))
+      && can(regex("^0x[0-9a-fA-F]{40}$", c.batch_sweeper))
+      && can(regex("^0x[0-9a-fA-F]{64}$", c.factory_code_hash))
+      && can(regex("^0x[0-9a-fA-F]{64}$", c.batch_sweeper_code_hash))
+      && c.factory_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
+      && c.batch_sweeper_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
+      && c.usdc_start_block >= 0 && floor(c.usdc_start_block) == c.usdc_start_block
+      && contains(["finalized", "latest"], c.finality_source)
+      && c.finality_confirmations >= 0 && c.finality_confirmations <= 10000 && floor(c.finality_confirmations) == c.finality_confirmations
+      && c.block_time_ms >= 1 && floor(c.block_time_ms) == c.block_time_ms
+      && c.log_range_size >= 1 && c.log_range_size <= 10000 && floor(c.log_range_size) == c.log_range_size
+      && (c.explorer_base_url == null || can(regex("^https://[^/?#]+/?$", c.explorer_base_url)))
+    ])
+    error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, integral whole-number block counts and times, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any. Both services also require every chain to name the same factory address; wrong-chain rescue only works when it deploys identically everywhere."
+  }
+}
+
+variable "rpc_urls" {
+  description = "Paid HTTPS JSON-RPC endpoint per chain, keyed by decimal chain id (one for every entry of chains). Supply as TF_VAR_rpc_urls. WARNING: sensitive values remain in Terraform state."
+  type        = map(string)
   sensitive   = true
   validation {
-    condition     = can(regex("^https://[^[:space:]]+$", var.rpc_url))
-    error_message = "rpc_url must be an HTTPS URL."
+    condition     = alltrue([for id, url in var.rpc_urls : can(regex("^[0-9]+$", id)) && can(regex("^https://[^[:space:]]+$", url))])
+    error_message = "rpc_urls keys must be decimal chain ids and values HTTPS URLs."
   }
 }
 

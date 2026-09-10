@@ -15,11 +15,22 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
       </>
     ),
   },
-  { name: "chain", type: "object", description: "{ id, name }." },
+  {
+    name: "networks",
+    type: "array",
+    description:
+      "[{ chain: { id, name }, token: { symbol, address, decimals } }]. The networks the payer may pay on, each with its native USDC contract.",
+  },
+  {
+    name: "chain",
+    type: "object | null",
+    description: "{ id, name }. The network the payer chose. Null until the wallet step.",
+  },
   {
     name: "token",
-    type: "object",
-    description: "{ symbol, address, decimals }. The exact USDC contract.",
+    type: "object | null",
+    description:
+      "{ symbol, address, decimals }. The exact USDC contract on the chosen network. Null until the wallet step.",
   },
   { name: "currency", type: "string", description: "USDC." },
   {
@@ -144,8 +155,13 @@ const OBJECT = `{
   "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "deposit_url": "https://payday.sh/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "status": "awaiting_deposit",
-  "chain": { "id": "143", "name": "Monad" },
-  "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 },
+  "networks": [
+    { "chain": { "id": "143", "name": "Monad" }, "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 } },
+    { "chain": { "id": "8453", "name": "Base" }, "token": { "symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 } },
+    { "chain": { "id": "42161", "name": "Arbitrum One" }, "token": { "symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6 } }
+  ],
+  "chain": null,
+  "token": null,
   "currency": "USDC",
   "address": null,
   "address_explorer_url": null,
@@ -311,11 +327,6 @@ const CREATE_BODY: FieldDoc[] = [
     description:
       "≤16 keys; ≤512 encoded bytes per value. Returned on reads and webhooks. Merchant-only.",
   },
-  {
-    name: "chain_id, token_address",
-    type: "string",
-    description: "Deployment overrides. Must equal the environment's values when present.",
-  },
 ];
 
 export const DEPOSIT_REQUESTS: EndpointGroup = {
@@ -393,11 +404,6 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
           status: 409,
           code: "account_contact_required",
           when: "Account has no verified email. Re-authenticate in the dashboard.",
-        },
-        {
-          status: 422,
-          code: "unsupported_chain / unsupported_token",
-          when: "Override not served by the environment.",
         },
       ],
       examples: {
@@ -852,10 +858,10 @@ Content-Length: 31288`,
       summary: "Retrieves the Proof of Payment for a settled request.",
       body: (
         <p>
-          Document version <code>payday.proof.v2</code>: canonical issuance snapshot, attribution
-          hash, payer wallet attestation, salt, chain, factory, token, deposit and recovery
-          addresses, credited transfers, settlement transaction hash, and a Payday-signed
-          verification attestation. Verifiable offline; reference implementation{" "}
+          Document version <code>payday.proof.v3</code>: canonical issuance snapshot (with every
+          network offered), attribution hash, payer wallet attestation, salt, the chosen chain,
+          factory, and token, deposit and recovery addresses, credited transfers, settlement
+          transaction hash, and a Payday-signed verification attestation. Verifiable offline; reference implementation{" "}
           <code>gateway_core::verify_proof</code>. Schema:{" "}
           <a href="/docs/proof-of-payment">Proof of Payment</a>.
         </p>
@@ -876,9 +882,9 @@ Content-Length: 31288`,
   -H "Authorization: Bearer $PAYDAY_API_KEY" > proof.json`,
         ts: `const proof = await payday.depositRequests.proof(id);`,
         response: `{
-  "version": "payday.proof.v2",
+  "version": "payday.proof.v3",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "canonical_issuance_snapshot": { "schema": "payday.invoice", "canonicalization": "RFC8785", "…": "…" },
+  "canonical_issuance_snapshot": { "schema": "payday.invoice.v3", "canonicalization": "RFC8785", "networks": [ "…" ], "…": "…" },
   "canonicalization": "RFC8785",
   "attribution_hash": "0x…",
   "payer_wallet": { "address": "0x5aAe…", "typed_data": { "…": "…" }, "digest": "0x…", "signature": "0x…", "method": "ecdsa" },

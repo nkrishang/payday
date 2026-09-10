@@ -73,6 +73,9 @@ pub struct DbPayerSession {
     /// consumed.
     pub wallet_nonce: Option<Vec<u8>>,
     pub wallet_nonce_expires_at: Option<DateTime<Utc>>,
+    /// The chain the challenge was minted for: the attestation is rebuilt
+    /// under that chain's domain when the signature comes back.
+    pub wallet_nonce_chain_id: Option<i64>,
     /// Set when the session was minted by exchanging a merchant client secret.
     pub merchant_session_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -100,15 +103,21 @@ impl DbPayerSession {
     pub fn wallet_challenge(&self, now: DateTime<Utc>) -> Option<WalletChallenge> {
         let nonce = B256::try_from(self.wallet_nonce.as_deref()?).ok()?;
         let expires_at = self.wallet_nonce_expires_at?;
-        (expires_at > now).then_some(WalletChallenge { nonce, expires_at })
+        let chain_id = self.wallet_nonce_chain_id? as u64;
+        (expires_at > now).then_some(WalletChallenge {
+            nonce,
+            expires_at,
+            chain_id,
+        })
     }
 }
 
-/// A one-time wallet challenge issued to a session.
+/// A one-time wallet challenge issued to a session, for one chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalletChallenge {
     pub nonce: B256,
     pub expires_at: DateTime<Utc>,
+    pub chain_id: u64,
 }
 
 /// A freshly minted session. `token` exists only here and in the response
@@ -290,7 +299,7 @@ impl PayerSessionRepository {
         sqlx::query_as::<_, DbPayerSession>(
             r#"
             SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
-                   wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
+                   wallet_nonce, wallet_nonce_expires_at, wallet_nonce_chain_id, created_at, expires_at
             FROM payer_sessions
             WHERE token_hash = $1 AND invoice_id = $2 AND expires_at > now()
             "#,
@@ -302,12 +311,15 @@ impl PayerSessionRepository {
     }
 
     /// Issue (or replace) the session's wallet challenge: 32 random bytes the
-    /// payer's wallet must sign, void after `ttl`. Callers check that the
-    /// session satisfies the invoice's policy first; the challenge is what
-    /// orders the wallet signature after the identity step.
+    /// payer's wallet must sign under `chain_id`'s domain, void after `ttl`.
+    /// Callers check that the session satisfies the invoice's policy and that
+    /// the chain is one of the invoice's networks first; the challenge is
+    /// what orders the wallet signature after the identity step and pins the
+    /// chain the signature is for.
     pub async fn issue_wallet_challenge(
         &self,
         session_id: Uuid,
+        chain_id: u64,
         ttl: Duration,
     ) -> Result<WalletChallenge, sqlx::Error> {
         let nonce = B256::from(rand::rng().random::<[u8; 32]>());
@@ -315,7 +327,8 @@ impl PayerSessionRepository {
             r#"
             UPDATE payer_sessions
             SET wallet_nonce = $2,
-                wallet_nonce_expires_at = LEAST(expires_at, now() + make_interval(secs => $3))
+                wallet_nonce_expires_at = LEAST(expires_at, now() + make_interval(secs => $3)),
+                wallet_nonce_chain_id = $4
             WHERE id = $1 AND expires_at > now()
             RETURNING wallet_nonce_expires_at
             "#,
@@ -323,9 +336,14 @@ impl PayerSessionRepository {
         .bind(session_id)
         .bind(nonce.as_slice())
         .bind(ttl.as_secs_f64())
+        .bind(chain_id as i64)
         .fetch_one(&self.pool)
         .await?;
-        Ok(WalletChallenge { nonce, expires_at })
+        Ok(WalletChallenge {
+            nonce,
+            expires_at,
+            chain_id,
+        })
     }
 
     pub async fn delete(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
@@ -476,7 +494,7 @@ impl PayerSessionRepository {
             let session = sqlx::query_as::<_, DbPayerSession>(
                 r#"
                 SELECT id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
-                       wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
+                       wallet_nonce, wallet_nonce_expires_at, wallet_nonce_chain_id, created_at, expires_at
                 FROM payer_sessions WHERE id = $1
                 "#,
             )
@@ -516,7 +534,7 @@ impl PayerSessionRepository {
             SET payer_ref = $2, email_verified_at = COALESCE(email_verified_at, $3)
             WHERE id = $1 AND expires_at > $3
             RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
-                      wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
+                      wallet_nonce, wallet_nonce_expires_at, wallet_nonce_chain_id, created_at, expires_at
             "#,
         )
         .bind(session_id)
@@ -641,7 +659,7 @@ impl PayerSessionRepository {
                 (id, token_hash, invoice_id, expires_at, merchant_session_verified_at)
             VALUES ($1, $2, $3, $4 + make_interval(secs => $5), $4)
             RETURNING id, invoice_id, payer_ref, email_verified_at, merchant_session_verified_at,
-                      wallet_nonce, wallet_nonce_expires_at, created_at, expires_at
+                      wallet_nonce, wallet_nonce_expires_at, wallet_nonce_chain_id, created_at, expires_at
             "#,
         )
         .bind(session_id)
@@ -951,14 +969,18 @@ mod tests {
         assert_eq!(found.wallet_challenge(Utc::now()), None);
 
         let first = repo
-            .issue_wallet_challenge(session.id, Duration::from_secs(600))
+            .issue_wallet_challenge(session.id, 1, Duration::from_secs(600))
             .await
             .unwrap();
         let second = repo
-            .issue_wallet_challenge(session.id, Duration::from_secs(600))
+            .issue_wallet_challenge(session.id, 8453, Duration::from_secs(600))
             .await
             .unwrap();
         assert_ne!(first.nonce, second.nonce, "each challenge is fresh");
+        assert_eq!(
+            second.chain_id, 8453,
+            "the challenge pins the chain it was minted for"
+        );
         let found = repo
             .find_active(&session.token, row.id)
             .await
@@ -997,7 +1019,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            repo.issue_wallet_challenge(session.id, Duration::from_secs(600))
+            repo.issue_wallet_challenge(session.id, 1, Duration::from_secs(600))
                 .await,
             Err(sqlx::Error::RowNotFound)
         ));

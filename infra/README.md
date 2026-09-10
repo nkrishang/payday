@@ -26,9 +26,15 @@ connection, and the payer application setup are documented in
 `docs/authentication.md`. `admin_reviewer_id` names who is recorded on
 operator decisions.
 
-Gatewayd links Monad addresses and settlement transactions through the
-configured explorer origin; every `deposit_url` points at the checkout on
-`checkout_base_url`.
+The networks a payer may pay on are the `chains` list: one entry per chain
+with its USDC contract, the contract generation's addresses and code hashes,
+finality policy, block time, log range, and explorer origin,
+passed to both tasks as `PAYDAY_CHAINS`. The paid RPC endpoints are the
+`rpc_urls` map, keyed by chain id (export `TF_VAR_rpc_urls` rather than
+writing them to a file); each becomes its own Secrets Manager secret,
+injected as `PAYDAY_RPC_URL_<chain_id>`. Gatewayd links addresses and
+settlement transactions through each chain's explorer; every `deposit_url`
+points at the checkout on `checkout_base_url`.
 
 ## Remote state bootstrap
 
@@ -51,7 +57,7 @@ Build both root Dockerfile targets, authenticate Docker to ECR, and push the **s
 ```bash
 cd infra
 cp terraform.tfvars.example terraform.tfvars   # replace every example value
-export TF_VAR_rpc_url='https://your-paid-provider.example/...'
+export TF_VAR_rpc_urls='{"143":"https://…","8453":"https://…","42161":"https://…"}'   # one paid endpoint per chain id
 terraform init -backend-config=backend.hcl
 terraform fmt -check -recursive
 terraform validate
@@ -80,7 +86,7 @@ those emails queue unsent.
 
 ## Sandbox deployment
 
-The same architecture can be instantiated independently for Monad testnet.
+The same architecture can be instantiated independently for the testnets.
 See `terraform.sandbox.tfvars.example` and `../docs/sandbox.md`. Use a separate
 backend state key and `name`; never plan sandbox variables against production
 state. The examples document planning only and do not change external state.

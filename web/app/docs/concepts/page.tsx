@@ -84,11 +84,13 @@ export default function ConceptsPage() {
 
       <H2 id="one-request-one-address-one-wallet">One request, one address, one payer wallet</H2>
       <p>
-        Every deposit request gets its own EVM address, and that address belongs to one payer
-        wallet. It does not exist when the request is issued. It exists once the payer, on the
-        hosted checkout, signs a short message from the wallet they intend to pay from. Payday
-        derives the address from the issued document and that signature together, which is why{" "}
-        <code>address</code> is <code>null</code> until then.
+        Every deposit request gets its own EVM address, on one network, and that address belongs
+        to one payer wallet. It does not exist when the request is issued. It exists once the
+        payer, on the hosted checkout, chooses the network they will pay on and signs a short
+        message from the wallet they intend to pay from. Payday derives the address from the
+        issued document, the chosen chain, and that signature together, which is why{" "}
+        <code>chain</code>, <code>token</code>, and <code>address</code> are <code>null</code>{" "}
+        until then. The merchant never picks a network; the request offers every supported one.
       </p>
 
       <Figure caption="Where the one-time address comes from. The salt depends on both the document and the payer's signature, and the address commits to the settlement terms, so none of them can change afterwards.">
@@ -270,9 +272,10 @@ export default function ConceptsPage() {
       <H2 id="safety-boundaries">Safety boundaries</H2>
       <ul>
         <li>
-          Only the exact <code>token.address</code> on the returned <code>chain.id</code> is
-          monitored. Bridged USDC, look-alike tokens, another network&apos;s USDC, and native gas do
-          not count and may be unrecoverable.
+          Only the exact <code>token.address</code> on the chosen <code>chain.id</code> is
+          monitored. Bridged USDC, look-alike tokens, and native gas do not count and may be
+          unrecoverable. The address commits to its chain: on any other network it refuses to
+          settle, and the funds can only be returned to the payer&apos;s wallet, by hand.
         </li>
         <li>
           A deposit link grants read access to the payer page and nothing else. It never exposes

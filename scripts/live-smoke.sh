@@ -138,7 +138,7 @@ echo "issued $id -> $(jq -r .deposit_url <<<"$created")"
 # 2. Bind the payer wallet: challenge, sign the EIP-712 typed data with cast
 #    as a wallet would, attest.
 challenge="$(payer_post "/v1/payer/deposit-requests/$id/wallet/challenge" \
-  "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet}')")"
+  "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')")"
 session="$(jq -er .payer_session <<<"$challenge")"
 typed="$logs/typed.json"
 jq -c .typed_data <<<"$challenge" >"$typed"
@@ -180,7 +180,7 @@ echo "settled in $(jq -r .settlement_tx_hash <<<"$settled")"
 # 5. The Proof of Payment names this wallet, this address, and the settlement.
 proof="$(merchant GET "/v1/deposit-requests/$id/proof")"
 jq -e --arg payer "$(lower "$PAYER")" --arg address "$(lower "$address")" \
-  '.version == "payday.proof.v2"
+  '.version == "payday.proof.v3"
    and (.payment_address | ascii_downcase) == $address
    and (.payer_wallet.address | ascii_downcase) == $payer
    and .payer_wallet.typed_data.primaryType == "PayerAttestation"

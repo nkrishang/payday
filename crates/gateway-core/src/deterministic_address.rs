@@ -7,7 +7,8 @@ use alloy_primitives::{Address, B256, b256, keccak256};
 use alloy_sol_types::{SolType, sol};
 
 use crate::{
-    Amount, BeneficiaryAddress, FactoryAddress, PaymentAddress, RecoveryAddress, Salt, TokenAddress,
+    Amount, BeneficiaryAddress, ChainId, FactoryAddress, PaymentAddress, RecoveryAddress, Salt,
+    TokenAddress,
 };
 
 /// Hash of Solady's CREATE3 proxy init code.
@@ -16,13 +17,17 @@ pub const PROXY_INITCODE_HASH: B256 =
     b256!("0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f");
 
 /// Solidity tuple type matching `PaymentFactory.deploymentSalt`'s abi.encode parameters.
-type DeploymentSaltInput = sol! { tuple(address, uint256, address, uint64, address, bytes32) };
+type DeploymentSaltInput =
+    sol! { tuple(address, uint256, address, uint64, address, bytes32, uint256) };
 
 /// Compute the deterministic CREATE3 payment address.
 ///
 /// This must match `PaymentFactory.paymentAddress(token, amount, receiver,
-/// expirationTimestamp, recovery, salt)`
-/// in Solidity for the same inputs.
+/// expirationTimestamp, recovery, salt, chainId)` in Solidity for the same
+/// inputs. The chain id is the one the payer chose; the factory sits at the
+/// same address on every chain, so the address is the same everywhere and
+/// `Payment` itself refuses to settle anywhere but `chain_id`.
+#[allow(clippy::too_many_arguments)]
 pub fn predict_payment_address(
     factory: FactoryAddress,
     token: TokenAddress,
@@ -31,6 +36,7 @@ pub fn predict_payment_address(
     expiration_timestamp: u64,
     recovery: RecoveryAddress,
     salt: Salt,
+    chain_id: ChainId,
 ) -> PaymentAddress {
     // Step 1: hash the factory's ABI-encoded payment parameters.
     let encoded = DeploymentSaltInput::abi_encode_sequence(&(
@@ -40,6 +46,7 @@ pub fn predict_payment_address(
         expiration_timestamp,
         recovery.0,
         salt.0,
+        alloy_primitives::U256::from(chain_id.0),
     ));
     let deployment_salt = keccak256(&encoded);
 

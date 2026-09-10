@@ -37,35 +37,52 @@ created → funded → deploying → fulfilled
    └──► expired ◄───────┘──► recovered        blocked (operator review)
 ```
 
-Only the exact `PAYDAY_USDC_ADDRESS` is accepted. USDC amounts use six decimal
-places. Production should configure Circle's chain-specific native USDC proxy;
-the local setup deploys a mintable six-decimal fixture with the same
-`paused()`/`isBlacklisted()` views.
+Only the exact `usdc` of each `PAYDAY_CHAINS` entry is accepted, on that
+chain. USDC amounts use six decimal places. Production configures Circle's
+chain-specific native USDC proxy per network; the local setup deploys a
+mintable six-decimal fixture with the same `paused()`/`isBlacklisted()`
+views on each of its two Anvils.
+
+A deposit request has no chain until the payer chooses one at the wallet
+step: the request offers every registry network, the challenge names the
+chosen `chain_id`, and the binding writes the chain, token, factory, and
+address together. The local stack runs two chains so that step has a real
+choice: Anvil on 8545 (chain 31337, the Monad-shaped `finalized` path) and
+Anvil on 8546 (chain 31338, the L2-shaped `latest` plus confirmations
+path).
 
 ## Indexing and finality
 
 The acquisition path has two halves over standard EVM JSON-RPC:
 
+The indexer runs one worker per `PAYDAY_CHAINS` entry, each with its own
+RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal.
+
 - **The reconciler** (the only writer) runs a pass every
   `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` and immediately on a wake. A pass is
-  one `eth_getBlockByNumber("finalized")` to anchor the boundary
-  (`PAYDAY_FINALITY_SOURCE=finalized`, minus `PAYDAY_FINALITY_CONFIRMATIONS`
-  blocks of margin, 0 on Monad), one header read to verify the stored cursor
-  hash, then per bounded range one range-end header read, one `eth_getLogs`
-  filtered to the USDC address and `Transfer` topic, and a second range-end
-  read that proves nothing moved while the logs were fetched. Deposits are
-  classified by the `blockTimestamp` the log itself carries, so a block with
-  transfers costs no extra request. Up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`
-  ranges drain per pass, so a backlog clears independently of the cadence.
+  one boundary header read (the entry's `finality_source`, `finalized` or
+  `latest`, minus `finality_confirmations` blocks), one header read to
+  verify the stored cursor hash, then, if the chain has anything to watch,
+  per bounded range one range-end header read, one `eth_getLogs` filtered
+  to the USDC address, the `Transfer` topic, and the watched recipients
+  (500 per call), and a second range-end read that proves nothing
+  moved while the logs were fetched. A chain with nothing to watch
+  fast-forwards its cursor instead and sleeps
+  `PAYDAY_INDEXER_IDLE_INTERVAL_MS`. Deposits are classified by the
+  `blockTimestamp` the log itself carries, so a block with transfers costs
+  no extra request. Up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges drain
+  per pass, so a backlog clears independently of the cadence.
 - **The transfer signal** is a WebSocket `eth_subscribe` on the same node
-  (`PAYDAY_RPC_WS_URL`, derived from `PAYDAY_RPC_URL` when unset) for USDC
-  transfers whose recipient is one of our payment addresses. On Monad it uses
-  `monadLogs` and wakes the reconciler when a matching log reaches the
-  `Finalized` commit state; Anvil lacks `monadLogs`, so the signal falls back
-  to the standard `logs` subscription and the reconciler polls finality for a
-  few seconds until the block is covered. The signal never writes: a missed
-  or duplicated notification costs latency, not correctness, and while the
-  socket is down the reconciler simply runs on `PAYDAY_INDEXER_POLL_INTERVAL_MS`.
+  (`PAYDAY_RPC_WS_URL_<chain_id>`, derived from the HTTP URL when unset)
+  for USDC transfers whose recipient is one of our payment addresses, held
+  only while the chain has something to watch. On Monad it uses `monadLogs`
+  and wakes the reconciler when a matching log reaches the `Finalized`
+  commit state; Anvil, Base, and Arbitrum lack `monadLogs`, so the signal
+  falls back to the standard `logs` subscription and the reconciler waits
+  a block time at a time until the block is behind the boundary. The signal
+  never writes: a missed or duplicated notification costs latency, not
+  correctness, and while the socket is down the reconciler simply runs on
+  `PAYDAY_INDEXER_POLL_INTERVAL_MS`.
 
 Observations, deposit request projections, and the hash-bearing cursor commit
 atomically. Every transfer to a known deposit request address is retained: `credited`
@@ -75,9 +92,9 @@ Each observation records the block and transaction index of the sweep that
 collected it, so a lagging cursor can never re-queue funds a finalized sweep
 already moved, including when deposit and sweep transactions share a block.
 
-Log ranges start at `PAYDAY_LOG_RANGE_SIZE` (100 by default, QuickNode's cap
-on Monad), halve when the provider reports a range/result-size error, and grow
-after a successful response. A one-block failure is retried rather than
+Log ranges start at the entry's `log_range_size` (100 on Monad, QuickNode's
+cap there; 10,000 on the L2s), halve when the provider reports a
+range/result-size error, and grow after a successful response. A one-block failure is retried rather than
 skipped.
 
 ## Prerequisites
@@ -106,12 +123,12 @@ an account and a key straight into the runner's database
 `PAYDAY_API_KEY`. To sign in through the browser instead, run the web app
 below: it signs in against the real development Privy app and the code
 arrives in your mailbox. Each run starts from a clean database,
-attachment store, and Anvil chain so their indexed histories cannot drift.
-After the bootstrap deploys the contracts, the runner reads their runtime
-bytecode from the chain and exports `PAYDAY_FACTORY_CODE_HASH` and
-`PAYDAY_BATCH_SWEEPER_CODE_HASH` from it (overriding any `.env` value),
-because both services verify the deployed contract generation at startup and
-refuse to start on a mismatch.
+attachment store, and Anvil chains so their indexed histories cannot drift.
+After the bootstrap deploys the contracts on both Anvils, the runner reads
+their runtime bytecode from each chain and builds `PAYDAY_CHAINS` from it
+(overriding any `.env` value), because both services verify the deployed
+contract generation on every chain at startup and refuse to start on a
+mismatch.
 
 To open a created deposit, run the hosted checkout in a third shell:
 
@@ -145,10 +162,15 @@ token; a blacklisted beneficiary and its operator release; an expired partial
 deposit returned automatically and completed late; a gated request whose
 wallet step follows its email verification; funds from a stranger's wallet
 flagged and refused a proof; the `recovered_funds` ledger and its webhook
-events) against a fresh Anvil started with
-`--slots-in-an-epoch 1 --block-time 1`, which makes the node's
-`finalized` tag advance like a real chain, and a fresh MinIO container
-standing in for the attachment bucket. Use it whenever the contracts or
+events; a request bound and settled on the second chain; a challenge for a
+chain the request does not offer refused with `422`; a create carrying
+`chain_id` refused with `400`; an idle chain fast-forwarding without a
+scan; and a deposit sent to an address on the wrong chain, refused by the
+contract and returned to the payer by hand exactly as
+`docs/runbooks/wrong-network-deposit.md` does it) against two fresh Anvils
+started with `--slots-in-an-epoch 1 --block-time 1`, which makes the
+node's `finalized` tag advance like a real chain, and a fresh MinIO
+container standing in for the attachment bucket. Use it whenever the contracts or
 the worker change:
 
 ```bash
@@ -189,11 +211,13 @@ Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC. Account #1 is
 the end-to-end suite's payer, whose wallet every request is bound to; account
 #5 plays the stranger who pays from an unattested wallet.
 
-Pin the deployed generation for both services (the runner does this for you):
+Pin the deployed generation for both services (the runner does this for
+you, per chain, when it builds `PAYDAY_CHAINS`); these are the two hashes
+each registry entry carries:
 
 ```bash
-export PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$(cast code 0x5FbDB2315678afecb367f032d93F642f64180aa3 --rpc-url http://127.0.0.1:8545)")"
-export PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$(cast code 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 --rpc-url http://127.0.0.1:8545)")"
+cast keccak "$(cast code 0x5FbDB2315678afecb367f032d93F642f64180aa3 --rpc-url http://127.0.0.1:8545)"   # factory_code_hash
+cast keccak "$(cast code 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 --rpc-url http://127.0.0.1:8545)"   # batch_sweeper_code_hash
 ```
 
 ### 3. Start the local attachment store
@@ -218,10 +242,12 @@ docker run --rm --network host \
 
 ### 4. Build and start the services manually
 
-Ensure `.env` contains the local addresses, database URL,
-RPC URL, finality settings, start block, signer and attestation keys,
-attachment store, and identity settings, and that the two code hashes above
-are exported (the `.env.example` placeholders are zero and will be refused).
+Ensure `.env` contains the database URL, `PAYDAY_CHAINS` (one entry per
+Anvil, with the fixture addresses, the two code hashes above, finality
+settings, and start block; `scripts/local-runner.sh`'s `chain_entry` builds
+one), `PAYDAY_RPC_URL_31337` and `PAYDAY_RPC_URL_31338`, signer and
+attestation keys, attachment store, and identity settings (the
+`.env.example` hash placeholders are zero and will be refused).
 Start the identity provider:
 
 ```bash
@@ -254,19 +280,20 @@ PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
 Expirations must be at least ten minutes and at most a year ahead.
 
 ```bash
-./target/debug/payday --json create \
-  --chain-id 31337 \
-  --token 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
-  --payout 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
-  --expires-in 3600 \
-  --amount 1.5
+curl -fsS http://127.0.0.1:3000/v1/deposit-requests \
+  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+  -H "Content-Type: application/json" -H "Idempotency-Key: local-1" \
+  -d '{"amount": "1.5", "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+       "issuer": {"name": "Local"}, "payer": {"name": "Payer"},
+       "payer_policy": {"mode": "permissionless"}, "expires_in": 3600}'
 ```
 
-The response's `address` is null: bind the payer's wallet first, as the
-hosted checkout does (challenge, sign the typed data with `cast wallet sign
---data --from-file`, attest; `scripts/e2e-anvil.sh`'s `bind_payer_wallet`
-is the reference). `recovery_address` is then that wallet; there is no flag
-to choose it.
+The response's `chain`, `token`, and `address` are null and `networks` lists
+both Anvils: bind the payer's wallet first, as the hosted checkout does
+(challenge with `{"wallet", "chain_id": "31337"}`, sign the typed data with
+`cast wallet sign --data --from-file`, attest; `scripts/e2e-anvil.sh`'s
+`bind_payer_wallet` is the reference). `recovery_address` is then that
+wallet; there is no flag to choose it, nor one to choose the chain.
 
 Copy `id` and, after the binding, `address` from `GET /v1/deposit-requests/{id}`,
 then transfer 1.5 USDC (`1500000` atomic units) from the bound wallet:
@@ -385,43 +412,45 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   prints to its log (`DEV IDENTITY OTP <email> <code>`). Local convenience
   only; the provider refuses to bind anything but loopback, and Auth0 issues
   the real codes
-- `PAYDAY_CHAIN_ID`
-- `PAYDAY_FACTORY_ADDRESS`
-- `PAYDAY_BATCH_SWEEPER_ADDRESS`
-- `PAYDAY_FACTORY_CODE_HASH`, `PAYDAY_BATCH_SWEEPER_CODE_HASH` — keccak256 of
-  the runtime bytecode at the two addresses
-  (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both services
-  compare them with the live chain at startup, also checking that
-  `BatchSweeper.factory()` is `PAYDAY_FACTORY_ADDRESS`, and refuse to start on
-  a mismatch. `just dev` and `just e2e` compute them from the running chain
-- `PAYDAY_USDC_ADDRESS` — exact Circle native-USDC proxy in production
+- `PAYDAY_CHAINS` — the network registry both services read: a JSON array
+  of `{chain_id, usdc, factory, batch_sweeper, factory_code_hash,
+  batch_sweeper_code_hash, usdc_start_block, finality_source,
+  finality_confirmations, block_time_ms, log_range_size,
+  explorer_base_url?}`, in the order the checkout offers networks. The
+  code hashes are keccak256 of the runtime bytecode at the two addresses
+  (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both
+  services compare them with each live chain at startup, also checking that
+  `BatchSweeper.factory()` is the entry's `factory`, and refuse to start on
+  a mismatch. `just dev` and `just e2e` build the two local entries from
+  the running Anvils (`build_chain_registry` in `scripts/local-runner.sh`).
+  `usdc` is the exact Circle native-USDC proxy in production;
+  `finality_source` is `finalized` or `latest` (see
+  `docs/usdc-indexer-architecture.md`)
+- `PAYDAY_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
+  (QuickNode in production, an Anvil locally); read by both services
+  (`gatewayd` uses it for deployment verification)
+- `PAYDAY_RPC_WS_URL_<chain_id>` — WebSocket endpoint for that chain's
+  transfer signal; unset derives it from the HTTP URL (`https` → `wss`,
+  `http` → `ws`, same host, path and token), `off` disables the signal
+- `PAYDAY_ONBOARDING_CHAIN_ID` — the chain the dashboard onboarding demo
+  deposit binds and pays on; defaults to the first registry entry
 - `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
   deposit links point; `http://127.0.0.1:3002`
   locally, `https://payday.sh` in production. Must be a bare origin, and HTTPS
   unless it is loopback
-- `PAYDAY_EXPLORER_BASE_URL` — optional HTTPS explorer origin; production
-  Monad uses `https://monadvision.com`, while Anvil leaves it unset
-- `PAYDAY_USDC_START_BLOCK` — required; the block to start indexing from on a
-  fresh database (the current block at first deployment)
-- `PAYDAY_RPC_URL` — QuickNode HTTPS URL in production, Anvil locally; read by
-  both services (`gatewayd` uses it for deployment verification)
-- `PAYDAY_RPC_WS_URL` — WebSocket endpoint for the indexer's transfer signal;
-  unset derives it from `PAYDAY_RPC_URL` (`https` → `wss`, `http` → `ws`,
-  same host, path and token), `off` disables the signal
-- `PAYDAY_FINALITY_SOURCE` — `finalized` (default; the node's finalized tag)
-  or `latest`
-- `PAYDAY_FINALITY_CONFIRMATIONS` — blocks subtracted from the finality
-  anchor; defaults to 2 in the binary, 0 on Monad and Anvil where the
-  finalized tag is authoritative
-- `PAYDAY_LOG_RANGE_SIZE` — adaptive `eth_getLogs` range ceiling, default 100
 - `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
-- `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` — reconcile cadence while the
-  transfer signal is connected, default 60000; the local runner uses 1000
+- `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` — reconcile cadence while a chain
+  has something to watch and its transfer signal is connected, default
+  60000; the local runner uses 1000
 - `PAYDAY_INDEXER_POLL_INTERVAL_MS` — sweep loop cadence, and the reconcile
   cadence while the signal is disconnected or disabled, default 2000
+- `PAYDAY_INDEXER_IDLE_INTERVAL_MS` — pass cadence for a chain with nothing
+  to watch, whose passes fast-forward the cursor without scanning, default
+  300000; the local runner uses 2000
 - `PAYDAY_INDEXER_LATE_WATCH_DAYS` — how long a settled address stays in the
-  signal's subscription so a late transfer still wakes the reconciler,
-  default 30 (the reconciler ledgers late transfers to any address forever)
+  watch list, which the signal subscribes to and every range scan is
+  filtered by, default 365; a late transfer outside the window is not seen
+  and is returned by hand (`docs/runbooks/wrong-network-deposit.md`)
 - `PAYDAY_INDEXER_RPC_MAX_RPS` — paces outgoing RPC calls under the provider's
   requests-per-second budget, default 40; 0 disables pacing (see
   [quicknode-rpc-limits.md](runbooks/quicknode-rpc-limits.md))
@@ -457,12 +486,15 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   key. Unlike attestation, both may be unset in any environment, including
   production — that simply disables `POST /v1/deposit-requests/{id}/onboarding-deposit`
 
-The AWS + Monad deployment procedure is in `docs/production-runbook.md`; its
+The AWS deployment procedure is in `docs/production-runbook.md`; its
 Terraform source is under `infra/`.
 
 ## Current constraints
 
-- One configured chain and one exact USDC contract per deployment.
+- One exact native-USDC contract per configured chain; the payer chooses the
+  chain, the merchant does not. A deposit sent to an address on another
+  supported chain is refused by the contract and returned by hand
+  (`docs/runbooks/wrong-network-deposit.md`).
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.
 - One helper transaction is in flight at a time; replacements share its nonce.

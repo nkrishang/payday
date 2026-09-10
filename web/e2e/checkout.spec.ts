@@ -47,6 +47,9 @@ async function installFakeWallet(page: Page) {
     ({ wallet }) => {
       const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
       const signed: unknown[] = [];
+      const switched: string[] = [];
+      // Starts on Monad; a switch request moves it, like a real wallet.
+      let chainId = "0x8f";
       const provider = {
         isFakeWallet: true,
         request: async ({ method, params }: { method: string; params?: unknown[] }) => {
@@ -55,9 +58,14 @@ async function installFakeWallet(page: Page) {
             case "eth_accounts":
               return [wallet];
             case "eth_chainId":
-              return "0x8f";
-            case "wallet_switchEthereumChain":
+              return chainId;
+            case "wallet_switchEthereumChain": {
+              const [{ chainId: wanted }] = params as [{ chainId: string }];
+              chainId = wanted;
+              switched.push(wanted);
+              for (const listener of listeners.get("chainChanged") ?? []) listener(wanted);
               return null;
+            }
             case "eth_signTypedData_v4":
               signed.push(params);
               return `0x${"ab".repeat(64)}1b`;
@@ -73,7 +81,7 @@ async function installFakeWallet(page: Page) {
           listeners.get(event)?.delete(listener);
         },
       };
-      Object.assign(window, { ethereum: provider, __signed: signed });
+      Object.assign(window, { ethereum: provider, __signed: signed, __switched: switched });
     },
     { wallet: PAYER_WALLET },
   );
@@ -198,7 +206,7 @@ test("a returned deposit request does the same", async ({ page }) => {
   await expectNoInstructions(page);
 });
 
-test("an unbound request takes the payer's signature before it shows any address", async ({
+test("an unbound request takes a network and the payer's signature before it shows any address", async ({
   page,
   request,
 }) => {
@@ -213,31 +221,47 @@ test("an unbound request takes the payer's signature before it shows any address
   await expect(page.getByText("Wallet required")).toBeVisible();
   await expect(page.getByText("Amount due")).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 })).toContainText("25.00");
-  await expect(page.getByText(/one-time payment destination for the wallet/i)).toBeVisible();
+  await expect(page.getByText(/one-time payment destination for the network/i)).toBeVisible();
   await expectNoInstructions(page);
   const html = await (await request.get("/pay/dr_unbound")).text();
   expect(html).not.toContain(ADDRESS);
 
+  // The network comes first: nothing can be signed until one is chosen.
+  const networks = page.getByRole("radiogroup", { name: /network to pay on/i });
+  await expect(networks.getByRole("radio", { name: /Monad/ })).toBeVisible();
+  await expect(networks.getByRole("radio", { name: /Base/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /choose a network first/i })).toBeDisabled();
+  await networks.getByRole("radio", { name: /Base/ }).click();
+  await expect(networks.getByRole("radio", { name: /Base/ })).toHaveAttribute("aria-checked", "true");
+
   // Connect the fake wallet, then sign the challenge it is handed.
   await page.getByRole("button", { name: /connect the wallet you will pay from/i }).click();
   await page.getByRole("dialog").getByRole("button").filter({ hasText: /injected/i }).click();
-  await expect(page.getByRole("button", { name: /sign to get your deposit address/i })).toBeVisible();
-  await page.getByRole("button", { name: /sign to get your deposit address/i }).click();
+  await expect(
+    page.getByRole("button", { name: /sign to get your deposit address on Base/i }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /sign to get your deposit address on Base/i }).click();
 
-  // The signature created the address; the page now offers it, tied to the
-  // wallet that signed.
+  // The signature created the address on the chosen network; the page now
+  // offers it, tied to the wallet that signed and to Base.
   await expect(page.getByText(ADDRESS)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText(/Send from/)).toBeVisible();
   await expect(page.getByRole("img", { name: /QR code/i })).toBeVisible();
+  await expect(page.getByText("Base · 8453")).toBeVisible();
   await expect(page.getByText("Wallet required")).toHaveCount(0);
-  // What the wallet was asked to sign is the API's document, verbatim.
+  // The wallet was switched to Base before signing, and what it was asked to
+  // sign is the API's document, verbatim, under Base's domain.
+  const switched = await page.evaluate(
+    () => (window as unknown as { __switched: string[] }).__switched,
+  );
+  expect(switched).toContain("0x2105");
   const signed = await page.evaluate(() => (window as unknown as { __signed: unknown[] }).__signed);
   expect(signed).toHaveLength(1);
   const [signer, json] = signed[0] as [string, string];
   expect(signer.toLowerCase()).toBe(PAYER_WALLET.toLowerCase());
   const typed = JSON.parse(json);
   expect(typed.primaryType).toBe("PayerAttestation");
-  expect(typed.domain.chainId).toBe(143);
+  expect(typed.domain.chainId).toBe(8453);
   expect(typed.message.wallet.toLowerCase()).toBe(PAYER_WALLET.toLowerCase());
   expect(typed.message.statement).toContain("Only transfers from this wallet");
   // The session never reached a URL.
@@ -439,12 +463,12 @@ test("an email-gated deposit request unlocks for the tab that verifies, and only
   expect(errors.filter((error) => !/401/.test(error))).toEqual([]);
 });
 
-test("the wallet button refuses a deposit request for another chain", async ({ page }) => {
+test("the wallet button refuses a deposit request bound on a chain this checkout lacks", async ({
+  page,
+}) => {
   await page.goto("/pay/dr_other-chain");
 
-  await expect(
-    page.getByText(/configured for Monad, but the deposit request asks for Ethereum/),
-  ).toBeVisible();
+  await expect(page.getByText(/This checkout cannot pay on Ethereum/)).toBeVisible();
   await expect(page.getByRole("button", { name: /pay with wallet/i })).toHaveCount(0);
   // The address and QR remain, so the deposit request is still payable by hand.
   await expect(page.getByText(ADDRESS)).toBeVisible();

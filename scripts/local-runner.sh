@@ -145,8 +145,18 @@ load_local_env() {
     source .env
     set +a
   fi
+  # Two local chains, so the checkout's network step has a real choice and
+  # the indexer runs one worker per chain: Anvil on 8545 (chain 31337, the
+  # Monad-shaped `finalized` path) and Anvil on 8546 (chain 31338, the
+  # L2-shaped `latest` plus confirmations path). The
+  # services read PAYDAY_CHAINS and PAYDAY_RPC_URL_<chain_id>; PAYDAY_RPC_URL
+  # names the first chain for the scripts' own cast calls.
   export PAYDAY_CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
   export PAYDAY_RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
+  export PAYDAY_SECOND_CHAIN_ID="${PAYDAY_SECOND_CHAIN_ID:-31338}"
+  export PAYDAY_SECOND_RPC_URL="${PAYDAY_SECOND_RPC_URL:-http://127.0.0.1:8546}"
+  export "PAYDAY_RPC_URL_${PAYDAY_CHAIN_ID}=$PAYDAY_RPC_URL"
+  export "PAYDAY_RPC_URL_${PAYDAY_SECOND_CHAIN_ID}=$PAYDAY_SECOND_RPC_URL"
   export PAYDAY_API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
   # Merchants sign in through Privy, for real, even locally: the dashboard
   # (`just web`) uses the same app id, and gatewayd verifies its identity
@@ -155,18 +165,19 @@ load_local_env() {
   export PAYDAY_PRIVY_APP_ID="${PAYDAY_PRIVY_APP_ID:-cmt9wxn7h011h0cjsma7fzytr}"
   export PAYDAY_DEV_IDENTITY=1
   export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://127.0.0.1:3001}"
-  export PAYDAY_FACTORY_ADDRESS="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
-  export PAYDAY_USDC_ADDRESS="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
-  export PAYDAY_BATCH_SWEEPER_ADDRESS="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
-  export PAYDAY_USDC_START_BLOCK="${PAYDAY_USDC_START_BLOCK:-0}"
-  export PAYDAY_FINALITY_SOURCE="${PAYDAY_FINALITY_SOURCE:-finalized}"
-  export PAYDAY_FINALITY_CONFIRMATIONS="${PAYDAY_FINALITY_CONFIRMATIONS:-0}"
+  # The fixture addresses (Bootstrap.s.sol) are the same on both chains.
+  FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
+  USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
+  BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
   export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-1000}"
   # The transfer signal derives ws://127.0.0.1:8545 from the RPC URL; Anvil
   # serves subscriptions on the same port and the signal falls back to the
   # standard `logs` subscription there. The timer backstop stays quick
   # locally so a test never waits a minute on a missed wake.
   export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-1000}"
+  # An idle local chain still keeps its clock moving every few seconds so
+  # expiry flows do not wait five minutes.
+  export PAYDAY_INDEXER_IDLE_INTERVAL_MS="${PAYDAY_INDEXER_IDLE_INTERVAL_MS:-2000}"
   # Anvil has no request budget to trip, so the indexer paces nothing locally.
   export PAYDAY_INDEXER_RPC_MAX_RPS="${PAYDAY_INDEXER_RPC_MAX_RPS:-0}"
   export PAYDAY_SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
@@ -198,27 +209,53 @@ load_local_env() {
   export PAYDAY_HOSTED_CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-$PAYDAY_PUBLIC_BASE_URL}"
 }
 
-# Both services compare the deployed runtime bytecode with these hashes at
-# startup and refuse to start on a mismatch. The running chain is the truth for
-# the contract generation, so they are always computed from it here, overriding
-# anything .env carries, once the bootstrap has deployed the fixtures.
-pin_deployment_code_hashes() {
-  local factory_code sweeper_code
-  factory_code="$(cast code "$PAYDAY_FACTORY_ADDRESS" --rpc-url "$PAYDAY_RPC_URL")"
-  sweeper_code="$(cast code "$PAYDAY_BATCH_SWEEPER_ADDRESS" --rpc-url "$PAYDAY_RPC_URL")"
+
+# One PAYDAY_CHAINS entry for a bootstrapped Anvil: the fixture addresses are
+# the same on every Anvil (account #0's first CREATE addresses), and both
+# services compare the deployed runtime bytecode with the hashes at startup
+# and refuse to start on a mismatch, so the hashes are always read from the
+# running chain. Finality is per chain so the second local chain exercises
+# the L2-shaped path (`latest` plus confirmations).
+chain_entry() {
+  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 factory_code sweeper_code
+  factory_code="$(cast code "$FACTORY" --rpc-url "$rpc_url")"
+  sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$rpc_url")"
   [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
-    echo "no code at PAYDAY_FACTORY_ADDRESS $PAYDAY_FACTORY_ADDRESS; the bootstrap did not deploy PaymentFactory" >&2
-    exit 1
+    echo "no code at PaymentFactory $FACTORY on chain $chain_id; the bootstrap did not deploy it" >&2
+    return 1
   }
   [[ -n "$sweeper_code" && "$sweeper_code" != 0x ]] || {
-    echo "no code at PAYDAY_BATCH_SWEEPER_ADDRESS $PAYDAY_BATCH_SWEEPER_ADDRESS; the bootstrap did not deploy BatchSweeper" >&2
-    exit 1
+    echo "no code at BatchSweeper $BATCH_SWEEPER on chain $chain_id; the bootstrap did not deploy it" >&2
+    return 1
   }
-  PAYDAY_FACTORY_CODE_HASH="$(cast keccak "$factory_code")"
-  PAYDAY_BATCH_SWEEPER_CODE_HASH="$(cast keccak "$sweeper_code")"
-  export PAYDAY_FACTORY_CODE_HASH PAYDAY_BATCH_SWEEPER_CODE_HASH
-  echo "[bootstrap] factory code hash $PAYDAY_FACTORY_CODE_HASH"
-  echo "[bootstrap] batch sweeper code hash $PAYDAY_BATCH_SWEEPER_CODE_HASH"
+  jq -cn --argjson chain_id "$chain_id" --arg usdc "$USDC" --arg factory "$FACTORY" \
+    --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
+    --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
+    --argjson confirmations "$confirmations" \
+    '{chain_id: $chain_id, usdc: $usdc, factory: $factory, batch_sweeper: $sweeper,
+      factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
+      usdc_start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
+      block_time_ms: 1000, log_range_size: 100}'
+}
+
+# The registry both services read, built from the two bootstrapped chains.
+build_chain_registry() {
+  local first second
+  first="$(chain_entry "$PAYDAY_CHAIN_ID" "$PAYDAY_RPC_URL" finalized 0)"
+  second="$(chain_entry "$PAYDAY_SECOND_CHAIN_ID" "$PAYDAY_SECOND_RPC_URL" latest 2)"
+  PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
+  export PAYDAY_CHAINS
+  echo "[bootstrap] PAYDAY_CHAINS=$PAYDAY_CHAINS"
+}
+
+wait_for_anvil() {
+  local rpc_url=$1
+  for _ in {1..100}; do
+    cast chain-id --rpc-url "$rpc_url" >/dev/null 2>&1 && return
+    sleep .1
+  done
+  echo "Anvil at $rpc_url did not become ready" >&2
+  exit 1
 }
 
 # A local account with a key, written straight into the runner's database:
@@ -250,22 +287,22 @@ if [[ "$mode" == e2e ]]; then
   exit
 fi
 
-need cargo; need anvil; need cast; need forge; need curl
+need cargo; need anvil; need cast; need forge; need curl; need jq
 cargo build --locked --workspace
 start_minio
 prefix postgres docker logs -f "$container"
 prefix minio docker logs -f "$minio_container"
 prefix scan-stub start_scan_stub
-prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --slots-in-an-epoch 1 --mixed-mining --block-time 1
-for _ in {1..100}; do
-  cast chain-id --rpc-url "$PAYDAY_RPC_URL" >/dev/null 2>&1 && break
-  sleep .1
+prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --port "${PAYDAY_RPC_URL##*:}" --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil2 anvil --chain-id "$PAYDAY_SECOND_CHAIN_ID" --port "${PAYDAY_SECOND_RPC_URL##*:}" --slots-in-an-epoch 1 --mixed-mining --block-time 1
+wait_for_anvil "$PAYDAY_RPC_URL"
+wait_for_anvil "$PAYDAY_SECOND_RPC_URL"
+echo "[bootstrap] deploying deterministic local fixtures on both chains"
+for rpc_url in "$PAYDAY_RPC_URL" "$PAYDAY_SECOND_RPC_URL"; do
+  forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
+    --rpc-url "$rpc_url" --private-key "$PAYDAY_SIGNER_KEY" --broadcast
 done
-cast chain-id --rpc-url "$PAYDAY_RPC_URL" >/dev/null 2>&1 || { echo "Anvil did not become ready" >&2; exit 1; }
-echo "[bootstrap] deploying deterministic local fixtures"
-forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
-  --rpc-url "$PAYDAY_RPC_URL" --private-key "$PAYDAY_SIGNER_KEY" --broadcast
-pin_deployment_code_hashes
+build_chain_registry
 prefix identity ./target/debug/payday-dev-identity
 for _ in {1..100}; do
   curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break

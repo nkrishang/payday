@@ -99,9 +99,9 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
       { code: "issuer_in_use", status: "409", meaning: "Requests issued under the identity." },
       { code: "issuer_email_already_verified", status: "409", meaning: "" },
       {
-        code: "unsupported_chain, unsupported_token",
+        code: "unsupported_chain",
         status: "422",
-        meaning: "Override not served by the environment.",
+        meaning: "Wallet challenge named a chain the request does not offer.",
       },
       {
         code: "webhooks_unavailable",

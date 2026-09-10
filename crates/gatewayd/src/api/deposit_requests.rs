@@ -16,16 +16,17 @@ use uuid::Uuid;
 use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
     CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
-    DepositRequestSummaryResponse, FactoryAddress, IndexerFreshnessDto, Invoice, IssuerId,
+    DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, IssuerId,
     OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
-    PayerPolicyMode, TokenAddress, TransferDto, TransferListResponse, USDC_DECIMALS,
-    parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
+    PayerPolicyMode, PaymentBinding, SnapshotNetwork, TransferDto, TransferListResponse,
+    USDC_DECIMALS, parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
 };
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
 use crate::api::json::{Json, Query};
 use crate::attachments::{AttachmentError, StorageError, content_disposition};
+use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::request_pdf::render_request_pdf;
 use crate::state::AppState;
 use gateway_db::{
@@ -81,11 +82,13 @@ fn enrich_response(
         .and_then(|v| v.parse().ok());
     let invoice = Invoice::try_from(&row)?;
     let mut response = DepositRequestResponse::from_invoice(invoice.clone(), expires_in);
+    let chain_id = invoice.network().map(|network| network.chain_id.0);
     response.deposit_url = state.payer.deposit_url(&invoice)?;
     response.address_explorer_url = response
         .address
         .as_deref()
-        .and_then(|address| state.payer.address_url(address));
+        .zip(chain_id)
+        .and_then(|(address, chain_id)| state.payer.address_url(chain_id, address));
     response.metadata = row.metadata.0.clone();
     response.customer_id = row.customer_id.map(|id| CustomerId(id).to_string());
     response.issuer_id = row.issuer_id.map(|id| IssuerId(id).to_string());
@@ -108,7 +111,8 @@ fn enrich_response(
     response.settlement_explorer_url = response
         .settlement_tx_hash
         .as_deref()
-        .and_then(|hash| state.payer.transaction_url(hash));
+        .zip(chain_id)
+        .and_then(|(hash, chain_id)| state.payer.transaction_url(chain_id, hash));
     response.transfers = transfers
         .into_iter()
         .filter(|t| t.invoice_id == row.id)
@@ -127,7 +131,8 @@ fn enrich_response(
                 amount_base_units: t.amount,
                 sender: sender.to_checksum(None),
                 transaction_hash: hash.to_string(),
-                explorer_url: state.payer.transaction_url(&hash.to_string()),
+                explorer_url: chain_id
+                    .and_then(|chain_id| state.payer.transaction_url(chain_id, &hash.to_string())),
                 block: t.block_number.to_string(),
                 disposition: if t.disposition == "error" {
                     "zero".into()
@@ -138,9 +143,11 @@ fn enrich_response(
             })
         })
         .collect::<Result<_, ApiError>>()?;
-    let cursor = freshness
-        .into_iter()
-        .find(|f| f.chain_id == row.chain_id && f.token_address == row.token_address);
+    // Freshness is per chain: an unbound request has no chain yet, so it
+    // reports none.
+    let cursor = freshness.into_iter().find(|f| {
+        Some(f.chain_id) == row.chain_id && Some(&f.token_address) == row.token_address.as_ref()
+    });
     response.as_of = cursor.as_ref().and_then(|cursor| {
         Some(AsOfDto {
             block: cursor.last_block.to_string(),
@@ -262,22 +269,6 @@ pub async fn create_deposit_request(
     payer_policy
         .validate()
         .map_err(|error| ApiError::invalid_request(error.to_string()))?;
-    let chain_id: u64 = req
-        .chain_id
-        .as_deref()
-        .map_or(Ok(state.chain_id.0), |value| {
-            value.parse().map_err(|_| {
-                ApiError::invalid_request("chain_id must be a non-negative integer string")
-            })
-        })?;
-
-    let token_addr = req
-        .token_address
-        .as_deref()
-        .map_or(Ok(state.usdc_address), |value| {
-            Address::from_str(value)
-                .map_err(|e| ApiError::invalid_request(format!("invalid token_address: {e}")))
-        })?;
     let beneficiary_addr = Address::from_str(&payout_address)
         .map_err(|e| ApiError::invalid_request(format!("invalid payout_address: {e}")))?;
     if beneficiary_addr.is_zero() {
@@ -296,15 +287,10 @@ pub async fn create_deposit_request(
     .map_err(|error| ApiError::invalid_request(error.to_string()))?;
     let expiration_timestamp = expiration.timestamp;
 
-    // 3. Enforce the configured chain and Circle-issued USDC contract.
-    if chain_id != state.chain_id.0 {
-        return Err(ApiError::unsupported_chain());
-    }
-
-    let token = TokenAddress(token_addr);
-    if token_addr != state.usdc_address {
-        return Err(ApiError::unsupported_token());
-    }
+    // 3. The request is payable on every network this deployment offers,
+    // each with Circle's native USDC there; the payer picks one when they
+    // sign. Nothing about the chain is a request field.
+    let networks = state.networks.networks();
 
     // 4. Parse amount using token decimals.
     let decimals = USDC_DECIMALS;
@@ -334,10 +320,10 @@ pub async fn create_deposit_request(
     // Recovery is not a request field: it is the payer's attested wallet,
     // known only when the payer binds it, so it is no part of issuance.
     let attachment_commitment = attachment.as_ref().and_then(DbAttachment::commitment);
+    let committed_networks: Vec<SnapshotNetwork> =
+        networks.iter().map(SnapshotNetwork::from).collect();
     let requested = IssuanceRequest {
-        chain_id,
-        factory: state.factory_address.as_slice(),
-        token: token_addr.as_slice(),
+        networks: &committed_networks,
         token_decimals: decimals,
         beneficiary: beneficiary_addr.as_slice(),
         amount: amount.0,
@@ -403,16 +389,13 @@ pub async fn create_deposit_request(
     }
 
     // 7. Commit to the document. The address is derived later, when the
-    // payer binds the wallet they will pay from.
-    let factory = FactoryAddress(state.factory_address);
+    // payer binds the wallet they will pay from on the network they chose.
     let beneficiary = BeneficiaryAddress(beneficiary_addr);
     let mut snapshot = CanonicalIssuanceSnapshot::new(
         issuer.clone(),
         payer.clone(),
         payer_policy.clone(),
-        factory,
-        ChainId(chain_id),
-        token,
+        &networks,
         beneficiary,
         amount,
         expiration_timestamp,
@@ -422,9 +405,7 @@ pub async fn create_deposit_request(
     snapshot.reference = req.reference.clone();
     snapshot.attachment = requested.attachment.cloned();
     let invoice = Invoice::issue(
-        factory,
-        ChainId(chain_id),
-        token,
+        &networks,
         beneficiary,
         amount,
         expiration_timestamp,
@@ -727,6 +708,28 @@ pub async fn list_deposit_requests(
     }))
 }
 
+/// The onboarding signer pays on exactly one chain with that chain's USDC. A
+/// binding names the network the payer chose; paying it from here on any other
+/// chain would send real funds to an address no indexer of that chain is
+/// watching, so every broadcast path must pass this guard first.
+fn ensure_onboarding_network(
+    signer: &OnboardingPayerSigner,
+    binding: &PaymentBinding,
+    payment_id: Uuid,
+) -> Result<(), ApiError> {
+    let chain = ChainId(signer.chain_id());
+    if binding.network.chain_id != chain || binding.network.token.0 != signer.usdc() {
+        tracing::error!(
+            %payment_id,
+            bound_chain = binding.network.chain_id.0,
+            signer_chain = chain.0,
+            "onboarding demo payment is bound to a network the onboarding signer does not pay on"
+        );
+        return Err(ApiError::onboarding_deposit_not_eligible());
+    }
+    Ok(())
+}
+
 fn full_deposit_request_id(value: &str) -> Result<Uuid, ApiError> {
     let suffix = value.strip_prefix("dr_").ok_or_else(|| {
         ApiError::invalid_request("starting_after must be a complete dr_ deposit request ID")
@@ -793,6 +796,14 @@ pub async fn onboarding_deposit(
         return Err(ApiError::onboarding_deposit_not_eligible());
     }
 
+    // The onboarding signer pays on exactly one chain with that chain's USDC.
+    // A request already bound on another network is not payable by it; refuse
+    // before the claim below consumes the account's one-shot demo payment, so
+    // an operator fixing the binding can still re-run the walkthrough.
+    if let Some(binding) = &invoice.binding {
+        ensure_onboarding_network(&signer, binding, row.id)?;
+    }
+
     let claim = state
         .onboarding_demo_payments
         .claim(account, row.id)
@@ -834,14 +845,18 @@ pub async fn onboarding_deposit(
         .await?;
 
     // The demo payer attests its wallet exactly as a payer's would: a
-    // challenge on the session, the EIP-712 signature, the binding. A retry
-    // finds the binding already in place.
-    let payment_address = match &invoice.binding {
-        Some(binding) => binding.payment_address,
+    // challenge on the session for the demo chain, the EIP-712 signature,
+    // the binding. A retry finds the binding already in place.
+    let chain = ChainId(signer.chain_id());
+    let binding = match &invoice.binding {
+        Some(binding) => binding.clone(),
         None => {
+            let network = *invoice
+                .network_for(chain)
+                .ok_or_else(ApiError::onboarding_deposit_not_eligible)?;
             let challenge = state
                 .payer_sessions
-                .issue_wallet_challenge(session.id, WALLET_CHALLENGE_TTL)
+                .issue_wallet_challenge(session.id, chain.0, WALLET_CHALLENGE_TTL)
                 .await?;
             let message = PayerAttestation::new(
                 invoice.attribution_hash,
@@ -849,20 +864,20 @@ pub async fn onboarding_deposit(
                 challenge.nonce,
                 challenge.expires_at.timestamp().max(0) as u64,
             );
-            let digest = message.digest(invoice.chain_id.0, invoice.factory.0);
+            let digest = message.digest(network.chain_id.0, network.factory.0);
             let signature = signer.sign_hash(&digest).await.map_err(|error| {
                 tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation failed");
                 ApiError::internal("failed to sign the onboarding payer attestation")
             })?;
             let attestation = payer_wallet_attestation(
                 &message,
-                invoice.chain_id.0,
-                invoice.factory.0,
+                network.chain_id.0,
+                network.factory.0,
                 &signature,
             );
             let now = Utc::now();
             let binding = invoice
-                .bind_payer_wallet(attestation, rfc3339(now))
+                .bind_payer_wallet(chain, attestation, rfc3339(now))
                 .map_err(|error| {
                     tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation did not verify");
                     ApiError::internal("failed to verify the onboarding payer attestation")
@@ -872,22 +887,32 @@ pub async fn onboarding_deposit(
                 .bind_payer_wallet(row.id, session.id, &binding, now)
                 .await?
             {
-                BindPayerWallet::Bound(_) => binding.payment_address,
+                BindPayerWallet::Bound(_) => binding,
+                // A concurrent caller won the binding, possibly on another
+                // network than the one this signer pays on: keep the winner's
+                // whole binding so the network check below applies to it too.
                 BindPayerWallet::AlreadyBound(bound) => Invoice::try_from(&bound)?
-                    .payment_address()
-                    .ok_or_else(|| ApiError::internal("bound invoice has no address"))?,
+                    .binding
+                    .ok_or_else(|| ApiError::internal("bound invoice has no binding"))?,
                 BindPayerWallet::NotBindable(_) => {
                     return Err(ApiError::deposit_request_not_payable());
                 }
             }
         }
     };
+    // The guard above ran before the claim for a pre-existing binding; this
+    // one covers a binding a concurrent call just won, possibly on another
+    // network than the one this signer pays on. Paying either from here on
+    // any other chain would send real funds to an address no indexer of that
+    // chain is watching.
+    ensure_onboarding_network(&signer, &binding, row.id)?;
+    let payment_address = binding.payment_address;
 
     let tx_hash = match claim {
         OnboardingClaim::AlreadySubmitted(tx_hash) => tx_hash,
         OnboardingClaim::Claimed | OnboardingClaim::PendingRetry => {
             let tx_hash = signer
-                .send_usdc(state.usdc_address, payment_address.0, invoice.amount.0)
+                .send_usdc(payment_address.0, invoice.amount.0)
                 .await
                 .map_err(|error| {
                     tracing::error!(%error, payment_id = %row.id, "onboarding demo transfer failed");
@@ -1210,7 +1235,6 @@ mod tests {
     #[test]
     fn create_wire_shape_defaults_metadata_and_takes_the_document() {
         let request = request(serde_json::json!({
-            "chain_id": "1", "token_address": "0x0000000000000000000000000000000000000001",
             "expires_in": 3600, "reference": "order-42", "heading": "March retainer",
             "payer_policy": {"mode": "verified_email", "expected_email": "Alice@Example.com"}
         }));

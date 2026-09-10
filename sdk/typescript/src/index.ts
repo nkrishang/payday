@@ -1,8 +1,10 @@
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type DepositRequestStatus = "awaiting_deposit" | "partially_deposited" | "deposited" | "settled" | "expired" | "returned" | "needs_attention";
 
-export interface Chain { id: string; name: string }
+export interface Chain { id: string; name: string; /** The gas token's symbol on this chain. */ native_symbol: string }
 export interface Token { symbol: string; address: string; decimals: number }
+/** One network a deposit request can be paid on: the chain and its exact native USDC contract. */
+export interface Network { chain: Chain; token: Token }
 export interface AsOf { block: string; at: string }
 
 /** A named party on a deposit request: the issuer or the payer. `details` is bounded free text rendered verbatim, never parsed. */
@@ -74,8 +76,6 @@ export interface CreateDepositRequest {
   attachment_id?: string;
   expires_in?: number;
   expires_at?: string;
-  chain_id?: string;
-  token_address?: string;
 }
 
 /** The commitment that ties the issued deposit request to the deposit address. */
@@ -85,9 +85,15 @@ export interface DepositRequest {
   id: string;
   deposit_url: string;
   status: DepositRequestStatus;
-  chain: Chain;
+  /**
+   * Every network the payer may pay on; the request commits to all of them
+   * and the payer picks one when they sign their wallet attestation.
+   */
+  networks: Network[];
+  /** The network the payer chose; null until a wallet is bound. */
+  chain: Chain | null;
   currency: string;
-  token: Token;
+  token: Token | null;
   /**
    * The one-time payment address. Null until the payer attests the wallet
    * they will pay from: the address commits to that attestation, so it
@@ -154,8 +160,8 @@ export interface DepositRequest {
   settlement_tx_hash: string | null;
   settlement_explorer_url: string | null;
   as_of: AsOf | null;
-  /** What a third party needs to execute the contract; null until the address exists. */
-  self_settlement: { factory: string; salt: string } | null;
+  /** What a third party needs to execute the contract on the chosen chain; null until the address exists. */
+  self_settlement: { chain_id: string; factory: string; salt: string } | null;
   attention: { code: string; message: string; action: string } | null;
   transfers: Transfer[];
   indexer_freshness: { last_indexed_block: string | null; last_finalized_block: string | null; cursor_updated_at: string | null };
@@ -288,6 +294,9 @@ export interface PayerDepositRequest {
   /** Safety guidance shown only when payout needs operator attention. */
   payer_message: string | null;
   content_unlocked: boolean;
+  /** The networks the payer may choose from; null while locked. */
+  networks: Network[] | null;
+  /** The chosen network, once a wallet is bound and the content is unlocked. */
   chain: Chain | null;
   token: Token | null;
   amount: string | null;
@@ -323,10 +332,12 @@ export interface PayerAttestationTypedData {
   };
 }
 
-/** A wallet challenge: the session it belongs to and the document to sign. */
+/** A wallet challenge: the session it belongs to, the network it is for, and the document to sign. */
 export interface WalletChallenge {
   payer_session: string;
   expires_at: string;
+  /** The network the payer chose; `typed_data.domain.chainId` names it too. */
+  chain: Chain;
   typed_data: PayerAttestationTypedData;
 }
 
@@ -463,7 +474,7 @@ export interface AttachmentCommitment { id: string; byte_length: string; sha256:
  * attestation rather than through this document.
  */
 export interface CanonicalIssuanceSnapshot {
-  schema: "payday.invoice";
+  schema: "payday.invoice.v3";
   canonicalization: "RFC8785";
   issuer: Party;
   bill_to: Party;
@@ -474,17 +485,17 @@ export interface CanonicalIssuanceSnapshot {
   expiration_timestamp: string;
   payer_policy: PayerPolicy;
   attachment: AttachmentCommitment | null;
-  chain_id: string;
-  token_address: string;
+  /** Every network the request may be paid on, ordered by chain id. */
+  networks: Array<{ chain_id: string; token_address: string; factory_address: string }>;
   receiver_address: string;
-  factory_address: string;
 }
 
 /**
  * The payer's wallet attestation as the proof carries it: the exact typed
- * data the wallet signed, its EIP-712 digest, and the signature. The proof's
- * salt is `keccak256("PAYDAY_SALT_V2" || attribution_hash || digest)` and the
- * wallet is the address's recovery term.
+ * data the wallet signed (under the chosen chain's domain), its EIP-712
+ * digest, and the signature. The proof's salt is
+ * `keccak256("PAYDAY_SALT_V3" || attribution_hash || digest)` and the wallet
+ * is the address's recovery term.
  */
 export interface PayerWalletAttestation {
   address: string;
@@ -522,7 +533,7 @@ export interface VerificationAttestationPayload {
   payment_id: string;
   /** `0x` hex, 32 bytes: the attribution hash of the canonical deposit request. */
   attribution_hash: string;
-  /** Decimal, as in the canonical issuance snapshot. */
+  /** Decimal: the chain the payer chose, one of the snapshot's networks. */
   chain_id: string;
   /** EIP-55 checksummed CREATE3 payment address. */
   payment_address: string;
@@ -556,6 +567,7 @@ export interface ProofOfPayment {
   attribution_hash: string;
   payer_wallet: PayerWalletAttestation;
   salt: string;
+  /** The network the payer chose among the snapshot's `networks`; the factory and token are that network's. */
   chain_id: string;
   factory_address: string;
   payment_address: string;
@@ -572,10 +584,16 @@ export interface ProofOfPayment {
   verification: SignedVerificationAttestation;
 }
 
+/** One entry per supported network. */
 export interface ServiceStatus {
-  chain: Chain & { finalized_block: string | null; finalized_at: string | null };
-  indexer: { cursor_block: string | null; cursor_at: string | null; lag_blocks: number | null };
-  sweeper: { state: string; queued: number };
+  chains: Array<{
+    id: string;
+    name: string;
+    finalized_block: string | null;
+    finalized_at: string | null;
+    indexer: { cursor_block: string | null; cursor_at: string | null; lag_blocks: number | null };
+    sweeper: { state: string; queued: number };
+  }>;
 }
 export interface Webhook {
   id: string;
@@ -1103,22 +1121,25 @@ export class PaydayPayerClient {
   /**
    * The payer's wallet attestation. Once the session satisfies the request's
    * policy (at once, for a permissionless request), `challenge` returns the
-   * EIP-712 document the wallet must sign, and `attest` hands the signature
-   * back. The signature binds that wallet to the request and derives its
-   * payment address; only transfers from that wallet count, and anything
-   * Payday returns goes back to it. These writes answer cross-origin requests
-   * from the hosted checkout only.
+   * EIP-712 document the wallet must sign under the chosen network's domain,
+   * and `attest` hands the signature back. The signature binds that wallet
+   * and that network to the request and derives its payment address; only
+   * transfers from that wallet on that chain count, and anything Payday
+   * returns goes back to it. These writes answer cross-origin requests from
+   * the hosted checkout only.
    */
   readonly wallet = {
     /**
-     * Mint the challenge for `wallet`. For a permissionless request with no
-     * session yet, the response carries a fresh `payer_session` to keep.
-     * Answers `409 wallet_already_bound` once a wallet is bound.
+     * Mint the challenge for `wallet` on `chainId`, one of the request's
+     * `networks`. For a permissionless request with no session yet, the
+     * response carries a fresh `payer_session` to keep. Answers
+     * `422 unsupported_chain` for a chain the request does not offer and
+     * `409 wallet_already_bound` once a wallet is bound.
      */
-    challenge: (id: string, wallet: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<WalletChallenge> =>
+    challenge: (id: string, wallet: string, chainId: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<WalletChallenge> =>
       request<WalletChallenge>(
         this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/wallet/challenge`,
-        { method: "POST", body: { wallet }, ...payerOptions(options) },
+        { method: "POST", body: { wallet, chain_id: chainId }, ...payerOptions(options) },
       ),
     /**
      * Submit the wallet's signature over the challenge's typed data. Answers
