@@ -335,6 +335,18 @@ variable "resend_api_key" {
   sensitive   = true
 }
 
+variable "privy_app_secret" {
+  description = <<-EOT
+    Privy app secret the API pregenerates merchant wallets with during email
+    sign-up. Leave empty to skip pregeneration: gatewayd answers pregenerate
+    with 503 and sign-in still creates the wallet itself. Supply as
+    TF_VAR_privy_app_secret. Note that Terraform state will contain it.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "payer_email_from" {
   description = "From header of the payer's deposit request email; Resend must have verified its domain."
   type        = string
