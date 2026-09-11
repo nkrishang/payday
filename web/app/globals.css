@@ -357,102 +357,26 @@
   }
 }
 
-/*
- * Logos that fall into place. Until the group has measured its marks they
- * are hidden; then each drops from the card's top edge (`--fall`, set per
- * mark) to where it sits, leaning a little on the way (`--tilt`), lands
- * with a bounce, and stays. `--i` staggers them, and the whole thing waits
- * a beat after load so the page is read before anything moves.
- */
-.landing-mark-drop {
-  --fall: 0px;
-  --tilt: 0deg;
-  --rest: 0deg;
-  --i: 0;
-  visibility: hidden;
-  rotate: var(--rest);
+/* Logos drifting past under the hero: one copy's width per cycle, both directions. */
+.landing-marquee {
+  animation: landing-marquee 48s linear infinite;
 }
 
-.landing-drop[data-ready] .landing-mark-drop {
-  visibility: visible;
-  animation: landing-fall 1100ms cubic-bezier(0.55, 0, 1, 0.45) both;
-  animation-delay: calc(1000ms + var(--i) * 70ms);
+.landing-marquee-reverse {
+  animation-direction: reverse;
 }
 
-@keyframes landing-fall {
-  0% {
-    opacity: 0;
-    transform: translateY(calc(-1 * var(--fall))) rotate(var(--tilt));
-    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
-  }
-  8% {
-    opacity: 1;
-  }
-  60% {
-    transform: translateY(0) rotate(0deg);
-    animation-timing-function: cubic-bezier(0, 0, 0.45, 1);
-  }
-  76% {
-    transform: translateY(-16px) rotate(calc(var(--tilt) * -0.35));
-    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
-  }
-  88% {
-    transform: translateY(0) rotate(0deg);
-    animation-timing-function: cubic-bezier(0, 0, 0.45, 1);
-  }
-  94% {
-    transform: translateY(-4px);
-    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0) rotate(0deg);
-  }
+.landing-marquee-fade {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+  mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
 }
 
-/*
- * The mark's depth. Drop-shadows follow the image's own silhouette, so a
- * stack of short, sharp ones reads as thickness beneath the logo and one
- * long soft one as its shadow on the page. The gloss is a gradient shown
- * only through the logo's shape: the mark is its own mask.
- */
-.landing-mark {
-  filter: drop-shadow(0 1px 0 rgb(15 15 14 / 0.28)) drop-shadow(0 2px 0 rgb(15 15 14 / 0.2))
-    drop-shadow(0 3px 0 rgb(15 15 14 / 0.12)) drop-shadow(0 10px 10px rgb(15 15 14 / 0.22));
-  transition:
-    translate 220ms cubic-bezier(0.22, 1, 0.36, 1),
-    filter 220ms ease-out;
-}
-
-.landing-mark-gloss {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    165deg,
-    rgb(255 255 255 / 0.55) 0%,
-    rgb(255 255 255 / 0.12) 38%,
-    rgb(255 255 255 / 0) 52%,
-    rgb(15 15 14 / 0) 66%,
-    rgb(15 15 14 / 0.16) 100%
-  );
-  -webkit-mask: var(--logo) center / contain no-repeat;
-  mask: var(--logo) center / contain no-repeat;
-  -webkit-mask-mode: alpha;
-  mask-mode: alpha;
-}
-
-.landing-mark-drop:hover .landing-mark {
-  translate: 0 -4px;
-  filter: drop-shadow(0 1px 0 rgb(15 15 14 / 0.28)) drop-shadow(0 2px 0 rgb(15 15 14 / 0.2))
-    drop-shadow(0 3px 0 rgb(15 15 14 / 0.12)) drop-shadow(0 18px 16px rgb(15 15 14 / 0.3));
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .landing-mark-drop,
-  .landing-drop[data-ready] .landing-mark-drop {
-    visibility: visible;
-    animation: none;
+@keyframes landing-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(-50% - 6px));
   }
 }
 
