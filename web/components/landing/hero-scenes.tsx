@@ -118,19 +118,22 @@ function easeOut(fraction: number): number {
  * the end. A frame after a long pause counts as a short one, so a background
  * tab does not skip a chapter when it comes back.
  */
-function useLoopClock(total: number, frozenAt: number | null): number {
+function useLoopClock(total: number, frozenAt: number | null, running: boolean): number {
   const [t, setT] = useState(0);
+  // Where the loop is, kept outside the effect so a pause (the stage
+  // scrolling out of view) resumes mid-story rather than from the top.
+  const elapsedRef = useRef(0);
 
   useEffect(() => {
-    if (frozenAt !== null) return;
+    if (frozenAt !== null || !running) return;
     let frame = 0;
     let last = performance.now();
-    let elapsed = 0;
-    let shown = 0;
+    let shown = elapsedRef.current;
     const tick = (now: number) => {
       const dt = Math.min(now - last, 100);
       last = now;
-      elapsed = (elapsed + dt) % total;
+      const elapsed = (elapsedRef.current + dt) % total;
+      elapsedRef.current = elapsed;
       // Thirty frames a second is plenty for typing and a moving cursor.
       if (Math.abs(elapsed - shown) >= 33 || elapsed < shown) {
         shown = elapsed;
@@ -140,9 +143,29 @@ function useLoopClock(total: number, frozenAt: number | null): number {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [total, frozenAt]);
+  }, [total, frozenAt, running]);
 
   return frozenAt ?? t;
+}
+
+/**
+ * Whether the stage is on screen. Off screen, the loop stops: a phone
+ * scrolling past the hero should not be re-rendering it thirty times a
+ * second underneath the scroll.
+ */
+function useInView(ref: React.RefObject<HTMLElement | null>): boolean {
+  const [inView, setInView] = useState(true);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setInView(entry?.isIntersecting ?? true),
+      { threshold: 0.05 },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
+  return inView;
 }
 
 /**
@@ -181,22 +204,18 @@ export function HeroScenes() {
   const pinned = usePinnedMoment();
   // Without motion, hold the dialog the backend just opened in the app.
   const frozenAt = pinned ?? (reduced ? 8_600 : null);
-  const t = useLoopClock(TOTAL_MS, frozenAt);
-
-  const chapter = CHAPTERS.reduce(
-    (current, entry, index) => (t >= entry.from ? index : current),
-    0,
-  );
-  const panel = panelAt(t);
-  const fading = frozenAt === null && t >= TOTAL_MS - LOOP_FADE_MS;
-
-  const [scale, setScale] = useState(1);
   const frameRef = useRef<HTMLDivElement>(null);
+  const inView = useInView(frameRef);
+  const t = useLoopClock(TOTAL_MS, frozenAt, inView);
+
+  // The stage is laid out at its own width and scaled to the frame. Until
+  // the first measurement has been applied it stays invisible, so the
+  // first paint on a phone never shows it at full size for a frame before
+  // it snaps down; it fades in at the right size instead.
+  const [scale, setScale] = useState<number | null>(null);
   useLayoutEffect(() => {
     const frame = frameRef.current;
     if (!frame) return;
-    // Measured before the first paint, so the stage never shows unscaled;
-    // the observer then follows the card as the viewport changes.
     const fit = (width: number) => setScale(width / STAGE.width);
     fit(frame.clientWidth);
     const observer = new ResizeObserver(([entry]) => {
@@ -205,6 +224,13 @@ export function HeroScenes() {
     observer.observe(frame);
     return () => observer.disconnect();
   }, []);
+
+  const chapter = CHAPTERS.reduce(
+    (current, entry, index) => (t >= entry.from ? index : current),
+    0,
+  );
+  const panel = panelAt(t);
+  const fading = frozenAt === null && t >= TOTAL_MS - LOOP_FADE_MS;
 
   return (
     <div
@@ -217,9 +243,13 @@ export function HeroScenes() {
       <div
         className={cn(
           "absolute top-0 left-0 origin-top-left",
-          fading ? "landing-stage-fade-out" : "landing-stage-fade-in",
+          scale === null
+            ? "invisible"
+            : fading
+              ? "landing-stage-fade-out"
+              : "landing-stage-fade-in",
         )}
-        style={{ width: STAGE.width, height: STAGE.height, transform: `scale(${scale})` }}
+        style={{ width: STAGE.width, height: STAGE.height, transform: `scale(${scale ?? 1})` }}
       >
         {/* A quiet green glow behind the stage: the product's "go" colour, faded almost to nothing. */}
         <div

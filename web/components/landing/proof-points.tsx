@@ -160,14 +160,14 @@ function Marquee({ logos, reverse }: { logos: readonly Logo[]; reverse?: boolean
               key={`${logo.name}-${copy ? "b" : "a"}`}
               title={logo.name}
               aria-hidden={copy || undefined}
-              className="flex h-14 shrink-0 items-center justify-center px-3"
+              className="flex h-16 shrink-0 items-center justify-center px-3.5"
             >
               <Image
                 src={logo.src}
                 width={96}
                 height={28}
                 alt={copy ? "" : logo.name}
-                className={cn("w-auto", logo.wide ? "h-6" : "h-8")}
+                className={cn("w-auto", logo.wide ? "h-7" : "h-9")}
               />
             </li>
           )),

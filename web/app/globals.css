@@ -160,36 +160,51 @@
 
   /*
    * A marker-pen highlight behind a run of the headline: a plain block of
-   * colour with no rounding, sitting a hair wider than the letters it holds,
-   * and repeated per line if the run ever wraps.
+   * colour with no rounding, sitting a hair wider than the letters it holds.
    *
-   * The block is a background image, not a colour, so its width can move:
-   * it fills in from the left edge, barely pauses, drains out towards the
-   * right edge like a health bar, and goes again almost at once. While full
-   * the anchor swaps from the left edge to the right one; at full width the
-   * two are the same rectangle, so the swap never shows.
+   * The block is a pseudo-element scaled on its own layer, not an animated
+   * background: it fills in from the left edge, barely pauses, drains out
+   * towards the right edge like a health bar, and goes again almost at
+   * once. Its origin swaps from the left edge to the right one while it is
+   * full; at full width the two are the same rectangle, so the swap never
+   * shows. A transform composites on the GPU, where an animated
+   * background-size repaints the heading every frame.
    */
   .landing-mark {
+    position: relative;
+    display: inline-block;
     padding: 0.06em 0.12em;
     margin-inline: -0.06em;
     color: inherit;
-    background-color: transparent;
-    background-image: linear-gradient(var(--mark), var(--mark));
-    background-repeat: no-repeat;
-    background-size: 0% 100%;
-    background-position: 0% 50%;
-    box-decoration-break: clone;
-    -webkit-box-decoration-break: clone;
+    background: transparent;
+    isolation: isolate;
+  }
+
+  .landing-mark::before {
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    background: var(--mark);
+    content: "";
+    transform: scaleX(0);
+    transform-origin: left center;
     animation: landing-mark-sweep 4s ease-in-out infinite both;
+    will-change: transform;
   }
 
   .landing-mark-yellow {
     --mark: #ead26d;
+  }
+
+  .landing-mark-yellow::before {
     animation-delay: 500ms;
   }
 
   .landing-mark-green {
     --mark: #a3d277;
+  }
+
+  .landing-mark-green::before {
     animation-delay: 900ms;
   }
 }
@@ -360,15 +375,42 @@
 /* Logos drifting past under the hero: one copy's width per cycle, both directions. */
 .landing-marquee {
   animation: landing-marquee 48s linear infinite;
+  /* Its own layer: the row moves without repainting the card each frame. */
+  will-change: transform;
 }
 
 .landing-marquee-reverse {
   animation-direction: reverse;
 }
 
+/*
+ * The rows fade at the card's edges under two gradients painted over them,
+ * rather than a mask: a mask over a moving row makes mobile browsers
+ * rasterise the whole row every frame, which is what made it crawl.
+ */
 .landing-marquee-fade {
-  -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
-  mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+  position: relative;
+}
+
+.landing-marquee-fade::before,
+.landing-marquee-fade::after {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  width: 12%;
+  pointer-events: none;
+  content: "";
+}
+
+.landing-marquee-fade::before {
+  left: 0;
+  background: linear-gradient(to right, #f6f2ea, rgb(246 242 234 / 0));
+}
+
+.landing-marquee-fade::after {
+  right: 0;
+  background: linear-gradient(to left, #f6f2ea, rgb(246 242 234 / 0));
 }
 
 @keyframes landing-marquee {
@@ -524,24 +566,24 @@
 
 @keyframes landing-mark-sweep {
   0% {
-    background-size: 0% 100%;
-    background-position: 0% 50%;
+    transform: scaleX(0);
+    transform-origin: left center;
     animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   }
   35% {
-    background-size: 100% 100%;
-    background-position: 0% 50%;
+    transform: scaleX(1);
+    transform-origin: left center;
     animation-timing-function: linear;
   }
   42% {
-    background-size: 100% 100%;
-    background-position: 100% 50%;
+    transform: scaleX(1);
+    transform-origin: right center;
     animation-timing-function: cubic-bezier(0.55, 0, 0.8, 0.4);
   }
   77%,
   100% {
-    background-size: 0% 100%;
-    background-position: 100% 50%;
+    transform: scaleX(0);
+    transform-origin: right center;
   }
 }
 
@@ -577,9 +619,9 @@
     transition-duration: 0.01ms !important;
   }
 
-  .landing-mark {
+  .landing-mark::before {
     animation: none;
-    background-size: 100% 100%;
+    transform: none;
   }
 }
 
