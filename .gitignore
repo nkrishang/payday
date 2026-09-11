@@ -26,3 +26,5 @@ auth0/backend.hcl
 # Local review scratch space; findings.md is the only tracked artifact.
 .review/*
 !.review/findings.md
+.vercel
+.env*
