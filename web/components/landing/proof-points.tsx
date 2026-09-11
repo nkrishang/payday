@@ -89,8 +89,8 @@ export function ProofPoints() {
 
       <Card
         eyebrow="Open source"
-        title="Self-hostable. No sales call."
-        body="Clone the repository, run it on your own infrastructure, and read every line that touches a deposit."
+        title="Self-hostable. Build with your agent."
+        body="Run Payday on your own infrastructure. Extend its capabilities with your agent."
       >
         <div className="mt-auto grid gap-4 pt-6">
           <a
