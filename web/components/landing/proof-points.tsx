@@ -77,8 +77,8 @@ export function ProofPoints() {
 
       <Card
         eyebrow="Works with every checkout"
-        title="A deposit destination, not another checkout."
-        body="Payday issues the address. Your users fund it from whatever they already use: a wallet, an exchange, an on-ramp."
+        title="Not another checkout."
+        body="Payday issues a destination address for every deposit intent, built to be fund-able by your app's checkout solution or directly by your users via a wallet, exchange or on-ramp."
       >
         <div className="landing-marquee-fade -mx-6 mt-auto grid gap-3 pt-6 sm:-mx-7">
           {CHECKOUTS.map((row, index) => (
