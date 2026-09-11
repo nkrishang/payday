@@ -115,9 +115,10 @@
     font-feature-settings: "tnum";
   }
 
+  /* Selected text is the headline's green marker, on every page. */
   ::selection {
-    background-color: var(--ink);
-    color: var(--surface);
+    background-color: #a3d277;
+    color: #0f0f0e;
   }
 
   :focus-visible {
