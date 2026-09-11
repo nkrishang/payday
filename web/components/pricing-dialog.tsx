@@ -86,7 +86,7 @@ export function PricingDialog({
               light ? "text-brand-subtle" : "text-[#b0afa9]",
             )}
           >
-            Payday is in beta and completely free to use right now — no fees, no plans to pick.
+            Payday is in beta and completely free to use right now. No fees, no card, no plans.
           </Dialog.Description>
 
           <p
