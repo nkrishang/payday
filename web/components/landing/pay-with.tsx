@@ -63,22 +63,25 @@ export function PayWith() {
       className="flex h-12 items-center justify-center gap-2.5 rounded-[10px] bg-brand-black px-4 text-[14.5px] font-medium text-brand-white"
     >
       Pay with
+      {/* The pill keeps one width whatever it holds, so "Pay with" and the
+          button never move; only the mark and name inside it change. */}
       <span
-        key={index}
         aria-hidden="true"
-        className={cn(
-          "landing-pop inline-flex h-8 items-center gap-2 rounded-[7px] bg-brand-white px-2.5 text-[13px] font-semibold text-brand-black",
-          leaving && "landing-pop-out",
-        )}
+        className="inline-flex h-8 w-[144px] items-center justify-center overflow-hidden rounded-[7px] bg-brand-white text-[13px] font-semibold text-brand-black"
       >
-        <Image
-          src={provider.src}
-          width={96}
-          height={24}
-          alt=""
-          className={cn("w-auto", "wordmark" in provider ? "h-[15px]" : "h-[18px]")}
-        />
-        {"wordmark" in provider ? null : provider.name}
+        <span
+          key={index}
+          className={cn("landing-pop inline-flex items-center gap-2", leaving && "landing-pop-out")}
+        >
+          <Image
+            src={provider.src}
+            width={96}
+            height={24}
+            alt=""
+            className={cn("w-auto", "wordmark" in provider ? "h-[15px]" : "h-[18px]")}
+          />
+          {"wordmark" in provider ? null : provider.name}
+        </span>
       </span>
     </span>
   );
