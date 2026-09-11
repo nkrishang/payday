@@ -5,6 +5,7 @@ import { HeroScenes } from "@/components/landing/hero-scenes";
 import { ProofPoints } from "@/components/landing/proof-points";
 import { GetStarted } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
+import { PricingDialog } from "@/components/pricing-dialog";
 
 export const metadata: Metadata = {
   title: "Payday — accept stablecoins on your terms.",
@@ -13,11 +14,14 @@ export const metadata: Metadata = {
   alternates: { canonical: "/" },
 };
 
+/** A half hour on the founder's calendar. */
+const DEMO_URL = "https://calendar.app.google/dXTDCwAEPpk25xzx8";
+
 export default function Home() {
   return (
     <div className="landing flex min-h-screen flex-col bg-brand-white text-brand-black">
       <header className="landing-reveal">
-        <nav className="mx-auto flex h-[88px] max-w-[1320px] items-center px-5 sm:px-8">
+        <nav className="mx-auto flex h-[88px] max-w-[1320px] items-center justify-between px-5 sm:px-8">
           <Link href="/" aria-label="Payday" className="rounded-[4px]">
             <Image
               src="/payday-logo-full-light.svg"
@@ -29,6 +33,18 @@ export default function Home() {
               className="h-auto w-[88px] sm:w-[100px]"
             />
           </Link>
+
+          <div className="flex items-center gap-6 text-[15px] font-medium text-brand-subtle sm:gap-8">
+            <PricingDialog appearance="light" />
+            <a
+              href={DEMO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="transition-colors hover:text-brand-black"
+            >
+              Request a demo
+            </a>
+          </div>
         </nav>
       </header>
 

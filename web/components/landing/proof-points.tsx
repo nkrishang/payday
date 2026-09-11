@@ -1,6 +1,7 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { PricingDialog } from "@/components/pricing-dialog";
 import { BuildWith } from "./build-with";
 
 /**
@@ -90,7 +91,18 @@ export function ProofPoints() {
       <Card
         eyebrow="Open source"
         title="Self-hostable. Build with your agent."
-        body="Run Payday on your own infrastructure. Extend its capabilities with your agent."
+        body={
+          <>
+            You can run Payday on your own infrastructure. Customize it with your AI agents. Or, use
+            the hosted service with{" "}
+            <PricingDialog
+              appearance="light"
+              trigger="transparent pricing"
+              triggerClassName="font-medium text-brand-black underline decoration-brand-black/30 underline-offset-[3px] transition-colors hover:decoration-brand-black"
+            />
+            .
+          </>
+        }
       >
         <div className="mt-auto grid gap-4 pt-6">
           <a
@@ -118,7 +130,7 @@ function Card({
 }: {
   eyebrow: string;
   title: string;
-  body: string;
+  body: ReactNode;
   children: ReactNode;
 }) {
   return (
