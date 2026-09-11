@@ -358,37 +358,56 @@
 }
 
 /*
- * Logo coins. A chip is the unit that travels: until its group has scrolled
- * into view it waits at the group's centre (`--dx`/`--dy`, set by the
- * group), small and faded, then springs out to its place, each chip a beat
- * after the last (`--i`). The body underneath bobs on its own phase, and the
- * coin itself is what lifts and wiggles under the pointer. Three layers, so
- * the three motions never fight over one transform.
+ * Logos that fall into place. Until the group has measured its marks they
+ * are hidden; then each drops from the card's top edge (`--fall`, set per
+ * mark) to where it sits, leaning a little on the way (`--tilt`), lands
+ * with a bounce, and stays. `--i` staggers them, and the whole thing waits
+ * a beat after load so the page is read before anything moves.
  */
-.landing-burst {
-  position: relative;
-}
-
-.landing-chip {
-  --dx: 0px;
-  --dy: 0px;
+.landing-mark-drop {
+  --fall: 0px;
+  --tilt: 0deg;
+  --rest: 0deg;
   --i: 0;
-  opacity: 0;
-  transform: translate(var(--dx), var(--dy)) scale(0.35);
-  transition:
-    transform 950ms cubic-bezier(0.22, 1.35, 0.36, 1),
-    opacity 450ms ease-out;
-  transition-delay: calc(var(--i) * 40ms);
+  visibility: hidden;
+  rotate: var(--rest);
 }
 
-.landing-burst[data-settled] .landing-chip {
-  opacity: 1;
-  transform: none;
+.landing-drop[data-ready] .landing-mark-drop {
+  visibility: visible;
+  animation: landing-fall 1100ms cubic-bezier(0.55, 0, 1, 0.45) both;
+  animation-delay: calc(1000ms + var(--i) * 70ms);
 }
 
-.landing-chip-body {
-  animation: landing-float 5200ms ease-in-out infinite;
-  animation-delay: calc(var(--i) * -830ms);
+@keyframes landing-fall {
+  0% {
+    opacity: 0;
+    transform: translateY(calc(-1 * var(--fall))) rotate(var(--tilt));
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  8% {
+    opacity: 1;
+  }
+  60% {
+    transform: translateY(0) rotate(0deg);
+    animation-timing-function: cubic-bezier(0, 0, 0.45, 1);
+  }
+  76% {
+    transform: translateY(-16px) rotate(calc(var(--tilt) * -0.35));
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  88% {
+    transform: translateY(0) rotate(0deg);
+    animation-timing-function: cubic-bezier(0, 0, 0.45, 1);
+  }
+  94% {
+    transform: translateY(-4px);
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) rotate(0deg);
+  }
 }
 
 /*
@@ -423,50 +442,16 @@
   mask-mode: alpha;
 }
 
-.landing-chip:hover .landing-mark {
+.landing-mark-drop:hover .landing-mark {
   translate: 0 -4px;
   filter: drop-shadow(0 1px 0 rgb(15 15 14 / 0.28)) drop-shadow(0 2px 0 rgb(15 15 14 / 0.2))
     drop-shadow(0 3px 0 rgb(15 15 14 / 0.12)) drop-shadow(0 18px 16px rgb(15 15 14 / 0.3));
-  animation: landing-wiggle 650ms ease-in-out both;
-}
-
-@keyframes landing-float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-5px);
-  }
-}
-
-@keyframes landing-wiggle {
-  0% {
-    rotate: 0deg;
-  }
-  25% {
-    rotate: -7deg;
-  }
-  55% {
-    rotate: 6deg;
-  }
-  80% {
-    rotate: -3deg;
-  }
-  100% {
-    rotate: 0deg;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .landing-chip {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
-
-  .landing-chip-body,
-  .landing-chip:hover .landing-mark {
+  .landing-mark-drop,
+  .landing-drop[data-ready] .landing-mark-drop {
+    visibility: visible;
     animation: none;
   }
 }

@@ -2,7 +2,7 @@ import Image from "next/image";
 import type { ReactNode } from "react";
 import { PricingDialog } from "@/components/pricing-dialog";
 import { BuildWith } from "./build-with";
-import { LogoBurst, Mark } from "./logo-cloud";
+import { LogoDrop, Mark } from "./logo-cloud";
 
 /**
  * Three things worth knowing before Get Started, under the hero: the chains
@@ -24,7 +24,6 @@ const CHECKOUTS = [
   { name: "Binance", src: "/logos/binance.svg" },
   { name: "Phantom", src: "/logos/phantom.svg" },
   { name: "Kraken", src: "/logos/kraken.svg" },
-  { name: "MoonPay", src: "/logos/moonpay.svg", wide: true },
   { name: "fun.xyz", src: "/logos/fun.svg" },
   { name: "Rainbow", src: "/logos/rainbow.svg" },
   { name: "OKX", src: "/logos/okx.svg" },
@@ -56,11 +55,11 @@ export function ProofPoints() {
         title="Any chain in. Your chain out."
         body="Convert better by letting your users pay where they already have funds. You choose the chain and destination where those funds settle."
       >
-        <LogoBurst className="mt-auto flex justify-around gap-4 pt-8 pb-2">
+        <LogoDrop className="mt-auto flex justify-around gap-4 pt-8 pb-1">
           {CHAINS.map((chain) => (
-            <Mark key={chain.name} src={chain.src} name={chain.name} label={chain.name} size="lg" />
+            <Mark key={chain.name} src={chain.src} name={chain.name} size="lg" />
           ))}
-        </LogoBurst>
+        </LogoDrop>
       </Card>
 
       <Card
@@ -68,11 +67,17 @@ export function ProofPoints() {
         title="Not another checkout."
         body="Payday issues a destination address for every deposit intent, fund-able by every hosted checkout solution, wallet, exchange or on-ramp."
       >
-        <LogoBurst className="mt-auto flex flex-wrap justify-center gap-x-4 gap-y-3 pt-8">
-          {CHECKOUTS.map((logo) => (
-            <Mark key={logo.name} src={logo.src} name={logo.name} wide={"wide" in logo} />
+        <LogoDrop className="relative mt-auto h-[160px] w-full">
+          {CHECKOUTS.map((logo, index) => (
+            <Mark
+              key={logo.name}
+              src={logo.src}
+              name={logo.name}
+              className="absolute"
+              style={resting(index, CHECKOUTS.length)}
+            />
           ))}
-        </LogoBurst>
+        </LogoDrop>
       </Card>
 
       <Card
@@ -109,6 +114,27 @@ export function ProofPoints() {
   );
 }
 
+/**
+ * Where mark `index` of `count` comes to rest on the floor of the pile: a
+ * spot along the width, a little height, a lean. Deterministic in the
+ * index, so the server and the browser agree on every position.
+ */
+function resting(index: number, count: number): React.CSSProperties {
+  const noise = (k: number) => (((index + 1) * 9301 + 49297 * k) % 233280) / 233280;
+  // Spread across the width in a shuffled order, so neighbours in the list
+  // do not land side by side.
+  const slot = (index * 11) % count;
+  const left = 1 + (slot / (count - 1)) * 86 + (noise(1) - 0.5) * 6;
+  const bottom = Math.round(70 * noise(2) ** 1.6);
+  const lean = Math.round((noise(3) - 0.5) * 44);
+  return {
+    left: `${left.toFixed(1)}%`,
+    bottom: `${bottom}px`,
+    zIndex: index,
+    "--rest": `${lean}deg`,
+  } as React.CSSProperties;
+}
+
 function Card({
   eyebrow,
   title,
@@ -121,7 +147,7 @@ function Card({
   children: ReactNode;
 }) {
   return (
-    <article className="flex min-h-[340px] flex-col overflow-hidden rounded-[18px] border border-brand-black/[0.14] p-6 sm:p-7">
+    <article className="relative flex min-h-[340px] flex-col overflow-hidden rounded-[18px] border border-brand-black/[0.14] p-6 sm:p-7">
       <p className="text-[11px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
         {eyebrow}
       </p>
