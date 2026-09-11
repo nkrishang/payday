@@ -11,10 +11,18 @@ import { BuildWith } from "./build-with";
  * infrastructure. Each card leads with the real marks rather than a claim.
  */
 
+/** Where a deposit can come from or go to, in the order the grid shows them. */
 const CHAINS = [
+  { name: "Ethereum", src: "/logos/ethereum.svg" },
+  { name: "Solana", src: "/logos/solana.svg" },
   { name: "Monad", src: "/payment-icons/monad.svg" },
-  { name: "Base", src: "/logos/base.svg" },
   { name: "Arbitrum", src: "/logos/arbitrum.svg" },
+  { name: "Base", src: "/logos/base.svg" },
+  { name: "Hyperliquid", src: "/logos/hyperliquid.png" },
+  { name: "Polygon", src: "/logos/polygon.svg" },
+  { name: "Tron", src: "/logos/tron.svg" },
+  { name: "BNB Chain", src: "/logos/bnb-chain.svg" },
+  { name: "Tempo", src: "/logos/tempo.svg" },
 ] as const;
 
 /**
@@ -62,10 +70,29 @@ export function ProofPoints() {
         title="Any chain in. Your chain out."
         body="Convert better by letting your users pay where they already have funds. You choose the chain and destination where those funds settle."
       >
-        <ul className="mt-auto flex items-center justify-around pt-8 pb-2">
+        <ul
+          aria-label="Chains"
+          className="mt-auto grid grid-cols-5 gap-px overflow-hidden rounded-[12px] border border-brand-black/10 bg-brand-black/10"
+        >
           {CHAINS.map((chain) => (
-            <li key={chain.name} className="flex items-center justify-center">
-              <Image src={chain.src} width={64} height={64} alt={chain.name} className="size-20" />
+            <li
+              key={chain.name}
+              title={chain.name}
+              className="landing-chain relative aspect-square bg-brand-white"
+            >
+              {/* The mark as a grey halftone, until the pointer arrives. */}
+              <span
+                aria-hidden="true"
+                className="landing-chain-halftone"
+                style={{ "--logo": `url(${chain.src})` } as React.CSSProperties}
+              />
+              <Image
+                src={chain.src}
+                width={64}
+                height={64}
+                alt={chain.name}
+                className="landing-chain-logo"
+              />
             </li>
           ))}
         </ul>

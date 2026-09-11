@@ -372,6 +372,67 @@
   }
 }
 
+/*
+ * The chain grid. Each tile holds the chain's mark twice: as a grey halftone
+ * — a dot screen shown only through the mark's own shape — and in full
+ * colour, hidden. The pointer swaps them: colour comes in quickly and goes
+ * out slowly, the way a light does.
+ */
+.landing-chain {
+  transition: background-color 400ms ease-out;
+}
+
+.landing-chain:hover {
+  background-color: rgb(15 15 14 / 0.035);
+  transition-duration: 180ms;
+}
+
+.landing-chain-halftone,
+.landing-chain-logo {
+  position: absolute;
+  inset: 22%;
+  width: 56%;
+  height: 56%;
+  object-fit: contain;
+}
+
+.landing-chain-halftone {
+  background: radial-gradient(circle, #7d7972 0.95px, transparent 1.15px) 0 0 / 2.5px 2.5px;
+  -webkit-mask: var(--logo) center / contain no-repeat;
+  mask: var(--logo) center / contain no-repeat;
+  -webkit-mask-mode: alpha;
+  mask-mode: alpha;
+  opacity: 0.9;
+  transition: opacity 420ms ease-out;
+}
+
+.landing-chain-logo {
+  opacity: 0;
+  transform: scale(0.94);
+  transition:
+    opacity 420ms ease-out,
+    transform 420ms ease-out;
+}
+
+.landing-chain:hover .landing-chain-halftone {
+  opacity: 0;
+  transition-duration: 160ms;
+}
+
+.landing-chain:hover .landing-chain-logo {
+  opacity: 1;
+  transform: none;
+  transition-duration: 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-chain,
+  .landing-chain-halftone,
+  .landing-chain-logo {
+    transition: none;
+  }
+}
+
 /* Logos drifting past under the hero: one copy's width per cycle, both directions. */
 .landing-marquee {
   animation: landing-marquee 48s linear infinite;
