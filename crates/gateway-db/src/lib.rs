@@ -10,6 +10,7 @@ mod proofs;
 mod sweeps;
 mod verifications;
 mod webhooks;
+mod withdrawals;
 
 pub use accounts::{
     API_KEY_GRACE_HOURS, AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError,
@@ -52,6 +53,11 @@ pub use verifications::{
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,
     WebhookRepository,
+};
+pub use withdrawals::{
+    AuthorizeOutcome, CancelOutcome, CreateWithdrawalError, DbWithdrawal, DbWithdrawalLeg, LegKind,
+    LegState, MinedStep, NewWithdrawal, NewWithdrawalLeg, RelayStats, RelayStep, StepOutcome,
+    WithdrawalRepository,
 };
 
 /// The gateway's schema migrations, embedded at compile time. This crate owns

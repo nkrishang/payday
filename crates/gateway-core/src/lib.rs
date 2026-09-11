@@ -34,5 +34,8 @@ pub use proof::*;
 mod payer_attestation;
 pub use payer_attestation::*;
 
+mod withdrawal_authorization;
+pub use withdrawal_authorization::*;
+
 mod deployment;
 pub use deployment::*;

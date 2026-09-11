@@ -10,6 +10,9 @@ pub struct ExpectedDeployment {
     pub factory_code_hash: B256,
     pub batch_sweeper: Address,
     pub batch_sweeper_code_hash: B256,
+    /// The `WithdrawalForwarder` and its expected runtime code hash, on a
+    /// chain that has CCTP.
+    pub forwarder: Option<(Address, B256)>,
 }
 
 /// What an RPC endpoint reports for the configured addresses.
@@ -18,6 +21,8 @@ pub struct ObservedDeployment {
     pub factory_code_hash: B256,
     pub batch_sweeper_code_hash: B256,
     pub bound_factory: Address,
+    /// Read only when `ExpectedDeployment::forwarder` is set.
+    pub forwarder_code_hash: Option<B256>,
 }
 
 #[derive(Debug, Error)]
@@ -53,6 +58,14 @@ pub enum DeploymentError {
         expected: Address,
         actual: Address,
     },
+    #[error(
+        "WithdrawalForwarder at {address} has runtime code hash {actual}, but the chain's cctp.forwarder_code_hash is {expected}; the configured forwarder is not the reviewed generation"
+    )]
+    ForwarderCodeHash {
+        address: Address,
+        expected: B256,
+        actual: B256,
+    },
 }
 
 pub fn check_deployment(
@@ -86,6 +99,17 @@ pub fn check_deployment(
             actual: observed.bound_factory,
         });
     }
+    if let Some((address, expected_hash)) = expected.forwarder {
+        // An unread hash never matches: the caller must have looked.
+        let actual = observed.forwarder_code_hash.unwrap_or_default();
+        if actual != expected_hash {
+            return Err(DeploymentError::ForwarderCodeHash {
+                address,
+                expected: expected_hash,
+                actual,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -103,12 +127,14 @@ mod tests {
             factory_code_hash: B256::ZERO,
             batch_sweeper: Address::ZERO,
             batch_sweeper_code_hash: B256::ZERO,
+            forwarder: None,
         };
         let observed = ObservedDeployment {
             chain_id: 1,
             factory_code_hash: B256::ZERO,
             batch_sweeper_code_hash: B256::ZERO,
             bound_factory: factory,
+            forwarder_code_hash: None,
         };
         assert!(matches!(
             check_deployment(&expected, &observed),
@@ -117,5 +143,35 @@ mod tests {
                 actual: 1
             })
         ));
+    }
+
+    #[test]
+    fn forwarder_code_hash_is_checked_only_when_configured() {
+        let factory = address!("0000000000000000000000000000000000000001");
+        let forwarder = address!("0000000000000000000000000000000000000002");
+        let mut expected = ExpectedDeployment {
+            chain_id: 143,
+            factory,
+            factory_code_hash: B256::ZERO,
+            batch_sweeper: Address::ZERO,
+            batch_sweeper_code_hash: B256::ZERO,
+            forwarder: None,
+        };
+        let mut observed = ObservedDeployment {
+            chain_id: 143,
+            factory_code_hash: B256::ZERO,
+            batch_sweeper_code_hash: B256::ZERO,
+            bound_factory: factory,
+            forwarder_code_hash: None,
+        };
+        check_deployment(&expected, &observed).unwrap();
+
+        expected.forwarder = Some((forwarder, B256::repeat_byte(0xF0)));
+        assert!(matches!(
+            check_deployment(&expected, &observed),
+            Err(DeploymentError::ForwarderCodeHash { address, .. }) if address == forwarder
+        ));
+        observed.forwarder_code_hash = Some(B256::repeat_byte(0xF0));
+        check_deployment(&expected, &observed).unwrap();
     }
 }

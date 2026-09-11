@@ -174,6 +174,45 @@ contract WithdrawalForwarderTest is Eip3009Test {
         forwarder.bridge(IERC3009(address(token)), merchant, 25e6, 6, RECIPIENT, SALT, validBefore, signature);
     }
 
+    /// @dev The vectors `gateway-core`'s `withdrawal_authorization` tests,
+    /// the SDK, and the web adapter pin, computed here from the type hash
+    /// and `abi.encode` alone so every implementation agrees with Solidity.
+    function test_nonce_and_digest_vectors_match_the_other_implementations() public view {
+        bytes32 nonce = forwarder.bridgeNonce(6, bytes32(uint256(uint160(0xD00D))), bytes32(uint256(7)));
+        assertEq(nonce, 0x18b79105e486e10f626b71939a0226c47316949b7c24ff1c397661ea861fafaa, "nonce vector");
+
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("USDC"),
+                keccak256("2"),
+                uint256(143),
+                0x754704Bc059F8C67012fEd69BC8A327a5aafb603
+            )
+        );
+        assertEq(
+            domainSeparator, 0xfe22123edc0dd4aeb912eb7948c5f0e531592c2053b3067612f427db342c93c6, "Monad USDC domain"
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                domainSeparator,
+                keccak256(
+                    abi.encode(
+                        RECEIVE_TYPEHASH,
+                        0x1111111111111111111111111111111111111111,
+                        0x2222222222222222222222222222222222222222,
+                        uint256(1_234_567),
+                        uint256(0),
+                        uint256(1_800_000_000),
+                        nonce
+                    )
+                )
+            )
+        );
+        assertEq(digest, 0xfe0bcc7d9e69ee02881011f29a4156caa15e02b8e94c2e0c9f40e66711651993, "digest vector");
+    }
+
     function test_same_chain_leg_is_a_relayed_transfer_with_authorization() public {
         uint256 validBefore = block.timestamp + 1 days;
         address destination = address(0xD00D);
