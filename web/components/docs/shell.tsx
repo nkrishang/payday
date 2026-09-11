@@ -14,7 +14,7 @@ import { Toc } from "./toc";
 
 /**
  * The frame around every documentation page: the landing page's header on
- * its 76px rule, a row of section tabs under it (the guides, and the API
+ * its 88px rule, a row of section tabs under it (the guides, and the API
  * reference), the section's page list down the left, the page in the
  * middle, and its own headings down the right. `brand-dark` (globals.css)
  * gives it the landing page's palette and type in both colour schemes, the
@@ -25,8 +25,8 @@ import { Toc } from "./toc";
  * folds into a drawer under the header.
  */
 
-/** The header's two rows: the 76px rule and the 44px tab row. */
-const HEADER_HEIGHT = 120;
+/** The header's two rows: the 88px rule and the 44px tab row. */
+const HEADER_HEIGHT = 132;
 
 const SECTIONS: ReadonlyArray<{ id: DocsSection; title: string; href: string }> = [
   { id: "docs", title: "Documentation", href: "/docs" },
@@ -52,7 +52,7 @@ export function DocsShell({ children }: { children: ReactNode }) {
   return (
     <div className="brand-dark docs min-h-dvh bg-canvas">
       <header className="sticky top-0 z-40 border-b border-brand-grey/20 bg-canvas/90 backdrop-blur-md">
-        <nav className="mx-auto flex h-[76px] max-w-[1400px] items-center justify-between px-5 sm:px-8">
+        <nav className="mx-auto flex h-[88px] max-w-[1400px] items-center justify-between px-5 sm:px-8">
           <div className="flex items-center gap-3">
             <Link href="/" className="rounded-md" aria-label="Payday home">
               <Image
@@ -60,8 +60,9 @@ export function DocsShell({ children }: { children: ReactNode }) {
                 width={2929}
                 height={1000}
                 priority
+                sizes="100px"
                 alt="Payday"
-                className="h-auto w-[116px] sm:w-[140px]"
+                className="h-auto w-[88px] sm:w-[100px]"
               />
             </Link>
             <span aria-hidden="true" className="hidden h-5 w-px bg-brand-grey/25 sm:block" />
@@ -73,7 +74,7 @@ export function DocsShell({ children }: { children: ReactNode }) {
             </Link>
           </div>
 
-          <div className="hidden items-center gap-9 text-[16px] text-brand-grey md:flex">
+          <div className="hidden items-center gap-6 text-[15px] font-medium text-brand-grey sm:gap-8 md:flex">
             <PricingDialog />
             <Link
               href="/dashboard"
@@ -100,10 +101,10 @@ export function DocsShell({ children }: { children: ReactNode }) {
         <div
           id="docs-drawer"
           hidden={!open}
-          className="max-h-[calc(100dvh-120px)] overflow-y-auto border-t border-brand-grey/20 bg-canvas px-5 py-5 md:hidden"
+          className="max-h-[calc(100dvh-132px)] overflow-y-auto border-t border-brand-grey/20 bg-canvas px-5 py-5 md:hidden"
         >
           <PageList section={section} pathname={pathname} onNavigate={() => setOpen(false)} />
-          <div className="mt-6 flex flex-wrap items-center gap-4 border-t border-brand-grey/20 pt-5 text-[15px] text-brand-grey">
+          <div className="mt-6 flex flex-wrap items-center gap-4 border-t border-brand-grey/20 pt-5 text-[15px] font-medium text-brand-grey">
             <PricingDialog />
             <Link href="/dashboard" className="text-brand-green">
               Dashboard

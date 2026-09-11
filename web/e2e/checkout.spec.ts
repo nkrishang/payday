@@ -232,11 +232,18 @@ test("an unbound request takes a network and the payer's signature before it sho
   await expect(networks.getByRole("radio", { name: /Base/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /choose a network first/i })).toBeDisabled();
   await networks.getByRole("radio", { name: /Base/ }).click();
-  await expect(networks.getByRole("radio", { name: /Base/ })).toHaveAttribute("aria-checked", "true");
+  await expect(networks.getByRole("radio", { name: /Base/ })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
 
   // Connect the fake wallet, then sign the challenge it is handed.
   await page.getByRole("button", { name: /connect the wallet you will pay from/i }).click();
-  await page.getByRole("dialog").getByRole("button").filter({ hasText: /injected/i }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button")
+    .filter({ hasText: /injected/i })
+    .click();
   await expect(
     page.getByRole("button", { name: /sign to get your deposit address on Base/i }),
   ).toBeVisible();
@@ -301,7 +308,9 @@ test("the countdown reaching zero does not itself declare the deposit request ex
   await expectNoInstructions(page);
 });
 
-test("a permissionless deposit request shows the document and offers its attachment", async ({ page }) => {
+test("a permissionless deposit request shows the document and offers its attachment", async ({
+  page,
+}) => {
   const errors = watchConsole(page);
   await page.goto("/pay/dr_document");
 
@@ -352,16 +361,7 @@ test("the attachment's signed URL is fetched on demand and never server-rendered
     .toEqual([expect.stringContaining("/__download/")]);
 });
 
-const WITHHELD = [
-  "25.00",
-  "USDC",
-  "Globex",
-  "INV-1042",
-  "Net 30",
-  "Payer",
-  ADDRESS,
-  "0x754704Bc",
-];
+const WITHHELD = ["25.00", "USDC", "Globex", "INV-1042", "Net 30", "Payer", ADDRESS, "0x754704Bc"];
 
 async function expectLocked(page: Page, html: string) {
   await expect(page.getByText("Verification required").first()).toBeVisible();
@@ -407,7 +407,9 @@ test("an email-gated deposit request reveals only the issuer, heading, and maske
   await page.goto("/pay/dr_gated-email");
 
   await expectLocked(page, html);
-  await expect(page.getByText(/once you verify ownership of the expected credentials/)).toBeVisible();
+  await expect(
+    page.getByText(/once you verify ownership of the expected credentials/),
+  ).toBeVisible();
   await expect(page.getByText(/identity/i)).toHaveCount(0);
   expect(errors).toEqual([]);
 });
@@ -512,10 +514,10 @@ test("the landing page renders and is indexable", async ({ page }) => {
   const response = await page.goto("/");
 
   await expect(
-    page.getByRole("heading", { name: "Make every stablecoin accountable." }),
+    page.getByRole("heading", { name: "Accept stablecoins on your terms." }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start Building" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Request a demo" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Get Started" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Read Docs" })).toHaveAttribute("href", "/docs");
   await expect(page.getByRole("img", { name: "Payday" }).first()).toBeVisible();
   expect(await page.locator('meta[name="robots"]').count()).toBe(0);
   expect(response?.status()).toBe(200);
@@ -532,58 +534,7 @@ test("the landing page links to public documentation without obsolete environmen
   expect(body).not.toContain("quickstart");
   // Public documentation lives in the app itself at /docs, not the repository
   // (see "Publish customer documentation at /docs").
-  await expect(page.getByRole("link", { name: "Docs" })).toHaveAttribute("href", "/docs");
-});
-
-test("the deposit carousel advances upward and settles with a bounce", async ({ page }) => {
-  await page.goto("/");
-
-  const track = page.locator(".scene-deposit-track");
-  await expect(track.locator(".deposit-row").first()).toBeVisible();
-
-  const positions = await track.evaluate((element) => {
-    const animation = element
-      .getAnimations()
-      .find((candidate) => candidate.effect?.getTiming().duration === 36_000);
-    if (!animation) return [];
-
-    animation.pause();
-    return [360, 720, 1_080].map((time) => {
-      animation.currentTime = time;
-      return new DOMMatrix(getComputedStyle(element).transform).m42;
-    });
-  });
-
-  expect(positions).toHaveLength(3);
-  expect(positions[1]).toBeLessThan(positions[0]!);
-  expect(positions[2]).toBeGreaterThan(positions[1]!);
-});
-
-test("the deposit scene stays fixed as its verification panel opens and closes", async ({
-  page,
-}) => {
-  await page.goto("/");
-  const stage = page.locator(".deposit-stage");
-
-  const snapshots = await stage.evaluate((element) => {
-    const animations = element.getAnimations({ subtree: true });
-    const panel = element.querySelector<HTMLElement>(".checkout-panel")!;
-
-    animations.forEach((animation) => animation.pause());
-    return [0, 9_000, 27_000, 35_999].map((time) => {
-      animations.forEach((animation) => (animation.currentTime = time));
-      const bounds = element.getBoundingClientRect();
-      return {
-        width: Math.round(bounds.width),
-        height: Math.round(bounds.height),
-        panelOpacity: Number(getComputedStyle(panel).opacity),
-      };
-    });
-  });
-
-  expect(new Set(snapshots.map(({ width }) => width)).size).toBe(1);
-  expect(new Set(snapshots.map(({ height }) => height)).size).toBe(1);
-  expect(snapshots.map(({ panelOpacity }) => panelOpacity)).toEqual([0, 1, 1, 0]);
+  await expect(page.getByRole("link", { name: "Read Docs" })).toHaveAttribute("href", "/docs");
 });
 
 /* ------------------------------------------------------------------------ */

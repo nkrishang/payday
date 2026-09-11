@@ -74,24 +74,22 @@ async function waitForWallet(): Promise<void> {
  * exchange underneath is Privy's, and it ends in the same session the
  * dashboard runs on.
  *
- * Like the landing page around it, the dialog is dark in both colour schemes,
- * so it names its colours rather than reading the theme tokens. Its ground is
- * the page's own #070707 because the wordmark bakes that colour in, both as a
- * backing rect and as the knockouts that cut the mark's two arches.
+ * Like the landing page around it, the dialog is light in both colour
+ * schemes, so it names its colours rather than reading the theme tokens. Its
+ * ground is the page's own #f6f2ea because the wordmark bakes that colour in.
  */
 
 const fieldStyles =
-  "h-12 w-full rounded-[8px] border border-brand-grey/30 bg-white/[0.04] px-3.5 text-[15px] " +
-  "text-brand-white transition-colors placeholder:text-brand-grey/60 focus:border-brand-green " +
+  "h-12 w-full rounded-[8px] border border-brand-black/25 bg-white px-3.5 text-[15px] " +
+  "text-brand-black transition-colors placeholder:text-brand-subtle/50 focus:border-brand-black " +
   "disabled:opacity-50";
 
-const labelStyles = "block text-[12px] font-medium text-brand-grey";
+const labelStyles = "block text-[12px] font-medium text-brand-subtle";
 
 const submitStyles =
-  "mt-4 flex h-13 w-full items-center justify-center gap-2.5 rounded-[8px] bg-brand-green " +
-  "px-5 text-[15px] font-medium text-brand-black transition-colors hover:bg-brand-green/90 " +
-  // Dimmed green reads as olive against this ground, so waiting is grey.
-  "disabled:pointer-events-none disabled:bg-white/[0.07] disabled:text-brand-grey";
+  "mt-4 flex h-13 w-full items-center justify-center gap-2.5 rounded-[8px] bg-brand-black " +
+  "px-5 text-[15px] font-medium text-brand-white transition-colors hover:bg-brand-black/85 " +
+  "disabled:pointer-events-none disabled:bg-brand-black/10 disabled:text-brand-subtle";
 
 /** m:ss, for a countdown that never shows a bare number of seconds. */
 function countdown(ms: number): string {
@@ -99,7 +97,7 @@ function countdown(ms: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function StartBuilding() {
+export function GetStarted() {
   const router = useRouter();
   const { authenticated } = usePrivy();
   const [open, setOpen] = useState(false);
@@ -264,25 +262,25 @@ export function StartBuilding() {
 
   return (
     <Dialog.Root open={open} onOpenChange={openChange}>
-      <Dialog.Trigger className="flex h-14 items-center justify-center gap-3 rounded-[8px] bg-brand-green px-5 text-[16px] font-medium text-brand-black transition-transform hover:-translate-y-0.5">
-        Start Building
+      <Dialog.Trigger className="flex h-14 items-center justify-center gap-3 rounded-[8px] bg-brand-black px-6 text-[17px] font-medium text-brand-white transition-colors hover:bg-brand-black/85">
+        Get Started
         <ArrowRight />
       </Dialog.Trigger>
 
       <Dialog.Portal>
-        <Dialog.Overlay className="landing-dialog-scrim fixed inset-0 z-50 bg-black/75 backdrop-blur-[3px]" />
+        <Dialog.Overlay className="landing-dialog-scrim fixed inset-0 z-50 bg-brand-black/40 backdrop-blur-[3px]" />
         <Dialog.Content
           // Radix would open on the close button; the mailbox is the point.
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             emailField.current?.focus();
           }}
-          className="landing-dialog fixed top-1/2 left-1/2 z-50 w-[calc(100vw-28px)] max-w-[432px] -translate-x-1/2 -translate-y-1/2 rounded-[14px] border border-brand-grey/25 bg-[#070707] px-6 pt-6 pb-7 text-brand-white sm:px-7"
+          className="landing-dialog fixed top-1/2 left-1/2 z-50 w-[calc(100vw-28px)] max-w-[432px] -translate-x-1/2 -translate-y-1/2 rounded-[14px] border border-brand-black bg-brand-white px-6 pt-6 pb-7 text-brand-black sm:px-7"
         >
           <div className="flex items-start justify-between gap-4">
             <Image
-              src="/payday-logo-full.svg"
-              width={2929}
+              src="/payday-logo-full-light.svg"
+              width={2800}
               height={1000}
               alt="Payday"
               className="mt-0.5 h-auto w-[84px]"
@@ -290,7 +288,7 @@ export function StartBuilding() {
             <Dialog.Close
               aria-label="Close"
               disabled={step === "wallet" || step === "signing-in"}
-              className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-brand-grey transition-colors hover:bg-white/[0.06] hover:text-brand-white disabled:pointer-events-none disabled:opacity-30"
+              className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-brand-subtle transition-colors hover:bg-brand-black/[0.06] hover:text-brand-black disabled:pointer-events-none disabled:opacity-30"
             >
               <X className="size-4" />
             </Dialog.Close>
@@ -304,9 +302,9 @@ export function StartBuilding() {
                 : step === "wallet"
                   ? "Almost there"
                   : "Welcome back"}
-            <span className="text-brand-yellow">.</span>
+            .
           </Dialog.Title>
-          <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-[#b0afa9]">
+          <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-brand-subtle">
             {step === "email"
               ? "Enter your email and we'll send a one-time code. No passwords or cards."
               : step === "code"
@@ -318,8 +316,8 @@ export function StartBuilding() {
 
           {step === "wallet" || step === "signing-in" ? (
             <div className="mt-8 flex flex-col items-center gap-4 py-4">
-              <Loader2 className="size-6 animate-spin text-brand-green" aria-hidden="true" />
-              <p role="status" className="text-[13px] text-brand-grey">
+              <Loader2 className="size-6 animate-spin text-brand-black" aria-hidden="true" />
+              <p role="status" className="text-[13px] text-brand-subtle">
                 {step === "wallet" ? "Creating your wallet…" : "Signing you in…"}
               </p>
             </div>
@@ -383,7 +381,7 @@ export function StartBuilding() {
                     setError(null);
                     markSent(0);
                   }}
-                  className="text-brand-grey transition-colors hover:text-brand-white disabled:opacity-50"
+                  className="text-brand-subtle transition-colors hover:text-brand-black disabled:opacity-50"
                 >
                   Use a different email
                 </button>
@@ -391,7 +389,7 @@ export function StartBuilding() {
                   type="button"
                   disabled={busy || !canResend}
                   onClick={resend}
-                  className="text-brand-green transition-colors hover:text-brand-green/80 disabled:cursor-default disabled:text-brand-grey disabled:hover:text-brand-grey"
+                  className="text-brand-black transition-colors hover:text-brand-black/70 disabled:cursor-default disabled:text-brand-subtle/60 disabled:hover:text-brand-subtle/60"
                 >
                   {canResend ? "Resend code" : `Resend in ${countdown(remaining)}`}
                 </button>
@@ -400,7 +398,7 @@ export function StartBuilding() {
           )}
 
           {step === "wallet" || step === "signing-in" ? null : (
-            <p className="mt-6 border-t border-brand-grey/20 pt-4 text-[12px] leading-relaxed text-brand-grey">
+            <p className="mt-6 border-t border-brand-black/15 pt-4 text-[12px] leading-relaxed text-brand-subtle">
               Already have an account? The same code signs you in. Payday stores no password.
             </p>
           )}
@@ -410,12 +408,12 @@ export function StartBuilding() {
   );
 }
 
-/** Inline problem text, announced, in the dark palette's `--danger` — named
- *  rather than read, because this panel is dark under either colour scheme. */
+/** Inline problem text, announced, in the light palette's `--danger` — named
+ *  rather than read, because this panel is light under either colour scheme. */
 function Problem({ children }: { children: React.ReactNode }) {
   if (!children) return null;
   return (
-    <p role="alert" className="mt-3 text-[13px] leading-relaxed text-[#f87171]">
+    <p role="alert" className="mt-3 text-[13px] leading-relaxed text-[#b91c1c]">
       {children}
     </p>
   );

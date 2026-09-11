@@ -11,9 +11,9 @@ import { API_PAGES, DOCS_PAGES } from "../components/docs/nav";
  * scrolls sideways on a phone.
  */
 
-test("the landing page's Docs link opens the documentation", async ({ page }) => {
+test("the landing page's Read Docs link opens the documentation", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Docs" }).click();
+  await page.getByRole("link", { name: "Read Docs" }).click();
   await expect(page).toHaveURL(/\/docs$/);
   await expect(page.getByRole("heading", { level: 1 })).toContainText("Stablecoin deposits");
 });

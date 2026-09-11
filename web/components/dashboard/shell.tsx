@@ -15,7 +15,7 @@ import { HOME_PATH, MerchantGate, useOptionalMerchant } from "./session";
  *
  * `dash` carries the landing page's palette and type (globals.css), and the
  * header is the landing page's own: the same wordmark at the same size, the
- * same Docs link and Pricing dialog, on the same 76px rule. There are no section
+ * same Docs link and Pricing dialog, on the same 88px rule. There are no section
  * tabs — everything a merchant does day to day is on `/dashboard` itself, and
  * the pages that remain are details of one record, which the back link and the
  * wordmark both return from.
@@ -69,7 +69,7 @@ function Header() {
 
   return (
     <header className="border-b border-brand-grey/20">
-      <nav className="mx-auto flex h-[76px] max-w-[1240px] items-center justify-between px-5 sm:px-8">
+      <nav className="mx-auto flex h-[88px] max-w-[1240px] items-center justify-between px-5 sm:px-8">
         {/* Named by the wordmark's own alt text, so it is not a second "Dashboard". */}
         <Link href={HOME_PATH} className="rounded-md">
           <Image
@@ -77,25 +77,26 @@ function Header() {
             width={2929}
             height={1000}
             priority
+            sizes="100px"
             alt="Payday"
-            className="h-auto w-[116px] sm:w-[140px]"
+            className="h-auto w-[88px] sm:w-[100px]"
           />
         </Link>
 
-        <div className="flex items-center whitespace-nowrap text-[15px] text-brand-grey sm:text-[16px]">
+        <div className="flex items-center whitespace-nowrap text-[15px] font-medium text-brand-grey">
           {/* The landing page's two nav items keep its spacing; signing out is
               not one of them, so a rule and a wider gap set it apart. */}
-          <div className="flex items-center gap-5 sm:gap-9">
+          <div className="flex items-center gap-6 sm:gap-8">
             <Link href="/docs" className="transition-colors hover:text-brand-white">
               Docs
             </Link>
             <PricingDialog />
           </div>
 
-          <span aria-hidden="true" className="mx-4 h-5 w-px bg-brand-grey/25 sm:mx-7" />
+          <span aria-hidden="true" className="mx-4 h-5 w-px bg-brand-grey/25 sm:mx-6" />
 
           {/* On a phone the wordmark, both nav items, and this label do not fit
-              on the 76px rule together, so the icon carries it alone there and
+              on the 88px rule together, so the icon carries it alone there and
               the label is its accessible name. */}
           <button
             type="button"

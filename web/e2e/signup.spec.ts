@@ -12,7 +12,7 @@ const EMAIL = "founder@acme.test";
 
 test("the hero opens a sign-up dialog that signs a new merchant in", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
 
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "Start building." })).toBeVisible();
@@ -51,7 +51,7 @@ test("a wrong code is refused without losing the dialog, and the digits stay sel
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
 
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(EMAIL);
@@ -74,7 +74,7 @@ test("a new code is offered only once the cooldown has run", async ({ page }) =>
   // moved through instead.
   await page.clock.install();
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
 
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(EMAIL);
@@ -102,7 +102,7 @@ test("a new code is offered only once the cooldown has run", async ({ page }) =>
 
 test("closing the dialog abandons the attempt", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
 
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(EMAIL);
@@ -113,14 +113,14 @@ test("closing the dialog abandons the attempt", async ({ page }) => {
   await expect(dialog).toBeHidden();
 
   // Reopening starts at the mailbox again, not on a code that has gone stale.
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
   await expect(dialog.getByRole("heading", { name: "Start building." })).toBeVisible();
   await expect(dialog.getByLabel("One-time code")).toBeHidden();
 });
 
 test("a visitor who still holds a session goes straight to the dashboard", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Email").fill(EMAIL);
   await dialog.getByRole("button", { name: "Send code" }).click();
@@ -128,9 +128,9 @@ test("a visitor who still holds a session goes straight to the dashboard", async
   await dialog.getByRole("button", { name: "Continue" }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
 
-  // Back on the landing page, "Start Building" has nothing to ask.
+  // Back on the landing page, "Get Started" has nothing to ask.
   await page.goto("/");
-  await page.getByRole("button", { name: "Start Building" }).click();
+  await page.getByRole("button", { name: "Get Started" }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
