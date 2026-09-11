@@ -63,14 +63,10 @@ export function ProofPoints() {
         title="Any chain in. Your chain out."
         body="Convert better by letting your users pay where they already have funds. You choose the chain and destination where those funds settle."
       >
-        <ul className="mt-auto grid grid-cols-3 gap-3 pt-6">
+        <ul className="mt-auto flex items-center justify-around pt-8 pb-2">
           {CHAINS.map((chain) => (
-            <li
-              key={chain.name}
-              className="flex flex-col items-center gap-3 rounded-[14px] border border-brand-black/10 bg-white/60 py-5"
-            >
-              <Image src={chain.src} width={64} height={64} alt="" className="size-11" />
-              <span className="text-[13px] font-medium">{chain.name}</span>
+            <li key={chain.name} className="flex items-center justify-center">
+              <Image src={chain.src} width={64} height={64} alt={chain.name} className="size-20" />
             </li>
           ))}
         </ul>
@@ -165,14 +161,14 @@ function Marquee({ logos, reverse }: { logos: readonly Logo[]; reverse?: boolean
               key={`${logo.name}-${copy ? "b" : "a"}`}
               title={logo.name}
               aria-hidden={copy || undefined}
-              className="flex h-14 shrink-0 items-center justify-center rounded-[12px] border border-brand-black/10 bg-white/60 px-4"
+              className="flex h-14 shrink-0 items-center justify-center px-3"
             >
               <Image
                 src={logo.src}
                 width={96}
                 height={28}
                 alt={copy ? "" : logo.name}
-                className={cn("w-auto", logo.wide ? "h-6" : "h-7")}
+                className={cn("w-auto", logo.wide ? "h-6" : "h-8")}
               />
             </li>
           )),
