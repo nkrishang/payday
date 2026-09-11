@@ -1,6 +1,6 @@
 "use client";
 
-import { Check } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -79,17 +79,14 @@ export function BuildWith() {
           </span>
         ))}
       </span>
-      {copied ? (
-        <span className="flex items-center gap-2 text-success">
-          <Check className="size-4" />
-          Copied prompt
-        </span>
-      ) : (
-        "Build with your AI agent"
-      )}
-      <span className="ml-auto text-[12px] font-normal text-brand-subtle">
-        {copied ? "" : "Copy prompt"}
+      <span className="whitespace-nowrap">
+        {copied ? "Copied prompt" : "Build with your AI agent"}
       </span>
+      {copied ? (
+        <Check className="ml-auto size-4 shrink-0 text-success" />
+      ) : (
+        <Copy className="ml-auto size-4 shrink-0 text-brand-subtle" />
+      )}
     </button>
   );
 }
