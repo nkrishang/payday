@@ -59,8 +59,8 @@ export function ProofPoints() {
     >
       <Card
         eyebrow="Multi-chain"
-        title="Settles on the chain your payer picks."
-        body="One address per deposit on Monad, Base, or Arbitrum. The payer chooses at the wallet step; you get the same webhook either way."
+        title="Any chain in. Your chain out."
+        body="Payers deposit from the chain they're already on. You pull the funds to the chain you settle on, when it suits you. Neither side has to think about the other's."
       >
         <ul className="mt-auto grid grid-cols-3 gap-3 pt-6">
           {CHAINS.map((chain) => (
