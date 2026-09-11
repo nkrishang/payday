@@ -60,7 +60,7 @@ export function ProofPoints() {
       <Card
         eyebrow="Multi-chain"
         title="Any chain in. Your chain out."
-        body="Payers deposit from the chain they're already on. You pull the funds to the chain you settle on, when it suits you. Neither side has to think about the other's."
+        body="Convert better by letting your users pay where they already have funds. You choose the chain and destination where those funds settle."
       >
         <ul className="mt-auto grid grid-cols-3 gap-3 pt-6">
           {CHAINS.map((chain) => (
