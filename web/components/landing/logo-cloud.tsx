@@ -65,10 +65,11 @@ export function LogoBurst({ className, children }: { className?: string; childre
 }
 
 /**
- * One logo on a coin: a bevelled tile with an edge and a soft drop, the
- * mark centred on its face, and a label under it when there is one.
+ * One logo, given body: the mark itself, with an extrusion and a drop that
+ * follow its own silhouette, and a gloss clipped to its shape. No tile
+ * behind it; what floats and wiggles is the logo.
  */
-export function Coin({
+export function Mark({
   src,
   name,
   label,
@@ -78,33 +79,32 @@ export function Coin({
 }: {
   src: string;
   name: string;
-  /** Shown under the coin; without it the name is the image's alt text. */
+  /** Shown under the mark; without it the name is the image's alt text. */
   label?: string;
   size?: "sm" | "lg";
-  /** A wordmark rather than a mark: the coin stretches to hold it. */
+  /** A wordmark rather than a mark: shorter, so its width stays sane. */
   wide?: boolean;
   className?: string;
 }) {
   const large = size === "lg";
+  const height = large ? "h-16" : wide ? "h-[22px]" : "h-9";
   return (
     <div data-chip title={label ? undefined : name} className={cn("landing-chip", className)}>
-      <div className="landing-chip-body flex flex-col items-center gap-3">
-        <div
-          className={cn(
-            "landing-coin flex items-center justify-center",
-            large ? "size-[88px] rounded-[22px]" : "h-[52px] rounded-[15px]",
-            !large && (wide ? "w-[128px] px-4" : "w-[52px]"),
-          )}
+      <div className="landing-chip-body flex flex-col items-center gap-4">
+        <span
+          className={cn("landing-mark relative inline-flex", large ? "px-1 py-1" : "px-1 py-2")}
+          style={{ "--logo": `url(${src})` } as React.CSSProperties}
         >
           <Image
             src={src}
             width={large ? 64 : 96}
             height={large ? 64 : 28}
             alt={label ? "" : name}
-            className={cn("w-auto", large ? "h-11" : wide ? "h-5" : "h-[26px]")}
+            className={cn("relative w-auto", height)}
           />
-        </div>
-        {label ? <span className="text-[13px] font-medium">{label}</span> : null}
+          <span aria-hidden="true" className="landing-mark-gloss" />
+        </span>
+        {label ? <span className="text-[13.5px] font-medium">{label}</span> : null}
       </div>
     </div>
   );

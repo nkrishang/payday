@@ -2,7 +2,7 @@ import Image from "next/image";
 import type { ReactNode } from "react";
 import { PricingDialog } from "@/components/pricing-dialog";
 import { BuildWith } from "./build-with";
-import { Coin, LogoBurst } from "./logo-cloud";
+import { LogoBurst, Mark } from "./logo-cloud";
 
 /**
  * Three things worth knowing before Get Started, under the hero: the chains
@@ -58,7 +58,7 @@ export function ProofPoints() {
       >
         <LogoBurst className="mt-auto flex justify-around gap-4 pt-8 pb-2">
           {CHAINS.map((chain) => (
-            <Coin key={chain.name} src={chain.src} name={chain.name} label={chain.name} size="lg" />
+            <Mark key={chain.name} src={chain.src} name={chain.name} label={chain.name} size="lg" />
           ))}
         </LogoBurst>
       </Card>
@@ -68,9 +68,9 @@ export function ProofPoints() {
         title="Not another checkout."
         body="Payday issues a destination address for every deposit intent, fund-able by every hosted checkout solution, wallet, exchange or on-ramp."
       >
-        <LogoBurst className="mt-auto flex flex-wrap justify-center gap-2.5 pt-8">
+        <LogoBurst className="mt-auto flex flex-wrap justify-center gap-x-4 gap-y-3 pt-8">
           {CHECKOUTS.map((logo) => (
-            <Coin key={logo.name} src={logo.src} name={logo.name} wide={"wide" in logo} />
+            <Mark key={logo.name} src={logo.src} name={logo.name} wide={"wide" in logo} />
           ))}
         </LogoBurst>
       </Card>
