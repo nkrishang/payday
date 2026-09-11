@@ -1,8 +1,8 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
-import { cn } from "@/lib/cn";
 import { PricingDialog } from "@/components/pricing-dialog";
 import { BuildWith } from "./build-with";
+import { Coin, LogoBurst } from "./logo-cloud";
 
 /**
  * Three things worth knowing before Get Started, under the hero: the chains
@@ -17,37 +17,30 @@ const CHAINS = [
   { name: "Arbitrum", src: "/logos/arbitrum.svg" },
 ] as const;
 
-/**
- * Where a payer's funds already are. Marks in the first row, the wider
- * wordmarks spread across both so neither row reads as the important one.
- */
+/** Where a payer's funds already are: wallets, exchanges, on-ramps. */
 const CHECKOUTS = [
-  [
-    { name: "Coinbase", src: "/logos/coinbase.svg" },
-    { name: "MetaMask", src: "/logos/metamask.svg" },
-    { name: "Binance", src: "/logos/binance.svg" },
-    { name: "MoonPay", src: "/logos/moonpay.svg", wide: true },
-    { name: "Phantom", src: "/logos/phantom.svg" },
-    { name: "Kraken", src: "/logos/kraken.svg" },
-    { name: "fun.xyz", src: "/logos/fun.svg" },
-    { name: "Rainbow", src: "/logos/rainbow.svg" },
-    { name: "OKX", src: "/logos/okx.svg" },
-    { name: "Stripe", src: "/logos/stripe.svg" },
-    { name: "Ledger", src: "/logos/ledger.svg" },
-  ],
-  [
-    { name: "WalletConnect", src: "/logos/walletconnect.svg" },
-    { name: "Bybit", src: "/logos/bybit.svg" },
-    { name: "Trust Wallet", src: "/logos/trust.svg" },
-    { name: "Robinhood", src: "/logos/robinhood.svg" },
-    { name: "KuCoin", src: "/logos/kucoin.svg" },
-    { name: "PayPal", src: "/logos/paypal.svg" },
-    { name: "Crypto.com", src: "/logos/crypto-com.svg" },
-    { name: "Rabby", src: "/logos/rabby.svg" },
-    { name: "Gemini", src: "/logos/gemini.svg" },
-    { name: "Revolut", src: "/logos/revolut.svg" },
-    { name: "Safe", src: "/logos/safe.svg" },
-  ],
+  { name: "Coinbase", src: "/logos/coinbase.svg" },
+  { name: "MetaMask", src: "/logos/metamask.svg" },
+  { name: "Binance", src: "/logos/binance.svg" },
+  { name: "Phantom", src: "/logos/phantom.svg" },
+  { name: "Kraken", src: "/logos/kraken.svg" },
+  { name: "MoonPay", src: "/logos/moonpay.svg", wide: true },
+  { name: "fun.xyz", src: "/logos/fun.svg" },
+  { name: "Rainbow", src: "/logos/rainbow.svg" },
+  { name: "OKX", src: "/logos/okx.svg" },
+  { name: "Stripe", src: "/logos/stripe.svg" },
+  { name: "Ledger", src: "/logos/ledger.svg" },
+  { name: "WalletConnect", src: "/logos/walletconnect.svg" },
+  { name: "Bybit", src: "/logos/bybit.svg" },
+  { name: "Trust Wallet", src: "/logos/trust.svg" },
+  { name: "Robinhood", src: "/logos/robinhood.svg" },
+  { name: "KuCoin", src: "/logos/kucoin.svg" },
+  { name: "PayPal", src: "/logos/paypal.svg" },
+  { name: "Crypto.com", src: "/logos/crypto-com.svg" },
+  { name: "Rabby", src: "/logos/rabby.svg" },
+  { name: "Gemini", src: "/logos/gemini.svg" },
+  { name: "Revolut", src: "/logos/revolut.svg" },
+  { name: "Safe", src: "/logos/safe.svg" },
 ] as const;
 
 const REPOSITORY = "https://github.com/nkrishang/payday";
@@ -63,17 +56,11 @@ export function ProofPoints() {
         title="Any chain in. Your chain out."
         body="Convert better by letting your users pay where they already have funds. You choose the chain and destination where those funds settle."
       >
-        <ul className="mt-auto grid grid-cols-3 gap-3 pt-6">
+        <LogoBurst className="mt-auto flex justify-around gap-4 pt-8 pb-2">
           {CHAINS.map((chain) => (
-            <li
-              key={chain.name}
-              className="flex flex-col items-center gap-3 rounded-[14px] border border-brand-black/10 bg-white/60 py-5"
-            >
-              <Image src={chain.src} width={64} height={64} alt="" className="size-11" />
-              <span className="text-[13px] font-medium">{chain.name}</span>
-            </li>
+            <Coin key={chain.name} src={chain.src} name={chain.name} label={chain.name} size="lg" />
           ))}
-        </ul>
+        </LogoBurst>
       </Card>
 
       <Card
@@ -81,11 +68,11 @@ export function ProofPoints() {
         title="Not another checkout."
         body="Payday issues a destination address for every deposit intent, fund-able by every hosted checkout solution, wallet, exchange or on-ramp."
       >
-        <div className="landing-marquee-fade -mx-6 mt-auto grid gap-3 pt-6 sm:-mx-7">
-          {CHECKOUTS.map((row, index) => (
-            <Marquee key={index} logos={row} reverse={index === 1} />
+        <LogoBurst className="mt-auto flex flex-wrap justify-center gap-2.5 pt-8">
+          {CHECKOUTS.map((logo) => (
+            <Coin key={logo.name} src={logo.src} name={logo.name} wide={"wide" in logo} />
           ))}
-        </div>
+        </LogoBurst>
       </Card>
 
       <Card
@@ -144,40 +131,5 @@ function Card({
       <p className="mt-2 text-[14px] leading-relaxed text-brand-subtle">{body}</p>
       {children}
     </article>
-  );
-}
-
-type Logo = { name: string; src: string; wide?: boolean };
-
-/**
- * A row of logos that drifts sideways forever. The list is laid twice, end
- * to end, and the track slides by exactly one copy before it snaps back,
- * which the eye never catches. The second copy is hidden from assistive
- * tech, so a screen reader hears each name once.
- */
-function Marquee({ logos, reverse }: { logos: readonly Logo[]; reverse?: boolean }) {
-  return (
-    <div className="overflow-hidden">
-      <ul className={cn("landing-marquee flex w-max gap-3", reverse && "landing-marquee-reverse")}>
-        {[false, true].map((copy) =>
-          logos.map((logo) => (
-            <li
-              key={`${logo.name}-${copy ? "b" : "a"}`}
-              title={logo.name}
-              aria-hidden={copy || undefined}
-              className="flex h-14 shrink-0 items-center justify-center rounded-[12px] border border-brand-black/10 bg-white/60 px-4"
-            >
-              <Image
-                src={logo.src}
-                width={96}
-                height={28}
-                alt={copy ? "" : logo.name}
-                className={cn("w-auto", logo.wide ? "h-6" : "h-7")}
-              />
-            </li>
-          )),
-        )}
-      </ul>
-    </div>
   );
 }

@@ -357,26 +357,117 @@
   }
 }
 
-/* Logos drifting past under the hero: one copy's width per cycle, both directions. */
-.landing-marquee {
-  animation: landing-marquee 48s linear infinite;
+/*
+ * Logo coins. A chip is the unit that travels: until its group has scrolled
+ * into view it waits at the group's centre (`--dx`/`--dy`, set by the
+ * group), small and faded, then springs out to its place, each chip a beat
+ * after the last (`--i`). The body underneath bobs on its own phase, and the
+ * coin itself is what lifts and wiggles under the pointer. Three layers, so
+ * the three motions never fight over one transform.
+ */
+.landing-burst {
+  position: relative;
 }
 
-.landing-marquee-reverse {
-  animation-direction: reverse;
+.landing-chip {
+  --dx: 0px;
+  --dy: 0px;
+  --i: 0;
+  opacity: 0;
+  transform: translate(var(--dx), var(--dy)) scale(0.35);
+  transition:
+    transform 950ms cubic-bezier(0.22, 1.35, 0.36, 1),
+    opacity 450ms ease-out;
+  transition-delay: calc(var(--i) * 40ms);
 }
 
-.landing-marquee-fade {
-  -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
-  mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+.landing-burst[data-settled] .landing-chip {
+  opacity: 1;
+  transform: none;
 }
 
-@keyframes landing-marquee {
-  from {
-    transform: translateX(0);
+.landing-chip-body {
+  animation: landing-float 5200ms ease-in-out infinite;
+  animation-delay: calc(var(--i) * -830ms);
+}
+
+.landing-coin {
+  position: relative;
+  background: linear-gradient(165deg, #fffefb 0%, #f3eee5 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.95),
+    inset 0 -2px 0 rgb(15 15 14 / 0.05),
+    0 0 0 1px rgb(15 15 14 / 0.09),
+    0 3px 0 rgb(15 15 14 / 0.07),
+    0 14px 22px -12px rgb(15 15 14 / 0.4);
+  transition:
+    translate 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 220ms ease-out;
+}
+
+/* A soft sheen across the top-left of the face. */
+.landing-coin::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    120% 90% at 20% 0%,
+    rgb(255 255 255 / 0.7) 0%,
+    rgb(255 255 255 / 0) 55%
+  );
+  content: "";
+  pointer-events: none;
+}
+
+.landing-chip:hover .landing-coin {
+  translate: 0 -4px;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.95),
+    inset 0 -2px 0 rgb(15 15 14 / 0.05),
+    0 0 0 1px rgb(15 15 14 / 0.1),
+    0 5px 0 rgb(15 15 14 / 0.07),
+    0 22px 28px -14px rgb(15 15 14 / 0.45);
+  animation: landing-wiggle 650ms ease-in-out both;
+}
+
+@keyframes landing-float {
+  0%,
+  100% {
+    transform: translateY(0);
   }
-  to {
-    transform: translateX(calc(-50% - 6px));
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes landing-wiggle {
+  0% {
+    rotate: 0deg;
+  }
+  25% {
+    rotate: -7deg;
+  }
+  55% {
+    rotate: 6deg;
+  }
+  80% {
+    rotate: -3deg;
+  }
+  100% {
+    rotate: 0deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-chip {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .landing-chip-body,
+  .landing-chip:hover .landing-coin {
+    animation: none;
   }
 }
 
