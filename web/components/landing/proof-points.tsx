@@ -69,7 +69,7 @@ export function ProofPoints() {
       <Card
         eyebrow="Works with every checkout"
         title="Not another checkout."
-        body="Payday issues a destination address for every deposit intent, fund-able by every hosted checkout solution, wallet, exchange or on-ramp."
+        body="Payday issues a destination address for every deposit intent, fund-able by every checkout, wallet, exchange or on-ramp."
       >
         <div className="mt-auto pt-6">
           <div className="rounded-[14px] border border-brand-black/10 bg-brand-white p-4 shadow-[0_18px_40px_-28px_rgb(15_15_14/0.45)]">
