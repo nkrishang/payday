@@ -96,7 +96,7 @@ export function PricingDialog({
             )}
           >
             {
-              "When we do introduce pricing, we'll make sure it never disrupts a workflow you've already built on Payday."
+              "When we do introduce pricing, we'll make sure it never disrupts a workflow you've already built."
             }
           </p>
 
