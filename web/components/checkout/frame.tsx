@@ -47,15 +47,16 @@ export function CheckoutFrame({
         <div className="mt-[-12%] h-[560px] w-[820px] shrink-0 rounded-full bg-brand-green/[0.07] blur-[120px]" />
       </div>
 
-      <header className="relative flex items-center justify-between px-5 py-5 sm:px-8">
+      <header className="relative flex h-[88px] items-center justify-between px-5 sm:px-8">
         <Link href="/" className="rounded-md" aria-label="Payday">
           <Image
             src="/payday-logo-full.svg"
             width={2929}
             height={1000}
             priority
+            sizes="100px"
             alt="Payday"
-            className="h-auto w-[104px] sm:w-[120px]"
+            className="h-auto w-[88px] sm:w-[100px]"
           />
         </Link>
         {aside}
