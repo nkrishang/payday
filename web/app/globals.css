@@ -433,53 +433,44 @@
   }
 }
 
-/* Logos drifting past under the hero: one copy's width per cycle, both directions. */
-.landing-marquee {
-  animation: landing-marquee 48s linear infinite;
-  /* Its own layer: the row moves without repainting the card each frame. */
-  will-change: transform;
-}
-
-.landing-marquee-reverse {
-  animation-direction: reverse;
-}
-
 /*
- * The rows fade at the card's edges under two gradients painted over them,
- * rather than a mask: a mask over a moving row makes mobile browsers
- * rasterise the whole row every frame, which is what made it crawl.
+ * The pay button's provider chip: one at a time, in with a little
+ * overshoot, out in a snap.
  */
-.landing-marquee-fade {
-  position: relative;
+.landing-pop {
+  animation: landing-pop-in 240ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
-.landing-marquee-fade::before,
-.landing-marquee-fade::after {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  bottom: 0;
-  width: 12%;
-  pointer-events: none;
-  content: "";
+.landing-pop-out {
+  animation: landing-pop-out 140ms cubic-bezier(0.55, 0, 1, 0.45) both;
 }
 
-.landing-marquee-fade::before {
-  left: 0;
-  background: linear-gradient(to right, #f6f2ea, rgb(246 242 234 / 0));
-}
-
-.landing-marquee-fade::after {
-  right: 0;
-  background: linear-gradient(to left, #f6f2ea, rgb(246 242 234 / 0));
-}
-
-@keyframes landing-marquee {
+@keyframes landing-pop-in {
   from {
-    transform: translateX(0);
+    opacity: 0;
+    transform: translateY(10px) scale(0.6);
   }
   to {
-    transform: translateX(calc(-50% - 6px));
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes landing-pop-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-pop,
+  .landing-pop-out {
+    animation: none;
   }
 }
 

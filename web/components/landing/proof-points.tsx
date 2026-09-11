@@ -1,8 +1,8 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
-import { cn } from "@/lib/cn";
 import { PricingDialog } from "@/components/pricing-dialog";
 import { BuildWith } from "./build-with";
+import { PayWith } from "./pay-with";
 
 /**
  * Three things worth knowing before Get Started, under the hero: the chains
@@ -23,38 +23,6 @@ const CHAINS = [
   { name: "Tron", src: "/logos/tron.svg" },
   { name: "BNB Chain", src: "/logos/bnb-chain.svg" },
   { name: "Tempo", src: "/logos/tempo.svg" },
-] as const;
-
-/**
- * Where a payer's funds already are. Marks in the first row, the wider
- * wordmarks spread across both so neither row reads as the important one.
- */
-const CHECKOUTS = [
-  [
-    { name: "Coinbase", src: "/logos/coinbase.svg" },
-    { name: "MetaMask", src: "/logos/metamask.svg" },
-    { name: "Binance", src: "/logos/binance.svg" },
-    { name: "MoonPay", src: "/logos/moonpay.svg", wide: true },
-    { name: "Phantom", src: "/logos/phantom.svg" },
-    { name: "Kraken", src: "/logos/kraken.svg" },
-    { name: "fun.xyz", src: "/logos/fun.svg" },
-    { name: "Rainbow", src: "/logos/rainbow.svg" },
-    { name: "OKX", src: "/logos/okx.svg" },
-    { name: "Stripe", src: "/logos/stripe.svg" },
-    { name: "Ledger", src: "/logos/ledger.svg" },
-  ],
-  [
-    { name: "WalletConnect", src: "/logos/walletconnect.svg" },
-    { name: "Trust Wallet", src: "/logos/trust.svg" },
-    { name: "Robinhood", src: "/logos/robinhood.svg" },
-    { name: "KuCoin", src: "/logos/kucoin.svg" },
-    { name: "PayPal", src: "/logos/paypal.svg" },
-    { name: "Crypto.com", src: "/logos/crypto-com.svg" },
-    { name: "Rabby", src: "/logos/rabby.svg" },
-    { name: "Gemini", src: "/logos/gemini.svg" },
-    { name: "Revolut", src: "/logos/revolut.svg" },
-    { name: "Safe", src: "/logos/safe.svg" },
-  ],
 ] as const;
 
 const REPOSITORY = "https://github.com/nkrishang/payday";
@@ -103,10 +71,39 @@ export function ProofPoints() {
         title="Not another checkout."
         body="Payday issues a destination address for every deposit intent, fund-able by every hosted checkout solution, wallet, exchange or on-ramp."
       >
-        <div className="landing-marquee-fade -mx-6 mt-auto grid gap-3 pt-6 sm:-mx-7">
-          {CHECKOUTS.map((row, index) => (
-            <Marquee key={index} logos={row} reverse={index === 1} />
-          ))}
+        <div className="mt-auto pt-6">
+          <div className="rounded-[14px] border border-brand-black/10 bg-brand-white p-4 shadow-[0_18px_40px_-28px_rgb(15_15_14/0.45)]">
+            <div className="flex items-baseline justify-between gap-3">
+              <p className="text-[11px] font-medium tracking-[0.14em] text-brand-subtle uppercase">
+                Deposit
+              </p>
+              <p className="tabular text-[11px] text-brand-subtle">Expires in 59:52</p>
+            </div>
+            <p className="tabular mt-1.5 flex items-baseline gap-2 text-[26px] leading-none font-semibold tracking-tight">
+              250.00
+              <span className="flex items-center gap-1.5 text-[13px] font-medium text-brand-subtle">
+                <Image
+                  src="/payment-icons/usdc.svg"
+                  width={64}
+                  height={64}
+                  alt=""
+                  className="size-4 rounded-full"
+                />
+                USDC
+              </span>
+            </p>
+            <div className="mt-3 flex items-center justify-between gap-3 text-[12px]">
+              <span className="text-brand-subtle">One-time address</span>
+              <span className="font-mono">0x9a3F…A0c2</span>
+            </div>
+            <div className="mt-3.5">
+              <PayWith />
+            </div>
+            <p className="mt-3 flex items-center justify-center gap-1.5 text-[11px] text-brand-subtle">
+              <span className="size-1.5 rounded-full bg-brand-green" />
+              Secured by Payday
+            </p>
+          </div>
         </div>
       </Card>
 
@@ -166,40 +163,5 @@ function Card({
       <p className="mt-2 text-[14px] leading-relaxed text-brand-subtle">{body}</p>
       {children}
     </article>
-  );
-}
-
-type Logo = { name: string; src: string; wide?: boolean };
-
-/**
- * A row of logos that drifts sideways forever. The list is laid twice, end
- * to end, and the track slides by exactly one copy before it snaps back,
- * which the eye never catches. The second copy is hidden from assistive
- * tech, so a screen reader hears each name once.
- */
-function Marquee({ logos, reverse }: { logos: readonly Logo[]; reverse?: boolean }) {
-  return (
-    <div className="overflow-hidden">
-      <ul className={cn("landing-marquee flex w-max gap-3", reverse && "landing-marquee-reverse")}>
-        {[false, true].map((copy) =>
-          logos.map((logo) => (
-            <li
-              key={`${logo.name}-${copy ? "b" : "a"}`}
-              title={logo.name}
-              aria-hidden={copy || undefined}
-              className="flex h-16 shrink-0 items-center justify-center px-3.5"
-            >
-              <Image
-                src={logo.src}
-                width={96}
-                height={28}
-                alt={copy ? "" : logo.name}
-                className={cn("w-auto", logo.wide ? "h-7" : "h-9")}
-              />
-            </li>
-          )),
-        )}
-      </ul>
-    </div>
   );
 }
