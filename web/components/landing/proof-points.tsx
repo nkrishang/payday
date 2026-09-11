@@ -37,7 +37,6 @@ const CHECKOUTS = [
   ],
   [
     { name: "WalletConnect", src: "/logos/walletconnect.svg" },
-    { name: "Bybit", src: "/logos/bybit.svg" },
     { name: "Trust Wallet", src: "/logos/trust.svg" },
     { name: "Robinhood", src: "/logos/robinhood.svg" },
     { name: "KuCoin", src: "/logos/kucoin.svg" },
