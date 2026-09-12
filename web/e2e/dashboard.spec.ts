@@ -355,3 +355,69 @@ async function streamToString(download: {
   for await (const chunk of stream) chunks.push(Buffer.from(chunk as Buffer));
   return Buffer.concat(chunks).toString("utf8");
 }
+
+test("a merchant withdraws everything to one network from the account section", async ({
+  page,
+}) => {
+  // The stub relayer advances one state per read and the page reads every ten
+  // seconds, so a bridge leg takes about a minute to land.
+  test.setTimeout(150_000);
+  await signIn(page, "withdraw-flow@example.com");
+  const section = page.getByRole("region", { name: "Account" });
+  await expect(section.getByRole("button", { name: "Export wallet key" })).toBeVisible();
+
+  // Prepare: pick Base as the destination and name an address.
+  await section.getByRole("button", { name: "Withdraw", exact: true }).click();
+  await section.getByRole("radio", { name: /Base/ }).click();
+  const address = section.getByRole("textbox", { name: "Destination address" });
+  await address.fill("0xnope");
+  await expect(section.getByRole("alert")).toContainText("Not a valid address");
+  await expect(section.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await address.fill("0x000000000000000000000000000000000000d00d");
+  await section.getByRole("button", { name: "Continue" }).click();
+
+  // Review: one leg per network the stub wallet holds USDC on. The Monad
+  // leg bridges through the forwarder; the Base leg is a plain transfer.
+  await expect(section.getByText("2 legs to Base")).toBeVisible();
+  const legs = section.getByRole("list", { name: "Legs" }).getByRole("listitem");
+  await expect(legs).toHaveCount(2);
+  await expect(legs.nth(0)).toContainText("5.00 USDC");
+  await expect(legs.nth(0)).toContainText("Monad → Base via CCTP");
+  await expect(legs.nth(0)).toContainText("Pays Payday's forwarder");
+  await expect(legs.nth(1)).toContainText("1.25 USDC");
+  await expect(legs.nth(1)).toContainText("on Base");
+
+  // Sign: the page checks each document, asks the wallet once per leg, and
+  // hands the signatures back. The stub relayer then advances a state per
+  // read, and the page polls every ten seconds until every leg has landed.
+  await section.getByRole("button", { name: "Sign and withdraw" }).click();
+  await expect(section.getByText("Withdrawing…")).toBeVisible();
+  await expect(section.getByText(/Bridged legs wait for Circle/)).toBeVisible();
+  await expect(section.getByText("Withdrawn to Base.")).toBeVisible({ timeout: 90_000 });
+  await expect(legs.nth(0).getByRole("link", { name: "Burn" })).toBeVisible();
+  await expect(legs.nth(0).getByRole("link", { name: "Mint" })).toBeVisible();
+  await expect(legs.nth(1).getByRole("link", { name: "Transfer" })).toBeVisible();
+  await section.getByRole("button", { name: "Done" }).click();
+
+  // The finished withdrawal is listed, and a new one can start.
+  const history = section.getByRole("list", { name: "Recent withdrawals" });
+  await expect(history.getByRole("listitem")).toHaveCount(1);
+  await expect(history).toContainText("Completed");
+  await expect(history).toContainText("5.00 USDC from Monad");
+  await expect(section.getByRole("button", { name: "Withdraw", exact: true })).toBeEnabled();
+});
+
+test("a withdrawal can be cancelled before it is signed", async ({ page }) => {
+  await signIn(page, "withdraw-cancel@example.com");
+  const section = page.getByRole("region", { name: "Account" });
+  await section.getByRole("button", { name: "Withdraw", exact: true }).click();
+  await section
+    .getByRole("textbox", { name: "Destination address" })
+    .fill("0x000000000000000000000000000000000000d00d");
+  await section.getByRole("button", { name: "Continue" }).click();
+  await expect(section.getByText(/legs? to Monad/)).toBeVisible();
+  await section.getByRole("button", { name: "Cancel withdrawal" }).click();
+  await expect(section.getByRole("button", { name: "Withdraw", exact: true })).toBeVisible();
+  const history = section.getByRole("list", { name: "Recent withdrawals" });
+  await expect(history).toContainText("Cancelled");
+});

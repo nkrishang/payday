@@ -1099,6 +1099,71 @@ assert_eq 422 "$(api_status POST "/v1/attachments/$rejected_id/finalize")" \
 assert_eq attachment_rejected "$(api_error_code POST "/v1/attachments/$rejected_id/finalize")" \
   "rejected upload reported the wrong error"
 
+
+echo "Testing a same-chain withdrawal: a signed EIP-3009 authorization relayed by the indexer"
+# The merchant's Payday wallet is an ordinary key here (Anvil account #4);
+# the API learns of it the way a dashboard session would record it.
+MERCHANT_WALLET_KEY="0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
+MERCHANT_WALLET="$(cast wallet address --private-key "$MERCHANT_WALLET_KEY")"
+WITHDRAW_DESTINATION="0x000000000000000000000000000000000000d00d"
+psql "$DATABASE_URL" --quiet --set ON_ERROR_STOP=1 --command \
+  "UPDATE accounts SET wallet_address = '$MERCHANT_WALLET' WHERE email = 'primary@example.test'" >/dev/null
+send_usdc "$MERCHANT_WALLET" 3000000
+assert_eq 3000000 "$(token_balance "$MERCHANT_WALLET")" "the merchant wallet was not funded"
+
+withdrawal_body="$(jq -cn --arg chain "$CHAIN_ID" --arg address "$WITHDRAW_DESTINATION" \
+  '{destination: {chain_id: $chain, address: $address}}')"
+assert_eq missing_idempotency_key "$(api_error_code POST /v1/withdrawals "$withdrawal_body")" \
+  "a withdrawal was created without an idempotency key"
+withdrawal="$(api_json POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-$run_id")"
+withdrawal_id="$(jq -r .id <<<"$withdrawal")"
+assert_eq awaiting_signature "$(jq -r .status <<<"$withdrawal")" "a new withdrawal is not awaiting its signature"
+assert_eq 1 "$(jq '.legs | length' <<<"$withdrawal")" "funds on one chain should make one leg"
+assert_eq transfer "$(jq -r '.legs[0].kind' <<<"$withdrawal")" "a same-chain leg is a transfer"
+assert_eq 3000000 "$(jq -r '.legs[0].amount_base_units' <<<"$withdrawal")" "the leg does not carry the whole balance"
+assert_eq TransferWithAuthorization "$(jq -r '.legs[0].authorization.primary_type' <<<"$withdrawal")" \
+  "a transfer leg is not a TransferWithAuthorization"
+assert_eq "$WITHDRAW_DESTINATION" "$(jq -r '.legs[0].authorization.typed_data.message.to' | lowercase <<<"$withdrawal")" \
+  "the authorization does not pay the destination"
+# Replay and conflict behave like deposit requests; a second withdrawal is refused while this one is open.
+assert_eq withdrawal_in_progress "$(api_error_code POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-other-$run_id")" \
+  "a second withdrawal was created while one is open"
+assert_eq "$withdrawal_id" "$(api_json POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-$run_id" | jq -r .id)" \
+  "the same idempotency key did not replay the withdrawal"
+
+# Sign exactly what the API sent, as a server with the exported key would.
+withdrawal_typed="$logs/withdrawal-typed-data.json"
+jq '.legs[0].authorization.typed_data' <<<"$withdrawal" >"$withdrawal_typed"
+leg_id="$(jq -r '.legs[0].id' <<<"$withdrawal")"
+withdrawal_signature="$(cast wallet sign --private-key "$MERCHANT_WALLET_KEY" --data --from-file "$withdrawal_typed")"
+wrong_signature="$(cast wallet sign --private-key "$STRANGER_KEY" --data --from-file "$withdrawal_typed")"
+assert_eq signature_invalid "$(api_error_code POST "/v1/withdrawals/$withdrawal_id/authorizations" \
+  "$(jq -cn --arg leg "$leg_id" --arg sig "$wrong_signature" '{authorizations: [{leg_id: $leg, signature: $sig}]}')")" \
+  "a stranger's signature was accepted"
+authorized="$(api_json POST "/v1/withdrawals/$withdrawal_id/authorizations" \
+  "$(jq -cn --arg leg "$leg_id" --arg sig "$withdrawal_signature" '{authorizations: [{leg_id: $leg, signature: $sig}]}')")"
+assert_eq in_progress "$(jq -r .status <<<"$authorized")" "a fully signed withdrawal is not in progress"
+assert_eq withdrawal_not_cancellable "$(api_error_code POST "/v1/withdrawals/$withdrawal_id/cancel")" \
+  "an authorized withdrawal cancelled after relaying began" || true
+
+# The indexer relays the transfer on its sweep cadence and finalizes it.
+for _ in {1..600}; do
+  withdrawal_status="$(api_json GET "/v1/withdrawals/$withdrawal_id" | jq -r .status)"
+  [[ "$withdrawal_status" == "completed" || "$withdrawal_status" == "failed" ]] && break
+  sleep 0.2
+done
+assert_eq completed "$withdrawal_status" "the withdrawal did not complete"
+finished="$(api_json GET "/v1/withdrawals/$withdrawal_id")"
+assert_eq completed "$(jq -r '.legs[0].state' <<<"$finished")" "the leg did not complete"
+assert_eq 66 "$(jq -r '.legs[0].transfer_tx_hash | length' <<<"$finished")" "the leg has no transfer transaction"
+assert_eq 3000000 "$(token_balance "$WITHDRAW_DESTINATION")" "the destination did not receive the whole balance"
+assert_eq 0 "$(token_balance "$MERCHANT_WALLET")" "the merchant wallet still holds USDC"
+assert_eq 1 "$(api_json GET "/v1/withdrawals?limit=5" | jq '.withdrawals | length')" "the withdrawal is not listed"
+assert_eq withdrawal_finished "$(api_error_code POST "/v1/withdrawals/$withdrawal_id/cancel")" \
+  "a completed withdrawal was cancellable"
+assert_eq nothing_to_withdraw "$(api_error_code POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-empty-$run_id")" \
+  "an empty wallet produced a withdrawal"
+
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive "second Anvil" "$second_anvil_pid"
 assert_process_alive gatewayd "$gatewayd_pid"

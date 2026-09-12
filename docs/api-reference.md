@@ -535,6 +535,66 @@ redirects and private, loopback, link-local, or reserved targets are
 rejected. See [Webhooks](webhooks.md) for signatures, event types, payloads,
 and retry policy.
 
+## Withdrawals
+
+The Payday wallet's whole USDC balance, on every network, to one address.
+Prepare, sign, submit, poll: the API snapshots the balances into legs, the
+merchant signs each leg's EIP-712 document with the wallet's key (Privy's
+`useSignTypedData` in the dashboard, or the key exported once from the
+dashboard on a server), and gateway-indexer relays. A transfer leg (funds
+already on the destination network) is one USDC `transferWithAuthorization`;
+a bridge leg is `WithdrawalForwarder.bridge` (a CCTP V2 burn) and, once
+Circle attests it, `MessageTransmitterV2.receiveMessage` on the destination.
+Payday pays gas; the signature fixes where each leg's funds may land. One
+withdrawal may be open per account. The full guide, the signer's checklist,
+and TypeScript/Rust/Go samples are on the docs site under Withdrawals.
+
+### `POST /v1/withdrawals`
+
+`Idempotency-Key` required. Body `{"destination": {"chain_id": "8453",
+"address": "0x…"}}`. Answers `201` with the withdrawal, every leg
+`awaiting_signature` and carrying `authorization`:
+
+```json
+{
+  "primary_type": "ReceiveWithAuthorization",
+  "typed_data": { "domain": { "name": "USDC", "version": "2", "chainId": 143, "verifyingContract": "0x7547…" },
+                  "primaryType": "ReceiveWithAuthorization", "types": { "…": "…" },
+                  "message": { "from": "0x…", "to": "0x…", "value": "1234567", "validAfter": "0", "validBefore": "1800000000", "nonce": "0x…" } },
+  "expires_at": "2027-01-15T08:00:00Z",
+  "forwarder": "0x…",
+  "nonce_preimage": { "destination_domain": 6, "mint_recipient": "0x…", "salt": "0x…" }
+}
+```
+
+Every `uint256` is a decimal string. A bridge leg's nonce is
+`keccak256(abi.encode(uint32 destination_domain, bytes32(mint_recipient), bytes32 salt))`;
+the forwarder recomputes it, so the signature commits to the destination.
+Errors: `409 wallet_not_ready`, `409 withdrawal_in_progress`,
+`409 nothing_to_withdraw`, `409 idempotency_conflict`, `503 withdrawals_unavailable`.
+
+### `POST /v1/withdrawals/{id}/authorizations`
+
+Body `{"authorizations": [{"leg_id": "wdl_…", "signature": "0x…"}]}`, any
+subset of the legs; each signature is 65 bytes `r || s || v`, verified against
+the wallet before any is stored. `400 signature_invalid` names the leg;
+`409 leg_not_awaiting_signature`, `409 authorization_expired` (24 hours),
+`409 withdrawal_finished`.
+
+### `GET /v1/withdrawals/{id}`, `GET /v1/withdrawals`
+
+The withdrawal (`status`: `awaiting_signature`, `in_progress`, `completed`,
+`failed`, `cancelled`) with every leg's `state` (`awaiting_signature`,
+`authorized`, `relaying`, `burned`, `attested`, `minting`, `completed`,
+`failed`, `expired`, `cancelled`), `transfer_tx_hash`, `burn_tx_hash`,
+`mint_tx_hash`, and `failure_reason`. The list is newest first,
+`{ "withdrawals": [...], "next_cursor": "wd_…" | null }`.
+
+### `POST /v1/withdrawals/{id}/cancel`
+
+Cancels while nothing has been relayed; signatures already given are never
+used. `409 withdrawal_not_cancellable` once a leg is in flight.
+
 ## Payer links and documentation
 
 The `deposit_url` points at the hosted checkout, whose origin is
@@ -728,6 +788,17 @@ limited to 8 KiB.
 | `missing_idempotency_key` | 400 | Create header absent |
 | `idempotency_conflict` | 409 | Key reused with any different immutable deposit request field, including the attachment hash; fetch the original with `GET` |
 | `invalid_request` | 400 | Invalid field, query, JSON, or request shape — malformed JSON, a missing or unknown field, a wrong type, a missing JSON content type, control characters in a text field — with the problem named in the message |
+| `withdrawal_not_found` | 404 | Missing, malformed, or another account's `wd_` id |
+| `withdrawal_leg_not_found` | 404 | A `leg_id` that is not a leg of the withdrawal |
+| `wallet_not_ready` | 409 | The account's Payday wallet is not known yet; sign in to the dashboard once |
+| `withdrawal_in_progress` | 409 | Another withdrawal is open; finish or cancel it |
+| `nothing_to_withdraw` | 409 | The Payday wallet holds no USDC on any network |
+| `signature_invalid` | 400 | A leg's signature is malformed or was not made by the Payday wallet; the message names the leg |
+| `leg_not_awaiting_signature` | 409 | The leg already carries another signature or has moved past signing |
+| `authorization_expired` | 409 | The leg's 24-hour authorization window passed; create a new withdrawal |
+| `withdrawal_not_cancellable` | 409 | A leg has been relayed; the withdrawal runs to completion |
+| `withdrawal_finished` | 409 | The withdrawal already completed, failed, or was cancelled |
+| `withdrawals_unavailable` | 503 | A balance could not be read, or a chain holding funds cannot bridge on this deployment |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
 | `unsupported_chain` | 422 | Wallet challenge named a chain the request does not offer |
 | `deposit_request_not_found` | 404 | Missing or cross-account deposit request |

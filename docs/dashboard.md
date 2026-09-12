@@ -84,10 +84,19 @@ supported network read straight from the public RPCs (`NEXT_PUBLIC_CHAINS`),
 and a Sign out. The wallet is the same address on every chain, so a settled
 deposit lands there on whichever network the payer chose. A
 wallet that Privy is still creating shows as such with a *Check again*; the
-API records it as soon as a session carries it. The **API key** section
-below it generates, rolls, and revokes the key the merchant's own server uses,
-with one confirmation and no second sign-in: the session is the credential,
-and the API refuses these routes to an API key on its own.
+API records it as soon as a session carries it. **Withdraw**, beneath the
+balances, moves everything the wallet holds on every network to one address
+the merchant names: the API snapshots the balances into one leg per network,
+the merchant signs each leg's EIP-712 authorization with the wallet Privy
+holds (no gas, no delegation), and the relayer carries the legs to the
+destination while the panel tracks them; funds on another network cross
+through Circle's CCTP, which takes seconds from Monad and about twenty
+minutes from Base or Arbitrum. **Export wallet key** shows the wallet's key
+once, through Privy's own dialog, for a merchant who wants to withdraw from
+their own server (`docs/api-reference.md`, Withdrawals). The **API key**
+section below it generates, rolls, and revokes the key the merchant's own
+server uses, with one confirmation and no second sign-in: the session is the
+credential, and the API refuses these routes to an API key on its own.
 
 ## Issuer identities
 

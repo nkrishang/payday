@@ -428,6 +428,7 @@ const store = {
   customers: new Map(),
   /** account key -> { issuers, payoutAddresses, issuerAddresses } */
   issuerWorlds: new Map(),
+  withdrawals: new Map(),
   /** id -> { id, filename, bytes, finalizeCalls, status, descriptor } */
   attachments: new Map(),
   /** id -> full DepositRequestResponse */
@@ -1723,6 +1724,229 @@ async function payments(req, res, url) {
   }
 }
 
+
+/**
+ * `/v1/withdrawals`: prepare, sign, submit, poll, against balances the stub
+ * invents. There is no chain behind the stub, so the wallet is given USDC
+ * on every configured network at a fixed level, the typed data is shaped
+ * exactly as gatewayd shapes it, and every leg advances one state per read
+ * so the page's tracking view has something to follow. Any well-formed
+ * signature is accepted.
+ */
+const STUB_CHAINS = [
+  { id: "143", name: "Monad", native_symbol: "MON", domain: 15, usdc: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", balance: 5_000_000n },
+  { id: "8453", name: "Base", native_symbol: "ETH", domain: 6, usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", balance: 1_250_000n },
+];
+const STUB_FORWARDER = "0xF0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0";
+const AUTHORIZATION_FIELDS = [
+  { name: "from", type: "address" },
+  { name: "to", type: "address" },
+  { name: "value", type: "uint256" },
+  { name: "validAfter", type: "uint256" },
+  { name: "validBefore", type: "uint256" },
+  { name: "nonce", type: "bytes32" },
+];
+const LEG_SEQUENCE = {
+  transfer: ["authorized", "relaying", "completed"],
+  bridge: ["authorized", "relaying", "burned", "attested", "minting", "completed"],
+};
+
+function formatUsdc(baseUnits) {
+  const text = baseUnits.toString().padStart(7, "0");
+  return `${text.slice(0, -6)}.${text.slice(-6)}`;
+}
+
+
+function withdrawalWorld(req) {
+  const key = accountKey(req);
+  let world = store.withdrawals.get(key);
+  if (!world) {
+    world = new Map();
+    store.withdrawals.set(key, world);
+  }
+  return world;
+}
+
+function withdrawalStatus(row) {
+  if (row.cancelled_at) return "cancelled";
+  if (row.legs.every((leg) => leg.state === "completed")) return "completed";
+  if (row.legs.some((leg) => ["failed", "expired"].includes(leg.state))
+    && row.legs.every((leg) => ["completed", "failed", "expired", "cancelled"].includes(leg.state))) {
+    return "failed";
+  }
+  if (row.legs.some((leg) => leg.state === "awaiting_signature")) return "awaiting_signature";
+  return "in_progress";
+}
+
+/** One state forward per read, as the relayer would in time. */
+function advanceLegs(row) {
+  if (row.cancelled_at) return;
+  for (const leg of row.legs) {
+    const sequence = LEG_SEQUENCE[leg.kind];
+    const at = sequence.indexOf(leg.state);
+    if (at === -1 || at === sequence.length - 1) continue;
+    leg.state = sequence[at + 1];
+    const hash = `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`;
+    if (leg.state === "completed" && leg.kind === "transfer") leg.transfer_tx_hash = hash;
+    if (leg.state === "burned") leg.burn_tx_hash = hash;
+    if (leg.state === "completed" && leg.kind === "bridge") leg.mint_tx_hash = hash;
+  }
+  const status = withdrawalStatus(row);
+  if (status === "completed" && !row.completed_at) row.completed_at = new Date().toISOString();
+  if (status === "failed" && !row.failed_at) row.failed_at = new Date().toISOString();
+}
+
+function shapeWithdrawal(row) {
+  return {
+    id: row.id,
+    status: withdrawalStatus(row),
+    wallet_address: row.wallet_address,
+    destination: row.destination,
+    legs: row.legs.map((leg) => ({
+      id: leg.id,
+      kind: leg.kind,
+      source_chain: leg.source_chain,
+      amount: leg.amount,
+      amount_base_units: leg.amount_base_units,
+      state: leg.state,
+      authorization: leg.state === "awaiting_signature" ? leg.authorization : null,
+      transfer_tx_hash: leg.transfer_tx_hash,
+      burn_tx_hash: leg.burn_tx_hash,
+      mint_tx_hash: leg.mint_tx_hash,
+      failure_reason: null,
+    })),
+    created_at: row.created_at,
+    completed_at: row.completed_at,
+    cancelled_at: row.cancelled_at,
+    failed_at: row.failed_at,
+  };
+}
+
+async function withdrawals(req, res, url) {
+  if (!url.pathname.startsWith("/v1/withdrawals")) return false;
+  const world = withdrawalWorld(req);
+  const session = sessionClaims(req);
+
+  if (url.pathname === "/v1/withdrawals") {
+    if (req.method === "GET") {
+      const all = [...world.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+      for (const row of all) advanceLegs(row);
+      const { page, next } = paginate(all, url.searchParams);
+      return send(res, 200, { withdrawals: page.map(shapeWithdrawal), next_cursor: next });
+    }
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (!idempotencyKey) return fail(res, 400, "missing_idempotency_key", "Idempotency-Key header is required");
+    const body = await readJson(req);
+    const destination = body.destination ?? {};
+    const chain = STUB_CHAINS.find((entry) => entry.id === String(destination.chain_id));
+    if (!chain) return fail(res, 400, "invalid_request", "destination.chain_id must be one of this deployment's networks");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(String(destination.address ?? ""))) {
+      return fail(res, 400, "invalid_request", "invalid destination.address");
+    }
+    if (!session.wallet) return fail(res, 409, "wallet_not_ready", "The account's Payday wallet is not known yet");
+    const replay = [...world.values()].find((row) => row.idempotency_key === idempotencyKey);
+    if (replay) return send(res, 200, shapeWithdrawal(replay), { "Idempotency-Replayed": "true" });
+    if ([...world.values()].some((row) => ["awaiting_signature", "in_progress"].includes(withdrawalStatus(row)))) {
+      return fail(res, 409, "withdrawal_in_progress", "This account already has a withdrawal in progress; let it finish or cancel it first");
+    }
+    const now = Date.now();
+    const validBefore = String(Math.floor(now / 1000) + 24 * 3600);
+    const row = {
+      id: `wd_${randomUUID()}`,
+      idempotency_key: idempotencyKey,
+      wallet_address: session.wallet,
+      destination: {
+        chain: { id: chain.id, name: chain.name, native_symbol: chain.native_symbol },
+        address: destination.address,
+      },
+      legs: STUB_CHAINS.map((source, position) => {
+        const bridge = source.id !== chain.id;
+        const salt = bridge ? hex32(randomUUID()) : null;
+        const nonce = hex32(randomUUID());
+        const to = bridge ? STUB_FORWARDER : destination.address;
+        return {
+          id: `wdl_${randomUUID()}`,
+          position,
+          kind: bridge ? "bridge" : "transfer",
+          source_chain: { id: source.id, name: source.name, native_symbol: source.native_symbol },
+          amount: formatUsdc(source.balance),
+          amount_base_units: source.balance.toString(),
+          state: "awaiting_signature",
+          authorization: {
+            primary_type: bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization",
+            typed_data: {
+              domain: { name: source.id === "143" ? "USDC" : "USD Coin", version: "2", chainId: Number(source.id), verifyingContract: source.usdc },
+              primaryType: bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization",
+              types: {
+                EIP712Domain: [
+                  { name: "name", type: "string" },
+                  { name: "version", type: "string" },
+                  { name: "chainId", type: "uint256" },
+                  { name: "verifyingContract", type: "address" },
+                ],
+                [bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization"]: AUTHORIZATION_FIELDS,
+              },
+              message: { from: session.wallet, to, value: source.balance.toString(), validAfter: "0", validBefore, nonce },
+            },
+            expires_at: new Date(now + 24 * 3600 * 1000).toISOString(),
+            forwarder: bridge ? STUB_FORWARDER : null,
+            nonce_preimage: bridge ? { destination_domain: chain.domain, mint_recipient: destination.address, salt } : null,
+          },
+          transfer_tx_hash: null,
+          burn_tx_hash: null,
+          mint_tx_hash: null,
+        };
+      }),
+      created_at: new Date(now).toISOString(),
+      completed_at: null,
+      cancelled_at: null,
+      failed_at: null,
+    };
+    world.set(row.id, row);
+    return send(res, 201, shapeWithdrawal(row));
+  }
+
+  const match = url.pathname.match(/^\/v1\/withdrawals\/([^/]+)(\/authorizations|\/cancel)?$/);
+  if (!match) return fail(res, 404, "not_found", "no route");
+  const row = world.get(decodeURIComponent(match[1]));
+  if (!row) return fail(res, 404, "withdrawal_not_found", "Withdrawal not found");
+  const action = match[2];
+  if (!action) {
+    if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
+    advanceLegs(row);
+    return send(res, 200, shapeWithdrawal(row));
+  }
+  if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+  if (action === "/cancel") {
+    if (row.cancelled_at) return send(res, 200, shapeWithdrawal(row));
+    if (["completed", "failed"].includes(withdrawalStatus(row))) {
+      return fail(res, 409, "withdrawal_finished", "This withdrawal has already completed or failed");
+    }
+    if (row.legs.some((leg) => !["awaiting_signature", "authorized"].includes(leg.state))) {
+      return fail(res, 409, "withdrawal_not_cancellable", "A leg of this withdrawal has already been relayed");
+    }
+    for (const leg of row.legs) leg.state = "cancelled";
+    row.cancelled_at = new Date().toISOString();
+    return send(res, 200, shapeWithdrawal(row));
+  }
+  const body = await readJson(req);
+  const authorizations = Array.isArray(body.authorizations) ? body.authorizations : [];
+  if (authorizations.length === 0) return fail(res, 400, "invalid_request", "authorizations must name at least one leg");
+  for (const item of authorizations) {
+    const leg = row.legs.find((entry) => entry.id === item.leg_id);
+    if (!leg) return fail(res, 404, "withdrawal_leg_not_found", `${item.leg_id} is not a leg of this withdrawal`);
+    if (!/^0x[0-9a-fA-F]{130}$/.test(String(item.signature ?? ""))) {
+      return fail(res, 400, "signature_invalid", `${item.leg_id}: signature must be 0x-prefixed hex of 65 bytes`);
+    }
+  }
+  for (const item of authorizations) {
+    const leg = row.legs.find((entry) => entry.id === item.leg_id);
+    if (leg.state === "awaiting_signature") leg.state = "authorized";
+  }
+  return send(res, 200, shapeWithdrawal(row));
+}
+
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -1748,6 +1972,7 @@ createServer(async (req, res) => {
       if ((await attachments(req, res, url)) !== false) return;
       if ((await payments(req, res, url)) !== false) return;
       if ((await account(req, res, url)) !== false) return;
+      if ((await withdrawals(req, res, url)) !== false) return;
     }
 
     return fail(res, 404, "not_found", "no route");

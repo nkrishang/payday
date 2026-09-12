@@ -1,34 +1,17 @@
-import { defineChain, type Chain } from "viem";
+import type { Chain } from "viem";
 import { createConfig, http } from "wagmi";
 import { injected, walletConnect } from "wagmi/connectors";
-import { config, type PublicChain } from "./config";
+import { config } from "./config";
+import { viemChains } from "./viem-chain";
 
 /**
  * A deployment serves several chains, each with its own USDC contract; the
  * payer picks one when they sign, and gatewayd rejects a challenge for any
  * other. The wallet stack is configured once from env with every one of
- * them, so the wallet can be switched to whichever the payer chose. The
- * checkout still verifies a deposit request's chain and token against these
- * values before it will let anyone sign or pay.
+ * them (`viem-chain.ts`), so the wallet can be switched to whichever the
+ * payer chose. The checkout still verifies a deposit request's chain and
+ * token against these values before it will let anyone sign or pay.
  */
-function toViemChain(chain: PublicChain): Chain {
-  return defineChain({
-    id: chain.id,
-    name: chain.name,
-    nativeCurrency: { name: chain.nativeSymbol, symbol: chain.nativeSymbol, decimals: 18 },
-    rpcUrls: { default: { http: [chain.rpcUrl] } },
-    ...(chain.explorerUrl
-      ? {
-          blockExplorers: {
-            default: { name: `${chain.name} explorer`, url: chain.explorerUrl },
-          },
-        }
-      : {}),
-    testnet: ![1, 143, 8453, 42161].includes(chain.id),
-  });
-}
-
-const viemChains = config.chains.map(toViemChain);
 
 /** The wagmi chain behind an API `chain.id`, or null when this deployment does not offer it. */
 export function wagmiChain(id: string | number | null | undefined): Chain | null {

@@ -460,6 +460,9 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   pauses and alarms, default 5
 - `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified item failures before a deposit request
   is `blocked`, default 8
+- `PAYDAY_CCTP_IRIS_URL` — Circle's attestation service the withdrawal relayer
+  polls for a bridge leg's burn, default `https://iris-api.circle.com`; the
+  local Anvil chains have no `cctp` block, so nothing polls it there
 - `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
   default 0.05 native tokens
 - `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS

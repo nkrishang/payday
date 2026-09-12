@@ -52,6 +52,13 @@ chains = [
     block_time_ms           = 300
     log_range_size          = 100
     explorer_base_url       = "https://monadvision.com"
+    cctp = {
+      domain              = 15
+      token_messenger     = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+      message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+      forwarder           = "0x0000000000000000000000000000000000000003"
+      forwarder_code_hash = "0x3333333333333333333333333333333333333333333333333333333333333333"
+    }
   },
   {
     chain_id                = 8453
@@ -66,6 +73,13 @@ chains = [
     block_time_ms           = 2000
     log_range_size          = 10000
     explorer_base_url       = "https://basescan.org"
+    cctp = {
+      domain              = 6
+      token_messenger     = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+      message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+      forwarder           = "0x0000000000000000000000000000000000000003"
+      forwarder_code_hash = "0x3333333333333333333333333333333333333333333333333333333333333333"
+    }
   },
   {
     chain_id                = 42161
@@ -80,6 +94,13 @@ chains = [
     block_time_ms           = 250
     log_range_size          = 10000
     explorer_base_url       = "https://arbiscan.io"
+    cctp = {
+      domain              = 3
+      token_messenger     = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+      message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+      forwarder           = "0x0000000000000000000000000000000000000003"
+      forwarder_code_hash = "0x3333333333333333333333333333333333333333333333333333333333333333"
+    }
   },
 ]
 
