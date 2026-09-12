@@ -23,6 +23,10 @@ pub async fn verify_deployment(
             .batch_sweeper_factory(expected.batch_sweeper)
             .await
             .map_err(chain_error)?,
+        forwarder_code_hash: match expected.forwarder {
+            Some((forwarder, _)) => Some(chain.code_hash(forwarder).await.map_err(chain_error)?),
+            None => None,
+        },
     };
     check_deployment(expected, &observed)?;
     tracing::info!(chain_id = observed.chain_id, factory = %expected.factory, batch_sweeper = %expected.batch_sweeper, "contract deployment verified");
@@ -51,6 +55,7 @@ mod tests {
             factory_code_hash: mock_code_hash(FACTORY),
             batch_sweeper: SWEEPER,
             batch_sweeper_code_hash: mock_code_hash(SWEEPER),
+            forwarder: None,
         }
     }
 

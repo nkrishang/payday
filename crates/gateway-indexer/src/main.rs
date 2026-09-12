@@ -2,6 +2,8 @@ mod chain;
 mod config;
 mod deployment;
 mod indexer;
+mod iris;
+mod relay;
 mod signal;
 
 use std::sync::Arc;
@@ -51,6 +53,14 @@ async fn main() {
         }
         SignerConfig::Local(_) => None,
     };
+    // Withdrawal legs are relayed by the chain workers; Circle's attestation
+    // service and the whole registry (for a bridge leg's destination domain)
+    // are shared between them.
+    let iris: Arc<dyn iris::AttestationSource> = Arc::new(
+        iris::IrisClient::new(config.iris_url())
+            .unwrap_or_else(|error| panic!("failed to build the attestation client: {error}")),
+    );
+    let registry = Arc::new(config.networks().clone());
     let mut workers = Vec::with_capacity(config.chains().len());
     let mut lock_connections = Vec::with_capacity(config.chains().len());
     for chain in config.chains() {
@@ -63,7 +73,17 @@ async fn main() {
                 )
             });
         lock_connections.push(lock_connection);
-        workers.push(connect_chain(&config, aws.as_ref(), chain, pool.clone()).await);
+        workers.push(
+            connect_chain(
+                &config,
+                aws.as_ref(),
+                chain,
+                pool.clone(),
+                iris.clone(),
+                registry.clone(),
+            )
+            .await,
+        );
     }
 
     // Run until the local interrupt or ECS's termination signal, then allow the
@@ -142,6 +162,8 @@ async fn connect_chain(
     aws: Option<&aws_config::SdkConfig>,
     chain: &ChainConfig,
     pool: PgPool,
+    iris: Arc<dyn iris::AttestationSource>,
+    registry: Arc<gateway_core::ChainRegistry>,
 ) -> ChainWorker {
     let chain_id = chain.chain_id;
     let wallet = match config.signer() {
@@ -187,6 +209,10 @@ async fn connect_chain(
             factory_code_hash: chain.factory_code_hash,
             batch_sweeper: chain.batch_sweeper,
             batch_sweeper_code_hash: chain.batch_sweeper_code_hash,
+            forwarder: chain
+                .cctp
+                .as_ref()
+                .map(|cctp| (cctp.forwarder, cctp.forwarder_code_hash)),
         },
     )
     .await
@@ -237,7 +263,16 @@ async fn connect_chain(
             sweep_backoff_base_secs: SWEEP_BACKOFF_BASE_SECS,
             sweep_backoff_cap_secs: SWEEP_BACKOFF_CAP_SECS,
             signer_low_balance_wei: config.signer_low_balance_wei(),
+            cctp: chain.cctp.clone(),
+            // Circle attests a finality-tagged chain's burn within seconds and
+            // an L2's once ~65 Ethereum blocks have passed (~15–19 minutes).
+            attestation_poll: match chain.finality_source {
+                FinalitySource::Finalized => Duration::from_secs(10),
+                FinalitySource::Latest => Duration::from_secs(60),
+            },
         },
+        iris,
+        registry,
     );
     let signal = config
         .rpc_ws_url(chain_id)

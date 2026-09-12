@@ -495,6 +495,34 @@ impl WithdrawalRepository {
             .await
     }
 
+    /// A withdrawal by id alone, for the relayer.
+    pub async fn by_id(&self, id: Uuid) -> Result<Option<DbWithdrawal>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM withdrawals WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    /// An attested leg whose message somebody else already delivered:
+    /// complete without a step of our own.
+    pub async fn mark_minted_elsewhere(&self, leg_id: Uuid) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let updated: Option<Uuid> = sqlx::query_scalar(
+            r#"UPDATE withdrawal_legs SET state = 'completed', updated_at = now()
+               WHERE id = $1 AND state = 'attested' AND step_chain_id IS NULL
+               RETURNING withdrawal_id"#,
+        )
+        .bind(leg_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(withdrawal_id) = updated else {
+            return Ok(false);
+        };
+        settle(&mut tx, withdrawal_id).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn get(
         &self,
         account: AccountId,

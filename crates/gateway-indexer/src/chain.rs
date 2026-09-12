@@ -436,6 +436,15 @@ pub struct SweepReceipt {
     pub outcomes: HashMap<Address, SweepOutcome>,
 }
 
+/// What a receipt says about any helper transaction, sweep or withdrawal
+/// step, before its logs are interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionOutcome {
+    pub succeeded: bool,
+    pub block: u64,
+    pub block_hash: B256,
+}
+
 /// An exact signed helper transaction. Persist this before broadcasting it so
 /// a restart can safely resend the same nonce, calldata, fees, and signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,6 +536,27 @@ pub trait ChainClient: Send + Sync {
         &self,
         transaction: &PreparedSweepTransaction,
     ) -> Result<(), ChainError>;
+
+    /// Sign one arbitrary call from the signer without broadcasting it: a
+    /// withdrawal relay step (`transferWithAuthorization`, the forwarder's
+    /// `bridge`, `receiveMessage`). Same nonce discipline as a sweep batch.
+    async fn prepare_call(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
+    ) -> Result<PreparedSweepTransaction, ChainError>;
+
+    /// Receipt of any transaction, or `None` while unmined.
+    async fn transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> Result<Option<TransactionOutcome>, ChainError>;
+
+    /// An `eth_call` at the latest block; the caller decodes the output.
+    async fn view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError>;
 
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
@@ -1083,22 +1113,72 @@ impl ChainClient for AlloyChainClient {
         gas_limit: u64,
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError> {
+        self.prepare_call(
+            batch_sweeper,
+            Self::execute_batch_calldata(sweeps),
+            nonce,
+            gas_limit,
+            fees,
+        )
+        .await
+    }
+
+    async fn prepare_call(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
+    ) -> Result<PreparedSweepTransaction, ChainError> {
         let tx = TransactionRequest::default()
-            .with_to(batch_sweeper)
+            .with_to(to)
             .with_chain_id(self.chain_id)
             .with_nonce(nonce)
             .with_gas_limit(gas_limit)
             .with_max_fee_per_gas(fees.max_fee_per_gas)
             .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
-            .with_input(Self::execute_batch_calldata(sweeps));
+            .with_input(calldata);
         let envelope = tx.build(&self.wallet).await.map_err(|error| {
-            ChainError::Transient(format!("could not sign sweep transaction: {error}"))
+            ChainError::Transient(format!("could not sign helper transaction: {error}"))
         })?;
         let raw: Bytes = envelope.encoded_2718().into();
         Ok(PreparedSweepTransaction {
             hash: keccak256(&raw),
             raw,
         })
+    }
+
+    async fn transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> Result<Option<TransactionOutcome>, ChainError> {
+        self.pacer.acquire().await;
+        let Some(receipt) = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionReceipt", error))?
+        else {
+            return Ok(None);
+        };
+        let block = receipt
+            .block_number
+            .ok_or_else(|| ChainError::Transient("receipt has no block number".to_string()))?;
+        let block_hash = receipt
+            .block_hash
+            .ok_or_else(|| ChainError::Transient("receipt has no block hash".to_string()))?;
+        Ok(Some(TransactionOutcome {
+            succeeded: receipt.status(),
+            block,
+            block_hash,
+        }))
+    }
+
+    async fn view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {
+        self.call_at(to, calldata, None)
+            .await
+            .map_err(|error| ChainError::rpc("eth_call", error))
     }
 
     async fn broadcast_sweep_transaction(

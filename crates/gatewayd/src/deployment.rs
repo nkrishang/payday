@@ -82,6 +82,10 @@ pub async fn verify_deployment(
             format!("could not decode response: {error}"),
         )
     })?;
+    let forwarder_code_hash = match expected.forwarder {
+        Some((forwarder, _)) => Some(code_hash(&provider, forwarder).await?),
+        None => None,
+    };
     check_deployment(
         expected,
         &ObservedDeployment {
@@ -89,12 +93,14 @@ pub async fn verify_deployment(
             factory_code_hash,
             batch_sweeper_code_hash,
             bound_factory,
+            forwarder_code_hash,
         },
     )?;
     tracing::info!(
         chain_id,
         factory = %expected.factory,
         batch_sweeper = %expected.batch_sweeper,
+        forwarder = ?expected.forwarder.map(|(address, _)| address),
         "contract deployment verified"
     );
     Ok(())
@@ -126,6 +132,7 @@ mod tests {
             factory_code_hash: B256::repeat_byte(0xF1),
             batch_sweeper: SWEEPER,
             batch_sweeper_code_hash: B256::repeat_byte(0xB1),
+            forwarder: None,
         }
     }
 
@@ -135,6 +142,7 @@ mod tests {
             factory_code_hash: B256::repeat_byte(0xF1),
             batch_sweeper_code_hash: B256::repeat_byte(0xB1),
             bound_factory: FACTORY,
+            forwarder_code_hash: None,
         }
     }
 

@@ -20,6 +20,7 @@ mod status;
 mod verification;
 mod wallet_pregeneration;
 mod webhooks;
+mod withdrawals;
 
 pub(crate) use auth::{Auth0Verifier, Identity, PrivyVerifier};
 pub use routes::router;

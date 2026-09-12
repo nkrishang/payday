@@ -55,6 +55,8 @@ pub struct Config {
     sweep_max_attempts: u32,
     signer_low_balance_wei: U256,
     signer: SignerConfig,
+    /// Circle's attestation service (`PAYDAY_CCTP_IRIS_URL`), mainnet by default.
+    iris_url: String,
 }
 
 /// Sweep signer selected at startup. Local keys keep Anvil fully self-contained;
@@ -166,11 +168,24 @@ impl Config {
                     .unwrap_or(DEFAULT_SIGNER_LOW_BALANCE_WEI),
             ),
             signer,
+            iris_url: std::env::var("PAYDAY_CCTP_IRIS_URL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| crate::iris::DEFAULT_IRIS_URL.to_owned()),
         }
     }
 
     pub fn database_url(&self) -> &str {
         &self.database_url
+    }
+
+    pub fn networks(&self) -> &ChainRegistry {
+        &self.networks
+    }
+
+    pub fn iris_url(&self) -> &str {
+        &self.iris_url
     }
 
     pub fn chains(&self) -> &[ChainConfig] {

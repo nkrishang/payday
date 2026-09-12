@@ -3,7 +3,7 @@ use gateway_core::{ChainRegistry, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
     IssuerRepository, OnboardingDemoPaymentRepository, PayerSessionRepository, ProofRepository,
-    WebhookRepository,
+    WebhookRepository, WithdrawalRepository,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -23,6 +23,7 @@ use crate::api::error::ApiError;
 use crate::api::{PrivyVerifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
+use crate::chain_reader::ChainReads;
 use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
 use crate::pregenerated_wallet::WalletPregenerator;
@@ -38,6 +39,10 @@ pub struct AppState {
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
     pub onboarding_demo_payments: OnboardingDemoPaymentRepository,
+    pub withdrawals: WithdrawalRepository,
+    /// Balances and USDC domains per chain, for withdrawals; `None` leaves
+    /// the withdrawal routes answering `withdrawals_unavailable`.
+    pub(crate) chain_reader: Option<Arc<dyn ChainReads>>,
     /// Verifies dashboard sessions; `None` means only API keys authenticate.
     pub merchant_verifier: Option<PrivyVerifier>,
     /// The payer audience; `None` leaves gated invoices unverifiable and the
@@ -86,10 +91,13 @@ impl AppState {
         payer_verification: Option<PayerVerification>,
         onboarding_payer: Option<OnboardingPayerSigner>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
+        chain_reader: Option<Arc<dyn ChainReads>>,
     ) -> Self {
         let pool = repo.pool().clone();
         Self {
             webhooks: WebhookRepository::new(pool.clone()),
+            withdrawals: WithdrawalRepository::new(pool.clone()),
+            chain_reader,
             attachments: AttachmentRepository::new(pool.clone()),
             customers: CustomerRepository::new(pool.clone()),
             issuers: IssuerRepository::new(pool.clone()),

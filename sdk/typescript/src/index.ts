@@ -764,6 +764,111 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   });
 }
 
+// --- Withdrawals ---
+
+/** EIP-712 typed data for one withdrawal leg: an EIP-3009 authorization under the source chain's USDC. Every `uint256` is a decimal string. */
+export interface WithdrawalTypedData {
+  domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  primaryType: "TransferWithAuthorization" | "ReceiveWithAuthorization";
+  types: Record<string, Array<{ name: string; type: string }>>;
+  message: {
+    from: string;
+    to: string;
+    value: string;
+    validAfter: string;
+    validBefore: string;
+    nonce: string;
+  };
+}
+
+export interface WithdrawalNoncePreimage {
+  /** Circle's CCTP domain of the destination chain. */
+  destination_domain: number;
+  /** The destination address, as the mint recipient. */
+  mint_recipient: string;
+  /** `0x` hex, 32 bytes. */
+  salt: string;
+}
+
+/** What the merchant signs for one leg, present while the leg awaits its signature. */
+export interface WithdrawalAuthorization {
+  primary_type: "TransferWithAuthorization" | "ReceiveWithAuthorization";
+  typed_data: WithdrawalTypedData;
+  /** When the token stops accepting the signature. */
+  expires_at: string;
+  /** Bridge legs: the WithdrawalForwarder the authorization pays. */
+  forwarder: string | null;
+  /** Bridge legs: `nonce = keccak256(abi.encode(destination_domain, bytes32(mint_recipient), salt))`. */
+  nonce_preimage: WithdrawalNoncePreimage | null;
+}
+
+export type WithdrawalLegState =
+  | "awaiting_signature"
+  | "authorized"
+  | "relaying"
+  | "burned"
+  | "attested"
+  | "minting"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "cancelled";
+
+export interface WithdrawalLeg {
+  id: string;
+  /** `transfer` when the funds already sit on the destination chain, `bridge` when they cross through CCTP. */
+  kind: "transfer" | "bridge";
+  source_chain: Chain;
+  amount: string;
+  amount_base_units: string;
+  state: WithdrawalLegState;
+  authorization: WithdrawalAuthorization | null;
+  transfer_tx_hash: string | null;
+  burn_tx_hash: string | null;
+  mint_tx_hash: string | null;
+  failure_reason: string | null;
+}
+
+export type WithdrawalStatus = "awaiting_signature" | "in_progress" | "completed" | "failed" | "cancelled";
+
+export interface Withdrawal {
+  id: string;
+  status: WithdrawalStatus;
+  /** The Payday wallet every leg is signed from. */
+  wallet_address: string;
+  destination: { chain: Chain; address: string };
+  /** One per network the wallet held USDC on when the withdrawal was created. */
+  legs: WithdrawalLeg[];
+  created_at: string;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  failed_at: string | null;
+}
+
+export interface WithdrawalPage {
+  withdrawals: Withdrawal[];
+  next_cursor: string | null;
+}
+
+export interface CreateWithdrawal {
+  destination: {
+    /** Decimal chain id of one of the deployment's networks. */
+    chain_id: string;
+    address: string;
+  };
+}
+
+export interface LegAuthorizationInput {
+  leg_id: string;
+  /** `0x` hex, 65 bytes `r || s || v`, over the leg's `typed_data`. */
+  signature: string;
+}
+
+export interface ListWithdrawalsParams {
+  limit?: number;
+  starting_after?: string;
+}
+
 export class PaydayClient {
   private readonly credential: string;
   private readonly baseUrl: string;
@@ -1004,6 +1109,36 @@ export class PaydayClient {
         method: "DELETE",
         body: { expected_generation: expectedGeneration },
       }),
+  };
+
+  /**
+   * Withdrawals: the Payday wallet's whole USDC balance, on every network,
+   * to one address. Prepare, sign, submit, poll. `create` snapshots the
+   * balances into legs, each carrying the EIP-712 document to sign under
+   * that chain's USDC (an EIP-3009 authorization); nothing moves until it is
+   * signed. Sign with `@payday/sdk/signing` or any EIP-712 signer holding
+   * the wallet's key, then `authorize`. Payday relays and pays gas; the
+   * signature itself fixes where the funds may land. One withdrawal may be
+   * open per account (`withdrawal_in_progress`, 409).
+   */
+  readonly withdrawals = {
+    create: (input: CreateWithdrawal, idempotencyKey: string): Promise<Withdrawal> => {
+      if (!idempotencyKey) throw new TypeError("idempotencyKey is required");
+      return this.request("/v1/withdrawals", { method: "POST", body: input, idempotencyKey });
+    },
+    get: (id: string): Promise<Withdrawal> => this.request(`/v1/withdrawals/${encodeURIComponent(id)}`),
+    /** Newest first; page with `starting_after`. */
+    list: (params: ListWithdrawalsParams = {}): Promise<WithdrawalPage> =>
+      this.request(`/v1/withdrawals${query(params)}`),
+    /** Records signatures for any subset of the legs; every one is verified before any is stored. */
+    authorize: (id: string, authorizations: LegAuthorizationInput[]): Promise<Withdrawal> =>
+      this.request(`/v1/withdrawals/${encodeURIComponent(id)}/authorizations`, {
+        method: "POST",
+        body: { authorizations },
+      }),
+    /** Cancels while nothing has been relayed; signatures already given are never used. */
+    cancel: (id: string): Promise<Withdrawal> =>
+      this.request(`/v1/withdrawals/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   };
 
   private request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string; signal?: AbortSignal } = {}): Promise<T> {

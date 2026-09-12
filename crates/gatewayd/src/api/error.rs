@@ -503,6 +503,106 @@ impl ApiError {
             message: "Per-account request limit exceeded".into(),
         }
     }
+
+    pub fn withdrawal_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "withdrawal_not_found",
+            message: "Withdrawal not found".into(),
+        }
+    }
+
+    pub fn withdrawal_leg_not_found(leg: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "withdrawal_leg_not_found",
+            message: format!("{leg} is not a leg of this withdrawal"),
+        }
+    }
+
+    /// The account's Payday wallet has not been seen yet: it is created at
+    /// the first dashboard sign-in and recorded from that session.
+    pub fn wallet_not_ready() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_not_ready",
+            message: "The account's Payday wallet is not known yet; sign in to the dashboard once"
+                .into(),
+        }
+    }
+
+    /// Legs snapshot balances, so two open withdrawals would authorize the
+    /// same funds twice.
+    pub fn withdrawal_in_progress() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "withdrawal_in_progress",
+            message: "This account already has a withdrawal in progress; let it finish or cancel it first"
+                .into(),
+        }
+    }
+
+    pub fn nothing_to_withdraw() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "nothing_to_withdraw",
+            message: "The Payday wallet holds no USDC on any supported network".into(),
+        }
+    }
+
+    /// The deployment cannot read balances, or cannot bridge from a chain the
+    /// wallet holds funds on.
+    pub fn withdrawals_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "withdrawals_unavailable",
+            message: message.into(),
+        }
+    }
+
+    pub fn withdrawal_signature_invalid(leg: &str, reason: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "signature_invalid",
+            message: format!("{leg}: {reason}"),
+        }
+    }
+
+    /// The leg already carries a different signature, or has moved past
+    /// signing.
+    pub fn withdrawal_leg_not_signable(leg: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "leg_not_awaiting_signature",
+            message: format!("{leg} is not awaiting a signature"),
+        }
+    }
+
+    pub fn withdrawal_authorization_expired(leg: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "authorization_expired",
+            message: format!("{leg}: the authorization window has passed; create a new withdrawal"),
+        }
+    }
+
+    /// A leg has been relayed: its funds are moving and cannot be recalled.
+    pub fn withdrawal_not_cancellable() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "withdrawal_not_cancellable",
+            message: "A leg of this withdrawal has already been relayed; it will run to completion"
+                .into(),
+        }
+    }
+
+    pub fn withdrawal_finished() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "withdrawal_finished",
+            message: "This withdrawal has already completed or failed".into(),
+        }
+    }
 }
 
 #[derive(Serialize)]
