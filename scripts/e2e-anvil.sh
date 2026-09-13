@@ -370,7 +370,7 @@ invoice_body() {
 # A merchant API request with the primary account's key. The body, when
 # given, is JSON; extra curl arguments follow it.
 merchant_curl() {
-  local method=$1 path=$2 body=$3
+  local method=$1 path=$2 body=${3:-}
   shift 3
   if [[ -n "$body" ]]; then
     curl --silent --request "$method" --header "Authorization: Bearer $PAYDAY_API_KEY" \
@@ -1154,11 +1154,14 @@ signed_body="$(jq -cn --arg leg "$leg_id" --arg sig "$withdrawal_signature" '{au
 authorized="$(api_json POST "/v1/withdrawals/$withdrawal_id/authorizations" "$signed_body")"
 assert_eq in_progress "$(jq -r .status <<<"$authorized")" "a fully signed withdrawal is not in progress"
 
-# The indexer relays the transfer on its sweep cadence and finalizes it.
-for _ in {1..600}; do
-  withdrawal_status="$(api_json GET "/v1/withdrawals/$withdrawal_id" | jq -r .status)"
+# The indexer relays the transfer on its sweep cadence and finalizes it. Read
+# without --fail and poll slower than the per-account rate limiter's one-token
+# refill per second: a refused poll is only a missed poll, and a loop at 5
+# requests a second drains the bucket and starts taking 429s mid-poll.
+for _ in {1..300}; do
+  withdrawal_status="$(merchant_curl GET "/v1/withdrawals/$withdrawal_id" | jq -r '.status // empty')"
   [[ "$withdrawal_status" == "completed" || "$withdrawal_status" == "failed" ]] && break
-  sleep 0.2
+  sleep 1.5
 done
 assert_eq completed "$withdrawal_status" "the withdrawal did not complete"
 finished="$(api_json GET "/v1/withdrawals/$withdrawal_id")"
