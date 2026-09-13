@@ -281,17 +281,17 @@ test("the account section shows the signed-in mailbox and the Payday wallet", as
 
   const section = page.getByRole("region", { name: "Account" });
   await expect(section).toContainText("account-view@example.com");
-  // The wallet is the account's own, shown in full and ready to copy; there
-  // is no chain behind the stub, so the balance says so rather than spinning.
+  // The wallet is the account's own, shown in full and ready to copy.
   const wallet = await page.evaluate(
     () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
   );
   expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
   await expect(section).toContainText(wallet);
   await expect(section.getByRole("button", { name: /Copy wallet address/ })).toBeVisible();
-  // One balance per network the deployment offers, each read on its own.
-  await expect(section.getByText(/Balance unavailable — Monad/)).toBeVisible({ timeout: 20_000 });
-  await expect(section.getByText(/Balance unavailable — Base/)).toBeVisible({ timeout: 20_000 });
+  // One balance per network the deployment offers, each read on its own from
+  // the stub RPC, which answers with each chain's stub balance.
+  await expect(section.getByText(/5\.00\s*USDC/)).toBeVisible({ timeout: 20_000 });
+  await expect(section.getByText(/1\.25\s*USDC/)).toBeVisible({ timeout: 20_000 });
 });
 
 test("a merchant can generate, roll, and revoke their API key from the session", async ({

@@ -231,11 +231,11 @@ finalize is waiting on, as described under
 ```bash
 docker run -d --rm --name payday-minio \
   -e MINIO_ROOT_USER=payday-local -e MINIO_ROOT_PASSWORD=payday-local -e MINIO_BROWSER=off \
-  -p 127.0.0.1:9000:9000 minio/minio server /data
+  -p 127.0.0.1:9000:9000 quay.io/minio/minio server /data
 curl -fsS http://127.0.0.1:9000/minio/health/live
 docker run --rm --network host \
   -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
-  minio/mc mb --ignore-existing local/payday-attachments-local
+  quay.io/minio/mc mb --ignore-existing local/payday-attachments-local
 ```
 
 `.env.example` carries the matching `PAYDAY_ATTACHMENT_*` and `AWS_*` values.
@@ -339,7 +339,7 @@ path — set any other value on the object key,
 ```bash
 docker run --rm --network host \
   -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
-  minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
+  quay.io/minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
   'GuardDutyMalwareScanStatus=THREATS_FOUND'
 ```
 

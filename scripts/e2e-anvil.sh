@@ -38,8 +38,9 @@ STRANGER="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 # 0x976EA74026E726554dB657fA54763abd0C3a0aa9, is the trusted attestor here.
 ATTESTATION_SIGNER_KEY="0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e"
 MINIO_PORT="${PAYDAY_MINIO_PORT:-9000}"
-MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-minio/minio}"
-MC_IMAGE="${PAYDAY_MC_IMAGE:-minio/mc}"
+# MinIO removed its Docker Hub images; quay.io is the official registry now.
+MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
+MC_IMAGE="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
 # MinIO's root credentials double as the AWS credentials gatewayd signs with.
 MINIO_CREDENTIAL="payday-local"
 ATTACHMENT_BUCKET="payday-attachments-local"

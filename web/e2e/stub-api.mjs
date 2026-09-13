@@ -16,7 +16,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { encodeAbiParameters, keccak256 } from "viem";
+import { encodeAbiParameters, keccak256, toHex } from "viem";
 
 // The API renders every timestamp as RFC 3339 to the second (`…:25Z`), so
 // the stub does too. This also keeps a withheld amount such as `25.00` from
@@ -1991,3 +1991,44 @@ createServer(async (req, res) => {
 }).listen(PORT, "127.0.0.1", () => {
   console.log(`stub Payday API on ${ORIGIN}`);
 });
+
+// The dashboard reads each network's USDC balance straight from the public RPC
+// its config names, and the playwright config points those at local ports
+// nothing else serves. These minimal endpoints answer the one call the page
+// makes — `balanceOf` — with the chain's stub balance for any wallet, so the
+// withdraw panel sees the same funds the API's legs report.
+const BALANCE_OF = "0x70a08231"; // keccak256("balanceOf(address)")[:4]
+const RPC_PORTS = [8545, 8546]; // same order as STUB_CHAINS
+for (const [index, port] of RPC_PORTS.entries()) {
+  const chain = STUB_CHAINS[index];
+  createServer((req, res) => {
+    // The browser preflights every POST that carries a JSON content type.
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, CORS);
+      return res.end();
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      let id = null;
+      try {
+        const request = JSON.parse(body);
+        id = request.id ?? null;
+        const call = request.params?.[0] ?? {};
+        const result =
+          request.method === "eth_chainId"
+            ? toHex(Number(chain.id))
+            : request.method === "eth_call" && String(call.data ?? "").startsWith(BALANCE_OF)
+              ? toHex(chain.balance, { size: 32 })
+              : null;
+        res.writeHead(200, { "Content-Type": "application/json", ...CORS });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+      } catch {
+        res.writeHead(200, { "Content-Type": "application/json", ...CORS });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32603, message: "stub failure" } }));
+      }
+    });
+  }).listen(port, "127.0.0.1", () => {
+    console.log(`stub ${chain.name} RPC on http://127.0.0.1:${port}`);
+  });
+}

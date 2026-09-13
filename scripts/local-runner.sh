@@ -13,8 +13,9 @@ postgres_image="${PAYDAY_POSTGRES_IMAGE:-postgres:16-alpine}"
 postgres_password="${PAYDAY_POSTGRES_PASSWORD:-payday-local}"
 minio_container="payday-minio-${mode}-${PPID}-$$"
 minio_port="${PAYDAY_MINIO_PORT:-9000}"
-minio_image="${PAYDAY_MINIO_IMAGE:-minio/minio}"
-mc_image="${PAYDAY_MC_IMAGE:-minio/mc}"
+# MinIO removed its Docker Hub images; quay.io is the official registry now.
+minio_image="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
+mc_image="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
 # MinIO's root credentials double as the AWS credentials gatewayd signs with.
 minio_credential="payday-local"
 attachment_bucket="payday-attachments-local"
