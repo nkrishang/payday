@@ -1106,8 +1106,12 @@ echo "Testing a same-chain withdrawal: a signed EIP-3009 authorization relayed b
 # scenario has touched it; the API learns of it the way a dashboard session
 # would record it.
 merchant_wallet_json="$(cast wallet new --json)"
-MERCHANT_WALLET_KEY="$(jq -r '.[0].private_key' <<<"$merchant_wallet_json")"
-MERCHANT_WALLET="$(jq -r '.[0].address' <<<"$merchant_wallet_json")"
+# cast 1.x wraps --json output in an envelope; older releases returned the
+# wallet's fields as the array directly.
+merchant_wallet="$(jq -er 'if type == "array" then .[0] elif .data then .data[0] else . end' \
+  <<<"$merchant_wallet_json")"
+MERCHANT_WALLET_KEY="$(jq -er .private_key <<<"$merchant_wallet")"
+MERCHANT_WALLET="$(jq -er .address <<<"$merchant_wallet")"
 WITHDRAW_DESTINATION="0x000000000000000000000000000000000000d00d"
 psql "$DATABASE_URL" --quiet --set ON_ERROR_STOP=1 --command \
   "UPDATE accounts SET wallet_address = '$MERCHANT_WALLET' WHERE email = 'primary@example.test'" >/dev/null
