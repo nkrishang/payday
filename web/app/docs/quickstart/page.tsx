@@ -153,7 +153,8 @@ export default function QuickstartPage() {
             Send <code>deposit_url</code> to the payer. If the request carried a{" "}
             <code>payer.email</code>, Payday has already emailed it to them. The hosted checkout
             shows the request, the networks it may be paid on, the amount still due, the exact
-            token and one-time address and QR once the payer has chosen a network and signed, a
+            token and one-time address and QR once the payer has chosen a network (or you pinned
+            one with <code>chain_id</code>) and signed, a
             deadline countdown, and live finalized status. It can also send the transfer from a connected wallet in the page.
           </p>
           <p>

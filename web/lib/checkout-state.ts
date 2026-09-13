@@ -377,13 +377,19 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
   // can have been sent.
   const ready = readyDepositRequest(payment);
   if (ready === null) {
+    // A request offering one network has no choice to make: the merchant
+    // pinned it, and only the wallet is still the payer's to give.
+    const pinned = payment.networks.length === 1 ? payment.networks[0] : null;
     return {
       phase: "wallet_required",
       tone: "neutral",
       label: "Wallet required",
-      title: "Choose a network and sign from the wallet you will pay from",
-      detail:
-        "Payday creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
+      title: pinned
+        ? "Sign from the wallet you will pay from"
+        : "Choose a network and sign from the wallet you will pay from",
+      detail: pinned
+        ? `This deposit is paid on ${pinned.chain.name}. Payday creates a unique, one-time payment destination for the wallet you intend to pay with; it is fixed once you sign.`
+        : "Payday creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
       showInstructions: false,
       showWalletStep: true,
       isTerminal: false,

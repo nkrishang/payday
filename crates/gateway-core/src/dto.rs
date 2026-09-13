@@ -21,9 +21,10 @@ pub fn rfc3339(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// The payer chooses the network they pay on among the deployment's
-/// supported ones, so a request names no chain or token: only the amount
-/// and where it settles.
+/// By default the payer chooses the network they pay on among the
+/// deployment's supported ones, so a request names no token: only the
+/// amount and where it settles. A merchant may pin the network with
+/// `chain_id`; the request then offers that one alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateDepositRequest {
@@ -32,6 +33,10 @@ pub struct CreateDepositRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payout_address: Option<String>,
     pub amount: String,
+    /// The one network the payer must pay on, as a decimal chain id string.
+    /// Absent, the payer picks among every network the deployment offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
     /// The issuing party as the document will carry it. Optional when
     /// `issuer_id` is given: the saved identity's name, contact address, and
     /// details are snapshotted in its place.
@@ -153,8 +158,10 @@ pub struct DepositRequestResponse {
     pub net_amount_base_units: String,
     pub status: DepositRequestStatus,
     /// Every network the payer may pay on; the request commits to all of them.
+    /// One entry when the merchant pinned the network.
     pub networks: Vec<NetworkDto>,
-    /// The network the payer chose, once a wallet is bound; `None` before.
+    /// The network the payment is on: the pinned one from issuance, or the
+    /// one the payer chose once a wallet is bound; `None` before either.
     pub token: Option<TokenDto>,
     pub chain: Option<ChainDto>,
     pub settlement_tx_hash: Option<String>,
@@ -367,9 +374,11 @@ pub struct PayerDepositRequestResponse {
     /// Safety guidance shown only when payout needs operator attention.
     pub payer_message: Option<String>,
     pub content_unlocked: bool,
-    /// The networks the payer may choose from; gated with the content.
+    /// The networks the payer may choose from; gated with the content. One
+    /// entry when the merchant pinned the network.
     pub networks: Option<Vec<NetworkDto>>,
-    /// The chosen network, once a wallet is bound and the content is unlocked.
+    /// The payment's network once known (pinned at issuance, or chosen when
+    /// a wallet is bound) and the content is unlocked.
     pub chain: Option<ChainDto>,
     pub token: Option<TokenDto>,
     pub amount: Option<String>,
@@ -558,7 +567,14 @@ impl DepositRequestResponse {
         let attention = inv.blocked_reason.as_deref().map(attention);
         let snapshot = inv.issuance_snapshot;
         let binding = inv.binding.as_ref();
-        let chosen = binding.map(|b| NetworkDto::from_terms(&b.network));
+        // A request offering one network is on it before any wallet binds;
+        // the address still waits for the binding.
+        let chosen = binding
+            .map(|b| NetworkDto::from_terms(&b.network))
+            .or_else(|| match inv.networks.as_slice() {
+                [only] => Some(NetworkDto::from_terms(only)),
+                _ => None,
+            });
         Self {
             id: inv.id.to_string(),
             deposit_url: String::new(),

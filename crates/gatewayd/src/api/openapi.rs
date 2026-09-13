@@ -126,6 +126,11 @@ struct CreateDepositRequest {
     /// Where exactly `amount` settles. May be left out when `issuer_id`
     /// names an identity with a saved payout address; its first one is used.
     payout_address: Option<String>,
+    /// Pin the network the payer must pay on: one of the deployment's chain
+    /// ids, as a decimal string. Left out, the payer chooses among all of
+    /// them when they sign. A chain this deployment does not serve is
+    /// `422 unsupported_chain`.
+    chain_id: Option<String>,
     /// The issuing party as the document will carry it. May be left out
     /// when `issuer_id` is given: the identity's name, contact address, and
     /// details are snapshotted in its place. An inline party always wins.
@@ -1179,8 +1184,16 @@ mod tests {
         assert!(chain["sweeper"].is_object());
         let create = &d["components"]["schemas"]["CreateDepositRequest"]["properties"];
         assert!(
-            create.get("chain_id").is_none(),
-            "the payer chooses the network"
+            create["chain_id"].is_object(),
+            "the merchant may pin the network"
+        );
+        assert!(
+            !d["components"]["schemas"]["CreateDepositRequest"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "chain_id"),
+            "pinning is optional"
         );
         assert!(create.get("token_address").is_none());
         let deposit_request = &d["components"]["schemas"]["DepositRequest"]["properties"];

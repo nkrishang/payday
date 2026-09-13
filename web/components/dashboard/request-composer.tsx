@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { controlStyles } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
+import { chainById, config } from "@/lib/config";
 import { clampWords, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { AttachmentUpload } from "./attachment-upload";
@@ -39,6 +40,14 @@ import { useMerchant } from "./session";
 
 /** The `payoutAddressId` that means the account's own wallet. */
 const ACCOUNT_WALLET = "account";
+/** The `chainId` that leaves the network to the payer: the default. */
+const PAYER_CHOICE = "";
+
+/** How the network reads once set, for the preview and the review. */
+function networkLabel(draft: Draft): string {
+  if (draft.chainId === PAYER_CHOICE) return "Payer's choice";
+  return chainById(draft.chainId)?.name ?? draft.chainId;
+}
 
 interface Draft {
   amount: string;
@@ -48,6 +57,8 @@ interface Draft {
   issuerId: string;
   /** `ACCOUNT_WALLET`, or one of the identity's saved wallets. */
   payoutAddressId: string;
+  /** `PAYER_CHOICE`, or the decimal id of the one network the payer must use. */
+  chainId: string;
   /** One of the presets, in hours, or `CUSTOM` for a chosen moment. */
   expiry: string;
   /** A `datetime-local` value in the merchant's own zone, when custom. */
@@ -125,6 +136,7 @@ function emptyDraft(
     customerId: customer?.id ?? "",
     issuerId: first?.id ?? "",
     payoutAddressId: defaultPayout(first, accountWallet),
+    chainId: PAYER_CHOICE,
     expiry: "168",
     expiresAt: "",
     billName: customer?.name ?? "",
@@ -351,6 +363,7 @@ export function RequestComposer({
             // The deposit request keeps its own snapshot of the identity, so a later
             // edit to it cannot reach a request already issued.
             payoutAddress,
+            chainId: draft.chainId,
             expiresInHours: draft.expiry === CUSTOM ? "" : draft.expiry,
             expiresAt: chosenMoment(draft),
             issuerName: issuer?.name ?? "",
@@ -492,6 +505,25 @@ export function RequestComposer({
                   <p role="alert" className="text-[12px] text-danger">
                     {errors.payoutAddressId}
                   </p>
+                ) : null}
+
+                {/* The payer normally picks the network when they sign; a
+                    merchant who needs the funds on one network pins it here
+                    and the checkout offers nothing else. */}
+                {config.chains.length > 1 ? (
+                  <Choice
+                    label="Network"
+                    options={[
+                      { id: PAYER_CHOICE, title: "Payer's choice", detail: "any supported network" },
+                      ...config.chains.map((chain) => ({
+                        id: String(chain.id),
+                        title: chain.name,
+                        detail: "USDC",
+                      })),
+                    ]}
+                    selected={draft.chainId}
+                    onSelect={(id) => set("chainId", id)}
+                  />
                 ) : null}
 
                 <div>
@@ -724,6 +756,7 @@ export function RequestComposer({
                       <span className="text-muted"> · {draft.expectedEmail.trim()}</span>
                     ) : null}
                   </Row>
+                  <Row label="Network">{networkLabel(draft)}</Row>
                   <Row label="Expires in">{expiryLabel(draft)}</Row>
                   {attachment ? <Row label="Attachment">{attachment.filename}</Row> : null}
                 </dl>
@@ -830,6 +863,13 @@ function Preview({
           label="Verification"
           value={draft.mode === "permissionless" ? "" : modeLabel(draft.mode)}
           at={2}
+          step={step}
+          onEdit={onEdit}
+        />
+        <Line
+          label="Network"
+          value={draft.chainId === PAYER_CHOICE ? "" : networkLabel(draft)}
+          at={0}
           step={step}
           onEdit={onEdit}
         />

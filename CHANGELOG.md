@@ -26,6 +26,19 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Added
+
+- A merchant may pin the network. `POST /v1/deposit-requests` takes an
+  optional `chain_id` (a decimal chain id string; `422 unsupported_chain`
+  for one the deployment does not serve). A pinned request offers that
+  network alone in `networks`, names it in `chain` and `token` from
+  issuance while `address` still waits for the payer's wallet, refuses a
+  wallet challenge on any other chain, and its webhook payloads carry
+  `chain_id` (also set for unpinned requests once the payer has chosen).
+  The dashboard composer gains a Network choice ("Payer's choice" by
+  default); the hosted checkout states a pinned network instead of
+  offering one.
+
 ### Changed
 
 - The payer chooses the network. A deposit request no longer carries a

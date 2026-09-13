@@ -361,6 +361,12 @@ const scenarios = {
   // before it shows any address, and show the address on the chosen network
   // once this session has signed.
   unbound: (id, session) => (session?.walletBound ? base(chosen(session.chainId)) : base(UNBOUND)),
+  // The merchant pinned Base: the request offers that network alone and
+  // names it before any wallet signs; only the wallet is still the payer's.
+  pinned: (id, session) =>
+    session?.walletBound
+      ? base({ networks: [NETWORKS[1]], ...chosen("8453") })
+      : base({ ...UNBOUND, networks: [NETWORKS[1]], chain: BASE, token: NETWORKS[1].token }),
   // Opened by the merchant's app with a client secret in the fragment; the
   // bare link stays locked with nothing for the payer to do here.
   "gated-merchant": (id, session) => gatedFor("merchant_session", session),
@@ -474,6 +480,13 @@ function merchantDepositRequest(input, extra = {}) {
     BigInt(amountUnits) > BigInt(receivedUnits) ? BigInt(amountUnits) - BigInt(receivedUnits) : 0n
   ).toString();
   const address = `0x${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
+  // A pinned network narrows the offer to that one entry and names it from
+  // issuance, as the API does; the default offer is every network with the
+  // stub payer bound on the first.
+  const pinned = input.chain_id
+    ? NETWORKS.find((network) => network.chain.id === input.chain_id)
+    : undefined;
+  const network = pinned ?? NETWORKS[0];
   return {
     id,
     deposit_url: `http://127.0.0.1:3003/pay/${id}`,
@@ -499,14 +512,14 @@ function merchantDepositRequest(input, extra = {}) {
     net_amount: fromBaseUnits(amountUnits),
     net_amount_base_units: amountUnits,
     status: "awaiting_deposit",
-    networks: NETWORKS,
-    token: { symbol: "USDC", address: TOKEN, decimals: 6 },
-    chain: MONAD,
+    networks: pinned ? [pinned] : NETWORKS,
+    token: network.token,
+    chain: network.chain,
     settlement_tx_hash: null,
     settlement_explorer_url: null,
     settled_at: null,
     settled_block: null,
-    self_settlement: { chain_id: "143", factory: FACTORY, salt: hex32(`salt:${id}`) },
+    self_settlement: { chain_id: network.chain.id, factory: FACTORY, salt: hex32(`salt:${id}`) },
     attention: null,
     issuer: input.issuer,
     payer: input.payer,

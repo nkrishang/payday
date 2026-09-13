@@ -56,6 +56,7 @@ Payday-Signature: v1,t=1756728000,sha256=6f1a…9c0e
       "likely_unsolicited_at": null,
       "payer_wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
       "address": "0x2222222222222222222222222222222222222222",
+      "chain_id": "143",
       "wallet_bound_at": "2026-09-01T11:58:30Z",
       "expires_at": "2026-09-02T11:57:00Z",
       "created_at": "2026-09-01T11:57:00Z"
@@ -263,7 +264,10 @@ export default function WebhooksPage() {
         </li>
         <li>
           <code>payer_wallet</code>, <code>address</code>, and <code>wallet_bound_at</code> are{" "}
-          <code>null</code> before <code>deposit_request.ready</code>.
+          <code>null</code> before <code>deposit_request.ready</code>. <code>chain_id</code> is the
+          network the payment is on, as the API&apos;s decimal string: known from issuance when the
+          merchant pinned it, otherwise from <code>deposit_request.ready</code>, and{" "}
+          <code>null</code> before.
         </li>
         <li>
           The payload never carries the expected email or any payer data beyond what you asserted.

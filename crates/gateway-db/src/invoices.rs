@@ -2346,6 +2346,7 @@ pub(crate) mod tests {
             "likely_unsolicited_at",
             "payer_wallet",
             "address",
+            "chain_id",
             "wallet_bound_at",
             "expires_at",
             "created_at",

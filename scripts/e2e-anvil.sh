@@ -247,14 +247,19 @@ create_invoice() {
   get_invoice "$id"
 }
 
-# Issue only: no address until a payer binds a wallet.
+# Issue only: no address until a payer binds a wallet. A fifth argument pins
+# the network the merchant wants the deposit on.
 issue_invoice() {
-  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4
+  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 chain_id=${5:-} body
+  body="$(invoice_body "$amount" "$beneficiary" "$expires_in")"
+  if [[ -n "$chain_id" ]]; then
+    body="$(jq -c --arg chain "$chain_id" '. + {chain_id: $chain}' <<<"$body")"
+  fi
   curl --fail --silent \
     --header "Authorization: Bearer $PAYDAY_API_KEY" \
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: $idempotency_key" \
-    --data "$(invoice_body "$amount" "$beneficiary" "$expires_in")" \
+    --data "$body" \
     "$API_URL/v1/deposit-requests"
 }
 
@@ -527,10 +532,14 @@ zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 36
 assert_eq 400 "$(api_status_code "$zero_beneficiary")" "a zero beneficiary was accepted"
 valid="$(invoice_body 1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 201 "$(api_status_code "$valid")" "a valid request was rejected"
-# The payer, not the merchant, chooses the network: chain fields are unknown
-# to the create route.
+# The merchant may pin the network with a decimal chain id the deployment
+# serves; anything else is refused, and the token is never a request field.
 with_chain="$(jq -c --arg chain "$CHAIN_ID" '. + {chain_id: $chain}' <<<"$valid")"
-assert_eq 400 "$(api_status_code "$with_chain")" "a request naming a chain was accepted"
+assert_eq 201 "$(api_status_code "$with_chain")" "a request pinning a served chain was refused"
+with_slug="$(jq -c '. + {chain_id: "monad"}' <<<"$valid")"
+assert_eq 400 "$(api_status_code "$with_slug")" "a chain slug was accepted"
+with_unknown_chain="$(jq -c '. + {chain_id: "999"}' <<<"$valid")"
+assert_eq 422 "$(api_status_code "$with_unknown_chain")" "a chain the deployment does not serve was accepted"
 with_token="$(jq -c --arg token "$USDC" '. + {token_address: $token}' <<<"$valid")"
 assert_eq 400 "$(api_status_code "$with_token")" "a request naming a token was accepted"
 # Merchants do not choose where recovered funds go; the field is unknown to
@@ -855,6 +864,38 @@ grep -q 'nothing watched; cursor fast-forwarded without scanning' "$logs/indexer
   echo "the indexer never fast-forwarded an idle chain" >&2
   exit 1
 }
+
+echo "Testing a request the merchant pinned to the second network"
+pinned_issued="$(issue_invoice 0.5 "$BENEFICIARY_EXACT" 3600 "pinned-$run_id" "$SECOND_CHAIN_ID")"
+pinned_id="$(jq -er .id <<<"$pinned_issued")"
+# The network is known from issuance and it is the only one offered; the
+# address still waits for the payer's wallet.
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$pinned_issued")" "a pinned request does not name its chain at issuance"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$pinned_issued")" \
+  "a pinned request offers more than its chain"
+assert_eq null "$(jq -r .address <<<"$pinned_issued")" "a pinned request has an address before any wallet"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$pinned_id")")" \
+  "the payer page does not name the pinned chain"
+# The payer cannot take it elsewhere.
+assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$pinned_id/wallet/challenge")" \
+  "a challenge was minted on a chain the merchant excluded"
+bind_payer_wallet "$pinned_id" "" "$SECOND_CHAIN_ID" >/dev/null
+pinned="$(get_invoice "$pinned_id")"
+pinned_address="$(jq -er .address <<<"$pinned")"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .self_settlement.chain_id <<<"$pinned")" "the pinned binding is not on the pinned chain"
+# The webhook payload names the chain the way the API does.
+wait_for_sql 1 "SELECT count(*) FROM webhook_events
+  WHERE invoice_id = '${pinned_id#dr_}'::uuid AND event_type = 'deposit_request.ready'
+    AND payload->'data'->'deposit_request'->>'chain_id' = '$SECOND_CHAIN_ID'" \
+  "the ready webhook does not carry the pinned chain id"
+pinned_before="$(token_balance "$BENEFICIARY_EXACT" "$SECOND_RPC_URL")"
+send_usdc "$pinned_address" 500000 "$SECOND_RPC_URL"
+wait_for_status "$pinned_id" settled
+assert_eq "$((pinned_before + 500000))" "$(token_balance "$BENEFICIARY_EXACT" "$SECOND_RPC_URL")" \
+  "pinned-network settlement balance mismatch"
 
 echo "Testing that a payment on the wrong chain never settles and can be returned by hand"
 wrong="$(create_invoice 0.5 "$BENEFICIARY_PARTIAL" 3600 "wrong-chain-$run_id")"

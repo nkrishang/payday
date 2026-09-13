@@ -288,9 +288,27 @@ pub async fn create_deposit_request(
     let expiration_timestamp = expiration.timestamp;
 
     // 3. The request is payable on every network this deployment offers,
-    // each with Circle's native USDC there; the payer picks one when they
-    // sign. Nothing about the chain is a request field.
-    let networks = state.networks.networks();
+    // each with Circle's native USDC there, and the payer picks one when
+    // they sign; or on the one network the merchant pinned, in which case
+    // the payer's choice is already made. A chain this deployment does not
+    // serve is refused the way a payer's wrong chain is: 422.
+    let networks = match req.chain_id.as_deref() {
+        None => state.networks.networks(),
+        Some(value) => {
+            let chain_id: u64 = value.trim().parse().map_err(|_| {
+                ApiError::invalid_request("chain_id must be a decimal chain id string")
+            })?;
+            state
+                .networks
+                .networks()
+                .into_iter()
+                .filter(|network| network.chain_id == ChainId(chain_id))
+                .collect::<Vec<_>>()
+        }
+    };
+    if networks.is_empty() {
+        return Err(ApiError::unsupported_chain());
+    }
 
     // 4. Parse amount using token decimals.
     let decimals = USDC_DECIMALS;

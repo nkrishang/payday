@@ -74,7 +74,9 @@ export default function CheckoutPage() {
         <li>
           <strong>The network step</strong>: the networks the request may be paid on (Monad, Base,
           Arbitrum One), each with its gas token and rough confirmation time. Choosing one is
-          mandatory before the wallet step, and the choice is final once signed.
+          mandatory before the wallet step, and the choice is final once signed. A request whose
+          merchant pinned the network (<code>chain_id</code> at creation) states it instead of
+          offering a choice.
         </li>
         <li>
           <strong>The instructions</strong>: the amount still due, the chosen network and the exact

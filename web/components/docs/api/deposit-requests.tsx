@@ -263,6 +263,19 @@ const CREATE_BODY: FieldDoc[] = [
     ),
   },
   {
+    name: "chain_id",
+    type: "string",
+    description: (
+      <>
+        Decimal chain id of one supported network (<code>&quot;143&quot;</code>,{" "}
+        <code>&quot;8453&quot;</code>, <code>&quot;42161&quot;</code>). Pins the network: the
+        request offers it alone, <code>chain</code> and <code>token</code> name it from issuance,
+        and the payer&apos;s challenge must name it. Omitted, the payer chooses. Immutable;
+        participates in idempotency.
+      </>
+    ),
+  },
+  {
     name: "issuer",
     type: "Party",
     description: (
@@ -354,7 +367,9 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
             <code>wallet_bound_at</code>, and <code>self_settlement</code> are null until the
             payer&apos;s wallet attestation is accepted, signalled by{" "}
             <code>deposit_request.ready</code>. Recovery is not a request field;{" "}
-            <code>recovery_address</code> is always the attested wallet.
+            <code>recovery_address</code> is always the attested wallet. <code>chain</code> and{" "}
+            <code>token</code> are null until then too, unless <code>chain_id</code> pinned the
+            network.
           </p>
         </>
       ),
@@ -404,6 +419,11 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
           status: 409,
           code: "account_contact_required",
           when: "Account has no verified email. Re-authenticate in the dashboard.",
+        },
+        {
+          status: 422,
+          code: "unsupported_chain",
+          when: "chain_id names a network this deployment does not serve.",
         },
       ],
       examples: {

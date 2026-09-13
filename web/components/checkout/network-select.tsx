@@ -28,6 +28,35 @@ export function NetworkSelect({
    * underneath an operation that is still completing for the old one. */
   disabled?: boolean;
 }) {
+  // One network is the merchant's decision, not the payer's: state it
+  // rather than offer a choice of one.
+  const [pinned] = networks;
+  if (networks.length === 1 && pinned) {
+    const configured = chainById(pinned.chain.id);
+    return (
+      <div>
+        <p className="text-[11px] font-medium tracking-[0.14em] text-faint uppercase">Pay on</p>
+        <p
+          data-testid="pinned-network"
+          className="mt-2 flex items-center justify-between gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3"
+        >
+          <span className="min-w-0">
+            <span className="block text-[14px] font-medium">{pinned.chain.name}</span>
+            <span className="mt-0.5 block text-[12px] text-faint">
+              {pinned.token.symbol} · gas in {pinned.chain.native_symbol}
+              {configured ? " · set by the merchant" : " · not available in this checkout"}
+            </span>
+          </span>
+          <span
+            aria-hidden
+            className="flex size-5 shrink-0 items-center justify-center rounded-full border border-ink bg-ink text-surface"
+          >
+            <Check className="size-3" />
+          </span>
+        </p>
+      </div>
+    );
+  }
   return (
     <fieldset>
       <legend className="text-[11px] font-medium tracking-[0.14em] text-faint uppercase">

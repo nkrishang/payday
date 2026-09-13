@@ -1917,28 +1917,24 @@ mod tests {
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn the_payer_chooses_the_network(pool: PgPool) {
         let app = app(pool.clone()).await;
-        for (field, value) in [
-            ("chain_id", "1"),
-            (
-                "token_address",
-                "0x0000000000000000000000000000000000000000",
-            ),
-        ] {
-            let mut body = valid_body();
-            body[field] = json!(value);
-            let refused = app
-                .clone()
-                .oneshot(create_request(KEY, "chain-field", &body))
-                .await
-                .unwrap();
-            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{field}");
-            let error = json_body(refused).await;
-            assert_eq!(error["error"]["code"], "invalid_request");
-            assert!(
-                error["error"]["message"].as_str().unwrap().contains(field),
-                "{error}"
-            );
-        }
+        // The token is never a request field; the chain is only as a pin.
+        let mut body = valid_body();
+        body["token_address"] = json!("0x0000000000000000000000000000000000000000");
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "chain-field", &body))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(refused).await;
+        assert_eq!(error["error"]["code"], "invalid_request");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("token_address"),
+            "{error}"
+        );
 
         let created = app
             .clone()
@@ -2008,6 +2004,137 @@ mod tests {
         let (on_one, _) = bind_wallet(&app, other["id"].as_str().unwrap(), None, &PAYER_KEY).await;
         assert_eq!(on_one["chain"]["id"], "1");
         assert_ne!(on_one["address"], bound["address"]);
+    }
+
+    /// A merchant may pin the network at issuance. The request then offers
+    /// that network alone, names it before any wallet binds, refuses a
+    /// challenge on any other, and the replay of the same key with another
+    /// pin conflicts like any other issuance field. A chain the deployment
+    /// does not serve, or a malformed id, is refused at create time.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn the_merchant_may_pin_the_network(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let mut malformed = valid_body();
+        malformed["chain_id"] = json!("base");
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "pin-malformed", &malformed))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(refused).await;
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("chain_id"),
+            "{error}"
+        );
+        let mut unknown = valid_body();
+        unknown["chain_id"] = json!("999");
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "pin-unknown", &unknown))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "unsupported_chain"
+        );
+
+        let mut pinned = valid_body();
+        pinned["chain_id"] = json!("2");
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "pinned", &pinned))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["networks"].as_array().unwrap().len(), 1);
+        assert_eq!(created["networks"][0]["chain"]["id"], "2");
+        assert_eq!(created["chain"]["id"], "2", "the network is known at issuance");
+        assert_eq!(
+            created["token"]["address"],
+            Address::repeat_byte(0x02).to_checksum(None)
+        );
+        assert!(created["address"].is_null(), "the address still waits for the wallet");
+        assert!(created["self_settlement"].is_null());
+
+        // The payer page names it too, and offers nothing else.
+        let payer_view = json_body(
+            app.clone()
+                .oneshot(payer_get(&format!("/v1/payer/deposit-requests/{id}"), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(payer_view["chain"]["id"], "2");
+        assert_eq!(payer_view["networks"].as_array().unwrap().len(), 1);
+        assert!(payer_view["address"].is_null());
+
+        let wallet = gateway_core::wallet_of(&PAYER_KEY);
+        let elsewhere = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(elsewhere.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(elsewhere).await["error"]["code"],
+            "unsupported_chain"
+        );
+
+        let challenge = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "2"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::OK);
+        let challenge = json_body(challenge).await;
+        let session = challenge["payer_session"].as_str().unwrap().to_owned();
+        let signature = sign_challenge(&challenge, &PAYER_KEY);
+        let bound = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/attest"),
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bound.status(), StatusCode::OK);
+        let bound = json_body(bound).await;
+        assert_eq!(bound["chain"]["id"], "2");
+        assert!(bound["address"].is_string());
+
+        // Idempotency: the same key replays; another pin conflicts.
+        let replay = app
+            .clone()
+            .oneshot(create_request(KEY, "pinned", &pinned))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(replay.headers()["Idempotency-Replayed"], "true");
+        assert_eq!(json_body(replay).await["id"], id);
+        let mut other_pin = valid_body();
+        other_pin["chain_id"] = json!("1");
+        let conflict = app
+            .clone()
+            .oneshot(create_request(KEY, "pinned", &other_pin))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]

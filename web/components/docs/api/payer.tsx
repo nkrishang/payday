@@ -379,7 +379,8 @@ Cache-Control: no-store`,
           Required for every request before an address exists. Gated modes require a session that
           satisfies the policy; permissionless requests without a session receive one. The payer
           chooses the network here: <code>chain_id</code> must be one of the request&apos;s{" "}
-          <code>networks</code>, and the typed data&apos;s domain names that chain and its factory,
+          <code>networks</code> (a single entry when the merchant pinned it), and the typed
+          data&apos;s domain names that chain and its factory,
           so the wallet must be on it to sign. The attestation binds the wallet to that chain and
           the address exists only there. Pass <code>typed_data</code> to{" "}
           <code>eth_signTypedData_v4</code> unmodified. Challenge validity: ten minutes.

@@ -114,8 +114,12 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await page.getByRole("link", { name: "New deposit request for this customer" }).click();
   await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
 
-  // Amount, and a deadline of the merchant's own choosing rather than a preset.
+  // Amount, the network pinned to Base, and a deadline of the merchant's own
+  // choosing rather than a preset.
   await page.getByLabel("Amount").fill("120.50");
+  const networks = page.getByRole("radiogroup", { name: "Network" });
+  await expect(networks.getByRole("radio", { name: "Payer's choice" })).toBeChecked();
+  await networks.getByRole("radio", { name: "Base" }).check();
   await page.getByRole("radio", { name: "Custom" }).click();
   const deadline = new Date(Date.now() + 3 * 24 * 3600_000);
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -159,6 +163,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   const summary = page.getByLabel("Request summary");
   await expect(summary).toContainText("retainer.pdf");
   await expect(summary).toContainText("Verified email");
+  await expect(summary).toContainText("Base");
 
   const created = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/v1/deposit-requests"),
@@ -170,6 +175,8 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   expect(body).not.toHaveProperty("expires_in");
   expect(body.notes).toBe("Net 15.");
   expect(body.attachment_id).toBeTruthy();
+  // The pinned network travels as the API's decimal chain id.
+  expect(body.chain_id).toBe("8453");
   // Settles to the account's own wallet, never typed by anyone.
   const wallet = await page.evaluate(
     () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
@@ -193,6 +200,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await expect(page.getByText("retainer.pdf")).toBeVisible();
   await expect(page.getByText("Verified email").first()).toBeVisible();
   await expect(page.getByText("peter@initrode.example")).toBeVisible();
+  await expect(page.getByText("Base · USDC")).toBeVisible();
   await expect(page.getByText("Pending").first()).toBeVisible();
   // No attempt yet, so nothing is broken out under the verdict.
   await expect(page.getByLabel("Verification activity")).toHaveCount(0);

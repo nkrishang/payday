@@ -148,9 +148,12 @@ function CheckoutBody({
   // payer's wallet is bound and the address exists.
   const unlocked = unlockedDepositRequest(payment);
   const ready = unlocked === null ? null : readyDepositRequest(unlocked);
-  // The chosen network, if it is one the request offers.
+  // The chosen network, if it is one the request offers; a request offering
+  // one network (the merchant pinned it) has it chosen already.
   const chosenNetwork =
-    unlocked?.networks.find((network) => network.chain.id === chosenChain) ?? null;
+    unlocked?.networks.find((network) => network.chain.id === chosenChain) ??
+    (unlocked?.networks.length === 1 ? unlocked.networks[0] : null) ??
+    null;
 
   return (
     <CheckoutFrame

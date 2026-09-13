@@ -49,6 +49,13 @@ export interface CreateDepositRequest {
    */
   payout_address?: string;
   /**
+   * Pin the network the payer must pay on: one of the deployment's chain ids
+   * as a decimal string (`"143"`). Left out, the payer chooses among every
+   * network when they sign. A chain Payday does not serve is refused with
+   * `422 unsupported_chain`.
+   */
+  chain_id?: string;
+  /**
    * The issuing party as the document will carry it. May be left out when
    * `issuer_id` is given: the identity's name, contact address, and details
    * are snapshotted in its place. An inline party always wins.
@@ -87,10 +94,14 @@ export interface DepositRequest {
   status: DepositRequestStatus;
   /**
    * Every network the payer may pay on; the request commits to all of them
-   * and the payer picks one when they sign their wallet attestation.
+   * and the payer picks one when they sign their wallet attestation. One
+   * entry when the merchant pinned the network with `chain_id`.
    */
   networks: Network[];
-  /** The network the payer chose; null until a wallet is bound. */
+  /**
+   * The payment's network: the pinned one from issuance, else the one the
+   * payer chose once a wallet is bound; null before either.
+   */
   chain: Chain | null;
   currency: string;
   token: Token | null;
@@ -294,9 +305,12 @@ export interface PayerDepositRequest {
   /** Safety guidance shown only when payout needs operator attention. */
   payer_message: string | null;
   content_unlocked: boolean;
-  /** The networks the payer may choose from; null while locked. */
+  /** The networks the payer may choose from; null while locked. One entry when pinned. */
   networks: Network[] | null;
-  /** The chosen network, once a wallet is bound and the content is unlocked. */
+  /**
+   * The payment's network once known (pinned at issuance, or chosen when a
+   * wallet is bound) and the content is unlocked.
+   */
   chain: Chain | null;
   token: Token | null;
   amount: string | null;

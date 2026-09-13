@@ -275,6 +275,37 @@ test("an unbound request takes a network and the payer's signature before it sho
   expect(sessionInUrls).toEqual([]);
 });
 
+test("a request pinned to one network offers no choice and signs under that network", async ({
+  page,
+}) => {
+  await installFakeWallet(page);
+  await page.goto("/pay/dr_pinned");
+
+  // The merchant chose Base: it is stated, not offered, and the sign button
+  // already names it.
+  await expect(page.getByText("Wallet required")).toBeVisible();
+  await expect(page.getByText(/This deposit is paid on Base/)).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: /network to pay on/i })).toHaveCount(0);
+  await expect(page.getByTestId("pinned-network")).toContainText("Base");
+  await expect(page.getByTestId("pinned-network")).toContainText("set by the merchant");
+  await expectNoInstructions(page);
+
+  await page.getByRole("button", { name: /connect the wallet you will pay from/i }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button")
+    .filter({ hasText: /injected/i })
+    .click();
+  await page.getByRole("button", { name: /sign to get your deposit address on Base/i }).click();
+
+  await expect(page.getByText(ADDRESS)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Base · 8453")).toBeVisible();
+  const signed = await page.evaluate(() => (window as unknown as { __signed: unknown[] }).__signed);
+  expect(signed).toHaveLength(1);
+  const [, json] = signed[0] as [string, string];
+  expect(JSON.parse(json).domain.chainId).toBe(8453);
+});
+
 test("a paused deposit request shows the gateway's own words", async ({ page }) => {
   await page.goto("/pay/dr_attention");
 

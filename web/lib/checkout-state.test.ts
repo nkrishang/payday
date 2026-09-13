@@ -109,6 +109,15 @@ describe("checkoutView", () => {
     expect(checkoutView(payment(), open).showWalletStep).toBe(false);
   });
 
+  it("asks only for the signature when the merchant pinned the network", () => {
+    const [monad] = unboundDepositRequest().networks;
+    const view = checkoutView(unboundDepositRequest({ networks: [monad!] }), open);
+    expect(view.phase).toBe("wallet_required");
+    expect(view.title).toBe("Sign from the wallet you will pay from");
+    expect(view.detail).toMatch(/paid on Monad/);
+    expect(view.detail).not.toMatch(/network and the wallet/);
+  });
+
   it("treats deposited as in-progress, because settlement has not happened yet", () => {
     const view = checkoutView(payment({ status: "deposited" }), open);
     expect(view.phase).toBe("deposited");
