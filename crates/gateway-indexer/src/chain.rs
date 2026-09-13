@@ -50,11 +50,14 @@ sol! {
     function paused() view returns (bool);
     function isBlacklisted(address account) view returns (bool);
     function balanceOf(address account) view returns (uint256);
+    function authorizationState(address authorizer, bytes32 nonce) view returns (bool);
 
     event SweepFailed(address indexed paymentAddress, address indexed token, bytes revertData);
     event SweepRecovered(address indexed paymentAddress, address indexed token, uint256 amount);
     event Settled(address indexed receiver, uint256 amount);
     event Recovered(address indexed recovery, address indexed token, uint256 amount);
+    /// USDC's EIP-3009 marker: a signed authorization was consumed.
+    event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
 }
 
 /// Recipients per `eth_getLogs` call: one OR-array in `topics[2]`. Every
@@ -555,8 +558,34 @@ pub trait ChainClient: Send + Sync {
         tx_hash: B256,
     ) -> Result<Option<TransactionOutcome>, ChainError>;
 
-    /// An `eth_call` at the latest block; the caller decodes the output.
-    async fn view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError>;
+    /// An `eth_call` at the `finalized` block; the caller decodes the output.
+    /// Withdrawal reconciliation reads through it: a competitor's transaction
+    /// in a block that later leaves the chain must not conclude a leg.
+    async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError>;
+
+    /// Whether the token has consumed `authorizer`'s EIP-3009 authorization
+    /// `nonce`, read at `at_block` (a height the caller verified).
+    async fn authorization_state(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        at_block: u64,
+    ) -> Result<bool, ChainError>;
+
+    /// The transaction in `from_block..=to_block` that consumed
+    /// `authorizer`'s EIP-3009 authorization `nonce` on `token` — the
+    /// `AuthorizationUsed` event, which only a successful use emits — with
+    /// its receipt. `None` when the range holds none, so the caller can scan
+    /// provider-sized chunks backward from the finalized block.
+    async fn authorization_used_tx(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Option<(B256, TransactionOutcome)>, ChainError>;
 
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
@@ -1175,10 +1204,71 @@ impl ChainClient for AlloyChainClient {
         }))
     }
 
-    async fn view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {
-        self.call_at(to, calldata, None)
+    async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {
+        let finalized = self.header(BlockNumberOrTag::Finalized).await?;
+        self.call_at(to, calldata, Some(finalized.number))
             .await
-            .map_err(|error| ChainError::rpc("eth_call", error))
+            .map_err(|error| ChainError::rpc("eth_call at finalized", error))
+    }
+
+    async fn authorization_state(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        at_block: u64,
+    ) -> Result<bool, ChainError> {
+        let output = self
+            .call_at(
+                token,
+                authorizationStateCall { authorizer, nonce }
+                    .abi_encode()
+                    .into(),
+                Some(at_block),
+            )
+            .await
+            .map_err(|error| ChainError::rpc("eth_call authorizationState", error))?;
+        authorizationStateCall::abi_decode_returns(&output).map_err(|error| {
+            ChainError::Transient(format!(
+                "could not decode authorizationState response: {error}"
+            ))
+        })
+    }
+
+    async fn authorization_used_tx(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Option<(B256, TransactionOutcome)>, ChainError> {
+        self.pacer.acquire().await;
+        let filter = Filter::new()
+            .address(token)
+            .event_signature(AuthorizationUsed::SIGNATURE_HASH)
+            .topic1(authorizer.into_word())
+            .topic2(nonce)
+            .from_block(from_block)
+            .to_block(to_block);
+        for log in self
+            .provider
+            .get_logs(&filter)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getLogs", error))?
+        {
+            if log.removed {
+                continue;
+            }
+            let transaction_hash = log.transaction_hash.ok_or_else(|| {
+                ChainError::Transient("authorization log is missing its transaction hash".into())
+            })?;
+            let receipt = self.transaction_receipt(transaction_hash).await?;
+            if let Some(outcome) = receipt {
+                return Ok(Some((transaction_hash, outcome)));
+            }
+        }
+        Ok(None)
     }
 
     async fn broadcast_sweep_transaction(

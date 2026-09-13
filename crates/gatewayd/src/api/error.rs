@@ -550,6 +550,19 @@ impl ApiError {
         }
     }
 
+    /// A bridge leg would move more than Circle's per-message burn limit, so
+    /// the withdrawal could never execute. The merchant can still withdraw
+    /// that network's balance to an address on the same network.
+    pub fn withdrawal_exceeds_bridge_limit(chain: &str, amount: &str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "withdrawal_exceeds_bridge_limit",
+            message: format!(
+                "Bridging {amount} USDC from {chain} is above Circle's 10,000,000 USDC limit for one bridge transaction. Withdraw that network's balance to an address on {chain} instead."
+            ),
+        }
+    }
+
     /// The deployment cannot read balances, or cannot bridge from a chain the
     /// wallet holds funds on.
     pub fn withdrawals_unavailable(message: impl Into<String>) -> Self {

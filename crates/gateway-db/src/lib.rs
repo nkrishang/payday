@@ -56,8 +56,8 @@ pub use webhooks::{
 };
 pub use withdrawals::{
     AuthorizeOutcome, CancelOutcome, CreateWithdrawalError, DbWithdrawal, DbWithdrawalLeg, LegKind,
-    LegState, MinedStep, NewWithdrawal, NewWithdrawalLeg, RelayStats, RelayStep, StepOutcome,
-    WithdrawalRepository,
+    LegState, MinedStep, NewWithdrawal, NewWithdrawalLeg, RelayStats, RelayStep, RetryStep,
+    StepOutcome, WithdrawalRepository,
 };
 
 /// The gateway's schema migrations, embedded at compile time. This crate owns

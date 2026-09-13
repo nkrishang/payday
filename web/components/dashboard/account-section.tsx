@@ -5,7 +5,7 @@ import { useExportWallet } from "@privy-io/react-auth";
 import { ArrowUpRight, KeyRound, LogOut, RefreshCw } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPublicClient, erc20Abi, http } from "viem";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -39,7 +39,11 @@ export function AccountSection({
   const wallet = account.wallet_address;
   // Bumped when a withdrawal leg lands, so every balance row reads again.
   const [balancesVersion, setBalancesVersion] = useState(0);
+  const [chainBalances, setChainBalances] = useState<Record<number, BalanceSnapshot>>({});
   const onBalancesChanged = useCallback(() => setBalancesVersion((current) => current + 1), []);
+  const reportBalance = useCallback((chainId: number, balance: BalanceSnapshot) => {
+    setChainBalances((current) => ({ ...current, [chainId]: balance }));
+  }, []);
 
   return (
     <section aria-label="Account">
@@ -85,7 +89,12 @@ export function AccountSection({
         </Row>
 
         {config.chains.map((chain) => (
-          <BalanceRow key={`${chain.id}-${balancesVersion}`} chain={chain} wallet={wallet} />
+          <BalanceRow
+            key={`${chain.id}-${balancesVersion}`}
+            chain={chain}
+            wallet={wallet}
+            onBalance={reportBalance}
+          />
         ))}
 
         <Row
@@ -117,15 +126,40 @@ export function AccountSection({
       </dl>
 
       <div className="mt-4">
-        <WithdrawPanel account={account} onBalancesChanged={onBalancesChanged} />
+        <WithdrawPanel
+          account={account}
+          balances={chainBalances}
+          onBalancesChanged={onBalancesChanged}
+        />
       </div>
     </section>
   );
 }
 
 /** The wallet's USDC balance on one network, with its explorer link. */
-function BalanceRow({ chain, wallet }: { chain: PublicChain; wallet: string | null }) {
+export type BalanceSnapshot = { status: "loading" | "unavailable" } | { status: "ready"; usdc: bigint };
+
+function BalanceRow({
+  chain,
+  wallet,
+  onBalance,
+}: {
+  chain: PublicChain;
+  wallet: string | null;
+  onBalance: (chainId: number, balance: BalanceSnapshot) => void;
+}) {
   const balances = useBalances(wallet, chain);
+  const { status, usdc } =
+    balances.status === "ready"
+      ? { status: balances.status, usdc: balances.usdc }
+      : { status: balances.status, usdc: null };
+  const snapshot = useMemo<BalanceSnapshot>(
+    () => (usdc === null ? { status } : { status: "ready", usdc }),
+    [status, usdc],
+  );
+  useEffect(() => {
+    onBalance(chain.id, snapshot);
+  }, [chain.id, snapshot, onBalance]);
   const explorer = wallet ? explorerAddressUrl(chain.explorerUrl, wallet) : null;
   return (
     <Row label={`Balance on ${chain.name}`}>

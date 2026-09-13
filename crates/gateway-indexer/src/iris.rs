@@ -21,8 +21,11 @@ pub enum AttestationStatus {
     NotIndexed,
     /// Indexed; the source chain is not final yet.
     Pending,
-    /// Ready to mint: the bytes `receiveMessage(message, attestation)` takes.
-    Complete { message: Bytes, attestation: Bytes },
+    /// Ready to mint: every complete V2 message in the transaction, each the
+    /// bytes `receiveMessage(message, attestation)` takes. One transaction
+    /// can carry several CCTP messages, so the caller picks the one that
+    /// describes its burn.
+    Complete { messages: Vec<(Bytes, Bytes)> },
 }
 
 #[derive(Debug, Error)]
@@ -77,20 +80,20 @@ struct IrisMessage {
     cctp_version: Option<u32>,
 }
 
-/// Interpret one Iris answer. Only the V2 message counts; a burn through the
-/// forwarder emits exactly one.
+/// Interpret one Iris answer: every complete V2 message the transaction
+/// carried, in the order the service listed them. A transaction through the
+/// forwarder emits exactly one, but a helper transaction may emit several,
+/// and which of them describes the caller's burn only the caller can say.
 pub fn parse_messages(body: &str) -> Result<AttestationStatus, IrisError> {
     let parsed: MessagesResponse =
         serde_json::from_str(body).map_err(|error| IrisError::Malformed(error.to_string()))?;
-    let Some(message) = parsed
+    let v2: Vec<&IrisMessage> = parsed
         .messages
         .iter()
-        .find(|message| message.cctp_version.unwrap_or(2) == 2)
-    else {
+        .filter(|message| message.cctp_version.unwrap_or(2) == 2)
+        .collect();
+    if v2.is_empty() {
         return Ok(AttestationStatus::NotIndexed);
-    };
-    if message.status != "complete" {
-        return Ok(AttestationStatus::Pending);
     }
     let decode = |field: &str, value: &Option<String>| -> Result<Bytes, IrisError> {
         let value = value
@@ -101,10 +104,20 @@ pub fn parse_messages(body: &str) -> Result<AttestationStatus, IrisError> {
             .map(Bytes::from)
             .map_err(|_| IrisError::Malformed(format!("{field} is not hex")))
     };
-    Ok(AttestationStatus::Complete {
-        message: decode("message", &message.message)?,
-        attestation: decode("attestation", &message.attestation)?,
-    })
+    let mut complete = Vec::new();
+    for message in v2 {
+        if message.status != "complete" {
+            continue;
+        }
+        complete.push((
+            decode("message", &message.message)?,
+            decode("attestation", &message.attestation)?,
+        ));
+    }
+    if complete.is_empty() {
+        return Ok(AttestationStatus::Pending);
+    }
+    Ok(AttestationStatus::Complete { messages: complete })
 }
 
 #[async_trait]
@@ -154,8 +167,26 @@ mod tests {
         assert_eq!(
             parse_messages(complete).unwrap(),
             AttestationStatus::Complete {
-                message: Bytes::from_static(&[1, 2]),
-                attestation: Bytes::from_static(&[0xab, 0xcd]),
+                messages: vec![(
+                    Bytes::from_static(&[1, 2]),
+                    Bytes::from_static(&[0xab, 0xcd])
+                )],
+            }
+        );
+        let two = r#"{"messages":[{"attestation":"0xabcd","message":"0x0102","eventNonce":"1","cctpVersion":2,"status":"complete"},{"attestation":"0xeeff","message":"0x0304","eventNonce":"2","cctpVersion":2,"status":"complete"}]}"#;
+        assert_eq!(
+            parse_messages(two).unwrap(),
+            AttestationStatus::Complete {
+                messages: vec![
+                    (
+                        Bytes::from_static(&[1, 2]),
+                        Bytes::from_static(&[0xab, 0xcd])
+                    ),
+                    (
+                        Bytes::from_static(&[3, 4]),
+                        Bytes::from_static(&[0xee, 0xff])
+                    ),
+                ],
             }
         );
         assert_eq!(

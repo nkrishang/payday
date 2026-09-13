@@ -10,7 +10,7 @@ each state says exactly which party is next and where the funds are.
 |---|---|---|
 | `awaiting_signature` | In the Payday wallet, untouched | The merchant (sign, or cancel). Expires 24 h after creation. |
 | `authorized` | In the Payday wallet, untouched | gateway-indexer on the source chain (`relay_step`). |
-| `relaying` | Moving: a `transferWithAuthorization` or `WithdrawalForwarder.bridge` is in flight | gateway-indexer: receipt, fee bump, or abandon on a consumed nonce. |
+| `relaying` | Moving: a `transferWithAuthorization` or `WithdrawalForwarder.bridge` is in flight | gateway-indexer: receipt, fee bump, or reconciliation of a consumed nonce. |
 | `burned` | Burned on the source chain; Circle owes the mint | Circle's attestation service (Iris). Monad: seconds. Base/Arbitrum: ~15–19 minutes. |
 | `attested` | Burned; attestation stored on the leg | gateway-indexer on the **destination** chain (`receiveMessage`). |
 | `minting` | The mint is in flight on the destination chain | gateway-indexer: receipt or fee bump. |
@@ -75,7 +75,24 @@ cast send 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64 \
 
 ## `failed`
 
-`failure_reason` names the reverted step. A reverted transfer or burn left
+`failure_reason` names the reverted step. A leg is not failed the first time
+a step reverts: while its obligation survives — an authorization nobody has
+consumed, an attestation Circle has already signed — the relayer re-queues
+it on a backoff that doubles with every consecutive revert, starting at
+30 s (`step_reverts` counts, `step_retry_at` says when it is next eligible),
+and only the fifth revert in a row is terminal. The count resets when a step
+finally succeeds. So a `failed` leg has reverted five times or hit a
+condition no retry fixes.
+
+A `relaying` step whose signer nonce was spent without any visible receipt
+(the RPC lost it, or somebody consumed the authorization) is never cleared:
+its transaction history stays on the leg while the relayer reconciles every
+tick, and it completes by itself once the consuming transaction surfaces in
+the finalized event search. If nothing has surfaced after 24 hours, the
+worker reports itself `paused` with the leg id and nonce until an operator
+resolves it.
+
+A reverted transfer or burn left
 the funds in the Payday wallet; the merchant creates a new withdrawal. A
 reverted mint whose message nonce is already used means somebody else
 minted it (the relayer completes the leg by itself when it sees that);

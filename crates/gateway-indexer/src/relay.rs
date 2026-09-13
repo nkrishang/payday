@@ -26,7 +26,9 @@ use std::time::Duration;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::{SolCall, sol};
 use chrono::Utc;
-use gateway_db::{DbWithdrawal, DbWithdrawalLeg, LegKind, LegState, MinedStep, StepOutcome};
+use gateway_db::{
+    DbWithdrawal, DbWithdrawalLeg, LegKind, LegState, MinedStep, RetryStep, StepOutcome,
+};
 use tracing::{info, warn};
 
 use crate::chain::{FeeEstimate, PreparedSweepTransaction};
@@ -51,9 +53,36 @@ const TRANSFER_GAS: u64 = 120_000;
 const BRIDGE_GAS: u64 = 350_000;
 const MINT_GAS: u64 = 350_000;
 
+/// A reverted step whose obligation survives — an unused authorization, an
+/// attestation Circle has already signed — is retried on this base backoff,
+/// which doubles with every consecutive revert; only a run of
+/// `MAX_STEP_REVERTS` reverts makes the failure permanent.
+const STEP_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_STEP_REVERTS: u32 = 5;
+
+/// How long a step whose nonce was spent without any visible receipt or
+/// consuming transaction may wait for the execution to surface before the
+/// worker reports itself stalled for an operator. The step and its history
+/// are untouched either way; the wait only keeps reporting honest.
+const UNRESOLVED_EXECUTION_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Offset of the message nonce in a CCTP V2 message header
 /// (version 4, sourceDomain 4, destinationDomain 4, then the nonce).
 const MESSAGE_NONCE_OFFSET: usize = 12;
+
+/// A CCTP V2 message's header is 148 bytes (version, the two domains, the
+/// nonce, sender, recipient, destinationCaller, and the two finality fields),
+/// and its packed burn body follows: a body version, then the burn token,
+/// the mint recipient, the amount, the depositor, the fee, and the fee
+/// execution, as 32-byte big-endian words.
+const MESSAGE_SENDER_OFFSET: usize = 44;
+const DESTINATION_CALLER_OFFSET: usize = 108;
+const BURN_TOKEN_OFFSET: usize = 152;
+const MINT_RECIPIENT_OFFSET: usize = 184;
+const AMOUNT_OFFSET: usize = 216;
+const BODY_MESSAGE_SENDER_OFFSET: usize = 248;
+const MAX_FEE_OFFSET: usize = 280;
+const MIN_BURN_MESSAGE_LEN: usize = 376;
 
 /// What a step's transaction is: where it goes, what it says, what it may cost.
 struct StepCall {
@@ -91,14 +120,25 @@ impl Indexer {
             let next_check = Utc::now()
                 + chrono::Duration::from_std(self.cfg.attestation_poll).unwrap_or_default();
             match self.iris.attestation(cctp.domain, burn_tx_hash).await {
-                Ok(AttestationStatus::Complete {
-                    message,
-                    attestation,
-                }) => {
-                    self.withdrawals
-                        .record_attestation(leg.id, &message, &attestation)
-                        .await?;
-                    info!(leg_id = %leg.id, %burn_tx_hash, "withdrawal burn attested");
+                Ok(AttestationStatus::Complete { messages }) => {
+                    let withdrawal = self.withdrawal_of(&leg).await?;
+                    match messages.iter().find(|(message, _)| {
+                        self.message_describes_burn(&leg, &withdrawal, cctp, message)
+                            .is_ok()
+                    }) {
+                        Some((message, attestation)) => {
+                            self.withdrawals
+                                .record_attestation(leg.id, message, attestation)
+                                .await?;
+                            info!(leg_id = %leg.id, %burn_tx_hash, "withdrawal burn attested");
+                        }
+                        None => {
+                            self.withdrawals
+                                .defer_attestation(leg.id, next_check)
+                                .await?;
+                            warn!(leg_id = %leg.id, %burn_tx_hash, messages = messages.len(), "none of the attestation service's messages describes this burn; none is recorded and the poll retries");
+                        }
+                    }
                 }
                 Ok(status) => {
                     self.withdrawals
@@ -113,6 +153,87 @@ impl Indexer {
                     warn!(leg_id = %leg.id, %error, "attestation poll failed; retrying");
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// The message an attestation answer carries must be this leg's: it
+    /// leaves the source domain this worker burns from, heads for the leg's
+    /// destination domain, and carries a nonce the transmitter could have
+    /// consumed (`usedNonces[0]` starts used, so a zero-nonce message would
+    /// look already-minted without ever minting), and its burn body is
+    /// exactly what this leg's forwarder burn produces: the source token
+    /// messenger as the sender, no designated destination caller, the leg's
+    /// token, the withdrawal's recipient, the leg's amount, the forwarder
+    /// itself as the depositor, and no fee. The body checks matter because
+    /// one transaction can carry several CCTP messages with identical
+    /// domains — a helper that burns for itself and for the merchant in one
+    /// call — so only the full envelope separates this burn from a foreign
+    /// one Payday could never mint. A mangled or foreign answer is refused,
+    /// and the leg waits for the right one.
+    fn message_describes_burn(
+        &self,
+        leg: &DbWithdrawalLeg,
+        withdrawal: &DbWithdrawal,
+        cctp: &gateway_core::CctpConfig,
+        message: &[u8],
+    ) -> Result<(), &'static str> {
+        let destination_domain = self
+            .registry
+            .cctp(leg.destination_chain_id)
+            .map(|cctp| cctp.domain)
+            .ok_or("the destination chain has no CCTP configured")?;
+        if message.len() < MIN_BURN_MESSAGE_LEN {
+            return Err("the message is shorter than a CCTP V2 burn message");
+        }
+        let domain =
+            |at: usize| u32::from_be_bytes(message[at..at + 4].try_into().expect("4 bytes"));
+        if domain(4) != cctp.domain {
+            return Err("the message left another source domain");
+        }
+        if domain(8) != destination_domain {
+            return Err("the message heads for another destination domain");
+        }
+        if message[MESSAGE_NONCE_OFFSET..MESSAGE_NONCE_OFFSET + 32]
+            .iter()
+            .all(|&byte| byte == 0)
+        {
+            return Err("the message's nonce is zero, which no transmitter can consume");
+        }
+        let word = |at: usize| B256::from_slice(&message[at..at + 32]);
+        if word(MESSAGE_SENDER_OFFSET) != cctp.token_messenger.into_word() {
+            return Err("the message was not sent by this chain's token messenger");
+        }
+        if !word(DESTINATION_CALLER_OFFSET).is_zero() {
+            return Err("the message names a designated destination caller Payday cannot satisfy");
+        }
+        let token: Address = leg
+            .token_address
+            .parse()
+            .map_err(|_| "the leg's token address is malformed")?;
+        if word(BURN_TOKEN_OFFSET) != token.into_word() {
+            return Err("the message burns another token");
+        }
+        let recipient: Address = withdrawal
+            .destination_address
+            .parse()
+            .map_err(|_| "the withdrawal's destination address is malformed")?;
+        if word(MINT_RECIPIENT_OFFSET) != recipient.into_word() {
+            return Err("the message mints to another recipient");
+        }
+        if U256::from_be_bytes::<32>(
+            message[AMOUNT_OFFSET..AMOUNT_OFFSET + 32]
+                .try_into()
+                .expect("32 bytes"),
+        ) != leg.amount
+        {
+            return Err("the message carries another amount");
+        }
+        if word(BODY_MESSAGE_SENDER_OFFSET) != cctp.forwarder.into_word() {
+            return Err("the message was not deposited by this chain's forwarder");
+        }
+        if !word(MAX_FEE_OFFSET).is_zero() {
+            return Err("the message carries a fee the forwarder never pays");
         }
         Ok(())
     }
@@ -161,16 +282,18 @@ impl Indexer {
     }
 
     async fn submit_step(&self, leg: &DbWithdrawalLeg) -> Result<(), IndexerError> {
-        let withdrawal = self.withdrawal_of(leg).await?;
         if leg.state == LegState::Attested {
             // `receiveMessage` is permissionless: somebody may have minted
-            // already, in which case the leg is done without a step.
+            // already, in which case submitting our own would only revert
+            // once it finalizes. The check reads at the finalized boundary,
+            // so it can only ever complete a leg whose mint is itself final.
             if self.message_nonce_used(leg).await? {
-                self.withdrawals.mark_minted_elsewhere(leg.id).await?;
-                info!(leg_id = %leg.id, "withdrawal mint already executed by another party");
+                self.withdrawals.complete_minted_elsewhere(leg.id).await?;
+                info!(leg_id = %leg.id, "withdrawal mint already executed by another party; leg complete");
                 return Ok(());
             }
         }
+        let withdrawal = self.withdrawal_of(leg).await?;
         let call = self.step_call(leg, &withdrawal)?;
         let nonce = self.chain.signer_nonce(true).await?;
         let fees = self.chain.estimate_fees().await?;
@@ -263,11 +386,16 @@ impl Indexer {
             return Ok(());
         }
         if !receipt.succeeded {
-            if leg.state == LegState::Minting && self.message_nonce_used(leg).await? {
-                self.withdrawals
-                    .complete_step(leg.id, StepOutcome::Minted { tx_hash: None })
-                    .await?;
-                info!(leg_id = %leg.id, %tx_hash, "withdrawal mint reverted because another party minted first; leg complete");
+            // Interpret the revert only once it is final: the reads below
+            // see the world at the finalized boundary, so an execution by
+            // another party near the reverted transaction is invisible
+            // until then, and counting the revert meanwhile could exhaust
+            // the retries of a step somebody else already completed.
+            let finalized = self.chain.finalized_header().await?;
+            if receipt.block > finalized.number {
+                return Ok(());
+            }
+            if self.reconcile_executed_elsewhere(leg).await? {
                 return Ok(());
             }
             let reason = match leg.state {
@@ -275,8 +403,7 @@ impl Indexer {
                 _ if leg.kind == LegKind::Transfer => "the transfer transaction reverted",
                 _ => "the burn transaction reverted",
             };
-            self.withdrawals.fail_leg(leg.id, reason).await?;
-            warn!(leg_id = %leg.id, %tx_hash, reason, "withdrawal step reverted; leg failed");
+            self.retry_or_fail(leg, reason).await?;
             return Ok(());
         }
         let outcome = match (leg.state, leg.kind) {
@@ -308,9 +435,34 @@ impl Indexer {
             return Ok(());
         }
         if self.chain.signer_nonce(false).await? > step.nonce {
-            self.withdrawals.abandon_step(leg.id).await?;
-            warn!(leg_id = %leg.id, nonce = step.nonce, "withdrawal step nonce was consumed without a visible receipt; leg returned to the queue");
-            return Ok(());
+            // The nonce was spent without a visible receipt: one of our
+            // submissions mined (this RPC lost its receipt) or somebody
+            // consumed the authorization first. Establish where the funds
+            // are before touching the step. While the evidence is not final
+            // yet — or the consuming transaction has not been located — the
+            // step stays exactly as it is, transaction history included, and
+            // the next tick reconciles again: the consuming transaction
+            // enters the finalized window the moment it is final.
+            if self.reconcile_executed_elsewhere(leg).await? {
+                return Ok(());
+            }
+            let unresolved_for = Utc::now()
+                .signed_duration_since(step.submitted_at)
+                .to_std()
+                .unwrap_or_default();
+            if unresolved_for < UNRESOLVED_EXECUTION_LIMIT {
+                tracing::debug!(leg_id = %leg.id, nonce = step.nonce, "withdrawal step nonce was spent without a visible receipt; waiting for the execution to surface");
+                return Ok(());
+            }
+            // The wait has run out of patience: report the worker stalled —
+            // it retries every tick — without touching the step, whose
+            // history is the operator's evidence.
+            return Err(IndexerError::SweepStalled(format!(
+                "withdrawal leg {} step (nonce {}) has been unexplained for {} s: the nonce is spent but no receipt or consuming transaction has surfaced; check the signer's nonce history and the leg, then resolve manually",
+                leg.id,
+                step.nonce,
+                unresolved_for.as_secs()
+            )));
         }
         if step.tx_hashes.len() as u32 >= self.cfg.sweep_max_submissions {
             return Err(IndexerError::SweepStalled(format!(
@@ -479,8 +631,136 @@ impl Indexer {
         }
     }
 
+    /// Whether this leg's work was already done by another party: a mint
+    /// whose nonce Circle's transmitter has consumed (finalized, so a
+    /// competitor's block cannot later leave the chain), or a source
+    /// authorization somebody else executed. The forwarder is permissionless
+    /// and a transfer leg's payee is the destination itself, so a competing
+    /// transaction moves the funds exactly where the signature commits them;
+    /// the leg is then complete, with the competitor's transaction as its
+    /// evidence. Returns false when the leg is still ours to do.
+    async fn reconcile_executed_elsewhere(
+        &self,
+        leg: &DbWithdrawalLeg,
+    ) -> Result<bool, IndexerError> {
+        if leg.state == LegState::Minting {
+            if !self.message_nonce_used(leg).await? {
+                return Ok(false);
+            }
+            self.withdrawals
+                .complete_step(leg.id, StepOutcome::Minted { tx_hash: None })
+                .await?;
+            info!(leg_id = %leg.id, "withdrawal mint already executed by another party; leg complete");
+            return Ok(true);
+        }
+        let Some(tx_hash) = self.authorization_consumed_elsewhere(leg).await? else {
+            return Ok(false);
+        };
+        let outcome = match leg.kind {
+            LegKind::Transfer => StepOutcome::Transferred { tx_hash },
+            LegKind::Bridge => StepOutcome::Burned {
+                tx_hash,
+                next_check_at: Utc::now()
+                    + chrono::Duration::from_std(self.cfg.attestation_poll).unwrap_or_default(),
+            },
+        };
+        self.withdrawals.complete_step(leg.id, outcome).await?;
+        info!(leg_id = %leg.id, %tx_hash, "withdrawal authorization executed by another party; leg complete");
+        Ok(true)
+    }
+
+    /// The transaction that consumed the leg's authorization, when it was
+    /// not ours: `None` while the authorization is still unconsumed. The
+    /// consuming transaction went through the payee — the forwarder for a
+    /// bridge leg, the destination for a transfer leg — because USDC refuses
+    /// `receiveWithAuthorization` from anyone else, so its burn/transfer
+    /// landed where the signature commits it and Circle can attest it.
+    async fn authorization_consumed_elsewhere(
+        &self,
+        leg: &DbWithdrawalLeg,
+    ) -> Result<Option<B256>, IndexerError> {
+        let withdrawal = self.withdrawal_of(leg).await?;
+        let authorizer: Address = withdrawal.wallet_address.parse().map_err(|_| {
+            IndexerError::Configuration(format!("withdrawal leg {} has a malformed wallet", leg.id))
+        })?;
+        let token: Address = leg.token_address.parse().map_err(|_| {
+            IndexerError::Configuration(format!("withdrawal leg {} has a malformed token", leg.id))
+        })?;
+        let finalized = self.chain.finalized_header().await?;
+        if !self
+            .chain
+            .authorization_state(token, authorizer, leg.nonce, finalized.number)
+            .await?
+        {
+            return Ok(None);
+        }
+        // The nonce is spent, so our reverted transaction did not do it.
+        // Find the transaction that did: newest-first in provider-sized
+        // chunks, down to the block the leg was created in — the
+        // authorization is at most one TTL old.
+        let start = self.authorization_search_start(leg, finalized.number);
+        let mut upper = finalized.number;
+        loop {
+            let lower = upper.saturating_sub(self.cfg.log_range_size - 1).max(start);
+            match self
+                .chain
+                .authorization_used_tx(token, authorizer, leg.nonce, lower, upper)
+                .await?
+            {
+                Some((tx_hash, receipt)) => {
+                    if !receipt.succeeded {
+                        return Err(IndexerError::Configuration(format!(
+                            "AuthorizationUsed in {} belongs to a reverted transaction",
+                            tx_hash
+                        )));
+                    }
+                    return Ok(Some(tx_hash));
+                }
+                None if lower == start => {
+                    warn!(leg_id = %leg.id, nonce = %leg.nonce, "an authorization was consumed but its transaction is outside the searched history");
+                    return Ok(None);
+                }
+                None => upper = lower - 1,
+            }
+        }
+    }
+
+    /// Where the backward search for a consuming transaction may start: the
+    /// block the leg was created in, minus a margin for the block-time
+    /// estimate, never before the deployment.
+    fn authorization_search_start(&self, leg: &DbWithdrawalLeg, finalized: u64) -> u64 {
+        let elapsed = Utc::now()
+            .signed_duration_since(leg.created_at)
+            .to_std()
+            .unwrap_or_default();
+        let blocks_since =
+            u64::try_from(elapsed.as_millis() / self.cfg.block_time.as_millis().max(1) + 120)
+                .unwrap_or(u64::MAX);
+        finalized
+            .saturating_sub(blocks_since)
+            .max(self.cfg.usdc_start_block)
+    }
+
+    /// A reverted step whose obligation survives is retried with a backoff;
+    /// a run of reverts is a real failure and ends the leg.
+    async fn retry_or_fail(&self, leg: &DbWithdrawalLeg, reason: &str) -> Result<(), IndexerError> {
+        match self
+            .withdrawals
+            .retry_step(leg.id, STEP_RETRY_BACKOFF, MAX_STEP_REVERTS, reason)
+            .await?
+        {
+            RetryStep::Retried => {
+                info!(leg_id = %leg.id, reason, "withdrawal step reverted recoverably; leg returns to the queue after a backoff");
+            }
+            RetryStep::Failed => {
+                warn!(leg_id = %leg.id, reason, "withdrawal step reverted once too often; leg failed");
+            }
+        }
+        Ok(())
+    }
+
     /// Whether the destination transmitter has already consumed the leg's
-    /// attested message.
+    /// attested message, read at the finalized boundary.
     async fn message_nonce_used(&self, leg: &DbWithdrawalLeg) -> Result<bool, IndexerError> {
         let Some(cctp) = &self.cfg.cctp else {
             return Ok(false);
@@ -498,7 +778,7 @@ impl Indexer {
             })?;
         let output = self
             .chain
-            .view_call(
+            .finalized_view_call(
                 cctp.message_transmitter,
                 usedNoncesCall {
                     nonce: B256::from_slice(nonce),
@@ -531,7 +811,8 @@ mod tests {
 
     use super::*;
     use crate::indexer::tests::{
-        CHAIN_ID, FakeIris, MockChain, OTHER_CHAIN_ID, config, indexer_with_relay, usdc,
+        CHAIN_ID, FakeIris, MockChain, OTHER_CHAIN_ID, config, indexer_with_relay,
+        mock_authorization_tx_hash, usdc,
     };
     use crate::indexer::{Indexer, IndexerConfig};
     use crate::iris::AttestationStatus;
@@ -629,11 +910,32 @@ mod tests {
             + 86_400
     }
 
-    /// A CCTP V2 message with the given nonce in its header slot.
-    fn message_with_nonce(nonce: B256) -> Vec<u8> {
-        let mut message = vec![0u8; 376];
+    /// A complete CCTP V2 burn message exactly as this chain's forwarder
+    /// produces it: the given source and destination domains and nonce in
+    /// its header, and the test's messenger, token, recipient, amount, and
+    /// forwarder in the fields the validator pins.
+    fn message_with_nonce(source_domain: u32, destination_domain: u32, nonce: B256) -> Vec<u8> {
+        let mut message = vec![0u8; MIN_BURN_MESSAGE_LEN];
+        message[4..8].copy_from_slice(&source_domain.to_be_bytes());
+        message[8..12].copy_from_slice(&destination_domain.to_be_bytes());
         message[MESSAGE_NONCE_OFFSET..MESSAGE_NONCE_OFFSET + 32].copy_from_slice(nonce.as_slice());
+        message[MESSAGE_SENDER_OFFSET..MESSAGE_SENDER_OFFSET + 32]
+            .copy_from_slice(MESSENGER.into_word().as_slice());
+        message[BURN_TOKEN_OFFSET..BURN_TOKEN_OFFSET + 32]
+            .copy_from_slice(usdc().into_word().as_slice());
+        message[MINT_RECIPIENT_OFFSET..MINT_RECIPIENT_OFFSET + 32]
+            .copy_from_slice(DESTINATION.into_word().as_slice());
+        message[AMOUNT_OFFSET..AMOUNT_OFFSET + 32]
+            .copy_from_slice(&U256::from(2_500_000u64).to_be_bytes::<32>());
+        message[BODY_MESSAGE_SENDER_OFFSET..BODY_MESSAGE_SENDER_OFFSET + 32]
+            .copy_from_slice(FORWARDER.into_word().as_slice());
         message
+    }
+
+    fn complete_attestation(message: Vec<u8>) -> AttestationStatus {
+        AttestationStatus::Complete {
+            messages: vec![(message.into(), vec![0xAA; 65].into())],
+        }
     }
 
     async fn leg_state(repo: &WithdrawalRepository, withdrawal: Uuid) -> DbWithdrawalLeg {
@@ -695,6 +997,142 @@ mod tests {
         assert_eq!(chain.submissions().len(), 1, "nothing left to relay");
     }
 
+    async fn burned_bridge_leg(
+        pool: &PgPool,
+        iris: Arc<FakeIris>,
+    ) -> (WithdrawalRepository, Uuid, B256, Indexer) {
+        let (repo, withdrawal, _) = authorized_leg(
+            pool,
+            LegKind::Bridge,
+            CHAIN_ID,
+            OTHER_CHAIN_ID,
+            far_future(),
+        )
+        .await;
+        let source = Arc::new(MockChain::new(10));
+        let worker = indexer(pool, source.clone(), CHAIN_ID, iris);
+        worker.sweep_tick().await.unwrap();
+        let burn = source.submissions().remove(0);
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Burned);
+        (repo, withdrawal, burn.tx_hash, worker)
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn an_attestation_message_for_another_burn_is_not_recorded(pool: PgPool) {
+        // A transaction can carry several CCTP messages, and a helper's burn
+        // may share this leg's domains and header shape. Only a message whose
+        // body is this leg's — token, recipient, amount — may be recorded.
+        let mut foreign = message_with_nonce(15, 6, B256::repeat_byte(0x77));
+        foreign[MINT_RECIPIENT_OFFSET..MINT_RECIPIENT_OFFSET + 32]
+            .copy_from_slice(B256::repeat_byte(0x99).as_slice());
+        let ours = message_with_nonce(15, 6, B256::repeat_byte(0x77));
+
+        // A foreign-only answer is refused: the leg stays burned and polls on.
+        let iris = Arc::new(FakeIris::default());
+        let (repo, withdrawal, burn, worker) = burned_bridge_leg(&pool, iris.clone()).await;
+        iris.answers
+            .lock()
+            .unwrap()
+            .insert(burn, complete_attestation(foreign.clone()));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(
+            leg.state,
+            LegState::Burned,
+            "a foreign answer is not recorded"
+        );
+        assert_eq!(leg.attestation_message, None);
+
+        // Among several messages, the leg's own is the one recorded.
+        let iris = Arc::new(FakeIris::default());
+        let (repo, withdrawal, burn, worker) = burned_bridge_leg(&pool, iris.clone()).await;
+        iris.answers.lock().unwrap().insert(
+            burn,
+            AttestationStatus::Complete {
+                messages: vec![
+                    (foreign.into(), vec![0xAA; 65].into()),
+                    (ours.clone().into(), vec![0xAA; 65].into()),
+                ],
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(
+            leg.state,
+            LegState::Attested,
+            "the leg's own message is the one recorded"
+        );
+        assert_eq!(
+            leg.attestation_message.as_deref(),
+            Some(ours.as_slice()),
+            "the leg's own message is the one recorded"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn an_attested_leg_somebody_else_minted_completes_without_submitting(pool: PgPool) {
+        let (repo, withdrawal, _) = authorized_leg(
+            &pool,
+            LegKind::Bridge,
+            CHAIN_ID,
+            OTHER_CHAIN_ID,
+            far_future(),
+        )
+        .await;
+        let iris = Arc::new(FakeIris::default());
+        let source = Arc::new(MockChain::new(10));
+        let source_worker = indexer(&pool, source.clone(), CHAIN_ID, iris.clone());
+        source_worker.sweep_tick().await.unwrap();
+        let burn = source.submissions().remove(0);
+        source_worker.sweep_tick().await.unwrap();
+        let message_nonce = B256::repeat_byte(0x77);
+        iris.answers.lock().unwrap().insert(
+            burn.tx_hash,
+            complete_attestation(message_with_nonce(15, 6, message_nonce)),
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        source_worker.sweep_tick().await.unwrap();
+        assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Attested);
+
+        // `receiveMessage` is permissionless: another party's mint consumed
+        // the message, finality included. The relayer must complete the leg
+        // on the very tick it would have submitted its own mint, and submit
+        // nothing.
+        let destination = Arc::new(MockChain::new(10).with(|state| {
+            state.view_results.insert(
+                (
+                    TRANSMITTER,
+                    usedNoncesCall {
+                        nonce: message_nonce,
+                    }
+                    .abi_encode()
+                    .into(),
+                ),
+                B256::with_last_byte(1).to_vec().into(),
+            );
+        }));
+        let destination_worker = indexer(&pool, destination.clone(), OTHER_CHAIN_ID, iris);
+        destination_worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(leg.state, LegState::Completed);
+        assert_eq!(leg.mint_tx_hash, None, "no mint of our own landed");
+        assert!(
+            destination.submissions().is_empty(),
+            "an already-minted attested leg submits nothing"
+        );
+        assert!(
+            repo.by_id(withdrawal)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+    }
+
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn a_bridge_leg_burns_waits_for_circle_and_mints_on_the_other_chain(pool: PgPool) {
         let (repo, withdrawal, _) = authorized_leg(
@@ -741,10 +1179,7 @@ mod tests {
         let message_nonce = B256::repeat_byte(0x77);
         iris.answers.lock().unwrap().insert(
             burn.tx_hash,
-            AttestationStatus::Complete {
-                message: message_with_nonce(message_nonce).into(),
-                attestation: vec![0xAA; 65].into(),
-            },
+            complete_attestation(message_with_nonce(15, 6, message_nonce)),
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
         source_worker.sweep_tick().await.unwrap();
@@ -763,7 +1198,7 @@ mod tests {
         let call = receiveMessageCall::abi_decode(&mint.calldata).unwrap();
         assert_eq!(
             call.message.as_ref(),
-            message_with_nonce(message_nonce).as_slice()
+            message_with_nonce(15, 6, message_nonce).as_slice()
         );
         assert_eq!(call.attestation.as_ref(), &[0xAA; 65][..]);
         assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Minting);
@@ -783,7 +1218,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn a_reverted_step_fails_the_leg_and_the_withdrawal(pool: PgPool) {
+    async fn a_reverted_step_returns_to_the_queue_instead_of_failing(pool: PgPool) {
         let (repo, withdrawal, _) =
             authorized_leg(&pool, LegKind::Transfer, CHAIN_ID, CHAIN_ID, far_future()).await;
         let chain = Arc::new(MockChain::new(10).with(|state| state.next_receipt_succeeds = false));
@@ -796,12 +1231,11 @@ mod tests {
 
         worker.sweep_tick().await.unwrap();
         worker.sweep_tick().await.unwrap();
+        // The transfer reverted, but its authorization is unconsumed and the
+        // merchant's signature still stands: the leg is queued again with a
+        // backoff, not failed.
         let leg = leg_state(&repo, withdrawal).await;
-        assert_eq!(leg.state, LegState::Failed);
-        assert_eq!(
-            leg.failure_reason.as_deref(),
-            Some("the transfer transaction reverted")
-        );
+        assert_eq!(leg.state, LegState::Authorized);
         assert!(leg.step.is_none());
         assert!(
             repo.by_id(withdrawal)
@@ -809,12 +1243,21 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .failed_at
-                .is_some()
+                .is_none()
         );
+        let (reverts, retry_at) = sqlx::query_as::<_, (i16, Option<chrono::DateTime<Utc>>)>(
+            "SELECT step_reverts, step_retry_at FROM withdrawal_legs WHERE id = $1",
+        )
+        .bind(leg.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reverts, 1);
+        assert!(retry_at.is_some());
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn a_mint_somebody_else_delivered_completes_without_a_transaction(pool: PgPool) {
+    async fn a_mint_somebody_else_delivered_completes_without_minting(pool: PgPool) {
         let (repo, withdrawal, leg_id) = authorized_leg(
             &pool,
             LegKind::Bridge,
@@ -851,11 +1294,17 @@ mod tests {
         );
         let message_nonce = B256::repeat_byte(0x77);
         assert!(
-            repo.record_attestation(leg_id, &message_with_nonce(message_nonce), &[0xAA; 65])
-                .await
-                .unwrap()
+            repo.record_attestation(
+                leg_id,
+                &message_with_nonce(15, 6, message_nonce),
+                &[0xAA; 65]
+            )
+            .await
+            .unwrap()
         );
         let chain = Arc::new(MockChain::new(10).with(|state| {
+            state.next_receipt_succeeds = false;
+            // Another party's mint consumed the message: our own reverts.
             state.view_results.insert(
                 (
                     TRANSMITTER,
@@ -876,10 +1325,113 @@ mod tests {
         );
 
         worker.sweep_tick().await.unwrap();
-        assert!(chain.submissions().is_empty(), "no mint of our own");
+        worker.sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
-        assert_eq!(leg.mint_tx_hash, None);
+        assert_eq!(leg.mint_tx_hash, None, "no mint of our own landed");
+        assert!(
+            repo.by_id(withdrawal)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_burn_somebody_else_executed_is_found_and_still_mints(pool: PgPool) {
+        let (repo, withdrawal, _) = authorized_leg(
+            &pool,
+            LegKind::Bridge,
+            CHAIN_ID,
+            OTHER_CHAIN_ID,
+            far_future(),
+        )
+        .await;
+        // The forwarder is permissionless: whoever replays our calldata
+        // consumes the authorization first, our transaction reverts on the
+        // spent nonce, and the burn that succeeded is someone else's. Its
+        // transaction is what Circle must attest.
+        let chain = Arc::new(MockChain::new(10).with(|state| {
+            state.next_receipt_succeeds = false;
+            state
+                .consumed_authorizations
+                .insert((WALLET, B256::repeat_byte(0x42)));
+            state
+                .authorization_events
+                .insert(B256::repeat_byte(0x42), 9);
+        }));
+        let iris = Arc::new(FakeIris::default());
+        let source_worker = indexer(&pool, chain.clone(), CHAIN_ID, iris.clone());
+        let destination = Arc::new(MockChain::new(10));
+        let destination_worker = indexer(&pool, destination.clone(), OTHER_CHAIN_ID, iris.clone());
+
+        source_worker.sweep_tick().await.unwrap();
+        source_worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(leg.state, LegState::Burned);
+        assert_eq!(
+            leg.burn_tx_hash,
+            Some(mock_authorization_tx_hash(B256::repeat_byte(0x42))),
+            "the competitor's transaction is the burn Circle attests"
+        );
+
+        // Circle attests the burn that actually happened, and the mint lands
+        // on the destination chain: nothing stranded.
+        let message_nonce = B256::repeat_byte(0x77);
+        iris.answers.lock().unwrap().insert(
+            mock_authorization_tx_hash(B256::repeat_byte(0x42)),
+            complete_attestation(message_with_nonce(15, 6, message_nonce)),
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        source_worker.sweep_tick().await.unwrap();
+        destination_worker.sweep_tick().await.unwrap();
+        destination_worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(leg.state, LegState::Completed);
+        assert!(
+            repo.by_id(withdrawal)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_transfer_leg_the_destination_executed_itself_completes(pool: PgPool) {
+        let (repo, withdrawal, _) =
+            authorized_leg(&pool, LegKind::Transfer, CHAIN_ID, CHAIN_ID, far_future()).await;
+        // The payee of a transfer leg is the destination address itself, and
+        // USDC lets only the payee consume a receive-less authorization: the
+        // destination may race us and win. Their transaction did exactly
+        // what ours would have, and is kept as the leg's evidence.
+        let chain = Arc::new(MockChain::new(10).with(|state| {
+            state.next_receipt_succeeds = false;
+            state
+                .consumed_authorizations
+                .insert((WALLET, B256::repeat_byte(0x42)));
+            state
+                .authorization_events
+                .insert(B256::repeat_byte(0x42), 9);
+        }));
+        let worker = indexer(
+            &pool,
+            chain.clone(),
+            CHAIN_ID,
+            Arc::new(FakeIris::default()),
+        );
+
+        worker.sweep_tick().await.unwrap();
+        worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(leg.state, LegState::Completed);
+        assert_eq!(
+            leg.transfer_tx_hash,
+            Some(mock_authorization_tx_hash(B256::repeat_byte(0x42)))
+        );
         assert!(
             repo.by_id(withdrawal)
                 .await
@@ -918,7 +1470,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn an_unmined_step_is_bumped_and_a_consumed_nonce_requeues_the_leg(pool: PgPool) {
+    async fn an_unmined_step_is_bumped_and_a_consumed_nonce_is_reconciled(pool: PgPool) {
         let (repo, withdrawal, _) =
             authorized_leg(&pool, LegKind::Transfer, CHAIN_ID, CHAIN_ID, far_future()).await;
         let chain = Arc::new(MockChain::new(10).with(|state| state.mine_at = None));
@@ -947,7 +1499,8 @@ mod tests {
         let step = leg_state(&repo, withdrawal).await.step.unwrap();
         assert_eq!(step.tx_hashes, vec![first.tx_hash, submissions[1].tx_hash]);
 
-        // The nonce mined elsewhere without a receipt for either: back to the queue.
+        // The nonce mined elsewhere without a receipt for either: the step
+        // and its history stay in flight while reconciliation looks.
         sqlx::query("UPDATE withdrawal_legs SET step_submitted_at = now() - interval '1 hour'")
             .execute(&pool)
             .await
@@ -955,7 +1508,51 @@ mod tests {
         chain.set(|state| state.mined_nonce = first.nonce + 1);
         worker.sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
-        assert_eq!(leg.state, LegState::Authorized);
+        assert_eq!(leg.state, LegState::Relaying, "no evidence yet, no touch");
+        let step = leg.step.clone().unwrap();
+        assert_eq!(
+            step.tx_hashes,
+            vec![first.tx_hash, submissions[1].tx_hash],
+            "the attempted transactions are kept while the evidence is missing"
+        );
+        assert_eq!(step.raw_transactions.len(), 2);
+
+        // Long past the wait, still unexplained: the worker reports itself
+        // stalled for an operator — and the step still stays untouched.
+        sqlx::query("UPDATE withdrawal_legs SET step_submitted_at = now() - interval '25 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = worker.sweep_tick().await.unwrap_err();
+        assert!(matches!(error, IndexerError::SweepStalled(_)));
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(leg.state, LegState::Relaying);
+        assert_eq!(
+            leg.step.unwrap().tx_hashes,
+            vec![first.tx_hash, submissions[1].tx_hash]
+        );
+
+        // The consuming transaction surfaces, finality included: the same
+        // step resolves into the completed leg.
+        chain.set(|state| {
+            state
+                .consumed_authorizations
+                .insert((WALLET, B256::repeat_byte(0x42)));
+            state
+                .authorization_events
+                .insert(B256::repeat_byte(0x42), 9);
+        });
+        worker.sweep_tick().await.unwrap();
+        let leg = leg_state(&repo, withdrawal).await;
+        assert_eq!(
+            leg.state,
+            LegState::Completed,
+            "the consuming transaction is found and completes the leg"
+        );
+        assert_eq!(
+            leg.transfer_tx_hash,
+            Some(mock_authorization_tx_hash(B256::repeat_byte(0x42)))
+        );
         assert!(leg.step.is_none());
     }
 }

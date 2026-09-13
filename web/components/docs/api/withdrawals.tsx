@@ -163,7 +163,7 @@ export const WITHDRAWALS: EndpointGroup = {
         ts: `import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
 
 const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
-const { authorizations } = await signWithdrawal(withdrawal, signer, { verifyNonce: signer.verifyNonce });
+const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
 const signed = await payday.withdrawals.authorize(withdrawal.id, authorizations);`,
         response: WITHDRAWAL.replace('"status": "awaiting_signature"', '"status": "in_progress"'),
       },

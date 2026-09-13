@@ -105,6 +105,11 @@ export default function WithdrawalsPage() {
         Payday pays every transaction&apos;s gas. One withdrawal may be open per account; its
         authorizations are valid for 24 hours, and a leg left unsigned that long expires.
       </p>
+      <Callout title="Circle's bridge limit">
+        One CCTP burn cannot exceed 10,000,000 USDC. Since Payday withdraws the whole balance,
+        withdraw a network holding more than that to an address on the same network rather than
+        bridging it. The dashboard and API refuse an oversized bridge leg.
+      </Callout>
 
       <H2 id="dashboard">From the dashboard</H2>
       <p>

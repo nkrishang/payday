@@ -19,9 +19,8 @@ let withdrawal = await payday.withdrawals.create(
 );
 
 // 2. Sign: checks every document against its leg, then signs it.
-const { authorizations } = await signWithdrawal(withdrawal, signer, {
-  verifyNonce: signer.verifyNonce,
-});
+const chains = (id: number) => deploymentChains.get(id) ?? null; // trusted USDC/CCTP registry
+const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
 
 // 3. Submit, then 4. poll until every leg has landed.
 withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
@@ -231,8 +230,9 @@ export const CHECKLIST = [
   "typed_data.message.from is your Payday wallet (the withdrawal's wallet_address).",
   "typed_data.domain.chainId is the leg's source_chain.id, and verifyingContract is that chain's native USDC.",
   "typed_data.message.value equals the leg's amount_base_units, and validAfter is \"0\".",
+  "typed_data.message.validBefore is still in the future.",
   "For a transfer leg, typed_data.message.to is your destination address.",
-  "For a bridge leg, typed_data.message.to is the WithdrawalForwarder the docs list for that chain (also in authorization.forwarder), nonce_preimage.mint_recipient is your destination address, and typed_data.message.nonce equals keccak256(abi.encode(uint32 destination_domain, bytes32(mint_recipient), bytes32 salt)) over nonce_preimage.",
+  "For a bridge leg, typed_data.message.to and authorization.forwarder equal the trusted WithdrawalForwarder for the source chain; nonce_preimage.destination_domain equals the trusted destination chain's CCTP domain; nonce_preimage.mint_recipient is your destination address; and typed_data.message.nonce equals keccak256(abi.encode(uint32 destination_domain, bytes32(mint_recipient), bytes32 salt)) over nonce_preimage.",
 ];
 
 export const WITHDRAWALS_PROMPT = `Build the Payday withdrawal flow for this server. Payday (https://payday.sh) holds our USDC in a "Payday wallet" on Monad (chain 143), Base (8453) and Arbitrum One (42161). A withdrawal moves the wallet's whole USDC balance on every network to one address we name, on one of those networks, with nothing deducted: Payday relays and pays gas, and our signature decides where each leg's funds may land. Read https://payday.sh/docs/withdrawals and https://payday.sh/docs/api/withdrawals/create first.
@@ -240,7 +240,7 @@ export const WITHDRAWALS_PROMPT = `Build the Payday withdrawal flow for this ser
 ## Flow: prepare, sign, submit, poll
 
 1. POST https://api.payday.sh/v1/withdrawals with headers Authorization: Bearer $PAYDAY_API_KEY, Content-Type: application/json, Idempotency-Key: <a fresh UUID>, and body {"destination": {"chain_id": "<decimal chain id>", "address": "<0x address we control on that chain>"}}. Response 201: a withdrawal with status "awaiting_signature" and one leg per network the wallet holds USDC on. Each leg has kind "transfer" (funds already on the destination chain) or "bridge" (moved through Circle's CCTP), amount_base_units (6 decimals), and authorization.typed_data: an EIP-712 document under that chain's USDC contract, whose primaryType is "TransferWithAuthorization" (transfer leg) or "ReceiveWithAuthorization" (bridge leg). Every uint256 in the document is a decimal string; nonce is 0x-hex bytes32; domain.chainId is a JSON number.
-   Errors: 400 invalid_request; 409 wallet_not_ready, withdrawal_in_progress (one open withdrawal per account; cancel or finish it), nothing_to_withdraw, idempotency_conflict; 503 withdrawals_unavailable.
+   A bridge leg cannot exceed Circle's per-message burn limit of 10,000,000 USDC; because withdrawals use the whole balance, withdraw an oversized network balance to that same network. Errors: 400 invalid_request; 409 wallet_not_ready, withdrawal_in_progress (one open withdrawal per account; cancel or finish it), nothing_to_withdraw, withdrawal_exceeds_bridge_limit, idempotency_conflict; 503 withdrawals_unavailable.
 2. For every leg with state "awaiting_signature", verify the document, then sign it with eth_signTypedData_v4 semantics (EIP-712: keccak256(0x1901 || domainSeparator || hashStruct(message))) using the Payday wallet's private key, exported once from the Payday dashboard (Account section, "Export wallet key") and kept in a secret manager. The signature is 65 bytes r || s || v with v = 27 or 28, as 0x-prefixed hex.
    Verification before signing, refuse otherwise:
 ${CHECKLIST.map((item) => `   - ${item}`).join("\n")}

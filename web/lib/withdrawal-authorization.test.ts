@@ -122,6 +122,36 @@ describe("checkLegAuthorization", () => {
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ to: DESTINATION }))).toMatch(/forwarder/);
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ value: "1" }))).toMatch(/amount/);
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ from: FORWARDER }))).toMatch(/Payday wallet/);
+    expect(checkLegAuthorization(WITHDRAWAL, withMessage({ nonce: `0x${"99".repeat(32)}` }))).toMatch(/nonce/);
+    expect(checkLegAuthorization(WITHDRAWAL, withMessage({ validBefore: "1" }))).toMatch(/expired/);
+    expect(
+      checkLegAuthorization(WITHDRAWAL, {
+        ...LEG,
+        authorization: {
+          ...LEG.authorization!,
+          forwarder: DESTINATION,
+          typed_data: { ...TYPED, message: { ...TYPED.message, to: DESTINATION } },
+        },
+      }),
+    ).toMatch(/trusted forwarder/);
+    expect(
+      checkLegAuthorization(WITHDRAWAL, {
+        ...LEG,
+        authorization: {
+          ...LEG.authorization!,
+          typed_data: { ...TYPED, domain: { ...TYPED.domain, verifyingContract: DESTINATION } },
+        },
+      }),
+    ).toMatch(/trusted USDC/);
+    expect(
+      checkLegAuthorization(WITHDRAWAL, {
+        ...LEG,
+        authorization: {
+          ...LEG.authorization!,
+          nonce_preimage: { destination_domain: 3, mint_recipient: DESTINATION, salt: SALT },
+        },
+      }),
+    ).toMatch(/destination network/);
     expect(
       checkLegAuthorization(WITHDRAWAL, {
         ...LEG,

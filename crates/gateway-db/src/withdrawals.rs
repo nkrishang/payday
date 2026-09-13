@@ -397,6 +397,14 @@ pub enum StepOutcome {
     Minted { tx_hash: Option<B256> },
 }
 
+/// How a retried step was resolved: put back in its queue, or failed for
+/// good once the reverts ran out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryStep {
+    Retried,
+    Failed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RelayStats {
     /// Authorized legs waiting to be relayed from this chain.
@@ -501,26 +509,6 @@ impl WithdrawalRepository {
             .bind(id)
             .fetch_optional(&self.pool)
             .await
-    }
-
-    /// An attested leg whose message somebody else already delivered:
-    /// complete without a step of our own.
-    pub async fn mark_minted_elsewhere(&self, leg_id: Uuid) -> Result<bool, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        let updated: Option<Uuid> = sqlx::query_scalar(
-            r#"UPDATE withdrawal_legs SET state = 'completed', updated_at = now()
-               WHERE id = $1 AND state = 'attested' AND step_chain_id IS NULL
-               RETURNING withdrawal_id"#,
-        )
-        .bind(leg_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(withdrawal_id) = updated else {
-            return Ok(false);
-        };
-        settle(&mut tx, withdrawal_id).await?;
-        tx.commit().await?;
-        Ok(true)
     }
 
     pub async fn get(
@@ -692,7 +680,9 @@ impl WithdrawalRepository {
         sqlx::query_as::<_, LegRow>(
             r#"SELECT l.* FROM withdrawal_legs l
                JOIN withdrawals w ON w.id = l.withdrawal_id
-               WHERE w.cancelled_at IS NULL AND (
+               WHERE w.cancelled_at IS NULL
+                 AND (l.step_retry_at IS NULL OR l.step_retry_at <= now())
+                 AND (
                    (l.state = 'attested' AND l.destination_chain_id = $1)
                    OR (l.state = 'authorized' AND l.source_chain_id = $1
                        AND l.valid_before > extract(epoch FROM now()) + $2))
@@ -711,6 +701,10 @@ impl WithdrawalRepository {
     /// to `relaying` or an attested leg to `minting`; false if the leg is no
     /// longer in either state (cancelled or expired meanwhile), in which case
     /// the caller must not broadcast.
+    ///
+    /// Locks the withdrawal row first, like every mutation here: cancellation
+    /// and step recording then cannot interleave, so a leg whose step is
+    /// recorded is never cancelled with its transaction in flight.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_step_submission(
         &self,
@@ -723,15 +717,27 @@ impl WithdrawalRepository {
         tx_hash: B256,
         raw_transaction: &[u8],
     ) -> Result<bool, sqlx::Error> {
-        sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let open: Option<bool> = sqlx::query_scalar(
+            r#"SELECT w.cancelled_at IS NULL FROM withdrawal_legs l
+               JOIN withdrawals w ON w.id = l.withdrawal_id
+               WHERE l.id = $1 FOR UPDATE OF w"#,
+        )
+        .bind(leg_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match open {
+            None | Some(false) => return Ok(false),
+            Some(true) => {}
+        }
+        let recorded = sqlx::query(
             r#"UPDATE withdrawal_legs
                SET state = CASE state WHEN 'authorized' THEN 'relaying' ELSE 'minting' END,
                    step_chain_id = $2, step_nonce = $3, step_gas_limit = $4,
                    step_max_fee_per_gas = $5, step_max_priority_fee_per_gas = $6,
                    step_tx_hashes = ARRAY[$7::bytea], step_raw_transactions = ARRAY[$8::bytea],
                    step_submitted_at = now(), step_broadcast_at = NULL, updated_at = now()
-               WHERE id = $1 AND step_chain_id IS NULL AND state IN ('authorized', 'attested')
-                 AND EXISTS (SELECT 1 FROM withdrawals w WHERE w.id = withdrawal_id AND w.cancelled_at IS NULL)"#,
+               WHERE id = $1 AND step_chain_id IS NULL AND state IN ('authorized', 'attested')"#,
         )
         .bind(leg_id)
         .bind(chain_id as i64)
@@ -741,9 +747,16 @@ impl WithdrawalRepository {
         .bind(max_priority_fee_per_gas.to_string())
         .bind(tx_hash.as_slice())
         .bind(raw_transaction)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
-        .map(|result| result.rows_affected() > 0)
+        .map(|result| result.rows_affected() > 0);
+        match recorded? {
+            true => {
+                tx.commit().await?;
+                Ok(true)
+            }
+            false => Ok(false),
+        }
     }
 
     /// Persist a signed same-nonce replacement before broadcasting it.
@@ -824,23 +837,27 @@ impl WithdrawalRepository {
         .map(|result| result.rows_affected() > 0)
     }
 
-    /// No submission for the step's nonce can mine any more: drop the step
-    /// and return the leg to the queue it came from.
-    pub async fn abandon_step(&self, leg_id: Uuid) -> Result<bool, sqlx::Error> {
-        sqlx::query(
+    /// An attested leg's message was already minted by another party:
+    /// complete the leg without any step of our own, parent-locked and
+    /// settled like every other transition.
+    pub async fn complete_minted_elsewhere(&self, leg_id: Uuid) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        lock_withdrawal_of(&mut tx, leg_id).await?;
+        let updated: Option<Uuid> = sqlx::query_scalar(
             r#"UPDATE withdrawal_legs
-               SET state = CASE state WHEN 'relaying' THEN 'authorized' ELSE 'attested' END,
-                   step_chain_id = NULL, step_nonce = NULL, step_gas_limit = NULL,
-                   step_max_fee_per_gas = NULL, step_max_priority_fee_per_gas = NULL,
-                   step_tx_hashes = NULL, step_raw_transactions = NULL, step_submitted_at = NULL,
-                   step_broadcast_at = NULL, step_mined_tx_hash = NULL, step_mined_block = NULL,
-                   step_mined_block_hash = NULL, updated_at = now()
-               WHERE id = $1 AND step_chain_id IS NOT NULL AND state IN ('relaying', 'minting')"#,
+               SET state = 'completed', step_reverts = 0, step_retry_at = NULL, updated_at = now()
+               WHERE id = $1 AND state = 'attested'
+               RETURNING withdrawal_id"#,
         )
         .bind(leg_id)
-        .execute(&self.pool)
-        .await
-        .map(|result| result.rows_affected() > 0)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(withdrawal_id) = updated else {
+            return Ok(false);
+        };
+        settle(&mut tx, withdrawal_id).await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// The step's transaction is final and succeeded.
@@ -850,6 +867,10 @@ impl WithdrawalRepository {
         outcome: StepOutcome,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
+        // The parent first: two legs reaching terminal states concurrently
+        // then serialize, and whichever runs second settles the withdrawal
+        // against the first one's outcome.
+        lock_withdrawal_of(&mut tx, leg_id).await?;
         // `outcome_kind` selects which hash column the step's transaction
         // lands in; the others keep their values.
         let (state, outcome_kind, tx_hash, next_check_at) = match outcome {
@@ -875,7 +896,8 @@ impl WithdrawalRepository {
                    step_max_fee_per_gas = NULL, step_max_priority_fee_per_gas = NULL,
                    step_tx_hashes = NULL, step_raw_transactions = NULL, step_submitted_at = NULL,
                    step_broadcast_at = NULL, step_mined_tx_hash = NULL, step_mined_block = NULL,
-                   step_mined_block_hash = NULL, updated_at = now()
+                   step_mined_block_hash = NULL, step_reverts = 0, step_retry_at = NULL,
+                   updated_at = now()
                WHERE id = $1 AND step_chain_id IS NOT NULL AND state = $5
                RETURNING withdrawal_id"#,
         )
@@ -900,6 +922,7 @@ impl WithdrawalRepository {
     /// last successful step left them, which `failure_reason` explains.
     pub async fn fail_leg(&self, leg_id: Uuid, reason: &str) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
+        lock_withdrawal_of(&mut tx, leg_id).await?;
         let updated: Option<Uuid> = sqlx::query_scalar(
             r#"UPDATE withdrawal_legs
                SET state = 'failed', failure_reason = $2,
@@ -927,15 +950,34 @@ impl WithdrawalRepository {
     /// and were never relayed. Returns how many legs expired.
     pub async fn expire_stale(&self, margin: Duration) -> Result<u64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let withdrawals: Vec<Uuid> = sqlx::query_scalar(
-            r#"UPDATE withdrawal_legs SET state = 'expired', updated_at = now()
-               WHERE state IN ('awaiting_signature', 'authorized')
-                 AND valid_before <= extract(epoch FROM now()) + $1
-               RETURNING withdrawal_id"#,
+        // Lock each withdrawal before touching its legs, like every mutation
+        // here: a leg cannot expire while its step is being recorded or
+        // resolved, and the settlement below reads a settled state.
+        let stale: Vec<Uuid> = sqlx::query_scalar(
+            r#"SELECT id FROM withdrawals WHERE id IN (
+                   SELECT l.withdrawal_id FROM withdrawal_legs l
+                   WHERE l.state IN ('awaiting_signature', 'authorized')
+                     AND l.valid_before <= extract(epoch FROM now()) + $1)
+               ORDER BY id FOR UPDATE"#,
         )
         .bind(margin.as_secs_f64())
         .fetch_all(&mut *tx)
         .await?;
+        let withdrawals: Vec<Uuid> = if stale.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_scalar(
+                r#"UPDATE withdrawal_legs SET state = 'expired', updated_at = now()
+                   WHERE withdrawal_id = ANY($1)
+                     AND state IN ('awaiting_signature', 'authorized')
+                     AND valid_before <= extract(epoch FROM now()) + $2
+                   RETURNING withdrawal_id"#,
+            )
+            .bind(&stale)
+            .bind(margin.as_secs_f64())
+            .fetch_all(&mut *tx)
+            .await?
+        };
         let expired = withdrawals.len() as u64;
         let mut distinct = withdrawals;
         distinct.sort();
@@ -945,6 +987,61 @@ impl WithdrawalRepository {
         }
         tx.commit().await?;
         Ok(expired)
+    }
+
+    /// The step's transaction reverted, but the leg's obligation survives —
+    /// an unused authorization, or an attestation Circle has already signed.
+    /// Clear the step and put the leg back in its queue, not to be picked
+    /// again until the base `backoff`, doubled for every revert already on
+    /// the leg, has passed. After `max_reverts` reverts the failure is
+    /// permanent instead: the leg is failed with `reason`, which also
+    /// settles the withdrawal. A leg that resolved in a concurrent
+    /// transaction reads as retried; there is nothing left to do for it.
+    pub async fn retry_step(
+        &self,
+        leg_id: Uuid,
+        backoff: Duration,
+        max_reverts: u32,
+        reason: &str,
+    ) -> Result<RetryStep, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        lock_withdrawal_of(&mut tx, leg_id).await?;
+        let reverted: Option<(Uuid, i16)> = sqlx::query_as(
+            r#"UPDATE withdrawal_legs
+               SET state = CASE state WHEN 'relaying' THEN 'authorized' ELSE 'attested' END,
+                   step_chain_id = NULL, step_nonce = NULL, step_gas_limit = NULL,
+                   step_max_fee_per_gas = NULL, step_max_priority_fee_per_gas = NULL,
+                   step_tx_hashes = NULL, step_raw_transactions = NULL, step_submitted_at = NULL,
+                   step_broadcast_at = NULL, step_mined_tx_hash = NULL, step_mined_block = NULL,
+                   step_mined_block_hash = NULL, step_reverts = step_reverts + 1,
+                   step_retry_at = now() + ($2 * power(2, LEAST(step_reverts, 6)) * interval '1 second'),
+                   updated_at = now()
+               WHERE id = $1 AND step_chain_id IS NOT NULL AND state IN ('relaying', 'minting')
+               RETURNING withdrawal_id, step_reverts"#,
+        )
+        .bind(leg_id)
+        .bind(backoff.as_secs_f64())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((withdrawal_id, reverts)) = reverted else {
+            return Ok(RetryStep::Retried);
+        };
+        if reverts as u32 >= max_reverts {
+            sqlx::query(
+                r#"UPDATE withdrawal_legs
+                   SET state = 'failed', failure_reason = $2, step_retry_at = NULL, updated_at = now()
+                   WHERE id = $1 AND state IN ('authorized', 'attested')"#,
+            )
+            .bind(leg_id)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?;
+            settle(&mut tx, withdrawal_id).await?;
+            tx.commit().await?;
+            return Ok(RetryStep::Failed);
+        }
+        tx.commit().await?;
+        Ok(RetryStep::Retried)
     }
 
     /// Burned legs from this chain whose attestation is due to be polled.
@@ -1025,6 +1122,25 @@ impl WithdrawalRepository {
             in_flight,
         })
     }
+}
+
+/// Lock the withdrawal a leg belongs to, first, so that two mutations of
+/// the same withdrawal's legs cannot interleave: whichever commits second
+/// then re-reads the first one's outcome (`SET lock_timeout` is not set on
+/// purpose — a relayer waiting out a slow cancellation is correct here).
+async fn lock_withdrawal_of(
+    tx: &mut Transaction<'_, Postgres>,
+    leg_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"SELECT w.id FROM withdrawal_legs l
+           JOIN withdrawals w ON w.id = l.withdrawal_id
+           WHERE l.id = $1 FOR UPDATE OF w"#,
+    )
+    .bind(leg_id)
+    .execute(&mut **tx)
+    .await
+    .map(drop)
 }
 
 /// Close the withdrawal once every leg is terminal: completed when all of
@@ -1411,8 +1527,13 @@ mod tests {
             .unwrap()
         );
         assert!(
-            repo.abandon_step(bridge).await.unwrap(),
-            "a consumed nonce sends the leg back"
+            matches!(
+                repo.retry_step(bridge, Duration::from_secs(0), 5, "test")
+                    .await
+                    .unwrap(),
+                RetryStep::Retried
+            ),
+            "a reverted step sends the leg back"
         );
         assert_eq!(
             repo.legs(input.id).await.unwrap()[0].state,
@@ -1579,5 +1700,221 @@ mod tests {
             CancelOutcome::Finished
         );
         repo.create(&withdrawal(account, "k2")).await.unwrap();
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn concurrent_terminal_transitions_still_settle_the_withdrawal(pool: PgPool) {
+        let repo = WithdrawalRepository::new(pool.clone());
+        let account = new_account(&pool, 1).await;
+        let input = withdrawal(account, "k1");
+        repo.create(&input).await.unwrap();
+        let [bridge, transfer] = [input.legs[0].id, input.legs[1].id];
+        let signature = [0x11u8; 65];
+        repo.authorize(account, input.id, bridge, &signature)
+            .await
+            .unwrap();
+        repo.authorize(account, input.id, transfer, &signature)
+            .await
+            .unwrap();
+        relay_transfer_leg(&repo, transfer).await;
+        assert!(
+            repo.record_step_submission(
+                bridge,
+                143,
+                3,
+                250_000,
+                50,
+                5,
+                B256::repeat_byte(0xC1),
+                b"burn"
+            )
+            .await
+            .unwrap()
+        );
+
+        // Both legs resolve "at once". Each mutation locks the withdrawal
+        // row first, so the second runs against the first one's outcome and
+        // settles: the withdrawal cannot stay open with every leg terminal.
+        let a = WithdrawalRepository::new(pool.clone());
+        let failing =
+            tokio::spawn(async move { a.fail_leg(bridge, "the burn transaction reverted").await });
+        assert!(
+            repo.complete_step(
+                transfer,
+                StepOutcome::Transferred {
+                    tx_hash: B256::repeat_byte(0xA1)
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(failing.await.unwrap().unwrap());
+
+        let legs = repo.legs(input.id).await.unwrap();
+        assert_eq!(legs[0].state, LegState::Failed);
+        assert_eq!(legs[1].state, LegState::Completed);
+        let row = repo.get(account, input.id).await.unwrap().unwrap();
+        assert!(
+            row.failed_at.is_some(),
+            "a failed leg fails the withdrawal even when the last leg completed concurrently"
+        );
+        assert!(row.completed_at.is_none());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn a_cancelled_withdrawal_takes_no_new_step(pool: PgPool) {
+        let repo = WithdrawalRepository::new(pool.clone());
+        let account = new_account(&pool, 1).await;
+        let input = withdrawal(account, "k1");
+        repo.create(&input).await.unwrap();
+        let transfer = input.legs[1].id;
+        repo.authorize(account, input.id, transfer, &[0x11u8; 65])
+            .await
+            .unwrap();
+
+        // A step recorded while the cancellation is deciding would leave the
+        // withdrawal cancelled with a transaction in flight; the parent lock
+        // on both sides rules the interleaving out in either order.
+        assert_eq!(
+            repo.cancel(account, input.id).await.unwrap(),
+            CancelOutcome::Cancelled
+        );
+        assert!(
+            !repo
+                .record_step_submission(
+                    transfer,
+                    8453,
+                    7,
+                    90_000,
+                    100,
+                    10,
+                    B256::repeat_byte(0xA1),
+                    b"raw"
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repo.legs(input.id).await.unwrap()[1].state,
+            LegState::Cancelled
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn a_reverted_step_is_retried_with_backoff_then_failed(pool: PgPool) {
+        let repo = WithdrawalRepository::new(pool.clone());
+        let account = new_account(&pool, 1).await;
+        let mut input = withdrawal(account, "k1");
+        input.legs[0].valid_before = 1; // long past: the bridge leg expires below
+        repo.create(&input).await.unwrap();
+        let [_bridge, transfer] = [input.legs[0].id, input.legs[1].id];
+        repo.authorize(account, input.id, transfer, &[0x11u8; 65])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.expire_stale(Duration::from_secs(300)).await.unwrap(),
+            1
+        );
+        let backoff = Duration::from_secs(600);
+
+        assert!(
+            repo.record_step_submission(
+                transfer,
+                8453,
+                7,
+                90_000,
+                100,
+                10,
+                B256::repeat_byte(0xA1),
+                b"raw"
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            repo.retry_step(transfer, backoff, 3, "the transfer transaction reverted")
+                .await
+                .unwrap(),
+            RetryStep::Retried
+        );
+        let leg = repo.legs(input.id).await.unwrap().remove(1);
+        assert_eq!(leg.state, LegState::Authorized, "back in the queue");
+        assert!(leg.step.is_none());
+        let (reverts, retry_at) = sqlx::query_as::<_, (i16, Option<chrono::DateTime<Utc>>)>(
+            "SELECT step_reverts, step_retry_at FROM withdrawal_legs WHERE id = $1",
+        )
+        .bind(transfer)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(reverts, 1);
+        let retry_at = retry_at.expect("the retry carries a backoff");
+        assert!(retry_at > Utc::now() + chrono::TimeDelta::try_seconds(500).unwrap());
+        assert!(
+            repo.next_relayable(8453, Duration::ZERO)
+                .await
+                .unwrap()
+                .is_none(),
+            "the backoff keeps the leg out of the queue"
+        );
+
+        // Once the backoff has passed the leg is relayed again; the third
+        // revert in a row is permanent.
+        sqlx::query("UPDATE withdrawal_legs SET step_retry_at = now() - interval '1 second'")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.record_step_submission(
+                transfer,
+                8453,
+                7,
+                90_000,
+                100,
+                10,
+                B256::repeat_byte(0xA2),
+                b"raw"
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            repo.retry_step(transfer, backoff, 3, "the transfer transaction reverted")
+                .await
+                .unwrap(),
+            RetryStep::Retried
+        );
+        sqlx::query("UPDATE withdrawal_legs SET step_retry_at = now() - interval '1 second'")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.record_step_submission(
+                transfer,
+                8453,
+                7,
+                90_000,
+                100,
+                10,
+                B256::repeat_byte(0xA3),
+                b"raw"
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            repo.retry_step(transfer, backoff, 3, "the transfer transaction reverted")
+                .await
+                .unwrap(),
+            RetryStep::Failed
+        );
+        let leg = repo.legs(input.id).await.unwrap().remove(1);
+        assert_eq!(leg.state, LegState::Failed);
+        assert_eq!(
+            leg.failure_reason.as_deref(),
+            Some("the transfer transaction reverted")
+        );
+        let row = repo.get(account, input.id).await.unwrap().unwrap();
+        assert!(row.failed_at.is_some());
     }
 }

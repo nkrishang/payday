@@ -569,9 +569,12 @@ and TypeScript/Rust/Go samples are on the docs site under Withdrawals.
 
 Every `uint256` is a decimal string. A bridge leg's nonce is
 `keccak256(abi.encode(uint32 destination_domain, bytes32(mint_recipient), bytes32 salt))`;
-the forwarder recomputes it, so the signature commits to the destination.
+the forwarder recomputes it, so the signature commits to the destination. A
+bridge leg is capped by Circle's per-message burn limit: a wallet balance
+above 10,000,000 USDC on a source chain cannot be bridged in one withdrawal.
 Errors: `409 wallet_not_ready`, `409 withdrawal_in_progress`,
-`409 nothing_to_withdraw`, `409 idempotency_conflict`, `503 withdrawals_unavailable`.
+`409 nothing_to_withdraw`, `409 idempotency_conflict`,
+`422 withdrawal_exceeds_bridge_limit`, `503 withdrawals_unavailable`.
 
 ### `POST /v1/withdrawals/{id}/authorizations`
 

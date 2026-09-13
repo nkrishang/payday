@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hashTypedData, recoverTypedDataAddress } from "viem";
+import { encodeAbiParameters, hashTypedData, keccak256, recoverTypedDataAddress } from "viem";
 import { PaydayClient } from "../dist/index.js";
 import {
   assertLegAuthorization,
@@ -17,6 +17,12 @@ const FORWARDER = "0x2222222222222222222222222222222222222222";
 const DESTINATION = "0x000000000000000000000000000000000000d00d";
 const NONCE = "0x18b79105e486e10f626b71939a0226c47316949b7c24ff1c397661ea861fafaa";
 const DIGEST = "0xfe0bcc7d9e69ee02881011f29a4156caa15e02b8e94c2e0c9f40e66711651993";
+const chains = (id) => id === 143
+  ? { usdc: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", cctp: { domain: 15, forwarder: FORWARDER } }
+  : id === 8453
+    ? { usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", cctp: { domain: 6, forwarder: "0x3333333333333333333333333333333333333333" } }
+    : null;
+const signingOptions = { chains, keccak: { encodeAbiParameters, keccak256 } };
 
 const bridgeLeg = {
   id: "wdl_1",
@@ -114,7 +120,7 @@ test("privateKeySigner signs every awaiting leg for the wallet and checks the no
   own.wallet_address = signer.address;
   own.legs[0].authorization.typed_data.message.from = signer.address;
 
-  const { authorizations } = await signWithdrawal(own, signer, { verifyNonce: signer.verifyNonce });
+  const { authorizations } = await signWithdrawal(own, signer, signingOptions);
   assert.equal(authorizations.length, 1);
   assert.equal(authorizations[0].leg_id, "wdl_1");
   const recovered = await recoverTypedDataAddress({
@@ -126,7 +132,7 @@ test("privateKeySigner signs every awaiting leg for the wallet and checks the no
   const redirected = structuredClone(own);
   redirected.legs[0].authorization.nonce_preimage.salt = `0x${"08".padStart(64, "0")}`;
   await assert.rejects(
-    signWithdrawal(redirected, signer, { verifyNonce: signer.verifyNonce }),
+    signWithdrawal(redirected, signer, signingOptions),
     /does not commit to the documented destination/,
   );
 
@@ -134,6 +140,60 @@ test("privateKeySigner signs every awaiting leg for the wallet and checks the no
   signed.legs[0].state = "authorized";
   signed.legs[0].authorization = null;
   assert.deepEqual(await signWithdrawal(signed, signer), { authorizations: [] });
+});
+
+test("bridge trust failures never reach the signer", async () => {
+  const cases = [
+    [(leg) => { leg.authorization.typed_data.message.nonce = `0x${"99".repeat(32)}`; }, /nonce/],
+    [(leg) => { leg.authorization.forwarder = DESTINATION; leg.authorization.typed_data.message.to = DESTINATION; }, /forwarder/],
+    [(leg) => { leg.authorization.nonce_preimage.destination_domain = 3; }, /destination domain/],
+    [(leg) => { leg.authorization.typed_data.domain.verifyingContract = DESTINATION; }, /trusted USDC/],
+    [(leg) => { leg.authorization.typed_data.message.validBefore = "1"; }, /expired/],
+  ];
+  for (const [tamper, message] of cases) {
+    const bad = structuredClone(withdrawal);
+    tamper(bad.legs[0]);
+    let calls = 0;
+    await assert.rejects(signWithdrawal(bad, { signTypedData: async () => { calls++; return "0xab"; } }, signingOptions), message);
+    assert.equal(calls, 0);
+  }
+  let calls = 0;
+  await assert.rejects(signWithdrawal(withdrawal, { signTypedData: async () => { calls++; return "0xab"; } }), /trusted chain registry/);
+  assert.equal(calls, 0);
+  await assert.rejects(
+    signWithdrawal(withdrawal, { signTypedData: async () => { calls++; return "0xab"; } }, { ...signingOptions, chains: () => null }),
+    /source chain/,
+  );
+  assert.equal(calls, 0);
+  await assert.rejects(
+    signWithdrawal(withdrawal, { signTypedData: async () => { calls++; return "0xab"; } }, {
+      ...signingOptions,
+      chains: (id) => id === 143 ? { ...chains(id), cctp: null } : chains(id),
+    }),
+    /no trusted CCTP/,
+  );
+  assert.equal(calls, 0);
+});
+
+test("one bad leg among several signs nothing", async () => {
+  // The second leg is a valid document for a different amount; the first is
+  // left honest. Nothing may be signed until every document has passed.
+  const second = structuredClone(bridgeLeg);
+  second.id = "wdl_2";
+  second.amount = "2";
+  second.amount_base_units = "2000000";
+  second.authorization.typed_data.message.value = "2000000";
+  const pair = { ...structuredClone(withdrawal), legs: [structuredClone(bridgeLeg), second] };
+
+  let calls = 0;
+  const signer = { signTypedData: async () => { calls++; return "0xab"; } };
+  const { authorizations } = await signWithdrawal(pair, signer, signingOptions);
+  assert.equal(authorizations.length, 2);
+
+  const bad = structuredClone(pair);
+  bad.legs[1].authorization.typed_data.message.nonce = `0x${"99".repeat(32)}`;
+  await assert.rejects(signWithdrawal(bad, signer, signingOptions), /nonce/);
+  assert.equal(calls, 2, "the honest pair signed, the tampered one signs nothing");
 });
 
 test("the client sends withdrawals the documented way", async () => {

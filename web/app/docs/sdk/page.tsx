@@ -43,7 +43,7 @@ let withdrawal = await payday.withdrawals.create(
   { destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
   crypto.randomUUID(),
 );
-const { authorizations } = await signWithdrawal(withdrawal, signer, { verifyNonce: signer.verifyNonce });
+const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
 withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
 // then poll payday.withdrawals.get(withdrawal.id) until status leaves "in_progress"`;
 

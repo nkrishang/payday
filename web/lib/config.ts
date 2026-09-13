@@ -157,6 +157,9 @@ export const config = {
 
 export type PublicConfig = typeof config;
 
+/** Circle's per-message CCTP burn ceiling, in whole USDC display units. */
+export const CCTP_BURN_LIMIT_USDC = 10_000_000n;
+
 /** The configured chain behind an API `chain.id` (a decimal string) or a numeric id. */
 export function chainById(id: string | number | null | undefined): PublicChain | null {
   if (id === null || id === undefined) return null;

@@ -354,9 +354,6 @@ pub async fn authorize(
         .get(account, id)
         .await?
         .ok_or_else(ApiError::withdrawal_not_found)?;
-    if row.cancelled_at.is_some() || row.completed_at.is_some() || row.failed_at.is_some() {
-        return Err(ApiError::withdrawal_finished());
-    }
     let wallet = Address::from_str(&row.wallet_address)
         .map_err(|_| ApiError::internal("stored wallet address is malformed"))?;
     let legs = state.withdrawals.legs(id).await?;
@@ -370,30 +367,48 @@ pub async fn authorize(
             .iter()
             .find(|leg| leg.id == item.leg_id.0)
             .ok_or_else(|| ApiError::withdrawal_leg_not_found(&leg_name))?;
-        if !matches!(
-            leg.state,
-            LegState::AwaitingSignature | LegState::Authorized
-        ) {
-            return Err(ApiError::withdrawal_leg_not_signable(&leg_name));
-        }
-        if leg.valid_before <= now {
-            return Err(ApiError::withdrawal_authorization_expired(&leg_name));
-        }
         let (authorization, domain) = leg_authorization(leg, wallet)?;
         let signature = verify_authorization(&authorization, &domain, item.signature.trim())
             .map_err(|error| {
                 ApiError::withdrawal_signature_invalid(&leg_name, &error.to_string())
             })?;
         let signature = signature.as_bytes().to_vec();
-        if leg.state == LegState::Authorized {
-            // Resending the signature already on file is a no-op; a
-            // different valid one for the same leg is not accepted.
-            if leg.signature.as_deref() == Some(signature.as_slice()) {
-                continue;
-            }
-            return Err(ApiError::withdrawal_leg_not_signable(&leg_name));
+        // Resending the signature already on file is a no-op, whatever the
+        // withdrawal or the leg has reached since: the relayer may have
+        // taken it and moved on, and a lost response — even one that arrives
+        // after the whole withdrawal finished — must not read as a conflict.
+        if leg.signature.as_deref() == Some(signature.as_slice()) {
+            continue;
         }
         verified.push((leg.id, leg_name, signature));
+    }
+    if verified.is_empty() {
+        // Every signature is already on file: an idempotent replay, answered
+        // with the withdrawal as it stands now, finished or not.
+        return Ok(AxumJson(response(&state.networks, row, legs)));
+    }
+    if row.cancelled_at.is_some() || row.completed_at.is_some() || row.failed_at.is_some() {
+        return Err(ApiError::withdrawal_finished());
+    }
+    for item in &verified {
+        let (_, leg_name, _) = item;
+        let leg = legs
+            .iter()
+            .find(|leg| leg.id == item.0)
+            .ok_or_else(|| ApiError::withdrawal_leg_not_found(leg_name))?;
+        if !matches!(
+            leg.state,
+            LegState::AwaitingSignature | LegState::Authorized
+        ) {
+            return Err(ApiError::withdrawal_leg_not_signable(leg_name));
+        }
+        if leg.valid_before <= now {
+            return Err(ApiError::withdrawal_authorization_expired(leg_name));
+        }
+        if leg.state == LegState::Authorized {
+            // A different valid signature for the same leg is not accepted.
+            return Err(ApiError::withdrawal_leg_not_signable(leg_name));
+        }
     }
     for (leg_id, leg_name, signature) in verified {
         match state
@@ -500,6 +515,16 @@ fn plan_legs(
                     chain_name(destination_chain_id)
                 ))
             })?;
+            // Circle's TokenMessengerV2 refuses a burn above its per-message
+            // limit, and a whole-balance authorization has no smaller piece
+            // to send instead: refuse the withdrawal here rather than leave
+            // the merchant with a signature that can never execute.
+            if balance > gateway_core::MAX_CCTP_BURN_PER_MESSAGE {
+                return Err(ApiError::withdrawal_exceeds_bridge_limit(
+                    chain_name(chain_id),
+                    &format_units(balance, USDC_DECIMALS).unwrap_or_else(|_| balance.to_string()),
+                ));
+            }
             let salt = B256::from(rand::random::<[u8; 32]>());
             (
                 LegKind::Bridge,

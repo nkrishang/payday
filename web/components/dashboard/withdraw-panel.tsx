@@ -12,12 +12,13 @@ import { StatusDot } from "@/components/ui/status-dot";
 import { describeError } from "@/lib/attachment-upload";
 import type { CheckoutTone } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
-import { chainById, config, type PublicChain } from "@/lib/config";
+import { CCTP_BURN_LIMIT_USDC, chainById, config, type PublicChain } from "@/lib/config";
 import { explorerTxUrl, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { checkLegAuthorization, privyTypedData } from "@/lib/withdrawal-authorization";
 import { PAYOUT_ADDRESS } from "./field-rules";
 import { formatDate } from "./labels";
 import { useMerchant, useResource } from "./session";
+import type { BalanceSnapshot } from "./account-section";
 
 /**
  * Withdrawing: the whole USDC balance of the Payday wallet, on every network,
@@ -45,9 +46,11 @@ const OPEN: ReadonlySet<Withdrawal["status"]> = new Set(["awaiting_signature", "
 
 export function WithdrawPanel({
   account,
+  balances,
   onBalancesChanged,
 }: {
   account: AccountMetadata;
+  balances: Record<number, BalanceSnapshot>;
   /** A leg completed: the balances shown above have moved. */
   onBalancesChanged: () => void;
 }) {
@@ -72,6 +75,10 @@ export function WithdrawPanel({
       } else if (cause instanceof PaydayError && cause.code === "withdrawal_in_progress") {
         setFailure("A withdrawal is already in progress. Continue it below, or cancel it first.");
         recent.reload();
+      } else if (cause instanceof PaydayError && cause.code === "withdrawal_exceeds_bridge_limit") {
+        setFailure(
+          "A network balance exceeds Circle's 10,000,000 USDC bridge limit. Withdraw that network's balance to an address on the same network.",
+        );
       } else {
         setFailure(describeError(cause));
       }
@@ -113,6 +120,19 @@ export function WithdrawPanel({
   }, [client, trackedId, trackedOpen, onBalancesChanged]);
 
   const addressValid = PAYOUT_ADDRESS.test(destinationAddress.trim());
+  const bridgeBalances = config.chains
+    .filter((chain) => chain.id !== destinationChain)
+    .map((chain) => ({ chain, balance: balances[chain.id] }));
+  const balancesUnavailable = bridgeBalances.some(({ balance }) => !balance || balance.status !== "ready");
+  const overBridgeLimit = bridgeBalances.find(
+    ({ balance }) =>
+      balance?.status === "ready" && balance.usdc > CCTP_BURN_LIMIT_USDC * 1_000_000n,
+  );
+  const bridgeGuard = overBridgeLimit
+    ? `${overBridgeLimit.chain.name} holds more than Circle's 10,000,000 USDC bridge limit. Choose ${overBridgeLimit.chain.name} as the destination.`
+    : balancesUnavailable
+      ? "Wait until every network balance is available before continuing."
+      : null;
 
   const prepare = async () => {
     setBusy(true);
@@ -124,6 +144,17 @@ export function WithdrawPanel({
         },
         crypto.randomUUID(),
       );
+      // The signature binds to the API's destination, so the one it echoed
+      // back must be the one the merchant typed. A mismatch is refused here,
+      // before anything is signed.
+      if (
+        withdrawal.destination.address.toLowerCase() !== destinationAddress.trim().toLowerCase() ||
+        Number(withdrawal.destination.chain.id) !== destinationChain
+      ) {
+        throw new Error(
+          "The API returned a withdrawal for a different destination than the one entered. Nothing was signed; please contact support.",
+        );
+      }
       setStage({ kind: "review", withdrawal });
       setBusy(false);
     } catch (cause) {
@@ -136,16 +167,22 @@ export function WithdrawPanel({
     setBusy(true);
     setFailure(null);
     setStage({ kind: "signing", withdrawal, signed: 0 });
+    let restoreWithdrawal = withdrawal;
     try {
       const authorizations: Array<{ leg_id: string; signature: string }> = [];
-      for (const leg of withdrawal.legs) {
-        if (leg.state !== "awaiting_signature" || !leg.authorization) continue;
+      const awaiting = withdrawal.legs.filter(
+        (leg) => leg.state === "awaiting_signature" && leg.authorization,
+      );
+      for (const leg of awaiting) {
         const problem = checkLegAuthorization(withdrawal, leg);
         if (problem) {
           throw new Error(
             `${problem} Nothing was signed; please try again, and contact support if this persists.`,
           );
         }
+      }
+      for (const leg of awaiting) {
+        if (!leg.authorization) continue;
         const { signature } = await signTypedData(
           privyTypedData(leg.authorization.typed_data),
           { uiOptions: { showWalletUIs: false }, address: wallet },
@@ -153,15 +190,23 @@ export function WithdrawPanel({
         authorizations.push({ leg_id: leg.id, signature });
         setStage({ kind: "signing", withdrawal, signed: authorizations.length });
       }
-      const next =
-        authorizations.length > 0
-          ? await client.withdrawals.authorize(withdrawal.id, authorizations)
-          : await client.withdrawals.get(withdrawal.id);
+      let next: Withdrawal;
+      if (authorizations.length > 0) {
+        try {
+          next = await client.withdrawals.authorize(withdrawal.id, authorizations);
+        } catch (cause) {
+          const fresh = await client.withdrawals.get(withdrawal.id);
+          restoreWithdrawal = fresh;
+          throw cause;
+        }
+      } else {
+        next = await client.withdrawals.get(withdrawal.id);
+      }
       setStage({ kind: "tracking", withdrawal: next });
       recent.reload();
       setBusy(false);
     } catch (cause) {
-      setStage({ kind: "review", withdrawal });
+      setStage({ kind: "review", withdrawal: restoreWithdrawal });
       failed(cause);
     }
   };
@@ -224,7 +269,7 @@ export function WithdrawPanel({
           className="dash-step border-t border-line px-4 pt-4 pb-5"
           onSubmit={(event) => {
             event.preventDefault();
-            if (addressValid && !busy) void prepare();
+            if (addressValid && !busy && !bridgeGuard) void prepare();
           }}
         >
           <fieldset>
@@ -268,8 +313,11 @@ export function WithdrawPanel({
               control. Every leg is signed to this address; it cannot be changed afterwards.
             </p>
           )}
+          {bridgeGuard ? (
+            <p role="alert" className="mt-2 text-[12px] text-danger">{bridgeGuard}</p>
+          ) : null}
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <Button type="submit" disabled={busy || !addressValid}>
+            <Button type="submit" disabled={busy || !addressValid || Boolean(bridgeGuard)}>
               {busy ? <Loader2 className="size-4 animate-spin" /> : null}
               Continue
             </Button>

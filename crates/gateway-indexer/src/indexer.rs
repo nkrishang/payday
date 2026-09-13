@@ -1387,7 +1387,7 @@ fn sweep_request(invoice: &Invoice) -> Result<SweepRequest, IndexerError> {
 pub(crate) mod tests {
     use super::*;
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
     use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
@@ -1429,6 +1429,14 @@ pub(crate) mod tests {
 
     fn block_timestamp(block: u64) -> u64 {
         GENESIS_TIMESTAMP + block * 10
+    }
+
+    /// The transaction hash the mock reports for a consumed authorization:
+    /// derived from the nonce, so tests can predict it.
+    pub(crate) fn mock_authorization_tx_hash(nonce: B256) -> B256 {
+        let mut hash = nonce;
+        hash[31] = hash[31].wrapping_add(1);
+        hash
     }
 
     /// The address a sweep item deploys to, derived the way the API does.
@@ -1532,6 +1540,11 @@ pub(crate) mod tests {
         /// `eth_call` answers by (contract, calldata); anything else is 32 zero bytes.
         pub(crate) view_results:
             HashMap<(Address, alloy_primitives::Bytes), alloy_primitives::Bytes>,
+        /// EIP-3009 authorizations the token has consumed, by (authorizer, nonce).
+        pub(crate) consumed_authorizations: HashSet<(Address, B256)>,
+        /// The block each consumed authorization's `AuthorizationUsed` event
+        /// appears in, so ranges ending before it find nothing.
+        pub(crate) authorization_events: HashMap<B256, u64>,
     }
 
     /// The code hash the mock reports for an address it has no override for:
@@ -1747,7 +1760,9 @@ pub(crate) mod tests {
                 }))
         }
 
-        async fn view_call(
+        /// The mock's world has one final history, so reading through
+        /// finality changes nothing.
+        async fn finalized_view_call(
             &self,
             to: Address,
             calldata: alloy_primitives::Bytes,
@@ -1760,6 +1775,50 @@ pub(crate) mod tests {
                 .get(&(to, calldata))
                 .cloned()
                 .unwrap_or_else(|| alloy_primitives::Bytes::from(vec![0u8; 32])))
+        }
+
+        async fn authorization_state(
+            &self,
+            token: Address,
+            authorizer: Address,
+            nonce: B256,
+            at_block: u64,
+        ) -> Result<bool, ChainError> {
+            let _ = token;
+            let _ = at_block;
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .consumed_authorizations
+                .contains(&(authorizer, nonce)))
+        }
+
+        async fn authorization_used_tx(
+            &self,
+            token: Address,
+            authorizer: Address,
+            nonce: B256,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<Option<(B256, crate::chain::TransactionOutcome)>, ChainError> {
+            let _ = token;
+            let _ = authorizer;
+            let state = self.state.lock().unwrap();
+            let Some(at_block) = state.authorization_events.get(&nonce).copied() else {
+                return Ok(None);
+            };
+            if at_block < from_block || at_block > to_block {
+                return Ok(None);
+            }
+            Ok(Some((
+                mock_authorization_tx_hash(nonce),
+                crate::chain::TransactionOutcome {
+                    succeeded: true,
+                    block: at_block,
+                    block_hash: B256::with_last_byte(at_block as u8),
+                },
+            )))
         }
 
         async fn broadcast_sweep_transaction(

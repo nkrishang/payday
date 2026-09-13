@@ -1,5 +1,6 @@
 import type { Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "@payday/sdk";
-import type { TypedDataDefinition } from "viem";
+import { encodeAbiParameters, keccak256, type TypedDataDefinition } from "viem";
+import { chainById } from "./config";
 
 /**
  * The EIP-712 document the Payday wallet signs for one withdrawal leg, in
@@ -10,10 +11,10 @@ import type { TypedDataDefinition } from "viem";
  * and rebuilds it from its own record when the signature comes back, so the
  * page never edits it: every `uint256` arrives as a decimal string and is
  * widened to a bigint, nothing else changes. What the page does check,
- * before asking for a signature, is that the document says what the leg
- * says (`checkLegAuthorization`): the same guard the SDK's signing helper
- * applies on a server, so a document the API got wrong is refused rather
- * than signed.
+ * before asking for a signature, is that the document is bound to the
+ * browser's trusted deployment configuration and intended destination. These
+ * checks are the merchant's security boundary, not a UX nicety: wallet UIs
+ * are deliberately hidden while the dashboard signs.
  */
 
 export const AUTHORIZATION_FIELDS = [
@@ -115,6 +116,20 @@ export function checkLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLeg
   if (typed.domain.chainId !== Number(leg.source_chain.id)) {
     return "The document is under another network's USDC.";
   }
+  const source = chainById(leg.source_chain.id);
+  if (!source) return "The source network is not trusted by this dashboard.";
+  if (!same(typed.domain.verifyingContract, source.usdcAddress)) {
+    return "The document is not under this network's trusted USDC contract.";
+  }
+  let validBefore: bigint;
+  try {
+    validBefore = BigInt(typed.message.validBefore);
+  } catch {
+    return "The document has an invalid expiry time.";
+  }
+  if (validBefore <= BigInt(Math.floor(Date.now() / 1000))) {
+    return "The authorization has already expired.";
+  }
   if (typed.message.value !== leg.amount_base_units || typed.message.validAfter !== "0") {
     return "The document does not authorize exactly this leg's amount.";
   }
@@ -128,6 +143,26 @@ export function checkLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLeg
     const preimage = authorization.nonce_preimage;
     if (!preimage || !same(preimage.mint_recipient, withdrawal.destination.address)) {
       return "The document does not commit the bridge to your destination address.";
+    }
+    if (!source.cctp) return "The source network has no trusted bridge configuration.";
+    if (!authorization.forwarder || !same(authorization.forwarder, source.cctp.forwarder)) {
+      return "The authorization does not use this network's trusted forwarder.";
+    }
+    const destination = chainById(withdrawal.destination.chain.id);
+    if (!destination) return "The destination network is not trusted by this dashboard.";
+    if (!destination.cctp) return "The destination network has no trusted bridge configuration.";
+    if (preimage.destination_domain !== destination.cctp.domain) {
+      return "The bridge authorization names the wrong destination network.";
+    }
+    const recipient = `0x${preimage.mint_recipient.slice(2).toLowerCase().padStart(64, "0")}` as `0x${string}`;
+    const nonce = keccak256(
+      encodeAbiParameters(
+        [{ type: "uint32" }, { type: "bytes32" }, { type: "bytes32" }],
+        [preimage.destination_domain, recipient, preimage.salt as `0x${string}`],
+      ),
+    );
+    if (!same(nonce, typed.message.nonce)) {
+      return "The signed nonce does not commit to the documented bridge destination.";
     }
   }
   return null;

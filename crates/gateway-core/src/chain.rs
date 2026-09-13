@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -71,6 +71,14 @@ pub struct ChainConfig {
     #[serde(default)]
     pub cctp: Option<CctpConfig>,
 }
+
+/// The largest amount a single CCTP V2 standard-transfer burn may move:
+/// Circle documents a 10,000,000 USDC per-transaction limit and its
+/// `TokenMessengerV2` reverts above it. A whole-balance withdrawal whose
+/// bridge leg exceeds it could never execute, so `POST /v1/withdrawals`
+/// refuses to create one; the web panel applies the same bound to the
+/// balances it shows.
+pub const MAX_CCTP_BURN_PER_MESSAGE: U256 = U256::from_limbs([10_000_000_000_000, 0, 0, 0]);
 
 /// CCTP V2 as deployed on one chain, plus Payday's `WithdrawalForwarder`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,10 +11,9 @@
  * `viem` on demand, which is why viem is an optional peer dependency and the
  * core client stays dependency-free.
  *
- * Before signing, `assertLegAuthorization` checks the document says what the
- * API says it does — the leg's amount, the destination or the documented
- * forwarder, and, for a bridge leg, the nonce's commitment to the destination
- * — so a signer never trusts the API's typed data blindly.
+ * The checks in this module are the signer's security boundary, not a UX
+ * convenience: bridge documents are signed only after their nonce commitment,
+ * trusted USDC, CCTP domain, and deployed forwarder have all been verified.
  */
 
 import type { LegAuthorizationInput, Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "./index.js";
@@ -22,6 +21,20 @@ import type { LegAuthorizationInput, Withdrawal, WithdrawalLeg, WithdrawalTypedD
 /** Anything that can sign EIP-712 typed data for the Payday wallet. */
 export interface WithdrawalSigner {
   signTypedData(typedData: SignableTypedData): Promise<string>;
+}
+
+export type EncodeAbiParameters = (params: Array<{ type: string }>, values: unknown[]) => `0x${string}`;
+export interface WithdrawalKeccak {
+  keccak256(data: `0x${string}`): `0x${string}`;
+  encodeAbiParameters: EncodeAbiParameters;
+}
+export interface TrustedWithdrawalChain {
+  usdc: string;
+  cctp: { domain: number; forwarder: string } | null;
+}
+export interface SignWithdrawalOptions {
+  keccak?: WithdrawalKeccak;
+  chains?: (chainId: number) => TrustedWithdrawalChain | null;
 }
 
 /** `WithdrawalTypedData` with every `uint256` as a bigint, as viem and ethers take it. */
@@ -85,6 +98,9 @@ export function assertLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLe
   if (typed.domain.chainId !== Number(leg.source_chain.id)) throw problem("is under another chain's domain");
   if (typed.message.value !== leg.amount_base_units) throw problem("does not authorize the leg's amount");
   if (typed.message.validAfter !== "0") throw problem("has a non-zero validAfter");
+  if (BigInt(typed.message.validBefore) <= BigInt(Math.floor(Date.now() / 1000))) {
+    throw problem("has already expired");
+  }
   if (!HEX_32.test(typed.message.nonce)) throw problem("has a malformed nonce");
   if (!HEX_ADDRESS.test(typed.domain.verifyingContract)) throw problem("has a malformed token address");
   const payee = leg.kind === "bridge" ? authorization.forwarder : withdrawal.destination.address;
@@ -101,20 +117,48 @@ export function assertLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLe
 }
 
 /**
- * Signs every leg still awaiting its signature. Checks each document with
- * `assertLegAuthorization` first; pass `verifyNonce` (from `privateKeySigner`
- * or your own keccak) to also check a bridge leg's nonce commitment.
+ * Signs every leg still awaiting its signature. All documents are checked
+ * before the first signature. Bridge legs require a trusted chain registry;
+ * nonce verification is mandatory and uses `options.keccak` or lazy-loaded
+ * viem.
  */
 export async function signWithdrawal(
   withdrawal: Withdrawal,
   signer: WithdrawalSigner,
-  options: { verifyNonce?: (leg: WithdrawalLeg, typed: WithdrawalTypedData) => void } = {},
+  options: SignWithdrawalOptions = {},
 ): Promise<{ authorizations: LegAuthorizationInput[] }> {
-  const authorizations: LegAuthorizationInput[] = [];
-  for (const leg of withdrawal.legs) {
-    if (leg.state !== "awaiting_signature" || !leg.authorization) continue;
+  const awaiting = withdrawal.legs.filter(
+    (leg): leg is WithdrawalLeg & { authorization: NonNullable<WithdrawalLeg["authorization"]> } =>
+      leg.state === "awaiting_signature" && leg.authorization !== null,
+  );
+  const hasBridge = awaiting.some((leg) => leg.kind === "bridge");
+  if (hasBridge && !options.chains) {
+    throw new Error("refusing to sign a bridge withdrawal without a trusted chain registry");
+  }
+  const keccak = hasBridge ? options.keccak ?? (await loadViemCore()) : null;
+  const checked = awaiting.map((leg) => {
     const typed = assertLegAuthorization(withdrawal, leg);
-    options.verifyNonce?.(leg, typed);
+    const source = options.chains?.(Number(leg.source_chain.id));
+    if (options.chains && !source) throw new Error(`leg ${leg.id}: source chain is not trusted`);
+    if (source && !sameAddress(typed.domain.verifyingContract, source.usdc)) {
+      throw new Error(`leg ${leg.id}: typed data is not under the trusted USDC contract`);
+    }
+    if (leg.kind === "bridge") {
+      if (!source?.cctp) throw new Error(`leg ${leg.id}: source chain has no trusted CCTP configuration`);
+      if (!sameAddress(leg.authorization.forwarder ?? "", source.cctp.forwarder)) {
+        throw new Error(`leg ${leg.id}: authorization names an untrusted forwarder`);
+      }
+      const destination = options.chains!(Number(withdrawal.destination.chain.id));
+      if (!destination?.cctp) throw new Error(`leg ${leg.id}: destination chain has no trusted CCTP configuration`);
+      if (leg.authorization.nonce_preimage?.destination_domain !== destination.cctp.domain) {
+        throw new Error(`leg ${leg.id}: nonce preimage names the wrong destination domain`);
+      }
+      verifyBridgeNonce(keccak!, leg, typed);
+    }
+    return { leg, typed };
+  });
+  const authorizations: LegAuthorizationInput[] = [];
+  for (const { leg, typed } of checked) {
     const signature = await signer.signTypedData(toSignableTypedData(typed));
     authorizations.push({ leg_id: leg.id, signature });
   }
@@ -142,7 +186,7 @@ export async function privateKeySigner(
 
 /** `keccak256(abi.encode(uint32 destinationDomain, bytes32 mintRecipient, bytes32 salt))`, as the forwarder recomputes it. */
 export function bridgeNonce(
-  keccak: { keccak256: (data: `0x${string}`) => `0x${string}`; encodeAbiParameters: EncodeAbiParameters },
+  keccak: WithdrawalKeccak,
   destinationDomain: number,
   mintRecipient: string,
   salt: string,
@@ -156,10 +200,8 @@ export function bridgeNonce(
   );
 }
 
-type EncodeAbiParameters = (params: Array<{ type: string }>, values: unknown[]) => `0x${string}`;
-
 function verifyBridgeNonce(
-  keccak: { keccak256: (data: `0x${string}`) => `0x${string}`; encodeAbiParameters: EncodeAbiParameters },
+  keccak: WithdrawalKeccak,
   leg: WithdrawalLeg,
   typed: WithdrawalTypedData,
 ): void {
@@ -177,13 +219,21 @@ function sameAddress(a: string, b: string): boolean {
 }
 
 interface ViemModules {
-  core: { keccak256: (data: `0x${string}`) => `0x${string}`; encodeAbiParameters: EncodeAbiParameters };
+  core: WithdrawalKeccak;
   accounts: {
     privateKeyToAccount: (key: `0x${string}`) => {
       address: `0x${string}`;
       signTypedData: (typedData: SignableTypedData) => Promise<`0x${string}`>;
     };
   };
+}
+
+async function loadViemCore(): Promise<WithdrawalKeccak> {
+  try {
+    return (await import("viem")) as unknown as WithdrawalKeccak;
+  } catch (cause) {
+    throw new Error("bridge signing needs options.keccak or the optional peer dependency viem: npm install viem", { cause });
+  }
 }
 
 async function loadViem(): Promise<ViemModules> {

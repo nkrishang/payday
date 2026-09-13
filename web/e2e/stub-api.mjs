@@ -16,6 +16,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { encodeAbiParameters, keccak256 } from "viem";
 
 // The API renders every timestamp as RFC 3339 to the second (`…:25Z`), so
 // the stub does too. This also keeps a withheld amount such as `25.00` from
@@ -1863,7 +1864,13 @@ async function withdrawals(req, res, url) {
       legs: STUB_CHAINS.map((source, position) => {
         const bridge = source.id !== chain.id;
         const salt = bridge ? hex32(randomUUID()) : null;
-        const nonce = hex32(randomUUID());
+        const recipient = `0x${destination.address.slice(2).toLowerCase().padStart(64, "0")}`;
+        const nonce = bridge
+          ? keccak256(encodeAbiParameters(
+              [{ type: "uint32" }, { type: "bytes32" }, { type: "bytes32" }],
+              [chain.domain, recipient, salt],
+            ))
+          : hex32(randomUUID());
         const to = bridge ? STUB_FORWARDER : destination.address;
         return {
           id: `wdl_${randomUUID()}`,

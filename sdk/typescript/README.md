@@ -194,7 +194,8 @@ let withdrawal = await payday.withdrawals.create(
   { destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
   crypto.randomUUID(),
 );
-const { authorizations } = await signWithdrawal(withdrawal, signer, { verifyNonce: signer.verifyNonce });
+const chains = (id: number) => deploymentChains.get(id) ?? null; // trusted USDC/CCTP registry
+const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
 withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
 while (withdrawal.status === "in_progress") {
   await new Promise((resolve) => setTimeout(resolve, 10_000));
@@ -205,6 +206,9 @@ while (withdrawal.status === "in_progress") {
 Any object with `signTypedData(typedData)` works as the signer (a KMS-backed
 viem account, ethers' `Wallet` through a one-line adapter); `toSignableTypedData`
 converts the API's document (decimal strings) into the bigint form those take.
+Bridge signing requires a trusted `chains` callback and always recomputes the
+nonce; it also verifies the USDC contract, forwarder, destination CCTP domain,
+and expiry before calling the signer. These checks are the security boundary.
 `withdrawals.list`, `withdrawals.get`, and `withdrawals.cancel` round out the
 namespace. The full guide, with Rust and Go samples, is at
 https://payday.sh/docs/withdrawals.
