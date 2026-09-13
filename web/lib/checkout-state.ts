@@ -397,13 +397,17 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
   }
 
   if (local.pendingTxHash) {
+    // A payment sent from another network: the wallet's transaction is on
+    // that chain, and what lands here is Relay's delivery.
+    const relayed = payment.relay?.status === "sent" || payment.relay?.status === "filled";
     return {
       phase: "confirming",
       tone: "progress",
-      label: "Confirming",
-      title: "Transaction confirmed on-chain",
-      detail:
-        "Payday credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
+      label: relayed ? "Delivering" : "Confirming",
+      title: relayed ? "Relay is delivering your payment" : "Transaction confirmed on-chain",
+      detail: relayed
+        ? `Your deposit was sent; Relay delivers it to ${ready.chain.name} in seconds, and Payday credits it once that network finalizes it. Keep this page open.`
+        : "Payday credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,

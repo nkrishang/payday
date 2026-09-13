@@ -19,7 +19,8 @@ use gateway_core::{
     DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, IssuerId,
     OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
     PayerPolicyMode, PaymentBinding, SnapshotNetwork, TransferDto, TransferListResponse,
-    USDC_DECIMALS, parse_expiration, payer_wallet_attestation, rfc3339, validate_expiration_window,
+    TransferRelayDto, USDC_DECIMALS, parse_expiration, payer_wallet_attestation, rfc3339,
+    validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -125,6 +126,22 @@ fn enrich_response(
                 .ok_or_else(|| ApiError::internal("invalid transfer timestamp"))?;
             let units = U256::from_str_radix(&t.amount, 10)
                 .map_err(|_| ApiError::internal("invalid transfer amount"))?;
+            let relay = match (t.relay_request_id, t.relay_origin_chain_id) {
+                (Some(request_id), Some(origin_chain_id)) => Some(TransferRelayDto {
+                    request_id: B256::try_from(request_id.as_slice())
+                        .map_err(|_| ApiError::internal("invalid relay request id"))?
+                        .to_string(),
+                    origin_chain_id: origin_chain_id.to_string(),
+                    origin_transaction_hash: t
+                        .relay_origin_tx_hash
+                        .as_deref()
+                        .map(B256::try_from)
+                        .transpose()
+                        .map_err(|_| ApiError::internal("invalid relay origin hash"))?
+                        .map(|hash| hash.to_string()),
+                }),
+                _ => None,
+            };
             Ok(TransferDto {
                 timestamp: rfc3339(timestamp),
                 amount: format_units(units, USDC_DECIMALS).unwrap_or_default(),
@@ -133,6 +150,7 @@ fn enrich_response(
                 transaction_hash: hash.to_string(),
                 explorer_url: chain_id
                     .and_then(|chain_id| state.payer.transaction_url(chain_id, &hash.to_string())),
+                relay,
                 block: t.block_number.to_string(),
                 disposition: if t.disposition == "error" {
                     "zero".into()

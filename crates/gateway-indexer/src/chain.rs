@@ -558,6 +558,11 @@ pub trait ChainClient: Send + Sync {
         tx_hash: B256,
     ) -> Result<Option<TransactionOutcome>, ChainError>;
 
+    /// The account that signed a transaction, or `None` while the node does
+    /// not know it. A cross-chain payment's origin transaction is verified
+    /// through this when its chain is one this deployment serves.
+    async fn transaction_sender(&self, tx_hash: B256) -> Result<Option<Address>, ChainError>;
+
     /// An `eth_call` at the `finalized` block; the caller decodes the output.
     /// Withdrawal reconciliation reads through it: a competitor's transaction
     /// in a block that later leaves the chain must not conclude a leg.
@@ -1202,6 +1207,16 @@ impl ChainClient for AlloyChainClient {
             block,
             block_hash,
         }))
+    }
+
+    async fn transaction_sender(&self, tx_hash: B256) -> Result<Option<Address>, ChainError> {
+        self.pacer.acquire().await;
+        let transaction = self
+            .provider
+            .get_transaction_by_hash(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionByHash", error))?;
+        Ok(transaction.map(|transaction| transaction.inner.signer()))
     }
 
     async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {

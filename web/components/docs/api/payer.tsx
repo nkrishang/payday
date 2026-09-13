@@ -143,7 +143,20 @@ export const PAYER: EndpointGroup = {
           {
             name: "chain, token",
             type: "object | null",
-            description: "The chosen network and its USDC contract. Present once bound.",
+            description:
+              "The payment's network and its USDC contract. Present once bound, or from issuance when the merchant pinned it.",
+          },
+          {
+            name: "relay_available",
+            type: "boolean",
+            description:
+              "Whether the payer may pay from another network through Relay: the deployment offers it, the address exists, and the request is payable.",
+          },
+          {
+            name: "relay",
+            type: "object | null",
+            description:
+              "The newest cross-chain payment quoted for the request: { id, status (quoted | sent | filled | failed | refunded | expired), origin_chain_id, origin_transaction_hash, fill_transaction_hash, created_at }. Gated.",
           },
           {
             name: "payer_wallet, address, address_explorer_url, deposit_uri",
@@ -484,6 +497,174 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
   -d '{ "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "signature": "0x…" }'`,
         ts: `const ready = await payer.wallet.attest(id, account, signature, challenge.payer_session);`,
         response: UNLOCKED,
+      },
+    },
+    {
+      slug: "relay-chains",
+      title: "Networks to pay from",
+      method: "GET",
+      path: "/v1/payer/deposit-requests/{id}/relay/chains",
+      auth: "payer_session",
+      summary: "The networks USDC may be paid from through Relay.",
+      body: (
+        <p>
+          Every network Relay takes USDC deposits on, except the request&apos;s own. Requires the
+          address (<code>409 wallet_required</code> before) and a payable request. Each entry
+          carries the network&apos;s USDC contract, a public RPC and explorer, and an icon, so a
+          wallet that lacks the network can be asked to add it.
+        </p>
+      ),
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      response: {
+        fields: [
+          {
+            name: "chains[]",
+            type: "object",
+            description:
+              "{ chain_id, name, native_symbol, usdc_address, explorer_url, icon_url, rpc_url }.",
+          },
+        ],
+      },
+      answers: [
+        { status: 404, code: "relay_unavailable", when: "This deployment has no Relay key." },
+        { status: 409, code: "wallet_required", when: "" },
+        { status: 410, code: "deposit_request_not_payable", when: "" },
+      ],
+      examples: {
+        curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/relay/chains"`,
+        ts: `const { chains } = await payer.relay.chains(id, { payerSession });`,
+        response: `{
+  "chains": [
+    { "chain_id": "8453", "name": "Base", "native_symbol": "ETH",
+      "usdc_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "explorer_url": "https://basescan.org", "icon_url": "https://assets.relay.link/icons/8453/light.png",
+      "rpc_url": "https://mainnet.base.org" }
+  ]
+}`,
+      },
+    },
+    {
+      slug: "relay-quote",
+      title: "Quote a payment from another network",
+      method: "POST",
+      path: "/v1/payer/deposit-requests/{id}/relay/quotes",
+      auth: "payer_session",
+      summary: "Asks Relay for a route and records it as a quote.",
+      body: (
+        <p>
+          Payday makes the quote, never the page: it pins the attested wallet as the sender, the
+          payment address as the recipient, USDC on the request&apos;s network as what lands, and
+          exactly the amount still due as the output. The answer is the transactions the wallet
+          sends on the origin network, in order (an ERC-20 approve, then Relay&apos;s deposit),
+          and what they cost. Ask again after <code>expires_at</code>. Every quote is a{" "}
+          <code>rli_</code> record; only one reported as sent is followed.
+        </p>
+      ),
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      bodyFields: [
+        {
+          name: "origin_chain_id",
+          type: "string",
+          required: true,
+          description: "Decimal chain id, one of the networks to pay from.",
+        },
+      ],
+      response: {
+        fields: [
+          { name: "id", type: "rli_ id", description: "" },
+          { name: "request_id", type: "string", description: "Relay's request id." },
+          { name: "origin", type: "object", description: "The network, as listed." },
+          {
+            name: "amount_in, amount_out",
+            type: "string",
+            description:
+              "USDC the wallet sends on the origin network, and exactly what lands on the payment address (the amount due). Base-unit counterparts included.",
+          },
+          { name: "relayer_fee_usd, time_estimate_seconds, expires_at", type: "", description: "" },
+          {
+            name: "steps[]",
+            type: "object",
+            description: "{ id: approve | deposit, transaction: { chain_id, to, data, value, gas } }.",
+          },
+        ],
+      },
+      answers: [
+        { status: 404, code: "relay_unavailable", when: "" },
+        { status: 409, code: "wallet_required", when: "" },
+        { status: 410, code: "deposit_request_not_payable", when: "" },
+        {
+          status: 422,
+          code: "relay_unsupported_origin",
+          when: "Not one of the networks to pay from, or the request's own.",
+        },
+        { status: 502, code: "relay_quote_failed", when: "Relay has no route, or is unreachable." },
+      ],
+      examples: {
+        curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/relay/quotes" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "origin_chain_id": "8453" }'`,
+        ts: `const quote = await payer.relay.quote(id, "8453", { payerSession });
+for (const step of quote.steps) {
+  await wallet.sendTransaction({ account, to: step.transaction.to, data: step.transaction.data, value: BigInt(step.transaction.value) });
+}`,
+        response: `{
+  "id": "rli_0198f80c-8d2f-7dc1-a369-90556a64f7b1",
+  "request_id": "0x1789…",
+  "origin": { "chain_id": "8453", "name": "Base", "…": "…" },
+  "amount_in": "10.520798", "amount_in_base_units": "10520798",
+  "amount_out": "10.500000", "amount_out_base_units": "10500000",
+  "relayer_fee_usd": "0.02", "time_estimate_seconds": 1,
+  "expires_at": "2026-09-06T12:20:00Z",
+  "steps": [
+    { "id": "approve", "transaction": { "chain_id": "8453", "to": "0x8335…", "data": "0x095e…", "value": "0", "gas": "73112" } },
+    { "id": "deposit", "transaction": { "chain_id": "8453", "to": "0x4cd0…", "data": "0xe801…", "value": "0", "gas": null } }
+  ]
+}`,
+      },
+    },
+    {
+      slug: "relay-sent",
+      title: "Report the deposit",
+      method: "POST",
+      path: "/v1/payer/deposit-requests/{id}/relay/quotes/{rli}/sent",
+      auth: "payer_session",
+      summary: "The wallet sent the quote's deposit; Payday follows it from here.",
+      body: (
+        <p>
+          Once. From then on the indexer asks Relay what became of the request, attributes the
+          delivered USDC to the attested wallet when Relay names it as the depositor, and the payer
+          view&apos;s <code>relay</code> block shows where it stands. The hash is advisory; the
+          origin transaction Relay records is what the proof names.
+        </p>
+      ),
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      pathParams: [
+        { name: "id", type: "dr_ id", required: true, description: "" },
+        { name: "rli", type: "rli_ id", required: true, description: "The quote." },
+      ],
+      bodyFields: [
+        {
+          name: "transaction_hash",
+          type: "string",
+          required: true,
+          description: "The deposit step's transaction, 0x hex, 32 bytes.",
+        },
+      ],
+      response: { description: "Payer view, with relay.status sent." },
+      answers: [
+        { status: 404, code: "relay_intent_not_found", when: "Not this request's quote." },
+        { status: 409, code: "relay_intent_not_quoted", when: "Already reported, or expired unsent." },
+        { status: 409, code: "relay_transaction_claimed", when: "That hash already pays another quote." },
+        { status: 410, code: "deposit_request_not_payable", when: "" },
+      ],
+      examples: {
+        curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/relay/quotes/rli_0198f80c-…/sent" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "transaction_hash": "0x…" }'`,
+        ts: `const following = await payer.relay.sent(id, quote.id, depositHash, { payerSession });`,
+        response: `{ "…": "the payer view", "relay": { "id": "rli_0198f80c-…", "status": "sent", "origin_chain_id": "8453", "origin_transaction_hash": "0x…", "fill_transaction_hash": null, "created_at": "2026-09-06T12:06:00Z" } }`,
       },
     },
   ],

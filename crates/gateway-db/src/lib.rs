@@ -7,6 +7,7 @@ mod issuers;
 mod notifications;
 mod onboarding;
 mod proofs;
+mod relay_intents;
 mod sweeps;
 mod verifications;
 mod webhooks;
@@ -37,6 +38,10 @@ pub use notifications::{
 };
 pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
+pub use relay_intents::{
+    AttributionSource, DbRelayIntent, MarkSent, NewRelayIntent, RelayIntentRepository,
+    RelayIntentStatus, Resolution,
+};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;

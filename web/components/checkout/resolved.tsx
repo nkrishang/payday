@@ -34,9 +34,14 @@ export function Resolved({
 
   const txHash = pendingTxHash ?? payment.settlement_tx_hash;
   const explorer = chainById(payment.chain?.id)?.explorerUrl ?? null;
-  const txUrl =
-    (pendingTxHash ? explorerTxUrl(explorer, pendingTxHash) : null) ??
-    payment.settlement_explorer_url;
+  // A deposit sent from another network through Relay is on that network,
+  // not this chain's explorer.
+  const relayed =
+    pendingTxHash !== null && payment.relay?.origin_transaction_hash === pendingTxHash;
+  const txUrl = relayed
+    ? null
+    : ((pendingTxHash ? explorerTxUrl(explorer, pendingTxHash) : null) ??
+      payment.settlement_explorer_url);
 
   const received = BigInt(payment.received_base_units) > 0n;
 

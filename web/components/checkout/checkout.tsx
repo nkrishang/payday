@@ -15,6 +15,7 @@ import { ClientSecretExchange, type ClientSecretStatus } from "./merchant-sessio
 import { NetworkSelect } from "./network-select";
 import { WalletProviders } from "./providers";
 import { QrPanel } from "./qr-panel";
+import { RelayPay } from "./relay-pay";
 import { Resolved } from "./resolved";
 import { useDepositRequest, useSecondsRemaining } from "./use-deposit-request";
 import { VerificationGate } from "./verification-gate";
@@ -233,6 +234,9 @@ function CheckoutBody({
 
               <div className="mt-6">
                 <WalletPay payment={ready} onSent={markSent} />
+                {ready.relay_available ? (
+                  <RelayPay payment={ready} payerSession={payerSession} onSent={markSent} />
+                ) : null}
               </div>
 
               <div className="my-6 flex items-center gap-3" aria-hidden>

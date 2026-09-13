@@ -21,6 +21,7 @@
 //! sweep worker, which keeps reporting it every tick until it clears, so
 //! payment detection never stops because a transaction is stuck.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,6 +48,8 @@ use crate::chain::{
 };
 use crate::iris::AttestationSource;
 use crate::signal::{SignalState, WatchList};
+use gateway_db::RelayIntentRepository;
+use gateway_relay::RelayApi;
 
 /// Maximum invoices included in one helper transaction.
 pub const SWEEP_BATCH_LIMIT: i64 = 20;
@@ -173,6 +176,13 @@ pub struct Indexer {
     pub(crate) iris: Arc<dyn AttestationSource>,
     /// Every chain, for the CCTP domain a bridge leg's destination has.
     pub(crate) registry: Arc<ChainRegistry>,
+    /// Cross-chain payments into this chain's addresses; see
+    /// `relay_intents.rs`. `None` when the deployment has no Relay key.
+    pub(crate) relay: Option<Arc<dyn RelayApi>>,
+    pub(crate) relay_intents: RelayIntentRepository,
+    /// Every chain's client, by chain id, for reading a cross-chain
+    /// payment's origin transaction when its chain is one we serve.
+    pub(crate) peers: Arc<HashMap<u64, Arc<dyn ChainClient>>>,
     current_log_range_size: AtomicU64,
     /// Wake-ups and health from the transfer signal; see `signal.rs`.
     signal: Arc<SignalState>,
@@ -183,6 +193,7 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repo: InvoiceRepository,
         cursor: CursorRepository,
@@ -190,9 +201,12 @@ impl Indexer {
         cfg: IndexerConfig,
         iris: Arc<dyn AttestationSource>,
         registry: Arc<ChainRegistry>,
+        relay: Option<Arc<dyn RelayApi>>,
+        peers: Arc<HashMap<u64, Arc<dyn ChainClient>>>,
     ) -> Self {
         let (watch_tx, _) = watch::channel(WatchList::default());
         let withdrawals = WithdrawalRepository::new(repo.pool().clone());
+        let relay_intents = RelayIntentRepository::new(repo.pool().clone());
         Self {
             repo,
             cursor,
@@ -200,6 +214,9 @@ impl Indexer {
             withdrawals,
             iris,
             registry,
+            relay,
+            relay_intents,
+            peers,
             current_log_range_size: AtomicU64::new(cfg.log_range_size),
             signal: SignalState::new(),
             watch_tx,
@@ -820,6 +837,9 @@ impl Indexer {
         // runs every tick; a relay step is taken only while no sweep batch is
         // in flight, and a sweep batch only while no relay step is.
         self.relay_housekeeping().await?;
+        // Cross-chain payments into this chain: no nonce, no signer, and a
+        // Relay outage must never degrade the sweeper, so errors stay inside.
+        self.relay_intent_housekeeping().await;
         match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
             Some(batch) if batch.broadcast_at.is_none() => self.broadcast_batch(&batch).await,
             Some(batch) => self.reconcile_batch(batch).await,
@@ -1324,6 +1344,10 @@ impl Indexer {
     async fn report_sweep_health(&self) -> Result<(), IndexerError> {
         let stats = self.repo.sweep_queue_stats(self.cfg.chain_id.0).await?;
         let relay = self.withdrawals.relay_stats(self.cfg.chain_id.0).await?;
+        let relay_intents_pending = self
+            .relay_intents
+            .pending_count(self.cfg.chain_id.0)
+            .await?;
         let balance = self.chain.signer_balance().await?;
         info!(
             queued = stats.queued,
@@ -1333,6 +1357,7 @@ impl Indexer {
             withdrawal_legs_awaiting_attestation = relay.awaiting_attestation,
             withdrawal_legs_attested = relay.attested,
             withdrawal_step_in_flight = relay.in_flight,
+            relay_intents_pending,
             signer_balance_wei = %balance,
             "sweep worker health"
         );
@@ -1545,6 +1570,8 @@ pub(crate) mod tests {
         /// The block each consumed authorization's `AuthorizationUsed` event
         /// appears in, so ranges ending before it find nothing.
         pub(crate) authorization_events: HashMap<B256, u64>,
+        /// Signers of transactions the node knows, by hash.
+        pub(crate) senders: HashMap<B256, Address>,
     }
 
     /// The code hash the mock reports for an address it has no override for:
@@ -1741,6 +1768,10 @@ pub(crate) mod tests {
                 },
             );
             Ok(PreparedSweepTransaction { hash: tx_hash, raw })
+        }
+
+        async fn transaction_sender(&self, tx_hash: B256) -> Result<Option<Address>, ChainError> {
+            Ok(self.state.lock().unwrap().senders.get(&tx_hash).copied())
         }
 
         async fn transaction_receipt(
@@ -2048,6 +2079,8 @@ pub(crate) mod tests {
             cfg,
             iris,
             registry,
+            None,
+            Arc::new(HashMap::new()),
         )
     }
 
@@ -2067,11 +2100,11 @@ pub(crate) mod tests {
     /// The wallet every test payer attests and pays from.
     const PAYER_KEY: [u8; 32] = [7u8; 32];
 
-    fn payer_wallet() -> Address {
+    pub(crate) fn payer_wallet() -> Address {
         wallet_of(&PAYER_KEY)
     }
 
-    fn payment_address(invoice: &Invoice) -> Address {
+    pub(crate) fn payment_address(invoice: &Invoice) -> Address {
         invoice.payment_address().expect("test invoice is bound").0
     }
 
@@ -2116,7 +2149,7 @@ pub(crate) mod tests {
 
     /// Issue and bind the test payer's wallet on `chain_id` in memory;
     /// `insert` writes the same binding to the row.
-    fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
+    pub(crate) fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
         let mut invoice = issue_unbound(amount, expiration);
         // A fresh nonce per invoice keeps identical requests at distinct
         // addresses, as a session's challenge would.
@@ -2183,7 +2216,7 @@ pub(crate) mod tests {
             .expect("insert should succeed");
     }
 
-    async fn insert(pool: &PgPool, invoice: &Invoice, key: &str) {
+    pub(crate) async fn insert(pool: &PgPool, invoice: &Invoice, key: &str) {
         let repo = InvoiceRepository::new(pool.clone());
         let account_id = uuid::Uuid::from_u128(1);
         sqlx::query(

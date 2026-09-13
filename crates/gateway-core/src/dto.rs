@@ -86,6 +86,98 @@ pub struct TransferDto {
     pub block: String,
     pub disposition: String,
     pub collected: bool,
+    /// Present when Relay's solver sent this transfer for a cross-chain
+    /// payment the attested wallet made from another chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<TransferRelayDto>,
+}
+
+/// The origin of a transfer Relay delivered: what the attested wallet sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferRelayDto {
+    /// Relay's request id, `0x` hex, 32 bytes.
+    pub request_id: String,
+    /// Decimal chain id the wallet paid on.
+    pub origin_chain_id: String,
+    /// The transaction the wallet sent there, `0x` hex, 32 bytes.
+    pub origin_transaction_hash: Option<String>,
+}
+
+/// A chain a payer may pay from through Relay, as the checkout lists it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayOriginChainDto {
+    /// Decimal chain id.
+    pub chain_id: String,
+    pub name: String,
+    pub native_symbol: Option<String>,
+    /// USDC on that chain: what the payer sends.
+    pub usdc_address: String,
+    pub explorer_url: Option<String>,
+    pub icon_url: Option<String>,
+    /// A public RPC, so a wallet that lacks the chain can be asked to add it.
+    pub rpc_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayOriginChainsResponse {
+    pub chains: Vec<RelayOriginChainDto>,
+}
+
+/// A quote for paying the amount still due from another chain. The steps
+/// are transactions for the attested wallet to send on the origin chain, in
+/// order; the last one is the deposit Relay fills against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayQuoteResponse {
+    /// The `rli_` id to report the origin transaction against.
+    pub id: String,
+    /// Relay's request id.
+    pub request_id: String,
+    pub origin: RelayOriginChainDto,
+    /// What the payer sends on the origin chain, in USDC.
+    pub amount_in: String,
+    pub amount_in_base_units: String,
+    /// What lands on the payment address: exactly the amount still due.
+    pub amount_out: String,
+    pub amount_out_base_units: String,
+    /// Relay's fee in USD, as it reports it.
+    pub relayer_fee_usd: Option<String>,
+    pub time_estimate_seconds: u64,
+    /// When the quote is no longer worth sending; ask for another after.
+    pub expires_at: String,
+    pub steps: Vec<RelayQuoteStepDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayQuoteStepDto {
+    /// `approve` or `deposit`.
+    pub id: String,
+    pub transaction: RelayTransactionDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayTransactionDto {
+    /// Decimal chain id the transaction is for: the origin chain.
+    pub chain_id: String,
+    pub to: String,
+    /// `0x` hex calldata.
+    pub data: String,
+    /// Decimal wei.
+    pub value: String,
+    /// Relay's gas estimate, when it gives one.
+    pub gas: Option<String>,
+}
+
+/// The cross-chain payment the page is following, on the payer view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayerRelayIntentDto {
+    pub id: String,
+    /// `quoted`, `sent`, `filled`, `failed`, `refunded`, or `expired`.
+    pub status: String,
+    pub origin_chain_id: String,
+    pub origin_transaction_hash: Option<String>,
+    /// The destination transaction that delivered the funds, once filled.
+    pub fill_transaction_hash: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -398,6 +490,12 @@ pub struct PayerDepositRequestResponse {
     /// after the payment has left the payable state.
     pub deposit_uri: Option<String>,
     pub details: Option<PayerDepositRequestDetails>,
+    /// Whether the payer may pay from another chain through Relay: the
+    /// deployment offers it, the address exists, and the request is payable.
+    pub relay_available: bool,
+    /// The newest cross-chain payment for this request, if any was quoted;
+    /// gated with the content.
+    pub relay: Option<PayerRelayIntentDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

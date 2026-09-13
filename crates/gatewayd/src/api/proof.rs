@@ -10,8 +10,9 @@ use axum::Extension;
 use axum::extract::{Path, State};
 use chrono::SecondsFormat;
 use gateway_core::{
-    ATTESTATION_VERSION, CANONICALIZATION, Invoice, InvoiceStatus, PROOF_VERSION, ProofOfPayment,
-    ProofTransfer, VerificationAttestationPayload, VerificationFact,
+    ATTESTATION_VERSION, AttestedRelayFill, CANONICALIZATION, Invoice, InvoiceStatus,
+    PROOF_VERSION, ProofOfPayment, ProofTransfer, RelayAttribution, VerificationAttestationPayload,
+    VerificationFact,
 };
 use gateway_db::AccountId;
 
@@ -52,9 +53,41 @@ pub async fn get_proof(
         return Ok(Json(proof));
     }
     let settlement_transfers = state.proofs.settlement_transfers(row.id).await?;
+    let payer_wallet = binding.payer_wallet.to_checksum(None);
     let transfers = settlement_transfers
         .iter()
         .map(|transfer| {
+            // A transfer Relay's solver made for a cross-chain payment the
+            // wallet sent carries its origin; the intent's payer wallet is
+            // the depositor the indexer verified.
+            let relay = match (
+                &transfer.relay_request_id,
+                transfer.relay_origin_chain_id,
+                &transfer.relay_origin_tx_hash,
+                &transfer.relay_payer_wallet,
+                &transfer.relay_attribution_source,
+            ) {
+                (
+                    Some(request_id),
+                    Some(origin_chain_id),
+                    Some(origin_tx),
+                    Some(wallet),
+                    Some(source),
+                ) => Some(RelayAttribution {
+                    request_id: B256::try_from(request_id.as_slice())
+                        .map_err(|_| ApiError::internal("invalid relay request id"))?
+                        .to_string(),
+                    origin_chain_id: origin_chain_id.to_string(),
+                    origin_transaction_hash: B256::try_from(origin_tx.as_slice())
+                        .map_err(|_| ApiError::internal("invalid relay origin hash"))?
+                        .to_string(),
+                    origin_sender: Address::try_from(wallet.as_slice())
+                        .map_err(|_| ApiError::internal("invalid relay depositor"))?
+                        .to_checksum(None),
+                    attribution_source: source.clone(),
+                }),
+                _ => None,
+            };
             Ok(ProofTransfer {
                 transaction_hash: B256::try_from(transfer.transaction_hash.as_slice())
                     .map_err(|_| ApiError::internal("invalid transfer hash"))?
@@ -68,18 +101,34 @@ pub async fn get_proof(
                     .to_checksum(None),
                 amount_base_units: transfer.amount.clone(),
                 block_number: transfer.block_number.to_string(),
+                relay,
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    // The proof's claim is that the attested wallet paid. Money from any
-    // other wallet was credited and settled, but it is not that claim, and
-    // no proof is issued for it.
-    if transfers
-        .iter()
-        .any(|transfer| transfer.sender != binding.payer_wallet.to_checksum(None))
-    {
+    // The proof's claim is that the attested wallet paid: from its own
+    // address, or from another chain through Relay with the origin verified
+    // as that wallet. Money from any other wallet was credited and settled,
+    // but it is not that claim, and no proof is issued for it.
+    if transfers.iter().any(|transfer| {
+        transfer.sender != payer_wallet
+            && transfer
+                .relay
+                .as_ref()
+                .is_none_or(|relay| relay.origin_sender != payer_wallet)
+    }) {
         return Err(ApiError::deposit_sender_mismatch());
     }
+    let relay_fills = transfers
+        .iter()
+        .filter(|transfer| transfer.sender != payer_wallet)
+        .filter_map(|transfer| {
+            transfer.relay.clone().map(|relay| AttestedRelayFill {
+                transaction_hash: transfer.transaction_hash.clone(),
+                log_index: transfer.log_index.clone(),
+                relay,
+            })
+        })
+        .collect();
 
     // Permissionless invoices verify no identity. Gated modes report whether
     // the policy was satisfied; the wallet binding is a fact about every
@@ -146,6 +195,7 @@ pub async fn get_proof(
             verified_at: row.verification_completed_at.map(rfc3339),
             wallet_bound_at: binding.bound_at.clone(),
             facts,
+            relay_fills,
         })
         .await
         .map_err(|error| {

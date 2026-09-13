@@ -99,7 +99,7 @@ export default function CheckoutPage() {
         and wallet steps.
       </p>
 
-      <H2 id="three-ways-to-pay">Three ways to pay</H2>
+      <H2 id="three-ways-to-pay">Four ways to pay</H2>
       <Table>
         <thead>
           <tr>
@@ -119,6 +119,17 @@ export default function CheckoutPage() {
             </td>
           </tr>
           <tr>
+            <td>From another network</td>
+            <td>
+              For USDC the payer holds on a chain the request is not on. The page lists the
+              networks Relay takes USDC from, Payday quotes the route pinned to the attested wallet,
+              the payment address, and exactly the amount due, and the wallet sends the quote&apos;s
+              transactions on that network; Relay delivers the USDC to the address in seconds and
+              Payday credits it to the payer once it finalizes. The route&apos;s fee is added to what
+              the payer sends. Offered only on deployments with a Relay key.
+            </td>
+          </tr>
+          <tr>
             <td>Scanned QR</td>
             <td>
               An EIP-681 request for the amount still due, which a mobile wallet turns into a
@@ -135,8 +146,10 @@ export default function CheckoutPage() {
         </tbody>
       </Table>
       <p>
-        All three stop being offered the moment the request is no longer payable, because funds sent
-        afterwards route back to the payer rather than to you.
+        All four stop being offered the moment the request is no longer payable, because funds sent
+        afterwards route back to the payer rather than to you. A delivery from another network that
+        lands after the deadline is returned the same way, to the payer&apos;s wallet on the
+        request&apos;s network.
       </p>
 
       <Callout tone="warning" title="What the payer must get right">

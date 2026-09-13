@@ -122,6 +122,7 @@ mod tests {
             verified_at: None,
             wallet_bound_at: "2026-09-06T00:00:00Z".into(),
             facts: Vec::new(),
+            relay_fills: Vec::new(),
         }
     }
 

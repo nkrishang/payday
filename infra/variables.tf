@@ -340,6 +340,18 @@ variable "resend_api_key" {
   sensitive   = true
 }
 
+variable "relay_api_key" {
+  description = <<-EOT
+    Relay (relay.link) API key the API quotes cross-chain payments with and
+    the indexer follows them with. Leave empty to not offer paying a deposit
+    request from another network. Supply as TF_VAR_relay_api_key. WARNING:
+    sensitive values remain in Terraform state.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "privy_app_secret" {
   description = <<-EOT
     Privy app secret the API pregenerates merchant wallets with during email

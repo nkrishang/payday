@@ -48,8 +48,12 @@ async function installFakeWallet(page: Page) {
       const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
       const signed: unknown[] = [];
       const switched: string[] = [];
-      // Starts on Monad; a switch request moves it, like a real wallet.
+      const sent: unknown[] = [];
+      const added: unknown[] = [];
+      // Starts on Monad; a switch request moves it, like a real wallet. The
+      // chains it knows: the configured ones plus whatever was added.
       let chainId = "0x8f";
+      const known = new Set(["0x8f", "0x2105"]);
       const provider = {
         isFakeWallet: true,
         request: async ({ method, params }: { method: string; params?: unknown[] }) => {
@@ -61,14 +65,32 @@ async function installFakeWallet(page: Page) {
               return chainId;
             case "wallet_switchEthereumChain": {
               const [{ chainId: wanted }] = params as [{ chainId: string }];
+              if (!known.has(wanted)) {
+                throw Object.assign(new Error("Unrecognized chain ID"), { code: 4902 });
+              }
               chainId = wanted;
               switched.push(wanted);
               for (const listener of listeners.get("chainChanged") ?? []) listener(wanted);
               return null;
             }
+            case "wallet_addEthereumChain": {
+              const [chain] = params as [{ chainId: string }];
+              known.add(chain.chainId);
+              added.push(chain);
+              return null;
+            }
             case "eth_signTypedData_v4":
               signed.push(params);
               return `0x${"ab".repeat(64)}1b`;
+            // A generous USDC balance on every chain, for the relay panel's check.
+            case "eth_call":
+              return `0x${"0".repeat(56)}${"5".repeat(8)}`;
+            case "eth_sendTransaction": {
+              sent.push(params);
+              return `0x${String(sent.length).padStart(2, "0").repeat(32)}`;
+            }
+            case "eth_getTransactionReceipt":
+              return { status: "0x1", blockNumber: "0x10" };
             default:
               throw Object.assign(new Error(`unsupported ${method}`), { code: 4200 });
           }
@@ -81,7 +103,13 @@ async function installFakeWallet(page: Page) {
           listeners.get(event)?.delete(listener);
         },
       };
-      Object.assign(window, { ethereum: provider, __signed: signed, __switched: switched });
+      Object.assign(window, {
+        ethereum: provider,
+        __signed: signed,
+        __switched: switched,
+        __sent: sent,
+        __added: added,
+      });
     },
     { wallet: PAYER_WALLET },
   );
@@ -273,6 +301,65 @@ test("an unbound request takes a network and the payer's signature before it sho
   expect(typed.message.statement).toContain("Only transfers from this wallet");
   // The session never reached a URL.
   expect(sessionInUrls).toEqual([]);
+});
+
+test("a payer can pay from another network through Relay", async ({ page }) => {
+  await installFakeWallet(page);
+  await page.goto("/pay/dr_awaiting");
+
+  // The option sits under the wallet button; opening it lists Relay's chains.
+  const toggle = page.getByRole("button", { name: /pay from another network/i });
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  await page.getByLabel("Network").click();
+  await expect(page.getByRole("option", { name: /Polygon/ })).toBeVisible();
+  // The request's own chain is never offered as an origin.
+  await expect(page.getByRole("option", { name: /Monad/ })).toHaveCount(0);
+  await page.getByRole("option", { name: /Polygon/ }).click();
+
+  // A quote arrives for exactly the amount due, with what it costs to send.
+  await expect(page.getByTestId("relay-quote")).toContainText("25.02 USDC");
+  await expect(page.getByTestId("relay-quote")).toContainText("exactly 25.00 USDC lands on Monad");
+
+  // Connect, then pay: the wallet lacks Polygon, so it is added from the
+  // chain record and switched to; the approve and the deposit are sent in
+  // order, and the deposit is reported before the page waits on delivery.
+  await page.getByRole("button", { name: /connect wallet/i }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button")
+    .filter({ hasText: /injected/i })
+    .click();
+  const reported = page.waitForRequest(
+    (request) => request.method() === "POST" && /\/relay\/quotes\/rli_[^/]+\/sent$/.test(request.url()),
+  );
+  await page.getByRole("button", { name: /pay from polygon/i }).click();
+  const sentReport = await reported;
+  const sent = await page.evaluate(() => (window as unknown as { __sent: unknown[] }).__sent);
+  expect(sent).toHaveLength(2);
+  const [approve, deposit] = sent as [[{ to: string; from: string }], [{ to: string; from: string }]];
+  expect(approve[0].to.toLowerCase()).toBe("0x3c499c542cef5e3811e1192ce70d8cc03d5c3359");
+  expect(deposit[0].to.toLowerCase()).toBe("0x4cd00e387622c35bddb9b4c962c136462338bc31");
+  expect(deposit[0].from.toLowerCase()).toBe(PAYER_WALLET.toLowerCase());
+  expect(sentReport.postDataJSON().transaction_hash).toMatch(/^0x02/);
+  const added = await page.evaluate(() => (window as unknown as { __added: { chainId: string }[] }).__added);
+  expect(added.map((chain) => chain.chainId)).toEqual(["0x89"]);
+  const switched = await page.evaluate(
+    () => (window as unknown as { __switched: string[] }).__switched,
+  );
+  expect(switched).toContain("0x89");
+
+  // The page now follows the delivery rather than a transfer of its own,
+  // and does not link the origin transaction to this chain's explorer.
+  await expect(page.getByText("Relay is delivering your payment")).toBeVisible();
+  await expect(page.getByText("Delivering", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: /view transaction/i })).toHaveCount(0);
+});
+
+test("the relay option is absent when the deployment does not offer it", async ({ page }) => {
+  await page.goto("/pay/dr_no-relay");
+  await expect(page.getByText("Amount due")).toBeVisible();
+  await expect(page.getByRole("button", { name: /pay from another network/i })).toHaveCount(0);
 });
 
 test("a request pinned to one network offers no choice and signs under that network", async ({

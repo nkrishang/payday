@@ -15,6 +15,7 @@ pub mod payer;
 pub mod payer_verification;
 pub mod payer_wallet;
 mod proof;
+pub mod relay;
 mod routes;
 mod status;
 mod verification;

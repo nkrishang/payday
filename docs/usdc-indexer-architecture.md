@@ -133,7 +133,20 @@ retained with a `late` disposition: it never counts toward the amount, but it
 sits at the address and is queued for return to the payer through
 `Deposit.recover`. A nonzero transfer from any wallet but the deposit request's
 attested payer wallet is credited too, but flags the deposit request
-`likely_unsolicited_at` once, at its chain time.
+`likely_unsolicited_at` once, at its chain time. The exception is a payment
+from another network through Relay: the API records each quote as a
+`relay_intents` row, and once the payer has reported the quote's deposit as
+sent, a transfer for exactly the quoted amount from an unknown sender is
+parked (`payment_observations.relay_parked_at`) instead of flagged. The
+destination chain's worker polls Relay for every `sent` intent; on `success`
+with the attested wallet as depositor it records the fill's hashes and
+attributes the parked transfer (`relay_intent_id`), and on `failure`,
+`refund`, a depositor mismatch, or a day without an answer it unparks the
+transfer into the ordinary flagging path, at the transfer's chain time. A
+fill Relay reports before the transfer is credited is matched by hash at
+credit time. A quote nobody reported as sent shields nothing. The flag is
+never cleared once set, so a `likely_unsolicited` webhook can now follow a
+`deposited` or `settled` one.
 Every nonzero observation also records the block and transaction index of the
 sweep that collected it, so the ledger always says which funds are still at the
 address. If payer identity or compliance policy requires a nonzero sender, make

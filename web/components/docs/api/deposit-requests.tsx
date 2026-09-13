@@ -878,11 +878,14 @@ Content-Length: 31288`,
       summary: "Retrieves the Proof of Payment for a settled request.",
       body: (
         <p>
-          Document version <code>payday.proof.v3</code>: canonical issuance snapshot (with every
+          Document version <code>payday.proof.v4</code>: canonical issuance snapshot (with every
           network offered), attribution hash, payer wallet attestation, salt, the chosen chain,
-          factory, and token, deposit and recovery addresses, credited transfers, settlement
-          transaction hash, and a Payday-signed verification attestation. Verifiable offline; reference implementation{" "}
-          <code>gateway_core::verify_proof</code>. Schema:{" "}
+          factory, and token, deposit and recovery addresses, credited transfers (a transfer
+          Relay&apos;s solver delivered for a payment from another network carries{" "}
+          <code>relay</code>: request id, origin chain, origin transaction, origin sender), settlement
+          transaction hash, and a Payday-signed verification attestation whose{" "}
+          <code>relay_fills</code> vouch for those origins. Verifiable offline; reference
+          implementation <code>gateway_core::verify_proof</code>. Schema:{" "}
           <a href="/docs/proof-of-payment">Proof of Payment</a>.
         </p>
       ),
@@ -894,7 +897,7 @@ Content-Length: 31288`,
         {
           status: 409,
           code: "deposit_sender_mismatch",
-          when: "A credited transfer originated from a wallet other than payer_wallet. No proof is issued.",
+          when: "A credited transfer originated from a wallet other than payer_wallet and is not a Relay delivery attributed to it. No proof is issued.",
         },
       ],
       examples: {
@@ -902,7 +905,7 @@ Content-Length: 31288`,
   -H "Authorization: Bearer $PAYDAY_API_KEY" > proof.json`,
         ts: `const proof = await payday.depositRequests.proof(id);`,
         response: `{
-  "version": "payday.proof.v3",
+  "version": "payday.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": { "schema": "payday.invoice.v3", "canonicalization": "RFC8785", "networks": [ "…" ], "…": "…" },
   "canonicalization": "RFC8785",

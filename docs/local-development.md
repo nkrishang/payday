@@ -463,6 +463,12 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_CCTP_IRIS_URL` — Circle's attestation service the withdrawal relayer
   polls for a bridge leg's burn, default `https://iris-api.circle.com`; the
   local Anvil chains have no `cctp` block, so nothing polls it there
+- `PAYDAY_RELAY_URL` and `PAYDAY_RELAY_API_KEY` — Relay (relay.link), for
+  paying a deposit request from another network; both `gatewayd` (quotes)
+  and `gateway-indexer` (following reported quotes) read them. Unset key:
+  the hosted checkout does not offer it. `just dev` and `just e2e` point
+  them at `scripts/relay-stub.mjs`, a stand-in on port 4020 that quotes a
+  USDC transfer to its solver on the second Anvil and fills it on the first
 - `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
   default 0.05 native tokens
 - `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS

@@ -253,7 +253,7 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("payday.proof.v3");
+  expect(body.version).toBe("payday.proof.v4");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
   expect(body.recovery_address).toBe(body.payer_wallet.address);
   expect(body.payment_id).toBe("dr_seed-settled");

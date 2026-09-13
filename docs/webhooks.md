@@ -51,7 +51,11 @@ that updates the lifecycle row.
 `verification.approved`, `deposit_request.ready`, and `deposit_request.likely_unsolicited`
 are inserted by the same `invoices` table trigger as the lifecycle events, in the
 transaction that first sets `verification_completed_at`, `wallet_bound_at`,
-or `likely_unsolicited_at`.
+or `likely_unsolicited_at`. A transfer from Relay's solver for a cross-chain
+payment the payer reported is held back from that flag until Relay resolves
+the request, so `deposit_request.likely_unsolicited` can arrive after
+`deposit_request.deposited` or `deposit_request.settled` for the same request
+when the request failed or was not the payer's after all.
 
 ## Payload
 

@@ -223,7 +223,12 @@ export default function WebhooksPage() {
             <td>
               <Pill tone="yellow">deposit_request.likely_unsolicited</Pill>
             </td>
-            <td>Finalized funds first arrived from a wallet other than the attested one.</td>
+            <td>
+              Finalized funds first arrived from a wallet other than the attested one. A delivery
+              from another network through Relay is held back from this until Relay resolves the
+              payment, so it can follow <code>deposited</code> or <code>settled</code> when that
+              payment failed or was not the payer&apos;s after all.
+            </td>
           </tr>
           <tr>
             <td>

@@ -109,6 +109,24 @@ describe("checkoutView", () => {
     expect(checkoutView(payment(), open).showWalletStep).toBe(false);
   });
 
+  it("follows a delivery through Relay after the deposit was reported", () => {
+    const relay = {
+      id: "rli_1",
+      status: "sent" as const,
+      origin_chain_id: "137",
+      origin_transaction_hash: "0x02",
+      fill_transaction_hash: null,
+      created_at: "2026-09-01T00:00:00Z",
+    };
+    const view = checkoutView(payment({ relay }), { ...open, pendingTxHash: "0x02" });
+    expect(view.phase).toBe("confirming");
+    expect(view.label).toBe("Delivering");
+    expect(view.title).toBe("Relay is delivering your payment");
+    expect(view.detail).toMatch(/delivers it to Monad/);
+    // A plain transfer confirms as before.
+    expect(checkoutView(payment(), { ...open, pendingTxHash: "0x01" }).label).toBe("Confirming");
+  });
+
   it("asks only for the signature when the merchant pinned the network", () => {
     const [monad] = unboundDepositRequest().networks;
     const view = checkoutView(unboundDepositRequest({ networks: [monad!] }), open);
