@@ -499,9 +499,9 @@ start_minio
 
 # A stand-in for Relay: quotes a USDC transfer to its solver on the second
 # chain and fills it on the first, so the cross-chain flow runs end to end
-# against the real API and indexer. The solver is Anvil account #8.
+# against the real API and indexer. The solver is a fixed key outside Anvil's ten accounts.
 echo "Starting the Relay stand-in"
-RELAY_SOLVER="0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
+RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
 export PAYDAY_RELAY_URL="http://127.0.0.1:4020"
 export PAYDAY_RELAY_API_KEY="local"
 RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT=4020 RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \

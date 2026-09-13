@@ -10,7 +10,7 @@
 // Origin chain: PAYDAY_SECOND_CHAIN_ID at PAYDAY_SECOND_RPC_URL (31338).
 // Destination chain: PAYDAY_CHAIN_ID at PAYDAY_RPC_URL (31337). Both hold
 // the same MockUSDC at RELAY_STUB_USDC; the solver key holds USDC on the
-// destination chain (the suite funds it) and is Anvil account #8.
+// destination chain (the suite funds its USDC; the stub gives it gas with anvil_setBalance) and is a fixed key outside Anvil's ten accounts, which the suite uses as beneficiaries.
 //
 // The quote's one step is a plain USDC `transfer` from the payer to the
 // solver on the origin chain for the quoted input amount. A real quote is
@@ -35,7 +35,7 @@ const API_KEY = process.env.RELAY_STUB_API_KEY ?? "local";
 const USDC = (process.env.RELAY_STUB_USDC ?? "").toLowerCase();
 const SOLVER_KEY =
   process.env.RELAY_STUB_SOLVER_KEY ??
-  "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97";
+  "0x1111111111111111111111111111111111111111111111111111111111111111";
 const DESTINATION = {
   id: Number(process.env.PAYDAY_CHAIN_ID ?? 31337),
   rpc: process.env.PAYDAY_RPC_URL ?? "http://127.0.0.1:8545",
@@ -53,6 +53,8 @@ if (!/^0x[0-9a-f]{40}$/.test(USDC)) {
 
 const solver = cast(["wallet", "address", "--private-key", SOLVER_KEY]).trim();
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+// Gas for the fills: the solver is not one of Anvil's funded accounts.
+rpc(DESTINATION.rpc, "anvil_setBalance", [solver, "0x3635c9adc5dea00000"]);
 
 /** requestId → the quote and what became of it. */
 const requests = new Map();

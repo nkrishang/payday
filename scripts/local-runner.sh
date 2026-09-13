@@ -308,9 +308,9 @@ for rpc_url in "$PAYDAY_RPC_URL" "$PAYDAY_SECOND_RPC_URL"; do
     --rpc-url "$rpc_url" --private-key "$PAYDAY_SIGNER_KEY" --broadcast
 done
 build_chain_registry
-# The Relay stand-in's solver (Anvil account #8) fills from its own USDC on
+# The Relay stand-in's solver (a fixed key outside Anvil's ten accounts) fills from its own USDC on
 # the first chain; the deployer's Bootstrap mint funds it.
-RELAY_SOLVER="0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
+RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
 cast send "$USDC" 'transfer(address,uint256)' "$RELAY_SOLVER" 100000000 \
   --private-key "$PAYDAY_ONBOARDING_PAYER_KEY" --rpc-url "$PAYDAY_RPC_URL" >/dev/null
 prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" \
