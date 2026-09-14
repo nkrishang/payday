@@ -327,7 +327,9 @@ pub async fn authorized_invoice(
     } else {
         None
     };
-    let relay_intent = if content_unlocked && wallet_bound && state.relay.is_some() {
+    let relay_intent = if content_unlocked && wallet_bound {
+        // Existing Relay state stays visible even when the deployment has
+        // no key: only new quoting depends on it.
         state.relay_intents.latest_for_invoice(row.id).await?
     } else {
         None

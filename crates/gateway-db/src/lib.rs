@@ -39,7 +39,7 @@ pub use notifications::{
 pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 pub use relay_intents::{
-    AttributionSource, DbRelayIntent, MarkSent, NewRelayIntent, RelayIntentRepository,
+    DbRelayIntent, FillResolution, MarkSent, NewRelayIntent, RelayIntentRepository,
     RelayIntentStatus, Resolution,
 };
 use sqlx::PgPool;

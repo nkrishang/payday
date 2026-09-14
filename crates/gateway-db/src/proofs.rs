@@ -58,7 +58,7 @@ impl ProofRepository {
                       o.log_index, o.block_number,
                       r.request_id AS relay_request_id,
                       r.origin_chain_id AS relay_origin_chain_id,
-                      r.origin_tx_hash AS relay_origin_tx_hash,
+                      r.verified_origin_tx_hash AS relay_origin_tx_hash,
                       r.payer_wallet AS relay_payer_wallet,
                       r.attribution_source AS relay_attribution_source
                FROM payment_observations o

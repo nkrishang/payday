@@ -260,12 +260,41 @@ impl Indexer {
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), IndexerError> {
         let worker = Arc::new(self);
         let index_loop = Arc::clone(&worker).run_index_loop(shutdown.clone());
-        let sweep_loop = worker.run_sweep_loop(shutdown);
-        tokio::pin!(index_loop, sweep_loop);
+        let sweep_loop = Arc::clone(&worker).run_sweep_loop(shutdown.clone());
+        let relay_loop = worker.run_relay_intent_loop(shutdown);
+        tokio::pin!(index_loop, sweep_loop, relay_loop);
 
         tokio::select! {
             result = &mut index_loop => result,
             () = &mut sweep_loop => Ok(()),
+            () = &mut relay_loop => Ok(()),
+        }
+    }
+
+    /// Follow cross-chain payments on this chain, on a clock of its own:
+    /// Relay's answers can take seconds each, and a payment poller's slowness
+    /// must never delay a sweep. The loop runs even without a Relay key, so
+    /// database cleanup (expiring quotes, failing stale intents, unparking)
+    /// keeps going after the API is gone.
+    async fn run_relay_intent_loop(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
+        let mut interval = tokio::time::interval(self.cfg.poll_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        info!("relay intent worker started");
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // One pass at a time; every error stays inside, the way
+                    // the sweep loop treats its own recoverable failures.
+                    self.relay_intent_housekeeping().await;
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        info!("relay intent worker shutting down");
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -837,9 +866,8 @@ impl Indexer {
         // runs every tick; a relay step is taken only while no sweep batch is
         // in flight, and a sweep batch only while no relay step is.
         self.relay_housekeeping().await?;
-        // Cross-chain payments into this chain: no nonce, no signer, and a
-        // Relay outage must never degrade the sweeper, so errors stay inside.
-        self.relay_intent_housekeeping().await;
+        // Cross-chain payments follow their own loop (`run_relay_intent_loop`);
+        // a Relay outage must never delay the sweeper.
         match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
             Some(batch) if batch.broadcast_at.is_none() => self.broadcast_batch(&batch).await,
             Some(batch) => self.reconcile_batch(batch).await,
@@ -1570,8 +1598,9 @@ pub(crate) mod tests {
         /// The block each consumed authorization's `AuthorizationUsed` event
         /// appears in, so ranges ending before it find nothing.
         pub(crate) authorization_events: HashMap<B256, u64>,
-        /// Signers of transactions the node knows, by hash.
-        pub(crate) senders: HashMap<B256, Address>,
+        /// Token payment receipts the node answers `token_payment_receipt`
+        /// with, by hash: execution plus the `Transfer` logs one token left.
+        pub(crate) token_receipts: HashMap<B256, crate::chain::TokenPaymentReceipt>,
     }
 
     /// The code hash the mock reports for an address it has no override for:
@@ -1770,8 +1799,18 @@ pub(crate) mod tests {
             Ok(PreparedSweepTransaction { hash: tx_hash, raw })
         }
 
-        async fn transaction_sender(&self, tx_hash: B256) -> Result<Option<Address>, ChainError> {
-            Ok(self.state.lock().unwrap().senders.get(&tx_hash).copied())
+        async fn token_payment_receipt(
+            &self,
+            tx_hash: B256,
+            _token: Address,
+        ) -> Result<Option<crate::chain::TokenPaymentReceipt>, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .token_receipts
+                .get(&tx_hash)
+                .cloned())
         }
 
         async fn transaction_receipt(

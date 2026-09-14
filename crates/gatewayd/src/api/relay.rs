@@ -27,8 +27,9 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use chrono::{Duration, Utc};
 use gateway_core::{
-    Invoice, PaymentBinding, RelayIntentId, RelayOriginChainDto, RelayOriginChainsResponse,
-    RelayQuoteResponse, RelayQuoteStepDto, RelayTransactionDto, USDC_DECIMALS, rfc3339,
+    ChainRegistry, Invoice, PaymentBinding, RelayIntentId, RelayOriginChainDto,
+    RelayOriginChainsResponse, RelayQuoteResponse, RelayQuoteStepDto, RelayTransactionDto,
+    USDC_DECIMALS, rfc3339,
 };
 use gateway_db::{MarkSent, NewRelayIntent};
 use gateway_relay::{QuoteRequest, RelayChain, RelayError};
@@ -60,13 +61,12 @@ pub struct SentBody {
     pub transaction_hash: String,
 }
 
-/// The request as the relay routes need it: unlocked, bound, and payable.
-struct Payable {
+/// The request as the relay routes need it: unlocked and bound.
+struct UnlockedBound {
     access: PayerInvoiceAccess,
-    remaining: U256,
 }
 
-impl Payable {
+impl UnlockedBound {
     fn invoice(&self) -> &Invoice {
         &self.access.invoice
     }
@@ -80,7 +80,11 @@ impl Payable {
     }
 }
 
-async fn payable(state: &AppState, id: &str, headers: &HeaderMap) -> Result<Payable, ApiError> {
+async fn unlocked_bound(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<UnlockedBound, ApiError> {
     let access = authorized_invoice(state, id, session_token(headers)).await?;
     if !access.content_unlocked {
         return Err(ApiError::verification_required());
@@ -88,15 +92,33 @@ async fn payable(state: &AppState, id: &str, headers: &HeaderMap) -> Result<Paya
     if access.invoice.binding.is_none() {
         return Err(ApiError::wallet_required());
     }
-    let (remaining, payable) = payment_state(&access.invoice, unix_now());
-    if !payable || remaining.is_zero() {
-        return Err(ApiError::deposit_request_not_payable());
-    }
-    Ok(Payable { access, remaining })
+    Ok(UnlockedBound { access })
 }
 
-fn origin_dto(chain: &RelayChain) -> Option<RelayOriginChainDto> {
+/// The quoting routes additionally need the request payable: money is only
+/// moved for a request that can still take it.
+async fn payable(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(UnlockedBound, U256), ApiError> {
+    let request = unlocked_bound(state, id, headers).await?;
+    let (remaining, is_payable) = payment_state(&request.invoice(), unix_now());
+    if !is_payable || remaining.is_zero() {
+        return Err(ApiError::deposit_request_not_payable());
+    }
+    Ok((request, remaining))
+}
+
+/// A Relay chain is offered as an origin only when this deployment serves it
+/// too: attribution needs the origin chain's own receipt, so a chain whose
+/// USDC is not the one configured here is never offered — and the quote
+/// route rejects it even if a caller bypasses the list.
+fn origin_dto(chain: &RelayChain, registry: &ChainRegistry) -> Option<RelayOriginChainDto> {
     let usdc = chain.usdc()?;
+    if registry.get(chain.id)?.usdc != usdc.address {
+        return None;
+    }
     Some(RelayOriginChainDto {
         chain_id: chain.id.to_string(),
         name: chain.display_name.clone(),
@@ -109,20 +131,21 @@ fn origin_dto(chain: &RelayChain) -> Option<RelayOriginChainDto> {
 }
 
 /// The chains a payer may pay this request from: every chain Relay takes
-/// USDC deposits on, except the request's own.
+/// USDC deposits on that this deployment also serves, except the request's
+/// own.
 pub async fn chains(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<RelayOriginChainsResponse>, ApiError> {
     let relay = state.relay()?;
-    let request = payable(&state, &id, &headers).await?;
+    let request = unlocked_bound(&state, &id, &headers).await?;
     let destination = request.binding().network.chain_id.0;
     let chains = relay.chains().await.map_err(relay_error)?;
     let chains = chains
         .iter()
         .filter(|chain| chain.id != destination)
-        .filter_map(origin_dto)
+        .filter_map(|chain| origin_dto(chain, &state.networks))
         .collect();
     Ok(Json(RelayOriginChainsResponse { chains }))
 }
@@ -136,7 +159,7 @@ pub async fn quote(
     Json(body): Json<QuoteBody>,
 ) -> Result<Json<RelayQuoteResponse>, ApiError> {
     let relay = state.relay()?;
-    let request = payable(&state, &id, &headers).await?;
+    let (request, remaining) = payable(&state, &id, &headers).await?;
     let origin_chain_id: u64 = body.origin_chain_id.trim().parse().map_err(|_| {
         ApiError::invalid_request("origin_chain_id must be a decimal chain id string")
     })?;
@@ -149,7 +172,7 @@ pub async fn quote(
     let origin = chains
         .iter()
         .find(|chain| chain.id == origin_chain_id)
-        .and_then(|chain| origin_dto(chain).map(|dto| (chain, dto)))
+        .and_then(|chain| origin_dto(chain, &state.networks).map(|dto| (chain, dto)))
         .ok_or_else(ApiError::relay_unsupported_origin)?;
     let (origin_chain, origin) = origin;
     let origin_usdc = origin_chain.usdc().expect("origin_dto checked it").address;
@@ -163,14 +186,14 @@ pub async fn quote(
             destination_chain_id: destination.chain_id.0,
             origin_currency: origin_usdc,
             destination_currency: destination.token.0,
-            amount: request.remaining,
+            amount: remaining,
         })
         .await
         .map_err(relay_error)?;
     // The quote must be exactly what was asked: the amount due lands, and
     // every step is a transaction the attested wallet sends on the origin
     // chain. Anything else is a route we do not offer.
-    if quote.amount_out != request.remaining {
+    if quote.amount_out != remaining {
         return Err(ApiError::relay_quote_failed(
             "Relay did not quote the exact amount due",
         ));
@@ -243,25 +266,35 @@ pub async fn quote(
 
 /// The wallet sent the deposit: the intent is `sent` and the indexer follows
 /// it. Answers with the payer view, whose `relay` block now shows it.
+///
+/// Reporting is authorized like any payer view of this request — unlocked
+/// and wallet-bound — but not gated on payability or on Relay being
+/// configured: the report records what already happened, and it may arrive
+/// after the invoice funded, after the quote expired, or after the key was
+/// removed. It is idempotent in identity and hash, so a retry over a flaky
+/// connection is safe.
 pub async fn sent(
     State(state): State<AppState>,
     Path((id, intent)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<SentBody>,
 ) -> Result<Json<gateway_core::PayerDepositRequestResponse>, ApiError> {
-    state.relay()?;
-    let request = payable(&state, &id, &headers).await?;
+    let request = unlocked_bound(&state, &id, &headers).await?;
     let intent_id = RelayIntentId::parse(&intent).ok_or_else(ApiError::relay_intent_not_found)?;
     let transaction_hash = B256::from_str(body.transaction_hash.trim())
         .map_err(|_| ApiError::invalid_request("transaction_hash must be a 32-byte hex hash"))?;
     match state
         .relay_intents
-        .mark_sent(intent_id.0, request.invoice().id.0, transaction_hash)
+        .mark_sent(
+            intent_id.0,
+            request.invoice().id.0,
+            request.binding().payer_wallet,
+            transaction_hash,
+        )
         .await?
     {
         MarkSent::Sent => {}
-        MarkSent::NotQuoted => return Err(ApiError::relay_intent_not_quoted()),
-        MarkSent::TransactionClaimed => return Err(ApiError::relay_transaction_claimed()),
+        MarkSent::HashConflict => return Err(ApiError::relay_report_conflict()),
         MarkSent::NotFound => return Err(ApiError::relay_intent_not_found()),
     }
     let access = authorized_invoice(&state, &id, session_token(&headers)).await?;

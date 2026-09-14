@@ -461,10 +461,9 @@ mod tests {
     /// The WithdrawalForwarder the test deployment's bridge legs pay.
     const TEST_FORWARDER: Address = Address::repeat_byte(0xF0);
 
-    /// The deployment under test offers two networks through one factory:
-    /// chain 1 with the zero token, chain 2 with another.
-    fn test_networks(factory: Address) -> Arc<gateway_core::ChainRegistry> {
-        let chain = |chain_id: u64, usdc: Address| gateway_core::ChainConfig {
+    /// One chain of the test deployment.
+    fn test_chain(chain_id: u64, usdc: Address, factory: Address) -> gateway_core::ChainConfig {
+        gateway_core::ChainConfig {
             chain_id,
             usdc,
             factory,
@@ -477,7 +476,7 @@ mod tests {
             block_time_ms: 1000,
             log_range_size: 100,
             explorer_base_url: None,
-            // CCTP on both chains, so withdrawals can bridge between them;
+            // CCTP on every chain, so withdrawals can bridge between them;
             // the domains are Monad's and Base's, the contracts stand-ins.
             cctp: Some(gateway_core::CctpConfig {
                 domain: if chain_id == 1 { 15 } else { 6 },
@@ -486,14 +485,33 @@ mod tests {
                 forwarder: TEST_FORWARDER,
                 forwarder_code_hash: alloy_primitives::B256::repeat_byte(0xC3),
             }),
-        };
-        Arc::new(
-            gateway_core::ChainRegistry::new(vec![
-                chain(1, Address::ZERO),
-                chain(2, Address::repeat_byte(0x02)),
-            ])
-            .unwrap(),
-        )
+        }
+    }
+
+    /// The deployment under test offers two networks through one factory:
+    /// chain 1 with the zero token, chain 2 with another.
+    fn test_networks(factory: Address) -> Arc<gateway_core::ChainRegistry> {
+        test_networks_on(vec![
+            test_chain(1, Address::ZERO, factory),
+            test_chain(2, Address::repeat_byte(0x02), factory),
+        ])
+    }
+
+    /// The deployment's networks plus the chain payers pay from through
+    /// Relay: the gateway can only verify a receipt on a chain it serves,
+    /// so an origin is offered only when it is one of them.
+    fn test_networks_with_relay_origin(factory: Address) -> Arc<gateway_core::ChainRegistry> {
+        test_networks_on(vec![
+            test_chain(1, Address::ZERO, factory),
+            test_chain(2, Address::repeat_byte(0x02), factory),
+            test_chain(RELAY_ORIGIN, relay_origin_usdc(), factory),
+        ])
+    }
+
+    fn test_networks_on(
+        chains: Vec<gateway_core::ChainConfig>,
+    ) -> Arc<gateway_core::ChainRegistry> {
+        Arc::new(gateway_core::ChainRegistry::new(chains).unwrap())
     }
 
     /// The router plus the memory bucket behind it, so a test can play the
@@ -509,14 +527,13 @@ mod tests {
         pool: PgPool,
         accounts: AccountRepository,
         merchant_verifier: Option<auth::PrivyVerifier>,
-        factory: Address,
+        networks: Arc<gateway_core::ChainRegistry>,
         payer_verification: Option<PayerVerification>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
         relay: Option<Arc<dyn gateway_relay::RelayApi>>,
     ) -> (AppState, Arc<MemoryObjectStorage>, Arc<FakeChainReader>) {
         let storage = Arc::new(MemoryObjectStorage::default());
         let store = AttachmentStore::new(storage.clone(), Duration::from_secs(300));
-        let networks = test_networks(factory);
         let chain = Arc::new(FakeChainReader::new(&networks));
         let state = AppState::new(
             InvoiceRepository::new(pool),
@@ -627,13 +644,43 @@ mod tests {
         payer_verification: Option<PayerVerification>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
     ) -> TestApp {
+        build_on(
+            pool,
+            merchant_verifier,
+            test_networks(factory),
+            payer_verification,
+            pregenerated_wallets,
+        )
+        .await
+    }
+
+    /// The deployment with the Relay origin chain among the served
+    /// networks, as a gateway quoting routes from another chain must be.
+    async fn build_relay(pool: PgPool) -> TestApp {
+        build_on(
+            pool,
+            None,
+            test_networks_with_relay_origin(Address::ZERO),
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn build_on(
+        pool: PgPool,
+        merchant_verifier: Option<auth::PrivyVerifier>,
+        networks: Arc<gateway_core::ChainRegistry>,
+        payer_verification: Option<PayerVerification>,
+        pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
+    ) -> TestApp {
         let accounts = AccountRepository::new(pool.clone());
         provision_test_account(&accounts).await;
         let (state, storage, chain) = test_state(
             pool,
             accounts,
             merchant_verifier,
-            factory,
+            networks,
             payer_verification,
             pregenerated_wallets,
             Some(Arc::new(FakeRelay::default()) as Arc<dyn gateway_relay::RelayApi>),
@@ -2280,7 +2327,7 @@ mod tests {
     /// vouches for and still verifies offline.
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn a_payer_may_pay_from_another_chain_through_relay(pool: PgPool) {
-        let app = app(pool.clone()).await;
+        let app = build_relay(pool.clone()).await.router;
         let created = json_body(
             app.clone()
                 .oneshot(create_request(KEY, "relay", &valid_body()))
@@ -2459,11 +2506,9 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(again.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            json_body(again).await["error"]["code"],
-            "relay_intent_not_quoted"
-        );
+        // Reporting the same transaction again is idempotent: a retry over
+        // a flaky connection must not error, let alone pay twice.
+        assert_eq!(again.status(), StatusCode::OK);
         let unknown = app
             .clone()
             .oneshot(payer_post(
@@ -2480,13 +2525,7 @@ mod tests {
         let fill = alloy_primitives::B256::repeat_byte(0xF1);
         let solver = Address::repeat_byte(0x50);
         gateway_db::RelayIntentRepository::new(pool.clone())
-            .resolve_filled(
-                intent.id,
-                &[fill],
-                Some(origin_tx),
-                "success",
-                gateway_db::AttributionSource::RelayApi,
-            )
+            .resolve_filled(intent.id, &[fill], origin_tx, "success")
             .await
             .unwrap();
         sqlx::query(
@@ -2555,7 +2594,7 @@ mod tests {
         assert_eq!(relay.origin_sender, payer_wallet.to_checksum(None));
         assert_eq!(relay.origin_chain_id, "8453");
         assert_eq!(relay.origin_transaction_hash, origin_tx.to_string());
-        assert_eq!(relay.attribution_source, "relay_api");
+        assert_eq!(relay.attribution_source, "receipt");
         assert_eq!(proof.verification.payload.relay_fills.len(), 1);
         assert_eq!(
             proof.verification.payload.relay_fills[0].transaction_hash,
@@ -2579,7 +2618,15 @@ mod tests {
     async fn relay_is_unavailable_without_a_key(pool: PgPool) {
         let accounts = AccountRepository::new(pool.clone());
         provision_test_account(&accounts).await;
-        let (state, _, _) = test_state(pool, accounts, None, Address::ZERO, None, None, None);
+        let (state, _, _) = test_state(
+            pool,
+            accounts,
+            None,
+            test_networks(Address::ZERO),
+            None,
+            None,
+            None,
+        );
         let app = router(state);
         let created = json_body(
             app.clone()

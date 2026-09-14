@@ -547,21 +547,14 @@ impl ApiError {
         }
     }
 
-    /// The quote was already reported as sent, or expired unsent.
-    pub fn relay_intent_not_quoted() -> Self {
+    /// The report names a different transaction than the one already
+    /// recorded for that quote. Asking for a new quote cannot help: the
+    /// recorded one stands.
+    pub fn relay_report_conflict() -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            code: "relay_intent_not_quoted",
-            message: "This quote can no longer be reported as sent; ask for a new one".into(),
-        }
-    }
-
-    /// Another quote already claimed that origin transaction.
-    pub fn relay_transaction_claimed() -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "relay_transaction_claimed",
-            message: "That transaction already pays for another quote".into(),
+            code: "relay_report_conflict",
+            message: "This quote already recorded a different origin transaction".into(),
         }
     }
 

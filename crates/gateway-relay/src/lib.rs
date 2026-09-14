@@ -21,8 +21,10 @@
 //!   transactions to send, in order (an ERC-20 `approve`, then the deposit).
 //! - `GET /intents/status/v3?requestId=`: the request's state and the fill's
 //!   destination transaction hashes.
-//! - `GET /requests/v3?id=`: the request record, which names the origin
-//!   depositor. It is what lets the attribution say who spent the funds.
+//! - `GET /requests/v3?id=`: the request record, whose chain-tagged
+//!   transaction lists say which origin transactions deposited and which
+//!   destination transactions filled. It tells the indexer where to look
+//!   for evidence; it never says who to credit.
 
 use alloy_primitives::{Address, B256, Bytes, U256, hex};
 use async_trait::async_trait;
@@ -173,12 +175,16 @@ impl IntentState {
 }
 
 /// `GET /requests/v3?id=`: the parts of the record attribution needs.
+///
+/// Nothing here establishes who spent the funds — Relay's record of a
+/// depositor is whatever the caller supplied, and a hash Relay saw is not a
+/// sender. The lists say which transactions to read the evidence from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayRequest {
     pub status: String,
-    /// The origin sender, as Relay indexed the deposit.
-    pub depositor: Option<Address>,
+    /// `(chain id, hash)` of the request's successful origin transactions.
     pub in_txs: Vec<(u64, B256)>,
+    /// `(chain id, hash)` of the request's successful destination transactions.
     pub out_txs: Vec<(u64, B256)>,
 }
 
@@ -290,7 +296,7 @@ impl RelayApi for RelayClient {
                     .query(&[("id", request_id.to_string())]),
             )
             .await?;
-        parse_request(&body)
+        parse_request(&body, request_id)
     }
 }
 
@@ -511,46 +517,73 @@ pub fn parse_status(body: &str) -> Result<IntentStatus, RelayError> {
     })
 }
 
-pub fn parse_request(body: &str) -> Result<Option<RelayRequest>, RelayError> {
+/// The request record for exactly `expected_request_id`: `None` when Relay
+/// holds none yet, an error when the answer is for some other request or
+/// names it more than once. The record's own `id` is checked so a seam or a
+/// redirected answer cannot hand one request's evidence to another.
+pub fn parse_request(
+    body: &str,
+    expected_request_id: B256,
+) -> Result<Option<RelayRequest>, RelayError> {
     let value: Value =
         serde_json::from_str(body).map_err(|error| RelayError::Malformed(error.to_string()))?;
-    let Some(record) = value["requests"]
+    let requests = value["requests"]
         .as_array()
-        .and_then(|requests| requests.first())
-    else {
+        .ok_or_else(|| RelayError::Malformed("requests is not an array".into()))?;
+    if requests.is_empty() {
         return Ok(None);
-    };
-    let status = record["status"].as_str().unwrap_or("").to_owned();
-    let depositor = record["protocol"]["deposit"]["origin"]["depositor"]
-        .as_str()
-        .or_else(|| record["user"].as_str())
-        .and_then(|text| text.parse::<Address>().ok());
-    let txs = |field: &str| -> Result<Vec<(u64, B256)>, RelayError> {
-        record["data"][field]
-            .as_array()
-            .map(|txs| {
-                txs.iter()
-                    .filter(|tx| {
-                        tx["status"]
-                            .as_str()
-                            .is_none_or(|status| status == "success")
+    }
+    let wanted = expected_request_id.to_string();
+    let matching: Vec<&Value> = requests
+        .iter()
+        .filter(|record| record["id"].as_str() == Some(wanted.as_str()))
+        .collect();
+    match matching.as_slice() {
+        [record] => {
+            let status = record["status"].as_str().unwrap_or("").to_owned();
+            let txs = |field: &str| -> Result<Vec<(u64, B256)>, RelayError> {
+                record["data"][field]
+                    .as_array()
+                    .map(|txs| {
+                        txs.iter()
+                            .filter(|tx| {
+                                tx["status"]
+                                    .as_str()
+                                    .is_none_or(|status| status == "success")
+                            })
+                            .map(|tx| {
+                                // v3 names the hash `txHash`; keep reading
+                                // the v2 field too, for the stub and older
+                                // captures.
+                                let hash = tx["txHash"]
+                                    .as_str()
+                                    .or_else(|| tx["hash"].as_str())
+                                    .ok_or_else(|| {
+                                        RelayError::Malformed(format!("{field} entry has no hash"))
+                                    })?;
+                                Ok((
+                                    u64_of("chainId", &tx["chainId"])?,
+                                    hash.parse::<B256>().map_err(|_| {
+                                        RelayError::Malformed(format!(
+                                            "{field} hash is not a 32-byte hex word"
+                                        ))
+                                    })?,
+                                ))
+                            })
+                            .collect()
                     })
-                    .map(|tx| {
-                        Ok((
-                            u64_of("chainId", &tx["chainId"])?,
-                            word("hash", &tx["hash"])?,
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_else(|| Ok(Vec::new()))
-    };
-    Ok(Some(RelayRequest {
-        status,
-        depositor,
-        in_txs: txs("inTxs")?,
-        out_txs: txs("outTxs")?,
-    }))
+                    .unwrap_or_else(|| Ok(Vec::new()))
+            };
+            Ok(Some(RelayRequest {
+                status,
+                in_txs: txs("inTxs")?,
+                out_txs: txs("outTxs")?,
+            }))
+        }
+        _ => Err(RelayError::Malformed(format!(
+            "request record is not exactly {wanted}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -647,24 +680,35 @@ mod tests {
     }
 
     #[test]
-    fn request_names_the_depositor_and_the_fill() {
-        let body = r#"{"requests":[{"id":"0x17","status":"success","user":"0x1884c66fd0eb29e356e6b5d455048bca46bb690f","recipient":"0x1884c66fd0eb29e356e6b5d455048bca46bb690f","data":{"inTxs":[{"hash":"0xd988132f8d94619ad1d94fa70215dec16dca069db50cbe67ce8ba193e377f19f","chainId":8453,"status":"success"}],"outTxs":[{"hash":"0x5f1778ef72420fa2d04538b539c4ff55f12a49d34268c3086652af2270cace9f","chainId":143,"status":"success"},{"hash":"0x5f1778ef72420fa2d04538b539c4ff55f12a49d34268c3086652af2270cace9e","chainId":143,"status":"pending"}]},"protocol":{"deposit":{"origin":{"depositor":"0x1884c66fd0eb29e356e6b5d455048bca46bb690f","chainId":8453}}}}]}"#;
-        let request = parse_request(body).unwrap().unwrap();
-        assert_eq!(request.status, "success");
-        assert_eq!(
-            request.depositor,
-            Some(
-                "0x1884c66fd0eb29e356e6b5d455048bca46bb690f"
-                    .parse()
-                    .unwrap()
-            )
+    fn request_names_the_transactions_on_their_chains() {
+        let id = "0x1789270142d0cafb3e82a8bce00a1efd499f233705cef1284b3688cd205cc788";
+        let body = format!(
+            r#"{{"requests":[{{"id":"{id}","status":"success","user":"0x1884c66fd0eb29e356e6b5d455048bca46bb690f","recipient":"0x1884c66fd0eb29e356e6b5d455048bca46bb690f","data":{{"inTxs":[{{"txHash":"0xd988132f8d94619ad1d94fa70215dec16dca069db50cbe67ce8ba193e377f19f","chainId":8453,"status":"success"}}],"outTxs":[{{"txHash":"0x5f1778ef72420fa2d04538b539c4ff55f12a49d34268c3086652af2270cace9f","chainId":143,"status":"success"}},{{"txHash":"0x5f1778ef72420fa2d04538b539c4ff55f12a49d34268c3086652af2270cace9e","chainId":143,"status":"pending"}}]}},"protocol":{{"deposit":{{"origin":{{"depositor":"0x0000000000000000000000000000000000000099","chainId":8453}}}}}}}}]}}"#
         );
+        let request = parse_request(&body, id.parse().unwrap()).unwrap().unwrap();
+        assert_eq!(request.status, "success");
+        // Whatever Relay names a depositor, the record only says where to
+        // look; attribution never reads a depositor.
         assert_eq!(request.in_txs.len(), 1);
         assert_eq!(request.in_txs[0].0, 8453);
         // Only successful destination transactions count as the fill.
         assert_eq!(request.out_txs.len(), 1);
         assert_eq!(request.out_txs[0].0, 143);
-        assert_eq!(parse_request(r#"{"requests":[]}"#).unwrap(), None);
+        // The legacy v2 field name still parses.
+        let legacy = format!(
+            r#"{{"requests":[{{"id":"{id}","status":"success","data":{{"inTxs":[{{"hash":"0xd988132f8d94619ad1d94fa70215dec16dca069db50cbe67ce8ba193e377f19f","chainId":8453}}]}}}}]}}"#
+        );
+        let request = parse_request(&legacy, id.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.in_txs.len(), 1);
+        assert_eq!(
+            parse_request(r#"{"requests":[]}"#, id.parse().unwrap()).unwrap(),
+            None
+        );
+        // A record for another request is not this one's evidence.
+        let other = r#"{"requests":[{"id":"0x9999","status":"success","data":{}}]}"#;
+        assert!(parse_request(other, id.parse().unwrap()).is_err());
     }
 
     #[test]

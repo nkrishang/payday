@@ -912,7 +912,7 @@ impl InvoiceRepository {
                       o.collected_at_block IS NOT NULL AS collected,
                       r.request_id AS relay_request_id,
                       r.origin_chain_id AS relay_origin_chain_id,
-                      r.origin_tx_hash AS relay_origin_tx_hash
+                      r.verified_origin_tx_hash AS relay_origin_tx_hash
                FROM payment_observations o
                JOIN invoices i ON i.id = o.invoice_id
                LEFT JOIN relay_intents r ON r.id = o.relay_intent_id AND r.status = 'filled'
@@ -1276,16 +1276,21 @@ impl InvoiceRepository {
             // Who sent it. A transfer from the attested wallet is the
             // payer's. One from anywhere else is the payer's too when Relay
             // made it for an intent of theirs: outright when the intent is
-            // already filled and names this transaction, provisionally
-            // (parked, not flagged) when an intent the payer reported as
-            // sent is still pending and the amount is the quoted one. A
-            // quote nobody sent explains nothing.
+            // already filled and this exact log is the quoted output it
+            // paid for, provisionally (parked, not flagged) when an intent
+            // the payer reported as sent is still pending and the amount is
+            // the quoted one. A transaction hash names a transaction, not a
+            // transfer: a fill only explains the log for its exact quoted
+            // amount, never the dust or an unrelated transfer in the same
+            // transaction. A quote nobody sent explains nothing.
             let attribution = if observation.sender.as_slice() == credit.payer_wallet {
                 Attribution::Payer
             } else if zero {
                 Attribution::Foreign
             } else if let Some(filled) = credit.relay.iter().find(|intent| {
                 intent.status == "filled"
+                    && U256::from_str_radix(&intent.quoted_out_amount, 10)
+                        .is_ok_and(|quoted| quoted == observation.amount)
                     && intent
                         .fill_tx_hashes
                         .iter()

@@ -448,6 +448,27 @@ pub struct TransactionOutcome {
     pub block_hash: B256,
 }
 
+/// One ERC-20 `Transfer` log a transaction emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenTransfer {
+    pub log_index: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub amount: U256,
+}
+
+/// A transaction's execution and the `Transfer` logs one token emitted in
+/// it: the evidence a cross-chain payment's origin side is judged on. The
+/// transaction's signer plus a debit log from the payer's own address is
+/// what proves the wallet spent the funds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenPaymentReceipt {
+    pub transaction_hash: B256,
+    pub sender: Address,
+    pub outcome: TransactionOutcome,
+    pub transfers: Vec<TokenTransfer>,
+}
+
 /// An exact signed helper transaction. Persist this before broadcasting it so
 /// a restart can safely resend the same nonce, calldata, fees, and signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -559,9 +580,15 @@ pub trait ChainClient: Send + Sync {
     ) -> Result<Option<TransactionOutcome>, ChainError>;
 
     /// The account that signed a transaction, or `None` while the node does
-    /// not know it. A cross-chain payment's origin transaction is verified
-    /// through this when its chain is one this deployment serves.
-    async fn transaction_sender(&self, tx_hash: B256) -> Result<Option<Address>, ChainError>;
+    /// not know it, with the transaction's execution and the `Transfer`
+    /// logs `token` emitted in it. A cross-chain payment's origin payment
+    /// is verified through this when its chain is one this deployment
+    /// serves: the signer is who sent it, and the logs are what moved.
+    async fn token_payment_receipt(
+        &self,
+        tx_hash: B256,
+        token: Address,
+    ) -> Result<Option<TokenPaymentReceipt>, ChainError>;
 
     /// An `eth_call` at the `finalized` block; the caller decodes the output.
     /// Withdrawal reconciliation reads through it: a competitor's transaction
@@ -1209,14 +1236,75 @@ impl ChainClient for AlloyChainClient {
         }))
     }
 
-    async fn transaction_sender(&self, tx_hash: B256) -> Result<Option<Address>, ChainError> {
+    async fn token_payment_receipt(
+        &self,
+        tx_hash: B256,
+        token: Address,
+    ) -> Result<Option<TokenPaymentReceipt>, ChainError> {
         self.pacer.acquire().await;
         let transaction = self
             .provider
             .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|error| ChainError::rpc("eth_getTransactionByHash", error))?;
-        Ok(transaction.map(|transaction| transaction.inner.signer()))
+        let Some(transaction) = transaction else {
+            return Ok(None);
+        };
+        let sender = transaction.inner.signer();
+        self.pacer.acquire().await;
+        let receipt = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionReceipt", error))?;
+        let Some(receipt) = receipt else {
+            return Ok(None);
+        };
+        let block = receipt
+            .block_number
+            .ok_or_else(|| ChainError::Transient("receipt has no block number".to_string()))?;
+        let block_hash = receipt
+            .block_hash
+            .ok_or_else(|| ChainError::Transient("receipt has no block hash".to_string()))?;
+        let outcome = TransactionOutcome {
+            succeeded: receipt.status(),
+            block,
+            block_hash,
+        };
+        // Every `Transfer` the requested token emitted in this transaction,
+        // decoded like `usdc_transfers` decodes its logs: a malformed one is
+        // a node problem, not an empty answer.
+        let signature = keccak256("Transfer(address,address,uint256)");
+        let mut transfers = Vec::new();
+        for log in receipt.inner.logs() {
+            if log.address() != token {
+                continue;
+            }
+            let topics = log.topics();
+            if topics.len() != 3 || topics[0] != signature {
+                continue;
+            }
+            let data = &log.inner.data.data;
+            if data.len() != 32 {
+                return Err(ChainError::Transient(
+                    "node returned a token Transfer with invalid amount data".to_string(),
+                ));
+            }
+            transfers.push(TokenTransfer {
+                log_index: log.log_index.ok_or_else(|| {
+                    ChainError::Transient("token Transfer missing log index".to_string())
+                })?,
+                sender: Address::from_word(topics[1]),
+                recipient: Address::from_word(topics[2]),
+                amount: U256::from_be_slice(data),
+            });
+        }
+        Ok(Some(TokenPaymentReceipt {
+            transaction_hash: tx_hash,
+            sender,
+            outcome,
+            transfers,
+        }))
     }
 
     async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {
