@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { lockedDepositRequest, merchantSessionDepositRequest, payment, unboundDepositRequest } from "@/test/fixtures";
 import { checkoutView, isTerminalStatus, readyDepositRequest, unlockedDepositRequest } from "./checkout-state";
 
-const open = { secondsRemaining: 3_600, pendingTxHash: null };
+const open = { secondsRemaining: 3_600, pendingPayment: null };
 
 describe("checkoutView", () => {
   it("asks for the full amount while nothing has arrived", () => {
@@ -43,13 +43,13 @@ describe("checkoutView", () => {
   });
 
   it("waits for finality after this browser sends a transfer", () => {
-    const view = checkoutView(payment(), { ...open, pendingTxHash: "0xabc" });
+    const view = checkoutView(payment(), { ...open, pendingPayment: { kind: "direct", hash: "0xabc" } });
     expect(view.phase).toBe("confirming");
     expect(view.showInstructions).toBe(false);
   });
 
   it("puts the deadline ahead of a pending transfer", () => {
-    const view = checkoutView(payment(), { secondsRemaining: 0, pendingTxHash: "0xabc" });
+    const view = checkoutView(payment(), { secondsRemaining: 0, pendingPayment: { kind: "direct", hash: "0xabc" } });
     expect(view.phase).toBe("closing");
   });
 
@@ -118,13 +118,29 @@ describe("checkoutView", () => {
       fill_transaction_hash: null,
       created_at: "2026-09-01T00:00:00Z",
     };
-    const view = checkoutView(payment({ relay }), { ...open, pendingTxHash: "0x02" });
+    const pendingPayment = { kind: "relay" as const, intentId: "rli_1", originChainId: "137", hash: "0x02" };
+    const view = checkoutView(payment({ relay }), { ...open, pendingPayment });
     expect(view.phase).toBe("confirming");
     expect(view.label).toBe("Delivering");
     expect(view.title).toBe("Relay is delivering your payment");
     expect(view.detail).toMatch(/delivers it to Monad/);
     // A plain transfer confirms as before.
-    expect(checkoutView(payment(), { ...open, pendingTxHash: "0x01" }).label).toBe("Confirming");
+    expect(checkoutView(payment(), { ...open, pendingPayment: { kind: "direct", hash: "0x01" } }).label).toBe("Confirming");
+  });
+
+  it("returns to payment with a warning when a broadcast Relay route fails or refunds", () => {
+    const pendingPayment = { kind: "relay" as const, intentId: "rli_1", originChainId: "137", hash: "0x02" };
+    for (const status of ["failed", "refunded"] as const) {
+      const relay = {
+        id: "rli_1", status, origin_chain_id: "137", origin_transaction_hash: "0x02",
+        fill_transaction_hash: null, created_at: "2026-09-01T00:00:00Z",
+      };
+      const view = checkoutView(payment({ relay }), { ...open, pendingPayment });
+      expect(view.phase, status).toBe("awaiting");
+      expect(view.tone, status).toBe("warning");
+      expect(view.showInstructions, status).toBe(true);
+      expect(view.detail, status).toMatch(/funds are coming back/);
+    }
   });
 
   it("asks only for the signature when the merchant pinned the network", () => {
@@ -227,10 +243,10 @@ describe("checkoutView for a gated deposit request", () => {
   });
 
   it("keeps the lock when the countdown ends or a transfer is pending", () => {
-    expect(checkoutView(lockedDepositRequest(), { secondsRemaining: 0, pendingTxHash: null }).phase).toBe(
+    expect(checkoutView(lockedDepositRequest(), { secondsRemaining: 0, pendingPayment: null }).phase).toBe(
       "verification_required",
     );
-    expect(checkoutView(lockedDepositRequest(), { ...open, pendingTxHash: "0xabc" }).phase).toBe(
+    expect(checkoutView(lockedDepositRequest(), { ...open, pendingPayment: { kind: "direct", hash: "0xabc" } }).phase).toBe(
       "verification_required",
     );
   });

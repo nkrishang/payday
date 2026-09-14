@@ -1179,12 +1179,18 @@ async function payer(req, res, url) {
   if (relaySent) {
     const quoted = relayQuotes.get(relaySent[1]);
     if (!quoted || quoted.id !== id) return fail(res, 404, "relay_intent_not_found", "No such quote");
-    if (quoted.sent) return fail(res, 409, "relay_intent_not_quoted", "Already reported");
     const body = await readJson(req);
+    if (quoted.sent) {
+      if (quoted.hash !== body.transaction_hash) {
+        return fail(res, 409, "relay_report_conflict", "A different transaction was already reported");
+      }
+      return send(res, 200, { ...payment, relay: relayFollowing.get(id) });
+    }
     if (!/^0x[0-9a-fA-F]{64}$/.test(String(body.transaction_hash ?? ""))) {
       return fail(res, 400, "invalid_request", "transaction_hash must be a 32-byte hex hash");
     }
     quoted.sent = true;
+    quoted.hash = body.transaction_hash;
     relayFollowing.set(id, {
       id: relaySent[1],
       status: "sent",

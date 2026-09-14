@@ -98,7 +98,7 @@ function CheckoutBody({
   // so a gated deposit request unlocks here after verification and stays unlocked
   // across a reload; it never reaches the server-rendered page.
   const [payerSession, setPayerSession] = usePayerSession(initial.id);
-  const { payment, receivedAt, reconnecting, pendingTxHash, markSent, refresh } = useDepositRequest(
+  const { payment, receivedAt, reconnecting, pendingPayment, markSent, refresh } = useDepositRequest(
     initial,
     payerSession,
   );
@@ -140,7 +140,7 @@ function CheckoutBody({
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
   const view = checkoutView(payment, {
     secondsRemaining,
-    pendingTxHash,
+    pendingPayment,
     emailCodeSent,
     exchangingClientSecret: clientSecretStatus === "exchanging",
   });
@@ -255,7 +255,7 @@ function CheckoutBody({
               </div>
             </section>
           ) : (
-            <Resolved payment={unlocked} view={view} pendingTxHash={pendingTxHash} />
+            <Resolved payment={unlocked} view={view} pendingPayment={pendingPayment} />
           )}
         </>
       )}

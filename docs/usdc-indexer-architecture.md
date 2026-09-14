@@ -137,16 +137,23 @@ attested payer wallet is credited too, but flags the deposit request
 from another network through Relay: the API records each quote as a
 `relay_intents` row, and once the payer has reported the quote's deposit as
 sent, a transfer for exactly the quoted amount from an unknown sender is
-parked (`payment_observations.relay_parked_at`) instead of flagged. The
-destination chain's worker polls Relay for every `sent` intent; on `success`
-with the attested wallet as depositor it records the fill's hashes and
-attributes the parked transfer (`relay_intent_id`), and on `failure`,
-`refund`, a depositor mismatch, or a day without an answer it unparks the
+parked (`payment_observations.relay_parked_at`) instead of flagged. Only a
+quote whose origin chain this deployment serves is followed: attribution
+reads the chain, so an intent from an unserved chain is deferred and never
+attributes. For a `sent` intent the destination chain's worker polls Relay,
+and on `success` it verifies the origin transaction on the origin chain —
+a succeeded receipt whose sender is the attested wallet and whose USDC
+`Transfer` log debited that wallet by exactly the quoted amount. The
+verified hash is kept on the intent (`verified_origin_tx_hash`, unique per
+origin chain) and the parked transfer is attributed (`relay_intent_id`,
+`attribution_source: receipt`); anything else Relay's answer could claim —
+a depositor name, a status hash — is never evidence. On `failure`,
+`refund`, or a day without a verified receipt the worker unparks the
 transfer into the ordinary flagging path, at the transfer's chain time. A
-fill Relay reports before the transfer is credited is matched by hash at
-credit time. A quote nobody reported as sent shields nothing. The flag is
-never cleared once set, so a `likely_unsolicited` webhook can now follow a
-`deposited` or `settled` one.
+fill Relay reports before the transfer is credited is matched by exact
+quoted amount at credit time. A quote nobody reported as sent shields
+nothing. The flag is never cleared once set, so a `likely_unsolicited`
+webhook can now follow a `deposited` or `settled` one.
 Every nonzero observation also records the block and transaction index of the
 sweep that collected it, so the ledger always says which funds are still at the
 address. If payer identity or compliance policy requires a nonzero sender, make

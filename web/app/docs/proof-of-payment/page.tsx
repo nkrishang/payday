@@ -238,9 +238,9 @@ export default function ProofPage() {
             Verify the signature over the <code>verification.payload</code> against Payday&apos;s
             published signer, and that the payload&apos;s hash, chain, address, wallet, and nonce
             match the rest of the proof. Its <code>relay_fills</code> are where Payday vouches that
-            it verified who sent a relayed transfer&apos;s origin transaction (
-            <code>attribution_source</code>: <code>receipt</code> read from a chain Payday serves,
-            or <code>relay_api</code> from Relay&apos;s record of the depositor).
+            it verified who sent a relayed transfer&apos;s origin transaction: every attribution is
+            an <code>attribution_source</code> of <code>receipt</code>, read from the origin
+            chain&apos;s own records on a network Payday serves — never from Relay&apos;s word.
           </p>
         </Step>
       </Steps>

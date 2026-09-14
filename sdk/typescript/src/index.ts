@@ -642,8 +642,8 @@ export interface RelayAttribution {
   origin_transaction_hash: string;
   /** Always the attested wallet. */
   origin_sender: string;
-  /** `receipt` (read from a chain Payday serves) or `relay_api` (Relay's record of the depositor). */
-  attribution_source: "receipt" | "relay_api";
+  /** Attribution verified from an origin-chain transaction receipt. */
+  attribution_source: "receipt";
 }
 
 /** A relayed transfer as the attestation vouches for it. */
@@ -1455,9 +1455,9 @@ export class PaydayPayerClient {
         { method: "POST", body: { origin_chain_id: originChainId }, ...payerOptions(options) },
       ),
     /**
-     * The wallet sent the quote's deposit: report its hash, once. Answers the
-     * payer view with `relay.status` `sent`; `409 relay_intent_not_quoted`
-     * for a quote already reported or expired.
+     * The wallet sent the quote's deposit: report its hash. Late and repeated
+     * reports are safe. Answers the payer view with `relay.status` `sent`;
+     * `409 relay_report_conflict` when the report conflicts with an existing one.
      */
     sent: (id: string, quoteId: string, transactionHash: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<PayerDepositRequest> =>
       request<PayerDepositRequest>(

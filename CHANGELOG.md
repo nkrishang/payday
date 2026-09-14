@@ -48,13 +48,22 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   address on the request's chain. The quote is made by the API, which
   pins the sender, the recipient, and the amount, and holds the Relay key
   (`PAYDAY_RELAY_API_KEY`; unset leaves the option off and the routes
-  answering `404 relay_unavailable`). The indexer follows each reported
-  quote (`relay_intents`, migration 0008): a transfer from Relay's solver
-  for a quote the payer reported as sent is parked rather than flagged as
-  likely unsolicited, and once Relay reports the fill with the attested
-  wallet as depositor it is attributed to the payer; a failed or refunded
-  quote hands it back to the flagging path, so a `likely_unsolicited`
-  event may now follow a `deposited` or `settled` one. The payer view
+  answering `404 relay_unavailable`). Only chains the deployment serves are
+  offered as origins: attribution verifies the origin transaction's receipt
+  on the origin chain itself, so a chain whose receipts Payday cannot read
+  is never quoted. The indexer follows each reported quote (`relay_intents`,
+  migrations 0008 and 0009): a transfer from Relay's solver for a quote the
+  payer reported as sent is parked rather than flagged as likely
+  unsolicited, and once the worker has verified an origin receipt whose
+  sender is the attested wallet and whose `Transfer` log debited it by
+  exactly the quoted amount, it is attributed to the payer
+  (`verified_origin_tx_hash`, `attribution_source: receipt`; Relay's own
+  record of the depositor is never evidence); a failed or refunded quote
+  hands it back to the flagging path, so a `likely_unsolicited` event may
+  now follow a `deposited` or `settled` one. The report endpoint is
+  idempotent and answers `409 relay_report_conflict` when a different
+  transaction is reported for the same quote, so the page can retry a
+  report it is not sure landed. The payer view
   gains `relay_available` and `relay`; transfers gain `relay
   {request_id, origin_chain_id, origin_transaction_hash}`.
 - Proof of Payment v4 (`payday.proof.v4`, `payday.attestation.v4`). A

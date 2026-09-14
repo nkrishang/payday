@@ -1,7 +1,7 @@
 "use client";
 
 import type { RelayOriginChain, RelayQuote } from "@payday/sdk";
-import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
+import type { PendingPayment, ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { ArrowLeftRight, ChevronDown, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { encodeFunctionData, erc20Abi, hexToBigInt, numberToHex, type Hex } from "viem";
@@ -11,6 +11,7 @@ import { MenuSelect } from "@/components/ui/menu-select";
 import { cn } from "@/lib/cn";
 import { formatBaseUnits, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { payerClient } from "@/lib/payday";
+import { clearRelayReport, recordRelayBroadcast } from "@/lib/relay-send";
 import { ConnectSheet } from "./connect-sheet";
 import { walletErrorMessage } from "./wallet-errors";
 
@@ -43,7 +44,7 @@ export function RelayPay({
 }: {
   payment: ReadyPayerDepositRequest;
   payerSession: string | null;
-  onSent: (hash: string) => void;
+  onSent: (payment: PendingPayment) => void;
 }) {
   const { address, isConnected, connector } = useAccount();
   const [open, setOpen] = useState(false);
@@ -54,6 +55,14 @@ export function RelayPay({
   const [stage, setStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
+  const quoteGeneration = useRef(0);
+  const originRef = useRef(origin);
+  const paymentIdRef = useRef(payment.id);
+  const executing = useRef(false);
+  useEffect(() => {
+    originRef.current = origin;
+    paymentIdRef.current = payment.id;
+  }, [origin, payment.id]);
   const following = payment.relay;
   const walletMatches =
     !isConnected || !address || address.toLowerCase() === payment.payer_wallet.toLowerCase();
@@ -74,41 +83,53 @@ export function RelayPay({
   const selected = chains?.find((chain) => chain.chain_id === origin) ?? null;
 
   const requestQuote = useCallback(
-    async (chainId: string) => {
+    async (chainId: string, signal?: AbortSignal) => {
+      const generation = ++quoteGeneration.current;
+      const requestPaymentId = payment.id;
       setQuoting(true);
       setError(null);
       try {
-        const fresh = await payerClient.relay.quote(payment.id, chainId, sessionOption(payerSession));
+        const fresh = await payerClient.relay.quote(payment.id, chainId, {
+          ...(signal ? { signal } : {}),
+          ...sessionOption(payerSession),
+        });
+        if (generation !== quoteGeneration.current || signal?.aborted ||
+          paymentIdRef.current !== requestPaymentId || originRef.current !== chainId ||
+          fresh.origin.chain_id !== chainId) return null;
         setQuote({ quote: fresh, at: Date.now() });
         return fresh;
       } catch (cause) {
-        setError(describe(cause));
-        setQuote(null);
+        if (generation === quoteGeneration.current && !signal?.aborted) {
+          setError(describe(cause));
+          setQuote(null);
+        }
         return null;
       } finally {
-        setQuoting(false);
+        if (generation === quoteGeneration.current) setQuoting(false);
       }
     },
     [payment.id, payerSession],
   );
 
   // A new origin gets a quote at once, so the payer sees what it costs.
-  const quotedFor = useRef<string>("");
   useEffect(() => {
-    if (!origin || quotedFor.current === origin) return;
-    quotedFor.current = origin;
-    void requestQuote(origin);
+    if (!origin) return;
+    const controller = new AbortController();
+    void Promise.resolve().then(() => requestQuote(origin, controller.signal));
+    return () => controller.abort();
   }, [origin, requestQuote]);
 
   const pay = useCallback(async () => {
-    setError(null);
-    if (!selected) return;
-    if (!isConnected || !connector) {
-      setConnectOpen(true);
-      return;
-    }
-    if (!walletMatches || !address) return;
+    if (executing.current) return;
+    executing.current = true;
     try {
+      setError(null);
+      if (!selected) return;
+      if (!isConnected || !connector) {
+        setConnectOpen(true);
+        return;
+      }
+      if (!walletMatches || !address) return;
       const provider = (await connector.getProvider()) as Eip1193;
       setStage(`Switching to ${selected.name}…`);
       await switchToChain(provider, selected);
@@ -119,6 +140,10 @@ export function RelayPay({
         setStage("Refreshing the quote…");
         current = await requestQuote(selected.chain_id);
         if (current === null) return;
+      }
+      if (current.origin.chain_id !== selected.chain_id ||
+        current.steps.some((step) => step.transaction.chain_id !== selected.chain_id)) {
+        throw new Error("The Relay quote does not match the selected origin network.");
       }
       setStage("Checking your balance…");
       const balance = await usdcBalance(provider, selected.usdc_address, address);
@@ -137,6 +162,7 @@ export function RelayPay({
             ? "Approve USDC in your wallet…"
             : `Confirm the deposit in your wallet…`,
         );
+        await assertWalletContext(provider, selected.chain_id, address);
         const hash = await sendStep(provider, address, step.transaction);
         if (last) {
           depositHash = hash;
@@ -149,12 +175,28 @@ export function RelayPay({
       // Reported at once: the indexer follows the intent from here, and the
       // page starts polling fast for the delivery on the request's chain.
       setStage("Relay is delivering your payment…");
-      await payerClient.relay.sent(payment.id, current.id, depositHash, sessionOption(payerSession));
-      onSent(depositHash);
+      const pending: PendingPayment = {
+        kind: "relay",
+        intentId: current.id,
+        originChainId: selected.chain_id,
+        hash: depositHash,
+      };
+      recordRelayBroadcast(payment.id, {
+        intentId: current.id,
+        originChainId: selected.chain_id,
+        hash: depositHash,
+        at: Date.now(),
+      });
+      onSent(pending);
+      // Best effort only: the session journal retries this idempotent report.
+      void payerClient.relay.sent(payment.id, current.id, depositHash, sessionOption(payerSession))
+        .then(() => clearRelayReport(payment.id))
+        .catch(() => undefined);
     } catch (cause) {
       setError(walletErrorMessage(cause));
     } finally {
       setStage(null);
+      executing.current = false;
     }
   }, [
     address,
@@ -228,6 +270,9 @@ export function RelayPay({
                   detail: "USDC",
                 })),
               ]}
+              // Locked only while transactions are in flight: a quote still
+              // loading must not trap the payer on that network.
+              disabled={stage !== null}
             />
           ) : null}
 
@@ -355,6 +400,7 @@ async function sendStep(
     params: [
       {
         from,
+        chainId: numberToHex(BigInt(transaction.chain_id)),
         to: transaction.to,
         data: transaction.data,
         value: numberToHex(BigInt(transaction.value)),
@@ -363,6 +409,19 @@ async function sendStep(
     ],
   });
   return hash as Hex;
+}
+
+async function assertWalletContext(provider: Eip1193, chainId: string, account: string): Promise<void> {
+  const currentChain = await provider.request({ method: "eth_chainId" }) as string;
+  if (hexToBigInt(currentChain as Hex) !== BigInt(chainId)) {
+    // "chain mismatch" is the phrase walletErrorMessage maps to the
+    // switch-back instruction the payer needs.
+    throw new Error("chain mismatch: the wallet is no longer on the origin network");
+  }
+  const accounts = await provider.request({ method: "eth_accounts" }) as string[];
+  if (!accounts.some((candidate) => candidate.toLowerCase() === account.toLowerCase())) {
+    throw new Error("account changed: the wallet is no longer holding the bound account");
+  }
 }
 
 async function waitForReceipt(provider: Eip1193, hash: Hex): Promise<void> {
