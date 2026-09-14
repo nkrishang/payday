@@ -5,6 +5,7 @@ members = [
     "crates/gateway-db",
     "crates/gatewayd",
     "crates/gateway-indexer",
+    "crates/gateway-relay",
     "crates/dev-identity",
 ]
 

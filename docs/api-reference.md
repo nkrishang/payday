@@ -280,13 +280,15 @@ verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/deposit-requests/{reference}/proof`
 
-Returns the Proof of Payment JSON (`payday.proof.v3`) for a settled deposit request
+Returns the Proof of Payment JSON (`payday.proof.v4`) for a settled deposit request
 (`payment_id` is the `dr_` id; inside `canonical_issuance_snapshot`, `attachment.id`
 is the raw UUID behind the API's `att_` id, since that document is the hashed
 commitment and its schema is frozen);
 `409 deposit_request_not_settled` before then, and `409 deposit_sender_mismatch` when
-any credited transfer came from a wallet other than the attested one, since
-no proof can then claim the attested wallet paid. The proof carries the
+any credited transfer came from a wallet other than the attested one and is
+not a Relay delivery attributed to it (`transfers[].relay`, vouched for in
+`verification.payload.relay_fills`), since no proof can then claim the
+attested wallet paid. The proof carries the
 canonical issuance snapshot, canonicalization version, attribution hash,
 `payer_wallet {address, typed_data, digest, signature, method}` (the exact
 EIP-712 document the payer's wallet signed, its signing digest, and the

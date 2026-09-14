@@ -326,6 +326,42 @@ test("the wallet step mints a challenge for the wallet and submits its signature
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
 });
 
+test("paying from another network lists chains, quotes, and reports the deposit with the session", async () => {
+  const quote = {
+    id: "rli_0198f80c-8d2f-7dc1-a369-90556a64f7b1",
+    request_id: `0x${"11".repeat(32)}`,
+    origin: { chain_id: "8453", name: "Base", native_symbol: "ETH", usdc_address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", explorer_url: null, icon_url: null, rpc_url: null },
+    amount_in: "25.020000", amount_in_base_units: "25020000",
+    amount_out: "25.000000", amount_out_base_units: "25000000",
+    relayer_fee_usd: "0.02", time_estimate_seconds: 5, expires_at: "2026-09-01T00:15:00Z",
+    steps: [{ id: "deposit", transaction: { chain_id: "8453", to: "0x4cd00e387622c35bddb9b4c962c136462338bc31", data: "0xe8017952", value: "0", gas: null } }],
+  };
+  const answers = [
+    { chains: [quote.origin] },
+    quote,
+    { ...payerPayment, relay_available: true, relay: { id: quote.id, status: "sent", origin_chain_id: "8453", origin_transaction_hash: `0x${"22".repeat(32)}`, fill_transaction_hash: null, created_at: "2026-09-01T00:00:00Z" } },
+  ];
+  const mock = mockFetch(() => new Response(JSON.stringify(answers.shift())));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const chains = await client.relay.chains("dr_1", { payerSession: "pps_relay" });
+  const quoted = await client.relay.quote("dr_1", "8453", { payerSession: "pps_relay" });
+  const sent = await client.relay.sent("dr_1", quoted.id, `0x${"22".repeat(32)}`, { payerSession: "pps_relay" });
+
+  assert.equal(chains.chains[0].name, "Base");
+  assert.equal(quoted.amount_out_base_units, "25000000");
+  assert.equal(sent.relay.status, "sent");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_1/relay/chains");
+  assert.equal(mock.calls[1].url, "https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes");
+  assert.deepEqual(JSON.parse(mock.calls[1].init.body), { origin_chain_id: "8453" });
+  assert.equal(mock.calls[2].url, `https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes/${quote.id}/sent`);
+  assert.deepEqual(JSON.parse(mock.calls[2].init.body), { transaction_hash: `0x${"22".repeat(32)}` });
+  for (const call of mock.calls) {
+    assert.equal(call.init.headers["Payday-Payer-Session"], "pps_relay");
+    assert.equal(call.init.headers.Authorization, undefined);
+  }
+});
+
 test("a wallet that is already bound surfaces wallet_already_bound", async () => {
   const mock = mockFetch(() => new Response(
     JSON.stringify({ error: { code: "wallet_already_bound", message: "bound" } }),

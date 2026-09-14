@@ -158,6 +158,10 @@ prefixed_id!(
     /// One leg of a withdrawal: the funds on one source chain.
     WithdrawalLegId, "wdl_", "withdrawal leg"
 );
+prefixed_id!(
+    /// One cross-chain payment quoted through Relay for a deposit request.
+    RelayIntentId, "rli_", "relay intent"
+);
 
 #[cfg(test)]
 mod tests {

@@ -512,6 +512,52 @@ impl ApiError {
         }
     }
 
+    /// The deployment has no Relay key, so no cross-chain payment is offered.
+    pub fn relay_unavailable() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "relay_unavailable",
+            message: "Paying from another network is not available here".into(),
+        }
+    }
+
+    /// Relay would not or could not quote the route.
+    pub fn relay_quote_failed(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "relay_quote_failed",
+            message: message.into(),
+        }
+    }
+
+    /// The origin chain is not one a payer may pay from.
+    pub fn relay_unsupported_origin() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "relay_unsupported_origin",
+            message: "USDC cannot be paid from that network; choose one of the offered ones".into(),
+        }
+    }
+
+    pub fn relay_intent_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "relay_intent_not_found",
+            message: "That quote does not belong to this deposit request".into(),
+        }
+    }
+
+    /// The report names a different transaction than the one already
+    /// recorded for that quote. Asking for a new quote cannot help: the
+    /// recorded one stands.
+    pub fn relay_report_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "relay_report_conflict",
+            message: "This quote already recorded a different origin transaction".into(),
+        }
+    }
+
     pub fn withdrawal_leg_not_found(leg: &str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

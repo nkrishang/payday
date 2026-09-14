@@ -454,6 +454,11 @@ pub struct DbInvoiceTransfer {
     pub block_number: i64,
     pub disposition: String,
     pub collected: bool,
+    /// Set when Relay's solver sent it for a cross-chain payment the
+    /// attested wallet made: the filled intent's request and origin.
+    pub relay_request_id: Option<Vec<u8>>,
+    pub relay_origin_chain_id: Option<i64>,
+    pub relay_origin_tx_hash: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -904,9 +909,13 @@ impl InvoiceRepository {
         let transfers = sqlx::query_as::<_, DbInvoiceTransfer>(
             r#"SELECT o.invoice_id, o.block_timestamp, o.amount, o.sender_address,
                       o.transaction_hash, o.block_number, o.disposition,
-                      o.collected_at_block IS NOT NULL AS collected
+                      o.collected_at_block IS NOT NULL AS collected,
+                      r.request_id AS relay_request_id,
+                      r.origin_chain_id AS relay_origin_chain_id,
+                      r.verified_origin_tx_hash AS relay_origin_tx_hash
                FROM payment_observations o
                JOIN invoices i ON i.id = o.invoice_id
+               LEFT JOIN relay_intents r ON r.id = o.relay_intent_id AND r.status = 'filled'
                WHERE i.account_id = $1 AND i.id = ANY($2::uuid[])
                ORDER BY o.block_number, o.transaction_index, o.log_index"#,
         )
@@ -1136,6 +1145,18 @@ impl InvoiceRepository {
             .await?
         };
 
+        /// A Relay intent that may explain a transfer from the solver's
+        /// wallet: `sent` (pending, matched by the quoted amount) or
+        /// `filled` (matched by the fill's transaction hash).
+        #[derive(sqlx::FromRow)]
+        struct RelayIntentLite {
+            id: Uuid,
+            invoice_id: Uuid,
+            status: String,
+            quoted_out_amount: String,
+            fill_tx_hashes: Vec<Vec<u8>>,
+        }
+
         struct InvoiceCredit {
             id: Uuid,
             status: String,
@@ -1152,6 +1173,45 @@ impl InvoiceRepository {
             /// from a wallet other than `payer_wallet`.
             first_foreign_timestamp: Option<u64>,
             crossing: Option<(U256, u64, B256, u64)>,
+            relay: Vec<RelayIntentLite>,
+        }
+
+        /// Who a transfer is from, as far as the crediting path can tell.
+        enum Attribution {
+            /// The attested wallet.
+            Payer,
+            /// Relay's solver, for an intent Relay has already filled.
+            Relay(Uuid),
+            /// Possibly Relay's solver, for an intent still pending: parked
+            /// until the poller resolves it.
+            Parked,
+            /// Anyone else.
+            Foreign,
+        }
+
+        // Relay intents the payer reported as sent, or that were filled,
+        // for every invoice in the batch: one query, locked in the same
+        // order the poller takes (invoices, then intents).
+        let invoice_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        let mut relay_by_invoice = HashMap::<Uuid, Vec<RelayIntentLite>>::new();
+        if !invoice_ids.is_empty() {
+            let intents = sqlx::query_as::<_, RelayIntentLite>(
+                r#"
+                SELECT id, invoice_id, status, quoted_out_amount, fill_tx_hashes
+                FROM relay_intents
+                WHERE invoice_id = ANY($1::uuid[]) AND status IN ('sent', 'filled')
+                FOR UPDATE
+                "#,
+            )
+            .bind(&invoice_ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            for intent in intents {
+                relay_by_invoice
+                    .entry(intent.invoice_id)
+                    .or_default()
+                    .push(intent);
+            }
         }
 
         let mut credits = HashMap::<Vec<u8>, InvoiceCredit>::new();
@@ -1182,6 +1242,7 @@ impl InvoiceRepository {
                     payer_wallet,
                     first_foreign_timestamp: None,
                     crossing: None,
+                    relay: relay_by_invoice.remove(&row.id).unwrap_or_default(),
                 },
             );
         }
@@ -1212,6 +1273,45 @@ impl InvoiceRepository {
                 },
             );
 
+            // Who sent it. A transfer from the attested wallet is the
+            // payer's. One from anywhere else is the payer's too when Relay
+            // made it for an intent of theirs: outright when the intent is
+            // already filled and this exact log is the quoted output it
+            // paid for, provisionally (parked, not flagged) when an intent
+            // the payer reported as sent is still pending and the amount is
+            // the quoted one. A transaction hash names a transaction, not a
+            // transfer: a fill only explains the log for its exact quoted
+            // amount, never the dust or an unrelated transfer in the same
+            // transaction. A quote nobody sent explains nothing.
+            let attribution = if observation.sender.as_slice() == credit.payer_wallet {
+                Attribution::Payer
+            } else if zero {
+                Attribution::Foreign
+            } else if let Some(filled) = credit.relay.iter().find(|intent| {
+                intent.status == "filled"
+                    && U256::from_str_radix(&intent.quoted_out_amount, 10)
+                        .is_ok_and(|quoted| quoted == observation.amount)
+                    && intent
+                        .fill_tx_hashes
+                        .iter()
+                        .any(|hash| hash.as_slice() == observation.transaction_hash.as_slice())
+            }) {
+                Attribution::Relay(filled.id)
+            } else if credit.relay.iter().any(|intent| {
+                intent.status == "sent"
+                    && U256::from_str_radix(&intent.quoted_out_amount, 10)
+                        .is_ok_and(|quoted| quoted == observation.amount)
+            }) {
+                Attribution::Parked
+            } else {
+                Attribution::Foreign
+            };
+            let relay_intent_id = match attribution {
+                Attribution::Relay(id) => Some(id),
+                _ => None,
+            };
+            let parked = matches!(attribution, Attribution::Parked);
+
             let inserted = sqlx::query(
                 r#"
                 INSERT INTO payment_observations
@@ -1219,8 +1319,9 @@ impl InvoiceRepository {
                      transaction_hash, transaction_index, log_index,
                      sender_address, recipient_address, invoice_id, amount,
                      disposition, disposition_reason, collected_at_block,
-                     collected_at_transaction_index)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                     collected_at_transaction_index, relay_intent_id, relay_parked_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, CASE WHEN $18 THEN now() ELSE NULL END)
                 ON CONFLICT DO NOTHING
                 "#,
             )
@@ -1240,6 +1341,8 @@ impl InvoiceRepository {
             .bind(disposition_reason)
             .bind(collected_at.map(|position| position.0))
             .bind(collected_at.map(|position| position.1))
+            .bind(relay_intent_id)
+            .bind(parked)
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -1249,7 +1352,7 @@ impl InvoiceRepository {
                 continue;
             }
             credit.touched = true;
-            if observation.sender.as_slice() != credit.payer_wallet {
+            if matches!(attribution, Attribution::Foreign) {
                 credit.first_foreign_timestamp = Some(
                     credit
                         .first_foreign_timestamp
@@ -2346,6 +2449,7 @@ pub(crate) mod tests {
             "likely_unsolicited_at",
             "payer_wallet",
             "address",
+            "chain_id",
             "wallet_bound_at",
             "expires_at",
             "created_at",

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 gateway-core = { path = "../gateway-core" }
 gateway-db = { path = "../gateway-db" }
+gateway-relay = { path = "../gateway-relay" }
 alloy-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-json-rpc = { workspace = true }

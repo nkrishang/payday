@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 const PROOF = `{
-  "version": "payday.proof.v3",
+  "version": "payday.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": {
     "schema": "payday.invoice.v3",
@@ -223,16 +223,24 @@ export default function ProofPage() {
         </Step>
         <Step title="Check the transfers">
           <p>
-            Every listed transfer must be from the attested wallet to the address, and their sum
-            must be at least the amount. Whether they and the settlement transaction really executed
-            is provable only against the chain: look them up by hash on any node or explorer.
+            Every listed transfer must be to the address, and their sum must be at least the
+            amount. Each must be from the attested wallet, or carry a <code>relay</code> block (the
+            payer paid from another network through Relay, and Relay&apos;s solver made this
+            transfer) whose <code>origin_sender</code> is the attested wallet and which appears
+            verbatim in the attestation&apos;s <code>relay_fills</code>. Whether the transfers and
+            the settlement transaction really executed is provable only against the chain: look
+            them up by hash on any node or explorer; a relayed transfer&apos;s origin transaction
+            is on the origin chain it names.
           </p>
         </Step>
         <Step title="Check Payday's attestation">
           <p>
             Verify the signature over the <code>verification.payload</code> against Payday&apos;s
             published signer, and that the payload&apos;s hash, chain, address, wallet, and nonce
-            match the rest of the proof.
+            match the rest of the proof. Its <code>relay_fills</code> are where Payday vouches that
+            it verified who sent a relayed transfer&apos;s origin transaction: every attribution is
+            an <code>attribution_source</code> of <code>receipt</code>, read from the origin
+            chain&apos;s own records on a network Payday serves — never from Relay&apos;s word.
           </p>
         </Step>
       </Steps>
@@ -243,10 +251,11 @@ export default function ProofPage() {
           Before settlement: <code>409 deposit_request_not_settled</code>.
         </li>
         <li>
-          When any credited transfer came from a wallet other than the attested one:{" "}
-          <code>409 deposit_sender_mismatch</code>. The funds still settled, but no proof can claim
-          the attested wallet paid them, so Payday does not issue one it cannot stand behind. The
-          request&apos;s <code>likely_unsolicited_at</code> and its transfers say what happened.
+          When any credited transfer came from a wallet other than the attested one and is not a
+          Relay delivery attributed to it: <code>409 deposit_sender_mismatch</code>. The funds still
+          settled, but no proof can claim the attested wallet paid them, so Payday does not issue
+          one it cannot stand behind. The request&apos;s <code>likely_unsolicited_at</code> and
+          its transfers say what happened.
         </li>
       </ul>
 

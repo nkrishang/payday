@@ -51,6 +51,8 @@ const READY: ReadyPayerDepositRequest = {
     reference: null,
     attachment: null,
   },
+  relay_available: true,
+  relay: null,
 };
 
 export function payment(overrides: Partial<ReadyPayerDepositRequest> = {}): ReadyPayerDepositRequest {

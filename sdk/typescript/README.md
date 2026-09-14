@@ -252,7 +252,10 @@ For `permissionless` deposit requests everything is unlocked immediately. For
 `details` are `null` until the payer's session satisfies the policy; `chain`
 and `token` are `null` until the payer has chosen a network and bound their
 wallet (`payer.wallet.challenge(id, wallet, chainId, options)`, then
-`attest`); pass the
+`attest`), unless the merchant pinned the network with `chain_id` at
+creation, in which case `networks` holds that one entry and `chain` and
+`token` name it from the start while `address` still waits for the wallet;
+pass the
 session token from verification as `payerSession` and it travels in the
 `Payday-Payer-Session` header. The response deliberately carries no merchant
 data — no payout or recovery address, metadata, customer, or policy

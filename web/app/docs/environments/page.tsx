@@ -85,8 +85,9 @@ export default function EnvironmentsPage() {
 
       <p>
         Every deposit request lists the <code>networks</code> it may be paid on, each with its
-        exact USDC contract. The payer picks one on the hosted checkout before signing, and from
-        then on <code>chain</code> and <code>token</code> name the choice. Read them from the
+        exact USDC contract. The payer picks one on the hosted checkout before signing, unless
+        the request was created with <code>chain_id</code>, which pins the list to that network;
+        from then on <code>chain</code> and <code>token</code> name it. Read them from the
         response rather than hard-coding them, and show them to the payer: a matching symbol is not
         enough, and USDC on another network, bridged USDC, and look-alike tokens do not count.
       </p>

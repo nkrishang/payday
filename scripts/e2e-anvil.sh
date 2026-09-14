@@ -247,14 +247,19 @@ create_invoice() {
   get_invoice "$id"
 }
 
-# Issue only: no address until a payer binds a wallet.
+# Issue only: no address until a payer binds a wallet. A fifth argument pins
+# the network the merchant wants the deposit on.
 issue_invoice() {
-  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4
+  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 chain_id=${5:-} body
+  body="$(invoice_body "$amount" "$beneficiary" "$expires_in")"
+  if [[ -n "$chain_id" ]]; then
+    body="$(jq -c --arg chain "$chain_id" '. + {chain_id: $chain}' <<<"$body")"
+  fi
   curl --fail --silent \
     --header "Authorization: Bearer $PAYDAY_API_KEY" \
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: $idempotency_key" \
-    --data "$(invoice_body "$amount" "$beneficiary" "$expires_in")" \
+    --data "$body" \
     "$API_URL/v1/deposit-requests"
 }
 
@@ -383,8 +388,19 @@ merchant_curl() {
 
 # The response body of a request that must succeed. The body slot is
 # positional, so pass "" before any extra curl arguments (e.g. --output).
+# A 429 from the per-account rate limiter is not a failed request — the
+# limiter refills one token a second, so a burst anywhere in this long
+# run can outrun it — so give the call a couple of refills first.
 api_json() {
-  merchant_curl "$1" "$2" "${3:-}" --fail "${@:4}"
+  local response
+  for _ in 1 2 3; do
+    if response="$(merchant_curl "$1" "$2" "${3:-}" --fail "${@:4}")"; then
+      printf '%s' "$response"
+      return 0
+    fi
+    sleep 1.2
+  done
+  printf '%s' "$response"
 }
 
 # Only the HTTP status of a request that may fail.
@@ -392,9 +408,18 @@ api_status() {
   merchant_curl "$1" "$2" "${3:-}" --output /dev/null --write-out '%{http_code}'
 }
 
-# Only the stable error code of a request that must fail.
+# Only the stable error code of a request that must fail. A rate-limited
+# attempt says nothing about the assertion, so retry it like api_json.
 api_error_code() {
-  merchant_curl "$1" "$2" "${3:-}" | jq -r .error.code
+  local response
+  for _ in 1 2 3; do
+    response="$(merchant_curl "$1" "$2" "${3:-}")"
+    if [[ "$(jq -r '.error.code // empty' <<<"$response")" != "rate_limited" ]]; then
+      break
+    fi
+    sleep 1.2
+  done
+  jq -r '.error.code // empty' <<<"$response"
 }
 
 # PUT a file to the presigned upload slot exactly as an SDK client would:
@@ -492,6 +517,28 @@ build_chain_registry
 echo "Starting MinIO as the local attachment store"
 start_minio
 
+# A stand-in for Relay: quotes a USDC transfer to its solver on the second
+# chain and fills it on the first, so the cross-chain flow runs end to end
+# against the real API and indexer. The solver is a fixed key outside Anvil's ten accounts.
+echo "Starting the Relay stand-in"
+RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
+export PAYDAY_RELAY_URL="http://127.0.0.1:4020"
+export PAYDAY_RELAY_API_KEY="local"
+RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT=4020 RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \
+  node scripts/relay-stub.mjs >"$logs/relay-stub.log" 2>&1 &
+relay_stub_pid=$!
+pids+=("$relay_stub_pid")
+for _ in {1..100}; do
+  curl --silent --output /dev/null --header "x-api-key: $PAYDAY_RELAY_API_KEY" "$PAYDAY_RELAY_URL/chains" && break
+  sleep 0.1
+done
+curl --fail --silent --output /dev/null --header "x-api-key: $PAYDAY_RELAY_API_KEY" "$PAYDAY_RELAY_URL/chains" || {
+  echo "the Relay stand-in did not become ready" >&2
+  exit 1
+}
+# The solver fills from its own USDC on the destination chain.
+send_usdc "$RELAY_SOLVER" 100000000
+
 echo "Starting gateway services"
 ./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
 identity_pid=$!
@@ -527,10 +574,14 @@ zero_beneficiary="$(invoice_body 1 0x0000000000000000000000000000000000000000 36
 assert_eq 400 "$(api_status_code "$zero_beneficiary")" "a zero beneficiary was accepted"
 valid="$(invoice_body 1 "$BENEFICIARY_EXACT" 3600)"
 assert_eq 201 "$(api_status_code "$valid")" "a valid request was rejected"
-# The payer, not the merchant, chooses the network: chain fields are unknown
-# to the create route.
+# The merchant may pin the network with a decimal chain id the deployment
+# serves; anything else is refused, and the token is never a request field.
 with_chain="$(jq -c --arg chain "$CHAIN_ID" '. + {chain_id: $chain}' <<<"$valid")"
-assert_eq 400 "$(api_status_code "$with_chain")" "a request naming a chain was accepted"
+assert_eq 201 "$(api_status_code "$with_chain")" "a request pinning a served chain was refused"
+with_slug="$(jq -c '. + {chain_id: "monad"}' <<<"$valid")"
+assert_eq 400 "$(api_status_code "$with_slug")" "a chain slug was accepted"
+with_unknown_chain="$(jq -c '. + {chain_id: "999"}' <<<"$valid")"
+assert_eq 422 "$(api_status_code "$with_unknown_chain")" "a chain the deployment does not serve was accepted"
 with_token="$(jq -c --arg token "$USDC" '. + {token_address: $token}' <<<"$valid")"
 assert_eq 400 "$(api_status_code "$with_token")" "a request naming a token was accepted"
 # Merchants do not choose where recovered funds go; the field is unknown to
@@ -856,6 +907,144 @@ grep -q 'nothing watched; cursor fast-forwarded without scanning' "$logs/indexer
   exit 1
 }
 
+echo "Testing a request the merchant pinned to the second network"
+pinned_issued="$(issue_invoice 0.5 "$BENEFICIARY_EXACT" 3600 "pinned-$run_id" "$SECOND_CHAIN_ID")"
+pinned_id="$(jq -er .id <<<"$pinned_issued")"
+# The network is known from issuance and it is the only one offered; the
+# address still waits for the payer's wallet.
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$pinned_issued")" "a pinned request does not name its chain at issuance"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$pinned_issued")" \
+  "a pinned request offers more than its chain"
+assert_eq null "$(jq -r .address <<<"$pinned_issued")" "a pinned request has an address before any wallet"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$pinned_id")")" \
+  "the payer page does not name the pinned chain"
+# The payer cannot take it elsewhere.
+assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$pinned_id/wallet/challenge")" \
+  "a challenge was minted on a chain the merchant excluded"
+bind_payer_wallet "$pinned_id" "" "$SECOND_CHAIN_ID" >/dev/null
+pinned="$(get_invoice "$pinned_id")"
+pinned_address="$(jq -er .address <<<"$pinned")"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .self_settlement.chain_id <<<"$pinned")" "the pinned binding is not on the pinned chain"
+# The webhook payload names the chain the way the API does.
+wait_for_sql 1 "SELECT count(*) FROM webhook_events
+  WHERE invoice_id = '${pinned_id#dr_}'::uuid AND event_type = 'deposit_request.ready'
+    AND payload->'data'->'deposit_request'->>'chain_id' = '$SECOND_CHAIN_ID'" \
+  "the ready webhook does not carry the pinned chain id"
+pinned_before="$(token_balance "$BENEFICIARY_EXACT" "$SECOND_RPC_URL")"
+send_usdc "$pinned_address" 500000 "$SECOND_RPC_URL"
+wait_for_status "$pinned_id" settled
+assert_eq "$((pinned_before + 500000))" "$(token_balance "$BENEFICIARY_EXACT" "$SECOND_RPC_URL")" \
+  "pinned-network settlement balance mismatch"
+
+echo "Testing a payment from the second network through Relay"
+# Pinned to the first chain; the payer's USDC is on the second. The page's
+# steps, made by hand: list the origins, quote, send the quote's transaction
+# from the attested wallet, report it, and watch the delivery settle the
+# request without a flag and with a proof that names the origin.
+relay_issued="$(issue_invoice 2 "$BENEFICIARY_EXACT" 3600 "relay-$run_id" "$CHAIN_ID")"
+relay_id="$(jq -er .id <<<"$relay_issued")"
+bind_payer_wallet "$relay_id" "" "$CHAIN_ID" >/dev/null
+relay_view="$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id")"
+assert_eq true "$(jq -r .relay_available <<<"$relay_view")" "a bound, payable request does not offer Relay"
+assert_eq null "$(jq -r .relay <<<"$relay_view")" "a request with no quote follows one"
+assert_eq "$SECOND_CHAIN_ID" "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id/relay/chains" \
+  | jq -r '[.chains[].chain_id] | join(" ")')" "the origins are not the other chain alone"
+relay_post() {
+  local path=$1 body=$2
+  curl --fail --silent --request POST \
+    --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+    --data "$body" "$API_URL/v1/payer/deposit-requests/$relay_id$path"
+}
+assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg chain "$CHAIN_ID" '{origin_chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes")" \
+  "a quote from the request's own chain was accepted"
+relay_quote="$(relay_post /relay/quotes "$(jq -cn --arg chain "$SECOND_CHAIN_ID" '{origin_chain_id: $chain}')")"
+rli="$(jq -er .id <<<"$relay_quote")"
+assert_eq 2000000 "$(jq -r .amount_out_base_units <<<"$relay_quote")" "the quote does not land the amount due"
+assert_eq 2020000 "$(jq -r .amount_in_base_units <<<"$relay_quote")" "the quote's input is not amount plus fee"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .steps[0].transaction.chain_id <<<"$relay_quote")" "the step is not on the origin chain"
+assert_eq quoted "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id" | jq -r .relay.status)" \
+  "the payer view does not follow the quote"
+relay_tx="$(cast send "$(jq -r .steps[0].transaction.to <<<"$relay_quote")" \
+  "$(jq -r .steps[0].transaction.data <<<"$relay_quote")" \
+  --private-key "$PAYER_KEY" --rpc-url "$SECOND_RPC_URL" --json | jq -r .transactionHash)"
+relay_sent="$(relay_post "/relay/quotes/$rli/sent" "$(jq -cn --arg hash "$relay_tx" '{transaction_hash: $hash}')")"
+assert_eq sent "$(jq -r .relay.status <<<"$relay_sent")" "reporting the deposit did not mark the quote sent"
+assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg hash "$relay_tx" '{transaction_hash: $hash}')" \
+  "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes/$rli/sent")" \
+  "the same report again was not idempotent"
+assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn '{transaction_hash: "0x0000000000000000000000000000000000000000000000000000000000000001"}')" \
+  "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes/$rli/sent")" \
+  "a different transaction was accepted for a reported quote"
+paid_at="$(date +%s)"
+wait_for_status "$relay_id" settled
+echo "Relay delivery settled $(( $(date +%s) - paid_at ))s after the origin transaction"
+relay_final="$(get_invoice "$relay_id")"
+assert_eq null "$(jq -r .likely_unsolicited_at <<<"$relay_final")" "a Relay delivery was flagged as unsolicited"
+assert_eq "$(lowercase "$RELAY_SOLVER")" "$(jq -r '.transfers[0].sender | ascii_downcase' <<<"$relay_final")" \
+  "the delivery did not come from the solver"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .transfers[0].relay.origin_chain_id <<<"$relay_final")" \
+  "the merchant's transfer does not name its origin chain"
+assert_eq "$relay_tx" "$(jq -r .transfers[0].relay.origin_transaction_hash <<<"$relay_final")" \
+  "the merchant's transfer does not name the origin transaction"
+assert_eq filled "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id" | jq -r .relay.status)" \
+  "the payer view does not report the fill"
+relay_proof="$(api_json GET "/v1/deposit-requests/$relay_id/proof")"
+jq -e '.version == "payday.proof.v4"
+  and (.transfers | length) == 1
+  and (.transfers[0].sender | ascii_downcase) != ($payer | ascii_downcase)
+  and .transfers[0].relay.origin_sender == $payer
+  and .transfers[0].relay.origin_chain_id == $origin
+  and .transfers[0].relay.origin_transaction_hash == $tx
+  and .transfers[0].relay.attribution_source == "receipt"
+  and (.verification.payload.relay_fills | length) == 1
+  and .verification.payload.relay_fills[0].transaction_hash == .transfers[0].transaction_hash' \
+  --arg payer "$PAYER" --arg origin "$SECOND_CHAIN_ID" --arg tx "$relay_tx" <<<"$relay_proof" >/dev/null || {
+  echo "the relayed Proof of Payment is incomplete: $(jq -c . <<<"$relay_proof")" >&2
+  exit 1
+}
+
+echo "Testing that a stranger's transfer parked on a failed Relay quote is flagged after all"
+parked_issued="$(issue_invoice 3 "$BENEFICIARY_EXACT" 3600 "relay-parked-$run_id" "$CHAIN_ID")"
+parked_id="$(jq -er .id <<<"$parked_issued")"
+bind_payer_wallet "$parked_id" "" "$CHAIN_ID" >/dev/null
+parked_address="$(get_invoice "$parked_id" | jq -er .address)"
+parked_quote="$(curl --fail --silent --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" '{origin_chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$parked_id/relay/quotes")"
+parked_rli="$(jq -er .id <<<"$parked_quote")"
+parked_request="$(jq -er .request_id <<<"$parked_quote")"
+# Reported as sent with a transaction nobody made; the stand-in is told to
+# fail the request, and a stranger pays the exact amount directly meanwhile.
+curl --fail --silent --output /dev/null --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn '{transaction_hash: "0x00000000000000000000000000000000000000000000000000000000000000aa"}')" \
+  "$API_URL/v1/payer/deposit-requests/$parked_id/relay/quotes/$parked_rli/sent"
+curl --fail --silent --output /dev/null --request POST "$PAYDAY_RELAY_URL/__fail/$parked_request"
+send_usdc "$STRANGER" 3000000
+cast send "$USDC" 'transfer(address,uint256)' "$parked_address" 3000000 \
+  --private-key "$STRANGER_KEY" --rpc-url "$RPC_URL" >/dev/null
+wait_for_status "$parked_id" settled
+wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${parked_id#dr_}'::uuid AND likely_unsolicited_at IS NOT NULL" \
+  "the stranger's transfer stayed parked after the quote failed"
+wait_for_sql 1 "SELECT count(*) FROM webhook_events
+  WHERE invoice_id = '${parked_id#dr_}'::uuid AND event_type = 'deposit_request.likely_unsolicited'" \
+  "the unparked transfer did not raise deposit_request.likely_unsolicited"
+assert_eq failed "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$parked_id" | jq -r .relay.status)" \
+  "the failed quote is not reported as failed"
+assert_eq deposit_sender_mismatch "$(api_error_code GET "/v1/deposit-requests/$parked_id/proof")" \
+  "a proof was served for a request paid by a stranger after a failed quote"
+
 echo "Testing that a payment on the wrong chain never settles and can be returned by hand"
 wrong="$(create_invoice 0.5 "$BENEFICIARY_PARTIAL" 3600 "wrong-chain-$run_id")"
 wrong_id="$(jq -er .id <<<"$wrong")"
@@ -1063,7 +1252,7 @@ api_json GET "/v1/deposit-requests/$documented_id/request.pdf" "" --output "$inv
 assert_eq "%PDF-" "$(head -c 5 "$invoice_pdf")" "invoice document is not a PDF"
 
 proof="$(api_json GET "/v1/deposit-requests/$exact_id/proof")"
-jq -e '.version == "payday.proof.v3" and .payment_address != null and .salt != null
+jq -e '.version == "payday.proof.v4" and .payment_address != null and .salt != null
   and .chain_id == $chain and (.canonical_issuance_snapshot.networks | length) == 2
   and .attribution_hash != null and .payer_wallet.signature != null
   and .payer_wallet.typed_data.primaryType == "PayerAttestation"
@@ -1169,10 +1358,16 @@ assert_eq completed "$(jq -r '.legs[0].state' <<<"$finished")" "the leg did not 
 assert_eq 66 "$(jq -r '.legs[0].transfer_tx_hash | length' <<<"$finished")" "the leg has no transfer transaction"
 assert_eq 3000000 "$(token_balance "$WITHDRAW_DESTINATION")" "the destination did not receive the whole balance"
 assert_eq 0 "$(token_balance "$MERCHANT_WALLET")" "the merchant wallet still holds USDC"
+# The status poll above drains the per-account bucket, and the limiter
+# refills a token a second. These last reads are a burst otherwise, and a
+# 429 here is the limiter working, not the withdrawal failing — pace them.
+sleep 1.2
 listed_withdrawals="$(api_json GET "/v1/withdrawals?limit=5")"
 assert_eq 1 "$(jq '.withdrawals | length' <<<"$listed_withdrawals")" "the withdrawal is not listed"
+sleep 1.2
 assert_eq withdrawal_finished "$(api_error_code POST "/v1/withdrawals/$withdrawal_id/cancel")" \
   "a completed withdrawal was cancellable"
+sleep 1.2
 empty_withdrawal="$(merchant_curl POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-empty-$run_id")"
 assert_eq nothing_to_withdraw "$(jq -r .error.code <<<"$empty_withdrawal")" \
   "an empty wallet produced a withdrawal"

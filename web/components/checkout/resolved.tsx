@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowUpRight, Check, Clock, Loader2 } from "lucide-react";
-import { tokenSymbol, type CheckoutView, type UnlockedPayerDepositRequest } from "@/lib/checkout-state";
+import { tokenSymbol, type CheckoutView, type PendingPayment, type UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
 import { chainById } from "@/lib/config";
 import { explorerTxUrl, formatDisplayAmount, truncateHash } from "@/lib/format";
@@ -23,20 +23,24 @@ const icons = {
 export function Resolved({
   payment,
   view,
-  pendingTxHash,
+  pendingPayment,
 }: {
   payment: UnlockedPayerDepositRequest;
   view: CheckoutView;
-  pendingTxHash: string | null;
+  pendingPayment: PendingPayment | null;
 }) {
   const Icon = icons[view.phase as keyof typeof icons] ?? Clock;
   const spinning = view.phase === "deposited" || view.phase === "confirming";
 
-  const txHash = pendingTxHash ?? payment.settlement_tx_hash;
+  const txHash = pendingPayment?.hash ?? payment.settlement_tx_hash;
   const explorer = chainById(payment.chain?.id)?.explorerUrl ?? null;
-  const txUrl =
-    (pendingTxHash ? explorerTxUrl(explorer, pendingTxHash) : null) ??
-    payment.settlement_explorer_url;
+  // A deposit sent from another network through Relay is on that network,
+  // not this chain's explorer.
+  const relayed = pendingPayment?.kind === "relay";
+  const txUrl = relayed
+    ? null
+    : ((pendingPayment?.hash ? explorerTxUrl(explorer, pendingPayment.hash) : null) ??
+      payment.settlement_explorer_url);
 
   const received = BigInt(payment.received_base_units) > 0n;
 

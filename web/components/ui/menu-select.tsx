@@ -30,12 +30,14 @@ export function MenuSelect({
   options,
   onChange,
   className,
+  disabled = false,
 }: {
   label: string;
   value: string;
   options: MenuOption[];
   onChange: (value: string) => void;
   className?: string;
+  disabled?: boolean;
 }) {
   const listId = useId();
   const [open, setOpen] = useState(false);
@@ -66,6 +68,7 @@ export function MenuSelect({
   }, [open]);
 
   const show = () => {
+    if (disabled) return;
     setActive(
       Math.max(
         0,
@@ -76,6 +79,7 @@ export function MenuSelect({
   };
 
   const choose = (next: string) => {
+    if (disabled) return;
     onChange(next);
     setOpen(false);
     trigger.current?.focus();
@@ -123,6 +127,7 @@ export function MenuSelect({
         aria-labelledby={`${listId}-label`}
         onClick={() => (open ? setOpen(false) : show())}
         onKeyDown={onTriggerKey}
+        disabled={disabled}
         className={cn(
           "mt-1.5 flex h-10 w-full items-center gap-2 rounded-[10px] border bg-surface pr-3 pl-3.5",
           "text-[13.5px] transition-colors hover:border-line-strong",
@@ -140,7 +145,7 @@ export function MenuSelect({
         />
       </button>
 
-      {open ? (
+      {open && !disabled ? (
         <ul
           role="listbox"
           aria-labelledby={`${listId}-label`}

@@ -23,6 +23,9 @@ export function walletErrorMessage(error: unknown): string {
   if (/chain mismatch|does not match the target chain/i.test(message)) {
     return "Your wallet is on a different network. Switch networks and try again.";
   }
+  if (/account changed/i.test(message)) {
+    return "Your wallet's account changed. Switch back to the wallet this request is bound to.";
+  }
   if (/timeout|timed out/i.test(message)) {
     return "The wallet did not respond. Try again.";
   }

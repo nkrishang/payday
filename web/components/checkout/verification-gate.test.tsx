@@ -6,7 +6,7 @@ import { lockedDepositRequest, merchantSessionDepositRequest } from "@/test/fixt
 import type { ClientSecretStatus } from "./merchant-session";
 import { VerificationGate } from "./verification-gate";
 
-const open: CheckoutLocalState = { secondsRemaining: 3_600, pendingTxHash: null };
+const open: CheckoutLocalState = { secondsRemaining: 3_600, pendingPayment: null };
 
 function gate(
   payment: PayerDepositRequest,

@@ -208,6 +208,10 @@ load_local_env() {
   export PAYDAY_PAYER_REF_MASTER_KEY="${PAYDAY_PAYER_REF_MASTER_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
   # The Next.js dev server (`just web`) is the hosted checkout locally.
   export PAYDAY_HOSTED_CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-$PAYDAY_PUBLIC_BASE_URL}"
+  # Relay is a stand-in locally (scripts/relay-stub.mjs): it quotes a USDC
+  # transfer to its solver on the second chain and fills on the first.
+  export PAYDAY_RELAY_URL="${PAYDAY_RELAY_URL:-http://127.0.0.1:4020}"
+  export PAYDAY_RELAY_API_KEY="${PAYDAY_RELAY_API_KEY:-local}"
 }
 
 
@@ -281,14 +285,14 @@ load_local_env
 export DATABASE_URL="postgresql://payday:${postgres_password}@127.0.0.1:${pg_port}/gateway"
 
 if [[ "$mode" == e2e ]]; then
-  need cargo; need anvil; need cast; need forge; need jq; need psql
+  need cargo; need anvil; need cast; need forge; need jq; need psql; need node
   cargo build --locked --workspace
   # The suite starts its own MinIO next to the processes it manages.
   ./scripts/e2e-anvil.sh
   exit
 fi
 
-need cargo; need anvil; need cast; need forge; need curl; need jq
+need cargo; need anvil; need cast; need forge; need curl; need jq; need node
 cargo build --locked --workspace
 start_minio
 prefix postgres docker logs -f "$container"
@@ -304,6 +308,13 @@ for rpc_url in "$PAYDAY_RPC_URL" "$PAYDAY_SECOND_RPC_URL"; do
     --rpc-url "$rpc_url" --private-key "$PAYDAY_SIGNER_KEY" --broadcast
 done
 build_chain_registry
+# The Relay stand-in's solver (a fixed key outside Anvil's ten accounts) fills from its own USDC on
+# the first chain; the deployer's Bootstrap mint funds it.
+RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
+cast send "$USDC" 'transfer(address,uint256)' "$RELAY_SOLVER" 100000000 \
+  --private-key "$PAYDAY_ONBOARDING_PAYER_KEY" --rpc-url "$PAYDAY_RPC_URL" >/dev/null
+prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" \
+  RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" node scripts/relay-stub.mjs
 prefix identity ./target/debug/payday-dev-identity
 for _ in {1..100}; do
   curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break

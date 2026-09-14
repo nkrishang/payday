@@ -151,6 +151,10 @@ function base(overrides = {}) {
       reference: null,
       attachment: null,
     },
+    // The stub deployment offers Relay; a bound, payable request may be
+    // paid from another network, and follows the newest quote reported.
+    relay_available: true,
+    relay: null,
     ...overrides,
   };
 }
@@ -164,6 +168,7 @@ const UNBOUND = {
   address: null,
   address_explorer_url: null,
   deposit_uri: null,
+  relay_available: false,
 };
 
 /**
@@ -258,11 +263,15 @@ function projectForPayer(payment, session) {
       address_explorer_url: null,
       deposit_uri: null,
       details: null,
+      relay_available: false,
+      relay: null,
     };
   }
   return {
     ...shared,
     content_unlocked: true,
+    relay_available: Boolean(payment.address) && shared.payable,
+    relay: relayFollowing.get(payment.id) ?? null,
     payer_wallet: payment.payer_wallet,
     networks: payment.networks,
     chain: payment.chain,
@@ -342,8 +351,24 @@ const SETTLED = {
 /** Reads counted per id, so one scenario can change between polls. */
 const reads = new Map();
 
+/** The chains the stub's Relay takes USDC from, as the API lists them. */
+const RELAY_CHAINS = [
+  { chain_id: "137", name: "Polygon", native_symbol: "POL", usdc_address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", explorer_url: "https://polygonscan.com", icon_url: "https://assets.relay.link/icons/137/light.png", rpc_url: "https://polygon-rpc.com" },
+  { chain_id: "8453", name: "Base", native_symbol: "ETH", usdc_address: BASE_TOKEN, explorer_url: "https://basescan.org", icon_url: "https://assets.relay.link/icons/8453/light.png", rpc_url: "https://mainnet.base.org" },
+  { chain_id: "42161", name: "Arbitrum One", native_symbol: "ETH", usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", explorer_url: "https://arbiscan.io", icon_url: "https://assets.relay.link/icons/42161/light.png", rpc_url: "https://arb1.arbitrum.io/rpc" },
+  { chain_id: "143", name: "Monad", native_symbol: "MON", usdc_address: TOKEN, explorer_url: "https://monadvision.com", icon_url: "https://assets.relay.link/icons/143/light.png", rpc_url: "https://rpc.monad.xyz" },
+];
+/** Relay's deposit router, where the quote's deposit step goes. */
+const RELAY_ROUTER = "0x4cd00e387622c35bddb9b4c962c136462338bc31";
+/** Quotes handed out, by `rli_` id, and the request each is for. */
+const relayQuotes = new Map();
+/** The newest reported cross-chain payment per request id. */
+const relayFollowing = new Map();
+
 const scenarios = {
   awaiting: () => base(),
+  // A deployment without a Relay key: the option is not offered.
+  "no-relay": () => base({ relay_available: false }),
   // The full document: heading, reference, notes, and an attached PDF.
   document: () =>
     base({
@@ -361,6 +386,12 @@ const scenarios = {
   // before it shows any address, and show the address on the chosen network
   // once this session has signed.
   unbound: (id, session) => (session?.walletBound ? base(chosen(session.chainId)) : base(UNBOUND)),
+  // The merchant pinned Base: the request offers that network alone and
+  // names it before any wallet signs; only the wallet is still the payer's.
+  pinned: (id, session) =>
+    session?.walletBound
+      ? base({ networks: [NETWORKS[1]], ...chosen("8453") })
+      : base({ ...UNBOUND, networks: [NETWORKS[1]], chain: BASE, token: NETWORKS[1].token }),
   // Opened by the merchant's app with a client secret in the fragment; the
   // bare link stays locked with nothing for the payer to do here.
   "gated-merchant": (id, session) => gatedFor("merchant_session", session),
@@ -474,6 +505,13 @@ function merchantDepositRequest(input, extra = {}) {
     BigInt(amountUnits) > BigInt(receivedUnits) ? BigInt(amountUnits) - BigInt(receivedUnits) : 0n
   ).toString();
   const address = `0x${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
+  // A pinned network narrows the offer to that one entry and names it from
+  // issuance, as the API does; the default offer is every network with the
+  // stub payer bound on the first.
+  const pinned = input.chain_id
+    ? NETWORKS.find((network) => network.chain.id === input.chain_id)
+    : undefined;
+  const network = pinned ?? NETWORKS[0];
   return {
     id,
     deposit_url: `http://127.0.0.1:3003/pay/${id}`,
@@ -499,14 +537,14 @@ function merchantDepositRequest(input, extra = {}) {
     net_amount: fromBaseUnits(amountUnits),
     net_amount_base_units: amountUnits,
     status: "awaiting_deposit",
-    networks: NETWORKS,
-    token: { symbol: "USDC", address: TOKEN, decimals: 6 },
-    chain: MONAD,
+    networks: pinned ? [pinned] : NETWORKS,
+    token: network.token,
+    chain: network.chain,
     settlement_tx_hash: null,
     settlement_explorer_url: null,
     settled_at: null,
     settled_block: null,
-    self_settlement: { chain_id: "143", factory: FACTORY, salt: hex32(`salt:${id}`) },
+    self_settlement: { chain_id: network.chain.id, factory: FACTORY, salt: hex32(`salt:${id}`) },
     attention: null,
     issuer: input.issuer,
     payer: input.payer,
@@ -598,7 +636,7 @@ function proofFor(payment) {
     }));
   const gated = GATED.has(payment.payer_policy.mode);
   return {
-    version: "payday.proof.v3",
+    version: "payday.proof.v4",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
       schema: "payday.invoice.v3",
@@ -644,7 +682,7 @@ function proofFor(payment) {
     transfers,
     verification: {
       payload: {
-        version: "payday.attestation.v3",
+        version: "payday.attestation.v4",
         payment_id: payment.id,
         attribution_hash: payment.attribution.hash,
         chain_id: "143",
@@ -1055,15 +1093,18 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session)?$/,
+    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session|\/relay\/chains|\/relay\/quotes|\/relay\/quotes\/[^/]+\/sent)?$/,
   );
   if (!match) return false;
+  const relaySent = /^\/relay\/quotes\/([^/]+)\/sent$/.exec(match[2] ?? "");
   const write =
     match[2] === "/verify/email/start" ||
     match[2] === "/verify/email/confirm" ||
     match[2] === "/wallet/challenge" ||
     match[2] === "/wallet/attest" ||
-    match[2] === "/session";
+    match[2] === "/session" ||
+    match[2] === "/relay/quotes" ||
+    relaySent !== null;
   if (req.method !== (write ? "POST" : "GET")) {
     return fail(res, 405, "method_not_allowed", "method not allowed");
   }
@@ -1081,6 +1122,85 @@ async function payer(req, res, url) {
   const session = sessionFor(req, id);
   const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued, session), id };
   const mode = payment.payer_policy.mode;
+  // A cross-chain payment reported for this request is followed on every
+  // read, as the real API's `relay` block is.
+  if (payment.content_unlocked && relayFollowing.has(id)) payment.relay = relayFollowing.get(id);
+
+  // Paying from another network: the chains Relay takes USDC on (except the
+  // request's own), a quote pinned to the amount due, and the report that
+  // the deposit was sent. The stub fills nothing; the page only needs to
+  // see the intent it reported.
+  if (match[2] === "/relay/chains" || match[2] === "/relay/quotes" || relaySent) {
+    if (!payment.content_unlocked) return fail(res, 401, "verification_required", "Verify first");
+    if (!payment.address) return fail(res, 409, "wallet_required", "Sign first");
+    if (!payment.relay_available) {
+      return fail(res, payment.payable ? 404 : 410, payment.payable ? "relay_unavailable" : "deposit_request_not_payable", "Not offered");
+    }
+  }
+  if (match[2] === "/relay/chains") {
+    return send(res, 200, {
+      chains: RELAY_CHAINS.filter((chain) => chain.chain_id !== payment.chain.id),
+    });
+  }
+  if (match[2] === "/relay/quotes") {
+    const body = await readJson(req);
+    const origin = RELAY_CHAINS.find((chain) => chain.chain_id === String(body.origin_chain_id));
+    if (!origin || origin.chain_id === payment.chain.id) {
+      return fail(res, 422, "relay_unsupported_origin", "USDC cannot be paid from that network");
+    }
+    const rli = `rli_${randomUUID()}`;
+    const due = BigInt(payment.remaining_base_units);
+    const amountIn = due + 20_000n;
+    const quote = {
+      id: rli,
+      request_id: hex32(`relay:${rli}`),
+      origin,
+      amount_in: fromBaseUnits(amountIn.toString()),
+      amount_in_base_units: amountIn.toString(),
+      amount_out: fromBaseUnits(due.toString()),
+      amount_out_base_units: due.toString(),
+      relayer_fee_usd: "0.02",
+      time_estimate_seconds: 5,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      steps: [
+        {
+          id: "approve",
+          transaction: { chain_id: origin.chain_id, to: origin.usdc_address, data: "0x095ea7b3", value: "0", gas: "73112" },
+        },
+        {
+          id: "deposit",
+          transaction: { chain_id: origin.chain_id, to: RELAY_ROUTER, data: "0xe8017952", value: "0", gas: null },
+        },
+      ],
+    };
+    relayQuotes.set(rli, { id, origin });
+    return send(res, 200, quote);
+  }
+  if (relaySent) {
+    const quoted = relayQuotes.get(relaySent[1]);
+    if (!quoted || quoted.id !== id) return fail(res, 404, "relay_intent_not_found", "No such quote");
+    const body = await readJson(req);
+    if (quoted.sent) {
+      if (quoted.hash !== body.transaction_hash) {
+        return fail(res, 409, "relay_report_conflict", "A different transaction was already reported");
+      }
+      return send(res, 200, { ...payment, relay: relayFollowing.get(id) });
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(body.transaction_hash ?? ""))) {
+      return fail(res, 400, "invalid_request", "transaction_hash must be a 32-byte hex hash");
+    }
+    quoted.sent = true;
+    quoted.hash = body.transaction_hash;
+    relayFollowing.set(id, {
+      id: relaySent[1],
+      status: "sent",
+      origin_chain_id: quoted.origin.chain_id,
+      origin_transaction_hash: body.transaction_hash,
+      fill_transaction_hash: null,
+      created_at: new Date().toISOString(),
+    });
+    return send(res, 200, { ...payment, relay: relayFollowing.get(id) });
+  }
 
   if (match[2] === "/session") {
     if (mode !== "merchant_session") {

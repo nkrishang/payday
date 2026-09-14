@@ -126,6 +126,11 @@ struct CreateDepositRequest {
     /// Where exactly `amount` settles. May be left out when `issuer_id`
     /// names an identity with a saved payout address; its first one is used.
     payout_address: Option<String>,
+    /// Pin the network the payer must pay on: one of the deployment's chain
+    /// ids, as a decimal string. Left out, the payer chooses among all of
+    /// them when they sign. A chain this deployment does not serve is
+    /// `422 unsupported_chain`.
+    chain_id: Option<String>,
     /// The issuing party as the document will carry it. May be left out
     /// when `issuer_id` is given: the identity's name, contact address, and
     /// details are snapshotted in its place. An inline party always wins.
@@ -317,6 +322,18 @@ struct Transfer {
     block: String,
     timestamp: String,
     collected: bool,
+    /// Present when Relay's solver sent the transfer for a cross-chain
+    /// payment the attested wallet made from another network.
+    relay: Option<TransferRelay>,
+}
+#[derive(Serialize, ToSchema)]
+struct TransferRelay {
+    /// Relay's request id, `0x` hex, 32 bytes.
+    request_id: String,
+    /// Decimal chain id the wallet paid on.
+    origin_chain_id: String,
+    /// The transaction the wallet sent there.
+    origin_transaction_hash: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 struct TransferList {
@@ -657,10 +674,40 @@ struct VerificationFact {
 struct ProofTransfer {
     transaction_hash: String,
     log_index: String,
+    /// The attested wallet, or Relay's solver for a relayed transfer.
     sender: String,
     recipient: String,
     amount_base_units: String,
     block_number: String,
+    /// Present when Relay's solver made the transfer for a cross-chain
+    /// payment the attested wallet sent. Accepted offline only when the
+    /// same block appears in the attestation's `relay_fills`.
+    relay: Option<RelayAttribution>,
+}
+#[derive(Serialize, ToSchema)]
+struct RelayAttribution {
+    /// Relay's request id, `0x` hex, 32 bytes.
+    request_id: String,
+    /// Decimal chain id the wallet paid on.
+    origin_chain_id: String,
+    /// The transaction the wallet sent there, `0x` hex, 32 bytes.
+    origin_transaction_hash: String,
+    /// Always the attested wallet.
+    origin_sender: String,
+    /// `receipt` (read from a chain Payday serves) or `relay_api` (Relay's
+    /// record of the depositor).
+    attribution_source: String,
+}
+/// A relayed transfer as the attestation vouches for it.
+#[derive(Serialize, ToSchema)]
+struct AttestedRelayFill {
+    transaction_hash: String,
+    log_index: String,
+    request_id: String,
+    origin_chain_id: String,
+    origin_transaction_hash: String,
+    origin_sender: String,
+    attribution_source: String,
 }
 #[derive(Serialize, ToSchema)]
 struct VerificationAttestationPayload {
@@ -681,10 +728,14 @@ struct VerificationAttestationPayload {
     verified_at: Option<String>,
     wallet_bound_at: String,
     facts: Vec<VerificationFact>,
+    /// The transfers Relay's solver made for cross-chain payments the
+    /// attested wallet sent, each with the origin Payday verified; absent
+    /// when every transfer came from the wallet itself.
+    relay_fills: Option<Vec<AttestedRelayFill>>,
 }
 /// Payday-attested, not address-committed: verification happens after
 /// issuance. `signature` recovers to `signer` over
-/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V3" || JCS(payload))`.
+/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V4" || JCS(payload))`.
 #[derive(Serialize, ToSchema)]
 struct SignedVerificationAttestation {
     payload: VerificationAttestationPayload,
@@ -1179,8 +1230,16 @@ mod tests {
         assert!(chain["sweeper"].is_object());
         let create = &d["components"]["schemas"]["CreateDepositRequest"]["properties"];
         assert!(
-            create.get("chain_id").is_none(),
-            "the payer chooses the network"
+            create["chain_id"].is_object(),
+            "the merchant may pin the network"
+        );
+        assert!(
+            !d["components"]["schemas"]["CreateDepositRequest"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "chain_id"),
+            "pinning is optional"
         );
         assert!(create.get("token_address").is_none());
         let deposit_request = &d["components"]["schemas"]["DepositRequest"]["properties"];

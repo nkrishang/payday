@@ -156,7 +156,7 @@ attested wallet, not the sending one.
 
 ## Proof of Payment
 
-A settled deposit request can be exported as a Proof of Payment (`payday.proof.v3`):
+A settled deposit request can be exported as a Proof of Payment (`payday.proof.v4`):
 the canonical issuance snapshot (which lists every network the request
 offered, each with its USDC contract and factory), the canonicalization
 version, the attribution hash, the payer's wallet attestation (the exact
@@ -168,7 +168,9 @@ Payday-signed attestation of the verification facts. From it anyone —
 merchant, payer, or auditor — can recompute the hash, verify the wallet
 signature, derive the salt from the hash and the signature's digest, recompute
 the CREATE3 deposit address with the wallet as its recovery term, and confirm
-that the address received transfers from that wallet covering the deposit request
+that the address received transfers from that wallet (or, for a payment made
+from another network through Relay, from Relay's solver with an origin the
+signed attestation vouches for) covering the deposit request
 amount, with no access to Payday's database and no need to trust a later PDF
 export. A PDF receipt proves none of that on its own.
 
