@@ -1338,10 +1338,16 @@ assert_eq completed "$(jq -r '.legs[0].state' <<<"$finished")" "the leg did not 
 assert_eq 66 "$(jq -r '.legs[0].transfer_tx_hash | length' <<<"$finished")" "the leg has no transfer transaction"
 assert_eq 3000000 "$(token_balance "$WITHDRAW_DESTINATION")" "the destination did not receive the whole balance"
 assert_eq 0 "$(token_balance "$MERCHANT_WALLET")" "the merchant wallet still holds USDC"
+# The status poll above drains the per-account bucket, and the limiter
+# refills a token a second. These last reads are a burst otherwise, and a
+# 429 here is the limiter working, not the withdrawal failing — pace them.
+sleep 1.2
 listed_withdrawals="$(api_json GET "/v1/withdrawals?limit=5")"
 assert_eq 1 "$(jq '.withdrawals | length' <<<"$listed_withdrawals")" "the withdrawal is not listed"
+sleep 1.2
 assert_eq withdrawal_finished "$(api_error_code POST "/v1/withdrawals/$withdrawal_id/cancel")" \
   "a completed withdrawal was cancellable"
+sleep 1.2
 empty_withdrawal="$(merchant_curl POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-empty-$run_id")"
 assert_eq nothing_to_withdraw "$(jq -r .error.code <<<"$empty_withdrawal")" \
   "an empty wallet produced a withdrawal"
