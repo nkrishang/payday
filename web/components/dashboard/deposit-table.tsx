@@ -7,12 +7,12 @@ import { useState } from "react";
 import { AddButton } from "@/components/ui/add-button";
 import { Amount } from "@/components/ui/amount";
 import { Button, buttonStyles } from "@/components/ui/button";
-import { Problem } from "@/components/ui/field";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { StatusDot } from "@/components/ui/status-dot";
 import { cn } from "@/lib/cn";
 import { DepositRowDetail } from "./deposit-row-detail";
 import { formatShortDate, modeLabel, STATUSES } from "./labels";
+import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";
 import { StatusBadge } from "./status-badge";
 import { VerificationBadge } from "./verification-status";
@@ -85,14 +85,16 @@ export function DepositTable({
   const [cursors, setCursors] = useState<string[]>([]);
   const after = cursors[cursors.length - 1];
 
-  const page = useResource(`${status}|${verification}|${customer}|${after ?? ""}`, (client) =>
-    client.depositRequests.list({
-      limit: PAGE_SIZE,
-      ...(status ? { status } : {}),
-      ...(verification ? { verification } : {}),
-      ...(customer ? { customer_id: customer } : {}),
-      ...(after ? { starting_after: after } : {}),
-    }),
+  const page = useResource(
+    `deposit-requests:page:${status}|${verification}|${customer}|${after ?? ""}`,
+    (client) =>
+      client.depositRequests.list({
+        limit: PAGE_SIZE,
+        ...(status ? { status } : {}),
+        ...(verification ? { verification } : {}),
+        ...(customer ? { customer_id: customer } : {}),
+        ...(after ? { starting_after: after } : {}),
+      }),
   );
 
   const requests = page.data?.deposit_requests ?? [];
@@ -214,9 +216,16 @@ export function DepositTable({
         </div>
       </div>
 
-      <div className="mt-4">
-        <Problem>{page.error}</Problem>
-      </div>
+      {page.error ? (
+        <LoadProblem
+          compact
+          className="mt-4"
+          title="Couldn't load deposit requests."
+          message={page.error}
+          detail={page.detail}
+          onRetry={page.reload}
+        />
+      ) : null}
 
       <div className="mt-4 overflow-x-auto rounded-[16px] border border-line bg-surface">
         {/* Fixed rather than content-driven, so the headers sit over their own

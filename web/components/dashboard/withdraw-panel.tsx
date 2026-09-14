@@ -56,7 +56,9 @@ export function WithdrawPanel({
 }) {
   const { client, signOut } = useMerchant();
   const { signTypedData } = useSignTypedData();
-  const recent = useResource("withdrawals", (payday) => payday.withdrawals.list({ limit: 5 }));
+  const recent = useResource("withdrawals:recent", (payday) =>
+    payday.withdrawals.list({ limit: 5 }),
+  );
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -245,8 +247,9 @@ export function WithdrawPanel({
       <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
         <span className="text-[14px] font-medium">Withdraw</span>
         <span className="min-w-0 flex-1 text-[12px] text-faint">
-          Move everything in your Payday wallet, on every network, to one address. Circle&apos;s
-          CCTP bridges what is on another network; you receive the full amount.
+          Move everything in your Payday wallet to your selected destination address and chain. The
+          wait-time depends on the destination chain.{" "}
+          <span className="font-medium text-brand-green">No fees apply.</span>
         </span>
         {stage.kind === "idle" ? (
           <Button
@@ -308,10 +311,7 @@ export function WithdrawPanel({
               Not a valid address: 0x and 40 hex characters.
             </p>
           ) : (
-            <p className="mt-1.5 text-[12px] text-faint">
-              An address on {chainById(destinationChain)?.name ?? "the chosen network"} that you
-              control. Every leg is signed to this address; it cannot be changed afterwards.
-            </p>
+            <p className="mt-1.5 text-[12px] text-faint">This cannot be changed later.</p>
           )}
           {bridgeGuard ? (
             <p role="alert" className="mt-2 text-[12px] text-danger">{bridgeGuard}</p>

@@ -67,10 +67,7 @@ export function AccountSection({
           <span className="text-[14px]">{account.email ?? email ?? "—"}</span>
         </Row>
 
-        <Row
-          label="Payday wallet"
-          hint="Deposit requests settle here unless you pick one of an identity's saved wallets."
-        >
+        <Row label="Payday wallet">
           {wallet ? (
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <span className="min-w-0 font-mono text-[13px] break-all">{wallet}</span>
@@ -97,10 +94,7 @@ export function AccountSection({
           />
         ))}
 
-        <Row
-          label="Wallet key"
-          hint="Only needed to withdraw from your own server; the dashboard signs without it."
-        >
+        <Row label="Wallet key">
           <div className="flex flex-wrap items-center gap-3">
             <Button
               type="button"
@@ -115,11 +109,11 @@ export function AccountSection({
               Export wallet key
             </Button>
             <span className="text-[12px] text-faint">
-              Shown once by Privy, never to Payday. Anyone holding it controls the wallet: keep it in
-              a secret manager.{" "}
+              Payday never sees your private key. An exported key is needed for{" "}
               <Link href="/docs/withdrawals" className="underline decoration-line underline-offset-2">
-                Withdrawing from a server
+                withdrawing from a server
               </Link>
+              .
             </span>
           </div>
         </Row>

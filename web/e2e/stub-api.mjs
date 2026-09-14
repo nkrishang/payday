@@ -2118,7 +2118,8 @@ createServer(async (req, res) => {
 // makes — `balanceOf` — with the chain's stub balance for any wallet, so the
 // withdraw panel sees the same funds the API's legs report.
 const BALANCE_OF = "0x70a08231"; // keccak256("balanceOf(address)")[:4]
-const RPC_PORTS = [8545, 8546]; // same order as STUB_CHAINS
+// Same order as STUB_CHAINS; the playwright config passes the ports it built the app for.
+const RPC_PORTS = (process.env.STUB_RPC_PORTS ?? "8545,8546").split(",").map(Number);
 for (const [index, port] of RPC_PORTS.entries()) {
   const chain = STUB_CHAINS[index];
   createServer((req, res) => {
@@ -2148,7 +2149,17 @@ for (const [index, port] of RPC_PORTS.entries()) {
         res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32603, message: "stub failure" } }));
       }
     });
-  }).listen(port, "127.0.0.1", () => {
-    console.log(`stub ${chain.name} RPC on http://127.0.0.1:${port}`);
-  });
+  })
+    .on("error", (error) => {
+      // A developer's own chain (`just dev` runs Anvil here) already holds the
+      // port: the dashboard's balance reads go to it instead, which the specs
+      // that only read the API do not mind. Everything else in the stub runs.
+      if (error.code !== "EADDRINUSE") throw error;
+      console.warn(
+        `stub ${chain.name} RPC not started: port ${port} is in use; wallet reads go there`,
+      );
+    })
+    .listen(port, "127.0.0.1", () => {
+      console.log(`stub ${chain.name} RPC on http://127.0.0.1:${port}`);
+    });
 }

@@ -312,7 +312,7 @@ test("a merchant can generate, roll, and revoke their API key from the session",
 
   // A first key: one confirmation, no second sign-in.
   await section.getByRole("button", { name: "Generate key" }).click();
-  await expect(section.getByText(/shown once, here, and never again/)).toBeVisible();
+  await expect(section.getByText(/shown here once and never again/)).toBeVisible();
   await section.getByRole("button", { name: "Confirm & generate" }).click();
 
   await expect(section.getByText("Key generated")).toBeVisible();

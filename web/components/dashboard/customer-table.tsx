@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { AddButton } from "@/components/ui/add-button";
 import { Button } from "@/components/ui/button";
-import { Problem } from "@/components/ui/field";
 import { formatShortDate } from "./labels";
+import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";
 
 /**
@@ -22,7 +22,7 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
   const router = useRouter();
   const [cursors, setCursors] = useState<string[]>([]);
   const after = cursors[cursors.length - 1];
-  const page = useResource(after ?? "", (client) =>
+  const page = useResource(`customers:page:${after ?? ""}`, (client) =>
     client.customers.list({ limit: PAGE_SIZE, ...(after ? { starting_after: after } : {}) }),
   );
   const customers = page.data?.customers ?? [];
@@ -49,9 +49,16 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
         </div>
       </div>
 
-      <div className="mt-6">
-        <Problem>{page.error}</Problem>
-      </div>
+      {page.error ? (
+        <LoadProblem
+          compact
+          className="mt-6"
+          title="Couldn't load customers."
+          message={page.error}
+          detail={page.detail}
+          onRetry={page.reload}
+        />
+      ) : null}
 
       <div className="mt-6 overflow-x-auto rounded-[16px] border border-line bg-surface">
         {/* On a phone the date column would be too narrow for a date, so it

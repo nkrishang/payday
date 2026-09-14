@@ -42,10 +42,95 @@ export function privyAppId(): string {
 export const RESEND_COOLDOWN_MS = 60 * 1000;
 
 /**
+ * How many times one request is sent before its failure is reported, and the
+ * longest a single wait between sends may be. The API's per-account limit
+ * refills one request a second and answers `Retry-After: 1`, so a burst that
+ * overran it clears within a couple of retries; anything still failing after
+ * these is a real outage, not congestion.
+ */
+export const RETRY_ATTEMPTS = 3;
+const RETRY_BASE_MS = 400;
+const RETRY_MAX_MS = 4_000;
+
+/** Statuses that say "not now" rather than "no". */
+const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
+
+/**
+ * Whether a request can be sent again without doing something twice: reads
+ * always, writes only when the caller pinned them with an idempotency key.
+ */
+function retriable(init: RequestInit | undefined): boolean {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD") return true;
+  return new Headers(init?.headers).has("Idempotency-Key");
+}
+
+/** The wait the API asked for, when it named one, else exponential with jitter. */
+function retryDelay(response: Response | null, attempt: number): number {
+  const asked = response?.headers.get("Retry-After");
+  const seconds = asked === null || asked === undefined ? Number.NaN : Number(asked);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, RETRY_MAX_MS);
+  }
+  const backoff = RETRY_BASE_MS * 2 ** attempt;
+  return Math.min(backoff + Math.random() * backoff * 0.5, RETRY_MAX_MS);
+}
+
+function wait(ms: number, signal: AbortSignal | null | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * `fetch` that absorbs congestion. A `429` or a `502`–`504`, or a network
+ * failure, on a request that is safe to repeat is sent again after the wait
+ * the API asked for (`Retry-After`) or a short backoff, up to
+ * `RETRY_ATTEMPTS` sends in all. Everything else — every other status, a
+ * request that cannot be repeated, an abort — passes straight through, so
+ * the caller sees exactly what the API said. The dashboard's page load is a
+ * burst of reads from one account; this is what keeps a burst that overran
+ * the per-account limit from ever reaching the page as an error.
+ */
+export function retryingFetch(base: typeof globalThis.fetch): typeof globalThis.fetch {
+  return async (input, init) => {
+    const again = retriable(init);
+    let attempt = 0;
+    for (;;) {
+      let response: Response | null = null;
+      try {
+        response = await base(input, init);
+      } catch (cause) {
+        if (!again || attempt + 1 >= RETRY_ATTEMPTS || init?.signal?.aborted) throw cause;
+      }
+      if (response !== null && (!again || !TRANSIENT_STATUSES.has(response.status))) {
+        return response;
+      }
+      if (response !== null && attempt + 1 >= RETRY_ATTEMPTS) return response;
+      attempt += 1;
+      await wait(retryDelay(response, attempt - 1), init?.signal);
+    }
+  };
+}
+
+/**
  * A merchant client for the API this deployment is configured against. The
  * optional `fetcher` exists for the attachment uploader, which watches the
  * SDK's presigned PUT go by to report the scanning stage; everything else uses
- * the browser's fetch.
+ * the browser's fetch. Either way the client retries congestion
+ * (`retryingFetch`).
  */
 export function createMerchantClient(
   sessionToken: string,
@@ -54,7 +139,7 @@ export function createMerchantClient(
   return new PaydayClient({
     accessToken: sessionToken,
     baseUrl: config.apiUrl,
-    ...(fetcher === undefined ? {} : { fetch: fetcher }),
+    fetch: retryingFetch(fetcher ?? ((...args) => globalThis.fetch(...args))),
   });
 }
 

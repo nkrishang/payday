@@ -146,7 +146,7 @@ function ApiKeyCard({
               }`
             : metadata.revoked_at
               ? `Revoked ${formatDate(metadata.revoked_at)}`
-              : "Generate one to call the API from your own server."}
+              : null}
         </span>
         {stage.kind === "idle" ? (
           <div className="flex shrink-0 items-center gap-2">
@@ -197,7 +197,7 @@ function ApiKeyCard({
             </p>
           ) : (
             <p className="mb-3 text-[12.5px] text-muted">
-              Generates a key for your own server. It is shown once, here, and never again.
+              For security purposes, the API key will be shown here once and never again.
             </p>
           )}
           <div className="flex flex-wrap items-center gap-3">

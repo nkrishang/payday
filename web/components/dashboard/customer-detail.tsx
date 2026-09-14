@@ -1,41 +1,34 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Button } from "@/components/ui/button";
-import { Problem } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { formatBaseUnits } from "@/lib/format";
 import { CustomerForm } from "./customer-form";
 import { DepositTable } from "./deposit-table";
 import { formatDate } from "./labels";
+import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";
 
 /** The product's only currency; stats span every deposit request, so no one row's own token names it. */
 const USDC_DECIMALS = 6;
 
 export function CustomerDetail({ id }: { id: string }) {
-  const customer = useResource(id, (client) => client.customers.get(id));
+  const customer = useResource(`customer:${id}`, (client) => client.customers.get(id));
   // Only for the requests table's "Issued by" badge; the form needs none of it.
   const issuers = useResource("issuers", (client) => client.issuers.list({ limit: 50 }));
 
-  const failure = customer.error ?? issuers.error;
-  if (failure) {
+  const failed = customer.error ? customer : issuers.error ? issuers : null;
+  if (failed && (!customer.data || !issuers.data)) {
     return (
-      <div className="grid gap-3">
-        <Problem>{failure}</Problem>
-        <div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => {
-              customer.reload();
-              issuers.reload();
-            }}
-          >
-            Try again
-          </Button>
-        </div>
-      </div>
+      <LoadProblem
+        title="Couldn't load this customer."
+        message={failed.error}
+        detail={failed.detail}
+        onRetry={() => {
+          customer.reload();
+          issuers.reload();
+        }}
+      />
     );
   }
   if (!customer.data || !issuers.data) {

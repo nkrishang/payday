@@ -2,6 +2,12 @@ import { defineConfig, devices } from "@playwright/test";
 
 const STUB_PORT = 4010;
 const APP_PORT = 3003;
+/**
+ * Where the stub answers the dashboard's wallet reads, one port per chain.
+ * `just dev` runs Anvil on 8545 and 8546; `PW_RPC_PORTS=18545,18546` runs the
+ * suite beside it.
+ */
+const RPC_PORTS = (process.env.PW_RPC_PORTS ?? "8545,8546").split(",");
 
 /**
  * The checkout renders on the server, so intercepting requests in the browser
@@ -18,7 +24,7 @@ const publicEnv = {
     {
       id: 143,
       name: "Monad",
-      rpcUrl: "http://127.0.0.1:8545",
+      rpcUrl: `http://127.0.0.1:${RPC_PORTS[0]}`,
       usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
       explorerUrl: "https://monadvision.com",
       confirmation: "Credited within seconds",
@@ -27,7 +33,7 @@ const publicEnv = {
     {
       id: 8453,
       name: "Base",
-      rpcUrl: "http://127.0.0.1:8546",
+      rpcUrl: `http://127.0.0.1:${RPC_PORTS[1]}`,
       usdcAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       explorerUrl: "https://basescan.org",
       confirmation: "Credited within a minute",
@@ -74,7 +80,11 @@ export default defineConfig({
       command: "node e2e/stub-api.mjs",
       url: `http://127.0.0.1:${STUB_PORT}/health`,
       reuseExistingServer: !process.env.CI,
-      env: { STUB_PORT: String(STUB_PORT), CHECKOUT_ORIGIN: `http://127.0.0.1:${APP_PORT}` },
+      env: {
+        STUB_PORT: String(STUB_PORT),
+        STUB_RPC_PORTS: RPC_PORTS.join(","),
+        CHECKOUT_ORIGIN: `http://127.0.0.1:${APP_PORT}`,
+      },
     },
     {
       // NEXT_PUBLIC_* values are inlined at build time, so the build has to

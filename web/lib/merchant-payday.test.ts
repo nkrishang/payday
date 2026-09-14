@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createMerchantClient, describeLoginError, privyAppId } from "./merchant-payday";
+import {
+  createMerchantClient,
+  describeLoginError,
+  privyAppId,
+  RETRY_ATTEMPTS,
+  retryingFetch,
+} from "./merchant-payday";
 
 type Call = { url: string; init: RequestInit };
 
@@ -53,6 +59,90 @@ describe("createMerchantClient", () => {
     expect(new Headers(mock.calls[0]?.init.headers).get("authorization")).toBe(
       "Bearer privy.identity.token",
     );
+  });
+});
+
+describe("retryingFetch", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const limited = () =>
+    new Response(
+      JSON.stringify({
+        error: { code: "rate_limited", message: "Per-account request limit exceeded" },
+      }),
+      { status: 429, headers: { "content-type": "application/json", "Retry-After": "1" } },
+    );
+
+  /** Answers each call in turn; the last answer repeats. */
+  function sequence(...answers: (() => Response)[]) {
+    let call = 0;
+    return mockFetch(() => {
+      const answer = answers[Math.min(call, answers.length - 1)] as () => Response;
+      call += 1;
+      return answer();
+    });
+  }
+
+  it("sends a refused read again after the wait the API asked for", async () => {
+    const mock = sequence(limited, () => json({ ok: true }));
+    const response = retryingFetch(mock.fetcher)("https://api.example.test/v1/account", {
+      method: "GET",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await response).status).toBe(200);
+    expect(mock.calls).toHaveLength(2);
+  });
+
+  it("gives up after the last attempt and hands back what the API said", async () => {
+    const mock = mockFetch(() => limited());
+    const response = retryingFetch(mock.fetcher)("https://api.example.test/v1/account", {});
+    await vi.advanceTimersByTimeAsync(RETRY_ATTEMPTS * 1_000);
+    expect((await response).status).toBe(429);
+    expect(mock.calls).toHaveLength(RETRY_ATTEMPTS);
+  });
+
+  it("retries a dropped connection on a read, but never a write it cannot pin", async () => {
+    const dropped = sequence(
+      () => {
+        throw new TypeError("Failed to fetch");
+      },
+      () => json({ ok: true }),
+    );
+    const read = retryingFetch(dropped.fetcher)("https://api.example.test/v1/issuers", {
+      method: "GET",
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await read).status).toBe(200);
+    expect(dropped.calls).toHaveLength(2);
+
+    const refused = mockFetch(() => limited());
+    const write = retryingFetch(refused.fetcher)("https://api.example.test/v1/customers", {
+      method: "POST",
+      body: "{}",
+    });
+    expect((await write).status).toBe(429);
+    expect(refused.calls).toHaveLength(1);
+
+    const pinned = sequence(limited, () => json({}, 201));
+    const idempotent = retryingFetch(pinned.fetcher)(
+      "https://api.example.test/v1/deposit-requests",
+      { method: "POST", headers: { "Idempotency-Key": "k1" }, body: "{}" },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await idempotent).status).toBe(201);
+    expect(pinned.calls).toHaveLength(2);
+  });
+
+  it("passes every other refusal straight through", async () => {
+    const mock = mockFetch(() => json({ error: { code: "invalid_request", message: "no" } }, 400));
+    const response = await retryingFetch(mock.fetcher)("https://api.example.test/v1/account", {});
+    expect(response.status).toBe(400);
+    expect(mock.calls).toHaveLength(1);
   });
 });
 

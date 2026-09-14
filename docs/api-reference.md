@@ -79,10 +79,12 @@ a raw UUID remains is the Proof of Payment's
 deposit address and its schema is frozen, so it carries the UUID the `att_`
 id wraps.
 
-API-key traffic has a process-local per-account token bucket: capacity 60,
+Every authenticated merchant request — an API key or a dashboard session
+alike — draws on a process-local per-account token bucket: capacity 60,
 refill one request per second. Responses include `X-RateLimit-Limit`,
 `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. A rejected request returns
-`429 rate_limited` and `Retry-After: 1`.
+`429 rate_limited` and `Retry-After: 1`; send it again after that wait. The
+dashboard and its client do so on their own.
 
 Block numbers, log indexes, and exact base-unit amounts are decimal strings. Human
 USDC values are decimal strings with six-decimal precision. Every timestamp
