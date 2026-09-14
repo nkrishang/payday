@@ -7,7 +7,7 @@ import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Problem, Textarea } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
-import { useMerchant } from "./session";
+import { useInvalidate, useMerchant } from "./session";
 
 /**
  * Creates a customer, or replaces an existing one's editable fields — the API
@@ -22,6 +22,7 @@ export function CustomerForm({
 }) {
   const router = useRouter();
   const { client, signOut } = useMerchant();
+  const invalidate = useInvalidate();
   const [name, setName] = useState(customer?.name ?? "");
   const [email, setEmail] = useState(customer?.email ?? "");
   const [details, setDetails] = useState(customer?.details ?? "");
@@ -49,6 +50,9 @@ export function CustomerForm({
           email: email.trim() || null,
           details: details.trim() || null,
         });
+        // The lists and the record itself, wherever they are being shown.
+        invalidate("customers");
+        invalidate(`customer:${customer.id}`);
         setSaved(true);
         onSaved?.(updated);
       } else {
@@ -57,6 +61,7 @@ export function CustomerForm({
           ...(email.trim() ? { email: email.trim() } : {}),
           ...(details.trim() ? { details: details.trim() } : {}),
         });
+        invalidate("customers");
         router.push(`/dashboard/customers/${encodeURIComponent(created.id)}`);
         return;
       }

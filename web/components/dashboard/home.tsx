@@ -7,7 +7,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
-import { Problem } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { formatDisplayAmount } from "@/lib/format";
 import { usePayerPreviewUrl } from "@/lib/payer-session";
@@ -17,10 +16,11 @@ import { CustomerTable } from "./customer-table";
 import { DepositTable } from "./deposit-table";
 import { IssuerManager } from "./issuer-manager";
 import { IssuerSetup } from "./issuer-setup";
+import { LoadProblem } from "./load-problem";
 import { OnboardingSuccess } from "./onboarding-success";
 import { OnboardingWalkthrough } from "./onboarding-walkthrough";
 import { RequestComposer } from "./request-composer";
-import { useMerchant, useResource } from "./session";
+import { useInvalidate, useMerchant, useResource } from "./session";
 
 /**
  * The dashboard.
@@ -54,9 +54,14 @@ export function DashboardHome() {
   const issuers = useResource("issuers", (client) => client.issuers.list({ limit: 50 }));
   // Only ever asks whether anything exists: the table below loads its own page
   // with its own filter and cursor.
-  const anything = useResource("home", (client) => client.depositRequests.list({ limit: 1 }));
+  const anything = useResource("deposit-requests:any", (client) =>
+    client.depositRequests.list({ limit: 1 }),
+  );
   // The filters and the composer both pick from these; loaded once, here.
-  const customers = useResource("customers", (client) => client.customers.list({ limit: 100 }));
+  const customers = useResource("customers:all", (client) => client.customers.list({ limit: 100 }));
+  // Something was issued, set up, or changed: every component showing that
+  // kind of thing fetches it again, here and in the sections below.
+  const invalidate = useInvalidate();
 
   const [view, setView] = useState<View>("overview");
   const [leavingTo, setLeavingTo] = useState<View | null>(null);
@@ -97,35 +102,31 @@ export function DashboardHome() {
     if (billed !== null && asked !== null) router.replace("/dashboard", { scroll: false });
   }, [billed, asked, router]);
 
-  const failure = account.error ?? issuers.error ?? anything.error ?? customers.error;
-  if (failure) {
-    return (
-      <div className="grid gap-3">
-        <Problem>{failure}</Problem>
-        <div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => {
-              account.reload();
-              issuers.reload();
-              anything.reload();
-              customers.reload();
-            }}
-          >
-            Try again
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
+  // Congestion and hiccups were retried before anything reaches here (see
+  // the cache in session.tsx), so a failure with nothing to show is the page
+  // itself; a failed refresh behind data already shown is not worth a word.
   if (
     account.data === null ||
     issuers.data === null ||
     anything.data === null ||
     customers.data === null
   ) {
+    const failed = [account, issuers, anything, customers].find((resource) => resource.error);
+    if (failed) {
+      return (
+        <LoadProblem
+          title="Couldn't load your dashboard."
+          message={failed.error}
+          detail={failed.detail}
+          onRetry={() => {
+            account.reload();
+            issuers.reload();
+            anything.reload();
+            customers.reload();
+          }}
+        />
+      );
+    }
     return <HomeSkeleton />;
   }
 
@@ -154,9 +155,9 @@ export function DashboardHome() {
         <OnboardingSuccess
           payment={onboardingDeposit}
           onDone={() => {
-            anything.reload();
-            issuers.reload();
-            customers.reload();
+            invalidate("deposit-requests");
+            invalidate("issuers");
+            invalidate("customers");
             setOnboardingIssuer(null);
             setOnboardingDeposit(null);
             show("overview");
@@ -166,7 +167,7 @@ export function DashboardHome() {
         <OnboardingWalkthrough
           issuer={onboardingIssuer}
           payoutAddress={accountWallet ?? onboardingIssuer.payout_addresses[0]?.address ?? null}
-          onWalletChanged={account.reload}
+          onWalletChanged={() => invalidate("account")}
           onIssued={setOnboardingDeposit}
         />
       ) : view === "setup" || forcedSetup ? (
@@ -174,12 +175,12 @@ export function DashboardHome() {
           issuers={identities}
           onCancel={forcedSetup ? null : () => show("overview")}
           onDone={(issuer) => {
-            issuers.reload();
+            invalidate("issuers");
             if (forcedSetup) {
               // A first-time identity gets a guided tour, not the blank composer.
               // Set directly rather than through `show()`: that helper's 140ms
               // leave/enter delay would leave `view` still "overview" for a
-              // moment after `issuers.reload()` resolves, and a freshly-ready
+              // moment after the identities reload, and a freshly-ready
               // issuer flips `forcedSetup` false mid-transition — the ternary
               // above would fall all the way through to the real Overview for
               // one frame. `onboardingIssuer` alone must gate this branch, and
@@ -202,8 +203,8 @@ export function DashboardHome() {
           onCancel={() => show("overview")}
           onIssued={(payment) => {
             setIssued(payment);
-            anything.reload();
-            customers.reload();
+            invalidate("deposit-requests");
+            invalidate("customers");
             show("issued");
           }}
         />
@@ -224,8 +225,8 @@ export function DashboardHome() {
           openRequest={tracking ?? undefined}
           onCompose={compose}
           onAddIdentity={() => show("setup")}
-          onIdentitiesChanged={issuers.reload}
-          onAccountChanged={account.reload}
+          onIdentitiesChanged={() => invalidate("issuers")}
+          onAccountChanged={() => invalidate("account")}
         />
       )}
     </div>
@@ -262,7 +263,7 @@ function Overview({
     <div>
       {/* Raised over the sections below: each entrance animation is its own
           stacking context, so a later one would paint over an open filter. */}
-      <div className="dash-hero dash-rise relative z-20 pt-2">
+      <div className="dash-rise relative z-20 pt-2">
         <DepositTable
           identities={identities}
           customers={customers}
@@ -307,7 +308,7 @@ function Issued({
   const { client } = useMerchant();
   const previewHref = usePayerPreviewUrl(client, payment);
   return (
-    <div className="dash-hero mx-auto max-w-[620px] pt-6 text-center sm:pt-12">
+    <div className="mx-auto max-w-[620px] pt-6 text-center sm:pt-12">
       <svg viewBox="0 0 64 64" className="mx-auto size-14" fill="none" aria-hidden="true">
         <circle
           className="dash-check-ring"

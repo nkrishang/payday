@@ -790,6 +790,21 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   [HTTP API reference](docs/api-reference.md), and [FAQ](docs/faq.md).
 - Added a customer-first repository landing page and documentation index.
 
+### Fixed
+
+- The dashboard no longer runs into the API's per-account request limit on
+  its own page load, and a read that fails for a passing reason no longer
+  replaces the page with a red line. Every component reading the same thing
+  now shares one request through a page-wide resource cache
+  (`web/components/dashboard/session.tsx`): one fetch per key however many
+  sections ask, results that survive a remount and Privy's identity-token
+  rotation, and a background refresh once they are old. The merchant client
+  retries `429` and `502`–`504` on reads (and on writes pinned with an
+  idempotency key) after `Retry-After`, the cache retries a transient
+  failure a few more times on a backoff while the page keeps its skeleton,
+  and only then does the page show a designed "couldn't load" state with
+  the API's message and request id in the small print.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

@@ -6,11 +6,10 @@ import type { ReactNode } from "react";
  * The shell every checkout state renders inside, so nothing jumps between
  * states. Full-page use (`/pay/[id]`, its error and not-found states) opts
  * into `.brand-dark` (see globals.css) so the hosted checkout reads as the
- * same product as the landing page and dashboard — same palette, same type,
- * same paper-grain texture — rather than falling back to a generic
- * light/dark scheme. Embedded use (the dashboard onboarding walkthrough's
- * live payer preview) skips it: it already sits inside the dashboard's own
- * `.dash`-themed tree, so re-applying it would just double the grain overlay.
+ * same product as the landing page and dashboard — same palette, same type —
+ * rather than falling back to a generic light/dark scheme. Embedded use (the
+ * dashboard onboarding walkthrough's live payer preview) skips it: it already
+ * sits inside the dashboard's own `.dash`-themed tree.
  */
 export function CheckoutFrame({
   children,

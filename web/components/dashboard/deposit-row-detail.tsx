@@ -29,6 +29,7 @@ import {
 import { usePayerPreviewUrl } from "@/lib/payer-session";
 import { formatDate, formatRelative } from "./labels";
 import { RecoveredFunds } from "./recovered-funds";
+import { LoadProblem } from "./load-problem";
 import { useMerchant, useResource } from "./session";
 import { StatusBadge } from "./status-badge";
 import { VerificationActivity } from "./verification-activity";
@@ -44,17 +45,18 @@ import { VerificationStatus } from "./verification-status";
  * and the files — with nothing repeated from the row.
  */
 export function DepositRowDetail({ id }: { id: string }) {
-  const request = useResource(id, (client) => client.depositRequests.get(id));
+  const request = useResource(`deposit-request:${id}`, (client) => client.depositRequests.get(id));
 
-  if (request.error) {
+  if (request.error && !request.data) {
     return (
-      <div className="grid gap-3 px-4 py-5">
-        <Problem>{request.error}</Problem>
-        <div>
-          <Button variant="secondary" size="sm" onClick={request.reload}>
-            Try again
-          </Button>
-        </div>
+      <div className="px-4 py-5">
+        <LoadProblem
+          compact
+          title="Couldn't load this request."
+          message={request.error}
+          detail={request.detail}
+          onRetry={request.reload}
+        />
       </div>
     );
   }

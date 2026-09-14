@@ -61,6 +61,8 @@ npm test          --workspace @payday/web
 
 npx playwright install chromium          # once
 npm run test:e2e  --workspace @payday/web
+# beside a running `just dev`, whose Anvils hold 8545 and 8546:
+PW_RPC_PORTS=18545,18546 npm run test:e2e --workspace @payday/web
 ```
 
 The browser suite runs against `e2e/stub-api.mjs`, a stand-in for the Payday

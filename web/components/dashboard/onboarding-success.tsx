@@ -98,7 +98,7 @@ export function OnboardingSuccess({
   }, [client, payment.id]);
 
   return (
-    <div className="dash-hero mx-auto max-w-[520px] pt-6 text-center sm:pt-12">
+    <div className="mx-auto max-w-[520px] pt-6 text-center sm:pt-12">
       <svg viewBox="0 0 64 64" className="mx-auto size-14" fill="none" aria-hidden="true">
         <circle
           className="dash-check-ring"

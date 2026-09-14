@@ -451,3 +451,99 @@ test("an identity can be renamed, and moving its contact address unproves it", a
     page.getByRole("region", { name: "Verify email" }).getByText("Sent to support@acme.example."),
   ).toBeVisible();
 });
+
+/**
+ * A page load is a burst of reads from one account, and the API meters each
+ * account. Congestion must never reach the page: the client retries after
+ * `Retry-After`, and the resource cache retries again behind the skeleton.
+ */
+test("a rate-limited page load settles quietly, with one request per resource", async ({
+  page,
+}) => {
+  const seen = new Map<string, number>();
+  let refused = 0;
+  await page.route(
+    (url) => url.pathname.startsWith("/v1/"),
+    async (route) => {
+      const request = route.request();
+      // Only the dashboard's own reads: the sign-in dialog polls the account
+      // while the wallet is created, and that is not the page load.
+      if (request.method() !== "GET" || !page.url().includes("/dashboard")) {
+        return route.continue();
+      }
+      const path = new URL(request.url()).pathname + new URL(request.url()).search;
+      seen.set(path, (seen.get(path) ?? 0) + 1);
+      // The first three reads of the page are refused, as an overrun bucket would.
+      if (refused < 3) {
+        refused += 1;
+        await route.fulfill({
+          status: 429,
+          contentType: "application/json",
+          headers: { "Retry-After": "1" },
+          body: JSON.stringify({
+            error: { code: "rate_limited", message: "Per-account request limit exceeded" },
+            request_id: "01a09f98-7a10-7551-bb0c-61a13ec56e1d",
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    },
+  );
+  await signIn(page, "metered@example.com");
+
+  await expect(page.getByRole("region", { name: "Issuer identities" })).toBeVisible();
+  await expect(page.getByText(/Couldn't load/)).toHaveCount(0);
+  await expect(page.getByText(/request limit exceeded/)).toHaveCount(0);
+  await expect(page.getByText(/01a09f98/)).toHaveCount(0);
+
+  // Deduplicated: the account, the identities, and the customers are each
+  // read by more than one section, and each was requested once — plus the
+  // one send again for each read that was refused.
+  expect(refused).toBe(3);
+  expect(seen.size).toBeGreaterThanOrEqual(5);
+  for (const [path, count] of seen) {
+    expect(count, path).toBeLessThanOrEqual(2);
+  }
+  expect([...seen.values()].reduce((sum, count) => sum + count, 0)).toBe(seen.size + 3);
+});
+
+test("a read that keeps failing becomes a page that says so, and recovers on retry", async ({
+  page,
+}) => {
+  let broken = true;
+  await page.route(
+    (url) => url.pathname === "/v1/account",
+    async (route) => {
+      // The sign-in dialog reads the account too, while the wallet is made;
+      // the outage is the dashboard's to handle.
+      if (route.request().method() !== "GET" || !broken || !page.url().includes("/dashboard")) {
+        return route.continue();
+      }
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "internal_error", message: "upstream timeout" },
+          request_id: "01a09f98-0000-7551-bb0c-61a13ec56e1d",
+        }),
+      });
+    },
+  );
+  await signIn(page, "outage@example.com");
+
+  // The skeleton holds through the retries; only then does the page say so,
+  // in its own words, with the API's message kept to the small print.
+  const problem = page.getByRole("alert").filter({ hasText: "Couldn't load your dashboard." });
+  await expect(problem).toBeVisible({ timeout: 30_000 });
+  await expect(problem).toContainText("Couldn't load your dashboard.");
+  await expect(problem).toContainText("Payday is temporarily unavailable.");
+  await expect(problem).toContainText(
+    "upstream timeout (request 01a09f98-0000-7551-bb0c-61a13ec56e1d)",
+  );
+
+  broken = false;
+  await problem.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("region", { name: "Issuer identities" })).toBeVisible();
+  await expect(page.getByText(/Couldn't load/)).toHaveCount(0);
+});

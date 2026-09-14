@@ -1,9 +1,8 @@
 "use client";
 
 import type { VerificationAttempt } from "@payday/sdk";
-import { Button } from "@/components/ui/button";
-import { Problem } from "@/components/ui/field";
 import { formatDate } from "./labels";
+import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";
 
 /**
@@ -19,17 +18,20 @@ import { useResource } from "./session";
 /** The rule that separates this from the verdict above it. */
 const RULE = "mt-4 border-t border-line pt-4";
 export function VerificationActivity({ paymentId }: { paymentId: string }) {
-  const detail = useResource(paymentId, (client) => client.depositRequests.verification(paymentId));
+  const detail = useResource(`deposit-request:${paymentId}:verification`, (client) =>
+    client.depositRequests.verification(paymentId),
+  );
 
-  if (detail.error) {
+  if (detail.error && !detail.data) {
     return (
-      <div className={`${RULE} grid gap-3`}>
-        <Problem>{detail.error}</Problem>
-        <div>
-          <Button variant="secondary" size="sm" onClick={detail.reload}>
-            Try again
-          </Button>
-        </div>
+      <div className={RULE}>
+        <LoadProblem
+          compact
+          title="Couldn't load the verification activity."
+          message={detail.error}
+          detail={detail.detail}
+          onRetry={detail.reload}
+        />
       </div>
     );
   }
