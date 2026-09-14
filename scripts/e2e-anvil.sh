@@ -388,8 +388,19 @@ merchant_curl() {
 
 # The response body of a request that must succeed. The body slot is
 # positional, so pass "" before any extra curl arguments (e.g. --output).
+# A 429 from the per-account rate limiter is not a failed request — the
+# limiter refills one token a second, so a burst anywhere in this long
+# run can outrun it — so give the call a couple of refills first.
 api_json() {
-  merchant_curl "$1" "$2" "${3:-}" --fail "${@:4}"
+  local response attempt
+  for attempt in 1 2 3; do
+    if response="$(merchant_curl "$1" "$2" "${3:-}" --fail "${@:4}")"; then
+      printf '%s' "$response"
+      return 0
+    fi
+    sleep 1.2
+  done
+  printf '%s' "$response"
 }
 
 # Only the HTTP status of a request that may fail.
@@ -397,9 +408,18 @@ api_status() {
   merchant_curl "$1" "$2" "${3:-}" --output /dev/null --write-out '%{http_code}'
 }
 
-# Only the stable error code of a request that must fail.
+# Only the stable error code of a request that must fail. A rate-limited
+# attempt says nothing about the assertion, so retry it like api_json.
 api_error_code() {
-  merchant_curl "$1" "$2" "${3:-}" | jq -r .error.code
+  local response attempt
+  for attempt in 1 2 3; do
+    response="$(merchant_curl "$1" "$2" "${3:-}")"
+    if [[ "$(jq -r '.error.code // empty' <<<"$response")" != "rate_limited" ]]; then
+      break
+    fi
+    sleep 1.2
+  done
+  jq -r '.error.code // empty' <<<"$response"
 }
 
 # PUT a file to the presigned upload slot exactly as an SDK client would:
