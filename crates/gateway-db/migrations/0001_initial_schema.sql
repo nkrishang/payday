@@ -2,9 +2,17 @@
 --
 -- This is the whole schema in one migration. It replaces the pre-release
 -- chain of 21 incremental migrations, which was squashed on 2026-09-06 while
--- Payday had no production data to carry forward. Every table, constraint,
--- index, function, and trigger below is exactly what that chain ended with;
--- only the intermediate states are gone.
+-- Payday had no production data to carry forward; the migrations that had
+-- accumulated on top of it since (the indexer watch indexes, the
+-- payer-chosen network, withdrawals, relay intents) were folded in on
+-- 2026-09-14 under the same terms. Every table, constraint, index, function,
+-- and trigger below is exactly what that chain ended with; only the
+-- intermediate states are gone.
+--
+-- While Payday is pre-release, edits to the schema land here. Once a real
+-- deposit has been accepted the baseline is frozen and a change is a new
+-- numbered migration, reviewed for compatibility with the image still
+-- running while the new one starts.
 --
 -- Internal tables keep the invoice naming (`invoices`, `payment_observations`,
 -- `invoice_attachments`): the product speaks of deposits and deposit requests,
@@ -267,10 +275,12 @@ CREATE TABLE invoices (
     account_id UUID NOT NULL REFERENCES accounts(id),
     idempotency_key TEXT NOT NULL,
 
-    -- Chain parameters committed at issuance.
-    chain_id BIGINT NOT NULL,
-    factory_address BYTEA NOT NULL,
-    token_address BYTEA NOT NULL,
+    -- The chain, factory, and token are binding-time facts: an unbound
+    -- request commits to none of them (the payer chooses the network when
+    -- they attest a wallet), and once bound they are immutable.
+    chain_id BIGINT,
+    factory_address BYTEA,
+    token_address BYTEA,
     token_decimals SMALLINT NOT NULL,
     beneficiary_address BYTEA NOT NULL,
     expiration_timestamp BIGINT NOT NULL,
@@ -455,11 +465,13 @@ CREATE TABLE invoices (
         (
             payer_wallet IS NULL AND payer_attestation IS NULL AND wallet_bound_at IS NULL
             AND recovery_address IS NULL AND salt IS NULL AND payment_address IS NULL
+            AND chain_id IS NULL AND factory_address IS NULL AND token_address IS NULL
         )
         OR
         (
             payer_wallet IS NOT NULL AND payer_attestation IS NOT NULL AND wallet_bound_at IS NOT NULL
             AND recovery_address = payer_wallet AND salt IS NOT NULL AND payment_address IS NOT NULL
+            AND chain_id IS NOT NULL AND factory_address IS NOT NULL AND token_address IS NOT NULL
         )
     ),
     -- Nothing can arrive at an address that does not exist: an unbound
@@ -495,15 +507,29 @@ CREATE INDEX invoices_likely_unsolicited
     ON invoices(account_id, likely_unsolicited_at DESC)
     WHERE likely_unsolicited_at IS NOT NULL;
 
--- The sweep queue and the expiry watch are the two scans the worker runs on
--- every pass; both must stay proportional to open work, not history.
+-- The sweep queue, the expiry watch, and the indexer's watch list are the
+-- scans the worker runs on every pass; all must stay proportional to open
+-- work, not history. The watch list is fingerprinted on a short timer, so
+-- each branch has its own partial index.
 CREATE INDEX invoices_sweep_queue ON invoices (chain_id, id) WHERE uncollected_count > 0;
 CREATE INDEX invoices_expiry_watch ON invoices (chain_id, expiration_timestamp)
     WHERE status IN ('created', 'funded');
 CREATE INDEX invoices_in_flight ON invoices (sweep_batch_id) WHERE sweep_batch_id IS NOT NULL;
+CREATE INDEX invoices_watch_open ON invoices (chain_id, token_address)
+    WHERE payment_address IS NOT NULL AND status NOT IN ('fulfilled', 'recovered');
+CREATE INDEX invoices_watch_recent ON invoices (chain_id, token_address, updated_at)
+    WHERE payment_address IS NOT NULL;
+
+-- An unbound request has no chain, so no chain's clock expires it through
+-- `invoices_expiry_watch`; every chain's reconciler expires unbound requests
+-- against its own finalized time through this index instead.
+CREATE INDEX invoices_unbound_expiry ON invoices (expiration_timestamp)
+    WHERE chain_id IS NULL AND status = 'created';
 
 -- Issuance fields are immutable from the start; the binding fields are
--- immutable from the moment they are set, and are set all at once. Lifecycle
+-- immutable from the moment they are set, and are set all at once. The
+-- chain, factory, and token join the binding group: settable once, from
+-- NULL, together with the rest of the binding. Lifecycle
 -- columns (status, received, sweep state, verification completion) remain
 -- mutable. Changing anything else means cancelling and reissuing.
 CREATE FUNCTION reject_invoice_issuance_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -512,9 +538,6 @@ BEGIN
      OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
      OR NEW.customer_id IS DISTINCT FROM OLD.customer_id
      OR NEW.issuer_id IS DISTINCT FROM OLD.issuer_id
-     OR NEW.chain_id IS DISTINCT FROM OLD.chain_id
-     OR NEW.factory_address IS DISTINCT FROM OLD.factory_address
-     OR NEW.token_address IS DISTINCT FROM OLD.token_address
      OR NEW.token_decimals IS DISTINCT FROM OLD.token_decimals
      OR NEW.beneficiary_address IS DISTINCT FROM OLD.beneficiary_address
      OR NEW.expiration_timestamp IS DISTINCT FROM OLD.expiration_timestamp
@@ -545,6 +568,9 @@ BEGIN
      OR NEW.recovery_address IS DISTINCT FROM OLD.recovery_address
      OR NEW.salt IS DISTINCT FROM OLD.salt
      OR NEW.payment_address IS DISTINCT FROM OLD.payment_address
+     OR NEW.chain_id IS DISTINCT FROM OLD.chain_id
+     OR NEW.factory_address IS DISTINCT FROM OLD.factory_address
+     OR NEW.token_address IS DISTINCT FROM OLD.token_address
   ) THEN
     RAISE EXCEPTION 'invoice % payer wallet binding is immutable once set', OLD.id
       USING ERRCODE = 'integrity_constraint_violation';
@@ -608,11 +634,127 @@ CREATE TABLE sweeper_status (
 );
 
 -- ---------------------------------------------------------------------------
+-- Relay intents: cross-chain payments through Relay (relay.link). The hosted
+-- checkout lets a payer whose USDC sits on another chain pay a deposit
+-- request anyway: gatewayd asks Relay for an exact-output quote whose
+-- recipient is the payment address, the payer sends the quote's transactions
+-- from the wallet they attested, and Relay's solver delivers USDC to the
+-- payment address on the request's chain. One row per quote; the row is what
+-- lets the indexer attribute the solver's transfer to the attested wallet
+-- instead of flagging it as likely unsolicited.
+--
+--   quoted ─▶ sent ─▶ filled
+--   quoted ─▶ expired          (never reported as sent)
+--   sent   ─▶ failed | refunded
+--
+-- `filled` means Payday verified the origin payment itself, from the origin
+-- chain's receipt. Relay's record of a depositor and the page's reported
+-- hash are hints for finding the evidence, never the evidence:
+-- `origin_tx_hash` keeps the page's report (an unverified hint), while the
+-- verified origin transaction is its own column, and only it is unique — a
+-- reported hash nobody verified must not squat on another payment's
+-- transaction.
+-- ---------------------------------------------------------------------------
+CREATE TABLE relay_intents (
+    id UUID PRIMARY KEY,
+    invoice_id UUID NOT NULL REFERENCES invoices(id),
+    -- Relay's request id, bytes32.
+    request_id BYTEA NOT NULL,
+    origin_chain_id BIGINT NOT NULL,
+    -- The invoice's chain, restated so the destination chain's worker can
+    -- scan its own intents without joining invoices.
+    destination_chain_id BIGINT NOT NULL,
+    origin_currency BYTEA NOT NULL,
+    -- The attested wallet the quote was made for: Relay's `user`.
+    payer_wallet BYTEA NOT NULL,
+    -- Base units, decimal: what the payer sends on the origin chain, and
+    -- exactly what lands on the payment address (EXACT_OUTPUT).
+    quoted_in_amount TEXT NOT NULL,
+    quoted_out_amount TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'quoted',
+    -- The origin transaction the page reported, then the one that was
+    -- verified from the origin chain's receipt (kept beside the report here;
+    -- in the migration chain it was appended at the end of the table).
+    origin_tx_hash BYTEA,
+    -- The destination transactions Relay reports for the fill.
+    fill_tx_hashes BYTEA[] NOT NULL DEFAULT '{}',
+    -- Relay's own last word on the request, for operators.
+    relay_status TEXT,
+    -- How the origin sender was established: `receipt` (the origin chain is
+    -- one this deployment serves and the transfer was read from it) or
+    -- `relay_api` (Relay's request record names the depositor).
+    attribution_source TEXT,
+    next_check_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ,
+    -- A quote nobody sends is forgotten after this.
+    expires_at TIMESTAMPTZ NOT NULL,
+    -- The verified origin transaction: its own column, and only it is
+    -- unique. See the section comment for why the two differ.
+    verified_origin_tx_hash BYTEA,
+
+    CONSTRAINT relay_intents_request_id_unique UNIQUE (request_id),
+    CONSTRAINT relay_intents_request_id_length CHECK (octet_length(request_id) = 32),
+    CONSTRAINT relay_intents_origin_currency_length CHECK (octet_length(origin_currency) = 20),
+    CONSTRAINT relay_intents_payer_wallet_length CHECK (octet_length(payer_wallet) = 20),
+    CONSTRAINT relay_intents_amounts_numeric
+        CHECK (quoted_in_amount ~ '^[0-9]+$' AND quoted_out_amount ~ '^[0-9]+$'),
+    CONSTRAINT relay_intents_status_valid
+        CHECK (status IN ('quoted', 'sent', 'filled', 'failed', 'refunded', 'expired')),
+    CONSTRAINT relay_intents_origin_tx_hash_length
+        CHECK (origin_tx_hash IS NULL OR octet_length(origin_tx_hash) = 32),
+    CONSTRAINT relay_intents_verified_origin_tx_hash_length
+        CHECK (
+            verified_origin_tx_hash IS NULL
+            OR octet_length(verified_origin_tx_hash) = 32
+        ),
+    -- A filled intent was verified through a receipt, or it is not filled.
+    CONSTRAINT relay_intents_verified_fill CHECK (
+        (
+            status = 'filled'
+            AND attribution_source IS NOT DISTINCT FROM 'receipt'
+            AND verified_origin_tx_hash IS NOT NULL
+        )
+        OR (
+            status <> 'filled'
+            AND attribution_source IS NULL
+            AND verified_origin_tx_hash IS NULL
+        )
+    )
+);
+
+-- One verified origin transaction pays for one intent.
+CREATE UNIQUE INDEX relay_intents_verified_origin_tx
+    ON relay_intents (origin_chain_id, verified_origin_tx_hash)
+    WHERE verified_origin_tx_hash IS NOT NULL;
+-- The crediting path's lookup: intents that may explain a solver's transfer.
+CREATE INDEX relay_intents_by_invoice_open
+    ON relay_intents (invoice_id)
+    WHERE status IN ('sent', 'filled');
+-- The destination worker's poll.
+CREATE INDEX relay_intents_polling
+    ON relay_intents (destination_chain_id, next_check_at)
+    WHERE status = 'sent';
+-- Forgetting unsent quotes.
+CREATE INDEX relay_intents_quoted ON relay_intents (expires_at) WHERE status = 'quoted';
+-- The page's view: the newest intent for its request.
+CREATE INDEX relay_intents_by_invoice ON relay_intents (invoice_id, created_at DESC);
+-- The reconciliation scan: unreported quotes whose exact amount somebody's
+-- transfer may have already paid (the solver can land before the report).
+CREATE INDEX relay_intents_reconciliation
+    ON relay_intents (destination_chain_id, next_check_at, expires_at)
+    WHERE status IN ('quoted', 'expired');
+
+-- ---------------------------------------------------------------------------
 -- Payment observations: every finalized USDC transfer into a payment
 -- address, as the ledger. Every nonzero observation is either still at the
 -- address or was drained by a sweep at `collected_at_block`. `late`
 -- transfers are recovered automatically to the payer's wallet; `error` rows
--- await an operator.
+-- await an operator. A transfer from a wallet other than the attested one,
+-- while an intent the payer reported as sent is pending, is parked rather
+-- than flagged: the poller either attributes it to the intent
+-- (relay_intent_id) or unparks it into the ordinary likely-unsolicited path.
 -- ---------------------------------------------------------------------------
 CREATE TABLE payment_observations (
     chain_id BIGINT NOT NULL,
@@ -632,6 +774,8 @@ CREATE TABLE payment_observations (
     collected_at_block BIGINT,
     collected_at_transaction_index BIGINT,
     block_timestamp BIGINT NOT NULL,
+    relay_intent_id UUID REFERENCES relay_intents(id),
+    relay_parked_at TIMESTAMPTZ,
 
     PRIMARY KEY (chain_id, token_address, transaction_hash, log_index),
     CONSTRAINT payment_observations_token_address_length
@@ -674,6 +818,9 @@ CREATE INDEX payment_observations_invoice_order
 CREATE INDEX payment_observations_uncollected ON payment_observations (invoice_id, block_number)
     WHERE collected_at_block IS NULL AND disposition <> 'error';
 CREATE INDEX payment_observations_errors ON payment_observations (observed_at) WHERE disposition = 'error';
+CREATE INDEX payment_observations_relay_parked
+    ON payment_observations (invoice_id)
+    WHERE relay_parked_at IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Recovery ledger: every amount returned to the payer's wallet on a
@@ -694,6 +841,167 @@ CREATE TABLE recovered_funds (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(invoice_id, transaction_hash, reason)
 );
+
+-- ---------------------------------------------------------------------------
+-- Merchant withdrawals: the whole USDC balance of the account's Payday wallet
+-- on every chain, moved to one destination the merchant names. One row per
+-- withdrawal, one leg per source chain. The merchant authorizes each leg
+-- with an EIP-3009 signature (crates/gateway-core/src/withdrawal_authorization.rs)
+-- and gateway-indexer relays it: a same-chain `transferWithAuthorization`, or
+-- `WithdrawalForwarder.bridge` (CCTP burn) followed, once Circle attests, by
+-- `MessageTransmitterV2.receiveMessage` on the destination chain. A relay
+-- step's transaction can revert for reasons no retry fixes only sometimes:
+-- those legs' obligations survive the revert (an unused authorization, an
+-- attestation Circle has already signed), so the relayer puts the step back
+-- in its queue after a backoff — `step_reverts` and `step_retry_at` — and
+-- only a run of reverts makes the failure permanent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE withdrawals (
+    id UUID PRIMARY KEY,
+    account_id UUID NOT NULL REFERENCES accounts(id),
+    idempotency_key TEXT NOT NULL,
+    -- The Payday wallet the legs are signed from, as it was at creation.
+    wallet_address TEXT NOT NULL,
+    destination_chain_id BIGINT NOT NULL,
+    destination_address TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Exactly one of these is set once every leg is terminal, or the
+    -- merchant cancelled before anything was relayed.
+    completed_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
+
+    CONSTRAINT withdrawals_idempotency UNIQUE (account_id, idempotency_key),
+    CONSTRAINT withdrawals_wallet_address_shape CHECK (wallet_address ~ '^0x[0-9a-fA-F]{40}$'),
+    CONSTRAINT withdrawals_destination_address_shape CHECK (destination_address ~ '^0x[0-9a-fA-F]{40}$'),
+    CONSTRAINT withdrawals_one_ending CHECK (num_nonnulls(completed_at, cancelled_at, failed_at) <= 1)
+);
+
+-- One withdrawal in flight per account: the legs snapshot the balances, and
+-- two overlapping snapshots would authorize the same funds twice.
+CREATE UNIQUE INDEX withdrawals_open ON withdrawals (account_id)
+    WHERE completed_at IS NULL AND cancelled_at IS NULL AND failed_at IS NULL;
+CREATE INDEX withdrawals_by_account ON withdrawals (account_id, created_at DESC, id DESC);
+
+CREATE TABLE withdrawal_legs (
+    id UUID PRIMARY KEY,
+    withdrawal_id UUID NOT NULL REFERENCES withdrawals(id),
+    -- Display order: the chain registry's order.
+    position SMALLINT NOT NULL,
+    kind TEXT NOT NULL,
+    source_chain_id BIGINT NOT NULL,
+    destination_chain_id BIGINT NOT NULL,
+    -- Base units, decimal.
+    amount TEXT NOT NULL,
+    state TEXT NOT NULL,
+
+    -- The authorization the merchant signs, complete enough to rebuild the
+    -- typed data and verify the signature without a chain read.
+    token_address TEXT NOT NULL,
+    domain_name TEXT NOT NULL,
+    domain_version TEXT NOT NULL,
+    authorization_kind TEXT NOT NULL,
+    -- The payee: the destination (transfer) or the forwarder (bridge).
+    authorization_to TEXT NOT NULL,
+    nonce BYTEA NOT NULL,
+    -- Bridge legs only: the salt behind the nonce's destination commitment.
+    salt BYTEA,
+    -- Unix seconds; the token refuses the authorization from then on.
+    valid_before BIGINT NOT NULL,
+    signature BYTEA,
+    authorized_at TIMESTAMPTZ,
+
+    -- The relayer's one in-flight transaction for this leg, in
+    -- sweep_batches' shape: one signer nonce, every same-nonce replacement
+    -- appended, the receipt once seen. Cleared when the step resolves.
+    step_chain_id BIGINT,
+    step_nonce BIGINT,
+    step_gas_limit BIGINT,
+    step_max_fee_per_gas TEXT,
+    step_max_priority_fee_per_gas TEXT,
+    step_tx_hashes BYTEA[],
+    step_raw_transactions BYTEA[],
+    step_submitted_at TIMESTAMPTZ,
+    step_broadcast_at TIMESTAMPTZ,
+    step_mined_tx_hash BYTEA,
+    step_mined_block BIGINT,
+    step_mined_block_hash BYTEA,
+    -- Outcomes.
+    transfer_tx_hash BYTEA,
+    burn_tx_hash BYTEA,
+    mint_tx_hash BYTEA,
+    attestation_message BYTEA,
+    attestation BYTEA,
+    attestation_next_check_at TIMESTAMPTZ,
+    failure_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Revert bookkeeping for the step: the count and the earliest next
+    -- attempt travel with the leg.
+    step_reverts SMALLINT NOT NULL DEFAULT 0,
+    step_retry_at TIMESTAMPTZ,
+
+    CONSTRAINT withdrawal_legs_position UNIQUE (withdrawal_id, position),
+    CONSTRAINT withdrawal_legs_kind CHECK (kind IN ('transfer', 'bridge')),
+    CONSTRAINT withdrawal_legs_kind_matches_chains
+        CHECK ((kind = 'transfer') = (source_chain_id = destination_chain_id)),
+    CONSTRAINT withdrawal_legs_amount_positive CHECK (amount ~ '^[0-9]+$' AND amount != '0'),
+    CONSTRAINT withdrawal_legs_state CHECK (state IN (
+        'awaiting_signature', 'authorized', 'relaying', 'burned', 'attested', 'minting',
+        'completed', 'failed', 'expired', 'cancelled')),
+    CONSTRAINT withdrawal_legs_authorization_kind
+        CHECK (authorization_kind IN ('transfer', 'receive')
+            AND (authorization_kind = 'transfer') = (kind = 'transfer')),
+    CONSTRAINT withdrawal_legs_addresses_shape
+        CHECK (token_address ~ '^0x[0-9a-fA-F]{40}$' AND authorization_to ~ '^0x[0-9a-fA-F]{40}$'),
+    CONSTRAINT withdrawal_legs_nonce_length CHECK (octet_length(nonce) = 32),
+    CONSTRAINT withdrawal_legs_salt CHECK ((salt IS NULL) = (kind = 'transfer')
+        AND (salt IS NULL OR octet_length(salt) = 32)),
+    CONSTRAINT withdrawal_legs_signature CHECK ((signature IS NULL) = (authorized_at IS NULL)
+        AND (signature IS NULL OR octet_length(signature) = 65)),
+    CONSTRAINT withdrawal_legs_signed_before_relay
+        CHECK (state IN ('awaiting_signature', 'expired', 'cancelled') OR signature IS NOT NULL),
+    CONSTRAINT withdrawal_legs_step_complete CHECK (
+        (step_chain_id IS NULL) = (step_nonce IS NULL)
+        AND (step_nonce IS NULL) = (step_gas_limit IS NULL)
+        AND (step_gas_limit IS NULL) = (step_max_fee_per_gas IS NULL)
+        AND (step_max_fee_per_gas IS NULL) = (step_max_priority_fee_per_gas IS NULL)
+        AND (step_max_priority_fee_per_gas IS NULL) = (step_tx_hashes IS NULL)
+        AND (step_tx_hashes IS NULL) = (step_raw_transactions IS NULL)
+        AND (step_raw_transactions IS NULL) = (step_submitted_at IS NULL)),
+    CONSTRAINT withdrawal_legs_step_only_while_relaying
+        CHECK (step_chain_id IS NULL OR state IN ('relaying', 'minting')),
+    CONSTRAINT withdrawal_legs_step_fees_numeric CHECK (
+        (step_max_fee_per_gas IS NULL OR step_max_fee_per_gas ~ '^[0-9]+$')
+        AND (step_max_priority_fee_per_gas IS NULL OR step_max_priority_fee_per_gas ~ '^[0-9]+$')),
+    CONSTRAINT withdrawal_legs_step_transactions_complete CHECK (
+        step_tx_hashes IS NULL
+        OR (cardinality(step_tx_hashes) >= 1 AND cardinality(step_raw_transactions) = cardinality(step_tx_hashes))),
+    CONSTRAINT withdrawal_legs_step_mined_complete CHECK (
+        (step_mined_tx_hash IS NULL) = (step_mined_block IS NULL)
+        AND (step_mined_block IS NULL) = (step_mined_block_hash IS NULL)
+        AND (step_mined_tx_hash IS NULL OR step_chain_id IS NOT NULL)),
+    CONSTRAINT withdrawal_legs_hash_lengths CHECK (
+        (step_mined_tx_hash IS NULL OR octet_length(step_mined_tx_hash) = 32)
+        AND (step_mined_block_hash IS NULL OR octet_length(step_mined_block_hash) = 32)
+        AND (transfer_tx_hash IS NULL OR octet_length(transfer_tx_hash) = 32)
+        AND (burn_tx_hash IS NULL OR octet_length(burn_tx_hash) = 32)
+        AND (mint_tx_hash IS NULL OR octet_length(mint_tx_hash) = 32)),
+    CONSTRAINT withdrawal_legs_attestation_complete
+        CHECK ((attestation_message IS NULL) = (attestation IS NULL)),
+    CONSTRAINT withdrawal_legs_failure_reason
+        CHECK ((failure_reason IS NOT NULL) = (state = 'failed'))
+);
+
+-- The relayer signs with one key per chain and keeps one transaction in
+-- flight on it; sweep_batches_open enforces the same for sweeps, and the
+-- indexer checks both before it signs anything.
+CREATE UNIQUE INDEX withdrawal_steps_open ON withdrawal_legs (step_chain_id) WHERE step_chain_id IS NOT NULL;
+CREATE INDEX withdrawal_legs_by_withdrawal ON withdrawal_legs (withdrawal_id, position);
+CREATE INDEX withdrawal_legs_relayable ON withdrawal_legs (source_chain_id, created_at) WHERE state = 'authorized';
+CREATE INDEX withdrawal_legs_mintable ON withdrawal_legs (destination_chain_id, created_at) WHERE state = 'attested';
+CREATE INDEX withdrawal_legs_attesting ON withdrawal_legs (source_chain_id, attestation_next_check_at) WHERE state = 'burned';
+CREATE INDEX withdrawal_legs_expiring ON withdrawal_legs (valid_before) WHERE state IN ('awaiting_signature', 'authorized');
 
 -- ---------------------------------------------------------------------------
 -- PDF attachments: staged by presigned upload, finalized after the malware
@@ -781,9 +1089,14 @@ CREATE TABLE payer_sessions (
     merchant_session_verified_at TIMESTAMPTZ,
     wallet_nonce BYTEA CHECK (wallet_nonce IS NULL OR octet_length(wallet_nonce) = 32),
     wallet_nonce_expires_at TIMESTAMPTZ,
+    -- The chain the challenge is minted for: the attestation is rebuilt from
+    -- the session's record when the signature comes back, so the payer
+    -- cannot sign under one chain's domain and bind another.
+    wallet_nonce_chain_id BIGINT,
     CHECK (expires_at > created_at),
     CONSTRAINT payer_sessions_wallet_challenge_complete
-        CHECK ((wallet_nonce IS NULL) = (wallet_nonce_expires_at IS NULL))
+        CHECK ((wallet_nonce IS NULL) = (wallet_nonce_expires_at IS NULL)
+            AND (wallet_nonce IS NULL) = (wallet_nonce_chain_id IS NULL))
 );
 
 CREATE INDEX payer_sessions_invoice ON payer_sessions(invoice_id);
@@ -981,7 +1294,9 @@ $$;
 -- UUID behind a resource prefix), decimal amounts beside their base units,
 -- the policy mode, the merchant's
 -- own payer reference, verification completion, the unsolicited-funding
--- timestamp, and the bound wallet and address; never the expected email or
+-- timestamp, the chain id the way the API names it (null until it is known:
+-- issuance for a pinned request, the wallet binding otherwise), and the
+-- bound wallet and address; never the expected email or
 -- any payer assertion. Addresses leave here as lowercase hex; the delivery
 -- worker checksums them (EIP-55) before signing the body.
 CREATE FUNCTION webhook_deposit_request_object(invoice invoices) RETURNS JSONB
@@ -1006,6 +1321,11 @@ LANGUAGE SQL STABLE AS $$
                              ELSE '0x' || encode(invoice.payer_wallet, 'hex') END,
         'address', CASE WHEN invoice.payment_address IS NULL THEN NULL
                         ELSE '0x' || encode(invoice.payment_address, 'hex') END,
+        'chain_id', CASE
+            WHEN invoice.chain_id IS NOT NULL THEN invoice.chain_id::text
+            WHEN jsonb_array_length(invoice.issuance_snapshot->'networks') = 1
+                THEN invoice.issuance_snapshot->'networks'->0->>'chain_id'
+            ELSE NULL END,
         'wallet_bound_at', webhook_rfc3339(invoice.wallet_bound_at),
         'expires_at', webhook_rfc3339(to_timestamp(invoice.expiration_timestamp)),
         'created_at', webhook_rfc3339(invoice.created_at))

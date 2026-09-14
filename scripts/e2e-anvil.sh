@@ -47,6 +47,10 @@ ATTACHMENT_BUCKET="payday-attachments-local"
 
 export PAYDAY_RPC_URL="$RPC_URL"
 export PAYDAY_API_URL="$API_URL"
+# gatewayd listens where its clients (this suite, on PAYDAY_API_URL) expect it:
+# derive the bind from the API URL so a suite run on shifted ports needs no
+# separate bind setting.
+export PAYDAY_BIND_ADDR="${PAYDAY_API_URL#http://}"
 # The binary's EnvFilter defaults to silent when RUST_LOG is unset (production
 # sets it in infra/main.tf). The assertions below read the indexer's log
 # trail, so give every service the same level production runs at.
@@ -69,8 +73,8 @@ export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
 export PAYDAY_API_KEY_PREFIX="payday_test_"
 export PAYDAY_DEV_IDENTITY=1
 export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
-export PAYDAY_DEV_IDENTITY_BIND="127.0.0.1:3001"
-export PAYDAY_DEV_IDENTITY_ISSUER="http://127.0.0.1:3001"
+export PAYDAY_DEV_IDENTITY_BIND="${PAYDAY_DEV_IDENTITY_BIND:-127.0.0.1:3001}"
+export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://${PAYDAY_DEV_IDENTITY_BIND}}"
 # No PAYDAY_PRIVY_APP_ID: this suite runs offline on API keys minted straight
 # into its database, and gatewayd simply refuses dashboard sessions.
 export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
@@ -522,9 +526,9 @@ start_minio
 # against the real API and indexer. The solver is a fixed key outside Anvil's ten accounts.
 echo "Starting the Relay stand-in"
 RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
-export PAYDAY_RELAY_URL="http://127.0.0.1:4020"
+export PAYDAY_RELAY_URL="${PAYDAY_RELAY_URL:-http://127.0.0.1:4020}"
 export PAYDAY_RELAY_API_KEY="local"
-RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT=4020 RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \
+RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \
   node scripts/relay-stub.mjs >"$logs/relay-stub.log" 2>&1 &
 relay_stub_pid=$!
 pids+=("$relay_stub_pid")

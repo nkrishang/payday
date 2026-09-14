@@ -732,12 +732,14 @@ to disagree.
 
 #### Concurrent index builds
 
-A migration that builds an index runs with `-- no-transaction` and
-`CREATE INDEX CONCURRENTLY` so the build never takes a write lock on the
-table (see `0002_indexer_watch_open.sql` and `0003_indexer_watch_recent.sql`).
-The cost of that is atomicity: a failed build leaves an invalid index and
+A post-freeze migration that builds an index on a large table runs with
+`-- no-transaction` and `CREATE INDEX CONCURRENTLY` so the build never takes
+a write lock on the table (the baseline currently holds none; both index
+builds that once lived in their own numbered migrations were folded back
+into it while Payday was still pre-release). The cost of that is atomicity:
+a failed build leaves an invalid index and
 does not record the version, so every later startup retries the migration
-and fails again — loudly, on purpose: these migrations deliberately omit
+and fails again — loudly, on purpose: such a migration deliberately omits
 `IF NOT EXISTS` so a retry cannot skip a leftover invalid index and record
 itself as applied. Recover in this order:
 
