@@ -392,8 +392,8 @@ merchant_curl() {
 # limiter refills one token a second, so a burst anywhere in this long
 # run can outrun it — so give the call a couple of refills first.
 api_json() {
-  local response attempt
-  for attempt in 1 2 3; do
+  local response
+  for _ in 1 2 3; do
     if response="$(merchant_curl "$1" "$2" "${3:-}" --fail "${@:4}")"; then
       printf '%s' "$response"
       return 0
@@ -411,8 +411,8 @@ api_status() {
 # Only the stable error code of a request that must fail. A rate-limited
 # attempt says nothing about the assertion, so retry it like api_json.
 api_error_code() {
-  local response attempt
-  for attempt in 1 2 3; do
+  local response
+  for _ in 1 2 3; do
     response="$(merchant_curl "$1" "$2" "${3:-}")"
     if [[ "$(jq -r '.error.code // empty' <<<"$response")" != "rate_limited" ]]; then
       break
