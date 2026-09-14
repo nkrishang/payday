@@ -36,6 +36,17 @@ await payday.depositRequests.get(request.id);
 await payday.depositRequests.get(request.id, { waitForChange: true, timeout: 30 });
 await payday.depositRequests.list({ status: "awaiting_deposit", limit: 20 });`;
 
+const WITHDRAW = `import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
+
+const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!); // exported once from the dashboard
+let withdrawal = await payday.withdrawals.create(
+  { destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
+  crypto.randomUUID(),
+);
+const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
+withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
+// then poll payday.withdrawals.get(withdrawal.id) until status leaves "in_progress"`;
+
 const ERRORS = `import { PaydayError } from "@payday/sdk";
 
 try {
@@ -175,6 +186,17 @@ export default function SdkPage() {
           request&apos;s payer view unlocked for its own issuer, for checking before sending.
         </li>
       </ul>
+
+      <H2 id="withdrawals">Withdrawals from a server</H2>
+      <p>
+        <code>payday.withdrawals</code> prepares, submits, polls, and cancels a withdrawal of the
+        Payday wallet&apos;s USDC. Signing the legs needs the wallet&apos;s key;{" "}
+        <code>@payday/sdk/signing</code> does it with <code>viem</code> as an optional peer
+        dependency, after checking every document against its leg. The flow, the signer&apos;s
+        checklist, and Rust and Go equivalents are on{" "}
+        <Link href="/docs/withdrawals#server">Withdrawals</Link>.
+      </p>
+      <CodeBlock code={WITHDRAW} lang="ts" />
 
       <H2 id="payer-client">The payer client</H2>
       <p>

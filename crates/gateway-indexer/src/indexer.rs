@@ -21,17 +21,20 @@
 //! sweep worker, which keeps reporting it every tick until it clears, so
 //! payment detection never stops because a transaction is stuck.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use chrono::Duration as ChronoDuration;
-use gateway_core::{ChainId, FinalitySource, Invoice, InvoiceStatus, PaymentBinding};
+use gateway_core::{
+    CctpConfig, ChainId, ChainRegistry, FinalitySource, Invoice, InvoiceStatus, PaymentBinding,
+};
 use gateway_db::{
     BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
     MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
-    WatchFingerprint,
+    WatchFingerprint, WithdrawalRepository,
 };
 use sqlx::types::chrono::Utc;
 use thiserror::Error;
@@ -43,7 +46,10 @@ use crate::chain::{
     BlockHeader, ChainClient, ChainError, FeeEstimate, PreparedSweepTransaction, SettlementEvent,
     SweepOutcome, SweepReceipt, SweepRequest, sweep_batch_gas_limit,
 };
+use crate::iris::AttestationSource;
 use crate::signal::{SignalState, WatchList};
+use gateway_db::RelayIntentRepository;
+use gateway_relay::RelayApi;
 
 /// Maximum invoices included in one helper transaction.
 pub const SWEEP_BATCH_LIMIT: i64 = 20;
@@ -62,7 +68,7 @@ const CURSOR_LAG_WARN_BLOCKS: u64 = 1_000;
 /// provider whose request budget the burst already strained. The retry bound
 /// keeps a permanently failing read from hanging the tick forever.
 const RANGE_RETRY_ATTEMPTS: u32 = 10;
-const RANGE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+pub(crate) const RANGE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const RANGE_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15);
 /// Warn once collectable funds have waited this long.
 const SWEEP_BACKLOG_WARN_SECS: f64 = 900.0;
@@ -150,15 +156,33 @@ pub struct IndexerConfig {
     pub sweep_backoff_base_secs: f64,
     pub sweep_backoff_cap_secs: f64,
     pub signer_low_balance_wei: U256,
+    /// CCTP on this chain, for withdrawal legs that bridge from or to it.
+    pub cctp: Option<CctpConfig>,
+    /// How often a burn from this chain is checked for Circle's attestation:
+    /// seconds on a finality-tagged chain, a minute on an L2 whose burns
+    /// take ~15 minutes to be attested.
+    pub attestation_poll: Duration,
 }
 
 /// The payment indexer. Owns its own repository handles and chain client; it is
 /// not shared with the HTTP handlers.
 pub struct Indexer {
-    repo: InvoiceRepository,
+    pub(crate) repo: InvoiceRepository,
     cursor: CursorRepository,
-    chain: Arc<dyn ChainClient>,
-    cfg: IndexerConfig,
+    pub(crate) chain: Arc<dyn ChainClient>,
+    pub(crate) cfg: IndexerConfig,
+    /// The withdrawal legs this chain's signer relays; see `relay.rs`.
+    pub(crate) withdrawals: WithdrawalRepository,
+    pub(crate) iris: Arc<dyn AttestationSource>,
+    /// Every chain, for the CCTP domain a bridge leg's destination has.
+    pub(crate) registry: Arc<ChainRegistry>,
+    /// Cross-chain payments into this chain's addresses; see
+    /// `relay_intents.rs`. `None` when the deployment has no Relay key.
+    pub(crate) relay: Option<Arc<dyn RelayApi>>,
+    pub(crate) relay_intents: RelayIntentRepository,
+    /// Every chain's client, by chain id, for reading a cross-chain
+    /// payment's origin transaction when its chain is one we serve.
+    pub(crate) peers: Arc<HashMap<u64, Arc<dyn ChainClient>>>,
     current_log_range_size: AtomicU64,
     /// Wake-ups and health from the transfer signal; see `signal.rs`.
     signal: Arc<SignalState>,
@@ -169,17 +193,30 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repo: InvoiceRepository,
         cursor: CursorRepository,
         chain: Arc<dyn ChainClient>,
         cfg: IndexerConfig,
+        iris: Arc<dyn AttestationSource>,
+        registry: Arc<ChainRegistry>,
+        relay: Option<Arc<dyn RelayApi>>,
+        peers: Arc<HashMap<u64, Arc<dyn ChainClient>>>,
     ) -> Self {
         let (watch_tx, _) = watch::channel(WatchList::default());
+        let withdrawals = WithdrawalRepository::new(repo.pool().clone());
+        let relay_intents = RelayIntentRepository::new(repo.pool().clone());
         Self {
             repo,
             cursor,
             chain,
+            withdrawals,
+            iris,
+            registry,
+            relay,
+            relay_intents,
+            peers,
             current_log_range_size: AtomicU64::new(cfg.log_range_size),
             signal: SignalState::new(),
             watch_tx,
@@ -223,12 +260,41 @@ impl Indexer {
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), IndexerError> {
         let worker = Arc::new(self);
         let index_loop = Arc::clone(&worker).run_index_loop(shutdown.clone());
-        let sweep_loop = worker.run_sweep_loop(shutdown);
-        tokio::pin!(index_loop, sweep_loop);
+        let sweep_loop = Arc::clone(&worker).run_sweep_loop(shutdown.clone());
+        let relay_loop = worker.run_relay_intent_loop(shutdown);
+        tokio::pin!(index_loop, sweep_loop, relay_loop);
 
         tokio::select! {
             result = &mut index_loop => result,
             () = &mut sweep_loop => Ok(()),
+            () = &mut relay_loop => Ok(()),
+        }
+    }
+
+    /// Follow cross-chain payments on this chain, on a clock of its own:
+    /// Relay's answers can take seconds each, and a payment poller's slowness
+    /// must never delay a sweep. The loop runs even without a Relay key, so
+    /// database cleanup (expiring quotes, failing stale intents, unparking)
+    /// keeps going after the API is gone.
+    async fn run_relay_intent_loop(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
+        let mut interval = tokio::time::interval(self.cfg.poll_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        info!("relay intent worker started");
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // One pass at a time; every error stays inside, the way
+                    // the sweep loop treats its own recoverable failures.
+                    self.relay_intent_housekeeping().await;
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        info!("relay intent worker shutting down");
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -453,7 +519,7 @@ impl Indexer {
     }
 
     /// Number of the block [`Self::boundary_header`] describes.
-    async fn finality_boundary(
+    pub(crate) async fn finality_boundary(
         &self,
         attempt: &mut u32,
         backoff: &mut Duration,
@@ -465,7 +531,7 @@ impl Indexer {
 
     /// A `block_header` read that backs off and retries throttle-shaped
     /// failures instead of aborting the work it belongs to.
-    async fn retried_header(
+    pub(crate) async fn retried_header(
         &self,
         number: u64,
         attempt: &mut u32,
@@ -786,7 +852,7 @@ impl Indexer {
     /// Reconcile the in-flight batch if there is one, otherwise claim and
     /// submit the next. The signer owns one nonce stream, so a new batch is
     /// never sent while a prior one is unresolved.
-    async fn sweep_tick(&self) -> Result<(), IndexerError> {
+    pub(crate) async fn sweep_tick(&self) -> Result<(), IndexerError> {
         let health_due = self
             .last_health_report
             .lock()
@@ -796,10 +862,21 @@ impl Indexer {
             self.report_sweep_health().await?;
             *self.last_health_report.lock().expect("health report lock") = Some(Instant::now());
         }
+        // Withdrawal legs share the signer with sweeps. Their nonce-free work
+        // runs every tick; a relay step is taken only while no sweep batch is
+        // in flight, and a sweep batch only while no relay step is.
+        self.relay_housekeeping().await?;
+        // Cross-chain payments follow their own loop (`run_relay_intent_loop`);
+        // a Relay outage must never delay the sweeper.
         match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
             Some(batch) if batch.broadcast_at.is_none() => self.broadcast_batch(&batch).await,
             Some(batch) => self.reconcile_batch(batch).await,
-            None => self.submit_next_batch().await,
+            None => {
+                if self.relay_step().await? {
+                    return Ok(());
+                }
+                self.submit_next_batch().await
+            }
         }
     }
 
@@ -1294,11 +1371,21 @@ impl Indexer {
 
     async fn report_sweep_health(&self) -> Result<(), IndexerError> {
         let stats = self.repo.sweep_queue_stats(self.cfg.chain_id.0).await?;
+        let relay = self.withdrawals.relay_stats(self.cfg.chain_id.0).await?;
+        let relay_intents_pending = self
+            .relay_intents
+            .pending_count(self.cfg.chain_id.0)
+            .await?;
         let balance = self.chain.signer_balance().await?;
         info!(
             queued = stats.queued,
             in_flight = stats.in_flight,
             oldest_uncollected_secs = stats.oldest_uncollected_secs,
+            withdrawal_legs_authorized = relay.authorized,
+            withdrawal_legs_awaiting_attestation = relay.awaiting_attestation,
+            withdrawal_legs_attested = relay.attested,
+            withdrawal_step_in_flight = relay.in_flight,
+            relay_intents_pending,
             signer_balance_wei = %balance,
             "sweep worker health"
         );
@@ -1353,7 +1440,7 @@ fn sweep_request(invoice: &Invoice) -> Result<SweepRequest, IndexerError> {
 pub(crate) mod tests {
     use super::*;
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
     use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
@@ -1371,13 +1458,13 @@ pub(crate) mod tests {
         PayerSessionRepository,
     };
 
-    const CHAIN_ID: u64 = 31337;
+    pub(crate) const CHAIN_ID: u64 = 31337;
     /// Block timestamps in the mock advance ten seconds per block from here.
     const GENESIS_TIMESTAMP: u64 = 1_800_000_000;
     /// Comfortably after every block the tests mine.
     const FAR_EXPIRY: u64 = GENESIS_TIMESTAMP + 1_000_000;
 
-    fn usdc() -> Address {
+    pub(crate) fn usdc() -> Address {
         address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")
     }
 
@@ -1385,16 +1472,24 @@ pub(crate) mod tests {
         FactoryAddress(address!("0x5FbDB2315678afecb367f032d93F642f64180aa3"))
     }
 
-    fn batch_sweeper() -> Address {
+    pub(crate) fn batch_sweeper() -> Address {
         address!("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
     }
 
-    fn block_hash(block: u64) -> B256 {
+    pub(crate) fn block_hash(block: u64) -> B256 {
         B256::with_last_byte(block as u8)
     }
 
     fn block_timestamp(block: u64) -> u64 {
         GENESIS_TIMESTAMP + block * 10
+    }
+
+    /// The transaction hash the mock reports for a consumed authorization:
+    /// derived from the nonce, so tests can predict it.
+    pub(crate) fn mock_authorization_tx_hash(nonce: B256) -> B256 {
+        let mut hash = nonce;
+        hash[31] = hash[31].wrapping_add(1);
+        hash
     }
 
     /// The address a sweep item deploys to, derived the way the API does.
@@ -1413,12 +1508,44 @@ pub(crate) mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    struct Submission {
-        nonce: u64,
-        gas_limit: u64,
-        fees: FeeEstimate,
-        sweeps: Vec<SweepRequest>,
-        tx_hash: B256,
+    pub(crate) struct Submission {
+        pub(crate) nonce: u64,
+        pub(crate) gas_limit: u64,
+        pub(crate) fees: FeeEstimate,
+        pub(crate) sweeps: Vec<SweepRequest>,
+        pub(crate) tx_hash: B256,
+        /// Set for generic calls (withdrawal steps); sweeps leave it empty.
+        pub(crate) to: Option<Address>,
+        pub(crate) calldata: alloy_primitives::Bytes,
+    }
+
+    /// Circle's attestation service as a test controls it: answers by burn
+    /// transaction hash, `NotIndexed` for anything else.
+    #[derive(Default)]
+    pub(crate) struct FakeIris {
+        pub(crate) answers: Mutex<HashMap<B256, crate::iris::AttestationStatus>>,
+        pub(crate) polls: Mutex<Vec<(u32, B256)>>,
+    }
+
+    #[async_trait]
+    impl crate::iris::AttestationSource for FakeIris {
+        async fn attestation(
+            &self,
+            source_domain: u32,
+            burn_tx_hash: B256,
+        ) -> Result<crate::iris::AttestationStatus, crate::iris::IrisError> {
+            self.polls
+                .lock()
+                .unwrap()
+                .push((source_domain, burn_tx_hash));
+            Ok(self
+                .answers
+                .lock()
+                .unwrap()
+                .get(&burn_tx_hash)
+                .cloned()
+                .unwrap_or(crate::iris::AttestationStatus::NotIndexed))
+        }
     }
 
     #[derive(Default)]
@@ -1433,19 +1560,19 @@ pub(crate) mod tests {
         log_requests: Vec<(u64, u64, Vec<Address>)>,
         /// Hash overrides to simulate a reorg at a height.
         hashes: HashMap<u64, B256>,
-        receipts: HashMap<B256, SweepReceipt>,
+        pub(crate) receipts: HashMap<B256, SweepReceipt>,
         /// Outcomes attached to the receipt of the next submission, keyed by
         /// payment address. Items without an entry get `Settled`.
         next_outcomes: HashMap<Address, SweepOutcome>,
         /// Block the next submission's receipt lands in; `None` leaves it unmined.
-        mine_at: Option<u64>,
-        next_receipt_succeeds: bool,
+        pub(crate) mine_at: Option<u64>,
+        pub(crate) next_receipt_succeeds: bool,
         prepared: HashMap<B256, Submission>,
         next_transaction_id: u8,
         submissions: Vec<Submission>,
-        mined_nonce: u64,
+        pub(crate) mined_nonce: u64,
         submit_error: Option<fn() -> ChainError>,
-        fees: FeeEstimate,
+        pub(crate) fees: FeeEstimate,
         balance: U256,
         settled: HashMap<Address, bool>,
         settlement_events: HashMap<Address, SettlementEvent>,
@@ -1463,6 +1590,17 @@ pub(crate) mod tests {
         pub(crate) code_hashes: HashMap<Address, B256>,
         /// Factory each BatchSweeper reports; defaults to the test factory.
         pub(crate) sweeper_factories: HashMap<Address, Address>,
+        /// `eth_call` answers by (contract, calldata); anything else is 32 zero bytes.
+        pub(crate) view_results:
+            HashMap<(Address, alloy_primitives::Bytes), alloy_primitives::Bytes>,
+        /// EIP-3009 authorizations the token has consumed, by (authorizer, nonce).
+        pub(crate) consumed_authorizations: HashSet<(Address, B256)>,
+        /// The block each consumed authorization's `AuthorizationUsed` event
+        /// appears in, so ranges ending before it find nothing.
+        pub(crate) authorization_events: HashMap<B256, u64>,
+        /// Token payment receipts the node answers `token_payment_receipt`
+        /// with, by hash: execution plus the `Transfer` logs one token left.
+        pub(crate) token_receipts: HashMap<B256, crate::chain::TokenPaymentReceipt>,
     }
 
     /// The code hash the mock reports for an address it has no override for:
@@ -1499,11 +1637,11 @@ pub(crate) mod tests {
             self
         }
 
-        fn set(&self, apply: impl FnOnce(&mut MockState)) {
+        pub(crate) fn set(&self, apply: impl FnOnce(&mut MockState)) {
             apply(&mut self.state.lock().unwrap());
         }
 
-        fn submissions(&self) -> Vec<Submission> {
+        pub(crate) fn submissions(&self) -> Vec<Submission> {
             self.state.lock().unwrap().submissions.clone()
         }
     }
@@ -1627,9 +1765,130 @@ pub(crate) mod tests {
                     fees,
                     sweeps: sweeps.to_vec(),
                     tx_hash,
+                    to: None,
+                    calldata: alloy_primitives::Bytes::new(),
                 },
             );
             Ok(PreparedSweepTransaction { hash: tx_hash, raw })
+        }
+
+        async fn prepare_call(
+            &self,
+            to: Address,
+            calldata: alloy_primitives::Bytes,
+            nonce: u64,
+            gas_limit: u64,
+            fees: FeeEstimate,
+        ) -> Result<PreparedSweepTransaction, ChainError> {
+            let mut state = self.state.lock().unwrap();
+            state.next_transaction_id += 1;
+            let tx_hash = B256::with_last_byte(state.next_transaction_id);
+            let raw = alloy_primitives::Bytes::copy_from_slice(tx_hash.as_slice());
+            state.prepared.insert(
+                tx_hash,
+                Submission {
+                    nonce,
+                    gas_limit,
+                    fees,
+                    sweeps: Vec::new(),
+                    tx_hash,
+                    to: Some(to),
+                    calldata,
+                },
+            );
+            Ok(PreparedSweepTransaction { hash: tx_hash, raw })
+        }
+
+        async fn token_payment_receipt(
+            &self,
+            tx_hash: B256,
+            _token: Address,
+        ) -> Result<Option<crate::chain::TokenPaymentReceipt>, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .token_receipts
+                .get(&tx_hash)
+                .cloned())
+        }
+
+        async fn transaction_receipt(
+            &self,
+            tx_hash: B256,
+        ) -> Result<Option<crate::chain::TransactionOutcome>, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .receipts
+                .get(&tx_hash)
+                .map(|receipt| crate::chain::TransactionOutcome {
+                    succeeded: receipt.succeeded,
+                    block: receipt.block,
+                    block_hash: receipt.block_hash,
+                }))
+        }
+
+        /// The mock's world has one final history, so reading through
+        /// finality changes nothing.
+        async fn finalized_view_call(
+            &self,
+            to: Address,
+            calldata: alloy_primitives::Bytes,
+        ) -> Result<alloy_primitives::Bytes, ChainError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .view_results
+                .get(&(to, calldata))
+                .cloned()
+                .unwrap_or_else(|| alloy_primitives::Bytes::from(vec![0u8; 32])))
+        }
+
+        async fn authorization_state(
+            &self,
+            token: Address,
+            authorizer: Address,
+            nonce: B256,
+            at_block: u64,
+        ) -> Result<bool, ChainError> {
+            let _ = token;
+            let _ = at_block;
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .consumed_authorizations
+                .contains(&(authorizer, nonce)))
+        }
+
+        async fn authorization_used_tx(
+            &self,
+            token: Address,
+            authorizer: Address,
+            nonce: B256,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<Option<(B256, crate::chain::TransactionOutcome)>, ChainError> {
+            let _ = token;
+            let _ = authorizer;
+            let state = self.state.lock().unwrap();
+            let Some(at_block) = state.authorization_events.get(&nonce).copied() else {
+                return Ok(None);
+            };
+            if at_block < from_block || at_block > to_block {
+                return Ok(None);
+            }
+            Ok(Some((
+                mock_authorization_tx_hash(nonce),
+                crate::chain::TransactionOutcome {
+                    succeeded: true,
+                    block: at_block,
+                    block_hash: B256::with_last_byte(at_block as u8),
+                },
+            )))
         }
 
         async fn broadcast_sweep_transaction(
@@ -1776,7 +2035,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn config() -> IndexerConfig {
+    pub(crate) fn config() -> IndexerConfig {
         IndexerConfig {
             chain_id: ChainId(CHAIN_ID),
             factory: factory().0,
@@ -1798,15 +2057,69 @@ pub(crate) mod tests {
             sweep_backoff_base_secs: 0.0,
             sweep_backoff_cap_secs: 0.0,
             signer_low_balance_wei: U256::ZERO,
+            cctp: None,
+            attestation_poll: Duration::from_millis(10),
         }
     }
 
+    /// The other chain a bridge leg in the relay tests crosses to.
+    pub(crate) const OTHER_CHAIN_ID: u64 = 8453;
+
+    /// The registry the test deployment runs: this chain alone without CCTP,
+    /// or, once a test configures CCTP, this chain and [`OTHER_CHAIN_ID`]
+    /// with CCTP on both (domains 15 and 6, as Monad and Base have).
+    pub(crate) fn test_registry(cctp: Option<CctpConfig>) -> Arc<ChainRegistry> {
+        let chain = |chain_id: u64, cctp: Option<CctpConfig>| gateway_core::ChainConfig {
+            chain_id,
+            usdc: usdc(),
+            factory: factory().0,
+            batch_sweeper: batch_sweeper(),
+            factory_code_hash: mock_code_hash(factory().0),
+            batch_sweeper_code_hash: mock_code_hash(batch_sweeper()),
+            usdc_start_block: 0,
+            finality_source: FinalitySource::Finalized,
+            finality_confirmations: 0,
+            block_time_ms: 25,
+            log_range_size: 100,
+            explorer_base_url: None,
+            cctp,
+        };
+        let chains = match cctp {
+            None => vec![chain(CHAIN_ID, None)],
+            Some(cctp) => vec![
+                chain(
+                    CHAIN_ID,
+                    Some(CctpConfig {
+                        domain: 15,
+                        ..cctp.clone()
+                    }),
+                ),
+                chain(OTHER_CHAIN_ID, Some(CctpConfig { domain: 6, ..cctp })),
+            ],
+        };
+        Arc::new(ChainRegistry::new(chains).unwrap())
+    }
+
     fn indexer_with(pool: &PgPool, chain: Arc<MockChain>, cfg: IndexerConfig) -> Indexer {
+        indexer_with_relay(pool, chain, cfg, Arc::new(FakeIris::default()))
+    }
+
+    pub(crate) fn indexer_with_relay(
+        pool: &PgPool,
+        chain: Arc<MockChain>,
+        cfg: IndexerConfig,
+        iris: Arc<FakeIris>,
+    ) -> Indexer {
+        let registry = test_registry(cfg.cctp.clone());
         Indexer::new(
             InvoiceRepository::new(pool.clone()),
             CursorRepository::new(pool.clone()),
             chain,
             cfg,
+            iris,
+            registry,
+            None,
+            Arc::new(HashMap::new()),
         )
     }
 
@@ -1826,11 +2139,11 @@ pub(crate) mod tests {
     /// The wallet every test payer attests and pays from.
     const PAYER_KEY: [u8; 32] = [7u8; 32];
 
-    fn payer_wallet() -> Address {
+    pub(crate) fn payer_wallet() -> Address {
         wallet_of(&PAYER_KEY)
     }
 
-    fn payment_address(invoice: &Invoice) -> Address {
+    pub(crate) fn payment_address(invoice: &Invoice) -> Address {
         invoice.payment_address().expect("test invoice is bound").0
     }
 
@@ -1875,7 +2188,7 @@ pub(crate) mod tests {
 
     /// Issue and bind the test payer's wallet on `chain_id` in memory;
     /// `insert` writes the same binding to the row.
-    fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
+    pub(crate) fn issue(chain_id: ChainId, amount: u64, expiration: u64) -> Invoice {
         let mut invoice = issue_unbound(amount, expiration);
         // A fresh nonce per invoice keeps identical requests at distinct
         // addresses, as a session's challenge would.
@@ -1942,7 +2255,7 @@ pub(crate) mod tests {
             .expect("insert should succeed");
     }
 
-    async fn insert(pool: &PgPool, invoice: &Invoice, key: &str) {
+    pub(crate) async fn insert(pool: &PgPool, invoice: &Invoice, key: &str) {
         let repo = InvoiceRepository::new(pool.clone());
         let account_id = uuid::Uuid::from_u128(1);
         sqlx::query(

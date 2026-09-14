@@ -34,6 +34,11 @@ describe("buildCreateDepositRequest", () => {
     expect(body.attachment_id).toBe("att_0198f80c-8d2f-7dc1-a369-90556a64f7aa");
   });
 
+  it("pins the network only when one was chosen", () => {
+    expect(buildCreateDepositRequest(filled, null)).not.toHaveProperty("chain_id");
+    expect(buildCreateDepositRequest({ ...filled, chainId: " 8453 " }, null).chain_id).toBe("8453");
+  });
+
   it("sends a chosen moment as a moment, in place of any duration", () => {
     const body = buildCreateDepositRequest(
       { ...filled, expiresInHours: "48", expiresAt: "2026-09-11T17:30:00.000Z" },

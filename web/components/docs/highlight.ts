@@ -5,7 +5,7 @@
  * so nothing here reaches the browser bundle.
  */
 
-export type Language = "bash" | "json" | "ts" | "http" | "text";
+export type Language = "bash" | "json" | "ts" | "rust" | "go" | "http" | "text";
 
 export type TokenType =
   | "plain"
@@ -32,6 +32,12 @@ const TS_KEYWORDS =
 const BASH_KEYWORDS =
   "curl|export|echo|jq|npm|npx|node|cat|set|if|then|fi|for|do|done|while|openssl|base64|printf";
 
+const RUST_KEYWORDS =
+  "as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while|Some|None|Ok|Err";
+
+const GO_KEYWORDS =
+  "break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|goto|if|import|interface|map|package|range|return|select|struct|switch|type|var|nil|true|false|err|error|string|byte|int|int64|uint32|uint64|bool";
+
 const RULES: Record<Language, Rule[]> = {
   json: [
     ["key", /"(?:[^"\\]|\\.)*"(?=\s*:)/y],
@@ -54,6 +60,20 @@ const RULES: Record<Language, Rule[]> = {
     ["string", /`(?:[^`\\]|\\.)*`|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/y],
     ["keyword", new RegExp(`\\b(?:${TS_KEYWORDS})\\b`, "y")],
     ["number", /\b\d+(?:\.\d+)?n?\b/y],
+    ["plain", /[\s\S]/y],
+  ],
+  rust: [
+    ["comment", /\/\/[^\n]*|\/\*[\s\S]*?\*\//y],
+    ["string", /b?"(?:[^"\\]|\\.)*"|r#"[\s\S]*?"#/y],
+    ["keyword", new RegExp(`\\b(?:${RUST_KEYWORDS})\\b`, "y")],
+    ["number", /\b\d[\d_]*(?:\.\d+)?(?:u(?:8|16|32|64|128|size)|i(?:8|16|32|64|128|size)|f(?:32|64))?\b/y],
+    ["plain", /[\s\S]/y],
+  ],
+  go: [
+    ["comment", /\/\/[^\n]*|\/\*[\s\S]*?\*\//y],
+    ["string", /`[^`]*`|"(?:[^"\\]|\\.)*"/y],
+    ["keyword", new RegExp(`\\b(?:${GO_KEYWORDS})\\b`, "y")],
+    ["number", /\b\d[\d_]*(?:\.\d+)?\b/y],
     ["plain", /[\s\S]/y],
   ],
   http: [

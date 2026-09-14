@@ -133,7 +133,27 @@ retained with a `late` disposition: it never counts toward the amount, but it
 sits at the address and is queued for return to the payer through
 `Deposit.recover`. A nonzero transfer from any wallet but the deposit request's
 attested payer wallet is credited too, but flags the deposit request
-`likely_unsolicited_at` once, at its chain time.
+`likely_unsolicited_at` once, at its chain time. The exception is a payment
+from another network through Relay: the API records each quote as a
+`relay_intents` row, and once the payer has reported the quote's deposit as
+sent, a transfer for exactly the quoted amount from an unknown sender is
+parked (`payment_observations.relay_parked_at`) instead of flagged. Only a
+quote whose origin chain this deployment serves is followed: attribution
+reads the chain, so an intent from an unserved chain is deferred and never
+attributes. For a `sent` intent the destination chain's worker polls Relay,
+and on `success` it verifies the origin transaction on the origin chain —
+a succeeded receipt whose sender is the attested wallet and whose USDC
+`Transfer` log debited that wallet by exactly the quoted amount. The
+verified hash is kept on the intent (`verified_origin_tx_hash`, unique per
+origin chain) and the parked transfer is attributed (`relay_intent_id`,
+`attribution_source: receipt`); anything else Relay's answer could claim —
+a depositor name, a status hash — is never evidence. On `failure`,
+`refund`, or a day without a verified receipt the worker unparks the
+transfer into the ordinary flagging path, at the transfer's chain time. A
+fill Relay reports before the transfer is credited is matched by exact
+quoted amount at credit time. A quote nobody reported as sent shields
+nothing. The flag is never cleared once set, so a `likely_unsolicited`
+webhook can now follow a `deposited` or `settled` one.
 Every nonzero observation also records the block and transaction index of the
 sweep that collected it, so the ledger always says which funds are still at the
 address. If payer identity or compliance policy requires a nonzero sender, make

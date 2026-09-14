@@ -21,10 +21,12 @@ use crate::api::payer;
 use crate::api::payer_verification;
 use crate::api::payer_wallet;
 use crate::api::proof;
+use crate::api::relay;
 use crate::api::status;
 use crate::api::verification;
 use crate::api::wallet_pregeneration;
 use crate::api::webhooks;
+use crate::api::withdrawals;
 use crate::api::{middleware as api_middleware, openapi};
 use crate::state::AppState;
 
@@ -156,6 +158,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/webhooks/{id}/test", post(webhooks::test))
         .route("/v1/webhook-deliveries", get(webhooks::deliveries))
+        .route(
+            "/v1/withdrawals",
+            post(withdrawals::create).get(withdrawals::list),
+        )
+        .route("/v1/withdrawals/{id}", get(withdrawals::get))
+        .route(
+            "/v1/withdrawals/{id}/authorizations",
+            post(withdrawals::authorize),
+        )
+        .route("/v1/withdrawals/{id}/cancel", post(withdrawals::cancel))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_account,
@@ -201,6 +213,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/payer/deposit-requests/{id}/verify",
             get(payer_verification::status),
         )
+        .route(
+            "/v1/payer/deposit-requests/{id}/relay/chains",
+            get(relay::chains),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -233,6 +249,17 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/payer/deposit-requests/{id}/session",
             post(merchant_session::exchange),
+        )
+        // Cross-chain payment quotes commit the attested wallet to a route
+        // and are followed by the indexer once reported as sent: writes,
+        // from the hosted checkout only.
+        .route(
+            "/v1/payer/deposit-requests/{id}/relay/quotes",
+            post(relay::quote),
+        )
+        .route(
+            "/v1/payer/deposit-requests/{id}/relay/quotes/{intent}/sent",
+            post(relay::sent),
         )
         .layer(RequestBodyLimitLayer::new(8 * 1024))
         .layer(
@@ -309,10 +336,117 @@ mod tests {
     use crate::attachments::memory::MemoryObjectStorage;
     use crate::attachments::{AttachmentStore, CLEAN_SCAN, SCAN_STATUS_TAG};
     use crate::attestation::VerificationAttestor;
+    use crate::chain_reader::ChainReads;
+    use crate::chain_reader::testing::FakeChainReader;
     use crate::payer_identity::PayerVerification;
     use crate::payer_identity::testing::{FakeTenant, OTP};
     use crate::pregenerated_wallet::WalletPregenerator;
     use crate::pregenerated_wallet::testing::FakePregenerator;
+    use gateway_relay::{
+        IntentState, IntentStatus, Quote, QuoteRequest, QuoteStep, RelayApi, RelayChain,
+        RelayCurrency, RelayError, RelayRequest, StepTransaction,
+    };
+
+    /// Relay as the routes see it: serves Base (8453) and the test chain 1
+    /// with USDC, quotes any route from the requested wallet with an
+    /// `approve` and a `deposit` step, and answers status as told.
+    #[derive(Default)]
+    pub(crate) struct FakeRelay {
+        pub(crate) quotes: std::sync::Mutex<Vec<QuoteRequest>>,
+        pub(crate) status: std::sync::Mutex<Option<IntentStatus>>,
+        pub(crate) refuse_quotes: std::sync::atomic::AtomicBool,
+    }
+
+    pub(crate) const RELAY_ORIGIN: u64 = 8453;
+    pub(crate) fn relay_origin_usdc() -> Address {
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap()
+    }
+
+    #[async_trait::async_trait]
+    impl RelayApi for FakeRelay {
+        async fn chains(&self) -> Result<Vec<RelayChain>, RelayError> {
+            let usdc = |address: Address| RelayCurrency {
+                symbol: "USDC".into(),
+                address,
+                decimals: 6,
+            };
+            let chain = |id: u64, name: &str, address: Address, deposit_enabled: bool| RelayChain {
+                id,
+                name: name.to_lowercase(),
+                display_name: name.into(),
+                explorer_url: Some(format!("https://{}.example", name.to_lowercase())),
+                icon_url: Some(format!("https://assets.relay.link/icons/{id}/light.png")),
+                http_rpc_url: Some(format!("https://rpc.{}.example", name.to_lowercase())),
+                vm_type: "evm".into(),
+                deposit_enabled,
+                disabled: false,
+                native_symbol: Some("ETH".into()),
+                solver_currencies: vec![usdc(address)],
+            };
+            Ok(vec![
+                chain(RELAY_ORIGIN, "Base", relay_origin_usdc(), true),
+                chain(1, "Test One", Address::repeat_byte(0x02), true),
+                chain(2, "Test Two", Address::repeat_byte(0x02), true),
+                chain(10, "Optimism", Address::repeat_byte(0x0a), false),
+            ])
+        }
+
+        async fn quote(&self, request: &QuoteRequest) -> Result<Quote, RelayError> {
+            if self.refuse_quotes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(RelayError::Status {
+                    status: 400,
+                    code: Some("NO_QUOTES".into()),
+                    message: "no solver for this route".into(),
+                });
+            }
+            self.quotes.lock().unwrap().push(request.clone());
+            let transaction = |to: u8, data: &[u8]| StepTransaction {
+                chain_id: request.origin_chain_id,
+                from: request.user,
+                to: Address::repeat_byte(to),
+                data: data.to_vec().into(),
+                value: alloy_primitives::U256::ZERO,
+                gas: Some(80_000),
+            };
+            Ok(Quote {
+                request_id: alloy_primitives::keccak256(request.recipient.as_slice()),
+                amount_in: request.amount + alloy_primitives::U256::from(20_000u64),
+                amount_out: request.amount,
+                relayer_fee_usd: Some("0.02".into()),
+                time_estimate_secs: 5,
+                steps: vec![
+                    QuoteStep {
+                        id: "approve".into(),
+                        kind: "transaction".into(),
+                        transactions: vec![transaction(0xAA, &[0x09, 0x5e, 0xa7, 0xb3])],
+                    },
+                    QuoteStep {
+                        id: "deposit".into(),
+                        kind: "transaction".into(),
+                        transactions: vec![transaction(0xBB, &[0xe8, 0x01, 0x79, 0x52])],
+                    },
+                ],
+            })
+        }
+
+        async fn status(&self, _: alloy_primitives::B256) -> Result<IntentStatus, RelayError> {
+            Ok(self.status.lock().unwrap().clone().unwrap_or(IntentStatus {
+                state: IntentState::Waiting,
+                raw: "waiting".into(),
+                in_tx_hashes: vec![],
+                tx_hashes: vec![],
+            }))
+        }
+
+        async fn request(
+            &self,
+            _: alloy_primitives::B256,
+        ) -> Result<Option<RelayRequest>, RelayError> {
+            Ok(None)
+        }
+    }
 
     const KEY: &str = "payday_live_0123456789abcdef0123456789abcdef";
     /// The wallet the test payer signs attestations with.
@@ -324,10 +458,12 @@ mod tests {
         VerificationAttestor::local(PrivateKeySigner::from_slice(&[7u8; 32]).unwrap())
     }
 
-    /// The deployment under test offers two networks through one factory:
-    /// chain 1 with the zero token, chain 2 with another.
-    fn test_networks(factory: Address) -> Arc<gateway_core::ChainRegistry> {
-        let chain = |chain_id: u64, usdc: Address| gateway_core::ChainConfig {
+    /// The WithdrawalForwarder the test deployment's bridge legs pay.
+    const TEST_FORWARDER: Address = Address::repeat_byte(0xF0);
+
+    /// One chain of the test deployment.
+    fn test_chain(chain_id: u64, usdc: Address, factory: Address) -> gateway_core::ChainConfig {
+        gateway_core::ChainConfig {
             chain_id,
             usdc,
             factory,
@@ -340,38 +476,70 @@ mod tests {
             block_time_ms: 1000,
             log_range_size: 100,
             explorer_base_url: None,
-        };
-        Arc::new(
-            gateway_core::ChainRegistry::new(vec![
-                chain(1, Address::ZERO),
-                chain(2, Address::repeat_byte(0x02)),
-            ])
-            .unwrap(),
-        )
+            // CCTP on every chain, so withdrawals can bridge between them;
+            // the domains are Monad's and Base's, the contracts stand-ins.
+            cctp: Some(gateway_core::CctpConfig {
+                domain: if chain_id == 1 { 15 } else { 6 },
+                token_messenger: Address::repeat_byte(0xC1),
+                message_transmitter: Address::repeat_byte(0xC2),
+                forwarder: TEST_FORWARDER,
+                forwarder_code_hash: alloy_primitives::B256::repeat_byte(0xC3),
+            }),
+        }
+    }
+
+    /// The deployment under test offers two networks through one factory:
+    /// chain 1 with the zero token, chain 2 with another.
+    fn test_networks(factory: Address) -> Arc<gateway_core::ChainRegistry> {
+        test_networks_on(vec![
+            test_chain(1, Address::ZERO, factory),
+            test_chain(2, Address::repeat_byte(0x02), factory),
+        ])
+    }
+
+    /// The deployment's networks plus the chain payers pay from through
+    /// Relay: the gateway can only verify a receipt on a chain it serves,
+    /// so an origin is offered only when it is one of them.
+    fn test_networks_with_relay_origin(factory: Address) -> Arc<gateway_core::ChainRegistry> {
+        test_networks_on(vec![
+            test_chain(1, Address::ZERO, factory),
+            test_chain(2, Address::repeat_byte(0x02), factory),
+            test_chain(RELAY_ORIGIN, relay_origin_usdc(), factory),
+        ])
+    }
+
+    fn test_networks_on(
+        chains: Vec<gateway_core::ChainConfig>,
+    ) -> Arc<gateway_core::ChainRegistry> {
+        Arc::new(gateway_core::ChainRegistry::new(chains).unwrap())
     }
 
     /// The router plus the memory bucket behind it, so a test can play the
-    /// uploading client and the malware scanner.
+    /// uploading client and the malware scanner, and the fake chain whose
+    /// balances a withdrawal snapshots.
     struct TestApp {
         router: Router,
         storage: Arc<MemoryObjectStorage>,
+        chain: Arc<FakeChainReader>,
     }
 
     fn test_state(
         pool: PgPool,
         accounts: AccountRepository,
         merchant_verifier: Option<auth::PrivyVerifier>,
-        factory: Address,
+        networks: Arc<gateway_core::ChainRegistry>,
         payer_verification: Option<PayerVerification>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
-    ) -> (AppState, Arc<MemoryObjectStorage>) {
+        relay: Option<Arc<dyn gateway_relay::RelayApi>>,
+    ) -> (AppState, Arc<MemoryObjectStorage>, Arc<FakeChainReader>) {
         let storage = Arc::new(MemoryObjectStorage::default());
         let store = AttachmentStore::new(storage.clone(), Duration::from_secs(300));
+        let chain = Arc::new(FakeChainReader::new(&networks));
         let state = AppState::new(
             InvoiceRepository::new(pool),
             accounts,
             merchant_verifier,
-            test_networks(factory),
+            networks,
             payer_access(),
             "payday_live_".into(),
             Some(WEBHOOK_KEY),
@@ -380,8 +548,10 @@ mod tests {
             payer_verification,
             None,
             pregenerated_wallets,
+            Some(chain.clone() as Arc<dyn ChainReads>),
+            relay,
         );
-        (state, storage)
+        (state, storage, chain)
     }
 
     /// The webhook secret-encryption key the test deployment is configured
@@ -474,7 +644,56 @@ mod tests {
         payer_verification: Option<PayerVerification>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
     ) -> TestApp {
+        build_on(
+            pool,
+            merchant_verifier,
+            test_networks(factory),
+            payer_verification,
+            pregenerated_wallets,
+        )
+        .await
+    }
+
+    /// The deployment with the Relay origin chain among the served
+    /// networks, as a gateway quoting routes from another chain must be.
+    async fn build_relay(pool: PgPool) -> TestApp {
+        build_on(
+            pool,
+            None,
+            test_networks_with_relay_origin(Address::ZERO),
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn build_on(
+        pool: PgPool,
+        merchant_verifier: Option<auth::PrivyVerifier>,
+        networks: Arc<gateway_core::ChainRegistry>,
+        payer_verification: Option<PayerVerification>,
+        pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
+    ) -> TestApp {
         let accounts = AccountRepository::new(pool.clone());
+        provision_test_account(&accounts).await;
+        let (state, storage, chain) = test_state(
+            pool,
+            accounts,
+            merchant_verifier,
+            networks,
+            payer_verification,
+            pregenerated_wallets,
+            Some(Arc::new(FakeRelay::default()) as Arc<dyn gateway_relay::RelayApi>),
+        );
+        TestApp {
+            router: router(state),
+            storage,
+            chain,
+        }
+    }
+
+    /// The account `KEY` authenticates as, created once per database.
+    async fn provision_test_account(accounts: &AccountRepository) {
         if accounts
             .find_by_identity("https://test.issuer/", "email|test-user")
             .await
@@ -492,18 +711,6 @@ mod tests {
                 )
                 .await
                 .unwrap();
-        }
-        let (state, storage) = test_state(
-            pool,
-            accounts,
-            merchant_verifier,
-            factory,
-            payer_verification,
-            pregenerated_wallets,
-        );
-        TestApp {
-            router: router(state),
-            storage,
         }
     }
 
@@ -1886,28 +2093,24 @@ mod tests {
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn the_payer_chooses_the_network(pool: PgPool) {
         let app = app(pool.clone()).await;
-        for (field, value) in [
-            ("chain_id", "1"),
-            (
-                "token_address",
-                "0x0000000000000000000000000000000000000000",
-            ),
-        ] {
-            let mut body = valid_body();
-            body[field] = json!(value);
-            let refused = app
-                .clone()
-                .oneshot(create_request(KEY, "chain-field", &body))
-                .await
-                .unwrap();
-            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{field}");
-            let error = json_body(refused).await;
-            assert_eq!(error["error"]["code"], "invalid_request");
-            assert!(
-                error["error"]["message"].as_str().unwrap().contains(field),
-                "{error}"
-            );
-        }
+        // The token is never a request field; the chain is only as a pin.
+        let mut body = valid_body();
+        body["token_address"] = json!("0x0000000000000000000000000000000000000000");
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "chain-field", &body))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(refused).await;
+        assert_eq!(error["error"]["code"], "invalid_request");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("token_address"),
+            "{error}"
+        );
 
         let created = app
             .clone()
@@ -1977,6 +2180,485 @@ mod tests {
         let (on_one, _) = bind_wallet(&app, other["id"].as_str().unwrap(), None, &PAYER_KEY).await;
         assert_eq!(on_one["chain"]["id"], "1");
         assert_ne!(on_one["address"], bound["address"]);
+    }
+
+    /// A merchant may pin the network at issuance. The request then offers
+    /// that network alone, names it before any wallet binds, refuses a
+    /// challenge on any other, and the replay of the same key with another
+    /// pin conflicts like any other issuance field. A chain the deployment
+    /// does not serve, or a malformed id, is refused at create time.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn the_merchant_may_pin_the_network(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let mut malformed = valid_body();
+        malformed["chain_id"] = json!("base");
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "pin-malformed", &malformed))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(refused).await;
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("chain_id"),
+            "{error}"
+        );
+        let mut unknown = valid_body();
+        unknown["chain_id"] = json!("999");
+        let refused = app
+            .clone()
+            .oneshot(create_request(KEY, "pin-unknown", &unknown))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "unsupported_chain"
+        );
+
+        let mut pinned = valid_body();
+        pinned["chain_id"] = json!("2");
+        let created = app
+            .clone()
+            .oneshot(create_request(KEY, "pinned", &pinned))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["networks"].as_array().unwrap().len(), 1);
+        assert_eq!(created["networks"][0]["chain"]["id"], "2");
+        assert_eq!(
+            created["chain"]["id"], "2",
+            "the network is known at issuance"
+        );
+        assert_eq!(
+            created["token"]["address"],
+            Address::repeat_byte(0x02).to_checksum(None)
+        );
+        assert!(
+            created["address"].is_null(),
+            "the address still waits for the wallet"
+        );
+        assert!(created["self_settlement"].is_null());
+
+        // The payer page names it too, and offers nothing else.
+        let payer_view = json_body(
+            app.clone()
+                .oneshot(payer_get(&format!("/v1/payer/deposit-requests/{id}"), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(payer_view["chain"]["id"], "2");
+        assert_eq!(payer_view["networks"].as_array().unwrap().len(), 1);
+        assert!(payer_view["address"].is_null());
+
+        let wallet = gateway_core::wallet_of(&PAYER_KEY);
+        let elsewhere = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(elsewhere.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(elsewhere).await["error"]["code"],
+            "unsupported_chain"
+        );
+
+        let challenge = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                None,
+                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "2"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::OK);
+        let challenge = json_body(challenge).await;
+        let session = challenge["payer_session"].as_str().unwrap().to_owned();
+        let signature = sign_challenge(&challenge, &PAYER_KEY);
+        let bound = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/wallet/attest"),
+                Some(&session),
+                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bound.status(), StatusCode::OK);
+        let bound = json_body(bound).await;
+        assert_eq!(bound["chain"]["id"], "2");
+        assert!(bound["address"].is_string());
+
+        // Idempotency: the same key replays; another pin conflicts.
+        let replay = app
+            .clone()
+            .oneshot(create_request(KEY, "pinned", &pinned))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(replay.headers()["Idempotency-Replayed"], "true");
+        assert_eq!(json_body(replay).await["id"], id);
+        let mut other_pin = valid_body();
+        other_pin["chain_id"] = json!("1");
+        let conflict = app
+            .clone()
+            .oneshot(create_request(KEY, "pinned", &other_pin))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    /// Paying from another chain through Relay: the checkout lists the
+    /// chains USDC may come from, asks for a quote pinned to the attested
+    /// wallet and the payment address, reports the origin transaction, and
+    /// follows the intent on the payer view. Once the indexer attributes
+    /// the solver's transfer, the proof carries the origin the attestation
+    /// vouches for and still verifies offline.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_payer_may_pay_from_another_chain_through_relay(pool: PgPool) {
+        let app = build_relay(pool.clone()).await.router;
+        let created = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "relay", &valid_body()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
+        let payer_view =
+            |session: Option<&str>| payer_get(&format!("/v1/payer/deposit-requests/{id}"), session);
+
+        // Nothing to pay from another chain until the address exists.
+        let unbound = json_body(app.clone().oneshot(payer_view(None)).await.unwrap()).await;
+        assert_eq!(unbound["relay_available"], false);
+        assert!(unbound["relay"].is_null());
+        let early = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/deposit-requests/{id}/relay/chains"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(early.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(early).await["error"]["code"], "wallet_required");
+
+        let (bound, _) = bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        let address = Address::parse_checksummed(bound["address"].as_str().unwrap(), None).unwrap();
+        let payer_wallet = gateway_core::wallet_of(&PAYER_KEY);
+        let ready = json_body(app.clone().oneshot(payer_view(None)).await.unwrap()).await;
+        assert_eq!(ready["relay_available"], true);
+        assert!(ready["relay"].is_null());
+
+        // The origin chains: every chain Relay takes USDC on, except the
+        // request's own and those not taking deposits.
+        let chains = json_body(
+            app.clone()
+                .oneshot(payer_get(
+                    &format!("/v1/payer/deposit-requests/{id}/relay/chains"),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let offered: Vec<&str> = chains["chains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chain| chain["chain_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(offered, ["8453", "2"]);
+        assert_eq!(chains["chains"][0]["name"], "Base");
+        assert_eq!(
+            chains["chains"][0]["usdc_address"],
+            relay_origin_usdc().to_checksum(None)
+        );
+        assert!(chains["chains"][0]["rpc_url"].is_string());
+
+        // A quote from the request's own chain, or one not offered, is refused.
+        let quotes = format!("/v1/payer/deposit-requests/{id}/relay/quotes");
+        for origin in ["1", "10", "999"] {
+            let refused = app
+                .clone()
+                .oneshot(payer_post(
+                    &quotes,
+                    None,
+                    Some(&json!({"origin_chain_id": origin})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                refused.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{origin}"
+            );
+            assert_eq!(
+                json_body(refused).await["error"]["code"],
+                "relay_unsupported_origin"
+            );
+        }
+        let malformed = app
+            .clone()
+            .oneshot(payer_post(
+                &quotes,
+                None,
+                Some(&json!({"origin_chain_id": "base"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+        // The quote: exactly the amount due lands, from the attested wallet
+        // on Base, in an approve and a deposit for the page to send.
+        let quoted = app
+            .clone()
+            .oneshot(payer_post(
+                &quotes,
+                None,
+                Some(&json!({"origin_chain_id": "8453"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(quoted.status(), StatusCode::OK);
+        let quote = json_body(quoted).await;
+        let intent_id = quote["id"].as_str().unwrap().to_owned();
+        assert!(intent_id.starts_with("rli_"));
+        assert_eq!(quote["origin"]["chain_id"], "8453");
+        assert_eq!(quote["amount_out_base_units"], "1000000");
+        assert_eq!(quote["amount_in_base_units"], "1020000");
+        assert_eq!(quote["relayer_fee_usd"], "0.02");
+        assert_eq!(
+            quote["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| step["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["approve", "deposit"]
+        );
+        assert_eq!(quote["steps"][1]["transaction"]["chain_id"], "8453");
+        assert_eq!(quote["steps"][1]["transaction"]["data"], "0xe8017952");
+        assert_eq!(quote["steps"][1]["transaction"]["gas"], "80000");
+        let intent = gateway_db::RelayIntentRepository::new(pool.clone())
+            .latest_for_invoice(uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.status, "quoted");
+        assert_eq!(intent.payer_wallet, payer_wallet.as_slice());
+        assert_eq!(intent.origin_currency, relay_origin_usdc().as_slice());
+        assert_eq!(intent.origin_chain_id, 8453);
+        assert_eq!(intent.destination_chain_id, 1);
+        let view = json_body(app.clone().oneshot(payer_view(None)).await.unwrap()).await;
+        assert_eq!(view["relay"]["id"], intent_id);
+        assert_eq!(view["relay"]["status"], "quoted");
+
+        // The wallet sent the deposit: the intent is sent, once.
+        let sent_path = format!("{quotes}/{intent_id}/sent");
+        let origin_tx = alloy_primitives::B256::repeat_byte(0xB1);
+        let wrong = app
+            .clone()
+            .oneshot(payer_post(
+                &sent_path,
+                None,
+                Some(&json!({"transaction_hash": "0x1234"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+        let sent = app
+            .clone()
+            .oneshot(payer_post(
+                &sent_path,
+                None,
+                Some(&json!({"transaction_hash": origin_tx.to_string()})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sent.status(), StatusCode::OK);
+        let sent = json_body(sent).await;
+        assert_eq!(sent["relay"]["status"], "sent");
+        assert_eq!(
+            sent["relay"]["origin_transaction_hash"],
+            origin_tx.to_string()
+        );
+        assert_eq!(sent["relay"]["origin_chain_id"], "8453");
+        assert!(sent["relay"]["fill_transaction_hash"].is_null());
+        let again = app
+            .clone()
+            .oneshot(payer_post(
+                &sent_path,
+                None,
+                Some(&json!({"transaction_hash": origin_tx.to_string()})),
+            ))
+            .await
+            .unwrap();
+        // Reporting the same transaction again is idempotent: a retry over
+        // a flaky connection must not error, let alone pay twice.
+        assert_eq!(again.status(), StatusCode::OK);
+        let unknown = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("{quotes}/rli_{}/sent", Uuid::nil()),
+                None,
+                Some(&json!({"transaction_hash": origin_tx.to_string()})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        // The indexer's side, as it happens: Relay reports the fill, the
+        // solver's transfer is credited against it, and the request settles.
+        let fill = alloy_primitives::B256::repeat_byte(0xF1);
+        let solver = Address::repeat_byte(0x50);
+        gateway_db::RelayIntentRepository::new(pool.clone())
+            .resolve_filled(intent.id, &[fill], origin_tx, "success")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO payment_observations
+                 (chain_id, token_address, block_number, block_hash, block_timestamp,
+                  transaction_hash, transaction_index, log_index, sender_address,
+                  recipient_address, invoice_id, amount, disposition, relay_intent_id)
+               VALUES (1, $1, 3, $2, 1800000000, $3, 0, 0, $4, $5, $6, '1000000', 'credited', $7)"#,
+        )
+        .bind(Address::repeat_byte(0x02).as_slice())
+        .bind([1u8; 32].as_slice())
+        .bind(fill.as_slice())
+        .bind(solver.as_slice())
+        .bind(address.as_slice())
+        .bind(uuid)
+        .bind(intent.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE invoices SET status = 'fulfilled', confirmed_received = '1000000', settlement_tx_hash = $2, resolved_at_block = 9, settled_at = now() WHERE id = $1",
+        )
+        .bind(uuid)
+        .bind([9u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let view = json_body(app.clone().oneshot(payer_view(None)).await.unwrap()).await;
+        assert_eq!(view["relay"]["status"], "filled");
+        assert_eq!(view["relay"]["fill_transaction_hash"], fill.to_string());
+
+        // The merchant sees where the transfer came from.
+        let merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(merchant["transfers"][0]["sender"], solver.to_checksum(None));
+        assert_eq!(merchant["transfers"][0]["relay"]["origin_chain_id"], "8453");
+        assert_eq!(
+            merchant["transfers"][0]["relay"]["origin_transaction_hash"],
+            origin_tx.to_string()
+        );
+        assert_eq!(
+            merchant["transfers"][0]["relay"]["request_id"],
+            intent.request_id().unwrap().to_string()
+        );
+
+        // The proof: the solver's transfer, attributed to the wallet's
+        // origin transaction, vouched for by the attestation.
+        let served = app
+            .clone()
+            .oneshot(get_request(
+                KEY,
+                &format!("/v1/deposit-requests/{id}/proof"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(served.status(), StatusCode::OK);
+        let proof: ProofOfPayment = serde_json::from_value(json_body(served).await).unwrap();
+        assert_eq!(proof.transfers.len(), 1);
+        assert_eq!(proof.transfers[0].sender, solver.to_checksum(None));
+        let relay = proof.transfers[0].relay.as_ref().unwrap();
+        assert_eq!(relay.origin_sender, payer_wallet.to_checksum(None));
+        assert_eq!(relay.origin_chain_id, "8453");
+        assert_eq!(relay.origin_transaction_hash, origin_tx.to_string());
+        assert_eq!(relay.attribution_source, "receipt");
+        assert_eq!(proof.verification.payload.relay_fills.len(), 1);
+        assert_eq!(
+            proof.verification.payload.relay_fills[0].transaction_hash,
+            fill.to_string()
+        );
+        let verified = verify_proof(&proof, None, &[attestor().address()])
+            .unwrap_or_else(|error| panic!("the relayed proof must verify offline: {error}"));
+        assert_eq!(verified.payer_wallet, payer_wallet);
+        let mut edited = proof.clone();
+        edited.transfers[0].relay.as_mut().unwrap().origin_sender =
+            Address::repeat_byte(0x77).to_checksum(None);
+        assert!(matches!(
+            verify_proof(&edited, None, &[attestor().address()]).unwrap_err(),
+            ProofError::TransferSenderMismatch
+        ));
+    }
+
+    /// Without a Relay key nothing is offered: the payer view says so and
+    /// the routes answer `relay_unavailable`.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn relay_is_unavailable_without_a_key(pool: PgPool) {
+        let accounts = AccountRepository::new(pool.clone());
+        provision_test_account(&accounts).await;
+        let (state, _, _) = test_state(
+            pool,
+            accounts,
+            None,
+            test_networks(Address::ZERO),
+            None,
+            None,
+            None,
+        );
+        let app = router(state);
+        let created = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "no-relay", &valid_body()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        let view = json_body(
+            app.clone()
+                .oneshot(payer_get(&format!("/v1/payer/deposit-requests/{id}"), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(view["relay_available"], false);
+        assert!(view["relay"].is_null());
+        let chains = app
+            .clone()
+            .oneshot(payer_get(
+                &format!("/v1/payer/deposit-requests/{id}/relay/chains"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(chains.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(chains).await["error"]["code"],
+            "relay_unavailable"
+        );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -2732,6 +3414,7 @@ mod tests {
         let TestApp {
             router: app,
             storage,
+            ..
         } = test_app(pool.clone()).await;
         let account = test_account(&pool).await;
 
@@ -2895,6 +3578,7 @@ mod tests {
         let TestApp {
             router: app,
             storage,
+            ..
         } = test_app(pool.clone()).await;
         let oversized = vec![b'%'; 5 * 1024 * 1024 + 1];
         let cases: Vec<(&str, &str, &[u8], &str)> = vec![
@@ -3044,6 +3728,7 @@ mod tests {
         let TestApp {
             router: app,
             storage,
+            ..
         } = test_app(pool.clone()).await;
         const EXPIRED: &str = "The upload expired before it was attached; upload the PDF again";
 
@@ -3099,6 +3784,7 @@ mod tests {
         let TestApp {
             router: app,
             storage,
+            ..
         } = test_app(pool.clone()).await;
         let (id, object_key) = finalized_upload(&app, &storage).await;
 
@@ -6056,5 +6742,447 @@ mod tests {
                 .unwrap()
                 .starts_with("issuer is required")
         );
+    }
+
+    // --- Withdrawals ---
+
+    /// The key behind the test merchant's Payday wallet.
+    const MERCHANT_KEY: [u8; 32] = [9u8; 32];
+    const WITHDRAWAL_DESTINATION: &str = "0xD00dD00dd00Dd00dD00DD00dD00Dd00dd00dD00D";
+
+    /// Give the test account a Payday wallet, as a dashboard session would.
+    async fn give_wallet(pool: &PgPool, account: AccountId) -> Address {
+        let wallet = gateway_core::wallet_of(&MERCHANT_KEY);
+        sqlx::query("UPDATE accounts SET wallet_address = $2 WHERE id = $1")
+            .bind(account.0)
+            .bind(wallet.to_checksum(None))
+            .execute(pool)
+            .await
+            .unwrap();
+        wallet
+    }
+
+    fn create_withdrawal(key: &str, idempotency_key: &str, chain_id: &str) -> Request<Body> {
+        Request::post("/v1/withdrawals")
+            .header(header::AUTHORIZATION, format!("Bearer {key}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(
+                json!({"destination": {"chain_id": chain_id, "address": WITHDRAWAL_DESTINATION}})
+                    .to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// Sign a leg's typed data exactly as an integrator would from the API
+    /// response alone, with the raw key.
+    fn sign_leg(leg: &Value, secret: &[u8; 32]) -> Value {
+        let typed: gateway_core::AuthorizationTypedData =
+            serde_json::from_value(leg["authorization"]["typed_data"].clone())
+                .expect("typed data is the documented shape");
+        let kind = match typed.primary_type.as_str() {
+            "ReceiveWithAuthorization" => gateway_core::AuthorizationKind::Receive,
+            _ => gateway_core::AuthorizationKind::Transfer,
+        };
+        let authorization = gateway_core::WithdrawalAuthorization {
+            kind,
+            from: typed.message.from.parse().unwrap(),
+            to: typed.message.to.parse().unwrap(),
+            value: alloy_primitives::U256::from_str_radix(&typed.message.value, 10).unwrap(),
+            valid_before: typed.message.valid_before.parse().unwrap(),
+            nonce: typed.message.nonce.parse().unwrap(),
+        };
+        let domain = gateway_core::UsdcDomain {
+            name: typed.domain.name,
+            version: typed.domain.version,
+            chain_id: typed.domain.chain_id,
+            token: typed.domain.verifying_contract.parse().unwrap(),
+        };
+        json!({
+            "leg_id": leg["id"],
+            "signature": gateway_core::sign_authorization(secret, &authorization, &domain),
+        })
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn withdrawal_is_prepared_signed_submitted_and_polled(pool: PgPool) {
+        let TestApp {
+            router: app, chain, ..
+        } = test_app(pool.clone()).await;
+        let account = test_account(&pool).await;
+
+        // No wallet yet: nothing to sign from.
+        let response = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w1", "2"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "wallet_not_ready"
+        );
+
+        let wallet = give_wallet(&pool, account).await;
+        let response = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w1", "2"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "nothing_to_withdraw"
+        );
+
+        // Funds on both chains, destination chain 2: a bridge leg from chain
+        // 1 and a transfer leg on chain 2, in registry order.
+        chain.set_balance(1, wallet, 5_000_000);
+        chain.set_balance(2, wallet, 1_250_000);
+        let response = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w1", "2"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        assert!(id.starts_with("wd_"));
+        assert_eq!(created["status"], "awaiting_signature");
+        assert_eq!(created["wallet_address"], wallet.to_checksum(None));
+        assert_eq!(created["destination"]["chain"]["id"], "2");
+        assert_eq!(created["destination"]["address"], WITHDRAWAL_DESTINATION);
+        let legs = created["legs"].as_array().unwrap();
+        assert_eq!(legs.len(), 2);
+
+        let bridge = &legs[0];
+        assert_eq!(bridge["kind"], "bridge");
+        assert_eq!(bridge["source_chain"]["id"], "1");
+        assert_eq!(bridge["amount"], "5.000000");
+        assert_eq!(bridge["amount_base_units"], "5000000");
+        assert_eq!(bridge["state"], "awaiting_signature");
+        let authorization = &bridge["authorization"];
+        assert_eq!(authorization["primary_type"], "ReceiveWithAuthorization");
+        assert_eq!(authorization["forwarder"], TEST_FORWARDER.to_checksum(None));
+        let typed = &authorization["typed_data"];
+        assert_eq!(typed["domain"]["chainId"], 1);
+        assert_eq!(typed["domain"]["name"], "USD Coin");
+        assert_eq!(
+            typed["domain"]["verifyingContract"],
+            Address::ZERO.to_checksum(None)
+        );
+        assert_eq!(typed["message"]["from"], wallet.to_checksum(None));
+        assert_eq!(typed["message"]["to"], TEST_FORWARDER.to_checksum(None));
+        assert_eq!(typed["message"]["value"], "5000000");
+        assert_eq!(typed["message"]["validAfter"], "0");
+        assert!(typed["types"]["ReceiveWithAuthorization"].is_array());
+        let preimage = &authorization["nonce_preimage"];
+        assert_eq!(preimage["destination_domain"], 6, "chain 2's CCTP domain");
+        assert_eq!(preimage["mint_recipient"], WITHDRAWAL_DESTINATION);
+        let expected_nonce = gateway_core::bridge_nonce(
+            6,
+            WITHDRAWAL_DESTINATION.parse().unwrap(),
+            preimage["salt"].as_str().unwrap().parse().unwrap(),
+        );
+        assert_eq!(
+            typed["message"]["nonce"],
+            expected_nonce.to_string(),
+            "the nonce commits to the destination"
+        );
+
+        let transfer = &legs[1];
+        assert_eq!(transfer["kind"], "transfer");
+        assert_eq!(transfer["source_chain"]["id"], "2");
+        assert_eq!(transfer["amount"], "1.250000");
+        assert_eq!(
+            transfer["authorization"]["primary_type"],
+            "TransferWithAuthorization"
+        );
+        assert_eq!(
+            transfer["authorization"]["typed_data"]["message"]["to"],
+            WITHDRAWAL_DESTINATION
+        );
+        assert!(transfer["authorization"]["forwarder"].is_null());
+        assert!(transfer["authorization"]["nonce_preimage"].is_null());
+
+        // The same key replays; another destination with it conflicts; a
+        // second withdrawal while this one is open is refused.
+        let replay = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w1", "2"))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(replay.headers()["idempotency-replayed"], "true");
+        assert_eq!(json_body(replay).await["id"], id);
+        let conflict = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w1", "1"))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["error"]["code"],
+            "idempotency_conflict"
+        );
+        let busy = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w2", "2"))
+            .await
+            .unwrap();
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(busy).await["error"]["code"],
+            "withdrawal_in_progress"
+        );
+
+        // A wrong key is refused before anything is recorded.
+        let bad = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/withdrawals/{id}/authorizations"),
+                &json!({"authorizations": [sign_leg(bridge, &PAYER_KEY), sign_leg(transfer, &MERCHANT_KEY)]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let bad = json_body(bad).await;
+        assert_eq!(bad["error"]["code"], "signature_invalid");
+        assert!(
+            bad["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with(bridge["id"].as_str().unwrap())
+        );
+        let unchanged = app
+            .clone()
+            .oneshot(get_request(KEY, &format!("/v1/withdrawals/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(unchanged).await["legs"][1]["state"],
+            "awaiting_signature",
+            "nothing recorded"
+        );
+
+        // Sign one leg, then the other.
+        let partial = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/withdrawals/{id}/authorizations"),
+                &json!({"authorizations": [sign_leg(transfer, &MERCHANT_KEY)]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(partial.status(), StatusCode::OK);
+        let partial = json_body(partial).await;
+        assert_eq!(partial["status"], "awaiting_signature");
+        assert_eq!(partial["legs"][1]["state"], "authorized");
+        assert!(partial["legs"][1]["authorization"].is_null());
+        assert!(partial["legs"][0]["authorization"].is_object());
+        let complete = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/withdrawals/{id}/authorizations"),
+                &json!({"authorizations": [sign_leg(bridge, &MERCHANT_KEY), sign_leg(transfer, &MERCHANT_KEY)]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            complete.status(),
+            StatusCode::OK,
+            "resending a signature is fine"
+        );
+        let complete = json_body(complete).await;
+        assert_eq!(complete["status"], "in_progress");
+        assert_eq!(complete["legs"][0]["state"], "authorized");
+
+        let unknown_leg = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/withdrawals/{id}/authorizations"),
+                &json!({"authorizations": [{"leg_id": "wdl_0198f80c-8d2f-7dc1-a369-90556a64f700", "signature": "0x00"}]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown_leg.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(unknown_leg).await["error"]["code"],
+            "withdrawal_leg_not_found"
+        );
+
+        let listed = app
+            .clone()
+            .oneshot(get_request(KEY, "/v1/withdrawals?limit=1"))
+            .await
+            .unwrap();
+        let listed = json_body(listed).await;
+        assert_eq!(listed["withdrawals"][0]["id"], id);
+        assert_eq!(
+            listed["withdrawals"][0]["legs"].as_array().unwrap().len(),
+            2
+        );
+        assert!(listed["next_cursor"].is_null());
+
+        // Authorized but unrelayed: still cancellable, and the account is free again.
+        let cancelled = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/withdrawals/{id}/cancel"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancelled = json_body(cancelled).await;
+        assert_eq!(cancelled["status"], "cancelled");
+        assert!(cancelled["cancelled_at"].is_string());
+        assert_eq!(cancelled["legs"][0]["state"], "cancelled");
+        let again = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "w2", "1"))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CREATED);
+        let again = json_body(again).await;
+        assert_eq!(
+            again["legs"][0]["kind"], "transfer",
+            "chain 1 funds stay on chain 1"
+        );
+        assert_eq!(again["legs"][1]["kind"], "bridge");
+
+        // Other accounts see nothing of it.
+        let other = other_account(&pool, "payday_live_ffffffffffffffffffffffffffffffff").await;
+        let _ = other;
+        let foreign = app
+            .clone()
+            .oneshot(get_request(
+                "payday_live_ffffffffffffffffffffffffffffffff",
+                &format!("/v1/withdrawals/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn withdrawal_requests_are_validated_and_unreadable_chains_are_reported(pool: PgPool) {
+        let TestApp {
+            router: app, chain, ..
+        } = test_app(pool.clone()).await;
+        let account = test_account(&pool).await;
+        let wallet = give_wallet(&pool, account).await;
+        chain.set_balance(1, wallet, 100);
+
+        let missing_key = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                "/v1/withdrawals",
+                &json!({"destination": {"chain_id": "1", "address": WITHDRAWAL_DESTINATION}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing_key.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(missing_key).await["error"]["code"],
+            "missing_idempotency_key"
+        );
+
+        for (body, fragment) in [
+            (
+                json!({"destination": {"chain_id": "9", "address": WITHDRAWAL_DESTINATION}}),
+                "destination.chain_id",
+            ),
+            (
+                json!({"destination": {"chain_id": "1", "address": "0xnope"}}),
+                "destination.address",
+            ),
+            (
+                json!({"destination": {"chain_id": "1", "address": "0x0000000000000000000000000000000000000000"}}),
+                "zero address",
+            ),
+            (json!({"destination": {"chain_id": "1"}}), "address"),
+            (
+                json!({"destination": {"chain_id": "1", "address": WITHDRAWAL_DESTINATION}, "amount": "1"}),
+                "amount",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/withdrawals")
+                        .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "k")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fragment}");
+            let error = json_body(response).await;
+            assert_eq!(error["error"]["code"], "invalid_request");
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(fragment),
+                "{}",
+                error["error"]["message"]
+            );
+        }
+
+        chain.failing.lock().unwrap().push(2);
+        let unreadable = app
+            .clone()
+            .oneshot(create_withdrawal(KEY, "k", "1"))
+            .await
+            .unwrap();
+        assert_eq!(unreadable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(unreadable).await["error"]["code"],
+            "withdrawals_unavailable"
+        );
+        chain.failing.lock().unwrap().clear();
+
+        let missing = app
+            .clone()
+            .oneshot(get_request(
+                KEY,
+                "/v1/withdrawals/wd_0198f80c-8d2f-7dc1-a369-90556a64f700",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let wrong_shape = app
+            .clone()
+            .oneshot(get_request(
+                KEY,
+                "/v1/withdrawals/cus_0198f80c-8d2f-7dc1-a369-90556a64f700",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_shape.status(), StatusCode::NOT_FOUND);
+        let bad_cursor = app
+            .clone()
+            .oneshot(get_request(
+                KEY,
+                "/v1/withdrawals?starting_after=wd_0198f80c-8d2f-7dc1-a369-90556a64f700",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad_cursor.status(), StatusCode::BAD_REQUEST);
     }
 }

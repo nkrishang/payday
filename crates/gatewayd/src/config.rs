@@ -42,6 +42,10 @@ pub struct Config {
     /// The Resend key that sends payers their deposit request emails;
     /// `None` leaves those queued and unsent.
     resend: Option<ResendConfig>,
+    /// Relay (`PAYDAY_RELAY_URL`), for cross-chain payments into a deposit
+    /// address; `PAYDAY_RELAY_API_KEY` unset leaves them unoffered.
+    relay_url: String,
+    relay_api_key: Option<String>,
 }
 
 /// Payer email goes out through Resend, the account Auth0 already sends
@@ -180,7 +184,24 @@ impl Config {
             webhook_encryption_key,
             notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
             resend,
+            relay_url: std::env::var("PAYDAY_RELAY_URL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| gateway_relay::DEFAULT_RELAY_URL.to_owned()),
+            relay_api_key: std::env::var("PAYDAY_RELAY_API_KEY")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
         }
+    }
+
+    pub fn relay_url(&self) -> &str {
+        &self.relay_url
+    }
+
+    pub fn relay_api_key(&self) -> Option<&str> {
+        self.relay_api_key.as_deref()
     }
 
     pub fn bind_addr(&self) -> &str {

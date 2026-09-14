@@ -175,6 +175,44 @@ Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never
 
 `account.issueApiKey(expectedGeneration)` and `account.revokeApiKey(expectedGeneration)` mint or revoke a key. They work only from a dashboard session: an API key, however valid for everything else, is refused here (`identity_unauthorized`) on purpose — whoever holds a key must not be able to mint another from it. Pass `expectedGeneration` from the account's current `generation`; a mismatch throws `PaydayError` with code `api_key_generation_conflict`, meaning something else changed the key first. `issueApiKey`'s result carries the raw key exactly once — nothing later, including `account.get()`, can return it again — and, when it replaced an earlier key, that key keeps authenticating for 24 hours.
 
+## Withdrawing from your server
+
+The Payday wallet's whole USDC balance, on every network, to one address:
+prepare, sign, submit, poll. Signing needs the wallet's key, exported once from
+the dashboard's Account section. `@payday/sdk/signing` signs with it through
+`viem` (an optional peer dependency: `npm install viem`), after checking every
+document against its leg so a wrong document is refused rather than signed.
+
+```ts
+import { PaydayClient } from "@payday/sdk";
+import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
+
+const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
+
+let withdrawal = await payday.withdrawals.create(
+  { destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
+  crypto.randomUUID(),
+);
+const chains = (id: number) => deploymentChains.get(id) ?? null; // trusted USDC/CCTP registry
+const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
+withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
+while (withdrawal.status === "in_progress") {
+  await new Promise((resolve) => setTimeout(resolve, 10_000));
+  withdrawal = await payday.withdrawals.get(withdrawal.id);
+}
+```
+
+Any object with `signTypedData(typedData)` works as the signer (a KMS-backed
+viem account, ethers' `Wallet` through a one-line adapter); `toSignableTypedData`
+converts the API's document (decimal strings) into the bigint form those take.
+Bridge signing requires a trusted `chains` callback and always recomputes the
+nonce; it also verifies the USDC contract, forwarder, destination CCTP domain,
+and expiry before calling the signer. These checks are the security boundary.
+`withdrawals.list`, `withdrawals.get`, and `withdrawals.cancel` round out the
+namespace. The full guide, with Rust and Go samples, is at
+https://payday.sh/docs/withdrawals.
+
 ## Building your own checkout
 
 `PaydayPayerClient` reads the public routes behind a `deposit_url`. It takes no API key and is safe to run in a browser: a deposit link is open by design, because anyone holding it is allowed to fulfil the deposit request.
@@ -214,7 +252,10 @@ For `permissionless` deposit requests everything is unlocked immediately. For
 `details` are `null` until the payer's session satisfies the policy; `chain`
 and `token` are `null` until the payer has chosen a network and bound their
 wallet (`payer.wallet.challenge(id, wallet, chainId, options)`, then
-`attest`); pass the
+`attest`), unless the merchant pinned the network with `chain_id` at
+creation, in which case `networks` holds that one entry and `chain` and
+`token` name it from the start while `address` still waits for the wallet;
+pass the
 session token from verification as `payerSession` and it travels in the
 `Payday-Payer-Session` header. The response deliberately carries no merchant
 data — no payout or recovery address, metadata, customer, or policy

@@ -1,8 +1,17 @@
 "use client";
 
 import { PrivyProvider } from "@privy-io/react-auth";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { privyAppId } from "@/lib/merchant-payday";
+import { viemChains } from "@/lib/viem-chain";
+
+type PrivyConfig = NonNullable<ComponentProps<typeof PrivyProvider>["config"]>;
+type PrivyChain = NonNullable<PrivyConfig["supportedChains"]>[number];
+
+// Privy's chain type is viem's with `blockExplorers` required; every chain
+// here is built by viem's `defineChain` from the same fields Privy reads, and
+// `exactOptionalPropertyTypes` is all that keeps the two apart.
+const privyChains = viemChains as unknown as [PrivyChain, ...PrivyChain[]];
 
 /**
  * Privy, for everything a merchant does: the landing page's sign-in dialog
@@ -21,6 +30,10 @@ import { privyAppId } from "@/lib/merchant-payday";
  * like loginWithCode" — exactly what signup-dialog.tsx uses — so it would be
  * a no-op here regardless of its value. The dialog calls `useCreateWallet`
  * itself instead, which is the one thing that actually ever creates it.
+ *
+ * The wallet signs withdrawal authorizations under each network's USDC
+ * domain, so Privy is told every network the deployment serves; without
+ * that it would refuse to sign for a chain it does not know (Monad).
  */
 export function MerchantAuth({ children }: { children: ReactNode }) {
   return (
@@ -29,6 +42,8 @@ export function MerchantAuth({ children }: { children: ReactNode }) {
       config={{
         loginMethods: ["email"],
         embeddedWallets: { ethereum: { createOnLogin: "off" } },
+        supportedChains: privyChains,
+        defaultChain: privyChains[0],
       }}
     >
       {children}

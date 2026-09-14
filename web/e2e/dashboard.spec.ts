@@ -114,8 +114,12 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await page.getByRole("link", { name: "New deposit request for this customer" }).click();
   await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
 
-  // Amount, and a deadline of the merchant's own choosing rather than a preset.
+  // Amount, the network pinned to Base, and a deadline of the merchant's own
+  // choosing rather than a preset.
   await page.getByLabel("Amount").fill("120.50");
+  const networks = page.getByRole("radiogroup", { name: "Network" });
+  await expect(networks.getByRole("radio", { name: "Payer's choice" })).toBeChecked();
+  await networks.getByRole("radio", { name: "Base" }).check();
   await page.getByRole("radio", { name: "Custom" }).click();
   const deadline = new Date(Date.now() + 3 * 24 * 3600_000);
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -159,6 +163,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   const summary = page.getByLabel("Request summary");
   await expect(summary).toContainText("retainer.pdf");
   await expect(summary).toContainText("Verified email");
+  await expect(summary).toContainText("Base");
 
   const created = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/v1/deposit-requests"),
@@ -170,6 +175,8 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   expect(body).not.toHaveProperty("expires_in");
   expect(body.notes).toBe("Net 15.");
   expect(body.attachment_id).toBeTruthy();
+  // The pinned network travels as the API's decimal chain id.
+  expect(body.chain_id).toBe("8453");
   // Settles to the account's own wallet, never typed by anyone.
   const wallet = await page.evaluate(
     () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
@@ -193,6 +200,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   await expect(page.getByText("retainer.pdf")).toBeVisible();
   await expect(page.getByText("Verified email").first()).toBeVisible();
   await expect(page.getByText("peter@initrode.example")).toBeVisible();
+  await expect(page.getByText("Base · USDC")).toBeVisible();
   await expect(page.getByText("Pending").first()).toBeVisible();
   // No attempt yet, so nothing is broken out under the verdict.
   await expect(page.getByLabel("Verification activity")).toHaveCount(0);
@@ -245,7 +253,7 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("payday.proof.v3");
+  expect(body.version).toBe("payday.proof.v4");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
   expect(body.recovery_address).toBe(body.payer_wallet.address);
   expect(body.payment_id).toBe("dr_seed-settled");
@@ -281,17 +289,17 @@ test("the account section shows the signed-in mailbox and the Payday wallet", as
 
   const section = page.getByRole("region", { name: "Account" });
   await expect(section).toContainText("account-view@example.com");
-  // The wallet is the account's own, shown in full and ready to copy; there
-  // is no chain behind the stub, so the balance says so rather than spinning.
+  // The wallet is the account's own, shown in full and ready to copy.
   const wallet = await page.evaluate(
     () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
   );
   expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
   await expect(section).toContainText(wallet);
   await expect(section.getByRole("button", { name: /Copy wallet address/ })).toBeVisible();
-  // One balance per network the deployment offers, each read on its own.
-  await expect(section.getByText(/Balance unavailable — Monad/)).toBeVisible({ timeout: 20_000 });
-  await expect(section.getByText(/Balance unavailable — Base/)).toBeVisible({ timeout: 20_000 });
+  // One balance per network the deployment offers, each read on its own from
+  // the stub RPC, which answers with each chain's stub balance.
+  await expect(section.getByText(/5\.00\s*USDC/)).toBeVisible({ timeout: 20_000 });
+  await expect(section.getByText(/1\.25\s*USDC/)).toBeVisible({ timeout: 20_000 });
 });
 
 test("a merchant can generate, roll, and revoke their API key from the session", async ({
@@ -355,3 +363,69 @@ async function streamToString(download: {
   for await (const chunk of stream) chunks.push(Buffer.from(chunk as Buffer));
   return Buffer.concat(chunks).toString("utf8");
 }
+
+test("a merchant withdraws everything to one network from the account section", async ({
+  page,
+}) => {
+  // The stub relayer advances one state per read and the page reads every ten
+  // seconds, so a bridge leg takes about a minute to land.
+  test.setTimeout(150_000);
+  await signIn(page, "withdraw-flow@example.com");
+  const section = page.getByRole("region", { name: "Account" });
+  await expect(section.getByRole("button", { name: "Export wallet key" })).toBeVisible();
+
+  // Prepare: pick Base as the destination and name an address.
+  await section.getByRole("button", { name: "Withdraw", exact: true }).click();
+  await section.getByRole("radio", { name: /Base/ }).click();
+  const address = section.getByRole("textbox", { name: "Destination address" });
+  await address.fill("0xnope");
+  await expect(section.getByRole("alert")).toContainText("Not a valid address");
+  await expect(section.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await address.fill("0x000000000000000000000000000000000000d00d");
+  await section.getByRole("button", { name: "Continue" }).click();
+
+  // Review: one leg per network the stub wallet holds USDC on. The Monad
+  // leg bridges through the forwarder; the Base leg is a plain transfer.
+  await expect(section.getByText("2 legs to Base")).toBeVisible();
+  const legs = section.getByRole("list", { name: "Legs" }).getByRole("listitem");
+  await expect(legs).toHaveCount(2);
+  await expect(legs.nth(0)).toContainText("5.00 USDC");
+  await expect(legs.nth(0)).toContainText("Monad → Base via CCTP");
+  await expect(legs.nth(0)).toContainText("Pays Payday's forwarder");
+  await expect(legs.nth(1)).toContainText("1.25 USDC");
+  await expect(legs.nth(1)).toContainText("on Base");
+
+  // Sign: the page checks each document, asks the wallet once per leg, and
+  // hands the signatures back. The stub relayer then advances a state per
+  // read, and the page polls every ten seconds until every leg has landed.
+  await section.getByRole("button", { name: "Sign and withdraw" }).click();
+  await expect(section.getByText("Withdrawing…")).toBeVisible();
+  await expect(section.getByText(/Bridged legs wait for Circle/)).toBeVisible();
+  await expect(section.getByText("Withdrawn to Base.")).toBeVisible({ timeout: 90_000 });
+  await expect(legs.nth(0).getByRole("link", { name: "Burn" })).toBeVisible();
+  await expect(legs.nth(0).getByRole("link", { name: "Mint" })).toBeVisible();
+  await expect(legs.nth(1).getByRole("link", { name: "Transfer" })).toBeVisible();
+  await section.getByRole("button", { name: "Done" }).click();
+
+  // The finished withdrawal is listed, and a new one can start.
+  const history = section.getByRole("list", { name: "Recent withdrawals" });
+  await expect(history.getByRole("listitem")).toHaveCount(1);
+  await expect(history).toContainText("Completed");
+  await expect(history).toContainText("5.00 USDC from Monad");
+  await expect(section.getByRole("button", { name: "Withdraw", exact: true })).toBeEnabled();
+});
+
+test("a withdrawal can be cancelled before it is signed", async ({ page }) => {
+  await signIn(page, "withdraw-cancel@example.com");
+  const section = page.getByRole("region", { name: "Account" });
+  await section.getByRole("button", { name: "Withdraw", exact: true }).click();
+  await section
+    .getByRole("textbox", { name: "Destination address" })
+    .fill("0x000000000000000000000000000000000000d00d");
+  await section.getByRole("button", { name: "Continue" }).click();
+  await expect(section.getByText(/legs? to Monad/)).toBeVisible();
+  await section.getByRole("button", { name: "Cancel withdrawal" }).click();
+  await expect(section.getByRole("button", { name: "Withdraw", exact: true })).toBeVisible();
+  const history = section.getByRole("list", { name: "Recent withdrawals" });
+  await expect(history).toContainText("Cancelled");
+});

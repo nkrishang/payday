@@ -90,7 +90,9 @@ export default function ConceptsPage() {
         message from the wallet they intend to pay from. Payday derives the address from the
         issued document, the chosen chain, and that signature together, which is why{" "}
         <code>chain</code>, <code>token</code>, and <code>address</code> are <code>null</code>{" "}
-        until then. The merchant never picks a network; the request offers every supported one.
+        until then. By default the request offers every supported network and the payer picks; a
+        merchant who needs the funds on one network pins it with <code>chain_id</code> at
+        issuance, and the request then offers that network alone and names it from the start.
       </p>
 
       <Figure caption="Where the one-time address comes from. The salt depends on both the document and the payer's signature, and the address commits to the settlement terms, so none of them can change afterwards.">

@@ -61,6 +61,11 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
         summary: "Issue and track deposit requests without writing code.",
       },
       {
+        href: "/docs/withdrawals",
+        title: "Withdrawals",
+        summary: "Move the Payday wallet's USDC, on every network, to one address.",
+      },
+      {
         href: "/docs/checkout",
         title: "Hosted checkout",
         summary: "What the payer sees, and how to build your own.",

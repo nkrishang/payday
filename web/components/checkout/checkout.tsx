@@ -15,6 +15,7 @@ import { ClientSecretExchange, type ClientSecretStatus } from "./merchant-sessio
 import { NetworkSelect } from "./network-select";
 import { WalletProviders } from "./providers";
 import { QrPanel } from "./qr-panel";
+import { RelayPay } from "./relay-pay";
 import { Resolved } from "./resolved";
 import { useDepositRequest, useSecondsRemaining } from "./use-deposit-request";
 import { VerificationGate } from "./verification-gate";
@@ -97,7 +98,7 @@ function CheckoutBody({
   // so a gated deposit request unlocks here after verification and stays unlocked
   // across a reload; it never reaches the server-rendered page.
   const [payerSession, setPayerSession] = usePayerSession(initial.id);
-  const { payment, receivedAt, reconnecting, pendingTxHash, markSent, refresh } = useDepositRequest(
+  const { payment, receivedAt, reconnecting, pendingPayment, markSent, refresh } = useDepositRequest(
     initial,
     payerSession,
   );
@@ -139,7 +140,7 @@ function CheckoutBody({
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
   const view = checkoutView(payment, {
     secondsRemaining,
-    pendingTxHash,
+    pendingPayment,
     emailCodeSent,
     exchangingClientSecret: clientSecretStatus === "exchanging",
   });
@@ -148,9 +149,12 @@ function CheckoutBody({
   // payer's wallet is bound and the address exists.
   const unlocked = unlockedDepositRequest(payment);
   const ready = unlocked === null ? null : readyDepositRequest(unlocked);
-  // The chosen network, if it is one the request offers.
+  // The chosen network, if it is one the request offers; a request offering
+  // one network (the merchant pinned it) has it chosen already.
   const chosenNetwork =
-    unlocked?.networks.find((network) => network.chain.id === chosenChain) ?? null;
+    unlocked?.networks.find((network) => network.chain.id === chosenChain) ??
+    (unlocked?.networks.length === 1 ? unlocked.networks[0] : null) ??
+    null;
 
   return (
     <CheckoutFrame
@@ -230,6 +234,9 @@ function CheckoutBody({
 
               <div className="mt-6">
                 <WalletPay payment={ready} onSent={markSent} />
+                {ready.relay_available ? (
+                  <RelayPay payment={ready} payerSession={payerSession} onSent={markSent} />
+                ) : null}
               </div>
 
               <div className="my-6 flex items-center gap-3" aria-hidden>
@@ -248,7 +255,7 @@ function CheckoutBody({
               </div>
             </section>
           ) : (
-            <Resolved payment={unlocked} view={view} pendingTxHash={pendingTxHash} />
+            <Resolved payment={unlocked} view={view} pendingPayment={pendingPayment} />
           )}
         </>
       )}

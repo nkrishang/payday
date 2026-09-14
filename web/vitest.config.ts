@@ -28,6 +28,7 @@ export default defineConfig({
           rpcUrl: "https://rpc.example.test",
           usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
           explorerUrl: "https://explorer.example.test",
+          cctp: { domain: 15, forwarder: "0x2222222222222222222222222222222222222222", tokenMessenger: "0x3333333333333333333333333333333333333333", messageTransmitter: "0x4444444444444444444444444444444444444444" },
         },
         {
           id: 8453,
@@ -35,6 +36,7 @@ export default defineConfig({
           rpcUrl: "https://base.example.test",
           usdcAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
           explorerUrl: "https://base-explorer.example.test",
+          cctp: { domain: 6, forwarder: "0x5555555555555555555555555555555555555555", tokenMessenger: "0x6666666666666666666666666666666666666666", messageTransmitter: "0x7777777777777777777777777777777777777777" },
         },
       ]),
       NEXT_PUBLIC_PRIVY_APP_ID: "privy-test-app",

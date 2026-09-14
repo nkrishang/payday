@@ -3,8 +3,9 @@ use gateway_core::{ChainRegistry, ProofOfPayment};
 use gateway_db::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
     IssuerRepository, OnboardingDemoPaymentRepository, PayerSessionRepository, ProofRepository,
-    WebhookRepository,
+    RelayIntentRepository, WebhookRepository, WithdrawalRepository,
 };
+use gateway_relay::{RelayApi, RelayChain, RelayError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ use crate::api::error::ApiError;
 use crate::api::{PrivyVerifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
+use crate::chain_reader::ChainReads;
 use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
 use crate::pregenerated_wallet::WalletPregenerator;
@@ -38,6 +40,10 @@ pub struct AppState {
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
     pub onboarding_demo_payments: OnboardingDemoPaymentRepository,
+    pub withdrawals: WithdrawalRepository,
+    /// Balances and USDC domains per chain, for withdrawals; `None` leaves
+    /// the withdrawal routes answering `withdrawals_unavailable`.
+    pub(crate) chain_reader: Option<Arc<dyn ChainReads>>,
     /// Verifies dashboard sessions; `None` means only API keys authenticate.
     pub merchant_verifier: Option<PrivyVerifier>,
     /// The payer audience; `None` leaves gated invoices unverifiable and the
@@ -45,6 +51,10 @@ pub struct AppState {
     pub payer_verification: Option<PayerVerification>,
     /// The networks a deposit request may be paid on.
     pub networks: Arc<ChainRegistry>,
+    /// Cross-chain payments through Relay; `None` without
+    /// `PAYDAY_RELAY_API_KEY`, and the relay routes answer `relay_unavailable`.
+    pub relay: Option<Arc<RelayService>>,
+    pub relay_intents: RelayIntentRepository,
     pub payer: PayerAccess,
     pub webhooks: WebhookRepository,
     /// 256-bit AEAD key. Webhook APIs remain unavailable when not configured.
@@ -86,10 +96,16 @@ impl AppState {
         payer_verification: Option<PayerVerification>,
         onboarding_payer: Option<OnboardingPayerSigner>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
+        chain_reader: Option<Arc<dyn ChainReads>>,
+        relay: Option<Arc<dyn RelayApi>>,
     ) -> Self {
         let pool = repo.pool().clone();
         Self {
             webhooks: WebhookRepository::new(pool.clone()),
+            withdrawals: WithdrawalRepository::new(pool.clone()),
+            relay: relay.map(|api| Arc::new(RelayService::new(api))),
+            relay_intents: RelayIntentRepository::new(pool.clone()),
+            chain_reader,
             attachments: AttachmentRepository::new(pool.clone()),
             customers: CustomerRepository::new(pool.clone()),
             issuers: IssuerRepository::new(pool.clone()),
@@ -112,6 +128,12 @@ impl AppState {
             pregenerated_wallets,
             pregenerate_wallet_asked: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    pub fn relay(&self) -> Result<&RelayService, ApiError> {
+        self.relay
+            .as_deref()
+            .ok_or_else(ApiError::relay_unavailable)
     }
 
     pub fn attachment_store(&self) -> Result<&AttachmentStore, ApiError> {
@@ -187,5 +209,53 @@ impl AppState {
             cache.clear();
         }
         cache.insert((account_id, invoice_id, attestor), proof);
+    }
+}
+
+/// Relay's chain list changes rarely and is asked for on every checkout
+/// that opens the cross-chain option, so it is read once an hour.
+const RELAY_CHAINS_TTL: Duration = Duration::from_secs(3600);
+
+/// Relay, with its chain list cached.
+pub struct RelayService {
+    api: Arc<dyn RelayApi>,
+    chains: Mutex<Option<(Instant, Arc<Vec<RelayChain>>)>>,
+}
+
+impl RelayService {
+    pub fn new(api: Arc<dyn RelayApi>) -> Self {
+        Self {
+            api,
+            chains: Mutex::new(None),
+        }
+    }
+
+    pub fn api(&self) -> &dyn RelayApi {
+        self.api.as_ref()
+    }
+
+    /// The chains Relay serves, refreshed hourly. A failed refresh keeps the
+    /// stale list rather than taking the option away.
+    pub async fn chains(&self) -> Result<Arc<Vec<RelayChain>>, RelayError> {
+        let mut cached = self.chains.lock().await;
+        if let Some((read_at, chains)) = cached.as_ref()
+            && read_at.elapsed() < RELAY_CHAINS_TTL
+        {
+            return Ok(Arc::clone(chains));
+        }
+        match self.api.chains().await {
+            Ok(chains) => {
+                let chains = Arc::new(chains);
+                *cached = Some((Instant::now(), Arc::clone(&chains)));
+                Ok(chains)
+            }
+            Err(error) => match cached.as_ref() {
+                Some((_, chains)) => {
+                    tracing::warn!(%error, "relay chain list refresh failed; serving the last one");
+                    Ok(Arc::clone(chains))
+                }
+                None => Err(error),
+            },
+        }
     }
 }

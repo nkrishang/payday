@@ -7,9 +7,11 @@ mod issuers;
 mod notifications;
 mod onboarding;
 mod proofs;
+mod relay_intents;
 mod sweeps;
 mod verifications;
 mod webhooks;
+mod withdrawals;
 
 pub use accounts::{
     API_KEY_GRACE_HOURS, AccountId, AccountRepository, ApiKeyMetadata, IssueApiKeyError,
@@ -36,6 +38,10 @@ pub use notifications::{
 };
 pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
+pub use relay_intents::{
+    DbRelayIntent, FillResolution, MarkSent, NewRelayIntent, RelayIntentRepository,
+    RelayIntentStatus, Resolution,
+};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -52,6 +58,11 @@ pub use verifications::{
 pub use webhooks::{
     DeliveryClaim, WebhookAttempt, WebhookDelivery, WebhookEndpoint, WebhookEvent,
     WebhookRepository,
+};
+pub use withdrawals::{
+    AuthorizeOutcome, CancelOutcome, CreateWithdrawalError, DbWithdrawal, DbWithdrawalLeg, LegKind,
+    LegState, MinedStep, NewWithdrawal, NewWithdrawalLeg, RelayStats, RelayStep, RetryStep,
+    StepOutcome, WithdrawalRepository,
 };
 
 /// The gateway's schema migrations, embedded at compile time. This crate owns

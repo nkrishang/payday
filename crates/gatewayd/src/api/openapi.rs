@@ -126,6 +126,11 @@ struct CreateDepositRequest {
     /// Where exactly `amount` settles. May be left out when `issuer_id`
     /// names an identity with a saved payout address; its first one is used.
     payout_address: Option<String>,
+    /// Pin the network the payer must pay on: one of the deployment's chain
+    /// ids, as a decimal string. Left out, the payer chooses among all of
+    /// them when they sign. A chain this deployment does not serve is
+    /// `422 unsupported_chain`.
+    chain_id: Option<String>,
     /// The issuing party as the document will carry it. May be left out
     /// when `issuer_id` is given: the identity's name, contact address, and
     /// details are snapshotted in its place. An inline party always wins.
@@ -317,6 +322,18 @@ struct Transfer {
     block: String,
     timestamp: String,
     collected: bool,
+    /// Present when Relay's solver sent the transfer for a cross-chain
+    /// payment the attested wallet made from another network.
+    relay: Option<TransferRelay>,
+}
+#[derive(Serialize, ToSchema)]
+struct TransferRelay {
+    /// Relay's request id, `0x` hex, 32 bytes.
+    request_id: String,
+    /// Decimal chain id the wallet paid on.
+    origin_chain_id: String,
+    /// The transaction the wallet sent there.
+    origin_transaction_hash: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 struct TransferList {
@@ -657,10 +674,40 @@ struct VerificationFact {
 struct ProofTransfer {
     transaction_hash: String,
     log_index: String,
+    /// The attested wallet, or Relay's solver for a relayed transfer.
     sender: String,
     recipient: String,
     amount_base_units: String,
     block_number: String,
+    /// Present when Relay's solver made the transfer for a cross-chain
+    /// payment the attested wallet sent. Accepted offline only when the
+    /// same block appears in the attestation's `relay_fills`.
+    relay: Option<RelayAttribution>,
+}
+#[derive(Serialize, ToSchema)]
+struct RelayAttribution {
+    /// Relay's request id, `0x` hex, 32 bytes.
+    request_id: String,
+    /// Decimal chain id the wallet paid on.
+    origin_chain_id: String,
+    /// The transaction the wallet sent there, `0x` hex, 32 bytes.
+    origin_transaction_hash: String,
+    /// Always the attested wallet.
+    origin_sender: String,
+    /// `receipt` (read from a chain Payday serves) or `relay_api` (Relay's
+    /// record of the depositor).
+    attribution_source: String,
+}
+/// A relayed transfer as the attestation vouches for it.
+#[derive(Serialize, ToSchema)]
+struct AttestedRelayFill {
+    transaction_hash: String,
+    log_index: String,
+    request_id: String,
+    origin_chain_id: String,
+    origin_transaction_hash: String,
+    origin_sender: String,
+    attribution_source: String,
 }
 #[derive(Serialize, ToSchema)]
 struct VerificationAttestationPayload {
@@ -681,10 +728,14 @@ struct VerificationAttestationPayload {
     verified_at: Option<String>,
     wallet_bound_at: String,
     facts: Vec<VerificationFact>,
+    /// The transfers Relay's solver made for cross-chain payments the
+    /// attested wallet sent, each with the origin Payday verified; absent
+    /// when every transfer came from the wallet itself.
+    relay_fills: Option<Vec<AttestedRelayFill>>,
 }
 /// Payday-attested, not address-committed: verification happens after
 /// issuance. `signature` recovers to `signer` over
-/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V3" || JCS(payload))`.
+/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V4" || JCS(payload))`.
 #[derive(Serialize, ToSchema)]
 struct SignedVerificationAttestation {
     payload: VerificationAttestationPayload,
@@ -795,10 +846,125 @@ fn list_payout_addresses() {}
 #[utoipa::path(delete, path="/v1/payout-addresses/{id}", operation_id="deletePayoutAddress", tag="issuers", params(("id"=String, Path)), responses((status=204,description="Deleted, with every association to it"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn delete_payout_address() {}
 
+#[derive(Deserialize, ToSchema)]
+struct WithdrawalDestinationRequest {
+    /// Decimal chain id of one of the deployment's networks.
+    chain_id: String,
+    /// The address the whole balance is sent or bridged to.
+    address: String,
+}
+#[derive(Deserialize, ToSchema)]
+struct CreateWithdrawal {
+    destination: WithdrawalDestinationRequest,
+}
+#[derive(Deserialize, ToSchema)]
+struct LegAuthorization {
+    leg_id: String,
+    /// `0x` hex, 65 bytes `r || s || v`, over the leg's `typed_data`.
+    signature: String,
+}
+#[derive(Deserialize, ToSchema)]
+struct WithdrawalAuthorizations {
+    /// Any subset of the withdrawal's legs; every signature is verified
+    /// before any is recorded.
+    authorizations: Vec<LegAuthorization>,
+}
+#[derive(Serialize, ToSchema)]
+struct WithdrawalDestination {
+    chain: Chain,
+    address: String,
+}
+#[derive(Serialize, ToSchema)]
+struct WithdrawalNoncePreimage {
+    /// Circle's CCTP domain of the destination chain.
+    destination_domain: u32,
+    /// The destination address, as the mint recipient.
+    mint_recipient: String,
+    /// `0x` hex, 32 bytes.
+    salt: String,
+}
+/// What the merchant signs for one leg: an EIP-3009 authorization under the
+/// source chain's USDC, ready for `eth_signTypedData_v4`.
+#[derive(Serialize, ToSchema)]
+struct WithdrawalAuthorization {
+    /// `TransferWithAuthorization` (same-chain leg) or
+    /// `ReceiveWithAuthorization` (bridge leg).
+    primary_type: String,
+    /// `{domain, primaryType, types, message}`; every `uint256` is a decimal
+    /// string, `nonce` is `0x` hex.
+    typed_data: serde_json::Value,
+    /// When the token stops accepting the signature (24 hours after creation).
+    expires_at: String,
+    /// Bridge legs: the WithdrawalForwarder the authorization pays.
+    forwarder: Option<String>,
+    /// Bridge legs: `nonce = keccak256(abi.encode(destination_domain, bytes32(mint_recipient), salt))`,
+    /// so a signer can check the destination the nonce commits to.
+    nonce_preimage: Option<WithdrawalNoncePreimage>,
+}
+#[derive(Serialize, ToSchema)]
+struct WithdrawalLeg {
+    id: String,
+    /// `transfer` when the funds already sit on the destination chain,
+    /// `bridge` when they cross through CCTP.
+    kind: String,
+    source_chain: Chain,
+    amount: String,
+    amount_base_units: String,
+    /// `awaiting_signature`, `authorized`, `relaying`, `burned`, `attested`,
+    /// `minting`, `completed`, `failed`, `expired`, or `cancelled`.
+    state: String,
+    /// Present while the leg awaits its signature.
+    authorization: Option<WithdrawalAuthorization>,
+    transfer_tx_hash: Option<String>,
+    burn_tx_hash: Option<String>,
+    mint_tx_hash: Option<String>,
+    failure_reason: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+struct Withdrawal {
+    id: String,
+    /// `awaiting_signature`, `in_progress`, `completed`, `failed`, or `cancelled`.
+    status: String,
+    /// The Payday wallet every leg is signed from.
+    wallet_address: String,
+    destination: WithdrawalDestination,
+    /// One per network the wallet held USDC on when the withdrawal was created.
+    legs: Vec<WithdrawalLeg>,
+    created_at: String,
+    completed_at: Option<String>,
+    cancelled_at: Option<String>,
+    failed_at: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+struct WithdrawalPage {
+    withdrawals: Vec<Withdrawal>,
+    next_cursor: Option<String>,
+}
+
+#[utoipa::path(post, path="/v1/withdrawals", operation_id="createWithdrawal", tag="withdrawals",
+ request_body(content=CreateWithdrawal, description="Snapshot the Payday wallet's USDC on every network into legs towards one destination. Each leg carries the typed data to sign; nothing moves until it is signed. A reused Idempotency-Key with the same destination replays the withdrawal; with another destination it is a 409 idempotency_conflict."),
+ params(("Idempotency-Key"=String, Header, description="Required, 1-255 bytes")),
+ responses((status=201, description="Created; every leg is awaiting_signature", body=Withdrawal), (status=200, description="Idempotent replay", body=Withdrawal, headers(("Idempotency-Replayed"=String, description="true"))), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=409, description="wallet_not_ready, withdrawal_in_progress, nothing_to_withdraw, or idempotency_conflict", body=ErrorResponse), (status=422, description="withdrawal_exceeds_bridge_limit: a bridge leg is above Circle's 10,000,000 USDC per-message burn limit", body=ErrorResponse), (status=429, body=ErrorResponse), (status=503, description="withdrawals_unavailable: a balance could not be read, or a chain the wallet holds funds on cannot bridge on this deployment", body=ErrorResponse)), security(("apiKey"=[])))]
+fn create_withdrawal() {}
+#[utoipa::path(get, path="/v1/withdrawals", operation_id="listWithdrawals", tag="withdrawals",
+ params(("starting_after"=Option<String>, Query, description="wd_ cursor returned as next_cursor"), ("limit"=Option<u32>, Query, minimum=1, maximum=100)),
+ responses((status=200, body=WithdrawalPage), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
+fn list_withdrawals() {}
+#[utoipa::path(get, path="/v1/withdrawals/{id}", operation_id="getWithdrawal", tag="withdrawals", params(("id"=String, Path)),
+ responses((status=200, body=Withdrawal), (status=401, body=ErrorResponse), (status=404, description="withdrawal_not_found", body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
+fn get_withdrawal() {}
+#[utoipa::path(post, path="/v1/withdrawals/{id}/authorizations", operation_id="authorizeWithdrawal", tag="withdrawals", params(("id"=String, Path)),
+ request_body(content=WithdrawalAuthorizations, description="The merchant's signatures, each recovered against the withdrawal's wallet over the leg's typed data. Partial sets are accepted; a leg already signed with the same signature is unchanged."),
+ responses((status=200, description="The withdrawal with the signed legs authorized; the relayer takes them from here", body=Withdrawal), (status=400, description="signature_invalid, naming the leg", body=ErrorResponse), (status=401, body=ErrorResponse), (status=404, description="withdrawal_not_found or withdrawal_leg_not_found", body=ErrorResponse), (status=409, description="leg_not_awaiting_signature, authorization_expired, or withdrawal_finished", body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
+fn authorize_withdrawal() {}
+#[utoipa::path(post, path="/v1/withdrawals/{id}/cancel", operation_id="cancelWithdrawal", tag="withdrawals", params(("id"=String, Path)),
+ responses((status=200, description="Cancelled; signatures already given are never used", body=Withdrawal), (status=401, body=ErrorResponse), (status=404, body=ErrorResponse), (status=409, description="withdrawal_not_cancellable once a leg has been relayed, or withdrawal_finished", body=ErrorResponse), (status=429, body=ErrorResponse)), security(("apiKey"=[])))]
+fn cancel_withdrawal() {}
+
 #[derive(OpenApi)]
-#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage)),
- modifiers(&Security), tags((name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
+#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
+ modifiers(&Security), tags((name="withdrawals",description="Moving the Payday wallet's USDC, across every network, to an address the merchant names"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
 struct Security;
@@ -883,6 +1049,11 @@ mod tests {
         ("/v1/payout-addresses", "post"),
         ("/v1/payout-addresses", "get"),
         ("/v1/payout-addresses/{id}", "delete"),
+        ("/v1/withdrawals", "post"),
+        ("/v1/withdrawals", "get"),
+        ("/v1/withdrawals/{id}", "get"),
+        ("/v1/withdrawals/{id}/authorizations", "post"),
+        ("/v1/withdrawals/{id}/cancel", "post"),
     ];
     #[test]
     fn contract_covers_axum_public_api_routes_and_is_typed() {
@@ -1059,8 +1230,16 @@ mod tests {
         assert!(chain["sweeper"].is_object());
         let create = &d["components"]["schemas"]["CreateDepositRequest"]["properties"];
         assert!(
-            create.get("chain_id").is_none(),
-            "the payer chooses the network"
+            create["chain_id"].is_object(),
+            "the merchant may pin the network"
+        );
+        assert!(
+            !d["components"]["schemas"]["CreateDepositRequest"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "chain_id"),
+            "pinning is optional"
         );
         assert!(create.get("token_address").is_none());
         let deposit_request = &d["components"]["schemas"]["DepositRequest"]["properties"];

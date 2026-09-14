@@ -5,7 +5,11 @@ use sqlx::PgPool;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// One finalized USDC transfer credited toward the invoice amount.
+/// One finalized USDC transfer credited toward the invoice amount. The
+/// `relay_*` columns are set when Relay's solver made the transfer for a
+/// cross-chain payment the attested wallet initiated (a filled intent):
+/// the origin chain and transaction the wallet sent, and how the sender
+/// was established.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbSettlementTransfer {
     pub sender_address: Vec<u8>,
@@ -14,6 +18,11 @@ pub struct DbSettlementTransfer {
     pub transaction_hash: Vec<u8>,
     pub log_index: i64,
     pub block_number: i64,
+    pub relay_request_id: Option<Vec<u8>>,
+    pub relay_origin_chain_id: Option<i64>,
+    pub relay_origin_tx_hash: Option<Vec<u8>>,
+    pub relay_payer_wallet: Option<Vec<u8>>,
+    pub relay_attribution_source: Option<String>,
 }
 
 /// Legacy aggregate retained as part of the crate's public read-model API.
@@ -45,10 +54,17 @@ impl ProofRepository {
         invoice_id: Uuid,
     ) -> Result<Vec<DbSettlementTransfer>, sqlx::Error> {
         sqlx::query_as::<_, DbSettlementTransfer>(
-            r#"SELECT sender_address, recipient_address, amount, transaction_hash, log_index, block_number
-               FROM payment_observations
-               WHERE invoice_id = $1 AND disposition = 'credited'
-               ORDER BY block_number, transaction_index, log_index"#,
+            r#"SELECT o.sender_address, o.recipient_address, o.amount, o.transaction_hash,
+                      o.log_index, o.block_number,
+                      r.request_id AS relay_request_id,
+                      r.origin_chain_id AS relay_origin_chain_id,
+                      r.verified_origin_tx_hash AS relay_origin_tx_hash,
+                      r.payer_wallet AS relay_payer_wallet,
+                      r.attribution_source AS relay_attribution_source
+               FROM payment_observations o
+               LEFT JOIN relay_intents r ON r.id = o.relay_intent_id AND r.status = 'filled'
+               WHERE o.invoice_id = $1 AND o.disposition = 'credited'
+               ORDER BY o.block_number, o.transaction_index, o.log_index"#,
         )
         .bind(invoice_id)
         .fetch_all(&self.pool)

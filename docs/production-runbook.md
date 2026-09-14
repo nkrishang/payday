@@ -278,6 +278,41 @@ addresses as `factory` and `batch_sweeper` and the hashes as
 `factory_code_hash` and `batch_sweeper_code_hash` in each entry of the
 `chains` list in Terraform.
 
+### The WithdrawalForwarder
+
+Withdrawals that cross networks burn through `WithdrawalForwarder`
+(`foundry/src/WithdrawalForwarder.sol`), a stateless, ownerless contract
+bound to Circle's `TokenMessengerV2` (`0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d`
+on Monad, Base, and Arbitrum). It is deployed like the factory, from a
+second fresh key at nonce 0, so it has one address everywhere and one runtime
+code hash to pin:
+
+```bash
+cast wallet import payday-forwarder-deployer --interactive
+for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
+  cast nonce "$(cast wallet address --account payday-forwarder-deployer)" --rpc-url "$rpc"   # must print 0
+done
+PAYDAY_CHAIN_ID=143 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
+  --rpc-url "$MONAD_RPC_URL" --account payday-forwarder-deployer --broadcast
+PAYDAY_CHAIN_ID=8453 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
+  --rpc-url "$BASE_RPC_URL" --account payday-forwarder-deployer --broadcast
+PAYDAY_CHAIN_ID=42161 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
+  --rpc-url "$ARBITRUM_RPC_URL" --account payday-forwarder-deployer --broadcast
+for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
+  cast keccak "$(cast code <FORWARDER_ADDRESS> --rpc-url "$rpc")"
+done
+```
+
+Put the address and hash in each chain's `cctp` block in `terraform.tfvars`,
+with Circle's domain (Monad 15, Base 6, Arbitrum 3) and the two CCTP
+contracts, which are the same on all three chains. Both services verify the
+forwarder's code hash at startup like the factory's. A chain without a
+`cctp` block still serves same-network withdrawals; `POST /v1/withdrawals`
+answers `withdrawals_unavailable` when a leg would have to bridge from or to
+it. Before the first production withdrawal, run the forwarder's fork tests
+against the live chains (`just forge-fork`) and one real withdrawal on
+staging (`docs/staging.md`).
+
 ## 3. Configure Privy, Resend, and Auth0
 
 Follow [authentication.md](authentication.md) §1 through §3, in that order.

@@ -42,6 +42,21 @@ export interface PublicChain {
   usdcAddress: string;
   /** How long a deposit typically takes to be credited, shown next to the choice. */
   confirmation: string;
+  /**
+   * Circle's CCTP on this chain and the WithdrawalForwarder deployed against
+   * it, when the chain can bridge; null on a chain that only supports
+   * same-chain withdrawals (local Anvil). Shown to a merchant so they can
+   * check the payee their bridge authorization names.
+   */
+  cctp: PublicCctp | null;
+}
+
+export interface PublicCctp {
+  /** Circle's domain id (Arbitrum 3, Base 6, Monad 15). */
+  domain: number;
+  forwarder: string;
+  tokenMessenger: string;
+  messageTransmitter: string;
 }
 
 /**
@@ -73,7 +88,9 @@ function parseChains(raw: string): PublicChain[] {
       return value;
     };
     const explorer = typeof item.explorerUrl === "string" && item.explorerUrl ? item.explorerUrl : null;
+    const cctp = parseCctp(item.cctp, index);
     return {
+      cctp,
       id,
       name: text("name"),
       rpcUrl: text("rpcUrl"),
@@ -89,6 +106,29 @@ function parseChains(raw: string): PublicChain[] {
           : "Credited within a minute",
     };
   });
+}
+
+/** `cctp: {domain, forwarder, tokenMessenger, messageTransmitter}`, optional per chain. */
+function parseCctp(raw: unknown, index: number): PublicCctp | null {
+  if (raw === undefined || raw === null) return null;
+  const item = raw as Record<string, unknown>;
+  const domain = Number(item.domain);
+  if (!Number.isSafeInteger(domain) || domain < 0) {
+    throw new Error(`NEXT_PUBLIC_CHAINS[${index}].cctp.domain must be a non-negative integer`);
+  }
+  const address = (key: string): string => {
+    const value = item[key];
+    if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) {
+      throw new Error(`NEXT_PUBLIC_CHAINS[${index}].cctp.${key} must be an EVM address`);
+    }
+    return value;
+  };
+  return {
+    domain,
+    forwarder: address("forwarder"),
+    tokenMessenger: address("tokenMessenger"),
+    messageTransmitter: address("messageTransmitter"),
+  };
 }
 
 const chains = parseChains(required(process.env.NEXT_PUBLIC_CHAINS, "NEXT_PUBLIC_CHAINS"));
@@ -116,6 +156,9 @@ export const config = {
 } as const;
 
 export type PublicConfig = typeof config;
+
+/** Circle's per-message CCTP burn ceiling, in whole USDC display units. */
+export const CCTP_BURN_LIMIT_USDC = 10_000_000n;
 
 /** The configured chain behind an API `chain.id` (a decimal string) or a numeric id. */
 export function chainById(id: string | number | null | undefined): PublicChain | null {

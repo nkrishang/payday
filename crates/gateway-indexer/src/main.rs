@@ -2,8 +2,12 @@ mod chain;
 mod config;
 mod deployment;
 mod indexer;
+mod iris;
+mod relay;
+mod relay_intents;
 mod signal;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +55,36 @@ async fn main() {
         }
         SignerConfig::Local(_) => None,
     };
+    // Withdrawal legs are relayed by the chain workers; Circle's attestation
+    // service and the whole registry (for a bridge leg's destination domain)
+    // are shared between them.
+    let iris: Arc<dyn iris::AttestationSource> = Arc::new(
+        iris::IrisClient::new(config.iris_url())
+            .unwrap_or_else(|error| panic!("failed to build the attestation client: {error}")),
+    );
+    let registry = Arc::new(config.networks().clone());
+    // Cross-chain payments are followed with Relay's API; without a key the
+    // API offers none and there is nothing to follow.
+    let relay: Option<Arc<dyn gateway_relay::RelayApi>> = match config.relay_api_key() {
+        Some(key) => Some(Arc::new(
+            gateway_relay::RelayClient::new(config.relay_url(), key)
+                .unwrap_or_else(|error| panic!("failed to build the Relay client: {error}")),
+        )),
+        None => {
+            info!("PAYDAY_RELAY_API_KEY is unset; cross-chain payments are not followed");
+            None
+        }
+    };
+    // Every chain's client is connected first and shared with every worker:
+    // a cross-chain payment's origin transaction is read from its own chain.
+    let mut clients: HashMap<u64, Arc<dyn ChainClient>> = HashMap::new();
+    for chain in config.chains() {
+        clients.insert(
+            chain.chain_id,
+            connect_client(&config, aws.as_ref(), chain).await,
+        );
+    }
+    let peers = Arc::new(clients);
     let mut workers = Vec::with_capacity(config.chains().len());
     let mut lock_connections = Vec::with_capacity(config.chains().len());
     for chain in config.chains() {
@@ -63,7 +97,16 @@ async fn main() {
                 )
             });
         lock_connections.push(lock_connection);
-        workers.push(connect_chain(&config, aws.as_ref(), chain, pool.clone()).await);
+        workers.push(build_worker(
+            &config,
+            chain,
+            peers[&chain.chain_id].clone(),
+            pool.clone(),
+            iris.clone(),
+            registry.clone(),
+            relay.clone(),
+            peers.clone(),
+        ));
     }
 
     // Run until the local interrupt or ECS's termination signal, then allow the
@@ -137,12 +180,13 @@ struct ChainWorker {
     signal: Option<signal::TransferSignal>,
 }
 
-async fn connect_chain(
+/// Connect to one chain and prove it is the one configured, with the
+/// contract generation this build assumes and an answerable finality source.
+async fn connect_client(
     config: &config::Config,
     aws: Option<&aws_config::SdkConfig>,
     chain: &ChainConfig,
-    pool: PgPool,
-) -> ChainWorker {
+) -> Arc<dyn ChainClient> {
     let chain_id = chain.chain_id;
     let wallet = match config.signer() {
         SignerConfig::Local(key) => {
@@ -187,6 +231,10 @@ async fn connect_chain(
             factory_code_hash: chain.factory_code_hash,
             batch_sweeper: chain.batch_sweeper,
             batch_sweeper_code_hash: chain.batch_sweeper_code_hash,
+            forwarder: chain
+                .cctp
+                .as_ref()
+                .map(|cctp| (cctp.forwarder, cctp.forwarder_code_hash)),
         },
     )
     .await
@@ -209,9 +257,24 @@ async fn connect_chain(
         }
     }
 
+    Arc::new(chain_client)
+}
+
+/// One chain's worker over an already-connected client.
+#[allow(clippy::too_many_arguments)]
+fn build_worker(
+    config: &config::Config,
+    chain: &ChainConfig,
+    client: Arc<dyn ChainClient>,
+    pool: PgPool,
+    iris: Arc<dyn iris::AttestationSource>,
+    registry: Arc<gateway_core::ChainRegistry>,
+    relay: Option<Arc<dyn gateway_relay::RelayApi>>,
+    peers: Arc<HashMap<u64, Arc<dyn ChainClient>>>,
+) -> ChainWorker {
+    let chain_id = chain.chain_id;
     let repo = gateway_db::InvoiceRepository::new(pool.clone());
     let cursor = gateway_db::CursorRepository::new(pool);
-    let client: Arc<dyn ChainClient> = Arc::new(chain_client);
     let indexer = indexer::Indexer::new(
         repo,
         cursor,
@@ -237,7 +300,18 @@ async fn connect_chain(
             sweep_backoff_base_secs: SWEEP_BACKOFF_BASE_SECS,
             sweep_backoff_cap_secs: SWEEP_BACKOFF_CAP_SECS,
             signer_low_balance_wei: config.signer_low_balance_wei(),
+            cctp: chain.cctp.clone(),
+            // Circle attests a finality-tagged chain's burn within seconds and
+            // an L2's once ~65 Ethereum blocks have passed (~15–19 minutes).
+            attestation_poll: match chain.finality_source {
+                FinalitySource::Finalized => Duration::from_secs(10),
+                FinalitySource::Latest => Duration::from_secs(60),
+            },
         },
+        iris,
+        registry,
+        relay,
+        peers,
     );
     let signal = config
         .rpc_ws_url(chain_id)

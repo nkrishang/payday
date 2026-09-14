@@ -150,6 +150,18 @@ prefixed_id!(
     /// One recovery ledger entry, as `deposit_request.recovered_funds` names it.
     RecoveryId, "rec_", "recovery"
 );
+prefixed_id!(
+    /// One withdrawal of a merchant's USDC to an address they named.
+    WithdrawalId, "wd_", "withdrawal"
+);
+prefixed_id!(
+    /// One leg of a withdrawal: the funds on one source chain.
+    WithdrawalLegId, "wdl_", "withdrawal leg"
+);
+prefixed_id!(
+    /// One cross-chain payment quoted through Relay for a deposit request.
+    RelayIntentId, "rli_", "relay intent"
+);
 
 #[cfg(test)]
 mod tests {
@@ -200,6 +212,8 @@ mod tests {
             WebhookEventId::PREFIX,
             VerificationAttemptId::PREFIX,
             RecoveryId::PREFIX,
+            WithdrawalId::PREFIX,
+            WithdrawalLegId::PREFIX,
             "dr_",
         ];
         let unique: std::collections::BTreeSet<_> = prefixes.iter().collect();

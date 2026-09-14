@@ -208,3 +208,32 @@ export function useUser() {
   }, []);
   return { refreshUser };
 }
+
+/** What the stub "signed": the typed data of every signTypedData call, oldest first. */
+export const signedTypedData: unknown[] = [];
+
+/**
+ * Signs nothing: returns a well-formed 65-byte signature and records the
+ * document, so a spec can assert what the page asked the wallet to sign.
+ * The stub API accepts any well-formed signature.
+ */
+export function useSignTypedData() {
+  const signTypedData = useCallback(async (typedData: unknown, _options?: unknown) => {
+    if (!read()) throw new Error("Not signed in");
+    signedTypedData.push(typedData);
+    return { signature: `0x${"ab".repeat(64)}1b` };
+  }, []);
+  return { signTypedData };
+}
+
+/** Recorded, never shown: the real SDK opens Privy's own export modal. */
+export const exportRequests: string[] = [];
+
+export function useExportWallet() {
+  const exportWallet = useCallback(async (options?: { address?: string }) => {
+    const session = read();
+    if (!session) throw new Error("Not signed in");
+    exportRequests.push(options?.address ?? session.wallet);
+  }, []);
+  return { exportWallet };
+}

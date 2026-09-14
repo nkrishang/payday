@@ -18,6 +18,14 @@ describe("NetworkSelect", () => {
     expect(onSelect).toHaveBeenCalledWith("8453");
   });
 
+  it("states a pinned network instead of offering a choice of one", () => {
+    const [monad] = networks;
+    render(<NetworkSelect networks={[monad!]} selected="143" onSelect={vi.fn()} />);
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(screen.getByTestId("pinned-network")).toHaveTextContent(/Monad/);
+    expect(screen.getByTestId("pinned-network")).toHaveTextContent(/set by the merchant/);
+  });
+
   it("locks every chain while an attestation is in flight", () => {
     render(<NetworkSelect networks={networks} selected="143" onSelect={vi.fn()} disabled />);
     expect(screen.getByRole("radio", { name: /Monad/ })).toBeDisabled();

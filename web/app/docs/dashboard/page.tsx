@@ -186,9 +186,13 @@ export default function DashboardPage() {
       <H3 id="account-and-api-key">Account and API key</H3>
       <p>
         The foot of the page is the account: the mailbox you signed in with, your Payday wallet in
-        full with its USDC and gas balance read from the public chain, and a sign-out. Below it, the{" "}
-        <strong>API key</strong> section generates, rolls, and revokes the key your own server calls
-        the API with.
+        full with its USDC balance on every network read from the public chain, and a sign-out.{" "}
+        <strong>Withdraw</strong> beneath the balances moves everything the wallet holds, on every
+        network, to one address you name; you sign once per network and the page tracks each leg
+        until it lands (<Link href="/docs/withdrawals">Withdrawals</Link>). <strong>Export wallet
+        key</strong> shows you the wallet&apos;s key, once, for withdrawing from your own server.
+        Below it, the <strong>API key</strong> section generates, rolls, and revokes the key your
+        own server calls the API with.
       </p>
       <ul>
         <li>

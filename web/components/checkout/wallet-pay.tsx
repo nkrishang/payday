@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
+import type { PendingPayment, ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, Wallet } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { erc20Abi, type Hex } from "viem";
@@ -45,7 +45,7 @@ export function WalletPay({
   onSent,
 }: {
   payment: ReadyPayerDepositRequest;
-  onSent: (hash: string) => void;
+  onSent: (payment: PendingPayment) => void;
 }) {
   const { address, isConnected, chainId } = useAccount();
   const { disconnect } = useDisconnect();
@@ -93,7 +93,7 @@ export function WalletPay({
   // the finality wait and start polling fast. Local state is left alone —
   // once the checkout knows, it stops rendering this component.
   useEffect(() => {
-    if (confirmed && txHash) onSent(txHash);
+    if (confirmed && txHash) onSent({ kind: "direct", hash: txHash });
   }, [confirmed, txHash, onSent]);
 
   const due = BigInt(payment.remaining_base_units);

@@ -26,6 +26,8 @@ const LANGUAGE_LABEL: Record<Language, string> = {
   bash: "Shell",
   json: "JSON",
   ts: "TypeScript",
+  rust: "Rust",
+  go: "Go",
   http: "HTTP",
   text: "Text",
 };

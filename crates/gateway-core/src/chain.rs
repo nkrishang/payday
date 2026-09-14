@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,6 +65,34 @@ pub struct ChainConfig {
     pub log_range_size: u64,
     #[serde(default)]
     pub explorer_base_url: Option<String>,
+    /// Circle's CCTP V2 on this chain and the withdrawal forwarder deployed
+    /// against it. Absent on a chain without CCTP (local Anvil): funds there
+    /// can only leave by a same-chain transfer.
+    #[serde(default)]
+    pub cctp: Option<CctpConfig>,
+}
+
+/// The largest amount a single CCTP V2 standard-transfer burn may move:
+/// Circle documents a 10,000,000 USDC per-transaction limit and its
+/// `TokenMessengerV2` reverts above it. A whole-balance withdrawal whose
+/// bridge leg exceeds it could never execute, so `POST /v1/withdrawals`
+/// refuses to create one; the web panel applies the same bound to the
+/// balances it shows.
+pub const MAX_CCTP_BURN_PER_MESSAGE: U256 = U256::from_limbs([10_000_000_000_000, 0, 0, 0]);
+
+/// CCTP V2 as deployed on one chain, plus Payday's `WithdrawalForwarder`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CctpConfig {
+    /// Circle's domain id for the chain (Arbitrum 3, Base 6, Monad 15).
+    pub domain: u32,
+    pub token_messenger: Address,
+    pub message_transmitter: Address,
+    /// The `WithdrawalForwarder` a merchant authorizes as the payee of a
+    /// bridge leg.
+    pub forwarder: Address,
+    /// keccak256 of the runtime bytecode at `forwarder`.
+    pub forwarder_code_hash: B256,
 }
 
 impl ChainConfig {
@@ -196,6 +224,11 @@ impl ChainRegistry {
         self.get(chain_id)
             .and_then(|chain| chain.explorer_base_url.as_deref())
     }
+
+    /// CCTP on `chain_id`, if the chain has it.
+    pub fn cctp(&self, chain_id: u64) -> Option<&CctpConfig> {
+        self.get(chain_id).and_then(|chain| chain.cctp.as_ref())
+    }
 }
 
 /// Display names for the chains the product knows about.
@@ -316,6 +349,30 @@ mod tests {
         unknown["name"] = serde_json::json!("Monad");
         assert!(matches!(
             ChainRegistry::parse(&serde_json::json!([unknown]).to_string()).unwrap_err(),
+            ChainRegistryError::Json(_)
+        ));
+    }
+
+    #[test]
+    fn cctp_is_optional_per_chain() {
+        let mut with_cctp = chain(143);
+        with_cctp["cctp"] = serde_json::json!({
+            "domain": 15,
+            "token_messenger": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+            "message_transmitter": "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64",
+            "forwarder": "0x1111111111111111111111111111111111111111",
+            "forwarder_code_hash": format!("0x{}", "ef".repeat(32)),
+        });
+        let json = serde_json::json!([with_cctp, chain(31337)]).to_string();
+        let registry = ChainRegistry::parse(&json).unwrap();
+        assert_eq!(registry.cctp(143).unwrap().domain, 15);
+        assert!(registry.cctp(31337).is_none());
+        assert!(registry.cctp(1).is_none());
+
+        let mut partial = chain(143);
+        partial["cctp"] = serde_json::json!({ "domain": 15 });
+        assert!(matches!(
+            ChainRegistry::parse(&serde_json::json!([partial]).to_string()).unwrap_err(),
             ChainRegistryError::Json(_)
         ));
     }

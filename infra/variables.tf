@@ -172,6 +172,16 @@ variable "chains" {
     block_time_ms           = number
     log_range_size          = number
     explorer_base_url       = optional(string)
+    # Circle's CCTP V2 on the chain and the WithdrawalForwarder deployed
+    # against it (foundry/script/WithdrawalForwarder.s.sol). Absent on a
+    # chain without CCTP: withdrawals there can only stay on their network.
+    cctp = optional(object({
+      domain              = number
+      token_messenger     = string
+      message_transmitter = string
+      forwarder           = string
+      forwarder_code_hash = string
+    }))
   }))
   validation {
     condition     = length(var.chains) > 0
@@ -201,6 +211,14 @@ variable "chains" {
       && c.block_time_ms >= 1 && floor(c.block_time_ms) == c.block_time_ms
       && c.log_range_size >= 1 && c.log_range_size <= 10000 && floor(c.log_range_size) == c.log_range_size
       && (c.explorer_base_url == null || can(regex("^https://[^/?#]+/?$", c.explorer_base_url)))
+      && (c.cctp == null || (
+        c.cctp.domain >= 0 && floor(c.cctp.domain) == c.cctp.domain
+        && can(regex("^0x[0-9a-fA-F]{40}$", c.cctp.token_messenger))
+        && can(regex("^0x[0-9a-fA-F]{40}$", c.cctp.message_transmitter))
+        && can(regex("^0x[0-9a-fA-F]{40}$", c.cctp.forwarder))
+        && can(regex("^0x[0-9a-fA-F]{64}$", c.cctp.forwarder_code_hash))
+        && c.cctp.forwarder_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
+      ))
     ])
     error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, integral whole-number block counts and times, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any. Both services also require every chain to name the same factory address; wrong-chain rescue only works when it deploys identically everywhere."
   }
@@ -316,6 +334,18 @@ variable "resend_api_key" {
     payer_email_from. Leave empty to queue those emails without sending
     them. Supply as TF_VAR_resend_api_key. WARNING: sensitive values remain
     in Terraform state.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "relay_api_key" {
+  description = <<-EOT
+    Relay (relay.link) API key the API quotes cross-chain payments with and
+    the indexer follows them with. Leave empty to not offer paying a deposit
+    request from another network. Supply as TF_VAR_relay_api_key. WARNING:
+    sensitive values remain in Terraform state.
   EOT
   type        = string
   default     = ""

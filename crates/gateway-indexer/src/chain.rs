@@ -50,11 +50,14 @@ sol! {
     function paused() view returns (bool);
     function isBlacklisted(address account) view returns (bool);
     function balanceOf(address account) view returns (uint256);
+    function authorizationState(address authorizer, bytes32 nonce) view returns (bool);
 
     event SweepFailed(address indexed paymentAddress, address indexed token, bytes revertData);
     event SweepRecovered(address indexed paymentAddress, address indexed token, uint256 amount);
     event Settled(address indexed receiver, uint256 amount);
     event Recovered(address indexed recovery, address indexed token, uint256 amount);
+    /// USDC's EIP-3009 marker: a signed authorization was consumed.
+    event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
 }
 
 /// Recipients per `eth_getLogs` call: one OR-array in `topics[2]`. Every
@@ -436,6 +439,36 @@ pub struct SweepReceipt {
     pub outcomes: HashMap<Address, SweepOutcome>,
 }
 
+/// What a receipt says about any helper transaction, sweep or withdrawal
+/// step, before its logs are interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionOutcome {
+    pub succeeded: bool,
+    pub block: u64,
+    pub block_hash: B256,
+}
+
+/// One ERC-20 `Transfer` log a transaction emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenTransfer {
+    pub log_index: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub amount: U256,
+}
+
+/// A transaction's execution and the `Transfer` logs one token emitted in
+/// it: the evidence a cross-chain payment's origin side is judged on. The
+/// transaction's signer plus a debit log from the payer's own address is
+/// what proves the wallet spent the funds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenPaymentReceipt {
+    pub transaction_hash: B256,
+    pub sender: Address,
+    pub outcome: TransactionOutcome,
+    pub transfers: Vec<TokenTransfer>,
+}
+
 /// An exact signed helper transaction. Persist this before broadcasting it so
 /// a restart can safely resend the same nonce, calldata, fees, and signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,6 +560,64 @@ pub trait ChainClient: Send + Sync {
         &self,
         transaction: &PreparedSweepTransaction,
     ) -> Result<(), ChainError>;
+
+    /// Sign one arbitrary call from the signer without broadcasting it: a
+    /// withdrawal relay step (`transferWithAuthorization`, the forwarder's
+    /// `bridge`, `receiveMessage`). Same nonce discipline as a sweep batch.
+    async fn prepare_call(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
+    ) -> Result<PreparedSweepTransaction, ChainError>;
+
+    /// Receipt of any transaction, or `None` while unmined.
+    async fn transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> Result<Option<TransactionOutcome>, ChainError>;
+
+    /// The account that signed a transaction, or `None` while the node does
+    /// not know it, with the transaction's execution and the `Transfer`
+    /// logs `token` emitted in it. A cross-chain payment's origin payment
+    /// is verified through this when its chain is one this deployment
+    /// serves: the signer is who sent it, and the logs are what moved.
+    async fn token_payment_receipt(
+        &self,
+        tx_hash: B256,
+        token: Address,
+    ) -> Result<Option<TokenPaymentReceipt>, ChainError>;
+
+    /// An `eth_call` at the `finalized` block; the caller decodes the output.
+    /// Withdrawal reconciliation reads through it: a competitor's transaction
+    /// in a block that later leaves the chain must not conclude a leg.
+    async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError>;
+
+    /// Whether the token has consumed `authorizer`'s EIP-3009 authorization
+    /// `nonce`, read at `at_block` (a height the caller verified).
+    async fn authorization_state(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        at_block: u64,
+    ) -> Result<bool, ChainError>;
+
+    /// The transaction in `from_block..=to_block` that consumed
+    /// `authorizer`'s EIP-3009 authorization `nonce` on `token` — the
+    /// `AuthorizationUsed` event, which only a successful use emits — with
+    /// its receipt. `None` when the range holds none, so the caller can scan
+    /// provider-sized chunks backward from the finalized block.
+    async fn authorization_used_tx(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Option<(B256, TransactionOutcome)>, ChainError>;
 
     /// `Payment.settled()` at a block whose hash the caller verified.
     async fn payment_settled(&self, payment: Address, block: u64) -> Result<bool, ChainError>;
@@ -1083,22 +1174,204 @@ impl ChainClient for AlloyChainClient {
         gas_limit: u64,
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError> {
+        self.prepare_call(
+            batch_sweeper,
+            Self::execute_batch_calldata(sweeps),
+            nonce,
+            gas_limit,
+            fees,
+        )
+        .await
+    }
+
+    async fn prepare_call(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        nonce: u64,
+        gas_limit: u64,
+        fees: FeeEstimate,
+    ) -> Result<PreparedSweepTransaction, ChainError> {
         let tx = TransactionRequest::default()
-            .with_to(batch_sweeper)
+            .with_to(to)
             .with_chain_id(self.chain_id)
             .with_nonce(nonce)
             .with_gas_limit(gas_limit)
             .with_max_fee_per_gas(fees.max_fee_per_gas)
             .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
-            .with_input(Self::execute_batch_calldata(sweeps));
+            .with_input(calldata);
         let envelope = tx.build(&self.wallet).await.map_err(|error| {
-            ChainError::Transient(format!("could not sign sweep transaction: {error}"))
+            ChainError::Transient(format!("could not sign helper transaction: {error}"))
         })?;
         let raw: Bytes = envelope.encoded_2718().into();
         Ok(PreparedSweepTransaction {
             hash: keccak256(&raw),
             raw,
         })
+    }
+
+    async fn transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> Result<Option<TransactionOutcome>, ChainError> {
+        self.pacer.acquire().await;
+        let Some(receipt) = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionReceipt", error))?
+        else {
+            return Ok(None);
+        };
+        let block = receipt
+            .block_number
+            .ok_or_else(|| ChainError::Transient("receipt has no block number".to_string()))?;
+        let block_hash = receipt
+            .block_hash
+            .ok_or_else(|| ChainError::Transient("receipt has no block hash".to_string()))?;
+        Ok(Some(TransactionOutcome {
+            succeeded: receipt.status(),
+            block,
+            block_hash,
+        }))
+    }
+
+    async fn token_payment_receipt(
+        &self,
+        tx_hash: B256,
+        token: Address,
+    ) -> Result<Option<TokenPaymentReceipt>, ChainError> {
+        self.pacer.acquire().await;
+        let transaction = self
+            .provider
+            .get_transaction_by_hash(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionByHash", error))?;
+        let Some(transaction) = transaction else {
+            return Ok(None);
+        };
+        let sender = transaction.inner.signer();
+        self.pacer.acquire().await;
+        let receipt = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getTransactionReceipt", error))?;
+        let Some(receipt) = receipt else {
+            return Ok(None);
+        };
+        let block = receipt
+            .block_number
+            .ok_or_else(|| ChainError::Transient("receipt has no block number".to_string()))?;
+        let block_hash = receipt
+            .block_hash
+            .ok_or_else(|| ChainError::Transient("receipt has no block hash".to_string()))?;
+        let outcome = TransactionOutcome {
+            succeeded: receipt.status(),
+            block,
+            block_hash,
+        };
+        // Every `Transfer` the requested token emitted in this transaction,
+        // decoded like `usdc_transfers` decodes its logs: a malformed one is
+        // a node problem, not an empty answer.
+        let signature = keccak256("Transfer(address,address,uint256)");
+        let mut transfers = Vec::new();
+        for log in receipt.inner.logs() {
+            if log.address() != token {
+                continue;
+            }
+            let topics = log.topics();
+            if topics.len() != 3 || topics[0] != signature {
+                continue;
+            }
+            let data = &log.inner.data.data;
+            if data.len() != 32 {
+                return Err(ChainError::Transient(
+                    "node returned a token Transfer with invalid amount data".to_string(),
+                ));
+            }
+            transfers.push(TokenTransfer {
+                log_index: log.log_index.ok_or_else(|| {
+                    ChainError::Transient("token Transfer missing log index".to_string())
+                })?,
+                sender: Address::from_word(topics[1]),
+                recipient: Address::from_word(topics[2]),
+                amount: U256::from_be_slice(data),
+            });
+        }
+        Ok(Some(TokenPaymentReceipt {
+            transaction_hash: tx_hash,
+            sender,
+            outcome,
+            transfers,
+        }))
+    }
+
+    async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {
+        let finalized = self.header(BlockNumberOrTag::Finalized).await?;
+        self.call_at(to, calldata, Some(finalized.number))
+            .await
+            .map_err(|error| ChainError::rpc("eth_call at finalized", error))
+    }
+
+    async fn authorization_state(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        at_block: u64,
+    ) -> Result<bool, ChainError> {
+        let output = self
+            .call_at(
+                token,
+                authorizationStateCall { authorizer, nonce }
+                    .abi_encode()
+                    .into(),
+                Some(at_block),
+            )
+            .await
+            .map_err(|error| ChainError::rpc("eth_call authorizationState", error))?;
+        authorizationStateCall::abi_decode_returns(&output).map_err(|error| {
+            ChainError::Transient(format!(
+                "could not decode authorizationState response: {error}"
+            ))
+        })
+    }
+
+    async fn authorization_used_tx(
+        &self,
+        token: Address,
+        authorizer: Address,
+        nonce: B256,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Option<(B256, TransactionOutcome)>, ChainError> {
+        self.pacer.acquire().await;
+        let filter = Filter::new()
+            .address(token)
+            .event_signature(AuthorizationUsed::SIGNATURE_HASH)
+            .topic1(authorizer.into_word())
+            .topic2(nonce)
+            .from_block(from_block)
+            .to_block(to_block);
+        for log in self
+            .provider
+            .get_logs(&filter)
+            .await
+            .map_err(|error| ChainError::rpc("eth_getLogs", error))?
+        {
+            if log.removed {
+                continue;
+            }
+            let transaction_hash = log.transaction_hash.ok_or_else(|| {
+                ChainError::Transient("authorization log is missing its transaction hash".into())
+            })?;
+            let receipt = self.transaction_receipt(transaction_hash).await?;
+            if let Some(outcome) = receipt {
+                return Ok(Some((transaction_hash, outcome)));
+            }
+        }
+        Ok(None)
     }
 
     async fn broadcast_sweep_transaction(

@@ -16,6 +16,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { encodeAbiParameters, keccak256, toHex } from "viem";
 
 // The API renders every timestamp as RFC 3339 to the second (`…:25Z`), so
 // the stub does too. This also keeps a withheld amount such as `25.00` from
@@ -150,6 +151,10 @@ function base(overrides = {}) {
       reference: null,
       attachment: null,
     },
+    // The stub deployment offers Relay; a bound, payable request may be
+    // paid from another network, and follows the newest quote reported.
+    relay_available: true,
+    relay: null,
     ...overrides,
   };
 }
@@ -163,6 +168,7 @@ const UNBOUND = {
   address: null,
   address_explorer_url: null,
   deposit_uri: null,
+  relay_available: false,
 };
 
 /**
@@ -257,11 +263,15 @@ function projectForPayer(payment, session) {
       address_explorer_url: null,
       deposit_uri: null,
       details: null,
+      relay_available: false,
+      relay: null,
     };
   }
   return {
     ...shared,
     content_unlocked: true,
+    relay_available: Boolean(payment.address) && shared.payable,
+    relay: relayFollowing.get(payment.id) ?? null,
     payer_wallet: payment.payer_wallet,
     networks: payment.networks,
     chain: payment.chain,
@@ -341,8 +351,24 @@ const SETTLED = {
 /** Reads counted per id, so one scenario can change between polls. */
 const reads = new Map();
 
+/** The chains the stub's Relay takes USDC from, as the API lists them. */
+const RELAY_CHAINS = [
+  { chain_id: "137", name: "Polygon", native_symbol: "POL", usdc_address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", explorer_url: "https://polygonscan.com", icon_url: "https://assets.relay.link/icons/137/light.png", rpc_url: "https://polygon-rpc.com" },
+  { chain_id: "8453", name: "Base", native_symbol: "ETH", usdc_address: BASE_TOKEN, explorer_url: "https://basescan.org", icon_url: "https://assets.relay.link/icons/8453/light.png", rpc_url: "https://mainnet.base.org" },
+  { chain_id: "42161", name: "Arbitrum One", native_symbol: "ETH", usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", explorer_url: "https://arbiscan.io", icon_url: "https://assets.relay.link/icons/42161/light.png", rpc_url: "https://arb1.arbitrum.io/rpc" },
+  { chain_id: "143", name: "Monad", native_symbol: "MON", usdc_address: TOKEN, explorer_url: "https://monadvision.com", icon_url: "https://assets.relay.link/icons/143/light.png", rpc_url: "https://rpc.monad.xyz" },
+];
+/** Relay's deposit router, where the quote's deposit step goes. */
+const RELAY_ROUTER = "0x4cd00e387622c35bddb9b4c962c136462338bc31";
+/** Quotes handed out, by `rli_` id, and the request each is for. */
+const relayQuotes = new Map();
+/** The newest reported cross-chain payment per request id. */
+const relayFollowing = new Map();
+
 const scenarios = {
   awaiting: () => base(),
+  // A deployment without a Relay key: the option is not offered.
+  "no-relay": () => base({ relay_available: false }),
   // The full document: heading, reference, notes, and an attached PDF.
   document: () =>
     base({
@@ -360,6 +386,12 @@ const scenarios = {
   // before it shows any address, and show the address on the chosen network
   // once this session has signed.
   unbound: (id, session) => (session?.walletBound ? base(chosen(session.chainId)) : base(UNBOUND)),
+  // The merchant pinned Base: the request offers that network alone and
+  // names it before any wallet signs; only the wallet is still the payer's.
+  pinned: (id, session) =>
+    session?.walletBound
+      ? base({ networks: [NETWORKS[1]], ...chosen("8453") })
+      : base({ ...UNBOUND, networks: [NETWORKS[1]], chain: BASE, token: NETWORKS[1].token }),
   // Opened by the merchant's app with a client secret in the fragment; the
   // bare link stays locked with nothing for the payer to do here.
   "gated-merchant": (id, session) => gatedFor("merchant_session", session),
@@ -428,6 +460,7 @@ const store = {
   customers: new Map(),
   /** account key -> { issuers, payoutAddresses, issuerAddresses } */
   issuerWorlds: new Map(),
+  withdrawals: new Map(),
   /** id -> { id, filename, bytes, finalizeCalls, status, descriptor } */
   attachments: new Map(),
   /** id -> full DepositRequestResponse */
@@ -472,6 +505,13 @@ function merchantDepositRequest(input, extra = {}) {
     BigInt(amountUnits) > BigInt(receivedUnits) ? BigInt(amountUnits) - BigInt(receivedUnits) : 0n
   ).toString();
   const address = `0x${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
+  // A pinned network narrows the offer to that one entry and names it from
+  // issuance, as the API does; the default offer is every network with the
+  // stub payer bound on the first.
+  const pinned = input.chain_id
+    ? NETWORKS.find((network) => network.chain.id === input.chain_id)
+    : undefined;
+  const network = pinned ?? NETWORKS[0];
   return {
     id,
     deposit_url: `http://127.0.0.1:3003/pay/${id}`,
@@ -497,14 +537,14 @@ function merchantDepositRequest(input, extra = {}) {
     net_amount: fromBaseUnits(amountUnits),
     net_amount_base_units: amountUnits,
     status: "awaiting_deposit",
-    networks: NETWORKS,
-    token: { symbol: "USDC", address: TOKEN, decimals: 6 },
-    chain: MONAD,
+    networks: pinned ? [pinned] : NETWORKS,
+    token: network.token,
+    chain: network.chain,
     settlement_tx_hash: null,
     settlement_explorer_url: null,
     settled_at: null,
     settled_block: null,
-    self_settlement: { chain_id: "143", factory: FACTORY, salt: hex32(`salt:${id}`) },
+    self_settlement: { chain_id: network.chain.id, factory: FACTORY, salt: hex32(`salt:${id}`) },
     attention: null,
     issuer: input.issuer,
     payer: input.payer,
@@ -596,7 +636,7 @@ function proofFor(payment) {
     }));
   const gated = GATED.has(payment.payer_policy.mode);
   return {
-    version: "payday.proof.v3",
+    version: "payday.proof.v4",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
       schema: "payday.invoice.v3",
@@ -642,7 +682,7 @@ function proofFor(payment) {
     transfers,
     verification: {
       payload: {
-        version: "payday.attestation.v3",
+        version: "payday.attestation.v4",
         payment_id: payment.id,
         attribution_hash: payment.attribution.hash,
         chain_id: "143",
@@ -1053,15 +1093,18 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session)?$/,
+    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session|\/relay\/chains|\/relay\/quotes|\/relay\/quotes\/[^/]+\/sent)?$/,
   );
   if (!match) return false;
+  const relaySent = /^\/relay\/quotes\/([^/]+)\/sent$/.exec(match[2] ?? "");
   const write =
     match[2] === "/verify/email/start" ||
     match[2] === "/verify/email/confirm" ||
     match[2] === "/wallet/challenge" ||
     match[2] === "/wallet/attest" ||
-    match[2] === "/session";
+    match[2] === "/session" ||
+    match[2] === "/relay/quotes" ||
+    relaySent !== null;
   if (req.method !== (write ? "POST" : "GET")) {
     return fail(res, 405, "method_not_allowed", "method not allowed");
   }
@@ -1079,6 +1122,85 @@ async function payer(req, res, url) {
   const session = sessionFor(req, id);
   const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued, session), id };
   const mode = payment.payer_policy.mode;
+  // A cross-chain payment reported for this request is followed on every
+  // read, as the real API's `relay` block is.
+  if (payment.content_unlocked && relayFollowing.has(id)) payment.relay = relayFollowing.get(id);
+
+  // Paying from another network: the chains Relay takes USDC on (except the
+  // request's own), a quote pinned to the amount due, and the report that
+  // the deposit was sent. The stub fills nothing; the page only needs to
+  // see the intent it reported.
+  if (match[2] === "/relay/chains" || match[2] === "/relay/quotes" || relaySent) {
+    if (!payment.content_unlocked) return fail(res, 401, "verification_required", "Verify first");
+    if (!payment.address) return fail(res, 409, "wallet_required", "Sign first");
+    if (!payment.relay_available) {
+      return fail(res, payment.payable ? 404 : 410, payment.payable ? "relay_unavailable" : "deposit_request_not_payable", "Not offered");
+    }
+  }
+  if (match[2] === "/relay/chains") {
+    return send(res, 200, {
+      chains: RELAY_CHAINS.filter((chain) => chain.chain_id !== payment.chain.id),
+    });
+  }
+  if (match[2] === "/relay/quotes") {
+    const body = await readJson(req);
+    const origin = RELAY_CHAINS.find((chain) => chain.chain_id === String(body.origin_chain_id));
+    if (!origin || origin.chain_id === payment.chain.id) {
+      return fail(res, 422, "relay_unsupported_origin", "USDC cannot be paid from that network");
+    }
+    const rli = `rli_${randomUUID()}`;
+    const due = BigInt(payment.remaining_base_units);
+    const amountIn = due + 20_000n;
+    const quote = {
+      id: rli,
+      request_id: hex32(`relay:${rli}`),
+      origin,
+      amount_in: fromBaseUnits(amountIn.toString()),
+      amount_in_base_units: amountIn.toString(),
+      amount_out: fromBaseUnits(due.toString()),
+      amount_out_base_units: due.toString(),
+      relayer_fee_usd: "0.02",
+      time_estimate_seconds: 5,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      steps: [
+        {
+          id: "approve",
+          transaction: { chain_id: origin.chain_id, to: origin.usdc_address, data: "0x095ea7b3", value: "0", gas: "73112" },
+        },
+        {
+          id: "deposit",
+          transaction: { chain_id: origin.chain_id, to: RELAY_ROUTER, data: "0xe8017952", value: "0", gas: null },
+        },
+      ],
+    };
+    relayQuotes.set(rli, { id, origin });
+    return send(res, 200, quote);
+  }
+  if (relaySent) {
+    const quoted = relayQuotes.get(relaySent[1]);
+    if (!quoted || quoted.id !== id) return fail(res, 404, "relay_intent_not_found", "No such quote");
+    const body = await readJson(req);
+    if (quoted.sent) {
+      if (quoted.hash !== body.transaction_hash) {
+        return fail(res, 409, "relay_report_conflict", "A different transaction was already reported");
+      }
+      return send(res, 200, { ...payment, relay: relayFollowing.get(id) });
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(body.transaction_hash ?? ""))) {
+      return fail(res, 400, "invalid_request", "transaction_hash must be a 32-byte hex hash");
+    }
+    quoted.sent = true;
+    quoted.hash = body.transaction_hash;
+    relayFollowing.set(id, {
+      id: relaySent[1],
+      status: "sent",
+      origin_chain_id: quoted.origin.chain_id,
+      origin_transaction_hash: body.transaction_hash,
+      fill_transaction_hash: null,
+      created_at: new Date().toISOString(),
+    });
+    return send(res, 200, { ...payment, relay: relayFollowing.get(id) });
+  }
 
   if (match[2] === "/session") {
     if (mode !== "merchant_session") {
@@ -1723,6 +1845,235 @@ async function payments(req, res, url) {
   }
 }
 
+
+/**
+ * `/v1/withdrawals`: prepare, sign, submit, poll, against balances the stub
+ * invents. There is no chain behind the stub, so the wallet is given USDC
+ * on every configured network at a fixed level, the typed data is shaped
+ * exactly as gatewayd shapes it, and every leg advances one state per read
+ * so the page's tracking view has something to follow. Any well-formed
+ * signature is accepted.
+ */
+const STUB_CHAINS = [
+  { id: "143", name: "Monad", native_symbol: "MON", domain: 15, usdc: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", balance: 5_000_000n },
+  { id: "8453", name: "Base", native_symbol: "ETH", domain: 6, usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", balance: 1_250_000n },
+];
+const STUB_FORWARDER = "0xF0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0";
+const AUTHORIZATION_FIELDS = [
+  { name: "from", type: "address" },
+  { name: "to", type: "address" },
+  { name: "value", type: "uint256" },
+  { name: "validAfter", type: "uint256" },
+  { name: "validBefore", type: "uint256" },
+  { name: "nonce", type: "bytes32" },
+];
+const LEG_SEQUENCE = {
+  transfer: ["authorized", "relaying", "completed"],
+  bridge: ["authorized", "relaying", "burned", "attested", "minting", "completed"],
+};
+
+function formatUsdc(baseUnits) {
+  const text = baseUnits.toString().padStart(7, "0");
+  return `${text.slice(0, -6)}.${text.slice(-6)}`;
+}
+
+
+function withdrawalWorld(req) {
+  const key = accountKey(req);
+  let world = store.withdrawals.get(key);
+  if (!world) {
+    world = new Map();
+    store.withdrawals.set(key, world);
+  }
+  return world;
+}
+
+function withdrawalStatus(row) {
+  if (row.cancelled_at) return "cancelled";
+  if (row.legs.every((leg) => leg.state === "completed")) return "completed";
+  if (row.legs.some((leg) => ["failed", "expired"].includes(leg.state))
+    && row.legs.every((leg) => ["completed", "failed", "expired", "cancelled"].includes(leg.state))) {
+    return "failed";
+  }
+  if (row.legs.some((leg) => leg.state === "awaiting_signature")) return "awaiting_signature";
+  return "in_progress";
+}
+
+/** One state forward per read, as the relayer would in time. */
+function advanceLegs(row) {
+  if (row.cancelled_at) return;
+  for (const leg of row.legs) {
+    const sequence = LEG_SEQUENCE[leg.kind];
+    const at = sequence.indexOf(leg.state);
+    if (at === -1 || at === sequence.length - 1) continue;
+    leg.state = sequence[at + 1];
+    const hash = `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`;
+    if (leg.state === "completed" && leg.kind === "transfer") leg.transfer_tx_hash = hash;
+    if (leg.state === "burned") leg.burn_tx_hash = hash;
+    if (leg.state === "completed" && leg.kind === "bridge") leg.mint_tx_hash = hash;
+  }
+  const status = withdrawalStatus(row);
+  if (status === "completed" && !row.completed_at) row.completed_at = new Date().toISOString();
+  if (status === "failed" && !row.failed_at) row.failed_at = new Date().toISOString();
+}
+
+function shapeWithdrawal(row) {
+  return {
+    id: row.id,
+    status: withdrawalStatus(row),
+    wallet_address: row.wallet_address,
+    destination: row.destination,
+    legs: row.legs.map((leg) => ({
+      id: leg.id,
+      kind: leg.kind,
+      source_chain: leg.source_chain,
+      amount: leg.amount,
+      amount_base_units: leg.amount_base_units,
+      state: leg.state,
+      authorization: leg.state === "awaiting_signature" ? leg.authorization : null,
+      transfer_tx_hash: leg.transfer_tx_hash,
+      burn_tx_hash: leg.burn_tx_hash,
+      mint_tx_hash: leg.mint_tx_hash,
+      failure_reason: null,
+    })),
+    created_at: row.created_at,
+    completed_at: row.completed_at,
+    cancelled_at: row.cancelled_at,
+    failed_at: row.failed_at,
+  };
+}
+
+async function withdrawals(req, res, url) {
+  if (!url.pathname.startsWith("/v1/withdrawals")) return false;
+  const world = withdrawalWorld(req);
+  const session = sessionClaims(req);
+
+  if (url.pathname === "/v1/withdrawals") {
+    if (req.method === "GET") {
+      const all = [...world.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+      for (const row of all) advanceLegs(row);
+      const { page, next } = paginate(all, url.searchParams);
+      return send(res, 200, { withdrawals: page.map(shapeWithdrawal), next_cursor: next });
+    }
+    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (!idempotencyKey) return fail(res, 400, "missing_idempotency_key", "Idempotency-Key header is required");
+    const body = await readJson(req);
+    const destination = body.destination ?? {};
+    const chain = STUB_CHAINS.find((entry) => entry.id === String(destination.chain_id));
+    if (!chain) return fail(res, 400, "invalid_request", "destination.chain_id must be one of this deployment's networks");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(String(destination.address ?? ""))) {
+      return fail(res, 400, "invalid_request", "invalid destination.address");
+    }
+    if (!session.wallet) return fail(res, 409, "wallet_not_ready", "The account's Payday wallet is not known yet");
+    const replay = [...world.values()].find((row) => row.idempotency_key === idempotencyKey);
+    if (replay) return send(res, 200, shapeWithdrawal(replay), { "Idempotency-Replayed": "true" });
+    if ([...world.values()].some((row) => ["awaiting_signature", "in_progress"].includes(withdrawalStatus(row)))) {
+      return fail(res, 409, "withdrawal_in_progress", "This account already has a withdrawal in progress; let it finish or cancel it first");
+    }
+    const now = Date.now();
+    const validBefore = String(Math.floor(now / 1000) + 24 * 3600);
+    const row = {
+      id: `wd_${randomUUID()}`,
+      idempotency_key: idempotencyKey,
+      wallet_address: session.wallet,
+      destination: {
+        chain: { id: chain.id, name: chain.name, native_symbol: chain.native_symbol },
+        address: destination.address,
+      },
+      legs: STUB_CHAINS.map((source, position) => {
+        const bridge = source.id !== chain.id;
+        const salt = bridge ? hex32(randomUUID()) : null;
+        const recipient = `0x${destination.address.slice(2).toLowerCase().padStart(64, "0")}`;
+        const nonce = bridge
+          ? keccak256(encodeAbiParameters(
+              [{ type: "uint32" }, { type: "bytes32" }, { type: "bytes32" }],
+              [chain.domain, recipient, salt],
+            ))
+          : hex32(randomUUID());
+        const to = bridge ? STUB_FORWARDER : destination.address;
+        return {
+          id: `wdl_${randomUUID()}`,
+          position,
+          kind: bridge ? "bridge" : "transfer",
+          source_chain: { id: source.id, name: source.name, native_symbol: source.native_symbol },
+          amount: formatUsdc(source.balance),
+          amount_base_units: source.balance.toString(),
+          state: "awaiting_signature",
+          authorization: {
+            primary_type: bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization",
+            typed_data: {
+              domain: { name: source.id === "143" ? "USDC" : "USD Coin", version: "2", chainId: Number(source.id), verifyingContract: source.usdc },
+              primaryType: bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization",
+              types: {
+                EIP712Domain: [
+                  { name: "name", type: "string" },
+                  { name: "version", type: "string" },
+                  { name: "chainId", type: "uint256" },
+                  { name: "verifyingContract", type: "address" },
+                ],
+                [bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization"]: AUTHORIZATION_FIELDS,
+              },
+              message: { from: session.wallet, to, value: source.balance.toString(), validAfter: "0", validBefore, nonce },
+            },
+            expires_at: new Date(now + 24 * 3600 * 1000).toISOString(),
+            forwarder: bridge ? STUB_FORWARDER : null,
+            nonce_preimage: bridge ? { destination_domain: chain.domain, mint_recipient: destination.address, salt } : null,
+          },
+          transfer_tx_hash: null,
+          burn_tx_hash: null,
+          mint_tx_hash: null,
+        };
+      }),
+      created_at: new Date(now).toISOString(),
+      completed_at: null,
+      cancelled_at: null,
+      failed_at: null,
+    };
+    world.set(row.id, row);
+    return send(res, 201, shapeWithdrawal(row));
+  }
+
+  const match = url.pathname.match(/^\/v1\/withdrawals\/([^/]+)(\/authorizations|\/cancel)?$/);
+  if (!match) return fail(res, 404, "not_found", "no route");
+  const row = world.get(decodeURIComponent(match[1]));
+  if (!row) return fail(res, 404, "withdrawal_not_found", "Withdrawal not found");
+  const action = match[2];
+  if (!action) {
+    if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
+    advanceLegs(row);
+    return send(res, 200, shapeWithdrawal(row));
+  }
+  if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
+  if (action === "/cancel") {
+    if (row.cancelled_at) return send(res, 200, shapeWithdrawal(row));
+    if (["completed", "failed"].includes(withdrawalStatus(row))) {
+      return fail(res, 409, "withdrawal_finished", "This withdrawal has already completed or failed");
+    }
+    if (row.legs.some((leg) => !["awaiting_signature", "authorized"].includes(leg.state))) {
+      return fail(res, 409, "withdrawal_not_cancellable", "A leg of this withdrawal has already been relayed");
+    }
+    for (const leg of row.legs) leg.state = "cancelled";
+    row.cancelled_at = new Date().toISOString();
+    return send(res, 200, shapeWithdrawal(row));
+  }
+  const body = await readJson(req);
+  const authorizations = Array.isArray(body.authorizations) ? body.authorizations : [];
+  if (authorizations.length === 0) return fail(res, 400, "invalid_request", "authorizations must name at least one leg");
+  for (const item of authorizations) {
+    const leg = row.legs.find((entry) => entry.id === item.leg_id);
+    if (!leg) return fail(res, 404, "withdrawal_leg_not_found", `${item.leg_id} is not a leg of this withdrawal`);
+    if (!/^0x[0-9a-fA-F]{130}$/.test(String(item.signature ?? ""))) {
+      return fail(res, 400, "signature_invalid", `${item.leg_id}: signature must be 0x-prefixed hex of 65 bytes`);
+    }
+  }
+  for (const item of authorizations) {
+    const leg = row.legs.find((entry) => entry.id === item.leg_id);
+    if (leg.state === "awaiting_signature") leg.state = "authorized";
+  }
+  return send(res, 200, shapeWithdrawal(row));
+}
+
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -1748,6 +2099,7 @@ createServer(async (req, res) => {
       if ((await attachments(req, res, url)) !== false) return;
       if ((await payments(req, res, url)) !== false) return;
       if ((await account(req, res, url)) !== false) return;
+      if ((await withdrawals(req, res, url)) !== false) return;
     }
 
     return fail(res, 404, "not_found", "no route");
@@ -1759,3 +2111,44 @@ createServer(async (req, res) => {
 }).listen(PORT, "127.0.0.1", () => {
   console.log(`stub Payday API on ${ORIGIN}`);
 });
+
+// The dashboard reads each network's USDC balance straight from the public RPC
+// its config names, and the playwright config points those at local ports
+// nothing else serves. These minimal endpoints answer the one call the page
+// makes — `balanceOf` — with the chain's stub balance for any wallet, so the
+// withdraw panel sees the same funds the API's legs report.
+const BALANCE_OF = "0x70a08231"; // keccak256("balanceOf(address)")[:4]
+const RPC_PORTS = [8545, 8546]; // same order as STUB_CHAINS
+for (const [index, port] of RPC_PORTS.entries()) {
+  const chain = STUB_CHAINS[index];
+  createServer((req, res) => {
+    // The browser preflights every POST that carries a JSON content type.
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, CORS);
+      return res.end();
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      let id = null;
+      try {
+        const request = JSON.parse(body);
+        id = request.id ?? null;
+        const call = request.params?.[0] ?? {};
+        const result =
+          request.method === "eth_chainId"
+            ? toHex(Number(chain.id))
+            : request.method === "eth_call" && String(call.data ?? "").startsWith(BALANCE_OF)
+              ? toHex(chain.balance, { size: 32 })
+              : null;
+        res.writeHead(200, { "Content-Type": "application/json", ...CORS });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+      } catch {
+        res.writeHead(200, { "Content-Type": "application/json", ...CORS });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32603, message: "stub failure" } }));
+      }
+    });
+  }).listen(port, "127.0.0.1", () => {
+    console.log(`stub ${chain.name} RPC on http://127.0.0.1:${port}`);
+  });
+}

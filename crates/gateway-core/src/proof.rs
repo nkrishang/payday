@@ -21,12 +21,23 @@
 //! `chain_id`. A verifier accepts the proof only if that chain is one the
 //! request offered and the proof's factory and token are that network's.
 //!
+//! A transfer may have been made by Relay's solver rather than the wallet,
+//! when the payer paid across chains through the hosted checkout: the
+//! wallet sent USDC on another chain and Relay delivered it here. Such a
+//! transfer carries a `relay` block naming the origin chain, the origin
+//! transaction, and the wallet that sent it. Offline, that block is accepted
+//! only if it appears verbatim in Payday's signed attestation (`relay_fills`)
+//! and its origin sender is the attested wallet: the attestation is where
+//! Payday vouches that it verified who spent the funds, since the origin
+//! sender is not checkable from this chain.
+//!
 //! Offline limits: the hash → attestation → salt → address chain, the
 //! attachment, Payday's attestation, and the transfers' recipient, sender
 //! and total are all checkable from the proof. Whether the transfers
 //! happened and whether the settlement transaction really forwarded the
 //! funds is provable only against the chain, by fetching the receipts the
-//! proof names.
+//! proof names; a relayed transfer's origin is provable only against its
+//! origin chain.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -43,9 +54,9 @@ use crate::{
     recompute_salt, verify_payer_attestation,
 };
 
-pub const PROOF_VERSION: &str = "payday.proof.v3";
-pub const ATTESTATION_VERSION: &str = "payday.attestation.v3";
-pub const ATTESTATION_DOMAIN: &[u8] = b"PAYDAY_VERIFICATION_ATTESTATION_V3";
+pub const PROOF_VERSION: &str = "payday.proof.v4";
+pub const ATTESTATION_VERSION: &str = "payday.attestation.v4";
+pub const ATTESTATION_DOMAIN: &[u8] = b"PAYDAY_VERIFICATION_ATTESTATION_V4";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofTransfer {
@@ -55,6 +66,40 @@ pub struct ProofTransfer {
     pub recipient: String,
     pub amount_base_units: String,
     pub block_number: String,
+    /// Present when Relay's solver made this transfer for a cross-chain
+    /// payment the attested wallet sent; see [`RelayAttribution`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayAttribution>,
+}
+
+/// Where a relayed transfer's funds came from. Not checkable from the
+/// destination chain; accepted offline only when the same block appears in
+/// the signed attestation's `relay_fills`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayAttribution {
+    /// Relay's request id, `0x` hex, 32 bytes.
+    pub request_id: String,
+    /// Decimal chain id the wallet paid on.
+    pub origin_chain_id: String,
+    /// The transaction the wallet sent there, `0x` hex, 32 bytes.
+    pub origin_transaction_hash: String,
+    /// EIP-55 checksummed: always the attested wallet.
+    pub origin_sender: String,
+    /// Always `receipt`: Payday read the origin payment from a chain it
+    /// serves. A proof whose attribution names any other source — Relay's
+    /// record of a depositor, say — is not a proof the attested wallet
+    /// spent the funds, and the verifier refuses it.
+    pub attribution_source: String,
+}
+
+/// A relayed transfer as the attestation vouches for it: the destination
+/// transfer it applies to, and the attribution it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedRelayFill {
+    pub transaction_hash: String,
+    pub log_index: String,
+    #[serde(flatten)]
+    pub relay: RelayAttribution,
 }
 
 /// One fact Payday observed in the payer's session, with the provider that
@@ -106,6 +151,11 @@ pub struct VerificationAttestationPayload {
     /// When the wallet attestation was accepted and the address derived.
     pub wallet_bound_at: String,
     pub facts: Vec<VerificationFact>,
+    /// The transfers Relay's solver made for cross-chain payments the
+    /// attested wallet sent, each with the origin Payday verified. Empty
+    /// when every transfer came from the wallet itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_fills: Vec<AttestedRelayFill>,
 }
 
 /// `signature` is the 65-byte `r || s || v` secp256k1 signature over
@@ -214,6 +264,10 @@ pub enum ProofError {
     TransferRecipientMismatch,
     #[error("a transfer in the proof was not sent from the payer's attested wallet")]
     TransferSenderMismatch,
+    #[error("a relayed transfer's attribution is not vouched for by the verification attestation")]
+    RelayFillNotAttested,
+    #[error("a relayed transfer's attribution was not verified from the origin chain's receipt")]
+    RelayOriginNotVerified,
     #[error("the proof's transfers add up to less than the request amount")]
     TransfersBelowInvoiceAmount,
 }
@@ -423,7 +477,40 @@ pub fn verify_proof(
             return Err(ProofError::TransferRecipientMismatch);
         }
         if address("transfer sender", &transfer.sender)? != attested.wallet {
-            return Err(ProofError::TransferSenderMismatch);
+            // Not the wallet's own transfer: acceptable only as a relayed
+            // one the attestation vouches for, whose origin sender is the
+            // wallet. The block must match the attestation's verbatim, so
+            // nothing in it can be edited after signing.
+            let relay = transfer
+                .relay
+                .as_ref()
+                .ok_or(ProofError::TransferSenderMismatch)?;
+            if relay.attribution_source != "receipt" {
+                // The attestation is where Payday vouches that it verified
+                // who spent the funds from the origin chain itself; anything
+                // else is Relay's or the page's word, which is no evidence.
+                return Err(ProofError::RelayOriginNotVerified);
+            }
+            word("transfer relay.request_id", &relay.request_id)?;
+            word(
+                "transfer relay.origin_transaction_hash",
+                &relay.origin_transaction_hash,
+            )?;
+            relay
+                .origin_chain_id
+                .parse::<u64>()
+                .map_err(|_| ProofError::Malformed("transfer relay.origin_chain_id"))?;
+            if address("transfer relay.origin_sender", &relay.origin_sender)? != attested.wallet {
+                return Err(ProofError::TransferSenderMismatch);
+            }
+            let vouched = proof.verification.payload.relay_fills.iter().any(|fill| {
+                fill.transaction_hash == transfer.transaction_hash
+                    && fill.log_index == transfer.log_index
+                    && fill.relay == *relay
+            });
+            if !vouched {
+                return Err(ProofError::RelayFillNotAttested);
+            }
         }
         let credited = U256::from_str_radix(&transfer.amount_base_units, 10)
             .map_err(|_| ProofError::Malformed("transfer amount_base_units"))?;
@@ -602,6 +689,7 @@ mod tests {
                     at: binding.bound_at.clone(),
                 },
             ],
+            relay_fills: Vec::new(),
         }
     }
 
@@ -616,6 +704,7 @@ mod tests {
             recipient: binding.payment_address.0.to_checksum(None),
             amount_base_units: amount.into(),
             block_number: block.into(),
+            relay: None,
         };
         ProofOfPayment {
             version: PROOF_VERSION.into(),
@@ -851,6 +940,71 @@ mod tests {
                 None
             ),
             ProofError::TransferSenderMismatch
+        ));
+        // Unless Relay's solver sent it for the wallet, and the attestation
+        // vouches for exactly that attribution.
+        let solver = Address::repeat_byte(0x50);
+        let relay = |origin_sender: Address| RelayAttribution {
+            request_id: B256::repeat_byte(0x71).to_string(),
+            origin_chain_id: "8453".into(),
+            origin_transaction_hash: B256::repeat_byte(0x72).to_string(),
+            origin_sender: origin_sender.to_checksum(None),
+            attribution_source: "receipt".into(),
+        };
+        let relayed = |origin_sender: Address, vouch: bool| {
+            let mut proof = proof(&invoice);
+            proof.transfers[1].sender = solver.to_checksum(None);
+            proof.transfers[1].relay = Some(relay(origin_sender));
+            let mut payload = payload(&invoice);
+            if vouch {
+                payload.relay_fills.push(AttestedRelayFill {
+                    transaction_hash: proof.transfers[1].transaction_hash.clone(),
+                    log_index: proof.transfers[1].log_index.clone(),
+                    relay: relay(origin_sender),
+                });
+            }
+            proof.verification = sign(payload);
+            proof
+        };
+        let wallet = wallet_of(&PAYER_KEY);
+        assert!(verify_proof(&relayed(wallet, true), None, &[]).is_ok());
+        assert!(matches!(
+            verify_proof(&relayed(wallet, false), None, &[]).unwrap_err(),
+            ProofError::RelayFillNotAttested
+        ));
+        // The attestation vouching for a relayed transfer from another
+        // wallet does not make it the payer's.
+        assert!(matches!(
+            verify_proof(&relayed(wallet_of(&OTHER_PAYER_KEY), true), None, &[]).unwrap_err(),
+            ProofError::TransferSenderMismatch
+        ));
+        // Editing the transfer's block after signing breaks the match.
+        let mut edited = relayed(wallet, true);
+        edited.transfers[1].relay.as_mut().unwrap().origin_chain_id = "42161".into();
+        assert!(matches!(
+            verify_proof(&edited, None, &[]).unwrap_err(),
+            ProofError::RelayFillNotAttested
+        ));
+        // A relayed transfer without the block is just a foreign transfer.
+        let mut bare = relayed(wallet, true);
+        bare.transfers[1].relay = None;
+        assert!(matches!(
+            verify_proof(&bare, None, &[]).unwrap_err(),
+            ProofError::TransferSenderMismatch
+        ));
+        // An attribution from any source but a verified receipt — Relay's
+        // record of a depositor, say — is refused even when the attestation
+        // vouches for it: the vouch is only ever as good as the evidence.
+        let mut unverified = relayed(wallet, true);
+        let mut relay = unverified.transfers[1].relay.clone().unwrap();
+        relay.attribution_source = "relay_api".into();
+        let vouched_relay = relay.clone();
+        unverified.transfers[1].relay = Some(relay);
+        unverified.verification.payload.relay_fills[0].relay = vouched_relay;
+        unverified.verification = sign(unverified.verification.payload);
+        assert!(matches!(
+            verify_proof(&unverified, None, &[]).unwrap_err(),
+            ProofError::RelayOriginNotVerified
         ));
         // 1,000,000 + 1,499,999 falls one base unit short of the request.
         assert!(matches!(

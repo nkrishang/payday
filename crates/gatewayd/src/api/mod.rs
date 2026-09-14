@@ -15,11 +15,13 @@ pub mod payer;
 pub mod payer_verification;
 pub mod payer_wallet;
 mod proof;
+pub mod relay;
 mod routes;
 mod status;
 mod verification;
 mod wallet_pregeneration;
 mod webhooks;
+mod withdrawals;
 
 pub(crate) use auth::{Auth0Verifier, Identity, PrivyVerifier};
 pub use routes::router;

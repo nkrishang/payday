@@ -51,7 +51,11 @@ that updates the lifecycle row.
 `verification.approved`, `deposit_request.ready`, and `deposit_request.likely_unsolicited`
 are inserted by the same `invoices` table trigger as the lifecycle events, in the
 transaction that first sets `verification_completed_at`, `wallet_bound_at`,
-or `likely_unsolicited_at`.
+or `likely_unsolicited_at`. A transfer from Relay's solver for a cross-chain
+payment the payer reported is held back from that flag until Relay resolves
+the request, so `deposit_request.likely_unsolicited` can arrive after
+`deposit_request.deposited` or `deposit_request.settled` for the same request
+when the request failed or was not the payer's after all.
 
 ## Payload
 
@@ -82,6 +86,7 @@ API's `amount`, and parse every timestamp the same way:
   "likely_unsolicited_at": null,
   "payer_wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
   "address": "0x2222222222222222222222222222222222222222",
+  "chain_id": "143",
   "wallet_bound_at": "2026-09-01T11:58:30Z",
   "expires_at": "2026-09-02T11:57:00Z",
   "created_at": "2026-09-01T11:57:00Z"
@@ -91,7 +96,10 @@ API's `amount`, and parse every timestamp the same way:
 The `dr_` id, the decimal `amount` and `received` beside their
 `_base_units`, EIP-55 addresses, and RFC 3339 UTC timestamps to the second
 are exactly what the API returns. `payer_wallet`, `address`, and
-`wallet_bound_at` are null before `deposit_request.ready`. `payer_reference`
+`wallet_bound_at` are null before `deposit_request.ready`. `chain_id` is the
+network the payment is on, as the API's decimal string: known from issuance
+when the merchant pinned it, otherwise from `deposit_request.ready`, null
+before. `payer_reference`
 is your own identifier for the payer on a `merchant_session` deposit (`null`
 otherwise), so a `deposit_request.deposited` or `deposit_request.settled`
 handler can credit that user's ledger directly. The payload never includes

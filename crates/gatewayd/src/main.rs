@@ -1,6 +1,7 @@
 mod api;
 mod attachments;
 mod attestation;
+mod chain_reader;
 mod config;
 mod deployment;
 mod dispatcher;
@@ -168,11 +169,37 @@ async fn main() {
                 factory_code_hash: chain.factory_code_hash,
                 batch_sweeper: chain.batch_sweeper,
                 batch_sweeper_code_hash: chain.batch_sweeper_code_hash,
+                forwarder: chain
+                    .cctp
+                    .as_ref()
+                    .map(|cctp| (cctp.forwarder, cctp.forwarder_code_hash)),
             },
         )
     }))
     .await
     .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
+    // Withdrawals read balances and each token's EIP-712 domain over the
+    // same RPC endpoints; a domain the token disowns is a startup failure,
+    // never a signature the relayer discovers is worthless.
+    let chain_reader = chain_reader::AlloyChainReader::connect(config.networks(), |chain_id| {
+        config.rpc_url(chain_id).to_owned()
+    })
+    .await
+    .unwrap_or_else(|error| panic!("USDC domain read failed: {error}"));
+    // Cross-chain payments through Relay need its API key on every quote;
+    // without one the hosted checkout simply does not offer them.
+    let relay: Option<Arc<dyn gateway_relay::RelayApi>> = match config.relay_api_key() {
+        Some(key) => Some(Arc::new(
+            gateway_relay::RelayClient::new(config.relay_url(), key)
+                .unwrap_or_else(|error| panic!("failed to build the Relay client: {error}")),
+        )),
+        None => {
+            tracing::warn!(
+                "PAYDAY_RELAY_API_KEY is unset; paying from another network is unavailable"
+            );
+            None
+        }
+    };
     let state = state::AppState::new(
         repo,
         accounts,
@@ -186,6 +213,8 @@ async fn main() {
         payer_verification,
         onboarding_payer,
         pregenerated_wallets,
+        Some(Arc::new(chain_reader)),
+        relay,
     );
     if let Some(key) = state.webhook_encryption_key {
         tokio::spawn(webhook_worker::run(state.webhooks.clone(), key));

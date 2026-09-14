@@ -263,6 +263,19 @@ const CREATE_BODY: FieldDoc[] = [
     ),
   },
   {
+    name: "chain_id",
+    type: "string",
+    description: (
+      <>
+        Decimal chain id of one supported network (<code>&quot;143&quot;</code>,{" "}
+        <code>&quot;8453&quot;</code>, <code>&quot;42161&quot;</code>). Pins the network: the
+        request offers it alone, <code>chain</code> and <code>token</code> name it from issuance,
+        and the payer&apos;s challenge must name it. Omitted, the payer chooses. Immutable;
+        participates in idempotency.
+      </>
+    ),
+  },
+  {
     name: "issuer",
     type: "Party",
     description: (
@@ -354,7 +367,9 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
             <code>wallet_bound_at</code>, and <code>self_settlement</code> are null until the
             payer&apos;s wallet attestation is accepted, signalled by{" "}
             <code>deposit_request.ready</code>. Recovery is not a request field;{" "}
-            <code>recovery_address</code> is always the attested wallet.
+            <code>recovery_address</code> is always the attested wallet. <code>chain</code> and{" "}
+            <code>token</code> are null until then too, unless <code>chain_id</code> pinned the
+            network.
           </p>
         </>
       ),
@@ -404,6 +419,11 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
           status: 409,
           code: "account_contact_required",
           when: "Account has no verified email. Re-authenticate in the dashboard.",
+        },
+        {
+          status: 422,
+          code: "unsupported_chain",
+          when: "chain_id names a network this deployment does not serve.",
         },
       ],
       examples: {
@@ -858,11 +878,14 @@ Content-Length: 31288`,
       summary: "Retrieves the Proof of Payment for a settled request.",
       body: (
         <p>
-          Document version <code>payday.proof.v3</code>: canonical issuance snapshot (with every
+          Document version <code>payday.proof.v4</code>: canonical issuance snapshot (with every
           network offered), attribution hash, payer wallet attestation, salt, the chosen chain,
-          factory, and token, deposit and recovery addresses, credited transfers, settlement
-          transaction hash, and a Payday-signed verification attestation. Verifiable offline; reference implementation{" "}
-          <code>gateway_core::verify_proof</code>. Schema:{" "}
+          factory, and token, deposit and recovery addresses, credited transfers (a transfer
+          Relay&apos;s solver delivered for a payment from another network carries{" "}
+          <code>relay</code>: request id, origin chain, origin transaction, origin sender), settlement
+          transaction hash, and a Payday-signed verification attestation whose{" "}
+          <code>relay_fills</code> vouch for those origins. Verifiable offline; reference
+          implementation <code>gateway_core::verify_proof</code>. Schema:{" "}
           <a href="/docs/proof-of-payment">Proof of Payment</a>.
         </p>
       ),
@@ -874,7 +897,7 @@ Content-Length: 31288`,
         {
           status: 409,
           code: "deposit_sender_mismatch",
-          when: "A credited transfer originated from a wallet other than payer_wallet. No proof is issued.",
+          when: "A credited transfer originated from a wallet other than payer_wallet and is not a Relay delivery attributed to it. No proof is issued.",
         },
       ],
       examples: {
@@ -882,7 +905,7 @@ Content-Length: 31288`,
   -H "Authorization: Bearer $PAYDAY_API_KEY" > proof.json`,
         ts: `const proof = await payday.depositRequests.proof(id);`,
         response: `{
-  "version": "payday.proof.v3",
+  "version": "payday.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": { "schema": "payday.invoice.v3", "canonicalization": "RFC8785", "networks": [ "…" ], "…": "…" },
   "canonicalization": "RFC8785",

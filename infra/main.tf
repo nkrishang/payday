@@ -241,6 +241,28 @@ locals {
   ] : []
 }
 
+# Paying a deposit request from another network goes through Relay with a
+# key the operator supplies; both services read it (the API quotes, the
+# indexer follows). Empty means not offered: no secret, no setting, and the
+# hosted checkout does not show the option.
+locals {
+  relay_enabled = nonsensitive(var.relay_api_key != "")
+}
+resource "aws_secretsmanager_secret" "relay_api_key" {
+  count = local.relay_enabled ? 1 : 0
+  name  = "${var.name}/relay-api-key"
+}
+resource "aws_secretsmanager_secret_version" "relay_api_key" {
+  count         = local.relay_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.relay_api_key[0].id
+  secret_string = var.relay_api_key
+}
+locals {
+  relay_secrets = local.relay_enabled ? [
+    { name = "PAYDAY_RELAY_API_KEY", valueFrom = aws_secretsmanager_secret.relay_api_key[0].arn }
+  ] : []
+}
+
 # Privy wallet pregeneration is a latency optimization for email sign-up:
 # empty means gatewayd answers pregenerate with 503 and sign-in still
 # creates the wallet itself (config.rs's PrivyConfig doc comment).
@@ -702,7 +724,7 @@ resource "aws_ecs_task_definition" "api" {
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
-    ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets),
+    ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets, local.relay_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
 }
@@ -729,7 +751,7 @@ resource "aws_ecs_task_definition" "indexer" {
       { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
       { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
     ]),
-    secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets),
+    secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets, local.relay_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
   }])
 

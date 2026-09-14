@@ -84,6 +84,12 @@ a tfvars file); the stack stores it in Secrets Manager and passes it to the
 API as `PAYDAY_RESEND_API_KEY` together with `payer_email_from`. Left empty,
 those emails queue unsent.
 
+Paying a deposit request from another network goes through Relay
+(relay.link). Supply a self-serve key from Relay's dashboard as
+`TF_VAR_relay_api_key`; the stack stores it in Secrets Manager and passes it
+to both the API and the indexer as `PAYDAY_RELAY_API_KEY`. Left empty, the
+hosted checkout does not offer the option.
+
 ## Sandbox deployment
 
 The same architecture can be instantiated independently for the testnets.

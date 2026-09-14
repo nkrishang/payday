@@ -7,6 +7,7 @@ edition = "2024"
 futures = { workspace = true }
 gateway-core = { path = "../gateway-core" }
 gateway-db = { path = "../gateway-db" }
+gateway-relay = { path = "../gateway-relay" }
 alloy-primitives = { workspace = true }
 alloy-network = { workspace = true }
 alloy-provider = { workspace = true }

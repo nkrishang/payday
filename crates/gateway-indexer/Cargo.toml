@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 gateway-core = { path = "../gateway-core" }
 gateway-db = { path = "../gateway-db" }
+gateway-relay = { path = "../gateway-relay" }
 alloy-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-json-rpc = { workspace = true }
@@ -24,6 +25,7 @@ aws-sdk-kms = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

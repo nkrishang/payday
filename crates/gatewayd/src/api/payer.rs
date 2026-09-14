@@ -7,8 +7,9 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use gateway_core::{
     AttachmentDescriptor, DepositRequestResponse, Invoice, InvoiceId, InvoiceStatus, NetworkDto,
-    PayerDepositRequestDetails, PayerDepositRequestResponse, PayerPolicyResponse, PaymentBinding,
-    VerificationFacts, VerificationRequirementsResponse, deposit_request_id, masked_email,
+    PayerDepositRequestDetails, PayerDepositRequestResponse, PayerPolicyResponse,
+    PayerRelayIntentDto, PaymentBinding, VerificationFacts, VerificationRequirementsResponse,
+    deposit_request_id, masked_email, rfc3339,
 };
 use gateway_db::DbAttachment;
 use qrcode::{QrCode, render::svg};
@@ -137,7 +138,7 @@ fn deposit_uri(binding: &PaymentBinding, amount: U256) -> String {
     )
 }
 
-fn payment_state(invoice: &Invoice, now: u64) -> (U256, bool) {
+pub(crate) fn payment_state(invoice: &Invoice, now: u64) -> (U256, bool) {
     let remaining = invoice.amount.0.saturating_sub(invoice.received.0);
     let payable = invoice.status == InvoiceStatus::Created
         && now <= invoice.expiration_timestamp
@@ -145,7 +146,7 @@ fn payment_state(invoice: &Invoice, now: u64) -> (U256, bool) {
     (remaining, payable)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -164,6 +165,9 @@ pub struct PayerInvoiceAccess {
     pub content_unlocked: bool,
     /// Fetched only when the content is unlocked.
     pub attachment: Option<DbAttachment>,
+    /// The newest cross-chain payment quoted for the request, fetched only
+    /// when the content is unlocked and the address exists.
+    pub relay_intent: Option<gateway_db::DbRelayIntent>,
 }
 
 /// One `content_unlocked` decision drives every gated field; no field is
@@ -182,9 +186,21 @@ pub(crate) fn payer_response(
         requirements,
         content_unlocked: unlocked,
         attachment,
+        relay_intent,
     } = access;
     let now = unix_now();
     let (remaining, payable) = payment_state(&invoice, now);
+    let relay_available = state.relay.is_some() && unlocked && payable && invoice.binding.is_some();
+    let relay = relay_intent
+        .filter(|_| unlocked)
+        .map(|intent| PayerRelayIntentDto {
+            id: gateway_core::RelayIntentId(intent.id).to_string(),
+            status: intent.status.clone(),
+            origin_chain_id: intent.origin_chain_id.to_string(),
+            origin_transaction_hash: intent.origin_tx_hash().map(|hash| hash.to_string()),
+            fill_transaction_hash: intent.fill_tx_hashes().first().map(|hash| hash.to_string()),
+            created_at: rfc3339(intent.created_at),
+        });
     let deposit_uri = invoice
         .binding
         .as_ref()
@@ -252,6 +268,8 @@ pub(crate) fn payer_response(
             reference: response.reference,
             attachment: attachment.as_ref().and_then(DbAttachment::descriptor),
         }),
+        relay_available,
+        relay,
     }
 }
 
@@ -309,12 +327,20 @@ pub async fn authorized_invoice(
     } else {
         None
     };
+    let relay_intent = if content_unlocked && wallet_bound {
+        // Existing Relay state stays visible even when the deployment has
+        // no key: only new quoting depends on it.
+        state.relay_intents.latest_for_invoice(row.id).await?
+    } else {
+        None
+    };
     Ok(PayerInvoiceAccess {
         invoice,
         settlement_tx_hash,
         requirements,
         content_unlocked,
         attachment,
+        relay_intent,
     })
 }
 

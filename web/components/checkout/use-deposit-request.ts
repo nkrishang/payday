@@ -2,11 +2,13 @@
 
 import type { PayerDepositRequest } from "@payday/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { PendingPayment } from "@/lib/checkout-state";
 import { backoffMs, jitter, pollDelayMs } from "@/lib/poll";
 import { payerClient } from "@/lib/payday";
+import { pendingRelayReport, RelaySendRetrier } from "@/lib/relay-send";
 
 interface PendingSend {
-  hash: string;
+  payment: PendingPayment;
   /** Credited total at the moment we sent, so we know when ours lands. */
   receivedAtSend: bigint;
   at: number;
@@ -18,9 +20,9 @@ export interface LiveDepositRequest {
   receivedAt: number;
   /** True once a read has failed and we are retrying with backoff. */
   reconnecting: boolean;
-  pendingTxHash: string | null;
+  pendingPayment: PendingPayment | null;
   /** Record a transfer this browser sent; starts the fast poll window. */
-  markSent: (hash: string) => void;
+  markSent: (payment: PendingPayment) => void;
   /** Re-read now, for the moment verification changes what this tab may see. */
   refresh: () => void;
 }
@@ -53,10 +55,11 @@ export function useDepositRequest(initial: PayerDepositRequest, payerSession: st
   });
 
   const poke = useRef<() => void>(() => {});
+  const reportPoke = useRef<() => void>(() => {});
 
-  const markSent = useCallback((hash: string) => {
+  const markSent = useCallback((payment: PendingPayment) => {
     const send: PendingSend = {
-      hash,
+      payment,
       // Locked content has no credited total; nothing can be sent from a locked
       // page, so this only runs with the mechanics present.
       receivedAtSend: BigInt(latest.current.payment.received_base_units ?? "0"),
@@ -68,6 +71,34 @@ export function useDepositRequest(initial: PayerDepositRequest, payerSession: st
   }, []);
 
   const id = initial.id;
+
+  // Reporting is deliberately independent of request polling: even a terminal
+  // invoice may accept a late report for a broadcast origin transaction.
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const retrier = new RelaySendRetrier((entry) =>
+      payerClient.relay.sent(id, entry.intentId, entry.hash, sessionOption(payerSession)),
+    );
+    const attempt = async () => {
+      if (disposed || latest.current.payment.relay?.status !== "quoted") return;
+      if (!pendingRelayReport(id)) return;
+      const accepted = await retrier.attempt(id);
+      if (!accepted && !disposed) timer = setTimeout(() => void attempt(), retrier.delay);
+    };
+    const wake = () => void attempt();
+    reportPoke.current = wake;
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", wake);
+    void attempt();
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("online", wake);
+      reportPoke.current = () => {};
+    };
+  }, [id, payerSession]);
 
   useEffect(() => {
     let disposed = false;
@@ -117,11 +148,16 @@ export function useDepositRequest(initial: PayerDepositRequest, payerSession: st
         setReconnecting(false);
         setState({ payment: next, receivedAt: Date.now() });
         latest.current = { ...latest.current, payment: next };
+        reportPoke.current();
 
         // Our transfer has been credited once the gateway's total moves past
         // what it was when we sent, so the "confirming" state can end.
         const send = latest.current.pendingSend;
         if (send && BigInt(next.received_base_units ?? "0") > send.receivedAtSend) {
+          latest.current = { ...latest.current, pendingSend: null };
+          setPendingSend(null);
+        } else if (send && send.payment.kind === "direct" &&
+          (next.status === "settled" || next.status === "returned" || next.status === "needs_attention")) {
           latest.current = { ...latest.current, pendingSend: null };
           setPendingSend(null);
         }
@@ -175,10 +211,14 @@ export function useDepositRequest(initial: PayerDepositRequest, payerSession: st
     payment: state.payment,
     receivedAt: state.receivedAt,
     reconnecting,
-    pendingTxHash: pendingSend?.hash ?? null,
+    pendingPayment: pendingSend?.payment ?? null,
     markSent,
     refresh,
   };
+}
+
+function sessionOption(payerSession: string | null): { payerSession?: string } {
+  return payerSession ? { payerSession } : {};
 }
 
 /** A local clock that advances once a second, for values derived from "now". */

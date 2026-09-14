@@ -146,7 +146,7 @@ pub struct TypedDataField {
 }
 
 impl TypedDataField {
-    fn new(name: &str, kind: &str) -> Self {
+    pub(crate) fn new(name: &str, kind: &str) -> Self {
         Self {
             name: name.into(),
             kind: kind.into(),

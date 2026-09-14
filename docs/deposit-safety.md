@@ -20,7 +20,10 @@ due and stop being offered the moment the deposit request is no longer payable.
   final: the address exists on that chain only. Money from any other wallet still counts toward the
   amount and settles, but the deposit request is flagged `likely_unsolicited`, no Proof
   of Deposit is issued for it, and anything returned goes to the attested
-  wallet, not the sending one.
+  wallet, not the sending one. The one way to pay from another network is
+  the hosted checkout's "Pay from another network": Payday quotes the route
+  through Relay for the attested wallet, and the delivery Relay's solver
+  makes is attributed to that wallet once Relay confirms it sent the deposit.
 - Verify the network and token contract in the wallet before approving the
   transfer. Token names and symbols are not sufficient; bridged USDC (such as
   `USDC.e`), look-alike tokens, and USDC on another network do not count. Check

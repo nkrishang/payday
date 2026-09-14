@@ -45,11 +45,15 @@ export type CheckoutPhase =
 
 export type CheckoutTone = "neutral" | "progress" | "success" | "warning";
 
+export type PendingPayment =
+  | { kind: "direct"; hash: string }
+  | { kind: "relay"; intentId: string; originChainId: string; hash: string | null };
+
 export interface CheckoutLocalState {
   /** Whole seconds until the deadline, anchored to the gateway's clock. */
   secondsRemaining: number;
-  /** Hash of a transfer this browser sent that the gateway has not yet credited. */
-  pendingTxHash: string | null;
+  /** A payment this browser sent that the gateway has not yet credited. */
+  pendingPayment: PendingPayment | null;
   /** A verification code was sent for this tab's session and awaits entry. */
   emailCodeSent?: boolean;
   /** A merchant client secret from the fragment is being exchanged right now. */
@@ -377,27 +381,51 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
   // can have been sent.
   const ready = readyDepositRequest(payment);
   if (ready === null) {
+    // A request offering one network has no choice to make: the merchant
+    // pinned it, and only the wallet is still the payer's to give.
+    const pinned = payment.networks.length === 1 ? payment.networks[0] : null;
     return {
       phase: "wallet_required",
       tone: "neutral",
       label: "Wallet required",
-      title: "Choose a network and sign from the wallet you will pay from",
-      detail:
-        "Payday creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
+      title: pinned
+        ? "Sign from the wallet you will pay from"
+        : "Choose a network and sign from the wallet you will pay from",
+      detail: pinned
+        ? `This deposit is paid on ${pinned.chain.name}. Payday creates a unique, one-time payment destination for the wallet you intend to pay with; it is fixed once you sign.`
+        : "Payday creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
       showInstructions: false,
       showWalletStep: true,
       isTerminal: false,
     };
   }
 
-  if (local.pendingTxHash) {
+  if (local.pendingPayment) {
+    // A payment sent from another network: the wallet's transaction is on
+    // that chain, and what lands here is Relay's delivery.
+    const relayed = local.pendingPayment.kind === "relay";
+    const relayFailed = relayed && (payment.relay?.status === "failed" || payment.relay?.status === "refunded");
+    if (relayFailed) {
+      const partial = payment.status === "partially_deposited";
+      return {
+        phase: partial ? "partial" : "awaiting",
+        tone: "warning",
+        label: partial ? "Partially deposited" : "Awaiting deposit",
+        title: partial ? `Send the remaining ${formatDisplayAmount(payment.remaining)} ${ready.token.symbol}` : "Cross-chain route failed",
+        detail: "The cross-chain route failed. Your origin funds are coming back to your wallet; you can try another payment.",
+        showInstructions: true,
+        showWalletStep: false,
+        isTerminal: false,
+      };
+    }
     return {
       phase: "confirming",
       tone: "progress",
-      label: "Confirming",
-      title: "Transaction confirmed on-chain",
-      detail:
-        "Payday credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
+      label: relayed ? "Delivering" : "Confirming",
+      title: relayed ? "Relay is delivering your payment" : "Transaction confirmed on-chain",
+      detail: relayed
+        ? `Your deposit was sent; Relay delivers it to ${ready.chain.name} in seconds, and Payday credits it once that network finalizes it. Keep this page open.`
+        : "Payday credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,

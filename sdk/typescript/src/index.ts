@@ -49,6 +49,13 @@ export interface CreateDepositRequest {
    */
   payout_address?: string;
   /**
+   * Pin the network the payer must pay on: one of the deployment's chain ids
+   * as a decimal string (`"143"`). Left out, the payer chooses among every
+   * network when they sign. A chain Payday does not serve is refused with
+   * `422 unsupported_chain`.
+   */
+  chain_id?: string;
+  /**
    * The issuing party as the document will carry it. May be left out when
    * `issuer_id` is given: the identity's name, contact address, and details
    * are snapshotted in its place. An inline party always wins.
@@ -87,10 +94,14 @@ export interface DepositRequest {
   status: DepositRequestStatus;
   /**
    * Every network the payer may pay on; the request commits to all of them
-   * and the payer picks one when they sign their wallet attestation.
+   * and the payer picks one when they sign their wallet attestation. One
+   * entry when the merchant pinned the network with `chain_id`.
    */
   networks: Network[];
-  /** The network the payer chose; null until a wallet is bound. */
+  /**
+   * The payment's network: the pinned one from issuance, else the one the
+   * payer chose once a wallet is bound; null before either.
+   */
   chain: Chain | null;
   currency: string;
   token: Token | null;
@@ -294,9 +305,12 @@ export interface PayerDepositRequest {
   /** Safety guidance shown only when payout needs operator attention. */
   payer_message: string | null;
   content_unlocked: boolean;
-  /** The networks the payer may choose from; null while locked. */
+  /** The networks the payer may choose from; null while locked. One entry when pinned. */
   networks: Network[] | null;
-  /** The chosen network, once a wallet is bound and the content is unlocked. */
+  /**
+   * The payment's network once known (pinned at issuance, or chosen when a
+   * wallet is bound) and the content is unlocked.
+   */
   chain: Chain | null;
   token: Token | null;
   amount: string | null;
@@ -313,6 +327,85 @@ export interface PayerDepositRequest {
   /** EIP-681 request for the amount still due; null while locked, unbound, or once not payable. */
   deposit_uri: string | null;
   details: PayerDepositRequestDetails | null;
+  /**
+   * Whether the payer may pay from another network through Relay: the
+   * deployment offers it, the address exists, and the request is payable.
+   */
+  relay_available: boolean;
+  /** The newest cross-chain payment quoted for this request, if any; null while locked. */
+  relay: PayerRelayIntent | null;
+}
+
+/** A network a payer may pay from through Relay, with its USDC. */
+export interface RelayOriginChain {
+  /** Decimal chain id. */
+  chain_id: string;
+  name: string;
+  native_symbol: string | null;
+  /** USDC on that network: what the payer sends. */
+  usdc_address: string;
+  explorer_url: string | null;
+  icon_url: string | null;
+  /** A public RPC, so a wallet that lacks the network can be asked to add it. */
+  rpc_url: string | null;
+}
+
+export interface RelayOriginChains {
+  chains: RelayOriginChain[];
+}
+
+/** One transaction the attested wallet sends on the origin network. */
+export interface RelayTransaction {
+  /** Decimal chain id: the origin network. */
+  chain_id: string;
+  to: string;
+  /** `0x` hex calldata. */
+  data: string;
+  /** Decimal wei. */
+  value: string;
+  /** Relay's gas estimate, when it gives one. */
+  gas: string | null;
+}
+
+export interface RelayQuoteStep {
+  /** `approve` or `deposit`. */
+  id: string;
+  transaction: RelayTransaction;
+}
+
+/**
+ * A quote for paying the amount still due from another network. The steps
+ * are transactions for the attested wallet to send on the origin network, in
+ * order; the last one is the deposit Relay fills against. Exactly
+ * `amount_out` lands on the payment address.
+ */
+export interface RelayQuote {
+  /** The `rli_` id to report the origin transaction against. */
+  id: string;
+  request_id: string;
+  origin: RelayOriginChain;
+  amount_in: string;
+  amount_in_base_units: string;
+  amount_out: string;
+  amount_out_base_units: string;
+  relayer_fee_usd: string | null;
+  time_estimate_seconds: number;
+  /** Ask for another quote after this. */
+  expires_at: string;
+  steps: RelayQuoteStep[];
+}
+
+export type RelayIntentStatus = "quoted" | "sent" | "filled" | "failed" | "refunded" | "expired";
+
+/** The cross-chain payment the page is following. */
+export interface PayerRelayIntent {
+  id: string;
+  status: RelayIntentStatus;
+  origin_chain_id: string;
+  origin_transaction_hash: string | null;
+  /** The destination transaction that delivered the funds, once filled. */
+  fill_transaction_hash: string | null;
+  created_at: string;
 }
 
 /** EIP-712 typed data exactly as `eth_signTypedData_v4` / viem's `signTypedData` take it. */
@@ -379,6 +472,15 @@ export interface DepositRequestPage { deposit_requests: DepositRequestSummary[];
 export interface Transfer {
   transaction_hash: string; explorer_url: string | null; sender: string; amount: string; amount_base_units: string;
   block: string; timestamp: string; disposition: "credited" | "late" | "zero"; collected: boolean;
+  /** Present when Relay's solver sent it for a cross-chain payment the attested wallet made. */
+  relay?: TransferRelay;
+}
+/** The origin of a transfer Relay delivered: what the attested wallet sent. */
+export interface TransferRelay {
+  request_id: string;
+  /** Decimal chain id the wallet paid on. */
+  origin_chain_id: string;
+  origin_transaction_hash: string | null;
 }
 export interface TransferList { transfers: Transfer[] }
 /** Internal: the dashboard onboarding walkthrough's one real demo transfer. */
@@ -516,10 +618,38 @@ export interface ProofTransfer {
   transaction_hash: string;
   /** Decimal receipt log index; canonical event identity with transaction_hash. */
   log_index: string;
+  /** The attested wallet, or Relay's solver for a relayed transfer. */
   sender: string;
   recipient: string;
   amount_base_units: string;
   block_number: string;
+  /**
+   * Present when Relay's solver made the transfer for a cross-chain payment
+   * the attested wallet sent. A verifier accepts it only when the same block
+   * appears in the attestation's `relay_fills` and `origin_sender` is the
+   * attested wallet.
+   */
+  relay?: RelayAttribution;
+}
+
+/** Where a relayed transfer's funds came from; vouched for by the attestation. */
+export interface RelayAttribution {
+  /** Relay's request id, `0x` hex, 32 bytes. */
+  request_id: string;
+  /** Decimal chain id the wallet paid on. */
+  origin_chain_id: string;
+  /** The transaction the wallet sent there. */
+  origin_transaction_hash: string;
+  /** Always the attested wallet. */
+  origin_sender: string;
+  /** Attribution verified from an origin-chain transaction receipt. */
+  attribution_source: "receipt";
+}
+
+/** A relayed transfer as the attestation vouches for it. */
+export interface AttestedRelayFill extends RelayAttribution {
+  transaction_hash: string;
+  log_index: string;
 }
 
 /**
@@ -539,6 +669,12 @@ export interface VerificationAttestationPayload {
   payment_address: string;
   payer_wallet: string;
   wallet_nonce: string;
+  /**
+   * The transfers Relay's solver made for cross-chain payments the attested
+   * wallet sent, each with the origin Payday verified; absent when every
+   * transfer came from the wallet itself.
+   */
+  relay_fills?: AttestedRelayFill[];
   payer_policy_mode: PayerPolicyMode;
   result: string;
   verified_at: string | null;
@@ -762,6 +898,111 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
     function onAbort() { clearTimeout(timer); reject(signal?.reason); }
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+// --- Withdrawals ---
+
+/** EIP-712 typed data for one withdrawal leg: an EIP-3009 authorization under the source chain's USDC. Every `uint256` is a decimal string. */
+export interface WithdrawalTypedData {
+  domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  primaryType: "TransferWithAuthorization" | "ReceiveWithAuthorization";
+  types: Record<string, Array<{ name: string; type: string }>>;
+  message: {
+    from: string;
+    to: string;
+    value: string;
+    validAfter: string;
+    validBefore: string;
+    nonce: string;
+  };
+}
+
+export interface WithdrawalNoncePreimage {
+  /** Circle's CCTP domain of the destination chain. */
+  destination_domain: number;
+  /** The destination address, as the mint recipient. */
+  mint_recipient: string;
+  /** `0x` hex, 32 bytes. */
+  salt: string;
+}
+
+/** What the merchant signs for one leg, present while the leg awaits its signature. */
+export interface WithdrawalAuthorization {
+  primary_type: "TransferWithAuthorization" | "ReceiveWithAuthorization";
+  typed_data: WithdrawalTypedData;
+  /** When the token stops accepting the signature. */
+  expires_at: string;
+  /** Bridge legs: the WithdrawalForwarder the authorization pays. */
+  forwarder: string | null;
+  /** Bridge legs: `nonce = keccak256(abi.encode(destination_domain, bytes32(mint_recipient), salt))`. */
+  nonce_preimage: WithdrawalNoncePreimage | null;
+}
+
+export type WithdrawalLegState =
+  | "awaiting_signature"
+  | "authorized"
+  | "relaying"
+  | "burned"
+  | "attested"
+  | "minting"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "cancelled";
+
+export interface WithdrawalLeg {
+  id: string;
+  /** `transfer` when the funds already sit on the destination chain, `bridge` when they cross through CCTP. */
+  kind: "transfer" | "bridge";
+  source_chain: Chain;
+  amount: string;
+  amount_base_units: string;
+  state: WithdrawalLegState;
+  authorization: WithdrawalAuthorization | null;
+  transfer_tx_hash: string | null;
+  burn_tx_hash: string | null;
+  mint_tx_hash: string | null;
+  failure_reason: string | null;
+}
+
+export type WithdrawalStatus = "awaiting_signature" | "in_progress" | "completed" | "failed" | "cancelled";
+
+export interface Withdrawal {
+  id: string;
+  status: WithdrawalStatus;
+  /** The Payday wallet every leg is signed from. */
+  wallet_address: string;
+  destination: { chain: Chain; address: string };
+  /** One per network the wallet held USDC on when the withdrawal was created. */
+  legs: WithdrawalLeg[];
+  created_at: string;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  failed_at: string | null;
+}
+
+export interface WithdrawalPage {
+  withdrawals: Withdrawal[];
+  next_cursor: string | null;
+}
+
+export interface CreateWithdrawal {
+  destination: {
+    /** Decimal chain id of one of the deployment's networks. */
+    chain_id: string;
+    address: string;
+  };
+}
+
+export interface LegAuthorizationInput {
+  leg_id: string;
+  /** `0x` hex, 65 bytes `r || s || v`, over the leg's `typed_data`. */
+  signature: string;
+}
+
+export interface ListWithdrawalsParams {
+  limit?: number;
+  starting_after?: string;
 }
 
 export class PaydayClient {
@@ -1006,6 +1247,36 @@ export class PaydayClient {
       }),
   };
 
+  /**
+   * Withdrawals: the Payday wallet's whole USDC balance, on every network,
+   * to one address. Prepare, sign, submit, poll. `create` snapshots the
+   * balances into legs, each carrying the EIP-712 document to sign under
+   * that chain's USDC (an EIP-3009 authorization); nothing moves until it is
+   * signed. Sign with `@payday/sdk/signing` or any EIP-712 signer holding
+   * the wallet's key, then `authorize`. Payday relays and pays gas; the
+   * signature itself fixes where the funds may land. One withdrawal may be
+   * open per account (`withdrawal_in_progress`, 409).
+   */
+  readonly withdrawals = {
+    create: (input: CreateWithdrawal, idempotencyKey: string): Promise<Withdrawal> => {
+      if (!idempotencyKey) throw new TypeError("idempotencyKey is required");
+      return this.request("/v1/withdrawals", { method: "POST", body: input, idempotencyKey });
+    },
+    get: (id: string): Promise<Withdrawal> => this.request(`/v1/withdrawals/${encodeURIComponent(id)}`),
+    /** Newest first; page with `starting_after`. */
+    list: (params: ListWithdrawalsParams = {}): Promise<WithdrawalPage> =>
+      this.request(`/v1/withdrawals${query(params)}`),
+    /** Records signatures for any subset of the legs; every one is verified before any is stored. */
+    authorize: (id: string, authorizations: LegAuthorizationInput[]): Promise<Withdrawal> =>
+      this.request(`/v1/withdrawals/${encodeURIComponent(id)}/authorizations`, {
+        method: "POST",
+        body: { authorizations },
+      }),
+    /** Cancels while nothing has been relayed; signatures already given are never used. */
+    cancel: (id: string): Promise<Withdrawal> =>
+      this.request(`/v1/withdrawals/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  };
+
   private request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string; signal?: AbortSignal } = {}): Promise<T> {
     return request<T>(this.fetcher, this.baseUrl, path, this.authorized(options));
   }
@@ -1152,6 +1423,47 @@ export class PaydayPayerClient {
       request<PayerDepositRequest>(
         this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/wallet/attest`,
         { method: "POST", body: { wallet, signature }, ...payerOptions({ ...options, payerSession }) },
+      ),
+  };
+
+  /**
+   * Paying from another network through Relay, once the address exists and
+   * while the request is payable (`relay_available`). Payday makes the quote:
+   * it pins the attested wallet as the sender, the payment address as the
+   * recipient, and exactly the amount still due as what lands. The page
+   * sends the quote's transactions from that wallet on the origin network,
+   * reports the deposit's hash, and follows `relay` on the payer view. All
+   * three answer `404 relay_unavailable` on a deployment without Relay,
+   * `409 wallet_required` before the address exists, and
+   * `410 deposit_request_not_payable` afterwards.
+   */
+  readonly relay = {
+    /** The networks USDC may be paid from: every one Relay takes deposits on, except the request's own. */
+    chains: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayOriginChains> =>
+      request<RelayOriginChains>(
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/chains`,
+        payerOptions(options),
+      ),
+    /**
+     * A quote from `originChainId`'s USDC. Answers `422 relay_unsupported_origin`
+     * for a network not offered and `502 relay_quote_failed` when Relay has no
+     * route; ask again after `expires_at`.
+     */
+    quote: (id: string, originChainId: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayQuote> =>
+      request<RelayQuote>(
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/quotes`,
+        { method: "POST", body: { origin_chain_id: originChainId }, ...payerOptions(options) },
+      ),
+    /**
+     * The wallet sent the quote's deposit: report its hash. Late and repeated
+     * reports are safe. Answers the payer view with `relay.status` `sent`;
+     * `409 relay_report_conflict` when the report conflicts with an existing one.
+     */
+    sent: (id: string, quoteId: string, transactionHash: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<PayerDepositRequest> =>
+      request<PayerDepositRequest>(
+        this.fetcher, this.baseUrl,
+        `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/quotes/${encodeURIComponent(quoteId)}/sent`,
+        { method: "POST", body: { transaction_hash: transactionHash }, ...payerOptions(options) },
       ),
   };
 }

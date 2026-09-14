@@ -6,6 +6,7 @@ import { ISSUERS, PAYOUT_ADDRESSES } from "./issuers";
 import { PAYER } from "./payer";
 import { type EndpointDoc, type EndpointGroup, endpointHref } from "./types";
 import { WEBHOOKS } from "./webhooks";
+import { WITHDRAWALS } from "./withdrawals";
 
 /** Every group of the reference, in sidebar order. */
 export const API_GROUPS: ReadonlyArray<EndpointGroup> = [
@@ -13,6 +14,7 @@ export const API_GROUPS: ReadonlyArray<EndpointGroup> = [
   CUSTOMERS,
   ISSUERS,
   PAYOUT_ADDRESSES,
+  WITHDRAWALS,
   ATTACHMENTS,
   WEBHOOKS,
   ACCOUNT_GROUP,
