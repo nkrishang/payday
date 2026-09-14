@@ -955,7 +955,7 @@ relay_tx="$(cast send "$(jq -r .steps[0].transaction.to <<<"$relay_quote")" \
   --private-key "$PAYER_KEY" --rpc-url "$SECOND_RPC_URL" --json | jq -r .transactionHash)"
 relay_sent="$(relay_post "/relay/quotes/$rli/sent" "$(jq -cn --arg hash "$relay_tx" '{transaction_hash: $hash}')")"
 assert_eq sent "$(jq -r .relay.status <<<"$relay_sent")" "reporting the deposit did not mark the quote sent"
-assert_eq sent "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg hash "$relay_tx" '{transaction_hash: $hash}')" \
   "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes/$rli/sent")" \
