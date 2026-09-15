@@ -40,7 +40,7 @@ auth0_issuer = "https://dev-5ojfw164vnkjnk6m.us.auth0.com/"
 # at the same addresses on each chain). Fill from the deployment output.
 chains = [
   {
-    chain_id                = 143
+    chain_id = 143
     tokens = [
       { currency = "USDC", address = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" },
       # Tether's USDT0: https://docs.usdt0.to/technical-documentation/deployments
@@ -50,7 +50,7 @@ chains = [
     batch_sweeper           = "0x0000000000000000000000000000000000000002"
     factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
     batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
-    start_block        = 0
+    start_block             = 0
     finality_source         = "finalized"
     finality_confirmations  = 0
     block_time_ms           = 300
@@ -65,14 +65,14 @@ chains = [
     }
   },
   {
-    chain_id                = 8453
+    chain_id = 8453
     # USDC alone: Base's USDT is a bridge wrapper without EIP-3009, not served.
-    tokens = [{ currency = "USDC", address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }]
+    tokens                  = [{ currency = "USDC", address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }]
     factory                 = "0x0000000000000000000000000000000000000001"
     batch_sweeper           = "0x0000000000000000000000000000000000000002"
     factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
     batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
-    start_block        = 0
+    start_block             = 0
     finality_source         = "latest"
     finality_confirmations  = 10
     block_time_ms           = 2000
@@ -87,7 +87,7 @@ chains = [
     }
   },
   {
-    chain_id                = 42161
+    chain_id = 42161
     tokens = [
       { currency = "USDC", address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" },
       # Tether's USDT0, the former bridged USDT upgraded in place.
@@ -97,7 +97,7 @@ chains = [
     batch_sweeper           = "0x0000000000000000000000000000000000000002"
     factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
     batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
-    start_block        = 0
+    start_block             = 0
     finality_source         = "latest"
     finality_confirmations  = 40
     block_time_ms           = 250
