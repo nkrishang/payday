@@ -294,8 +294,14 @@ resource "aws_secretsmanager_secret_version" "admin_bearer" {
   secret_string = random_password.admin_bearer.result
 }
 
+# The sweep signer pool: `sweep_signer_count` keys, each an address the
+# indexer keeps one helper transaction in flight on, so sweeps and
+# withdrawal steps run side by side. Every key must be funded with gas on
+# every chain (docs/production-runbook.md §8). Index 0 is the original
+# single signer, kept at its address and alias.
 resource "aws_kms_key" "signer" {
-  description              = "${var.name} Ethereum transaction signer"
+  count                    = var.sweep_signer_count
+  description              = "${var.name} Ethereum transaction signer ${count.index}"
   key_usage                = "SIGN_VERIFY"
   customer_master_key_spec = "ECC_SECG_P256K1"
   deletion_window_in_days  = 30
@@ -304,9 +310,18 @@ resource "aws_kms_key" "signer" {
     prevent_destroy = true
   }
 }
+moved {
+  from = aws_kms_key.signer
+  to   = aws_kms_key.signer[0]
+}
 resource "aws_kms_alias" "signer" {
-  name          = "alias/${var.name}-signer"
-  target_key_id = aws_kms_key.signer.key_id
+  count         = var.sweep_signer_count
+  name          = count.index == 0 ? "alias/${var.name}-signer" : "alias/${var.name}-signer-${count.index}"
+  target_key_id = aws_kms_key.signer[count.index].key_id
+}
+moved {
+  from = aws_kms_alias.signer
+  to   = aws_kms_alias.signer[0]
 }
 
 # Retained for any balance recovered under the pre-2026-09 scheme, in which
@@ -453,7 +468,7 @@ resource "aws_iam_role" "indexer_task" {
 }
 resource "aws_iam_role_policy" "indexer_kms" {
   role   = aws_iam_role.indexer_task.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.signer.arn }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.signer[*].arn }] })
 }
 
 # ---------------------------------------------------------------------------
@@ -746,7 +761,7 @@ resource "aws_ecs_task_definition" "indexer" {
     readonlyRootFilesystem = true,
     stopTimeout            = 120,
     environment = concat(local.common_environment, [
-      { name = "PAYDAY_KMS_KEY_ID", value = aws_kms_key.signer.arn },
+      { name = "PAYDAY_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
       { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
       { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
       { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
@@ -1037,7 +1052,7 @@ locals {
     signer_low_balance = {
       pattern     = "\"sweep signer balance low\""
       period      = 300
-      description = "The KMS sweep signer is below PAYDAY_SIGNER_LOW_BALANCE_WEI; fund it"
+      description = "A KMS sweep signer is below its chain's low-balance level; the log line names the address, fund it"
     }
     cursor_lagging = {
       pattern     = "\"indexer cursor lagging\""

@@ -1,8 +1,8 @@
 output "api_url" { value = "https://${var.domain_name}" }
 output "api_ecr_repository_url" { value = aws_ecr_repository.api.repository_url }
 output "indexer_ecr_repository_url" { value = aws_ecr_repository.indexer.repository_url }
-output "kms_key_arn" { value = aws_kms_key.signer.arn }
-output "kms_public_key_note" { value = "AWS KMS exposes the secp256k1 public key via GetPublicKey, not an Ethereum address; derive and independently verify the address before funding." }
+output "kms_key_arns" { value = aws_kms_key.signer[*].arn }
+output "kms_public_key_note" { value = "The sweep signer pool: AWS KMS exposes each key's secp256k1 public key via GetPublicKey, not an Ethereum address; derive and independently verify every address before funding it on every chain." }
 output "recovery_kms_key_arn" { value = aws_kms_key.recovery.arn }
 output "recovery_kms_public_key_note" { value = "Legacy: the recovery key was every payment's recovery term before payments returned excess funds to the payer's own attested wallet. gatewayd no longer reads its address; keep it only until any balance it holds has been returned by hand." }
 output "attestation_kms_key_arn" { value = aws_kms_key.attestation.arn }

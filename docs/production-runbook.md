@@ -158,8 +158,8 @@ in that order. USDC has six decimals on all of them.
   `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
   detects a consumed nonce from the signer's mined transaction count.
 - Monad bills the gas *limit*: every helper transaction reserves
-  `100k + 400k × items` gas of MON from the sweep signer. Base and
-  Arbitrum bill gas used plus the L1 data fee.
+  `100k + 400k × items` gas of MON from the pool signer that sends it.
+  Base and Arbitrum bill gas used plus the L1 data fee.
 
 Reconfirm every USDC address against
 [Circle's official contract-address page](https://developers.circle.com/stablecoins/usdc-contract-addresses)
@@ -500,27 +500,42 @@ resource.
 
 ## 8. Verify and fund the KMS signers
 
-### Sweep signer
+### Sweep signer pool
 
-The indexer logs the Ethereum address derived from the KMS public key:
+The indexer sweeps with `sweep_signer_count` KMS keys (five in production),
+each an address that keeps one helper transaction in flight, so several
+sweep batches and withdrawal steps run at once on every chain. At boot it
+logs one line per key and chain with the Ethereum address derived from the
+KMS public key:
 
 ```bash
 aws logs tail /ecs/payday/indexer --since 15m \
   --filter-pattern 'configured sweep signer'
 ```
 
-Independently derive the same address with Foundry's AWS KMS support:
+Independently derive every address with Foundry's AWS KMS support:
 
 ```bash
-export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw kms_key_arn)"
-cast wallet address --aws
+for arn in $(terraform -chdir=infra output -json kms_key_arns | jq -r '.[]'); do
+  AWS_KMS_KEY_ID="$arn" cast wallet address --aws
+done
 ```
 
-The two addresses must match. It is one address on every chain, and it
-sweeps on every chain, so fund it on each: only enough MON on Monad and ETH
-on Base and Arbitrum One for expected sweeps. The worker alarms per chain
-below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. The signer does not custody USDC; it
-pays gas to invoke the permissionless factory.
+The addresses must match the log, in order. Each is one address on every
+chain, and each sweeps on every chain, so fund **every** address on each
+chain: only enough MON on Monad and ETH on Base and Arbitrum One for expected
+sweeps, spread over the pool (the worker rotates through the signers, so
+they drain evenly). The worker alarms per signer and chain below the chain's
+`signer_low_balance_wei` (`PAYDAY_SIGNER_LOW_BALANCE_WEI` as the fallback),
+and the `sweep signer balance low` line names the address. The signers do
+not custody USDC; they pay gas to invoke the permissionless factory.
+
+Raising `sweep_signer_count` adds keys at the end of the pool; lowering it
+is refused by Terraform's `prevent_destroy`, and a key removed from the
+pool while it owns an open batch halts the sweep worker until that row is
+resolved by hand (`docs/runbooks/stuck-deposit-request.md`). Deploy a
+release that changes the pool with no sweep batch open, or set the open
+row's `signer` column to the address that signed it.
 
 ### Attestation signer
 
@@ -699,7 +714,8 @@ Do not advertise or depend on the service until this succeeds.
 For each application update, build and push a new `git-<SHA>` tag, change
 `image_tag`, review `terraform plan`, and apply it. ECS's deployment circuit
 breaker rolls back failed task startups. The indexer deployment stops the old
-task before starting the new one so two sweep nonce owners never overlap. A
+task before starting the new one so two owners of a sweep signer's nonce
+stream never overlap. A
 manual rollback sets `image_tag` to a previous known-good image and applies
 again. Secrets Manager rotation is not observed by running tasks; force a new
 deployment after rotating a secret.

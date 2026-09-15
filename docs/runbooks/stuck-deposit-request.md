@@ -101,9 +101,10 @@ aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
 
 Possible causes:
 
-- **KMS signer out of MON**: the `payday-indexer-signer-low-balance` alarm
-  fires and submissions fail with an insufficient-funds error until the signer
-  is funded. See [daily-monitoring.md](daily-monitoring.md) step 7.
+- **A KMS signer out of MON**: the `payday-indexer-signer-low-balance` alarm
+  fires (the log line names the address) and that signer's submissions fail
+  with an insufficient-funds error until it is funded; the other pool signers
+  keep sweeping. See [daily-monitoring.md](daily-monitoring.md) step 7.
 - **Helper transaction unconfirmed**: the worker replaces it on the same nonce
   with fees bumped by 12.5% every `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS`, up to
   `PAYDAY_SWEEP_MAX_SUBMISSIONS` times, then pauses and raises
@@ -186,20 +187,32 @@ them so.
 ## Sweep worker paused
 
 `payday-indexer-sweep-paused` means the worker logged `sweep worker paused`
-on every pass. Block indexing continues; only helper transactions stop. The
-log line carries the reason:
+on every pass. Block indexing continues, and so do the other signers of the
+pool; only the named signer's helper transactions stop. The log line carries
+the reason, the batch, and the signer:
 
 - **Unconfirmed after N submissions**: every replacement of the batch's
-  nonce failed to mine. Check the signer balance and the fee market. To
-  resolve manually, send any transaction from the KMS key with that nonce and
-  a higher fee (for example a zero-value self-transfer) — the worker then sees
-  the nonce consumed, abandons the batch, and re-queues its deposit requests:
+  nonce failed to mine. Check that signer's balance and the fee market. To
+  resolve manually, send any transaction from that signer's KMS key with the
+  batch's nonce and a higher fee (for example a zero-value self-transfer) —
+  the worker then sees the nonce consumed, abandons the batch, and re-queues
+  its deposit requests. The batch row says which signer:
 
   ```bash
-  export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw kms_key_arn)"
+  psql "$DATABASE_URL" -Atc "SELECT '0x' || encode(signer, 'hex'), nonce
+    FROM sweep_batches WHERE resolved_at IS NULL AND chain_id = <CHAIN_ID>"
+  # Pick the ARN in `terraform output -json kms_key_arns` whose
+  # `cast wallet address --aws` is that address, then:
+  export AWS_KMS_KEY_ID="<that key's ARN>"
   cast send "$(cast wallet address --aws)" --value 0 --nonce <NONCE> \
     --gas-price <HIGHER_FEE> --aws --rpc-url "$MONAD_RPC_URL"
   ```
+
+- **Signed outside the pool**: an open batch's `signer` is not one of the
+  configured keys (the key was removed from `sweep_signer_count`, or the row
+  predates the pool and carries the zero address). Restore the key, or set
+  the row's `signer` to the address that signed it, or resolve the batch by
+  hand as above with that key; the worker retries every pass.
 
 - **No outcome for deposit request**: the finalized receipt of the helper transaction
   carries no event for a deposit request it should contain. This is an invariant
