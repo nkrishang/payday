@@ -1009,6 +1009,11 @@ impl Indexer {
                 }
                 Err(error) => {
                     warn!(signer = %signer, error = %error, "sweep submission failed");
+                    // Advance past the failed signer too: whatever it claimed
+                    // it released with backoff, so on the next pass the queue
+                    // must be offered to the healthy signers behind it, not
+                    // handed back to the one that just failed to sign.
+                    self.sweep_cursor.store(index + 1, Ordering::Relaxed);
                     report.push(Some(signer), error);
                 }
             }
@@ -1570,6 +1575,8 @@ impl Indexer {
 
     /// Queue depth, relay state, and every pool signer's balance: one
     /// `eth_getBalance` per signer, at most every `SWEEP_HEALTH_INTERVAL`.
+    /// A balance read that fails is logged and costs only its own signer's
+    /// entry; the pass proceeds on the rest.
     pub(crate) async fn report_sweep_health(&self) -> Result<Vec<SignerHealth>, IndexerError> {
         let stats = self.repo.sweep_queue_stats(self.cfg.chain_id.0).await?;
         let relay = self.withdrawals.relay_stats(self.cfg.chain_id.0).await?;
@@ -1581,12 +1588,16 @@ impl Indexer {
         let balances = join_all(pool.iter().map(|&signer| self.chain.signer_balance(signer))).await;
         let mut health = Vec::with_capacity(pool.len());
         for (signer, balance) in pool.into_iter().zip(balances) {
-            let balance = balance?;
-            health.push(SignerHealth {
-                signer,
-                balance,
-                low: balance < self.cfg.signer_low_balance_wei,
-            });
+            match balance {
+                Ok(balance) => health.push(SignerHealth {
+                    signer,
+                    balance,
+                    low: balance < self.cfg.signer_low_balance_wei,
+                }),
+                Err(error) => {
+                    error!(%signer, %error, "failed to read sweep signer balance");
+                }
+            }
         }
         let balances = health
             .iter()
@@ -1847,6 +1858,10 @@ pub(crate) mod tests {
         pub(crate) fee_requests: usize,
         /// Balance overrides per signer; a missing entry is one native token.
         pub(crate) balances: HashMap<Address, U256>,
+        /// Signers whose `eth_getBalance` fails, for health isolation tests.
+        pub(crate) balance_errors: HashSet<Address>,
+        /// Signers whose signing fails, for rotation isolation tests.
+        pub(crate) prepare_errors: HashSet<Address>,
         settled: HashMap<Address, bool>,
         settlement_events: HashMap<Address, SettlementEvent>,
         /// Blocks from which each payment's settlement event exists: ranges
@@ -2020,6 +2035,11 @@ pub(crate) mod tests {
         }
 
         async fn signer_balance(&self, signer: Address) -> Result<U256, ChainError> {
+            if self.state.lock().unwrap().balance_errors.contains(&signer) {
+                return Err(ChainError::Transient(format!(
+                    "balance read throttled for {signer}"
+                )));
+            }
             Ok(self
                 .state
                 .lock()
@@ -2048,6 +2068,11 @@ pub(crate) mod tests {
             let mut state = self.state.lock().unwrap();
             if !state.signers.contains(&signer) {
                 return Err(ChainError::Transient(format!("no key for signer {signer}")));
+            }
+            if state.prepare_errors.contains(&signer) {
+                return Err(ChainError::Transient(format!(
+                    "signing failed for {signer}"
+                )));
             }
             state.next_transaction_id += 1;
             let tx_hash = B256::with_last_byte(state.next_transaction_id);
@@ -2080,6 +2105,11 @@ pub(crate) mod tests {
             let mut state = self.state.lock().unwrap();
             if !state.signers.contains(&signer) {
                 return Err(ChainError::Transient(format!("no key for signer {signer}")));
+            }
+            if state.prepare_errors.contains(&signer) {
+                return Err(ChainError::Transient(format!(
+                    "signing failed for {signer}"
+                )));
             }
             state.next_transaction_id += 1;
             let tx_hash = B256::with_last_byte(state.next_transaction_id);
@@ -4850,6 +4880,73 @@ pub(crate) mod tests {
                     low: true,
                 },
             ]
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_failing_signer_does_not_hold_the_head_of_the_queue(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with_signers(2).with(|state| {
+            state.prepare_errors.insert(mock_signer(0));
+        }));
+        let worker = indexer_with(
+            &pool,
+            chain.clone(),
+            IndexerConfig {
+                // Real deployments back off in hours; a zero backoff would
+                // hand the row straight back within the same pass and hide
+                // the rotation bug this test pins.
+                sweep_backoff_base_secs: 3600.0,
+                sweep_backoff_cap_secs: 3600.0,
+                ..config()
+            },
+        );
+
+        // The head of the rotation claims the only invoice and fails to sign
+        // it; the released row backs off, so the healthy signer idles.
+        assert!(worker.sweep_tick().await.is_err());
+        assert!(chain.submissions().is_empty());
+
+        // Once the backoff lapses, the pass must start behind the failed
+        // signer: the healthy one takes the work.
+        sqlx::query("UPDATE invoices SET last_attempt_at = now() - interval '12 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0].signer,
+            mock_signer(1),
+            "the queue moves to the healthy signer, not back to the failed one"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_failed_balance_read_does_not_hide_the_other_signers(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(7).with_signers(2).with(|state| {
+            state.balance_errors.insert(mock_signer(0));
+            state.balances.insert(mock_signer(1), U256::ZERO);
+        }));
+        let worker = indexer_with(
+            &pool,
+            chain,
+            IndexerConfig {
+                signer_low_balance_wei: U256::from(1),
+                ..config()
+            },
+        );
+        let health = worker.report_sweep_health().await.unwrap();
+        assert_eq!(
+            health,
+            vec![SignerHealth {
+                signer: mock_signer(1),
+                balance: U256::ZERO,
+                low: true,
+            }],
+            "the failed read costs only its own signer's entry"
         );
     }
 }

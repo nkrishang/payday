@@ -532,10 +532,30 @@ not custody USDC; they pay gas to invoke the permissionless factory.
 
 Raising `sweep_signer_count` adds keys at the end of the pool; lowering it
 is refused by Terraform's `prevent_destroy`, and a key removed from the
-pool while it owns an open batch halts the sweep worker until that row is
-resolved by hand (`docs/runbooks/stuck-deposit-request.md`). Deploy a
-release that changes the pool with no sweep batch open, or set the open
-row's `signer` column to the address that signed it.
+pool while it owns an open batch or withdrawal step halts the sweep worker
+until that row is resolved by hand (`docs/runbooks/stuck-deposit-request.md`,
+`docs/runbooks/stuck-withdrawal.md`). Deploy a release that changes the pool
+with no sweep batch or withdrawal relay step open, or set the open batch's
+`signer` / open step's `step_signer` column to the address that signed it.
+
+### Deploying the signer pool (0002) to a database with real data
+
+Migration `0002_signer_pool.sql` is the one post-freeze migration that is
+*not* compatible with the previous image: batch submissions from the old
+indexer omit `signer` (whose default the migration drops) and step
+submissions omit `step_signer`, so an old task running against the migrated
+schema fails on every submission. Deploy it in a coordinated window, in this
+order:
+
+1. Stop the indexer task (`ecs update-service --desired-count 0`) and wait
+   for any open sweep batch or withdrawal step to resolve — a row open when
+   the migration applies gets the zero address and halts the new worker
+   until an operator sets its `signer`/`step_signer` column by hand.
+2. Deploy the new API image; its startup runs the migration. The old indexer
+   must already be stopped so it cannot write the columns the migration is
+   about to require.
+3. Fund the new signer addresses on every chain (above), then set the
+   indexer service's desired count back.
 
 ### Attestation signer
 
@@ -729,7 +749,8 @@ database, which the staging deploy does on its own
 ([staging.md](staging.md)) and production does as in §7. Once real data
 exists, the baseline is frozen and a change is a new numbered file,
 reviewed for compatibility with the image still running while the new one
-starts.
+starts. The exception so far is `0002_signer_pool.sql`, which the previous
+image cannot write against; §8 documents its coordinated deploy window.
 
 #### Rolling back after a new migration has applied
 
@@ -745,6 +766,14 @@ to it. Do not delete the row from `_sqlx_migrations` to force the old image
 to start: its notion of the schema is then missing an index it never reads,
 and the next migration to assume the table shape will not be the last thing
 to disagree.
+
+For `0002_signer_pool.sql` the second option is only half a rollback: an
+image built from the pre-pool commit runs against the migrated schema, but
+its submissions omit the `signer`/`step_signer` columns, so it can serve
+reads yet cannot submit a sweep batch or relay step. If a rollback is
+required while that migration is the newest one, roll the application back
+and accept a paused sweeper, or repair the open rows by hand; the durable
+rollback is rolling forward to the post-migration commit.
 
 #### Concurrent index builds
 

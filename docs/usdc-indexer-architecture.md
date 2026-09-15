@@ -513,12 +513,19 @@ pass of the sweep worker:
    chain; an open row whose signer is not in the pool, or a signer owning
    both a batch and a step, halts the pass as a configuration error.
 
-Per pass this costs two database reads when idle, one receipt read per open
-row (issued concurrently, still under the per-chain RPC pacer), one
-`eth_feeHistory` shared by every signature of the pass, and per submission
-one nonce read, one KMS `Sign`, and one `eth_sendRawTransaction`. Health
-reads one `eth_getBalance` per signer every five minutes and warns per
-signer below the chain's low-balance level.
+The open-lane discovery of a pass is two database reads; a pass also runs
+several small statements that cost no RPC (stale-claim expiry, the open-row
+reads, the next relayable leg, an empty claim, the attestation queue, the
+status write). Per open row it reads one receipt per submitted hash until
+one is mined (issued concurrently, still under the per-chain RPC pacer), and
+a mined receipt costs the finality re-reads and header checks of
+classification. Per pass one `eth_feeHistory` serves every signature of the
+pass, as long as the estimate succeeds — a failed estimate leaves the cache
+empty and the next signer that needs one reads it again — and per submission
+there is one nonce read, one KMS `Sign`, and one `eth_sendRawTransaction`.
+Health reads one `eth_getBalance` per signer every five minutes and warns per
+signer below the chain's low-balance level; a balance read that fails costs
+only its own signer's entry.
 
 Each exact signed transaction is persisted in its
 `sweep_batches` outbox before broadcast, so a crash can only cause an

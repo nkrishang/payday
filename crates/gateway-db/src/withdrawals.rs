@@ -2040,4 +2040,48 @@ mod tests {
         assert_eq!(open[0].id, transfer_b);
         let _ = account_a;
     }
+
+    /// An upgrade test, not a fresh-schema one: the database starts at
+    /// migration 0001 with a relay step already open, exactly the state a
+    /// production deploy has when 0002 applies. The rewritten
+    /// `withdrawal_legs_step_complete` constraint requires `step_signer` to
+    /// be null exactly when `step_chain_id` is, so without the backfill the
+    /// migration fails on every open step and takes both services down.
+    #[sqlx::test(migrations = false)]
+    async fn migration_0002_backfills_the_signer_of_a_step_open_before_the_pool(
+        pool: sqlx::PgPool,
+    ) {
+        crate::MIGRATOR.run_to(1, &pool).await.unwrap();
+
+        let repo = WithdrawalRepository::new(pool.clone());
+        let (account, transfer) = authorized_transfer_leg(&pool, &repo, "pre-pool").await;
+        // Open the relay step the way the pre-pool code did: no signer column
+        // exists yet to record the owner in.
+        sqlx::query(
+            r#"UPDATE withdrawal_legs SET state = 'relaying', step_chain_id = 8453,
+               step_nonce = 7, step_gas_limit = 90000,
+               step_max_fee_per_gas = '100', step_max_priority_fee_per_gas = '10',
+               step_tx_hashes = ARRAY['\xa1'::bytea],
+               step_raw_transactions = ARRAY['\xa1'::bytea],
+               step_submitted_at = now()
+               WHERE id = $1"#,
+        )
+        .bind(transfer)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::MIGRATOR.run(&pool).await.unwrap();
+        let signer: Vec<u8> =
+            sqlx::query_scalar("SELECT step_signer FROM withdrawal_legs WHERE id = $1")
+                .bind(transfer)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            signer, [0u8; 20],
+            "the open step gets the zero-address sentinel, which halts the worker until an operator names the signer that submitted it"
+        );
+        let _ = account;
+    }
 }

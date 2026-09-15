@@ -3,10 +3,11 @@
 -- signed it, and the open-row uniqueness moves from "per chain" to "per
 -- chain and signer".
 --
--- A batch open while this migration runs gets the zero address; the worker
--- halts on it ("signed outside the pool") until an operator sets the column
--- to the address that signed it or resolves the row by hand. Deploy with no
--- open batch (docs/production-runbook.md) and nothing needs doing.
+-- A batch or relay step open while this migration runs gets the zero
+-- address; the worker halts on it ("signed outside the pool") until an
+-- operator sets the column to the address that signed it or resolves the
+-- row by hand. Deploy with no open batch or step
+-- (docs/production-runbook.md) and nothing needs doing.
 
 ALTER TABLE sweep_batches
     ADD COLUMN signer BYTEA NOT NULL DEFAULT '\x0000000000000000000000000000000000000000',
@@ -17,6 +18,11 @@ DROP INDEX sweep_batches_open;
 CREATE UNIQUE INDEX sweep_batches_open ON sweep_batches (chain_id, signer) WHERE resolved_at IS NULL;
 
 ALTER TABLE withdrawal_legs ADD COLUMN step_signer BYTEA;
+-- An open step predates the pool and has no owner recorded: backfill the
+-- same sentinel the batches get, before the rewritten constraint below
+-- would reject it (step_chain_id set, step_signer null).
+UPDATE withdrawal_legs SET step_signer = '\x0000000000000000000000000000000000000000'
+    WHERE step_chain_id IS NOT NULL;
 ALTER TABLE withdrawal_legs DROP CONSTRAINT withdrawal_legs_step_complete;
 ALTER TABLE withdrawal_legs ADD CONSTRAINT withdrawal_legs_step_complete CHECK (
     (step_chain_id IS NULL) = (step_signer IS NULL)
