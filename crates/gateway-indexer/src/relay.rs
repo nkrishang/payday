@@ -738,7 +738,7 @@ impl Indexer {
                 .unwrap_or(u64::MAX);
         finalized
             .saturating_sub(blocks_since)
-            .max(self.cfg.usdc_start_block)
+            .max(self.cfg.start_block)
     }
 
     /// A reverted step whose obligation survives is retried with a backoff;
@@ -891,6 +891,7 @@ mod tests {
             account_id: account,
             idempotency_key: "k".into(),
             wallet_address: WALLET.to_checksum(None),
+            currency: "USDC".into(),
             destination_chain_id: destination,
             destination_address: DESTINATION.to_checksum(None),
             legs: vec![leg],

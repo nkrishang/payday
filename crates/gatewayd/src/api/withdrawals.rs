@@ -1,16 +1,22 @@
-//! Withdrawals: the merchant's whole USDC balance across every supported
-//! network, moved to one address they name.
+//! Withdrawals: the merchant's whole balance in one currency, moved to one
+//! address they name.
 //!
 //! Prepare, sign, submit, poll. `POST /v1/withdrawals` reads the Payday
-//! wallet's balance on every chain and returns one leg per non-zero balance,
-//! each with the EIP-712 typed data the merchant must sign (an EIP-3009
-//! authorization under that chain's USDC; see
+//! wallet's balance in the currency on every chain serving it and returns
+//! one leg per non-zero balance, each with the EIP-712 typed data the
+//! merchant must sign (an EIP-3009 authorization under that chain's token
+//! contract; see
 //! `gateway_core::withdrawal_authorization`). `POST …/authorizations` takes
 //! the signatures, verified offline against the wallet. From then on
 //! `gateway-indexer` relays: a same-chain `transferWithAuthorization`, or
 //! the forwarder's CCTP burn and, once Circle attests, the mint on the
 //! destination chain. The merchant's signature fixes where every leg's
 //! funds may land; Payday pays gas and can redirect nothing.
+//!
+//! Only USDC bridges: CCTP burns and mints USDC alone, at exactly 1:1. A
+//! withdrawal in any other currency moves the destination chain's balance
+//! and nothing else; a balance on another chain is withdrawn separately, to
+//! an address on that chain, so the merchant is never quoted a rate.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -23,8 +29,8 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::{Extension, Json as AxumJson};
 use gateway_core::{
-    AuthorizationKind, AuthorizationTypedData, ChainDto, ChainRegistry, USDC_DECIMALS, UsdcDomain,
-    WithdrawalAuthorization, WithdrawalId, WithdrawalLegId, bridge_nonce, chain_name,
+    AuthorizationKind, AuthorizationTypedData, ChainDto, ChainRegistry, Currency, TokenDomain,
+    TokenDto, WithdrawalAuthorization, WithdrawalId, WithdrawalLegId, bridge_nonce, chain_name,
     native_symbol, rfc3339, verify_authorization,
 };
 use gateway_db::{
@@ -50,6 +56,9 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWithdrawalRequest {
+    /// `USDC` (the default) or `USDT`: the one currency the withdrawal moves.
+    #[serde(default)]
+    currency: Option<String>,
     destination: DestinationRequest,
 }
 
@@ -93,6 +102,8 @@ pub struct WithdrawalResponse {
     status: &'static str,
     /// The wallet every leg is signed from.
     wallet_address: String,
+    /// The currency every leg moves.
+    currency: String,
     destination: DestinationResponse,
     legs: Vec<LegResponse>,
     created_at: String,
@@ -114,6 +125,8 @@ pub struct LegResponse {
     /// `bridge` when they cross through CCTP.
     kind: &'static str,
     source_chain: ChainDto,
+    /// The contract the leg is signed under: the currency on the source chain.
+    token: TokenDto,
     amount: String,
     amount_base_units: String,
     state: &'static str,
@@ -170,6 +183,15 @@ pub async fn create(
             "Idempotency-Key must be 1 to {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
         )));
     }
+    let currency = match request.currency.as_deref().map(str::trim) {
+        None | Some("") => Currency::Usdc,
+        Some(code) => code
+            .parse::<Currency>()
+            .map_err(|_| ApiError::invalid_request("currency must be USDC or USDT"))?,
+    };
+    if state.networks.networks(currency).is_empty() {
+        return Err(ApiError::unsupported_currency(currency));
+    }
     let destination_chain_id = request
         .destination
         .chain_id
@@ -182,6 +204,16 @@ pub async fn create(
                 "destination.chain_id must be one of this deployment's networks",
             )
         })?;
+    if state
+        .networks
+        .token(destination_chain_id, currency)
+        .is_none()
+    {
+        return Err(ApiError::invalid_request(format!(
+            "destination.chain_id must be a network serving {currency}; {} does not",
+            chain_name(destination_chain_id)
+        )));
+    }
     let destination = Address::from_str(request.destination.address.trim()).map_err(|error| {
         ApiError::invalid_request(format!("invalid destination.address: {error}"))
     })?;
@@ -207,26 +239,44 @@ pub async fn create(
         .find_by_idempotency_key(account, &idempotency_key)
         .await?
     {
-        return replay(&state, existing, destination_chain_id, &destination_address).await;
+        return replay(
+            &state,
+            existing,
+            currency,
+            destination_chain_id,
+            &destination_address,
+        )
+        .await;
     }
 
     let reader = state.chain_reader()?;
-    let balances = balances(&state.networks, reader.as_ref(), wallet).await?;
+    let balances = balances(&state.networks, reader.as_ref(), currency, wallet).await?;
     let legs = plan_legs(
         &state.networks,
         reader.as_ref(),
+        currency,
         &balances,
         destination_chain_id,
         destination,
     )?;
     if legs.is_empty() {
-        return Err(ApiError::nothing_to_withdraw());
+        // A currency without a bridge may still sit on other chains: name
+        // them, so the merchant withdraws each to an address there.
+        let elsewhere: Vec<&str> = balances
+            .iter()
+            .filter(|(chain_id, _, balance)| {
+                !balance.is_zero() && *chain_id != destination_chain_id
+            })
+            .map(|(chain_id, _, _)| chain_name(*chain_id))
+            .collect();
+        return Err(ApiError::nothing_to_withdraw(currency, &elsewhere));
     }
     let input = NewWithdrawal {
         id: Uuid::now_v7(),
         account_id: account,
         idempotency_key: idempotency_key.clone(),
         wallet_address: wallet.to_checksum(None),
+        currency: currency.code().into(),
         destination_chain_id,
         destination_address: destination_address.clone(),
         legs,
@@ -241,7 +291,14 @@ pub async fn create(
                 .find_by_idempotency_key(account, &idempotency_key)
                 .await?
                 .ok_or_else(|| ApiError::internal("withdrawal vanished after conflict"))?;
-            return replay(&state, existing, destination_chain_id, &destination_address).await;
+            return replay(
+                &state,
+                existing,
+                currency,
+                destination_chain_id,
+                &destination_address,
+            )
+            .await;
         }
         Err(CreateWithdrawalError::Database(error)) => return Err(error.into()),
     }
@@ -261,10 +318,12 @@ pub async fn create(
 async fn replay(
     state: &AppState,
     existing: DbWithdrawal,
+    currency: Currency,
     destination_chain_id: u64,
     destination_address: &str,
 ) -> Result<(StatusCode, HeaderMap, AxumJson<WithdrawalResponse>), ApiError> {
-    if existing.destination_chain_id as u64 != destination_chain_id
+    if existing.currency != currency.code()
+        || existing.destination_chain_id as u64 != destination_chain_id
         || existing.destination_address != destination_address
     {
         return Err(ApiError::idempotency_conflict());
@@ -455,17 +514,22 @@ pub async fn cancel(
 
 // --- Planning ---
 
-/// The wallet's USDC on every registered chain, read together.
+/// The wallet's balance in `currency` on every chain serving it, read
+/// together: `(chain_id, token, balance)` in registry order.
 async fn balances(
     networks: &ChainRegistry,
     reader: &dyn ChainReads,
+    currency: Currency,
     wallet: Address,
-) -> Result<Vec<(u64, U256)>, ApiError> {
-    let reads = networks.chains().iter().map(|chain| async move {
-        reader
-            .usdc_balance(chain.chain_id, wallet)
-            .await
-            .map(|balance| (chain.chain_id, balance))
+) -> Result<Vec<(u64, Address, U256)>, ApiError> {
+    let reads = networks.chains().iter().filter_map(|chain| {
+        let token = chain.token(currency)?.address;
+        Some(async move {
+            reader
+                .balance(chain.chain_id, token, wallet)
+                .await
+                .map(|balance| (chain.chain_id, token, balance))
+        })
     });
     futures::future::try_join_all(reads).await.map_err(|error| {
         tracing::warn!(%error, "withdrawal balance read failed");
@@ -473,22 +537,27 @@ async fn balances(
     })
 }
 
-/// One leg per non-zero balance, in registry order, with the authorization
-/// each will need.
+/// One leg per non-zero balance the withdrawal can move, in registry
+/// order, with the authorization each will need. A balance on the
+/// destination chain is a transfer leg. A balance elsewhere is a bridge leg
+/// when the currency has a 1:1 bridge (CCTP, USDC only); otherwise it is
+/// left where it is, for a withdrawal to an address on that chain.
 fn plan_legs(
     networks: &ChainRegistry,
     reader: &dyn ChainReads,
-    balances: &[(u64, U256)],
+    currency: Currency,
+    balances: &[(u64, Address, U256)],
     destination_chain_id: u64,
     destination: Address,
 ) -> Result<Vec<NewWithdrawalLeg>, ApiError> {
     let valid_before = unix_now() + AUTHORIZATION_TTL.as_secs();
+    let bridges = currency.cross_chain_settlement().is_some();
     let mut legs = Vec::new();
-    for (position, &(chain_id, balance)) in balances.iter().enumerate() {
-        if balance.is_zero() {
+    for &(chain_id, token, balance) in balances {
+        if balance.is_zero() || (chain_id != destination_chain_id && !bridges) {
             continue;
         }
-        let domain = reader.usdc_domain(chain_id).ok_or_else(|| {
+        let domain = reader.domain(chain_id, token).ok_or_else(|| {
             ApiError::withdrawals_unavailable(format!(
                 "{} is not readable on this deployment",
                 chain_name(chain_id)
@@ -522,7 +591,8 @@ fn plan_legs(
             if balance > gateway_core::MAX_CCTP_BURN_PER_MESSAGE {
                 return Err(ApiError::withdrawal_exceeds_bridge_limit(
                     chain_name(chain_id),
-                    &format_units(balance, USDC_DECIMALS).unwrap_or_else(|_| balance.to_string()),
+                    &format_units(balance, currency.decimals())
+                        .unwrap_or_else(|_| balance.to_string()),
                 ));
             }
             let salt = B256::from(rand::random::<[u8; 32]>());
@@ -535,7 +605,7 @@ fn plan_legs(
         };
         legs.push(NewWithdrawalLeg {
             id: Uuid::now_v7(),
-            position: position as i16,
+            position: legs.len() as i16,
             kind,
             source_chain_id: chain_id,
             amount: balance,
@@ -558,7 +628,7 @@ fn plan_legs(
 fn leg_authorization(
     leg: &DbWithdrawalLeg,
     wallet: Address,
-) -> Result<(WithdrawalAuthorization, UsdcDomain), ApiError> {
+) -> Result<(WithdrawalAuthorization, TokenDomain), ApiError> {
     let malformed = |field: &str| ApiError::internal(format!("stored leg {field} is malformed"));
     let to = Address::from_str(&leg.authorization_to).map_err(|_| malformed("payee"))?;
     let token = Address::from_str(&leg.token_address).map_err(|_| malformed("token"))?;
@@ -573,7 +643,7 @@ fn leg_authorization(
         valid_before: leg.valid_before,
         nonce: leg.nonce,
     };
-    let domain = UsdcDomain {
+    let domain = TokenDomain {
         name: leg.domain_name.clone(),
         version: leg.domain_version.clone(),
         chain_id: leg.source_chain_id,
@@ -587,6 +657,7 @@ pub(crate) fn response(
     row: DbWithdrawal,
     legs: Vec<DbWithdrawalLeg>,
 ) -> WithdrawalResponse {
+    let currency = row.currency.parse::<Currency>().unwrap_or(Currency::Usdc);
     let wallet = Address::from_str(&row.wallet_address).unwrap_or_default();
     let destination = Address::from_str(&row.destination_address).unwrap_or_default();
     let destination_domain = networks
@@ -610,13 +681,14 @@ pub(crate) fn response(
         id: WithdrawalId(row.id),
         status,
         wallet_address: row.wallet_address.clone(),
+        currency: currency.code().into(),
         destination: DestinationResponse {
             chain: chain_dto(row.destination_chain_id as u64),
             address: row.destination_address.clone(),
         },
         legs: legs
             .into_iter()
-            .map(|leg| leg_response(leg, wallet, destination, destination_domain))
+            .map(|leg| leg_response(leg, currency, wallet, destination, destination_domain))
             .collect(),
         created_at: rfc3339(row.created_at),
         completed_at: row.completed_at.map(rfc3339),
@@ -627,6 +699,7 @@ pub(crate) fn response(
 
 fn leg_response(
     leg: DbWithdrawalLeg,
+    currency: Currency,
     wallet: Address,
     destination: Address,
     destination_domain: Option<u32>,
@@ -654,7 +727,12 @@ fn leg_response(
         id: WithdrawalLegId(leg.id),
         kind: leg.kind.as_str(),
         source_chain: chain_dto(leg.source_chain_id),
-        amount: format_units(leg.amount, USDC_DECIMALS).unwrap_or_default(),
+        token: TokenDto {
+            symbol: currency.symbol_on(leg.source_chain_id).into(),
+            address: leg.token_address.clone(),
+            decimals: currency.decimals(),
+        },
+        amount: format_units(leg.amount, currency.decimals()).unwrap_or_default(),
         amount_base_units: leg.amount.to_string(),
         state: leg.state.as_str(),
         authorization,

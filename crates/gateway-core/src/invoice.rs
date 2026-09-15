@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use crate::{
     ATTRIBUTION_VERSION, Amount, AttributionError, BeneficiaryAddress, CANONICALIZATION,
-    CanonicalIssuanceSnapshot, ChainId, NetworkTerms, PayerAttestationError, PayerAttestationScope,
-    PayerWalletAttestation, PaymentAddress, RecoveryAddress, SNAPSHOT_SCHEMA, Salt,
-    derive_attribution, predict_payment_address, recompute_salt, verify_payer_attestation,
+    CanonicalIssuanceSnapshot, ChainId, Currency, NetworkTerms, PayerAttestationError,
+    PayerAttestationScope, PayerWalletAttestation, PaymentAddress, RecoveryAddress,
+    SNAPSHOT_SCHEMA, Salt, derive_attribution, predict_payment_address, recompute_salt,
+    verify_payer_attestation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -191,6 +192,7 @@ impl Invoice {
     /// against terms nobody was paid under. No address exists yet: see
     /// [`Invoice::bind_payer_wallet`].
     pub fn issue(
+        currency: Currency,
         networks: &[NetworkTerms],
         beneficiary: BeneficiaryAddress,
         amount: Amount,
@@ -201,6 +203,7 @@ impl Invoice {
             snapshot.issuer.clone(),
             snapshot.bill_to.clone(),
             snapshot.payer_policy.clone(),
+            currency,
             networks,
             beneficiary,
             amount,
@@ -212,6 +215,8 @@ impl Invoice {
                 "canonicalization",
                 snapshot.canonicalization == CANONICALIZATION,
             ),
+            ("currency", snapshot.currency == expected.currency),
+            ("decimals", snapshot.decimals == expected.decimals),
             ("networks", snapshot.networks == expected.networks),
             (
                 "receiver_address",
@@ -255,6 +260,13 @@ impl Invoice {
             attribution_hash: attribution.attribution_hash,
             issuance_snapshot: snapshot,
         })
+    }
+
+    /// The currency the request is denominated in. Every issued snapshot
+    /// names one this build knows; the fallback only guards a row written by
+    /// a newer build, which the service does not otherwise handle.
+    pub fn currency(&self) -> Currency {
+        self.issuance_snapshot.currency().unwrap_or(Currency::Usdc)
     }
 
     /// The committed terms for `chain_id`, if the request may be paid there.
@@ -447,12 +459,14 @@ mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             networks,
             beneficiary,
             amount,
             expiration_timestamp,
         );
         Invoice::issue(
+            Currency::Usdc,
             networks,
             beneficiary,
             amount,
@@ -796,6 +810,7 @@ mod tests {
                 party("Acme"),
                 party("Globex"),
                 PayerPolicy::Permissionless,
+                Currency::Usdc,
                 &networks(),
                 beneficiary,
                 amount,
@@ -835,8 +850,15 @@ mod tests {
             }),
         ];
         for (field, snapshot) in mismatches {
-            let error = Invoice::issue(&networks(), beneficiary, amount, 1_900_000_000, snapshot)
-                .unwrap_err();
+            let error = Invoice::issue(
+                Currency::Usdc,
+                &networks(),
+                beneficiary,
+                amount,
+                1_900_000_000,
+                snapshot,
+            )
+            .unwrap_err();
             assert!(
                 matches!(error, AttributionError::SnapshotMismatch { field: f } if f == field),
                 "{field}: {error}"
@@ -847,13 +869,22 @@ mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             &[],
             beneficiary,
             amount,
             1_900_000_000,
         );
         assert!(matches!(
-            Invoice::issue(&[], beneficiary, amount, 1_900_000_000, empty).unwrap_err(),
+            Invoice::issue(
+                Currency::Usdc,
+                &[],
+                beneficiary,
+                amount,
+                1_900_000_000,
+                empty
+            )
+            .unwrap_err(),
             AttributionError::SnapshotMismatch { field: "networks" }
         ));
     }

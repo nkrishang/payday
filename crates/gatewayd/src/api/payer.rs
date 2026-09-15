@@ -207,10 +207,11 @@ pub(crate) fn payer_response(
         .filter(|_| unlocked && payable)
         .map(|binding| deposit_uri(binding, remaining));
     let chain_id = invoice.network().map(|network| network.chain_id.0);
+    let currency = invoice.currency();
     let networks: Vec<NetworkDto> = invoice
         .networks
         .iter()
-        .map(NetworkDto::from_terms)
+        .map(|network| NetworkDto::from_terms(network, currency))
         .collect();
     let payer_message = invoice.blocked_reason.as_ref().map(|_| {
         "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.".into()
@@ -242,6 +243,7 @@ pub(crate) fn payer_response(
         settlement_explorer_url,
         payer_message,
         content_unlocked: unlocked,
+        currency: unlocked.then(|| currency.code().to_string()),
         networks: unlocked.then_some(networks),
         chain: response.chain.filter(|_| unlocked),
         token: response.token.filter(|_| unlocked),
@@ -423,9 +425,9 @@ pub async fn attachment(
 mod tests {
     use alloy_primitives::{B256, U256, address};
     use gateway_core::{
-        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        NetworkTerms, Party, PayerAttestation, PayerPolicy, TokenAddress, sign_payer_attestation,
-        wallet_of,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, Currency, FactoryAddress,
+        Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy, TokenAddress,
+        sign_payer_attestation, wallet_of,
     };
 
     use super::*;
@@ -451,13 +453,21 @@ mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
             u64::MAX / 2,
         );
-        let mut invoice =
-            Invoice::issue(&networks, beneficiary, amount, u64::MAX / 2, snapshot).unwrap();
+        let mut invoice = Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            u64::MAX / 2,
+            snapshot,
+        )
+        .unwrap();
         let message = PayerAttestation::new(
             invoice.attribution_hash,
             wallet_of(&PAYER_KEY),

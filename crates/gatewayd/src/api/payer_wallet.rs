@@ -180,7 +180,7 @@ pub async fn challenge(
         Json(ChallengeResponse {
             payer_session: token,
             expires_at: rfc3339(challenge.expires_at),
-            chain: NetworkDto::from_terms(&network).chain,
+            chain: NetworkDto::from_terms(&network, invoice.currency()).chain,
             typed_data: message.typed_data(network.chain_id.0, network.factory.0),
         }),
     )

@@ -62,14 +62,18 @@ sol! {
 
 /// Recipients per `eth_getLogs` call: one OR-array in `topics[2]`. Every
 /// range scan is filtered by the watch list, so the cost of a range grows
-/// with the addresses Payday watches and never with the chain's USDC volume.
+/// with the addresses Payday watches and never with the chain's transfer volume.
 /// Providers accept thousands; 500 keeps every request small and matches the
 /// signal's subscription chunk.
 pub const LOG_FILTER_CHUNK: usize = 500;
 
-/// A validated USDC `Transfer` log with the metadata needed for durable ordering.
+/// A validated `Transfer` log from one of the chain's configured token
+/// contracts to a watched address, with the metadata needed for durable
+/// ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsdcTransfer {
+pub struct WatchedTransfer {
+    /// The contract that emitted it.
+    pub token: Address,
     pub block_number: u64,
     pub block_hash: B256,
     /// The containing block's timestamp, carried by the log itself
@@ -520,16 +524,16 @@ pub trait ChainClient: Send + Sync {
     /// Canonical header at an exact height; `Transient` if the node lacks it.
     async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError>;
 
-    /// Successful USDC `Transfer` logs in an inclusive block range addressed
-    /// to `recipients` (chunked into as many calls as the list needs). An
-    /// empty list fetches nothing.
-    async fn usdc_transfers(
+    /// Successful `Transfer` logs of any of `tokens` in an inclusive block
+    /// range addressed to `recipients` (chunked into as many calls as the
+    /// list needs). An empty list fetches nothing.
+    async fn token_transfers(
         &self,
-        token: Address,
+        tokens: &[Address],
         from_block: u64,
         to_block: u64,
         recipients: &[Address],
-    ) -> Result<Vec<UsdcTransfer>, ChainError>;
+    ) -> Result<Vec<WatchedTransfer>, ChainError>;
 
     /// Mined receipt for a helper transaction, or `None` while unmined.
     async fn sweep_receipt(
@@ -797,14 +801,14 @@ impl AlloyChainClient {
     /// validated but not yet timestamped.
     async fn transfer_logs(
         &self,
-        token: Address,
+        tokens: &[Address],
         from_block: u64,
         to_block: u64,
         recipients: &[Address],
     ) -> Result<Vec<Log>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
         let filter = Filter::new()
-            .address(token)
+            .address(tokens.to_vec())
             .event_signature(signature)
             .from_block(from_block)
             .to_block(to_block)
@@ -865,20 +869,20 @@ impl ChainClient for AlloyChainClient {
         self.header(BlockNumberOrTag::Number(number)).await
     }
 
-    async fn usdc_transfers(
+    async fn token_transfers(
         &self,
-        token: Address,
+        tokens: &[Address],
         from_block: u64,
         to_block: u64,
         recipients: &[Address],
-    ) -> Result<Vec<UsdcTransfer>, ChainError> {
+    ) -> Result<Vec<WatchedTransfer>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
         // An empty list is a scan for nothing; the caller fast-forwards
         // instead, but answer honestly if asked.
         let mut logs = Vec::new();
         for chunk in recipients.chunks(LOG_FILTER_CHUNK) {
             logs.extend(
-                self.transfer_logs(token, from_block, to_block, chunk)
+                self.transfer_logs(tokens, from_block, to_block, chunk)
                     .await?,
             );
         }
@@ -910,56 +914,57 @@ impl ChainClient for AlloyChainClient {
         logs.into_iter()
             .map(|log| {
                 let topics = log.topics();
-                if log.address() != token
+                if !tokens.contains(&log.address())
                     || log.removed
                     || topics.len() != 3
                     || topics[0] != signature
                 {
                     return Err(ChainError::Transient(
-                        "RPC returned a malformed USDC Transfer log".to_string(),
+                        "RPC returned a malformed Transfer log".to_string(),
                     ));
                 }
                 let data = &log.inner.data.data;
                 if data.len() != 32 {
                     return Err(ChainError::Transient(
-                        "RPC returned a USDC Transfer with invalid amount data".to_string(),
+                        "RPC returned a Transfer with invalid amount data".to_string(),
                     ));
                 }
 
                 let block_number = log.block_number.ok_or_else(|| {
-                    ChainError::Transient("USDC log missing block number".to_string())
+                    ChainError::Transient("log missing block number".to_string())
                 })?;
                 if !(from_block..=to_block).contains(&block_number) {
                     return Err(ChainError::Transient(format!(
-                        "RPC returned USDC log from block {block_number} outside requested range {from_block}..={to_block}"
+                        "RPC returned a log from block {block_number} outside requested range {from_block}..={to_block}"
                     )));
                 }
                 if !recipients.contains(&Address::from_word(topics[2])) {
                     return Err(ChainError::Transient(
-                        "RPC returned a USDC Transfer outside the requested recipient filter"
+                        "RPC returned a Transfer outside the requested recipient filter"
                             .to_string(),
                     ));
                 }
 
-                Ok(UsdcTransfer {
+                Ok(WatchedTransfer {
+                    token: log.address(),
                     block_number,
                     block_hash: log.block_hash.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing block hash".to_string())
+                        ChainError::Transient("log missing block hash".to_string())
                     })?,
                     block_timestamp: log
                         .block_timestamp
                         .or_else(|| timestamps.get(&block_number).copied())
                         .ok_or_else(|| {
-                            ChainError::Transient("USDC log missing block timestamp".to_string())
+                            ChainError::Transient("log missing block timestamp".to_string())
                         })?,
                     transaction_hash: log.transaction_hash.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing transaction hash".to_string())
+                        ChainError::Transient("log missing transaction hash".to_string())
                     })?,
                     transaction_index: log.transaction_index.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing transaction index".to_string())
+                        ChainError::Transient("log missing transaction index".to_string())
                     })?,
                     log_index: log.log_index.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing log index".to_string())
+                        ChainError::Transient("log missing log index".to_string())
                     })?,
                     sender: Address::from_word(topics[1]),
                     recipient: Address::from_word(topics[2]),

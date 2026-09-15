@@ -1,7 +1,7 @@
 //! Paying a deposit request from another chain, through Relay.
 //!
 //! The hosted checkout offers it once the address exists: the payer picks
-//! the chain their USDC is on, this service asks Relay for a quote whose
+//! the chain and stablecoin they hold, this service asks Relay for a quote whose
 //! recipient is the payment address and whose output is exactly the amount
 //! still due, and the page sends the quote's transactions from the attested
 //! wallet. The quote is made here, not in the browser, for two reasons:
@@ -16,8 +16,8 @@
 //!
 //! Routes (all under `/v1/payer/deposit-requests/{id}/relay`):
 //!
-//! - `GET  /chains`            the chains USDC may be paid from
-//! - `POST /quotes`            `{origin_chain_id}` → a quote and its steps
+//! - `GET  /chains`            the chains, and the stablecoins on them, a payer may pay from
+//! - `POST /quotes`            `{origin_chain_id, origin_token}` → a quote and its steps
 //! - `POST /quotes/{rli}/sent` `{transaction_hash}` → the payer view
 
 use std::str::FromStr;
@@ -27,12 +27,12 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use chrono::{Duration, Utc};
 use gateway_core::{
-    ChainRegistry, Invoice, PaymentBinding, RelayIntentId, RelayOriginChainDto,
-    RelayOriginChainsResponse, RelayQuoteResponse, RelayQuoteStepDto, RelayTransactionDto,
-    USDC_DECIMALS, rfc3339,
+    ChainRegistry, Currency, Invoice, PaymentBinding, RelayIntentId, RelayOriginChainDto,
+    RelayOriginChainsResponse, RelayOriginTokenDto, RelayQuoteResponse, RelayQuoteStepDto,
+    RelayTransactionDto, rfc3339,
 };
 use gateway_db::{MarkSent, NewRelayIntent};
-use gateway_relay::{QuoteRequest, RelayChain, RelayError};
+use gateway_relay::{QuoteRequest, RelayChain, RelayCurrency, RelayError};
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
@@ -50,8 +50,12 @@ pub const QUOTE_VALIDITY: Duration = Duration::minutes(15);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuoteBody {
-    /// Decimal chain id of the chain the payer's USDC is on.
+    /// Decimal chain id of the chain the payer pays from.
     pub origin_chain_id: String,
+    /// The contract the payer sends there: one of the chain's offered
+    /// `tokens`. Absent, the chain's USDC.
+    #[serde(default)]
+    pub origin_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -110,29 +114,61 @@ async fn payable(
     Ok((request, remaining))
 }
 
+/// The stablecoins a payer may send from a Relay chain: each currency this
+/// build knows that Relay's solvers take there. Where this deployment serves
+/// the currency on that chain too, the addresses must agree, since the
+/// registry names the issuer's contract and Relay must not be quoting a
+/// look-alike; a currency this deployment does not serve there (USDT on Base)
+/// is offered on Relay's word, which the quote and the receipt both check.
+fn origin_tokens(chain: &RelayChain, registry: &ChainRegistry) -> Vec<(Currency, RelayCurrency)> {
+    Currency::ALL
+        .into_iter()
+        .filter_map(|currency| {
+            let listed = chain.currency(currency.code())?;
+            match registry.token(chain.id, currency) {
+                Some(ours) if ours.address != listed.address => None,
+                _ => Some((currency, listed.clone())),
+            }
+        })
+        .collect()
+}
+
+fn origin_token_dto(currency: Currency, listed: &RelayCurrency) -> RelayOriginTokenDto {
+    RelayOriginTokenDto {
+        currency: currency.code().into(),
+        symbol: listed.symbol.clone(),
+        address: listed.address.to_checksum(None),
+        decimals: listed.decimals,
+    }
+}
+
 /// A Relay chain is offered as an origin only when this deployment serves it
-/// too: attribution needs the origin chain's own receipt, so a chain whose
-/// USDC is not the one configured here is never offered — and the quote
-/// route rejects it even if a caller bypasses the list.
+/// too: attribution needs the origin chain's own receipt. A chain with no
+/// stablecoin a payer could send is never offered — and the quote route
+/// rejects it even if a caller bypasses the list.
 fn origin_dto(chain: &RelayChain, registry: &ChainRegistry) -> Option<RelayOriginChainDto> {
-    let usdc = chain.usdc()?;
-    if registry.get(chain.id)?.usdc != usdc.address {
+    registry.get(chain.id)?;
+    let tokens: Vec<RelayOriginTokenDto> = origin_tokens(chain, registry)
+        .iter()
+        .map(|(currency, listed)| origin_token_dto(*currency, listed))
+        .collect();
+    if tokens.is_empty() {
         return None;
     }
     Some(RelayOriginChainDto {
         chain_id: chain.id.to_string(),
         name: chain.display_name.clone(),
         native_symbol: chain.native_symbol.clone(),
-        usdc_address: usdc.address.to_checksum(None),
+        tokens,
         explorer_url: chain.explorer_url.clone(),
         icon_url: chain.icon_url.clone(),
         rpc_url: chain.http_rpc_url.clone(),
     })
 }
 
-/// The chains a payer may pay this request from: every chain Relay takes
-/// USDC deposits on that this deployment also serves, except the request's
-/// own.
+/// The chains a payer may pay this request from: every chain Relay takes a
+/// known stablecoin on that this deployment also serves, except the
+/// request's own.
 pub async fn chains(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -150,8 +186,9 @@ pub async fn chains(
     Ok(Json(RelayOriginChainsResponse { chains }))
 }
 
-/// A quote for the amount still due, from the chosen chain's USDC, delivered
-/// to the payment address by Relay; recorded as a `quoted` intent.
+/// A quote for the amount still due, from the chosen stablecoin on the chosen
+/// chain, delivered to the payment address in the request's currency by
+/// Relay; recorded as a `quoted` intent.
 pub async fn quote(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -175,7 +212,24 @@ pub async fn quote(
         .and_then(|chain| origin_dto(chain, &state.networks).map(|dto| (chain, dto)))
         .ok_or_else(ApiError::relay_unsupported_origin)?;
     let (origin_chain, origin) = origin;
-    let origin_usdc = origin_chain.usdc().expect("origin_dto checked it").address;
+    let offered = origin_tokens(origin_chain, &state.networks);
+    let (origin_currency, origin_token) = match body.origin_token.as_deref().map(str::trim) {
+        None | Some("") => offered
+            .iter()
+            .find(|(currency, _)| *currency == Currency::Usdc)
+            .cloned()
+            .ok_or_else(ApiError::relay_unsupported_origin)?,
+        Some(text) => {
+            let wanted = alloy_primitives::Address::from_str(text)
+                .map_err(|_| ApiError::invalid_request("origin_token must be an address"))?;
+            offered
+                .iter()
+                .find(|(_, listed)| listed.address == wanted)
+                .cloned()
+                .ok_or_else(ApiError::relay_unsupported_origin)?
+        }
+    };
+    let origin_usdc = origin_token.address;
 
     let quote = relay
         .api()
@@ -246,16 +300,18 @@ pub async fn quote(
             expires_at,
         })
         .await?;
-    let human = |units: U256| {
-        alloy_primitives::utils::format_units(units, USDC_DECIMALS).unwrap_or_default()
+    let human = |units: U256, decimals: u8| {
+        alloy_primitives::utils::format_units(units, decimals).unwrap_or_default()
     };
+    let destination_decimals = request.invoice().currency().decimals();
     Ok(Json(RelayQuoteResponse {
         id: RelayIntentId(intent.id).to_string(),
         request_id: quote.request_id.to_string(),
         origin,
-        amount_in: human(quote.amount_in),
+        origin_token: origin_token_dto(origin_currency, &origin_token),
+        amount_in: human(quote.amount_in, origin_token.decimals),
         amount_in_base_units: quote.amount_in.to_string(),
-        amount_out: human(quote.amount_out),
+        amount_out: human(quote.amount_out, destination_decimals),
         amount_out_base_units: quote.amount_out.to_string(),
         relayer_fee_usd: quote.relayer_fee_usd,
         time_estimate_seconds: quote.time_estimate_secs,

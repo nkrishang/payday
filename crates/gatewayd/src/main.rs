@@ -82,7 +82,15 @@ async fn main() {
                 &aws,
                 config.rpc_url(onboarding_chain.chain_id),
                 onboarding_chain.chain_id,
-                onboarding_chain.usdc,
+                onboarding_chain
+                    .token(gateway_core::Currency::Usdc)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the onboarding chain {} does not serve USDC; the demo pays USDC",
+                            onboarding_chain.chain_id
+                        )
+                    })
+                    .address,
             )
             .await
             .unwrap_or_else(|error| panic!("{error}")),
@@ -185,7 +193,7 @@ async fn main() {
         config.rpc_url(chain_id).to_owned()
     })
     .await
-    .unwrap_or_else(|error| panic!("USDC domain read failed: {error}"));
+    .unwrap_or_else(|error| panic!("token domain read failed: {error}"));
     // Cross-chain payments through Relay need its API key on every quote;
     // without one the hosted checkout simply does not offer them.
     let relay: Option<Arc<dyn gateway_relay::RelayApi>> = match config.relay_api_key() {

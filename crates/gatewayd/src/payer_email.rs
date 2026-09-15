@@ -26,8 +26,10 @@ const RESEND_SEND_URL: &str = "https://api.resend.com/emails";
 pub struct DepositRequestEmail {
     pub issuer_name: String,
     pub payer_name: String,
-    /// Trimmed decimal USDC, as the API presents it.
+    /// Trimmed decimal amount, as the API presents it.
     pub amount: String,
+    /// The currency code the amount is in.
+    pub currency: String,
     pub heading: Option<String>,
     pub reference: Option<String>,
     pub expires_at: DateTime<Utc>,
@@ -38,12 +40,12 @@ impl DepositRequestEmail {
     pub fn subject(&self) -> String {
         match &self.heading {
             Some(heading) => format!(
-                "{} sent you a deposit request: {heading} ({} USDC)",
-                self.issuer_name, self.amount
+                "{} sent you a deposit request: {heading} ({} {})",
+                self.issuer_name, self.amount, self.currency
             ),
             None => format!(
-                "{} sent you a deposit request for {} USDC",
-                self.issuer_name, self.amount
+                "{} sent you a deposit request for {} {}",
+                self.issuer_name, self.amount, self.currency
             ),
         }
     }
@@ -59,8 +61,8 @@ impl DepositRequestEmail {
             format!("Hi {},", self.payer_name),
             String::new(),
             format!(
-                "{} has issued you a deposit request through Payday for {} USDC.",
-                self.issuer_name, self.amount
+                "{} has issued you a deposit request through Payday for {} {}.",
+                self.issuer_name, self.amount, self.currency
             ),
             String::new(),
         ];
@@ -70,7 +72,7 @@ impl DepositRequestEmail {
         if let Some(reference) = &self.reference {
             lines.push(format!("Reference: {reference}"));
         }
-        lines.push(format!("Amount: {} USDC", self.amount));
+        lines.push(format!("Amount: {} {}", self.amount, self.currency));
         lines.push(format!("Expires: {}", self.expires_at_text()));
         lines.push(String::new());
         lines.push(
@@ -95,6 +97,7 @@ impl DepositRequestEmail {
         let issuer = escape(&self.issuer_name);
         let payer = escape(&self.payer_name);
         let amount = escape(&self.amount);
+        let currency = escape(&self.currency);
         let url = escape(&self.deposit_url);
         let expires = escape(&self.expires_at_text());
         let mut rows = String::new();
@@ -104,12 +107,16 @@ impl DepositRequestEmail {
         if let Some(reference) = &self.reference {
             rows.push_str(&detail_row("Reference", &escape(reference), true));
         }
-        rows.push_str(&detail_row("Amount", &format!("{amount} USDC"), false));
+        rows.push_str(&detail_row(
+            "Amount",
+            &format!("{amount} {}", escape(&self.currency)),
+            false,
+        ));
         rows.push_str(&detail_row("Expires", &expires, false));
         let subject = escape(&self.subject());
         let preheader = escape(&format!(
-            "{} is requesting {} USDC. Review and pay from your wallet.",
-            self.issuer_name, self.amount
+            "{} is requesting {} {}. Review and pay from your wallet.",
+            self.issuer_name, self.amount, self.currency
         ));
 
         format!(
@@ -133,7 +140,7 @@ impl DepositRequestEmail {
 <tr><td style="background-color:#121311;border:1px solid #232420;border-radius:16px;padding:32px 28px;">
 <p style="margin:0 0 8px;font-size:13px;letter-spacing:0.04em;text-transform:uppercase;color:#8b8a84;">Deposit request</p>
 <h1 style="margin:0 0 20px;font-size:22px;line-height:1.3;font-weight:600;color:#f6f2ea;">{issuer} has sent you a deposit request</h1>
-<p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#b0afa9;">Hi {payer}, <span style="color:#f6f2ea;">{issuer}</span> is requesting <span style="color:#f6f2ea;">{amount} USDC</span> through Payday. Open the request to review the details and pay from your wallet.</p>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#b0afa9;">Hi {payer}, <span style="color:#f6f2ea;">{issuer}</span> is requesting <span style="color:#f6f2ea;">{amount} {currency}</span> through Payday. Open the request to review the details and pay from your wallet.</p>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;border-top:1px solid #232420;">
 {rows}</table>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;">
@@ -290,6 +297,7 @@ mod tests {
             issuer_name: "Acme <Studios> & Co".into(),
             payer_name: "Globex".into(),
             amount: "1250.5".into(),
+            currency: "USDC".into(),
             heading: Some("March retainer".into()),
             reference: Some("INV-001".into()),
             expires_at: DateTime::parse_from_rfc3339("2026-09-07T14:05:00Z")

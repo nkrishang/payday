@@ -79,20 +79,35 @@ pub struct CustomerPage {
 /// How many requests this customer has been billed, how much of that has
 /// actually been confirmed on chain, and how much is still outstanding on
 /// the ones still open. Base units, like an invoice's own
-/// `amount_base_units` — the caller scales for display.
+/// `amount_base_units`, one total per currency the customer has been asked
+/// for: two currencies never add up.
 #[derive(Debug, Serialize)]
 pub struct CustomerStats {
+    request_count: i64,
+    totals: Vec<CustomerCurrencyTotal>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CustomerCurrencyTotal {
+    currency: String,
     request_count: i64,
     collected_base_units: String,
     pending_base_units: String,
 }
 
-impl From<gateway_db::CustomerInvoiceStats> for CustomerStats {
-    fn from(row: gateway_db::CustomerInvoiceStats) -> Self {
+impl From<Vec<gateway_db::CustomerCurrencyStats>> for CustomerStats {
+    fn from(rows: Vec<gateway_db::CustomerCurrencyStats>) -> Self {
         Self {
-            request_count: row.request_count,
-            collected_base_units: row.collected_base_units,
-            pending_base_units: row.pending_base_units,
+            request_count: rows.iter().map(|row| row.request_count).sum(),
+            totals: rows
+                .into_iter()
+                .map(|row| CustomerCurrencyTotal {
+                    currency: row.currency,
+                    request_count: row.request_count,
+                    collected_base_units: row.collected_base_units,
+                    pending_base_units: row.pending_base_units,
+                })
+                .collect(),
         }
     }
 }

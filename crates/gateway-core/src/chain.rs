@@ -1,6 +1,8 @@
-//! The supported networks: their identity, their native USDC, and the
-//! contract generation deployed on each. Both services read the same
-//! `PAYDAY_CHAINS` JSON, so a chain is either supported everywhere or nowhere.
+//! The supported networks: their identity, the stablecoin contracts each
+//! carries, and the contract generation deployed on each. Both services read
+//! the same `PAYDAY_CHAINS` JSON, so a chain is either supported everywhere
+//! or nowhere, and a currency is served on a chain exactly when that chain's
+//! entry lists its contract.
 
 use std::fmt;
 
@@ -8,7 +10,7 @@ use alloy_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{FactoryAddress, TokenAddress};
+use crate::{Currency, FactoryAddress, TokenAddress};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChainId(pub u64);
@@ -20,9 +22,10 @@ impl fmt::Display for ChainId {
 }
 
 /// What a deposit request commits to about one network it may be paid on:
-/// the chain, the exact USDC contract, and the factory the address is
-/// derived through. A payer's attestation selects one of these; the address
-/// is derived from that one.
+/// the chain, the exact contract of the request's currency there, and the
+/// factory the address is derived through. A payer's attestation selects one
+/// of these; the address is derived from that one. A request has one
+/// currency, so no two of its networks share a chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkTerms {
     pub chain_id: ChainId,
@@ -42,21 +45,34 @@ pub enum FinalitySource {
     Latest,
 }
 
+/// One stablecoin contract on one chain: the issuer's canonical deployment
+/// there (Circle's native USDC proxy; Tether's USDT0 on Monad and Arbitrum),
+/// never a bridged look-alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenConfig {
+    pub currency: Currency,
+    pub address: Address,
+}
+
 /// One supported chain as `PAYDAY_CHAINS` describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChainConfig {
     pub chain_id: u64,
-    /// Circle's native USDC proxy on this chain.
-    pub usdc: Address,
+    /// The currencies served on this chain, each by its exact contract. A
+    /// currency absent here is simply not offered on this chain.
+    pub tokens: Vec<TokenConfig>,
     pub factory: Address,
     pub batch_sweeper: Address,
     /// keccak256 of the runtime bytecode at `factory`.
     pub factory_code_hash: B256,
     /// keccak256 of the runtime bytecode at `batch_sweeper`.
     pub batch_sweeper_code_hash: B256,
-    /// Where a fresh database starts indexing; never genesis.
-    pub usdc_start_block: u64,
+    /// Where a fresh database starts indexing this chain; never genesis. A
+    /// currency added to a live chain needs no earlier block: no request
+    /// could have offered it before the deployment that serves it.
+    pub start_block: u64,
     pub finality_source: FinalitySource,
     pub finality_confirmations: u64,
     /// Typical block interval; paces the wake catch-up after a signal.
@@ -72,8 +88,9 @@ pub struct ChainConfig {
     #[serde(default)]
     pub explorer_base_url: Option<String>,
     /// Circle's CCTP V2 on this chain and the withdrawal forwarder deployed
-    /// against it. Absent on a chain without CCTP (local Anvil): funds there
-    /// can only leave by a same-chain transfer.
+    /// against it. Absent on a chain without CCTP (local Anvil): USDC there
+    /// can only leave by a same-chain transfer. CCTP moves USDC alone; no
+    /// other currency ever has a bridge leg.
     #[serde(default)]
     pub cctp: Option<CctpConfig>,
 }
@@ -102,12 +119,33 @@ pub struct CctpConfig {
 }
 
 impl ChainConfig {
-    pub fn network(&self) -> NetworkTerms {
-        NetworkTerms {
+    /// The contract serving `currency` on this chain, if it is offered here.
+    pub fn token(&self, currency: Currency) -> Option<&TokenConfig> {
+        self.tokens.iter().find(|token| token.currency == currency)
+    }
+
+    /// The currency `address` serves on this chain, if it is one of ours.
+    pub fn currency_of(&self, address: Address) -> Option<Currency> {
+        self.tokens
+            .iter()
+            .find(|token| token.address == address)
+            .map(|token| token.currency)
+    }
+
+    /// Every contract address served on this chain, in registry order: the
+    /// indexer's log filter.
+    pub fn token_addresses(&self) -> Vec<Address> {
+        self.tokens.iter().map(|token| token.address).collect()
+    }
+
+    /// The terms a request in `currency` commits to on this chain, if the
+    /// chain serves it.
+    pub fn network(&self, currency: Currency) -> Option<NetworkTerms> {
+        self.token(currency).map(|token| NetworkTerms {
             chain_id: ChainId(self.chain_id),
-            token: TokenAddress(self.usdc),
+            token: TokenAddress(token.address),
             factory: FactoryAddress(self.factory),
-        }
+        })
     }
 
     /// The environment variable carrying this chain's RPC URL. The URL is a
@@ -132,6 +170,18 @@ pub enum ChainRegistryError {
     Duplicate(u64),
     #[error("PAYDAY_CHAINS chain {chain_id}: {field} must be positive")]
     NotPositive { chain_id: u64, field: &'static str },
+    #[error("PAYDAY_CHAINS chain {0}: tokens must list at least one currency")]
+    NoTokens(u64),
+    #[error("PAYDAY_CHAINS chain {chain_id}: {currency} is listed more than once")]
+    DuplicateCurrency { chain_id: u64, currency: Currency },
+    #[error("PAYDAY_CHAINS chain {chain_id}: {address} is listed under more than one currency")]
+    DuplicateToken { chain_id: u64, address: Address },
+    #[error(
+        "PAYDAY_CHAINS chain {0}: a cctp block needs USDC on the chain; CCTP burns and mints USDC alone"
+    )]
+    CctpWithoutUsdc(u64),
+    #[error("PAYDAY_CHAINS must list USDC on at least one chain")]
+    NoUsdc,
     #[error(
         "PAYDAY_CHAINS chain {chain_id}: factory {actual} differs from chain {first_chain_id}'s {expected}; \
          wrong-chain rescue only works when every chain deploys the factory at the same address"
@@ -172,6 +222,33 @@ impl ChainRegistry {
                     });
                 }
             }
+            if chain.tokens.is_empty() {
+                return Err(ChainRegistryError::NoTokens(chain.chain_id));
+            }
+            for (index, token) in chain.tokens.iter().enumerate() {
+                let earlier = &chain.tokens[..index];
+                if earlier.iter().any(|t| t.currency == token.currency) {
+                    return Err(ChainRegistryError::DuplicateCurrency {
+                        chain_id: chain.chain_id,
+                        currency: token.currency,
+                    });
+                }
+                if earlier.iter().any(|t| t.address == token.address) {
+                    return Err(ChainRegistryError::DuplicateToken {
+                        chain_id: chain.chain_id,
+                        address: token.address,
+                    });
+                }
+            }
+            if chain.cctp.is_some() && chain.token(Currency::Usdc).is_none() {
+                return Err(ChainRegistryError::CctpWithoutUsdc(chain.chain_id));
+            }
+        }
+        if !chains
+            .iter()
+            .any(|chain| chain.token(Currency::Usdc).is_some())
+        {
+            return Err(ChainRegistryError::NoUsdc);
         }
         // A payment address derives from the factory, and wrong-chain rescue
         // returns funds only because the factory sits at the *same* address
@@ -218,12 +295,49 @@ impl ChainRegistry {
         &self.chains[0]
     }
 
-    /// The terms every new deposit request commits to, in canonical order.
-    pub fn networks(&self) -> Vec<NetworkTerms> {
-        let mut networks: Vec<NetworkTerms> =
-            self.chains.iter().map(ChainConfig::network).collect();
+    /// The first chain serving USDC, in registry order: where the onboarding
+    /// demo pays. The registry refuses to exist without one.
+    pub fn first_usdc(&self) -> (&ChainConfig, &TokenConfig) {
+        self.chains
+            .iter()
+            .find_map(|chain| chain.token(Currency::Usdc).map(|token| (chain, token)))
+            .expect("ChainRegistry::new requires USDC on some chain")
+    }
+
+    /// The terms a new deposit request in `currency` commits to, in
+    /// canonical order: one entry per chain serving it. Empty when no chain
+    /// does.
+    pub fn networks(&self, currency: Currency) -> Vec<NetworkTerms> {
+        let mut networks: Vec<NetworkTerms> = self
+            .chains
+            .iter()
+            .filter_map(|chain| chain.network(currency))
+            .collect();
         networks.sort_by_key(|network| network.chain_id);
         networks
+    }
+
+    /// The currencies at least one chain serves, in code order.
+    pub fn currencies(&self) -> Vec<Currency> {
+        Currency::ALL
+            .into_iter()
+            .filter(|currency| {
+                self.chains
+                    .iter()
+                    .any(|chain| chain.token(*currency).is_some())
+            })
+            .collect()
+    }
+
+    /// The contract serving `currency` on `chain_id`, if both are served.
+    pub fn token(&self, chain_id: u64, currency: Currency) -> Option<&TokenConfig> {
+        self.get(chain_id).and_then(|chain| chain.token(currency))
+    }
+
+    /// The currency `address` serves on `chain_id`, if it is one of ours there.
+    pub fn currency_of(&self, chain_id: u64, address: Address) -> Option<Currency> {
+        self.get(chain_id)
+            .and_then(|chain| chain.currency_of(address))
     }
 
     pub fn explorer_base_url(&self, chain_id: u64) -> Option<&str> {
@@ -266,21 +380,32 @@ pub fn native_symbol(id: u64) -> &'static str {
 mod tests {
     use super::*;
 
+    const USDC: &str = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
+    const USDT: &str = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D";
+
     fn chain(id: u64) -> serde_json::Value {
         serde_json::json!({
             "chain_id": id,
-            "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+            "tokens": [{"currency": "USDC", "address": USDC}],
             "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
             "batch_sweeper": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
             "factory_code_hash": format!("0x{}", "ab".repeat(32)),
             "batch_sweeper_code_hash": format!("0x{}", "cd".repeat(32)),
-            "usdc_start_block": 100,
+            "start_block": 100,
             "finality_source": "finalized",
             "finality_confirmations": 0,
             "block_time_ms": 300,
             "log_range_size": 100,
             "explorer_base_url": "https://monadvision.com"
         })
+    }
+
+    fn with_usdt(mut chain: serde_json::Value) -> serde_json::Value {
+        chain["tokens"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"currency": "USDT", "address": USDT}));
+        chain
     }
 
     #[test]
@@ -302,10 +427,103 @@ mod tests {
             registry.explorer_base_url(143),
             Some("https://monadvision.com")
         );
-        let networks = registry.networks();
+        let networks = registry.networks(Currency::Usdc);
         assert_eq!(networks[0].chain_id, ChainId(143));
         assert_eq!(networks[1].chain_id, ChainId(8453));
-        assert_eq!(networks[0].token.0, registry.first().usdc);
+        assert_eq!(
+            networks[0].token.0,
+            registry.first().token(Currency::Usdc).unwrap().address
+        );
+        assert_eq!(registry.networks(Currency::Usdt), vec![]);
+        assert_eq!(registry.currencies(), vec![Currency::Usdc]);
+    }
+
+    #[test]
+    fn a_currency_is_offered_exactly_on_the_chains_listing_its_contract() {
+        // USDT on Monad only: a USDT request commits to that one network,
+        // while USDC still commits to both.
+        let json = serde_json::json!([with_usdt(chain(143)), chain(8453)]).to_string();
+        let registry = ChainRegistry::parse(&json).unwrap();
+        assert_eq!(registry.currencies(), vec![Currency::Usdc, Currency::Usdt]);
+        let usdt = registry.networks(Currency::Usdt);
+        assert_eq!(usdt.len(), 1);
+        assert_eq!(usdt[0].chain_id, ChainId(143));
+        assert_eq!(usdt[0].token.0, USDT.parse::<Address>().unwrap());
+        assert_eq!(registry.networks(Currency::Usdc).len(), 2);
+        assert_eq!(
+            registry.token(143, Currency::Usdt).map(|t| t.address),
+            Some(USDT.parse().unwrap())
+        );
+        assert_eq!(registry.token(8453, Currency::Usdt), None);
+        assert_eq!(
+            registry.currency_of(143, USDT.parse().unwrap()),
+            Some(Currency::Usdt)
+        );
+        assert_eq!(registry.currency_of(8453, USDT.parse().unwrap()), None);
+        assert_eq!(
+            registry.get(143).unwrap().token_addresses(),
+            vec![USDC.parse::<Address>().unwrap(), USDT.parse().unwrap()]
+        );
+        let (first, token) = registry.first_usdc();
+        assert_eq!((first.chain_id, token.currency), (143, Currency::Usdc));
+    }
+
+    #[test]
+    fn registry_rejects_token_lists_that_could_not_serve() {
+        let mut none = chain(143);
+        none["tokens"] = serde_json::json!([]);
+        assert_eq!(
+            ChainRegistry::parse(&serde_json::json!([none]).to_string()).unwrap_err(),
+            ChainRegistryError::NoTokens(143)
+        );
+        let twice = with_usdt(with_usdt(chain(143)));
+        assert_eq!(
+            ChainRegistry::parse(&serde_json::json!([twice]).to_string()).unwrap_err(),
+            ChainRegistryError::DuplicateCurrency {
+                chain_id: 143,
+                currency: Currency::Usdt
+            }
+        );
+        let mut same_address = chain(143);
+        same_address["tokens"] = serde_json::json!([
+            {"currency": "USDC", "address": USDC},
+            {"currency": "USDT", "address": USDC},
+        ]);
+        assert_eq!(
+            ChainRegistry::parse(&serde_json::json!([same_address]).to_string()).unwrap_err(),
+            ChainRegistryError::DuplicateToken {
+                chain_id: 143,
+                address: USDC.parse().unwrap()
+            }
+        );
+        // USDT alone: fine on one chain, but the registry needs USDC somewhere.
+        let mut usdt_only = chain(143);
+        usdt_only["tokens"] = serde_json::json!([{"currency": "USDT", "address": USDT}]);
+        assert_eq!(
+            ChainRegistry::parse(&serde_json::json!([usdt_only.clone()]).to_string()).unwrap_err(),
+            ChainRegistryError::NoUsdc
+        );
+        ChainRegistry::parse(&serde_json::json!([usdt_only.clone(), chain(8453)]).to_string())
+            .unwrap();
+        // CCTP is USDC's bridge: a chain without USDC cannot carry it.
+        usdt_only["cctp"] = serde_json::json!({
+            "domain": 15,
+            "token_messenger": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+            "message_transmitter": "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64",
+            "forwarder": "0x1111111111111111111111111111111111111111",
+            "forwarder_code_hash": format!("0x{}", "ef".repeat(32)),
+        });
+        assert_eq!(
+            ChainRegistry::parse(&serde_json::json!([usdt_only, chain(8453)]).to_string())
+                .unwrap_err(),
+            ChainRegistryError::CctpWithoutUsdc(143)
+        );
+        let mut unknown_currency = chain(143);
+        unknown_currency["tokens"] = serde_json::json!([{"currency": "AUSD", "address": USDT}]);
+        assert!(matches!(
+            ChainRegistry::parse(&serde_json::json!([unknown_currency]).to_string()).unwrap_err(),
+            ChainRegistryError::Json(_)
+        ));
     }
 
     #[test]

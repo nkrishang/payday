@@ -1,14 +1,15 @@
 //! The merchant's withdrawal authorization: an EIP-3009 signature over their
-//! own USDC that Payday relays but cannot redirect.
+//! own stablecoin that Payday relays but cannot redirect.
 //!
-//! A withdrawal moves the whole USDC balance of the merchant's Payday wallet
-//! on each chain to one destination. Each chain's balance is one *leg*, and
-//! each leg is authorized by one EIP-712 signature under the chain's USDC
-//! contract, using the token's own `TransferWithAuthorization` /
-//! `ReceiveWithAuthorization` types (EIP-3009):
+//! A withdrawal moves the merchant's Payday wallet balance in one currency
+//! to one destination. Each chain's balance is one *leg*, and each leg is
+//! authorized by one EIP-712 signature under that chain's token contract,
+//! using the token's own `TransferWithAuthorization` /
+//! `ReceiveWithAuthorization` types (EIP-3009). Every contract Payday serves
+//! implements them: Circle's FiatToken and Tether's USDT0 alike.
 //!
 //! ```text
-//! domain  = EIP712Domain{name: USDC.name(), version: USDC.version(), chainId, verifyingContract: USDC}
+//! domain  = EIP712Domain{name: token.name(), version: token.version(), chainId, verifyingContract: token}
 //! transfer leg: TransferWithAuthorization{from: wallet, to: destination, value, validAfter: 0, validBefore, nonce: random}
 //! bridge leg:   ReceiveWithAuthorization{from: wallet, to: forwarder,   value, validAfter: 0, validBefore,
 //!                                        nonce: keccak256(abi.encode(destinationDomain, bytes32(destination), salt))}
@@ -16,16 +17,18 @@
 //! ```
 //!
 //! The signature itself binds where the funds may go. A transfer leg names
-//! the destination as the payee. A bridge leg names the `WithdrawalForwarder`
-//! as the payee and commits to the CCTP destination through the nonce: the
-//! forwarder recomputes the nonce from the destination it is asked to burn
-//! towards, and USDC rejects the signature unless they agree. The relayer
-//! therefore pays gas and nothing else. Only ECDSA (externally owned)
-//! wallets are accepted; the Payday wallet is one.
+//! the destination as the payee. A bridge leg, which only USDC has (CCTP
+//! burns and mints USDC alone), names the `WithdrawalForwarder` as the payee
+//! and commits to the CCTP destination through the nonce: the forwarder
+//! recomputes the nonce from the destination it is asked to burn towards,
+//! and USDC rejects the signature unless they agree. The relayer therefore
+//! pays gas and nothing else. Only ECDSA (externally owned) wallets are
+//! accepted; the Payday wallet is one.
 //!
-//! The domain's `name` differs between Circle's deployments ("USDC" on
-//! Monad, "USD Coin" on Base and Arbitrum), so it is read from the token
-//! and carried with every authorization rather than assumed.
+//! The domain's `name` and `version` differ between deployments ("USDC" on
+//! Monad, "USD Coin" on Base and Arbitrum, both version "2"; "USDT0" on
+//! Monad and "USD₮0" on Arbitrum, version "1"), so they are read from the
+//! token and carried with every authorization rather than assumed.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -72,17 +75,17 @@ sol! {
     }
 }
 
-/// One chain's USDC as an EIP-712 domain: `name()` and `version()` read from
-/// the token, its chain, and its address.
+/// One chain's stablecoin contract as an EIP-712 domain: `name()` and
+/// `version()` read from the token, its chain, and its address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UsdcDomain {
+pub struct TokenDomain {
     pub name: String,
     pub version: String,
     pub chain_id: u64,
     pub token: Address,
 }
 
-impl UsdcDomain {
+impl TokenDomain {
     pub fn eip712(&self) -> Eip712Domain {
         Eip712Domain::new(
             Some(self.name.clone().into()),
@@ -178,7 +181,7 @@ impl WithdrawalAuthorization {
     }
 
     /// The EIP-712 signing hash under the token's domain.
-    pub fn digest(&self, domain: &UsdcDomain) -> B256 {
+    pub fn digest(&self, domain: &TokenDomain) -> B256 {
         let separator = domain.separator();
         let mut bytes = [0u8; 66];
         bytes[0] = 0x19;
@@ -190,7 +193,7 @@ impl WithdrawalAuthorization {
 
     /// The document a wallet signs (`eth_signTypedData_v4`), exactly as the
     /// API hands it out.
-    pub fn typed_data(&self, domain: &UsdcDomain) -> AuthorizationTypedData {
+    pub fn typed_data(&self, domain: &TokenDomain) -> AuthorizationTypedData {
         AuthorizationTypedData {
             domain: TypedDataDomain {
                 name: domain.name.clone(),
@@ -317,7 +320,7 @@ pub enum AuthorizationError {
 /// must recover to `authorization.from`. Returns the parsed signature.
 pub fn verify_authorization(
     authorization: &WithdrawalAuthorization,
-    domain: &UsdcDomain,
+    domain: &TokenDomain,
     signature: &str,
 ) -> Result<Signature, AuthorizationError> {
     let bytes = hex::decode(signature).map_err(|_| AuthorizationError::SignatureMalformed)?;
@@ -346,7 +349,7 @@ pub fn parse_address(value: &str) -> Option<Address> {
 pub fn sign_authorization(
     secret: &[u8; 32],
     authorization: &WithdrawalAuthorization,
-    domain: &UsdcDomain,
+    domain: &TokenDomain,
 ) -> String {
     let key = k256::ecdsa::SigningKey::from_slice(secret).expect("valid secp256k1 key");
     let digest = authorization.digest(domain);
@@ -364,8 +367,8 @@ mod tests {
     use super::*;
     use crate::wallet_of;
 
-    fn monad_usdc() -> UsdcDomain {
-        UsdcDomain {
+    fn monad_usdc() -> TokenDomain {
+        TokenDomain {
             name: "USDC".into(),
             version: "2".into(),
             chain_id: 143,
@@ -414,7 +417,7 @@ mod tests {
             monad_usdc().separator(),
             b256!("0xfe22123edc0dd4aeb912eb7948c5f0e531592c2053b3067612f427db342c93c6")
         );
-        let base = UsdcDomain {
+        let base = TokenDomain {
             name: "USD Coin".into(),
             version: "2".into(),
             chain_id: 8453,
@@ -424,7 +427,7 @@ mod tests {
             base.separator(),
             b256!("0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f")
         );
-        let arbitrum = UsdcDomain {
+        let arbitrum = TokenDomain {
             name: "USD Coin".into(),
             version: "2".into(),
             chain_id: 42_161,
@@ -433,6 +436,33 @@ mod tests {
         assert_eq!(
             arbitrum.separator(),
             b256!("0x08d11903f8419e68b1b8721bcbe2e9fc68569122a77ef18c216f10b3b5112c78")
+        );
+    }
+
+    /// Tether's USDT0: `DOMAIN_SEPARATOR()` read from each contract on
+    /// 2026-09-15. Neither exposes `version()`; "1" is what the separator
+    /// hashes under, which is how the chain reader settles it.
+    #[test]
+    fn usdt0_domain_separators_match_the_live_tokens() {
+        let monad = TokenDomain {
+            name: "USDT0".into(),
+            version: "1".into(),
+            chain_id: 143,
+            token: address!("0xe7cd86e13AC4309349F30B3435a9d337750fC82D"),
+        };
+        assert_eq!(
+            monad.separator(),
+            b256!("0x101a90213d0b0d9d607fe3b94dcb41e91f20ab1432d4cd23ae9f820c0968452a")
+        );
+        let arbitrum = TokenDomain {
+            name: "USD₮0".into(),
+            version: "1".into(),
+            chain_id: 42_161,
+            token: address!("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"),
+        };
+        assert_eq!(
+            arbitrum.separator(),
+            b256!("0x566af68fb471b22d6421762f84aa7bd761c670a2e4d5c8a47d4085d5957b127c")
         );
     }
 
@@ -510,7 +540,7 @@ mod tests {
             verify_authorization(&redirected, &domain, &signature),
             Err(AuthorizationError::SignerMismatch)
         );
-        let base = UsdcDomain {
+        let base = TokenDomain {
             chain_id: 8453,
             ..domain.clone()
         };

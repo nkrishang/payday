@@ -10,7 +10,7 @@ use aws_sdk_sesv2::{
     types::{Body, Content, Destination, EmailContent, Message},
 };
 use chrono::{DateTime, Utc};
-use gateway_core::{Invoice, USDC_DECIMALS};
+use gateway_core::Invoice;
 use gateway_db::{
     InvoiceRepository, NotificationEvent, NotificationRecipient, NotificationRepository,
 };
@@ -171,7 +171,10 @@ fn compose(invoice: &Invoice, payer_access: &PayerAccess) -> DepositRequestEmail
     DepositRequestEmail {
         issuer_name: snapshot.issuer.name.clone(),
         payer_name: snapshot.bill_to.name.clone(),
-        amount: trimmed_usdc(&format_units(invoice.amount.0, USDC_DECIMALS).unwrap_or_default()),
+        amount: trimmed_amount(
+            &format_units(invoice.amount.0, invoice.currency().decimals()).unwrap_or_default(),
+        ),
+        currency: invoice.currency().code().into(),
         heading: snapshot.heading.clone(),
         reference: snapshot.reference.clone(),
         expires_at: DateTime::from_timestamp(invoice.expiration_timestamp as i64, 0)
@@ -181,7 +184,7 @@ fn compose(invoice: &Invoice, payer_access: &PayerAccess) -> DepositRequestEmail
 }
 
 /// "1250.500000" reads as "1250.5" in prose; "1.000000" as "1".
-fn trimmed_usdc(value: &str) -> String {
+fn trimmed_amount(value: &str) -> String {
     match value.split_once('.') {
         Some((whole, fraction)) => {
             let fraction = fraction.trim_end_matches('0');
@@ -226,7 +229,11 @@ async fn deliver_merchant(
         }
         return;
     };
-    let (reason, action) = guidance(&event.reason);
+    let currency = event
+        .currency
+        .parse::<gateway_core::Currency>()
+        .unwrap_or(gateway_core::Currency::Usdc);
+    let (reason, action) = guidance(&event.reason, currency);
     let text = format!(
         "Payout for deposit request {} needs attention.\n\nReason: {reason}\nAction: {action}\n\nThe funds remain safe while payout is paused.",
         event.invoice_id
@@ -269,44 +276,48 @@ async fn deliver_merchant(
     }
 }
 
-pub fn guidance(code: &str) -> (&'static str, &'static str) {
-    match code {
+pub fn guidance(code: &str, currency: gateway_core::Currency) -> (String, &'static str) {
+    let issuer = currency.issuer_name();
+    let (message, action): (String, &'static str) = match code {
         "beneficiary_blacklisted" => (
-            "The payout address is restricted by the USDC issuer.",
+            format!("The payout address is restricted by {issuer}, the {currency} issuer."),
             "Contact Payday support to agree on recovery after the deposit request expires.",
         ),
         "recovery_blacklisted" => (
-            "The payer's wallet, where excess funds return, is restricted by the USDC issuer.",
+            format!(
+                "The payer's wallet, where excess funds return, is restricted by {issuer}, the {currency} issuer."
+            ),
             "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
-            "The deposit address is restricted by the USDC issuer.",
+            format!("The deposit address is restricted by {issuer}, the {currency} issuer."),
             "Contact Payday support for a compliance escalation.",
         ),
         "balance_below_amount" => (
-            "The finalized deposit record does not match the on-chain balance.",
+            "The finalized deposit record does not match the on-chain balance.".into(),
             "No action is needed from the payer; Payday support is investigating.",
         ),
         "parameters_mismatch" | "corrupt_row" => (
-            "The stored deposit request details require manual review.",
+            "The stored deposit request details require manual review.".into(),
             "Contact Payday support to review the deposit request before payout resumes.",
         ),
         "retries_exhausted" => (
-            "Automatic payout attempts were unsuccessful.",
+            "Automatic payout attempts were unsuccessful.".into(),
             "No action is needed from the payer; Payday support will inspect and retry the payout.",
         ),
         _ => (
-            "Automatic payout requires a manual review.",
+            "Automatic payout requires a manual review.".into(),
             "Contact Payday support and provide the deposit request ID.",
         ),
-    }
+    };
+    (message, action)
 }
 
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{U256, address};
     use gateway_core::{
-        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, Currency, FactoryAddress,
         InvoiceStatus, NetworkTerms, Party, PayerPolicy, TokenAddress,
     };
 
@@ -330,6 +341,7 @@ mod tests {
             party("Acme", None),
             party("Globex", Some("payer@example.com")),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
@@ -337,7 +349,15 @@ mod tests {
         );
         snapshot.heading = Some("March retainer".into());
         snapshot.reference = Some("INV-001".into());
-        Invoice::issue(&networks, beneficiary, amount, 1_788_000_000, snapshot).unwrap()
+        Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            1_788_000_000,
+            snapshot,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -386,11 +406,11 @@ mod tests {
     }
 
     #[test]
-    fn usdc_amounts_are_trimmed_for_prose() {
-        assert_eq!(trimmed_usdc("1250.500000"), "1250.5");
-        assert_eq!(trimmed_usdc("1.000000"), "1");
-        assert_eq!(trimmed_usdc("0.000001"), "0.000001");
-        assert_eq!(trimmed_usdc("42"), "42");
+    fn amounts_are_trimmed_for_prose() {
+        assert_eq!(trimmed_amount("1250.500000"), "1250.5");
+        assert_eq!(trimmed_amount("1.000000"), "1");
+        assert_eq!(trimmed_amount("0.000001"), "0.000001");
+        assert_eq!(trimmed_amount("42"), "42");
     }
 
     #[test]

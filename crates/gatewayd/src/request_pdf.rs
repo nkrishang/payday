@@ -162,7 +162,10 @@ fn layout(invoice: &DepositRequestResponse) -> Vec<Line> {
                 "Networks",
                 &format!("Payer's choice: {}", offered.join(", ")),
             );
-            lines.field("Token", "Native USDC on the chosen network");
+            lines.field(
+                "Token",
+                &format!("{} on the chosen network", invoice.currency),
+            );
         }
     }
     lines.field(
@@ -406,8 +409,8 @@ mod tests {
     use alloy_primitives::{B256, U256, address};
     use gateway_core::{
         Amount, AttachmentDescriptor, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId,
-        FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy, TokenAddress,
-        sign_payer_attestation, wallet_of,
+        Currency, FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy,
+        TokenAddress, sign_payer_attestation, wallet_of,
     };
     use uuid::Uuid;
 
@@ -444,6 +447,7 @@ mod tests {
             PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
             },
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
@@ -452,8 +456,15 @@ mod tests {
         snapshot.heading = Some("March retainer — “final”".into());
         snapshot.reference = Some("INV-42".into());
         snapshot.notes = notes.map(str::to_owned);
-        let mut invoice =
-            Invoice::issue(&networks, beneficiary, amount, 1_900_000_000, snapshot).unwrap();
+        let mut invoice = Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            snapshot,
+        )
+        .unwrap();
         let key = [7u8; 32];
         let message = PayerAttestation::new(
             invoice.attribution_hash,

@@ -281,6 +281,9 @@ CREATE TABLE invoices (
     chain_id BIGINT,
     factory_address BYTEA,
     token_address BYTEA,
+    -- The currency the request is denominated in: its wire code. Every
+    -- network in the snapshot is that currency's contract on its chain.
+    currency TEXT NOT NULL,
     token_decimals SMALLINT NOT NULL,
     beneficiary_address BYTEA NOT NULL,
     expiration_timestamp BIGINT NOT NULL,
@@ -374,6 +377,8 @@ CREATE TABLE invoices (
         CHECK (octet_length(token_address) = 20),
     CONSTRAINT invoices_token_decimals_range
         CHECK (token_decimals BETWEEN 0 AND 255),
+    CONSTRAINT invoices_currency_known
+        CHECK (currency IN ('USDC', 'USDT')),
     CONSTRAINT invoices_beneficiary_address_length
         CHECK (octet_length(beneficiary_address) = 20),
     CONSTRAINT invoices_expiration_timestamp_non_negative
@@ -538,6 +543,7 @@ BEGIN
      OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
      OR NEW.customer_id IS DISTINCT FROM OLD.customer_id
      OR NEW.issuer_id IS DISTINCT FROM OLD.issuer_id
+     OR NEW.currency IS DISTINCT FROM OLD.currency
      OR NEW.token_decimals IS DISTINCT FROM OLD.token_decimals
      OR NEW.beneficiary_address IS DISTINCT FROM OLD.beneficiary_address
      OR NEW.expiration_timestamp IS DISTINCT FROM OLD.expiration_timestamp
@@ -581,7 +587,7 @@ END $$;
 CREATE TRIGGER invoice_issuance_immutable
 BEFORE UPDATE OF
     account_id, idempotency_key, customer_id, issuer_id, chain_id, factory_address,
-    token_address, token_decimals, beneficiary_address, expiration_timestamp,
+    token_address, currency, token_decimals, beneficiary_address, expiration_timestamp,
     expires_in_secs, expiration_intent, recovery_address, amount, net_amount,
     salt, payment_address, issuer, bill_to, notes, heading, memo, reference,
     payer_policy_mode, expected_email, payer_reference, issuance_snapshot,
@@ -600,14 +606,11 @@ FOR EACH ROW EXECUTE FUNCTION reject_invoice_issuance_mutation();
 -- ---------------------------------------------------------------------------
 CREATE TABLE indexer_cursor (
     chain_id BIGINT PRIMARY KEY,
-    token_address BYTEA NOT NULL,
     last_block BIGINT NOT NULL,
     last_block_hash BYTEA NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_block_timestamp BIGINT,
 
-    CONSTRAINT indexer_cursor_token_address_length
-        CHECK (octet_length(token_address) = 20),
     CONSTRAINT indexer_cursor_last_block_non_negative
         CHECK (last_block >= 0),
     CONSTRAINT indexer_cursor_last_block_hash_length
@@ -617,14 +620,11 @@ CREATE TABLE indexer_cursor (
 );
 
 CREATE TABLE indexer_status (
-    chain_id BIGINT NOT NULL,
-    token_address BYTEA NOT NULL,
+    chain_id BIGINT PRIMARY KEY,
     finalized_block BIGINT NOT NULL CHECK (finalized_block >= 0),
     finalized_block_hash BYTEA NOT NULL CHECK (octet_length(finalized_block_hash) = 32),
     finalized_block_timestamp BIGINT NOT NULL CHECK (finalized_block_timestamp >= 0),
-    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (chain_id, token_address),
-    CHECK (octet_length(token_address) = 20)
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE sweeper_status (
@@ -862,6 +862,8 @@ CREATE TABLE withdrawals (
     idempotency_key TEXT NOT NULL,
     -- The Payday wallet the legs are signed from, as it was at creation.
     wallet_address TEXT NOT NULL,
+    -- The one currency the legs move; a withdrawal never mixes two.
+    currency TEXT NOT NULL CHECK (currency IN ('USDC', 'USDT')),
     destination_chain_id BIGINT NOT NULL,
     destination_address TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1304,6 +1306,7 @@ LANGUAGE SQL STABLE AS $$
     SELECT jsonb_build_object(
         'id', 'dr_' || invoice.id::text,
         'status', webhook_public_status(invoice.status, invoice.confirmed_received, invoice.blocked_reason),
+        'currency', invoice.currency,
         'amount', webhook_decimal_amount(invoice.amount, invoice.token_decimals),
         'amount_base_units', invoice.amount,
         'received', webhook_decimal_amount(invoice.confirmed_received, invoice.token_decimals),

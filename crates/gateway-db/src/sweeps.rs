@@ -825,8 +825,8 @@ mod tests {
 
     use alloy_primitives::{U256, address};
     use gateway_core::{
-        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, Invoice, Party, PayerPolicy,
-        USDC_DECIMALS,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, Currency, Invoice, Party,
+        PayerPolicy,
     };
     use sqlx::PgPool;
 
@@ -869,18 +869,26 @@ mod tests {
             party("Acme"),
             party("Globex"),
             policy,
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
             1_900_000_000,
         );
-        let invoice =
-            Invoice::issue(&networks, beneficiary, amount, 1_900_000_000, snapshot).unwrap();
+        let invoice = Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            snapshot,
+        )
+        .unwrap();
         let input = CreateInvoiceInput::from_invoice(
             &invoice,
             AccountId(account_id),
             invoice.id.0.to_string(),
-            USDC_DECIMALS,
+            Currency::Usdc.decimals(),
             3_600,
             "in:3600".into(),
         );
@@ -1177,13 +1185,12 @@ mod tests {
     async fn set_finalized_clock(pool: &PgPool, timestamp: u64) {
         sqlx::query(
             r#"
-            INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash, last_block_timestamp)
-            VALUES ($1, $2, 1, $3, $4)
+            INSERT INTO indexer_cursor (chain_id, last_block, last_block_hash, last_block_timestamp)
+            VALUES ($1, 1, $2, $3)
             ON CONFLICT (chain_id) DO UPDATE SET last_block_timestamp = EXCLUDED.last_block_timestamp
             "#,
         )
         .bind(CHAIN_ID as i64)
-        .bind([0xe7u8; 20].as_slice())
         .bind([0x11u8; 32].as_slice())
         .bind(timestamp as i64)
         .execute(pool)

@@ -32,6 +32,8 @@ pub struct DbInvoice {
     pub chain_id: Option<i64>,
     pub factory_address: Option<Vec<u8>>,
     pub token_address: Option<Vec<u8>>,
+    /// The wire code of the currency the request is denominated in.
+    pub currency: String,
     pub token_decimals: i16,
     pub beneficiary_address: Vec<u8>,
     pub expiration_timestamp: i64,
@@ -111,12 +113,14 @@ pub struct DbInvoice {
     pub likely_unsolicited_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
 }
 
-/// See [`InvoiceRepository::customer_stats`].
+/// See [`InvoiceRepository::customer_stats`]: one row per currency the
+/// customer has been asked for.
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CustomerInvoiceStats {
+pub struct CustomerCurrencyStats {
+    pub currency: String,
     pub request_count: i64,
     /// Base units, like an invoice's own `amount_base_units` — the caller
-    /// scales for display; a token's decimals live per invoice, not here.
+    /// scales for display by the currency's decimals.
     pub collected_base_units: String,
     pub pending_base_units: String,
 }
@@ -367,6 +371,7 @@ pub struct CreateInvoiceInput {
     pub reference: Option<String>,
     pub metadata: serde_json::Value,
     pub payer_policy: PayerPolicy,
+    pub currency: String,
     pub token_decimals: u8,
     pub beneficiary_address: [u8; 20],
     pub expiration_timestamp: u64,
@@ -391,6 +396,7 @@ pub struct IssuanceRequest<'a> {
     /// The networks offered, in canonical order; a deployment that gained
     /// or lost a chain since the original issuance is a different request.
     pub networks: &'a [gateway_core::SnapshotNetwork],
+    pub currency: &'a str,
     pub token_decimals: u8,
     pub beneficiary: &'a [u8],
     pub amount: U256,
@@ -411,6 +417,7 @@ pub struct IssuanceRequest<'a> {
 pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> bool {
     let committed = existing.issuance_snapshot.0.attachment.as_ref();
     existing.issuance_snapshot.0.networks == request.networks
+        && existing.currency == request.currency
         && existing.token_decimals == request.token_decimals as i16
         && existing.beneficiary_address == request.beneficiary
         && existing.expiration_intent == request.expiration_intent
@@ -430,9 +437,13 @@ pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> boo
         && committed == request.attachment
 }
 
-/// One validated, finalized USDC `Transfer` log from the configured token.
+/// One validated, finalized `Transfer` log from one of the chain's configured
+/// token contracts.
 #[derive(Debug, Clone)]
 pub struct PaymentObservation {
+    /// The contract that emitted it: the request's own token credits it,
+    /// any other token to the same address is not a payment.
+    pub token: Address,
     pub block_number: u64,
     pub block_hash: B256,
     pub block_timestamp: u64,
@@ -464,7 +475,6 @@ pub struct DbInvoiceTransfer {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbIndexerFreshness {
     pub chain_id: i64,
-    pub token_address: Vec<u8>,
     pub last_block: i64,
     pub last_block_timestamp: Option<i64>,
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
@@ -508,6 +518,7 @@ impl CreateInvoiceInput {
             reference: snapshot.reference.clone(),
             metadata: serde_json::json!({}),
             payer_policy: snapshot.payer_policy.clone(),
+            currency: snapshot.currency.clone(),
             token_decimals,
             beneficiary_address: invoice.beneficiary.0.into(),
             expiration_timestamp: invoice.expiration_timestamp,
@@ -535,6 +546,7 @@ impl CreateInvoiceInput {
             existing,
             &IssuanceRequest {
                 networks: &self.issuance_snapshot.networks,
+                currency: &self.currency,
                 token_decimals: self.token_decimals,
                 beneficiary: &self.beneficiary_address,
                 amount: U256::from_str_radix(&self.amount, 10).unwrap_or_default(),
@@ -623,11 +635,11 @@ impl InvoiceRepository {
             INSERT INTO invoices
                 (id, account_id, idempotency_key, customer_id, issuer_id, issuer, bill_to, notes, heading,
                  reference, metadata, payer_policy_mode, expected_email, payer_reference,
-                 token_decimals, beneficiary_address,
+                 currency, token_decimals, beneficiary_address,
                  expiration_timestamp, expires_in_secs, expiration_intent,
                  amount, net_amount, issuance_snapshot,
                  attribution_version, attribution_hash, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $23, $14, $15,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $23, $24, $14, $15,
                     $16, $17, $18, $19, $19, $20, $21, $22, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
@@ -656,6 +668,7 @@ impl InvoiceRepository {
         .bind(input.attribution_version as i16)
         .bind(input.attribution_hash)
         .bind(input.payer_policy.payer_reference())
+        .bind(&input.currency)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -881,19 +894,22 @@ impl InvoiceRepository {
         &self,
         account: AccountId,
         customer_id: Uuid,
-    ) -> Result<CustomerInvoiceStats, sqlx::Error> {
-        sqlx::query_as::<_, CustomerInvoiceStats>(
+    ) -> Result<Vec<CustomerCurrencyStats>, sqlx::Error> {
+        sqlx::query_as::<_, CustomerCurrencyStats>(
             r#"SELECT
+                 currency,
                  count(*) AS request_count,
                  COALESCE(SUM(confirmed_received::numeric), 0)::text AS collected_base_units,
                  COALESCE(SUM(amount::numeric - confirmed_received::numeric)
                    FILTER (WHERE status = 'created'), 0)::text AS pending_base_units
                FROM invoices
-               WHERE account_id = $1 AND customer_id = $2"#,
+               WHERE account_id = $1 AND customer_id = $2
+               GROUP BY currency
+               ORDER BY currency"#,
         )
         .bind(account.0)
         .bind(customer_id)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await
     }
 
@@ -924,12 +940,11 @@ impl InvoiceRepository {
         .fetch_all(&self.pool)
         .await?;
         let freshness = sqlx::query_as::<_, DbIndexerFreshness>(
-            r#"SELECT DISTINCT c.chain_id, c.token_address, c.last_block, c.last_block_timestamp,
+            r#"SELECT DISTINCT c.chain_id, c.last_block, c.last_block_timestamp,
                       c.updated_at, s.finalized_block
                FROM indexer_cursor c
                LEFT JOIN indexer_status s ON s.chain_id = c.chain_id
-                    AND s.token_address = c.token_address
-               JOIN invoices i ON i.chain_id = c.chain_id AND i.token_address = c.token_address
+               JOIN invoices i ON i.chain_id = c.chain_id
                WHERE i.account_id = $1 AND i.id = ANY($2::uuid[])"#,
         )
         .bind(account.0)
@@ -992,22 +1007,20 @@ impl InvoiceRepository {
     pub async fn watch_addresses(
         &self,
         chain_id: u64,
-        token: Address,
         recent_since: DateTime<Utc>,
     ) -> Result<Vec<Address>, sqlx::Error> {
         let rows: Vec<Vec<u8>> = sqlx::query_scalar(
             r#"
             SELECT payment_address FROM invoices
             WHERE payment_address IS NOT NULL
-              AND chain_id = $1 AND token_address = $2
+              AND chain_id = $1
               AND (status NOT IN ('fulfilled', 'recovered')
                    OR uncollected_count > 0
-                   OR updated_at > $3)
+                   OR updated_at > $2)
             ORDER BY payment_address
             "#,
         )
         .bind(chain_id as i64)
-        .bind(token.as_slice())
         .bind(recent_since)
         .fetch_all(self.pool())
         .await?;
@@ -1025,21 +1038,19 @@ impl InvoiceRepository {
     pub async fn watch_fingerprint(
         &self,
         chain_id: u64,
-        token: Address,
         recent_since: DateTime<Utc>,
     ) -> Result<WatchFingerprint, sqlx::Error> {
         let (count, newest): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
             r#"
             SELECT count(*), max(updated_at) FROM invoices
             WHERE payment_address IS NOT NULL
-              AND chain_id = $1 AND token_address = $2
+              AND chain_id = $1
               AND (status NOT IN ('fulfilled', 'recovered')
                    OR uncollected_count > 0
-                   OR updated_at > $3)
+                   OR updated_at > $2)
             "#,
         )
         .bind(chain_id as i64)
-        .bind(token.as_slice())
         .bind(recent_since)
         .fetch_one(self.pool())
         .await?;
@@ -1056,10 +1067,12 @@ impl InvoiceRepository {
         Ok(block.map(|value| value as u64))
     }
 
-    /// Atomically apply one contiguous finalized log range and advance its
-    /// canonical cursor.
+    /// Atomically apply one contiguous finalized log range and advance the
+    /// chain's canonical cursor.
     ///
-    /// Every transfer to a known invoice address is retained. Transfers to an
+    /// Every transfer of a request's own token to its address is retained; a
+    /// transfer of another configured token to that address is no payment and
+    /// is left for the wrong-asset runbook, like any stray transfer. Transfers to an
     /// open invoice are `credited` toward its amount; transfers to any other
     /// status are `late` and queued for recovery; zero-value transfers are
     /// `error`. A nonzero transfer from any wallet but the invoice's attested
@@ -1069,11 +1082,9 @@ impl InvoiceRepository {
     /// a finalized sweep already moved. Open invoices whose deadline lies
     /// before the range's end-block timestamp become `expired`. Replays are
     /// idempotent by transaction hash + log index.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn apply_finalized_usdc_range(
+    pub async fn apply_finalized_range(
         &self,
         chain_id: u64,
-        token: Address,
         expected_cursor: Option<IndexerCursor>,
         end_block: u64,
         end_block_hash: B256,
@@ -1082,10 +1093,10 @@ impl InvoiceRepository {
     ) -> Result<RangeOutcome, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
-        type StoredCursor = (Vec<u8>, i64, Vec<u8>, Option<i64>);
+        type StoredCursor = (i64, Vec<u8>, Option<i64>);
         let stored: Option<StoredCursor> = sqlx::query_as(
             r#"
-            SELECT token_address, last_block, last_block_hash, last_block_timestamp
+            SELECT last_block, last_block_hash, last_block_timestamp
             FROM indexer_cursor
             WHERE chain_id = $1
             FOR UPDATE
@@ -1096,16 +1107,11 @@ impl InvoiceRepository {
         .await?;
 
         let stored_cursor = stored
-            .map(|(stored_token, block, hash, timestamp)| {
-                if stored_token.as_slice() != token.as_slice() {
-                    return Err(sqlx::Error::Protocol(
-                        "indexer cursor belongs to a different token".into(),
-                    ));
-                }
+            .map(|(block, hash, timestamp)| {
                 let block_hash = B256::try_from(hash.as_slice()).map_err(|_| {
                     sqlx::Error::Decode("invalid indexer cursor block hash length".into())
                 })?;
-                Ok(IndexerCursor {
+                Ok::<_, sqlx::Error>(IndexerCursor {
                     block: block as u64,
                     block_hash,
                     block_timestamp: timestamp.map(|value| value as u64),
@@ -1133,13 +1139,11 @@ impl InvoiceRepository {
                 r#"
                 SELECT * FROM invoices
                 WHERE chain_id = $1
-                  AND token_address = $2
-                  AND payment_address = ANY($3::bytea[])
+                  AND payment_address = ANY($2::bytea[])
                 FOR UPDATE
                 "#,
             )
             .bind(chain_id as i64)
-            .bind(token.as_slice())
             .bind(&recipients)
             .fetch_all(&mut *tx)
             .await?
@@ -1166,6 +1170,8 @@ impl InvoiceRepository {
             drained_at: Option<(i64, i64)>,
             uncollected: i32,
             touched: bool,
+            /// The request's own token: the only contract whose transfers pay it.
+            token_address: Vec<u8>,
             /// The wallet the payer attested; funds from anywhere else are
             /// likely unsolicited (product plan §4.9).
             payer_wallet: Vec<u8>,
@@ -1223,8 +1229,8 @@ impl InvoiceRepository {
                 sqlx::Error::Decode(format!("invalid confirmed_received for {}", row.id).into())
             })?;
             // The address filter above only matches bound invoices.
-            let (Some(payment_address), Some(payer_wallet)) =
-                (row.payment_address, row.payer_wallet)
+            let (Some(payment_address), Some(payer_wallet), Some(token_address)) =
+                (row.payment_address, row.payer_wallet, row.token_address)
             else {
                 continue;
             };
@@ -1239,6 +1245,7 @@ impl InvoiceRepository {
                     drained_at: row.drained_at_block.zip(row.drained_at_transaction_index),
                     uncollected: row.uncollected_count,
                     touched: false,
+                    token_address,
                     payer_wallet,
                     first_foreign_timestamp: None,
                     crossing: None,
@@ -1251,6 +1258,9 @@ impl InvoiceRepository {
             let Some(credit) = credits.get_mut(observation.recipient.as_slice()) else {
                 continue;
             };
+            if credit.token_address.as_slice() != observation.token.as_slice() {
+                continue;
+            }
 
             let zero = observation.amount.is_zero();
             let open = matches!(credit.status.as_str(), "created" | "funded");
@@ -1326,7 +1336,7 @@ impl InvoiceRepository {
                 "#,
             )
             .bind(chain_id as i64)
-            .bind(token.as_slice())
+            .bind(observation.token.as_slice())
             .bind(observation.block_number as i64)
             .bind(observation.block_hash.as_slice())
             .bind(observation.block_timestamp as i64)
@@ -1372,7 +1382,7 @@ impl InvoiceRepository {
                 .received
                 .checked_add(observation.amount)
                 .ok_or_else(|| {
-                    sqlx::Error::Decode("USDC observation total overflowed uint256".into())
+                    sqlx::Error::Decode("observation total overflowed uint256".into())
                 })?;
             if credit.status == "created"
                 && credit.crossing.is_none()
@@ -1458,16 +1468,14 @@ impl InvoiceRepository {
         outcome.expired = sqlx::query_scalar(
             r#"
             UPDATE invoices
-            SET status = 'expired', expired_at = to_timestamp($3), updated_at = now()
+            SET status = 'expired', expired_at = to_timestamp($2), updated_at = now()
             WHERE chain_id = $1
-              AND token_address = $2
               AND status IN ('created', 'funded')
-              AND expiration_timestamp < $3
+              AND expiration_timestamp < $2
             RETURNING id
             "#,
         )
         .bind(chain_id as i64)
-        .bind(token.as_slice())
         .bind(end_block_timestamp as i64)
         .fetch_all(&mut *tx)
         .await?;
@@ -1475,18 +1483,16 @@ impl InvoiceRepository {
         sqlx::query(
             r#"
             INSERT INTO indexer_cursor
-                (chain_id, token_address, last_block, last_block_hash, last_block_timestamp, updated_at)
-            VALUES ($1, $2, $3, $4, $5, now())
+                (chain_id, last_block, last_block_hash, last_block_timestamp, updated_at)
+            VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (chain_id) DO UPDATE
-            SET token_address = EXCLUDED.token_address,
-                last_block = EXCLUDED.last_block,
+            SET last_block = EXCLUDED.last_block,
                 last_block_hash = EXCLUDED.last_block_hash,
                 last_block_timestamp = EXCLUDED.last_block_timestamp,
                 updated_at = now()
             "#,
         )
         .bind(chain_id as i64)
-        .bind(token.as_slice())
         .bind(end_block as i64)
         .bind(end_block_hash.as_slice())
         .bind(end_block_timestamp as i64)
@@ -1534,12 +1540,16 @@ pub(crate) mod tests {
     use super::*;
     use alloy_primitives::address;
     use gateway_core::{
-        AttachmentCommitment, PayerAttestation, PayerPolicyMode, sign_payer_attestation, wallet_of,
+        AttachmentCommitment, Currency, PayerAttestation, PayerPolicyMode, sign_payer_attestation,
+        wallet_of,
     };
     use sqlx::types::chrono::{DateTime, Utc};
 
     /// The wallet every test payer signs with unless it says otherwise.
     pub(crate) const TEST_PAYER_KEY: [u8; 32] = [7u8; 32];
+
+    /// The token every test request on the fixture chain is denominated in.
+    pub(crate) const TEST_TOKEN: Address = address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512");
 
     /// The networks a test request offers: the local fixture chain first
     /// (where `bind_for_test` binds) and a second chain nobody pays on.
@@ -1649,6 +1659,7 @@ pub(crate) mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             &row_networks(),
             BeneficiaryAddress(Address::repeat_byte(3)),
             Amount(U256::from(100)),
@@ -1684,14 +1695,22 @@ pub(crate) mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
             4_000_000_000,
         );
         snapshot.attachment = attachment.and_then(DbAttachment::commitment);
-        let invoice =
-            Invoice::issue(&networks, beneficiary, amount, 4_000_000_000, snapshot).unwrap();
+        let invoice = Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            4_000_000_000,
+            snapshot,
+        )
+        .unwrap();
         CreateInvoiceInput::from_invoice(&invoice, owner, key.into(), 6, 3_600, "in:3600".into())
     }
 
@@ -1705,6 +1724,7 @@ pub(crate) mod tests {
             chain_id: Some(1),
             factory_address: Some(vec![1u8; 20]),
             token_address: Some(vec![2u8; 20]),
+            currency: "USDC".into(),
             token_decimals: 18,
             beneficiary_address: vec![3u8; 20],
             expiration_timestamp: 1_900_000_000,
@@ -1756,7 +1776,7 @@ pub(crate) mod tests {
             payer_reference: None,
             verification_completed_at: None,
             issuance_snapshot: sqlx::types::Json(snapshot()),
-            attribution_version: 3,
+            attribution_version: 4,
             attribution_hash: vec![8u8; 32],
             likely_unsolicited_at: None,
         }
@@ -1766,6 +1786,7 @@ pub(crate) mod tests {
     fn unbound_invoice() -> Invoice {
         let snapshot = snapshot();
         Invoice::issue(
+            Currency::Usdc,
             &row_networks(),
             BeneficiaryAddress(Address::repeat_byte(3)),
             Amount(U256::from(100)),
@@ -1791,7 +1812,7 @@ pub(crate) mod tests {
         assert_eq!(binding.bound_at, "1970-01-01T00:00:00Z");
         assert_eq!(invoice.received.0, U256::ZERO);
         assert_eq!(invoice.execute_tx_hash, None);
-        assert_eq!(invoice.attribution_version, 3);
+        assert_eq!(invoice.attribution_version, 4);
         assert_eq!(invoice.attribution_hash, B256::repeat_byte(8));
         assert_eq!(invoice.issuance_snapshot.issuer.name, "Acme");
 
@@ -2058,7 +2079,7 @@ pub(crate) mod tests {
             issued.row.expected_email.as_deref(),
             Some("alice@example.com")
         );
-        assert_eq!(issued.row.attribution_version, 3);
+        assert_eq!(issued.row.attribution_version, 4);
         assert_eq!(
             issued.row.attribution_hash.as_slice(),
             original.attribution_hash.as_slice()
@@ -2238,11 +2259,13 @@ pub(crate) mod tests {
         repo.insert_issued(&other, None).await.unwrap();
 
         let stats = repo.customer_stats(owner, customer).await.unwrap();
-        assert_eq!(stats.request_count, 3);
+        assert_eq!(stats.len(), 1, "one currency, one row");
+        assert_eq!(stats[0].currency, "USDC");
+        assert_eq!(stats[0].request_count, 3);
         // Collected: the partial's confirmed receipt plus the settled invoice's full amount.
-        assert_eq!(stats.collected_base_units, "1400000");
+        assert_eq!(stats[0].collected_base_units, "1400000");
         // Pending: the untouched invoice's full amount plus the partial's remaining balance.
-        assert_eq!(stats.pending_base_units, "1600000");
+        assert_eq!(stats[0].pending_base_units, "1600000");
 
         // A customer with no invoices at all reads as zero, not null.
         let empty_customer = Uuid::now_v7();
@@ -2252,10 +2275,9 @@ pub(crate) mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        // A customer with no invoices at all has no currency rows.
         let empty = repo.customer_stats(owner, empty_customer).await.unwrap();
-        assert_eq!(empty.request_count, 0);
-        assert_eq!(empty.collected_base_units, "0");
-        assert_eq!(empty.pending_base_units, "0");
+        assert!(empty.is_empty());
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
@@ -2364,11 +2386,11 @@ pub(crate) mod tests {
         sqlx::query(
             r#"INSERT INTO invoices
                  (id, account_id, idempotency_key,
-                  token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
+                  currency, token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
                   expiration_intent, amount, net_amount, status, reference, metadata,
                   payer_policy_mode, expected_email, issuance_snapshot, attribution_version,
                   attribution_hash)
-               VALUES ($1, $2, 'allowlist', 6, $3, 4000000000, 3600, 'at:4000000000',
+               VALUES ($1, $2, 'allowlist', 'USDC', 6, $3, 4000000000, 3600, 'at:4000000000',
                   '1000000', '1000000', 'created', 'order-7', '{"source":"checkout"}',
                   'verified_email', 'alice@example.com', '{}', 3, $4)"#,
         )
@@ -2450,6 +2472,7 @@ pub(crate) mod tests {
             "payer_wallet",
             "address",
             "chain_id",
+            "currency",
             "wallet_bound_at",
             "expires_at",
             "created_at",
@@ -2708,6 +2731,7 @@ pub(crate) mod tests {
         let mut hash = alloy_primitives::keccak256(recipient.as_slice()).0;
         hash[0] = block as u8;
         PaymentObservation {
+            token: TEST_TOKEN,
             block_number: block,
             block_hash: B256::repeat_byte(block as u8),
             block_timestamp: timestamp,
@@ -2738,16 +2762,19 @@ pub(crate) mod tests {
         let own = insert_bound(&pool, &own, None).await;
         let open = insert_bound(&pool, &open, None).await;
         let address = |row: &DbInvoice| Address::from_slice(row.payment_address.as_ref().unwrap());
-        let token = Address::from_slice(foreign.token_address.as_ref().unwrap());
+        assert_eq!(
+            foreign.token_address.as_deref(),
+            Some(TEST_TOKEN.as_slice()),
+            "observations name the request's own token"
+        );
         let payer = test_payer_wallet();
         let stranger = Address::repeat_byte(0x99);
 
         // A partial transfer to each, all before the deadline: one from a
         // wallet that is not the attested payer's.
         let outcome = repo
-            .apply_finalized_usdc_range(
+            .apply_finalized_range(
                 1,
-                token,
                 None,
                 10,
                 B256::repeat_byte(10),
@@ -2783,9 +2810,8 @@ pub(crate) mod tests {
             block_timestamp: Some(1_000),
         });
         let outcome = repo
-            .apply_finalized_usdc_range(
+            .apply_finalized_range(
                 1,
-                token,
                 cursor,
                 11,
                 B256::repeat_byte(11),

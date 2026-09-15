@@ -115,6 +115,15 @@ impl ApiError {
         }
     }
 
+    /// The currency is one this build knows but no registered chain serves.
+    pub fn unsupported_currency(currency: gateway_core::Currency) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unsupported_currency",
+            message: format!("{currency} is not served on any of this deployment's networks"),
+        }
+    }
+
     /// The chain a payer named is not one the request can be paid on.
     pub fn unsupported_chain() -> Self {
         Self {
@@ -535,7 +544,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "relay_unsupported_origin",
-            message: "USDC cannot be paid from that network; choose one of the offered ones".into(),
+            message: "This request cannot be paid from that network with that token; choose one of the offered ones".into(),
         }
     }
 
@@ -588,11 +597,21 @@ impl ApiError {
         }
     }
 
-    pub fn nothing_to_withdraw() -> Self {
+    /// Nothing the withdrawal could move. `elsewhere` names the chains that
+    /// do hold the currency but cannot bridge it to the destination.
+    pub fn nothing_to_withdraw(currency: gateway_core::Currency, elsewhere: &[&str]) -> Self {
+        let message = if elsewhere.is_empty() {
+            format!("The Payday wallet holds no {currency} on any network serving it")
+        } else {
+            format!(
+                "The Payday wallet holds no {currency} on the destination network. {currency} does not bridge; its balance on {} is withdrawn to an address on that network",
+                elsewhere.join(", ")
+            )
+        };
         Self {
             status: StatusCode::CONFLICT,
             code: "nothing_to_withdraw",
-            message: "The Payday wallet holds no USDC on any supported network".into(),
+            message,
         }
     }
 

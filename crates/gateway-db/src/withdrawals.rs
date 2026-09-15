@@ -1,6 +1,8 @@
 //! Merchant withdrawals and their legs.
 //!
-//! A withdrawal snapshots the Payday wallet's USDC on every chain into legs.
+//! A withdrawal snapshots the Payday wallet's balance in one currency into legs,
+//! one per chain it sits on (one chain at all, unless the currency has a 1:1
+//! bridge).
 //! The merchant signs each leg's EIP-3009 authorization; `gateway-indexer`
 //! relays the signed legs on the chains it serves. A leg's relay step keeps
 //! the same durable shape as a sweep batch (one signer nonce, every
@@ -110,6 +112,7 @@ pub struct DbWithdrawal {
     pub account_id: Uuid,
     pub idempotency_key: String,
     pub wallet_address: String,
+    pub currency: String,
     pub destination_chain_id: i64,
     pub destination_address: String,
     pub created_at: DateTime<Utc>,
@@ -330,6 +333,8 @@ pub struct NewWithdrawal {
     pub account_id: AccountId,
     pub idempotency_key: String,
     pub wallet_address: String,
+    /// The currency every leg moves.
+    pub currency: String,
     pub destination_chain_id: u64,
     pub destination_address: String,
     pub legs: Vec<NewWithdrawalLeg>,
@@ -436,8 +441,8 @@ impl WithdrawalRepository {
         let mut tx = self.pool.begin().await?;
         let inserted = sqlx::query(
             r#"INSERT INTO withdrawals
-                   (id, account_id, idempotency_key, wallet_address, destination_chain_id, destination_address)
-               VALUES ($1, $2, $3, $4, $5, $6)"#,
+                   (id, account_id, idempotency_key, wallet_address, currency, destination_chain_id, destination_address)
+               VALUES ($1, $2, $3, $4, $7, $5, $6)"#,
         )
         .bind(input.id)
         .bind(input.account_id.0)
@@ -445,6 +450,7 @@ impl WithdrawalRepository {
         .bind(&input.wallet_address)
         .bind(input.destination_chain_id as i64)
         .bind(&input.destination_address)
+        .bind(&input.currency)
         .execute(&mut *tx)
         .await;
         if let Err(sqlx::Error::Database(error)) = &inserted {
@@ -1216,6 +1222,7 @@ mod tests {
             account_id: account,
             idempotency_key: key.into(),
             wallet_address: WALLET.into(),
+            currency: "USDC".into(),
             destination_chain_id: 8453,
             destination_address: DESTINATION.into(),
             legs: vec![
