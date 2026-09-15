@@ -32,13 +32,16 @@ export default function FaqPage() {
 
       <H2 id="which-asset">Which asset and network can pay?</H2>
       <p>
-        Circle-issued native USDC on Monad, Base, or Arbitrum One in production, and on their
-        testnets in the sandbox. The payer chooses the network on the hosted checkout before
-        signing; you do not. Read <code>networks</code> from the request, then{" "}
-        <code>chain</code> and <code>token</code> once the payer has chosen. Bridged USDC,
-        look-alike tokens, and gas tokens do not count and may be unrecoverable; USDC sent to the
-        address on a different network is refused by the address and returned by hand. See{" "}
-        <Link href="/docs/environments">Environments</Link>.
+        USDC on Monad, Base, or Arbitrum One, and USDT (as Tether&apos;s USDT0) on Monad or
+        Arbitrum One, in production; Circle&apos;s test USDC on their testnets in the sandbox. A
+        request is denominated in one <code>currency</code>, USDC unless you say otherwise. For USDC
+        the payer chooses the network on the hosted checkout before signing; a USDT request names
+        its network at issuance, because only USDC bridges for you at 1:1. Read{" "}
+        <code>networks</code> from the request, then <code>chain</code> and <code>token</code>{" "}
+        once the payer has chosen. Any other token, a bridged or wrapped version, look-alike tokens,
+        and gas tokens do not count and may be unrecoverable; the request&apos;s currency sent to
+        the address on a different network is refused by the address and returned by hand. See{" "}
+        <Link href="/docs/environments#currencies-and-networks">Environments</Link>.
       </p>
 
       <H2 id="why-null-address">Why is the address null after I create a request?</H2>

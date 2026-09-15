@@ -30,7 +30,7 @@ export default function SecurityPage() {
       <p>
         Payday never holds funds. Each request gets a one-time smart-contract address whose
         settlement terms are fixed before it exists, derived from the issued document and the
-        payer&apos;s own signature. A finality-gated indexer reads USDC transfer events from the
+        payer&apos;s own signature. A finality-gated indexer reads stablecoin transfer events from the
         chain into a durable ledger and updates each request from that ledger. When a request is
         funded or expires, a settlement transaction executes the contract, which can only move the
         funds under its own fixed terms: the amount to your wallet, and anything else to the
@@ -85,7 +85,7 @@ export default function SecurityPage() {
           cancelled and reissued.
         </li>
         <li>
-          <strong>Counterfactual.</strong> USDC can arrive before any contract exists at the
+          <strong>Counterfactual.</strong> Funds can arrive before any contract exists at the
           address. Deployment later routes whatever balance is there under the committed terms.
         </li>
         <li>
@@ -102,7 +102,8 @@ export default function SecurityPage() {
       <H2 id="detection">Detection and crediting</H2>
       <p>
         Payday runs its own indexer against the chain. It does not download blocks or trust a
-        third-party notification; it queries the USDC contract&apos;s <code>Transfer</code> event
+        third-party notification; it queries each served stablecoin contract&apos;s{" "}
+        <code>Transfer</code> event
         logs for the addresses it is expecting, in bounded block ranges, up to the chain&apos;s
         finalized boundary.
       </p>
@@ -111,7 +112,10 @@ export default function SecurityPage() {
       </Figure>
       <p>A transfer is credited only when all of the following hold:</p>
       <ol>
-        <li>It was emitted by the exact USDC contract configured for the environment.</li>
+        <li>
+          It was emitted by the request&apos;s currency&apos;s exact contract on the chosen
+          network, as configured for the environment.
+        </li>
         <li>Its recipient is a known deposit address.</li>
         <li>Its block is at or below the finalized boundary.</li>
         <li>Its block timestamp is no later than the request&apos;s deadline.</li>
@@ -138,8 +142,12 @@ export default function SecurityPage() {
           <tr>
             <td>Exact asset</td>
             <td>
-              USDC is identified by chain id and contract address, never by symbol or name. Upgrades
-              to the USDC proxy are monitored.
+              Each currency is identified by chain id and contract address, never by symbol or
+              name: Circle&apos;s USDC, and Tether&apos;s USDT0 for USDT on Monad and Arbitrum One.
+              Only the request&apos;s currency is credited; another served stablecoin sent to the
+              address (USDC to a USDT address) is not a payment and is returned to the payer&apos;s
+              wallet by the wrong-asset procedure, <code>recover(address)</code> on the deployed
+              contract. Upgrades to the token proxies are monitored.
             </td>
           </tr>
           <tr>
@@ -281,8 +289,9 @@ export default function SecurityPage() {
         </li>
         <li>
           Pages are served with a strict Content-Security-Policy, cannot be framed, and send no
-          Referer. The checkout&apos;s pay button sends a plain USDC transfer of the amount still
-          due: no approval, no contract call, nothing that could redirect funds.
+          Referer. The checkout&apos;s pay button sends a plain transfer of the request&apos;s
+          currency for the amount still due: no approval, no contract call, nothing that could
+          redirect funds.
         </li>
         <li>
           The dashboard holds no API key. It authenticates with the merchant&apos;s session and

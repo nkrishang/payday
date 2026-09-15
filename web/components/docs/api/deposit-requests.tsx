@@ -19,7 +19,7 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
     name: "networks",
     type: "array",
     description:
-      "[{ chain: { id, name }, token: { symbol, address, decimals } }]. The networks the payer may pay on, each with its native USDC contract.",
+      "[{ chain: { id, name }, token: { symbol, address, decimals } }]. The networks the payer may pay on, each with the currency's contract there. token.symbol is what a wallet shows: USDT0 for USDT on Monad and Arbitrum One.",
   },
   {
     name: "chain",
@@ -30,9 +30,13 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
     name: "token",
     type: "object | null",
     description:
-      "{ symbol, address, decimals }. The exact USDC contract on the chosen network. Null until the wallet step.",
+      "{ symbol, address, decimals }. The currency's exact contract on the chosen network. Null until the wallet step.",
   },
-  { name: "currency", type: "string", description: "USDC." },
+  {
+    name: "currency",
+    type: "string",
+    description: "USDC or USDT. Denominates amount and every network's token.",
+  },
   {
     name: "address",
     type: "string | null",
@@ -60,7 +64,8 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
     type: "decimal string",
     description: (
       <>
-        Six-decimal USDC. Each has an integer <code>*_base_units</code> counterpart.
+        Six decimals, in <code>currency</code>. Each has an integer <code>*_base_units</code>{" "}
+        counterpart.
       </>
     ),
   },
@@ -211,7 +216,7 @@ const OBJECT = `{
     "cursor_updated_at": "2026-09-06T11:59:59Z"
   },
   "self_settlement": null,
-  "attribution": { "version": 2, "hash": "0x…" }
+  "attribution": { "version": 4, "hash": "0x…" }
 }`;
 
 export const DEPOSIT_REQUEST_EXAMPLE = OBJECT;
@@ -236,7 +241,19 @@ const CREATE_BODY: FieldDoc[] = [
     name: "amount",
     type: "string",
     required: true,
-    description: "Positive USDC decimal; at most six fractional digits. Settled exactly.",
+    description: "Positive decimal in currency; at most six fractional digits. Settled exactly.",
+  },
+  {
+    name: "currency",
+    type: "string",
+    description: (
+      <>
+        <code>USDC</code> (default) or <code>USDT</code>. USDT has no 1:1 bridge for you, so a
+        USDT request must pin <code>chain_id</code> to a network serving it (Monad or Arbitrum
+        One); the payer may still pay it from another network through Relay. Immutable;
+        participates in idempotency.
+      </>
+    ),
   },
   {
     name: "payer_policy",
@@ -270,8 +287,8 @@ const CREATE_BODY: FieldDoc[] = [
         Decimal chain id of one supported network (<code>&quot;143&quot;</code>,{" "}
         <code>&quot;8453&quot;</code>, <code>&quot;42161&quot;</code>). Pins the network: the
         request offers it alone, <code>chain</code> and <code>token</code> name it from issuance,
-        and the payer&apos;s challenge must name it. Omitted, the payer chooses. Immutable;
-        participates in idempotency.
+        and the payer&apos;s challenge must name it. Omitted, the payer chooses among the networks
+        serving <code>currency</code>; required for USDT. Immutable; participates in idempotency.
       </>
     ),
   },
@@ -371,6 +388,11 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
             <code>token</code> are null until then too, unless <code>chain_id</code> pinned the
             network.
           </p>
+          <p>
+            A USDT request is <code>{`"currency": "USDT"`}</code> with <code>chain_id</code>{" "}
+            <code>&quot;143&quot;</code> or <code>&quot;42161&quot;</code>; its{" "}
+            <code>networks</code> carry that chain&apos;s USDT0 contract alone.
+          </p>
         </>
       ),
       headers: [
@@ -391,7 +413,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         {
           status: 400,
           code: "invalid_request",
-          when: "Shape, unknown field, type, or control character. Message names the field.",
+          when: "Shape, unknown field, type, or control character; a USDT request without chain_id. Message names the field.",
         },
         { status: 400, code: "invalid_amount", when: "Syntax, precision, or sign." },
         { status: 400, code: "missing_idempotency_key", when: "Header absent." },
@@ -423,7 +445,12 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         {
           status: 422,
           code: "unsupported_chain",
-          when: "chain_id names a network this deployment does not serve.",
+          when: "chain_id names a network this deployment does not serve, or one that does not serve currency.",
+        },
+        {
+          status: 422,
+          code: "unsupported_currency",
+          when: "No network on this deployment serves currency.",
         },
       ],
       examples: {
@@ -500,8 +527,8 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
             <code>payer_policy_mode</code>, <code>customer_id</code>, <code>issuer_id</code>,{" "}
             <code>has_attachment</code>, <code>verification_completed_at</code>,{" "}
             <code>likely_unsolicited_at</code>, <code>status</code>, <code>amount</code>,{" "}
-            <code>received</code>, <code>cancellation_requested_at</code>, <code>created_at</code>,{" "}
-            <code>updated_at</code>, <code>expires_at</code>.
+            <code>received</code>, <code>currency</code>, <code>cancellation_requested_at</code>,{" "}
+            <code>created_at</code>, <code>updated_at</code>, <code>expires_at</code>.
           </>
         ),
       },
@@ -527,6 +554,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       "status": "partially_deposited",
       "amount": "10.500000",
       "received": "4.000000",
+      "currency": "USDC",
       "cancellation_requested_at": null,
       "created_at": "2026-09-06T12:00:00Z",
       "updated_at": "2026-09-06T12:10:00Z",
@@ -907,7 +935,7 @@ Content-Length: 31288`,
         response: `{
   "version": "payday.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "canonical_issuance_snapshot": { "schema": "payday.invoice.v3", "canonicalization": "RFC8785", "networks": [ "…" ], "…": "…" },
+  "canonical_issuance_snapshot": { "schema": "payday.invoice.v4", "canonicalization": "RFC8785", "currency": "USDC", "decimals": "6", "networks": [ "…" ], "…": "…" },
   "canonicalization": "RFC8785",
   "attribution_hash": "0x…",
   "payer_wallet": { "address": "0x5aAe…", "typed_data": { "…": "…" }, "digest": "0x…", "signature": "0x…", "method": "ecdsa" },

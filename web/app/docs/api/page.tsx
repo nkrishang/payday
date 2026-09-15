@@ -196,7 +196,7 @@ export default function ApiIntroductionPage() {
         </thead>
         <tbody>
           <tr>
-            <td>USDC amounts</td>
+            <td>Amounts (USDC or USDT)</td>
             <td>
               Decimal string, six fractional digits (<code>&quot;25.000000&quot;</code>), with an
               integer <code>*_base_units</code> counterpart (<code>&quot;25000000&quot;</code>).

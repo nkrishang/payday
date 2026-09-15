@@ -45,6 +45,7 @@ Payday-Signature: v1,t=1756728000,sha256=6f1a…9c0e
       "amount_base_units": "10500000",
       "received": "10.500000",
       "received_base_units": "10500000",
+      "currency": "USDC",
       "heading": "March retainer",
       "reference": "INV-1042",
       "metadata": { "po": "PO-77" },
@@ -273,6 +274,10 @@ export default function WebhooksPage() {
           network the payment is on, as the API&apos;s decimal string: known from issuance when the
           merchant pinned it, otherwise from <code>deposit_request.ready</code>, and{" "}
           <code>null</code> before.
+        </li>
+        <li>
+          <code>currency</code> is the request&apos;s, <code>USDC</code> or <code>USDT</code>;{" "}
+          <code>amount</code> and <code>received</code> are in it.
         </li>
         <li>
           The payload never carries the expected email or any payer data beyond what you asserted.

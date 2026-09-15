@@ -13,10 +13,12 @@ const PROOF = `{
   "version": "payday.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": {
-    "schema": "payday.invoice.v3",
+    "schema": "payday.invoice.v4",
     "canonicalization": "RFC8785",
     "issuer": { "name": "Acme LLC", "email": "billing@acme.example" },
     "bill_to": { "name": "Customer Inc" },
+    "currency": "USDC",
+    "decimals": "6",
     "amount_base_units": "25000000",
     "heading": "March retainer",
     "reference": "INV-1042",
@@ -126,15 +128,19 @@ export default function ProofPage() {
           <tr>
             <td>canonical_issuance_snapshot</td>
             <td>
-              The exact document that was hashed at issuance, in canonical form: parties, amount in
+              The exact document that was hashed at issuance, in canonical form (
+              <code>payday.invoice.v4</code>): parties, the currency and its decimals, amount in
               base units, heading, reference, notes, deadline, policy, the attachment&apos;s length
-              and SHA-256, your payout address, and every network offered, each with its USDC
-              contract and factory.
+              and SHA-256, your payout address, and every network offered, each with the
+              currency&apos;s contract and factory there.
             </td>
           </tr>
           <tr>
             <td>attribution_hash</td>
-            <td>The hash of that document, after RFC 8785 canonicalization.</td>
+            <td>
+              <code>keccak256(&quot;PAYDAY_ATTRIBUTION_V4&quot; || canonical bytes)</code> of that
+              document, after RFC 8785 canonicalization.
+            </td>
           </tr>
           <tr>
             <td>payer_wallet</td>
@@ -168,8 +174,9 @@ export default function ProofPage() {
           <tr>
             <td>transfers</td>
             <td>
-              Every credited USDC transfer into the address: transaction, log index, sender, amount,
-              block. All must come from the attested wallet and sum to at least the amount.
+              Every credited transfer of the currency into the address: transaction, log index,
+              sender, amount, block. All must come from the attested wallet and sum to at least the
+              amount.
             </td>
           </tr>
           <tr>

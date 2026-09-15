@@ -6,7 +6,7 @@ import { Callout, DocsPage, H2, Table } from "@/components/docs/prose";
 export const metadata: Metadata = {
   title: "Environments",
   description:
-    "Production and sandbox: the base URLs, the networks and USDC contracts each one settles on, and how the two differ.",
+    "Production and sandbox: the base URLs, the currencies and networks each one settles on with their contracts, and how the two differ.",
 };
 
 const SANDBOX = `curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/dr_…" \\
@@ -22,7 +22,7 @@ export default function EnvironmentsPage() {
     <DocsPage
       eyebrow="Using Payday"
       title="Environments"
-      lead="Two isolated services with the same API. Production settles real USDC on Monad, Base, and Arbitrum One; the sandbox settles Circle's test USDC on their testnets, with its own accounts, keys, and database."
+      lead="Two isolated services with the same API. Production settles USDC on Monad, Base, and Arbitrum One and USDT on Monad and Arbitrum One; the sandbox settles Circle's test USDC on their testnets, with its own accounts, keys, and database."
     >
       <Table>
         <thead>
@@ -57,9 +57,9 @@ export default function EnvironmentsPage() {
             <td>Monad testnet (10143), Base Sepolia (84532), Arbitrum Sepolia (421614)</td>
           </tr>
           <tr>
-            <td>Token</td>
-            <td>Circle-issued native USDC on each network</td>
-            <td>Circle test USDC on each network</td>
+            <td>Currencies</td>
+            <td>USDC on every network; USDT (as USDT0) on Monad and Arbitrum One</td>
+            <td>Circle test USDC on each network; USDT is not offered</td>
           </tr>
           <tr>
             <td>Funds</td>
@@ -83,13 +83,70 @@ export default function EnvironmentsPage() {
         </tbody>
       </Table>
 
+      <H2 id="currencies-and-networks">Currencies and networks</H2>
       <p>
-        Every deposit request lists the <code>networks</code> it may be paid on, each with its
-        exact USDC contract. The payer picks one on the hosted checkout before signing, unless
-        the request was created with <code>chain_id</code>, which pins the list to that network;
-        from then on <code>chain</code> and <code>token</code> name it. Read them from the
-        response rather than hard-coding them, and show them to the payer: a matching symbol is not
-        enough, and USDC on another network, bridged USDC, and look-alike tokens do not count.
+        A deposit request is denominated in one <code>currency</code>, <code>USDC</code> by default
+        or <code>USDT</code>. Production serves these contracts; all have six decimals.
+      </p>
+      <Table>
+        <thead>
+          <tr>
+            <th>Network</th>
+            <th>USDC</th>
+            <th>USDT</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Monad (143)</td>
+            <td>
+              <code>0x754704Bc059F8C67012fEd69BC8A327a5aafb603</code>
+            </td>
+            <td>
+              <code>0xe7cd86e13AC4309349F30B3435a9d337750fC82D</code> (USDT0)
+            </td>
+          </tr>
+          <tr>
+            <td>Base (8453)</td>
+            <td>
+              <code>0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913</code>
+            </td>
+            <td>Not served</td>
+          </tr>
+          <tr>
+            <td>Arbitrum One (42161)</td>
+            <td>
+              <code>0xaf88d065e77c8cC2239327C5EDb3A432268e5831</code>
+            </td>
+            <td>
+              <code>0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9</code> (USDT0)
+            </td>
+          </tr>
+        </tbody>
+      </Table>
+      <p>
+        USDC is Circle&apos;s native issuance on each network. USDT on Monad and Arbitrum One is
+        Tether&apos;s USDT0, the omnichain USDT operated under Tether&apos;s license and backed 1:1
+        by USDT locked on Ethereum; a wallet shows it as <code>USDT0</code>, which is what{" "}
+        <code>token.symbol</code> carries there. Base&apos;s USDT is a bridge wrapper and is not
+        served as a deposit currency. The sandbox serves Circle&apos;s test USDC only.
+      </p>
+      <p>
+        The rule behind the matrix: Payday never gives you a rate worse than 1:1. USDC bridges
+        through Circle&apos;s CCTP at exactly 1:1, so a USDC request may be paid on any network
+        and withdrawn to whichever you choose. USDT has no such path, so a USDT request must pin{" "}
+        <code>chain_id</code> to a network serving it (<code>400 invalid_request</code> naming{" "}
+        <code>chain_id</code> otherwise; <code>422 unsupported_chain</code> for a network that does
+        not serve it), and a USDT withdrawal moves the destination network&apos;s balance only.
+      </p>
+      <p>
+        Every deposit request lists the <code>networks</code> it may be paid on, each with the
+        currency&apos;s exact contract there. The payer picks one on the hosted checkout before
+        signing, unless the request was created with <code>chain_id</code>, which pins the list to
+        that network; from then on <code>chain</code> and <code>token</code> name it. Read them
+        from the response rather than hard-coding them, and show them to the payer: a matching
+        symbol is not enough, and the same currency on another network, a bridged or wrapped
+        version, another stablecoin, and look-alike tokens do not count.
       </p>
 
       <H2 id="sandbox">Using the sandbox</H2>

@@ -43,7 +43,7 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
       {
         href: "/docs/concepts",
         title: "Deposit requests and deposits",
-        summary: "The two primitives, the lifecycle, and where every unit of USDC goes.",
+        summary: "The two primitives, the lifecycle, and where every unit goes.",
       },
       {
         href: "/docs/payer-verification",
@@ -63,7 +63,7 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
       {
         href: "/docs/withdrawals",
         title: "Withdrawals",
-        summary: "Move the Payday wallet's USDC, on every network, to one address.",
+        summary: "Move the Payday wallet's USDC or USDT to one address.",
       },
       {
         href: "/docs/checkout",

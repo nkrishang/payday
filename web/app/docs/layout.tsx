@@ -11,7 +11,7 @@ import { DocsShell } from "@/components/docs/shell";
 export const metadata: Metadata = {
   title: { default: "Docs", template: "%s · Payday Docs" },
   description:
-    "How to accept USDC deposits with Payday: concepts, the dashboard, the hosted checkout, webhooks, the TypeScript SDK, and the full HTTP API reference.",
+    "How to accept USDC and USDT deposits with Payday: concepts, the dashboard, the hosted checkout, webhooks, the TypeScript SDK, and the full HTTP API reference.",
 };
 
 export default function DocsLayout({ children }: { children: ReactNode }) {

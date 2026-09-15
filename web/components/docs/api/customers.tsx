@@ -73,8 +73,11 @@ export const CUSTOMERS: EndpointGroup = {
       response: {
         description: (
           <>
-            <code>Customer</code> plus <code>stats</code>: <code>request_count</code>,{" "}
-            <code>collected_base_units</code>, <code>pending_base_units</code>. This route only.
+            <code>Customer</code> plus <code>stats</code>: <code>request_count</code> and{" "}
+            <code>totals</code>, one entry per currency the customer has been asked for:{" "}
+            <code>{`{ currency, request_count, collected_base_units, pending_base_units }`}</code>.
+            Base units scale by that currency&apos;s decimals; totals never add across currencies.
+            This route only.
           </>
         ),
       },
@@ -85,7 +88,7 @@ export const CUSTOMERS: EndpointGroup = {
         ts: `const customer = await payday.customers.get(id);`,
         response: CUSTOMER.replace(
           '"updated_at": "2026-09-06T12:00:00Z"',
-          '"updated_at": "2026-09-06T12:00:00Z",\n  "stats": { "request_count": 3, "collected_base_units": "2500000000", "pending_base_units": "1250000000" }',
+          '"updated_at": "2026-09-06T12:00:00Z",\n  "stats": {\n    "request_count": 3,\n    "totals": [\n      { "currency": "USDC", "request_count": 2, "collected_base_units": "2500000000", "pending_base_units": "0" },\n      { "currency": "USDT", "request_count": 1, "collected_base_units": "0", "pending_base_units": "1250000000" }\n    ]\n  }',
         ),
       },
     },

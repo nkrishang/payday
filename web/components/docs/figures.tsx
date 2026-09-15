@@ -9,7 +9,7 @@ import { cn } from "@/lib/cn";
  * draw it better than paths would.
  */
 
-/** Where the USDC goes in each situation, drawn as a bar against the requested amount. */
+/** Where the funds go in each situation, drawn as a bar against the requested amount. */
 export function RoutingFigure() {
   const rows: Array<{
     title: string;
@@ -65,7 +65,7 @@ export function RoutingFigure() {
       ),
     },
     {
-      title: "USDC arrives after settlement",
+      title: "Funds arrive after settlement",
       received: 0.4,
       late: true,
       outcome: (

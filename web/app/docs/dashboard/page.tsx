@@ -143,7 +143,9 @@ export default function DashboardPage() {
       </p>
       <ol>
         <li>
-          <strong>Amount.</strong> The USDC amount, used directly. The identity when you have more
+          <strong>Amount.</strong> The currency, USDC or USDT, then the amount, used directly. The
+          network: for USDC, the payer&apos;s choice or one pinned network; for USDT, Monad or
+          Arbitrum One, since a USDT request is always pinned. The identity when you have more
           than one, the payout wallet when the identity offers alternatives to your Payday wallet,
           and the deadline: 24 hours, 7 days, 30 days, or a moment you pick.
         </li>
@@ -186,10 +188,12 @@ export default function DashboardPage() {
       <H3 id="account-and-api-key">Account and API key</H3>
       <p>
         The foot of the page is the account: the mailbox you signed in with, your Payday wallet in
-        full with its USDC balance on every network read from the public chain, and a sign-out.{" "}
-        <strong>Withdraw</strong> beneath the balances moves everything the wallet holds, on every
-        network, to one address you name; you sign once per network and the page tracks each leg
-        until it lands (<Link href="/docs/withdrawals">Withdrawals</Link>). <strong>Export wallet
+        full with its balance in every stablecoin each network serves, read from the public chain,
+        and a sign-out. <strong>Withdraw</strong> beneath the balances moves everything the wallet
+        holds in one currency to one address you name, offering only the networks that serve it:
+        USDC from every network at once, USDT from the destination network alone; you sign once per
+        leg and the page tracks each until it lands (
+        <Link href="/docs/withdrawals">Withdrawals</Link>). <strong>Export wallet
         key</strong> shows you the wallet&apos;s key, once, for withdrawing from your own server.
         Below it, the <strong>API key</strong> section generates, rolls, and revokes the key your
         own server calls the API with.

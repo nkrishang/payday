@@ -20,7 +20,7 @@ import {
 export const metadata: Metadata = {
   title: "Deposit requests and deposits",
   description:
-    "Payday's two primitives, the one-time address, every public status, and where each unit of USDC goes.",
+    "Payday's two primitives, the one-time address, every public status, and where each unit goes.",
 };
 
 export default function ConceptsPage() {
@@ -40,7 +40,7 @@ export default function ConceptsPage() {
         </CompareItem>
         <CompareItem title="Deposit" badge={<Pill tone="yellow">the funds</Pill>}>
           <p>
-            What answers it on-chain: the one-time address, the USDC transfers that reach it, and
+            What answers it on-chain: the one-time address, the transfers that reach it, and
             the settlement that moves the amount to your wallet. You read its state from the
             request: <code>status</code>, <code>received</code>, <code>transfers</code>.
           </p>
@@ -65,9 +65,16 @@ export default function ConceptsPage() {
           <Link href="/docs/api/customers">customer</Link>; the request still stores its own
           snapshot.
         </Def>
+        <Def term="currency">
+          <code>USDC</code> by default, or <code>USDT</code>. One per request; every network it
+          offers carries that currency&apos;s contract. USDC may be paid on any supported network;
+          a USDT request pins its network with <code>chain_id</code>, because only USDC bridges for
+          you at 1:1. See <Link href="/docs/environments#currencies-and-networks">Environments</Link>
+          .
+        </Def>
         <Def term="amount">
-          A USDC decimal with up to six fractional digits. Exactly this settles to your payout
-          address, no more and no less.
+          A decimal in the request&apos;s currency with up to six fractional digits. Exactly this
+          settles to your payout address, no more and no less.
         </Def>
         <Def term="payout_address">
           Your wallet. By default the wallet Payday created for your account at sign-in; any EVM
@@ -90,9 +97,10 @@ export default function ConceptsPage() {
         message from the wallet they intend to pay from. Payday derives the address from the
         issued document, the chosen chain, and that signature together, which is why{" "}
         <code>chain</code>, <code>token</code>, and <code>address</code> are <code>null</code>{" "}
-        until then. By default the request offers every supported network and the payer picks; a
-        merchant who needs the funds on one network pins it with <code>chain_id</code> at
-        issuance, and the request then offers that network alone and names it from the start.
+        until then. By default a USDC request offers every supported network and the payer picks;
+        a merchant who needs the funds on one network pins it with <code>chain_id</code> at
+        issuance, and the request then offers that network alone and names it from the start. A
+        USDT request is always pinned.
       </p>
 
       <Figure caption="Where the one-time address comes from. The salt depends on both the document and the payer's signature, and the address commits to the settlement terms, so none of them can change afterwards.">
@@ -101,7 +109,7 @@ export default function ConceptsPage() {
 
       <p>
         The address is <strong>counterfactual</strong>: it is calculated before any contract is
-        deployed at it, so USDC can arrive the moment it is shown. When Payday later deploys and
+        deployed at it, so funds can arrive the moment it is shown. When Payday later deploys and
         executes the contract, the funds can only move under the terms the address already commits
         to: this token, this amount, your payout address, this deadline, and the payer&apos;s wallet
         as the recovery destination. Anyone may execute it; nobody can redirect it.
@@ -109,8 +117,8 @@ export default function ConceptsPage() {
       <p>Two things follow, and both are worth internalising:</p>
       <ul>
         <li>
-          <strong>Only transfers from the attested wallet are the payer&apos;s.</strong> USDC from
-          any other wallet still counts toward the amount and settles, but the request is flagged{" "}
+          <strong>Only transfers from the attested wallet are the payer&apos;s.</strong> Funds from
+          any other wallet still count toward the amount and settle, but the request is flagged{" "}
           <code>likely_unsolicited</code> and no Proof of Payment will claim the payer paid it.
         </li>
         <li>
@@ -148,13 +156,13 @@ export default function ConceptsPage() {
             <td>
               <StatusPill tone="neutral">awaiting_deposit</StatusPill>
             </td>
-            <td>No finalized, on-time USDC has been credited yet.</td>
+            <td>No finalized, on-time funds have been credited yet.</td>
           </tr>
           <tr>
             <td>
               <StatusPill tone="progress">partially_deposited</StatusPill>
             </td>
-            <td>Some finalized USDC is credited, but less than the amount.</td>
+            <td>Some finalized funds are credited, but less than the amount.</td>
           </tr>
           <tr>
             <td>
@@ -230,8 +238,9 @@ export default function ConceptsPage() {
 
       <H2 id="finality-and-freshness">Finality and freshness</H2>
       <p>
-        Payday credits only <strong>finalized</strong> transfers of the configured Circle-issued
-        USDC contract. A wallet may show a transaction as submitted, included, or confirmed before{" "}
+        Payday credits only <strong>finalized</strong> transfers of the request&apos;s currency,
+        as its issuer&apos;s configured contract on the chosen network. A wallet may show a
+        transaction as submitted, included, or confirmed before{" "}
         <code>received</code> changes. There is intentionally no endpoint to mark a request
         deposited by hand.
       </p>
@@ -256,7 +265,7 @@ export default function ConceptsPage() {
 
       <H3 id="amounts">Amounts</H3>
       <p>
-        USDC has six decimals. Every amount is returned twice: as a decimal string (
+        USDC and USDT both have six decimals. Every amount is returned twice: as a decimal string (
         <code>&quot;25.000000&quot;</code>) for display, and as an integer string of base units (
         <code>&quot;25000000&quot;</code>) for arithmetic. Do arithmetic on base units with integer
         or decimal types; never with binary floating point.
@@ -275,9 +284,13 @@ export default function ConceptsPage() {
       <ul>
         <li>
           Only the exact <code>token.address</code> on the chosen <code>chain.id</code> is
-          monitored. Bridged USDC, look-alike tokens, and native gas do not count and may be
-          unrecoverable. The address commits to its chain: on any other network it refuses to
-          settle, and the funds can only be returned to the payer&apos;s wallet, by hand.
+          credited: the request&apos;s currency, as its issuer&apos;s contract there. Any other
+          stablecoin Payday serves, sent to the address (USDC to a USDT address, say), is not a
+          payment; it is returned to the payer&apos;s wallet by the wrong-asset procedure,{" "}
+          <code>recover(address)</code> on the deployed contract. Bridged or wrapped versions,
+          look-alike tokens, and native gas do not count and may be unrecoverable. The address
+          commits to its chain: on any other network it refuses to settle, and the funds can only
+          be returned to the payer&apos;s wallet, by hand.
         </li>
         <li>
           A deposit link grants read access to the payer page and nothing else. It never exposes

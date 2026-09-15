@@ -190,7 +190,7 @@ export default function SdkPage() {
       <H2 id="withdrawals">Withdrawals from a server</H2>
       <p>
         <code>payday.withdrawals</code> prepares, submits, polls, and cancels a withdrawal of the
-        Payday wallet&apos;s USDC. Signing the legs needs the wallet&apos;s key;{" "}
+        Payday wallet&apos;s USDC or USDT. Signing the legs needs the wallet&apos;s key;{" "}
         <code>@payday/sdk/signing</code> does it with <code>viem</code> as an optional peer
         dependency, after checking every document against its leg. The flow, the signer&apos;s
         checklist, and Rust and Go equivalents are on{" "}
