@@ -98,6 +98,13 @@ export function assertLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLe
   if (typed.primaryType !== expectedType) throw problem(`is a ${typed.primaryType} for a ${leg.kind} leg`);
   if (!sameAddress(typed.message.from, withdrawal.wallet_address)) throw problem("is not signed from the Payday wallet");
   if (typed.domain.chainId !== Number(leg.source_chain.id)) throw problem("is under another chain's domain");
+  // A transfer leg must move funds on the chain the withdrawal settles on:
+  // the planner never puts one elsewhere, so a leg sourced from another
+  // chain — under that chain's perfectly legitimate token — would send the
+  // balance where the merchant is not.
+  if (leg.kind === "transfer" && leg.source_chain.id !== withdrawal.destination.chain.id) {
+    throw problem("moves funds on a chain the withdrawal does not settle on");
+  }
   if (typed.message.value !== leg.amount_base_units) throw problem("does not authorize the leg's amount");
   if (typed.message.validAfter !== "0") throw problem("has a non-zero validAfter");
   if (BigInt(typed.message.validBefore) <= BigInt(Math.floor(Date.now() / 1000))) {

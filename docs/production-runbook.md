@@ -425,7 +425,14 @@ Replace every placeholder in `terraform.tfvars`, including:
   demo pays), and the fixed values from the table above. Both tasks receive
   the list as `PAYDAY_CHAINS`, whose entries carry
   `tokens: [{"currency":"USDC","address":"0x…"},{"currency":"USDT","address":"0x…"}]`
-  and `start_block`
+  and `start_block`. Each `tokens` address must be the issuer's **canonical
+  deployment** of that currency on that chain (Circle's native USDC;
+  Tether's USDT0), never a bridged look-alike: startup verifies each
+  contract's decimals and its own EIP-712 domain, but no on-chain call can
+  tell *which* issuer an address belongs to — both are self-consistent — so
+  a swapped address starts cleanly and mislabels every request. Copy the
+  addresses from the issuer's own documentation (see
+  `docs/deposit-safety.md`) and double-check them before applying
 - `privy_app_id`, `auth0_issuer`, `payer_auth0_audience`, and
   `payer_auth0_client_id` from §3
 - `admin_reviewer_id`, who operator decisions are recorded against

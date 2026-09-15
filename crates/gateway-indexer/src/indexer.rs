@@ -1170,6 +1170,7 @@ impl Indexer {
                 let probe = self
                     .chain
                     .probe_failure(
+                        invoice.currency(),
                         binding.network.token.0,
                         payment,
                         invoice.beneficiary.0,
@@ -1993,6 +1994,7 @@ pub(crate) mod tests {
 
         async fn probe_failure(
             &self,
+            _currency: gateway_core::Currency,
             _token: Address,
             payment: Address,
             _receiver: Address,
@@ -3754,11 +3756,13 @@ pub(crate) mod tests {
     async fn failure_classification_retries_transient_and_blocks_permanent_causes(pool: PgPool) {
         let paused = make_invoice(100);
         let blacklisted = make_invoice(200);
+        let sender_blocked = make_invoice(500);
         let underfunded = make_invoice(300);
         let unknown = make_invoice(400);
         for (invoice, key) in [
             (&paused, "a"),
             (&blacklisted, "b"),
+            (&sender_blocked, "e"),
             (&underfunded, "c"),
             (&unknown, "d"),
         ] {
@@ -3768,7 +3772,13 @@ pub(crate) mod tests {
             revert_data: Bytes::from_static(&[0x30, 0x11, 0x64, 0x25]),
         };
         let chain = Arc::new(MockChain::new(7).with(|state| {
-            for invoice in [&paused, &blacklisted, &underfunded, &unknown] {
+            for invoice in [
+                &paused,
+                &blacklisted,
+                &sender_blocked,
+                &underfunded,
+                &unknown,
+            ] {
                 state
                     .next_outcomes
                     .insert(payment_address(invoice), failed.clone());
@@ -3785,6 +3795,16 @@ pub(crate) mod tests {
                 FailureProbe {
                     paused: Some(false),
                     receiver_blacklisted: Some(true),
+                    ..FailureProbe::default()
+                },
+            );
+            state.probes.insert(
+                payment_address(&sender_blocked),
+                FailureProbe {
+                    paused: Some(false),
+                    // USDT0's shape: the sender alone is blocked; a transfer
+                    // to the beneficiary would still succeed.
+                    payment_blacklisted: Some(true),
                     ..FailureProbe::default()
                 },
             );
@@ -3811,6 +3831,13 @@ pub(crate) mod tests {
         assert_eq!(
             blacklisted_row.blocked_reason.as_deref(),
             Some("beneficiary_blacklisted")
+        );
+
+        let sender_blocked_row = fetch(&pool, &sender_blocked).await;
+        assert_eq!(sender_blocked_row.status, "blocked");
+        assert_eq!(
+            sender_blocked_row.blocked_reason.as_deref(),
+            Some("payment_address_blacklisted")
         );
 
         let underfunded_row = fetch(&pool, &underfunded).await;

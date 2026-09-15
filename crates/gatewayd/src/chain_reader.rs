@@ -11,6 +11,15 @@
 //! relayed. The same pass reads `decimals()` and refuses to start when a
 //! contract disagrees with the currency it is configured as: every amount
 //! the API renders assumes the currency's decimals.
+//!
+//! What these checks cannot tell is *which* stablecoin an address is: both
+//! issuers' contracts are self-consistent under their own name, so swapping
+//! the USDC and USDT0 addresses in `PAYDAY_CHAINS` would start cleanly and
+//! mislabel every request. Issuer identity — the canonical deployment of
+//! each currency on each chain, never a bridged look-alike — is an
+//! operator-trusted input; verify each `tokens` address against the issuer's
+//! own documentation when editing the registry (see
+//! `docs/production-runbook.md`, "Changing the chains").
 
 use std::collections::HashMap;
 

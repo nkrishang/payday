@@ -116,6 +116,13 @@ export function checkLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLeg
   if (typed.domain.chainId !== Number(leg.source_chain.id)) {
     return "The document is under another network's token.";
   }
+  // A transfer leg must move funds on the chain the withdrawal settles on:
+  // the planner never puts one elsewhere, so a leg sourced from another
+  // chain — under that chain's perfectly legitimate token — would send the
+  // balance where the merchant is not.
+  if (leg.kind === "transfer" && leg.source_chain.id !== withdrawal.destination.chain.id) {
+    return "The document moves funds on a network this withdrawal does not settle on.";
+  }
   const source = chainById(leg.source_chain.id);
   if (!source) return "The source network is not trusted by this dashboard.";
   const trusted = tokenOn(source, withdrawal.currency);

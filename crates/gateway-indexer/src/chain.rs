@@ -49,6 +49,8 @@ sol! {
     function settled() view returns (bool);
     function paused() view returns (bool);
     function isBlacklisted(address account) view returns (bool);
+    /// Tether's restriction getter (USDT0); Circle's is `isBlacklisted`.
+    function isBlocked(address account) view returns (bool);
     function balanceOf(address account) view returns (uint256);
     function authorizationState(address authorizer, bytes32 nonce) view returns (bool);
 
@@ -494,6 +496,16 @@ pub struct FailureProbe {
     pub balance: Option<U256>,
 }
 
+/// Whether `currency`'s contract can refuse a transfer *to* a blocked
+/// recipient. Circle's FiatToken reverts when either side of a transfer is
+/// blacklisted; USDT0's hook restricts the sender alone, so a blocked
+/// beneficiary or recovery wallet cannot fail a settlement or recovery
+/// transfer, and probing their restriction would only invite a false
+/// `beneficiary_blacklisted` / `recovery_blacklisted` classification.
+fn recipient_restriction_matters(currency: gateway_core::Currency) -> bool {
+    matches!(currency, gateway_core::Currency::Usdc)
+}
+
 /// The transaction that deployed a `Payment` somebody else executed, with
 /// the amounts its constructor routed. `settled` is the `Settled` amount when
 /// the deployment paid the receiver; `recovered` is what went to the recovery
@@ -643,9 +655,12 @@ pub trait ChainClient: Send + Sync {
     ) -> Result<Option<SettlementEvent>, ChainError>;
 
     /// Read the token facts that distinguish a transient failure from a
-    /// permanent one, at a block whose hash the caller verified.
+    /// permanent one, at a block whose hash the caller verified. The
+    /// currency selects the token's restriction getter: Circle's
+    /// `isBlacklisted` or Tether's `isBlocked`.
     async fn probe_failure(
         &self,
+        currency: gateway_core::Currency,
         token: Address,
         payment: Address,
         receiver: Address,
@@ -1412,6 +1427,7 @@ impl ChainClient for AlloyChainClient {
 
     async fn probe_failure(
         &self,
+        currency: gateway_core::Currency,
         token: Address,
         payment: Address,
         receiver: Address,
@@ -1434,21 +1450,41 @@ impl ChainClient for AlloyChainClient {
             .await
             .ok()
             .and_then(|output| balanceOfCall::abi_decode_returns(&output).ok());
-        let blacklisted = |account: Address| {
-            self.optional_bool(
+        // Each issuer names its own addresses: Circle's FiatToken exposes
+        // `isBlacklisted`, Tether's USDT0 `isBlocked`. A getter the token
+        // does not have reverts, and `optional_bool` answers that with
+        // `None`, so the wrong getter would blind the classifier — pick the
+        // one the currency's contract actually has.
+        let restricted = |account: Address| match currency {
+            gateway_core::Currency::Usdc => self.optional_bool(
                 token,
                 isBlacklistedCall { account }.abi_encode().into(),
                 block,
-            )
+            ),
+            gateway_core::Currency::Usdt => {
+                self.optional_bool(token, isBlockedCall { account }.abi_encode().into(), block)
+            }
         };
+        let payment_blacklisted = restricted(payment).await;
+        // Circle reverts a transfer touching a blocked party on either side;
+        // USDT0's hook restricts the sender alone, so a transfer *to* a
+        // blocked address succeeds and a blocked beneficiary or recovery
+        // wallet cannot be why a sweep failed. Reporting those as blocked
+        // would permanently stall a sweep that failed for another reason.
+        let (receiver_blacklisted, recovery_blacklisted) =
+            if recipient_restriction_matters(currency) {
+                (restricted(receiver).await, restricted(recovery).await)
+            } else {
+                (None, None)
+            };
         Ok(FailureProbe {
             code_present: !code.is_empty(),
             paused: self
                 .optional_bool(token, pausedCall {}.abi_encode().into(), block)
                 .await,
-            payment_blacklisted: blacklisted(payment).await,
-            receiver_blacklisted: blacklisted(receiver).await,
-            recovery_blacklisted: blacklisted(recovery).await,
+            payment_blacklisted,
+            receiver_blacklisted,
+            recovery_blacklisted,
             balance,
         })
     }
@@ -1494,6 +1530,12 @@ mod tests {
                 .transpose()
                 .unwrap(),
         })
+    }
+
+    #[test]
+    fn usdt0_blocks_senders_not_recipients() {
+        assert!(recipient_restriction_matters(gateway_core::Currency::Usdc));
+        assert!(!recipient_restriction_matters(gateway_core::Currency::Usdt));
     }
 
     #[test]

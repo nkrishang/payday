@@ -113,6 +113,70 @@ test("assertLegAuthorization refuses a document that strays from the leg", () =>
   assert.throws(tampered((leg) => (leg.authorization.typed_data.message.validAfter = "1")), /validAfter/);
 });
 
+test("a transfer leg must move funds on the destination chain", () => {
+  // The same leg as a same-chain transfer on Monad while the withdrawal
+  // settles on Base: a legitimate token on a legitimate chain, but not one
+  // the withdrawal can settle through.
+  const straying = structuredClone(bridgeLeg);
+  straying.kind = "transfer";
+  straying.authorization.primary_type = "TransferWithAuthorization";
+  straying.authorization.typed_data.primaryType = "TransferWithAuthorization";
+  straying.authorization.typed_data.message.to = DESTINATION;
+  delete straying.authorization.forwarder;
+  delete straying.authorization.nonce_preimage;
+  assert.throws(
+    () => assertLegAuthorization(withdrawal, straying),
+    /does not settle on/,
+  );
+
+  // The same withdrawal as a same-chain transfer under Base's own USDC
+  // contract is a complete, signable document.
+  const matching = structuredClone(bridgeLeg);
+  matching.kind = "transfer";
+  matching.source_chain = { id: "8453", name: "Base", native_symbol: "ETH" };
+  matching.token = { symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 };
+  matching.authorization = {
+    primary_type: "TransferWithAuthorization",
+    typed_data: {
+      domain: {
+        name: "USD Coin",
+        version: "2",
+        chainId: 8453,
+        verifyingContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      },
+      primaryType: "TransferWithAuthorization",
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        TransferWithAuthorization: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      message: {
+        from: WALLET,
+        to: DESTINATION,
+        value: "1234567",
+        validAfter: "0",
+        validBefore: "1800000000",
+        nonce: `0x${"42".repeat(32)}`,
+      },
+    },
+    expires_at: "2027-01-15T08:00:00Z",
+    forwarder: null,
+    nonce_preimage: null,
+  };
+  assertLegAuthorization(withdrawal, matching);
+});
+
 test("privateKeySigner signs every awaiting leg for the wallet and checks the nonce commitment", async () => {
   // Any key: the address it signs as must equal the withdrawal's wallet, so
   // the fixture wallet is replaced by the key's address here.

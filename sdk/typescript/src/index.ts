@@ -606,10 +606,14 @@ export interface AttachmentCommitment { id: string; byte_length: string; sha256:
  * attestation rather than through this document.
  */
 export interface CanonicalIssuanceSnapshot {
-  schema: "payday.invoice.v3";
+  schema: "payday.invoice.v4";
   canonicalization: "RFC8785";
   issuer: Party;
   bill_to: Party;
+  /** The currency's wire code (`USDC`, `USDT`); every network below is that currency's contract on its chain. */
+  currency: string;
+  /** Decimal: base units per whole unit, so `amount_base_units` reads without a registry. */
+  decimals: string;
   amount_base_units: string;
   notes: string | null;
   heading: string | null;

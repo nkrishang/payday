@@ -113,6 +113,28 @@ describe("checkLegAuthorization", () => {
     expect(checkLegAuthorization(WITHDRAWAL, LEG)).toBeNull();
   });
 
+  it("refuses a transfer leg that moves funds on another chain", () => {
+    // The same leg as a same-chain transfer on Monad while the withdrawal
+    // settles on Base: a legitimate token on a legitimate chain, but not
+    // one the withdrawal can settle through.
+    const straying: WithdrawalLeg = {
+      ...LEG,
+      kind: "transfer",
+      authorization: {
+        ...LEG.authorization!,
+        primary_type: "TransferWithAuthorization",
+        typed_data: {
+          ...TYPED,
+          primaryType: "TransferWithAuthorization",
+          message: { ...TYPED.message, to: DESTINATION },
+        },
+        forwarder: null,
+        nonce_preimage: null,
+      },
+    };
+    expect(checkLegAuthorization(WITHDRAWAL, straying)).toMatch(/does not settle on/);
+  });
+
   it("names what strayed", () => {
     const withMessage = (patch: Partial<WithdrawalTypedData["message"]>): WithdrawalLeg => ({
       ...LEG,

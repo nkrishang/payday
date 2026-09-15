@@ -250,7 +250,14 @@ pub async fn create(
     }
 
     let reader = state.chain_reader()?;
-    let balances = balances(&state.networks, reader.as_ref(), currency, wallet).await?;
+    let balances = balances(
+        &state.networks,
+        reader.as_ref(),
+        currency,
+        wallet,
+        destination_chain_id,
+    )
+    .await?;
     let legs = plan_legs(
         &state.networks,
         reader.as_ref(),
@@ -514,27 +521,71 @@ pub async fn cancel(
 
 // --- Planning ---
 
-/// The wallet's balance in `currency` on every chain serving it, read
-/// together: `(chain_id, token, balance)` in registry order.
+/// The wallet's balance in `currency` on the chains the withdrawal can move,
+/// in registry order. A currency with a 1:1 bridge (CCTP, USDC only) can
+/// sweep from any chain serving it, so every balance is needed and one read
+/// failure blocks planning: an unknown balance must not be quietly bridged
+/// or left behind. A currency without a bridge only ever moves the
+/// destination chain's balance, so that one read is required while the
+/// others only name themselves in a `nothing_to_withdraw` message — an
+/// outage on a chain the withdrawal would not touch must not block it.
+/// Returns `(chain_id, token, balance)`.
 async fn balances(
     networks: &ChainRegistry,
     reader: &dyn ChainReads,
     currency: Currency,
     wallet: Address,
+    destination_chain_id: u64,
 ) -> Result<Vec<(u64, Address, U256)>, ApiError> {
-    let reads = networks.chains().iter().filter_map(|chain| {
+    let read = |chain: &gateway_core::ChainConfig| {
+        let chain_id = chain.chain_id;
         let token = chain.token(currency)?.address;
         Some(async move {
             reader
-                .balance(chain.chain_id, token, wallet)
+                .balance(chain_id, token, wallet)
                 .await
-                .map(|balance| (chain.chain_id, token, balance))
+                .map(|balance| (chain_id, token, balance))
         })
-    });
-    futures::future::try_join_all(reads).await.map_err(|error| {
+    };
+    let unavailable = |error: crate::chain_reader::ChainReadError| {
         tracing::warn!(%error, "withdrawal balance read failed");
         ApiError::withdrawals_unavailable(format!("Could not read the wallet's balance: {error}"))
-    })
+    };
+    if currency.cross_chain_settlement().is_some() {
+        let reads = networks.chains().iter().filter_map(read);
+        return futures::future::try_join_all(reads)
+            .await
+            .map_err(unavailable);
+    }
+    // The destination chain's balance is the withdrawal itself: refuse
+    // rather than plan blind.
+    let destination = networks
+        .get(destination_chain_id)
+        .and_then(read)
+        .ok_or_else(|| ApiError::internal("destination chain does not serve the currency"))?
+        .await
+        .map_err(unavailable)?;
+    if !destination.2.is_zero() {
+        return Ok(vec![destination]);
+    }
+    // Zero at the destination: other chains only appear in the
+    // `nothing_to_withdraw` message, so their reads are best-effort.
+    let elsewhere = networks
+        .chains()
+        .iter()
+        .filter(|chain| chain.chain_id != destination_chain_id)
+        .filter_map(read);
+    let mut balances = vec![destination];
+    for (chain_id, token, balance) in futures::future::join_all(elsewhere)
+        .await
+        .into_iter()
+        .flatten()
+    {
+        if !balance.is_zero() {
+            balances.push((chain_id, token, balance));
+        }
+    }
+    Ok(balances)
 }
 
 /// One leg per non-zero balance the withdrawal can move, in registry
@@ -771,5 +822,210 @@ impl AppState {
         self.chain_reader.clone().ok_or_else(|| {
             ApiError::withdrawals_unavailable("Withdrawals are not available on this deployment")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+    use crate::chain_reader::ChainReadError;
+
+    const USDC: &str = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603";
+    const USDT: &str = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D";
+    const USDT_ARBITRUM: &str = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9";
+    const WALLET: &str = "0x1111111111111111111111111111111111111111";
+
+    fn chain(id: u64, tokens: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "chain_id": id,
+            "tokens": tokens,
+            "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+            "batch_sweeper": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+            "factory_code_hash": format!("0x{}", "ab".repeat(32)),
+            "batch_sweeper_code_hash": format!("0x{}", "cd".repeat(32)),
+            "start_block": 100,
+            "finality_source": "finalized",
+            "finality_confirmations": 0,
+            "block_time_ms": 300,
+            "log_range_size": 100
+        })
+    }
+
+    /// USDT on Monad and Arbitrum One, USDC on Monad — the deployment shape
+    /// the pinning rules exist for.
+    fn registry() -> ChainRegistry {
+        ChainRegistry::parse(
+            &serde_json::json!([
+                chain(
+                    143,
+                    serde_json::json!([
+                        {"currency": "USDC", "address": USDC},
+                        {"currency": "USDT", "address": USDT}
+                    ])
+                ),
+                chain(
+                    42161,
+                    serde_json::json!([
+                        {"currency": "USDT", "address": USDT_ARBITRUM}
+                    ])
+                )
+            ])
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    /// Balances per chain, with the chains whose balance read fails.
+    struct MockReader {
+        balances: HashMap<u64, U256>,
+        failing: HashSet<u64>,
+        reads: std::sync::Mutex<HashSet<u64>>,
+    }
+
+    impl MockReader {
+        fn failing(chain_id: u64) -> Self {
+            Self {
+                balances: HashMap::new(),
+                failing: HashSet::from([chain_id]),
+                reads: std::sync::Mutex::new(HashSet::new()),
+            }
+        }
+
+        /// `failing` chain's balance read errors; `funded` chain holds
+        /// `balance`.
+        fn funded(funded: u64, balance: u64, failing: u64) -> Self {
+            Self {
+                balances: HashMap::from([(funded, U256::from(balance))]),
+                failing: HashSet::from([failing]),
+                reads: std::sync::Mutex::new(HashSet::new()),
+            }
+        }
+
+        fn read(&self, chain_id: u64) -> bool {
+            self.reads.lock().unwrap().contains(&chain_id)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChainReads for MockReader {
+        async fn balance(
+            &self,
+            chain_id: u64,
+            _token: Address,
+            _wallet: Address,
+        ) -> Result<U256, ChainReadError> {
+            self.reads.lock().unwrap().insert(chain_id);
+            if self.failing.contains(&chain_id) {
+                return Err(ChainReadError::Rpc {
+                    chain_id,
+                    operation: "test",
+                    message: "down".into(),
+                });
+            }
+            Ok(self.balances.get(&chain_id).copied().unwrap_or(U256::ZERO))
+        }
+
+        fn domain(&self, _chain_id: u64, _token: Address) -> Option<&TokenDomain> {
+            None
+        }
+    }
+
+    fn wallet() -> Address {
+        WALLET.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn usdt_withdrawal_ignores_an_unrelated_chain_outage() {
+        // The wallet's USDT sits on Monad; Arbitrum's balance read is down.
+        // A withdrawal to Monad touches Arbitrum for nothing, so it must
+        // still plan — and must never even read Arbitrum's balance.
+        let reader = MockReader::funded(143, 5, 42161);
+        let balances = balances(&registry(), &reader, Currency::Usdt, wallet(), 143)
+            .await
+            .unwrap();
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0].0, 143);
+        assert_eq!(balances[0].1, USDT.parse::<Address>().unwrap());
+        assert_eq!(balances[0].2, U256::from(5));
+        assert!(!reader.read(42161));
+    }
+
+    #[tokio::test]
+    async fn usdt_unfunded_destination_is_diagnosed_best_effort() {
+        // Nothing on Monad and Arbitrum's read down: the merchant still gets
+        // the nothing-to-withdraw answer, built from whatever could be read.
+        let reader = MockReader::failing(42161);
+        let balances = balances(&registry(), &reader, Currency::Usdt, wallet(), 143)
+            .await
+            .unwrap();
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0].0, 143);
+        assert_eq!(balances[0].2, U256::ZERO);
+        assert!(reader.read(42161), "the diagnosis looks elsewhere");
+    }
+
+    #[tokio::test]
+    async fn usdt_destination_balance_blocks_planning_when_unreadable() {
+        // The destination chain's balance is the withdrawal itself: an
+        // outage there is a 503, not a plan.
+        let reader = MockReader::failing(143);
+        let error = balances(&registry(), &reader, Currency::Usdt, wallet(), 143)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("Could not read the wallet's balance")
+        );
+    }
+
+    #[tokio::test]
+    async fn usdt_zero_destination_balance_still_sees_a_funded_elsewhere() {
+        // Nothing on Monad, funds on Arbitrum: the zero balance carries
+        // through to planning, which reports nothing_to_withdraw naming
+        // Arbitrum.
+        let reader = MockReader {
+            balances: HashMap::from([(42161, U256::from(5u8))]),
+            failing: HashSet::new(),
+            reads: std::sync::Mutex::new(HashSet::new()),
+        };
+        let balances = balances(&registry(), &reader, Currency::Usdt, wallet(), 143)
+            .await
+            .unwrap();
+        assert_eq!(balances.len(), 2);
+        assert_eq!(balances[0].0, 143);
+        assert_eq!(balances[1].0, 42161);
+    }
+
+    #[tokio::test]
+    async fn usdc_bridge_planning_refuses_an_unreadable_chain() {
+        // Every chain holding USDC could become a bridge leg, so a read
+        // failure anywhere must not let an unknown balance be bridged or
+        // silently dropped.
+        let reader = MockReader::failing(42161);
+        let networks = ChainRegistry::parse(
+            &serde_json::json!([
+                chain(
+                    143,
+                    serde_json::json!([{"currency": "USDC", "address": USDC}])
+                ),
+                chain(
+                    42161,
+                    serde_json::json!([{"currency": "USDC", "address": USDC}])
+                )
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let error = balances(&networks, &reader, Currency::Usdc, wallet(), 143)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("Could not read the wallet's balance")
+        );
     }
 }

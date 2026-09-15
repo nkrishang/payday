@@ -58,7 +58,15 @@ export function WalletPay({
 
   const configured = chainById(payment.chain.id);
   const target = wagmiChain(payment.chain.id);
-  const tokenMatches = tokenFor(payment.chain.id, payment.token.address) !== null;
+  // The response's token must be this deployment's contract for the request's
+  // own currency on the chosen chain — not merely any configured token there
+  // — and must carry the same decimals, so a tampered response can never get
+  // a transfer of the wrong asset or at a wrong scale.
+  const configuredToken = tokenFor(payment.chain.id, payment.token.address);
+  const tokenMatches =
+    configuredToken !== null &&
+    configuredToken.currency === payment.currency &&
+    configuredToken.decimals === payment.token.decimals;
   const supported = configured !== null && target !== null && tokenMatches;
   const targetId = target?.id ?? 0;
   const walletMatches =

@@ -123,6 +123,10 @@ struct Attribution {
 #[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"payer":{"name":"Globex"},"payer_policy":{"mode":"permissionless"},"expires_in":3600,"reference":"INV-42","customer_id":"cus_0198f80c-1111-7dc1-a369-90556a64f700","metadata":{"po":"PO-77"}}))]
 struct CreateDepositRequest {
     amount: String,
+    /// `USDC` (the default) or `USDT`: the one currency the request is
+    /// denominated in. `USDT` requires `chain_id`: it settles on the pinned
+    /// chain and does not bridge.
+    currency: Option<String>,
     /// Where exactly `amount` settles. May be left out when `issuer_id`
     /// names an identity with a saved payout address; its first one is used.
     payout_address: Option<String>,
@@ -486,12 +490,25 @@ struct CustomerPage {
 }
 #[derive(Serialize, ToSchema)]
 struct CustomerStats {
-    /// Deposit requests addressed to this customer, of any status.
+    /// Deposit requests addressed to this customer, of any status, in every
+    /// currency together.
     request_count: i64,
-    /// Confirmed on chain across all of this customer's deposit requests. Base units,
-    /// like a deposit request's own `amount_base_units` — scale for display.
+    /// One entry per currency the customer has been asked for: two currencies
+    /// never add up.
+    totals: Vec<CustomerCurrencyTotal>,
+}
+#[derive(Serialize, ToSchema)]
+struct CustomerCurrencyTotal {
+    /// The currency's wire code (`USDC`, `USDT`).
+    currency: String,
+    /// Deposit requests in this currency addressed to the customer, of any status.
+    request_count: i64,
+    /// Confirmed on chain across this currency's deposit requests for the
+    /// customer. Base units, like a deposit request's own `amount_base_units`
+    /// — scale by the currency's decimals for display.
     collected_base_units: String,
-    /// Outstanding on the ones still open — awaiting deposit or partially paid. Base units.
+    /// Outstanding on this currency's requests still open — awaiting deposit
+    /// or partially paid. Base units.
     pending_base_units: String,
 }
 /// `getCustomer` only: a list of many customers would mean one aggregate
@@ -618,6 +635,12 @@ struct CanonicalIssuanceSnapshot {
     canonicalization: String,
     issuer: Party,
     payer: Party,
+    /// The currency's wire code (`USDC`, `USDT`); every network below is
+    /// that currency's contract on its chain.
+    currency: String,
+    /// Decimal: base units per whole unit, so `amount_base_units` reads
+    /// without a registry.
+    decimals: String,
     amount_base_units: String,
     notes: Option<String>,
     heading: Option<String>,
@@ -629,7 +652,7 @@ struct CanonicalIssuanceSnapshot {
     networks: Vec<SnapshotNetwork>,
     receiver_address: String,
 }
-/// One committed network: decimal chain id, EIP-55 USDC and factory.
+/// One committed network: decimal chain id, EIP-55 token and factory.
 #[derive(Serialize, ToSchema)]
 struct SnapshotNetwork {
     chain_id: String,
@@ -855,6 +878,10 @@ struct WithdrawalDestinationRequest {
 }
 #[derive(Deserialize, ToSchema)]
 struct CreateWithdrawal {
+    /// `USDC` (the default) or `USDT`: the one currency the withdrawal moves.
+    /// Every network holding USDC is swept into the destination; USDT moves
+    /// the destination chain's balance alone.
+    currency: Option<String>,
     destination: WithdrawalDestinationRequest,
 }
 #[derive(Deserialize, ToSchema)]
@@ -884,7 +911,8 @@ struct WithdrawalNoncePreimage {
     salt: String,
 }
 /// What the merchant signs for one leg: an EIP-3009 authorization under the
-/// source chain's USDC, ready for `eth_signTypedData_v4`.
+/// source chain's contract for the withdrawal's currency, ready for
+/// `eth_signTypedData_v4`.
 #[derive(Serialize, ToSchema)]
 struct WithdrawalAuthorization {
     /// `TransferWithAuthorization` (same-chain leg) or
@@ -908,6 +936,9 @@ struct WithdrawalLeg {
     /// `bridge` when they cross through CCTP.
     kind: String,
     source_chain: Chain,
+    /// The contract the leg is signed under: the withdrawal's currency on
+    /// the source chain.
+    token: Token,
     amount: String,
     amount_base_units: String,
     /// `awaiting_signature`, `authorized`, `relaying`, `burned`, `attested`,
@@ -927,8 +958,10 @@ struct Withdrawal {
     status: String,
     /// The Payday wallet every leg is signed from.
     wallet_address: String,
+    /// `USDC` or `USDT`: the one currency every leg moves.
+    currency: String,
     destination: WithdrawalDestination,
-    /// One per network the wallet held USDC on when the withdrawal was created.
+    /// One per network the wallet held the currency on when the withdrawal was created.
     legs: Vec<WithdrawalLeg>,
     created_at: String,
     completed_at: Option<String>,
