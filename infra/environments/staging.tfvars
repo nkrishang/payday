@@ -129,3 +129,6 @@ db_skip_final_snapshot = true
 
 # main deploys here automatically after CI passes.
 github_repository = "nkrishang/payday"
+
+# Two sweep signers, enough to exercise the pool with little gas to fund.
+sweep_signer_count = 2

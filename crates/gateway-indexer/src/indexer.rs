@@ -16,29 +16,33 @@
 //! Neither path trusts the other: the signal never writes, and the timer
 //! never waits for it.
 //!
-//! A fatal block-indexer error ends the process (finalized history no longer
-//! matches; the operator must look). A fatal sweep condition only pauses the
-//! sweep worker, which keeps reporting it every tick until it clears, so
-//! payment detection never stops because a transaction is stuck.
+//! The sweep worker signs with a pool of keys: every signer keeps at most
+//! one helper transaction in flight, the pool is walked in rotation, and a
+//! withdrawal relay step and a sweep batch can run side by side on different
+//! signers. A fatal block-indexer error ends the process (finalized history
+//! no longer matches; the operator must look). A fatal sweep condition only
+//! pauses the sweep worker, which keeps reporting it every tick until it
+//! clears, so payment detection never stops because a transaction is stuck.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use chrono::Duration as ChronoDuration;
+use futures::future::join_all;
 use gateway_core::{
     CctpConfig, ChainId, ChainRegistry, FinalitySource, Invoice, InvoiceStatus, PaymentBinding,
 };
 use gateway_db::{
-    BatchResolution, CursorRepository, DbInvoice, IndexerCursor, InvoiceOutcome, InvoiceRepository,
-    MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason, SweepBatch,
-    WatchFingerprint, WithdrawalRepository,
+    BatchResolution, CursorRepository, DbInvoice, DbWithdrawalLeg, IndexerCursor, InvoiceOutcome,
+    InvoiceRepository, MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason,
+    SweepBatch, WatchFingerprint, WithdrawalRepository,
 };
 use sqlx::types::chrono::Utc;
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{OnceCell, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
@@ -97,6 +101,59 @@ struct PassSummary {
 impl PassSummary {
     fn backlog(&self) -> bool {
         self.indexed < self.boundary
+    }
+}
+
+/// Whether a lane's row is still in flight after this pass's work on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneOutcome {
+    Open,
+    Resolved,
+}
+
+/// What a free signer did in the submission phase of a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Submitted {
+    /// A helper transaction was signed and broadcast on the signer.
+    Yes,
+    /// Rows were claimed but every one was blocked; the queue may hold more.
+    Skipped,
+    /// Nothing to relay and nothing claimable: no further signer need ask.
+    Idle,
+}
+
+/// One pool signer's native balance against the alarm level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignerHealth {
+    pub(crate) signer: Address,
+    pub(crate) balance: U256,
+    pub(crate) low: bool,
+}
+
+/// Every error one sweep pass produced, by lane (`None` is chain-wide work).
+/// A pass never stops at the first failing lane: the others still reconcile
+/// and submit, and the report collapses to its most severe error for the
+/// loop's health state.
+#[derive(Debug, Default)]
+pub(crate) struct TickReport {
+    pub(crate) errors: Vec<(Option<Address>, IndexerError)>,
+}
+
+impl TickReport {
+    fn push(&mut self, signer: Option<Address>, error: IndexerError) {
+        self.errors.push((signer, error));
+    }
+
+    /// The first error that halts the worker, else the first error at all.
+    pub(crate) fn into_result(self) -> Result<(), IndexerError> {
+        let mut errors = self.errors.into_iter().map(|(_, error)| error);
+        let Some(first) = errors.next() else {
+            return Ok(());
+        };
+        if first.requires_halt() {
+            return Err(first);
+        }
+        Err(errors.find(IndexerError::requires_halt).unwrap_or(first))
     }
 }
 
@@ -173,7 +230,7 @@ pub struct Indexer {
     cursor: CursorRepository,
     pub(crate) chain: Arc<dyn ChainClient>,
     pub(crate) cfg: IndexerConfig,
-    /// The withdrawal legs this chain's signer relays; see `relay.rs`.
+    /// The withdrawal legs this chain's signers relay; see `relay.rs`.
     pub(crate) withdrawals: WithdrawalRepository,
     pub(crate) iris: Arc<dyn AttestationSource>,
     /// Every chain, for the CCTP domain a bridge leg's destination has.
@@ -192,6 +249,9 @@ pub struct Indexer {
     watch_tx: watch::Sender<WatchList>,
     watch_fingerprint: Mutex<Option<WatchFingerprint>>,
     last_health_report: Mutex<Option<Instant>>,
+    /// Where the next pass starts walking the signer pool, so consecutive
+    /// submissions rotate through the signers and gas spend spreads evenly.
+    sweep_cursor: AtomicUsize,
 }
 
 impl Indexer {
@@ -224,6 +284,7 @@ impl Indexer {
             watch_tx,
             watch_fingerprint: Mutex::new(None),
             last_health_report: Mutex::new(None),
+            sweep_cursor: AtomicUsize::new(0),
             cfg,
         }
     }
@@ -849,35 +910,155 @@ impl Indexer {
         Ok(())
     }
 
-    /// Reconcile the in-flight batch if there is one, otherwise claim and
-    /// submit the next. The signer owns one nonce stream, so a new batch is
-    /// never sent while a prior one is unresolved.
+    /// One sweep pass, collapsed to its most severe error: the loop's and
+    /// the tests' entry point.
     pub(crate) async fn sweep_tick(&self) -> Result<(), IndexerError> {
+        self.sweep_pass().await.into_result()
+    }
+
+    /// One pass over the signer pool. Every in-flight helper transaction is
+    /// reconciled concurrently (each signer owns at most one), then every
+    /// signer left free takes the next piece of work, in rotation: a
+    /// withdrawal leg to relay first, else a batch of sweeps. Claiming is
+    /// sequential so a short queue becomes one full batch rather than one
+    /// batch per signer (Monad bills the gas limit), and a signer whose lane
+    /// failed stays busy this pass because its row's state is unknown.
+    async fn sweep_pass(&self) -> TickReport {
+        let mut report = TickReport::default();
         let health_due = self
             .last_health_report
             .lock()
             .expect("health report lock")
             .is_none_or(|at| at.elapsed() >= SWEEP_HEALTH_INTERVAL);
         if health_due {
-            self.report_sweep_health().await?;
+            if let Err(error) = self.report_sweep_health().await {
+                report.push(None, error);
+                return report;
+            }
             *self.last_health_report.lock().expect("health report lock") = Some(Instant::now());
         }
-        // Withdrawal legs share the signer with sweeps. Their nonce-free work
-        // runs every tick; a relay step is taken only while no sweep batch is
-        // in flight, and a sweep batch only while no relay step is.
-        self.relay_housekeeping().await?;
-        // Cross-chain payments follow their own loop (`run_relay_intent_loop`);
-        // a Relay outage must never delay the sweeper.
-        match self.repo.open_sweep_batch(self.cfg.chain_id.0).await? {
-            Some(batch) if batch.broadcast_at.is_none() => self.broadcast_batch(&batch).await,
-            Some(batch) => self.reconcile_batch(batch).await,
-            None => {
-                if self.relay_step().await? {
-                    return Ok(());
+        // Withdrawal legs share the signer pool with sweeps. Their nonce-free
+        // work runs every pass, before any lane. Cross-chain payments follow
+        // their own loop (`run_relay_intent_loop`); a Relay outage must never
+        // delay the sweeper.
+        if let Err(error) = self.relay_housekeeping().await {
+            report.push(None, error);
+            return report;
+        }
+
+        let chain_id = self.cfg.chain_id.0;
+        let pool = self.chain.signers();
+        let (batches, steps) = match tokio::try_join!(
+            self.repo.open_sweep_batches(chain_id),
+            self.withdrawals.open_steps(chain_id)
+        ) {
+            Ok(open) => open,
+            Err(error) => {
+                report.push(None, error.into());
+                return report;
+            }
+        };
+        if let Err(error) = lane_signers(&pool, &batches, &steps) {
+            report.push(None, error);
+            return report;
+        }
+
+        // One fee estimate per pass, taken lazily by the first lane or
+        // submission that signs.
+        let fees = OnceCell::new();
+        let (batch_lanes, step_lanes) = tokio::join!(
+            join_all(batches.into_iter().map(|batch| async {
+                let signer = batch.signer;
+                (signer, self.batch_lane(batch, &fees).await)
+            })),
+            join_all(steps.into_iter().map(|leg| async {
+                let signer = leg.step.as_ref().map(|step| step.signer);
+                (signer, self.step_lane(leg, &fees).await)
+            })),
+        );
+        let mut busy: HashSet<Address> = HashSet::new();
+        let lanes = batch_lanes
+            .into_iter()
+            .map(|(signer, outcome)| (Some(signer), outcome))
+            .chain(step_lanes);
+        for (signer, outcome) in lanes {
+            match outcome {
+                Ok(LaneOutcome::Resolved) => {}
+                Ok(LaneOutcome::Open) => {
+                    busy.extend(signer);
                 }
-                self.submit_next_batch().await
+                Err(error) => {
+                    warn!(signer = ?signer, error = %error, "sweep lane failed");
+                    busy.extend(signer);
+                    report.push(signer, error);
+                }
             }
         }
+
+        let start = self.sweep_cursor.load(Ordering::Relaxed) % pool.len();
+        for offset in 0..pool.len() {
+            let index = (start + offset) % pool.len();
+            let signer = pool[index];
+            if busy.contains(&signer) {
+                continue;
+            }
+            match self.submit_on(signer, &fees).await {
+                Ok(Submitted::Idle) => break,
+                Ok(Submitted::Yes | Submitted::Skipped) => {
+                    self.sweep_cursor.store(index + 1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    warn!(signer = %signer, error = %error, "sweep submission failed");
+                    // Advance past the failed signer too: whatever it claimed
+                    // it released with backoff, so on the next pass the queue
+                    // must be offered to the healthy signers behind it, not
+                    // handed back to the one that just failed to sign.
+                    self.sweep_cursor.store(index + 1, Ordering::Relaxed);
+                    report.push(Some(signer), error);
+                }
+            }
+        }
+        report
+    }
+
+    /// The pass's shared fee estimate, read from the node once.
+    pub(crate) async fn tick_fees(
+        &self,
+        cache: &OnceCell<FeeEstimate>,
+    ) -> Result<FeeEstimate, IndexerError> {
+        cache
+            .get_or_try_init(|| async {
+                self.chain.estimate_fees().await.map_err(IndexerError::from)
+            })
+            .await
+            .copied()
+    }
+
+    /// A free signer takes the next work: a withdrawal leg to relay has
+    /// priority over a new sweep batch, as it did when one signer did both.
+    async fn submit_on(
+        &self,
+        signer: Address,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<Submitted, IndexerError> {
+        if self.take_relay_step(signer, fees).await? {
+            return Ok(Submitted::Yes);
+        }
+        self.submit_next_batch(signer, fees).await
+    }
+
+    /// Advance one open batch: broadcast it if its newest signed transaction
+    /// never left, otherwise reconcile it against the chain.
+    async fn batch_lane(
+        &self,
+        batch: SweepBatch,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<LaneOutcome, IndexerError> {
+        if batch.broadcast_at.is_none() {
+            self.broadcast_batch(&batch).await?;
+            return Ok(LaneOutcome::Open);
+        }
+        self.reconcile_batch(batch, fees).await
     }
 
     async fn broadcast_prepared(
@@ -912,11 +1093,15 @@ impl Indexer {
             })?,
         };
         self.broadcast_prepared(batch.id, &transaction).await?;
-        info!(batch_id = %batch.id, tx_hash = %transaction.hash, nonce = batch.nonce, "durable helper transaction broadcast");
+        info!(batch_id = %batch.id, tx_hash = %transaction.hash, signer = %batch.signer, nonce = batch.nonce, "durable helper transaction broadcast");
         Ok(())
     }
 
-    async fn reconcile_batch(&self, batch: SweepBatch) -> Result<(), IndexerError> {
+    async fn reconcile_batch(
+        &self,
+        batch: SweepBatch,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<LaneOutcome, IndexerError> {
         // A replacement and the submission it replaced share a nonce; whichever
         // mined resolves the batch. Newest first: it is the likeliest.
         for &tx_hash in batch.tx_hashes.iter().rev() {
@@ -928,7 +1113,7 @@ impl Indexer {
                 return self.apply_receipt(&batch, tx_hash, receipt).await;
             }
         }
-        self.handle_unmined(&batch).await
+        self.handle_unmined(&batch, fees).await
     }
 
     async fn apply_receipt(
@@ -936,7 +1121,7 @@ impl Indexer {
         batch: &SweepBatch,
         tx_hash: alloy_primitives::B256,
         receipt: SweepReceipt,
-    ) -> Result<(), IndexerError> {
+    ) -> Result<LaneOutcome, IndexerError> {
         let mined = MinedBatch {
             tx_hash,
             block: receipt.block,
@@ -949,7 +1134,7 @@ impl Indexer {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
         if receipt.block > self.finality_boundary(&mut attempt, &mut backoff).await? {
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
         let header = self
             .retried_header(receipt.block, &mut attempt, &mut backoff)
@@ -957,20 +1142,20 @@ impl Indexer {
         if header.hash != receipt.block_hash {
             self.repo.clear_batch_mined(batch.id).await?;
             warn!(batch_id = %batch.id, %tx_hash, block = receipt.block, "helper transaction receipt is no longer canonical; waiting for a new receipt");
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
 
         if !receipt.succeeded {
             if self.chain.block_header(receipt.block).await?.hash != receipt.block_hash {
                 self.repo.clear_batch_mined(batch.id).await?;
-                return Ok(());
+                return Ok(LaneOutcome::Open);
             }
             let requeued = self
                 .repo
                 .resolve_batch(batch.id, BatchResolution::Reverted)
                 .await?;
             warn!(batch_id = %batch.id, %tx_hash, requeued, "finalized helper transaction reverted; invoices returned to the queue");
-            return Ok(());
+            return Ok(LaneOutcome::Resolved);
         }
 
         let rows = self.repo.batch_invoices(batch.id).await?;
@@ -992,7 +1177,7 @@ impl Indexer {
         if self.chain.block_header(receipt.block).await?.hash != receipt.block_hash {
             self.repo.clear_batch_mined(batch.id).await?;
             warn!(batch_id = %batch.id, %tx_hash, block = receipt.block, "helper transaction changed during classification; discarding results");
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
         self.repo
             .finalize_batch(
@@ -1017,7 +1202,7 @@ impl Indexer {
                 }
             }
         }
-        Ok(())
+        Ok(LaneOutcome::Resolved)
     }
 
     /// Translate one item's receipt outcome into the invoice's next state.
@@ -1218,31 +1403,36 @@ impl Indexer {
     }
 
     /// No submission for the batch has a receipt yet.
-    async fn handle_unmined(&self, batch: &SweepBatch) -> Result<(), IndexerError> {
+    async fn handle_unmined(
+        &self,
+        batch: &SweepBatch,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<LaneOutcome, IndexerError> {
         let age = Utc::now()
             .signed_duration_since(batch.submitted_at)
             .to_std()
             .unwrap_or_default();
         if age < self.cfg.sweep_pending_timeout {
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
 
         // Monad reports no receipt for a transaction still in flight and forgets
         // one it dropped, so after the timeout the mined nonce is the signal: if
         // it moved past ours without a receipt, nothing we sent can mine any more.
-        if self.chain.signer_nonce(false).await? > batch.nonce {
+        if self.chain.signer_nonce(batch.signer, false).await? > batch.nonce {
             let requeued = self
                 .repo
                 .resolve_batch(batch.id, BatchResolution::Abandoned)
                 .await?;
-            warn!(batch_id = %batch.id, nonce = batch.nonce, requeued, "sweep batch nonce was consumed without a visible receipt; invoices returned to the queue");
-            return Ok(());
+            warn!(batch_id = %batch.id, signer = %batch.signer, nonce = batch.nonce, requeued, "sweep batch nonce was consumed without a visible receipt; invoices returned to the queue");
+            return Ok(LaneOutcome::Resolved);
         }
 
         if batch.tx_hashes.len() as u32 >= self.cfg.sweep_max_submissions {
             return Err(IndexerError::SweepStalled(format!(
-                "sweep batch {} (nonce {}) is unconfirmed after {} submissions; check the signer balance and fee market, then replace or cancel nonce {} manually",
+                "sweep batch {} (signer {}, nonce {}) is unconfirmed after {} submissions; check the signer balance and fee market, then replace or cancel nonce {} manually",
                 batch.id,
+                batch.signer,
                 batch.nonce,
                 batch.tx_hashes.len(),
                 batch.nonce
@@ -1253,7 +1443,7 @@ impl Indexer {
             max_fee_per_gas: batch.max_fee_per_gas,
             max_priority_fee_per_gas: batch.max_priority_fee_per_gas,
         };
-        let fees = self.chain.estimate_fees().await?.max(previous.bumped());
+        let fees = self.tick_fees(fees).await?.max(previous.bumped());
         let rows = self.repo.batch_invoices(batch.id).await?;
         let requests = rows
             .iter()
@@ -1262,6 +1452,7 @@ impl Indexer {
         let transaction = self
             .chain
             .prepare_sweep_batch(
+                batch.signer,
                 self.cfg.batch_sweeper,
                 &requests,
                 batch.nonce,
@@ -1286,11 +1477,16 @@ impl Indexer {
             )));
         }
         self.broadcast_prepared(batch.id, &transaction).await?;
-        warn!(batch_id = %batch.id, nonce = batch.nonce, tx_hash = %transaction.hash, submission = batch.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed helper transaction");
-        Ok(())
+        warn!(batch_id = %batch.id, signer = %batch.signer, nonce = batch.nonce, tx_hash = %transaction.hash, submission = batch.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed helper transaction");
+        Ok(LaneOutcome::Open)
     }
 
-    async fn submit_next_batch(&self) -> Result<(), IndexerError> {
+    /// Claim the next batch of sweeps and send it from `signer`.
+    async fn submit_next_batch(
+        &self,
+        signer: Address,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<Submitted, IndexerError> {
         let claimed = self
             .repo
             .claim_sweep_batch(
@@ -1301,7 +1497,7 @@ impl Indexer {
             )
             .await?;
         if claimed.is_empty() {
-            return Ok(());
+            return Ok(Submitted::Idle);
         }
 
         let mut ids = Vec::with_capacity(claimed.len());
@@ -1335,15 +1531,22 @@ impl Indexer {
             requests.push(sweep_request(&invoice)?);
         }
         if ids.is_empty() {
-            return Ok(());
+            return Ok(Submitted::Skipped);
         }
 
-        let nonce = self.chain.signer_nonce(true).await?;
-        let fees = self.chain.estimate_fees().await?;
+        let nonce = self.chain.signer_nonce(signer, true).await?;
+        let fees = self.tick_fees(fees).await?;
         let gas_limit = sweep_batch_gas_limit(requests.len());
         let transaction = match self
             .chain
-            .prepare_sweep_batch(self.cfg.batch_sweeper, &requests, nonce, gas_limit, fees)
+            .prepare_sweep_batch(
+                signer,
+                self.cfg.batch_sweeper,
+                &requests,
+                nonce,
+                gas_limit,
+                fees,
+            )
             .await
         {
             Ok(transaction) => transaction,
@@ -1356,6 +1559,7 @@ impl Indexer {
             .repo
             .record_batch_submission(
                 self.cfg.chain_id.0,
+                signer,
                 &ids,
                 nonce,
                 gas_limit,
@@ -1366,18 +1570,41 @@ impl Indexer {
             )
             .await?;
         self.broadcast_prepared(batch_id, &transaction).await?;
-        info!(%batch_id, tx_hash = %transaction.hash, nonce, invoices = ids.len(), gas_limit, "helper transaction submitted");
-        Ok(())
+        info!(%batch_id, tx_hash = %transaction.hash, %signer, nonce, invoices = ids.len(), gas_limit, "helper transaction submitted");
+        Ok(Submitted::Yes)
     }
 
-    async fn report_sweep_health(&self) -> Result<(), IndexerError> {
+    /// Queue depth, relay state, and every pool signer's balance: one
+    /// `eth_getBalance` per signer, at most every `SWEEP_HEALTH_INTERVAL`.
+    /// A balance read that fails is logged and costs only its own signer's
+    /// entry; the pass proceeds on the rest.
+    pub(crate) async fn report_sweep_health(&self) -> Result<Vec<SignerHealth>, IndexerError> {
         let stats = self.repo.sweep_queue_stats(self.cfg.chain_id.0).await?;
         let relay = self.withdrawals.relay_stats(self.cfg.chain_id.0).await?;
         let relay_intents_pending = self
             .relay_intents
             .pending_count(self.cfg.chain_id.0)
             .await?;
-        let balance = self.chain.signer_balance().await?;
+        let pool = self.chain.signers();
+        let balances = join_all(pool.iter().map(|&signer| self.chain.signer_balance(signer))).await;
+        let mut health = Vec::with_capacity(pool.len());
+        for (signer, balance) in pool.into_iter().zip(balances) {
+            match balance {
+                Ok(balance) => health.push(SignerHealth {
+                    signer,
+                    balance,
+                    low: balance < self.cfg.signer_low_balance_wei,
+                }),
+                Err(error) => {
+                    error!(%signer, %error, "failed to read sweep signer balance");
+                }
+            }
+        }
+        let balances = health
+            .iter()
+            .map(|entry| format!("{}={}", entry.signer, entry.balance))
+            .collect::<Vec<_>>()
+            .join(",");
         info!(
             queued = stats.queued,
             in_flight = stats.in_flight,
@@ -1387,11 +1614,12 @@ impl Indexer {
             withdrawal_legs_attested = relay.attested,
             withdrawal_step_in_flight = relay.in_flight,
             relay_intents_pending,
-            signer_balance_wei = %balance,
+            signers = health.len(),
+            signer_balances_wei = %balances,
             "sweep worker health"
         );
-        if balance < self.cfg.signer_low_balance_wei {
-            warn!(signer_balance_wei = %balance, threshold_wei = %self.cfg.signer_low_balance_wei, "sweep signer balance low");
+        for entry in health.iter().filter(|entry| entry.low) {
+            warn!(signer = %entry.signer, signer_balance_wei = %entry.balance, threshold_wei = %self.cfg.signer_low_balance_wei, "sweep signer balance low");
         }
         if stats
             .oldest_uncollected_secs
@@ -1403,8 +1631,51 @@ impl Indexer {
                 "sweep backlog stale"
             );
         }
-        Ok(())
+        Ok(health)
     }
+}
+
+/// Every open row's signer must be in the pool, and no signer may own more
+/// than one open helper transaction (the database keeps batches and steps
+/// unique per signer separately; a signer with one of each is a bug).
+fn lane_signers(
+    pool: &[Address],
+    batches: &[SweepBatch],
+    steps: &[DbWithdrawalLeg],
+) -> Result<(), IndexerError> {
+    if pool.is_empty() {
+        return Err(IndexerError::Configuration(
+            "the signer pool is empty".to_string(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    let owned = batches
+        .iter()
+        .map(|batch| (Some(batch.signer), format!("sweep batch {}", batch.id)))
+        .chain(steps.iter().map(|leg| {
+            (
+                leg.step.as_ref().map(|step| step.signer),
+                format!("withdrawal leg {}", leg.id),
+            )
+        }));
+    for (signer, row) in owned {
+        let Some(signer) = signer else {
+            return Err(IndexerError::Configuration(format!(
+                "open {row} has no relay step"
+            )));
+        };
+        if !pool.contains(&signer) {
+            return Err(IndexerError::Configuration(format!(
+                "open {row} was signed by {signer}, which is not in the signer pool; restore its key or resolve the row by hand"
+            )));
+        }
+        if !seen.insert(signer) {
+            return Err(IndexerError::Configuration(format!(
+                "signer {signer} owns more than one open helper transaction, including {row}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn decode(row: &DbInvoice) -> Result<Invoice, IndexerError> {
@@ -1477,6 +1748,11 @@ pub(crate) mod tests {
         address!("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
     }
 
+    /// The k-th signer of the mock's pool; the default pool is `[mock_signer(0)]`.
+    pub(crate) fn mock_signer(index: u8) -> Address {
+        Address::repeat_byte(0xA0 + index)
+    }
+
     pub(crate) fn block_hash(block: u64) -> B256 {
         B256::with_last_byte(block as u8)
     }
@@ -1510,6 +1786,8 @@ pub(crate) mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct Submission {
+        /// The pool signer the transaction was signed from.
+        pub(crate) signer: Address,
         pub(crate) nonce: u64,
         pub(crate) gas_limit: u64,
         pub(crate) fees: FeeEstimate,
@@ -1571,10 +1849,20 @@ pub(crate) mod tests {
         prepared: HashMap<B256, Submission>,
         next_transaction_id: u8,
         submissions: Vec<Submission>,
-        pub(crate) mined_nonce: u64,
+        /// The pool, in rotation order. `MockChain::new` seeds one signer.
+        pub(crate) signers: Vec<Address>,
+        /// Mined transaction count per signer; a missing entry is 0.
+        pub(crate) mined_nonces: HashMap<Address, u64>,
         submit_error: Option<fn() -> ChainError>,
         pub(crate) fees: FeeEstimate,
-        balance: U256,
+        /// `estimate_fees` calls, for the once-per-pass assertion.
+        pub(crate) fee_requests: usize,
+        /// Balance overrides per signer; a missing entry is one native token.
+        pub(crate) balances: HashMap<Address, U256>,
+        /// Signers whose `eth_getBalance` fails, for health isolation tests.
+        pub(crate) balance_errors: HashSet<Address>,
+        /// Signers whose signing fails, for rotation isolation tests.
+        pub(crate) prepare_errors: HashSet<Address>,
         settled: HashMap<Address, bool>,
         settlement_events: HashMap<Address, SettlementEvent>,
         /// Blocks from which each payment's settlement event exists: ranges
@@ -1627,10 +1915,15 @@ pub(crate) mod tests {
                         max_fee_per_gas: 100,
                         max_priority_fee_per_gas: 2,
                     },
-                    balance: U256::from(10u64).pow(U256::from(18u64)),
+                    signers: vec![mock_signer(0)],
                     ..MockState::default()
                 }),
             }
+        }
+
+        /// A pool of `count` signers, `mock_signer(0)..mock_signer(count)`.
+        pub(crate) fn with_signers(self, count: u8) -> Self {
+            self.with(|state| state.signers = (0..count).map(mock_signer).collect())
         }
 
         pub(crate) fn with(self, apply: impl FnOnce(&mut MockState)) -> Self {
@@ -1731,23 +2024,42 @@ pub(crate) mod tests {
             Ok(self.state.lock().unwrap().receipts.get(&tx_hash).cloned())
         }
 
-        async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError> {
+        fn signers(&self) -> Vec<Address> {
+            self.state.lock().unwrap().signers.clone()
+        }
+
+        async fn signer_nonce(&self, signer: Address, pending: bool) -> Result<u64, ChainError> {
             let state = self.state.lock().unwrap();
             // Monad semantics: `pending` reads the same as `latest`.
             let _ = pending;
-            Ok(state.mined_nonce)
+            Ok(state.mined_nonces.get(&signer).copied().unwrap_or(0))
         }
 
-        async fn signer_balance(&self) -> Result<U256, ChainError> {
-            Ok(self.state.lock().unwrap().balance)
+        async fn signer_balance(&self, signer: Address) -> Result<U256, ChainError> {
+            if self.state.lock().unwrap().balance_errors.contains(&signer) {
+                return Err(ChainError::Transient(format!(
+                    "balance read throttled for {signer}"
+                )));
+            }
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .balances
+                .get(&signer)
+                .copied()
+                .unwrap_or(U256::from(10u64).pow(U256::from(18u64))))
         }
 
         async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError> {
-            Ok(self.state.lock().unwrap().fees)
+            let mut state = self.state.lock().unwrap();
+            state.fee_requests += 1;
+            Ok(state.fees)
         }
 
         async fn prepare_sweep_batch(
             &self,
+            signer: Address,
             _batch_sweeper: Address,
             sweeps: &[SweepRequest],
             nonce: u64,
@@ -1755,12 +2067,21 @@ pub(crate) mod tests {
             fees: FeeEstimate,
         ) -> Result<PreparedSweepTransaction, ChainError> {
             let mut state = self.state.lock().unwrap();
+            if !state.signers.contains(&signer) {
+                return Err(ChainError::Transient(format!("no key for signer {signer}")));
+            }
+            if state.prepare_errors.contains(&signer) {
+                return Err(ChainError::Transient(format!(
+                    "signing failed for {signer}"
+                )));
+            }
             state.next_transaction_id += 1;
             let tx_hash = B256::with_last_byte(state.next_transaction_id);
             let raw = alloy_primitives::Bytes::copy_from_slice(tx_hash.as_slice());
             state.prepared.insert(
                 tx_hash,
                 Submission {
+                    signer,
                     nonce,
                     gas_limit,
                     fees,
@@ -1775,6 +2096,7 @@ pub(crate) mod tests {
 
         async fn prepare_call(
             &self,
+            signer: Address,
             to: Address,
             calldata: alloy_primitives::Bytes,
             nonce: u64,
@@ -1782,12 +2104,21 @@ pub(crate) mod tests {
             fees: FeeEstimate,
         ) -> Result<PreparedSweepTransaction, ChainError> {
             let mut state = self.state.lock().unwrap();
+            if !state.signers.contains(&signer) {
+                return Err(ChainError::Transient(format!("no key for signer {signer}")));
+            }
+            if state.prepare_errors.contains(&signer) {
+                return Err(ChainError::Transient(format!(
+                    "signing failed for {signer}"
+                )));
+            }
             state.next_transaction_id += 1;
             let tx_hash = B256::with_last_byte(state.next_transaction_id);
             let raw = alloy_primitives::Bytes::copy_from_slice(tx_hash.as_slice());
             state.prepared.insert(
                 tx_hash,
                 Submission {
+                    signer,
                     nonce,
                     gas_limit,
                     fees,
@@ -1909,6 +2240,7 @@ pub(crate) mod tests {
             }
             let submission = state.prepared[&transaction.hash].clone();
             let tx_hash = submission.tx_hash;
+            let signer = submission.signer;
             let nonce = submission.nonce;
             let sweeps = submission.sweeps.clone();
             state.submissions.push(submission);
@@ -1928,7 +2260,7 @@ pub(crate) mod tests {
                         })
                         .collect();
                 let succeeded = state.next_receipt_succeeds;
-                state.mined_nonce = nonce + 1;
+                state.mined_nonces.insert(signer, nonce + 1);
                 state.receipts.insert(
                     tx_hash,
                     SweepReceipt {
@@ -2134,7 +2466,7 @@ pub(crate) mod tests {
     }
 
     /// Build a USDC invoice for the test chain with the given atomic amount.
-    fn make_invoice(amount: u64) -> Invoice {
+    pub(crate) fn make_invoice(amount: u64) -> Invoice {
         make_invoice_expiring(amount, FAR_EXPIRY)
     }
 
@@ -2313,7 +2645,7 @@ pub(crate) mod tests {
 
     /// Insert an invoice and credit it through the block indexer at `block`,
     /// or at the first block the cursor has not yet passed.
-    async fn insert_funded(pool: &PgPool, invoice: &Invoice, key: &str, block: u64) {
+    pub(crate) async fn insert_funded(pool: &PgPool, invoice: &Invoice, key: &str, block: u64) {
         insert(pool, invoice, key).await;
         let block = CursorRepository::new(pool.clone())
             .get(CHAIN_ID)
@@ -3140,22 +3472,29 @@ pub(crate) mod tests {
             "a non-final revert still owns its nonce"
         );
 
+        // The final revert returns both invoices to the queue behind their
+        // attempt count, and the signer it freed picks them up again in the
+        // same pass (no backoff in tests), so a second batch is open at once.
         chain.set(|state| state.finalized = 7);
         worker.sweep_tick().await.unwrap();
         for invoice in [&first, &second] {
             let row = fetch(&pool, invoice).await;
             assert_eq!(row.status, "deploying");
-            assert_eq!(row.sweep_batch_id, None);
+            assert!(row.sweep_batch_id.is_some());
             assert_eq!(row.sweep_attempts, 1);
         }
-        assert_eq!(open_batches(&pool).await, 0);
+        assert_eq!(open_batches(&pool).await, 1);
+        assert_eq!(chain.submissions().len(), 2);
 
+        // That batch reverts too (the mock decided at broadcast); the third
+        // one succeeds.
         chain.set(|state| state.next_receipt_succeeds = true);
         worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions().len(), 3);
         worker.sweep_tick().await.unwrap();
         assert_eq!(fetch(&pool, &first).await.status, "fulfilled");
         assert_eq!(fetch(&pool, &second).await.status, "fulfilled");
-        assert_eq!(chain.submissions().len(), 2);
+        assert_eq!(chain.submissions().len(), 3);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -3917,16 +4256,20 @@ pub(crate) mod tests {
             );
         };
 
-        for attempt in 1..=3 {
+        // The mock fixes an item's outcome when its batch is broadcast, and
+        // the pass that classifies a retry resubmits the item on the freed
+        // signer, so the failure is armed before every pass.
+        chain.set(fail);
+        worker.sweep_tick().await.unwrap();
+        for attempt in 1..=2 {
             chain.set(fail);
-            worker.sweep_tick().await.unwrap();
             worker.sweep_tick().await.unwrap();
             let row = fetch(&pool, &invoice).await;
             assert_eq!(row.sweep_attempts, attempt);
-            if attempt < 3 {
-                assert_eq!(row.status, "deploying");
-            }
+            assert_eq!(row.status, "deploying");
+            assert_eq!(chain.submissions().len(), attempt as usize + 1);
         }
+        worker.sweep_tick().await.unwrap();
         let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "blocked");
         assert_eq!(row.blocked_reason.as_deref(), Some("retries_exhausted"));
@@ -4016,7 +4359,7 @@ pub(crate) mod tests {
         // The replacement mines; the batch resolves through its newer hash.
         chain.set(|state| {
             let tx_hash = state.submissions[1].tx_hash;
-            state.mined_nonce = 1;
+            state.mined_nonces.insert(mock_signer(0), 1);
             state.receipts.insert(
                 tx_hash,
                 SweepReceipt {
@@ -4055,7 +4398,7 @@ pub(crate) mod tests {
 
         chain.set(|state| {
             let tx_hash = state.submissions[0].tx_hash;
-            state.mined_nonce = 1;
+            state.mined_nonces.insert(mock_signer(0), 1);
             state.receipts.insert(
                 tx_hash,
                 SweepReceipt {
@@ -4087,22 +4430,29 @@ pub(crate) mod tests {
         worker.sweep_tick().await.unwrap();
 
         set_submitted_at_in_the_past(&pool).await;
-        chain.set(|state| state.mined_nonce = 1);
+        chain.set(|state| {
+            state.mined_nonces.insert(mock_signer(0), 1);
+        });
         worker.sweep_tick().await.unwrap();
+        let resolution: String = sqlx::query_scalar(
+            "SELECT resolution FROM sweep_batches WHERE resolved_at IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(resolution, "abandoned");
+        // The invoice went back to the queue behind its attempt count and the
+        // freed signer claimed it again in the same pass: the next batch uses
+        // the next nonce and lets the contract decide.
         let row = fetch(&pool, &invoice).await;
         assert_eq!(row.status, "deploying");
-        assert_eq!(row.sweep_batch_id, None);
+        assert!(row.sweep_batch_id.is_some());
         assert_eq!(row.sweep_attempts, 1);
-        let resolution: String = sqlx::query_scalar("SELECT resolution FROM sweep_batches")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(resolution, "abandoned");
-
-        // The next batch uses the next nonce and lets the contract decide.
-        chain.set(|state| state.mine_at = Some(8));
-        worker.sweep_tick().await.unwrap();
-        assert_eq!(chain.submissions()[1].nonce, 1);
+        assert_eq!(open_batches(&pool).await, 1);
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(submissions[1].nonce, 1);
+        assert_eq!(submissions[1].signer, mock_signer(0));
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -4140,7 +4490,7 @@ pub(crate) mod tests {
         // ...and resumes the moment the stuck transaction is found mined.
         chain.set(|state| {
             let tx_hash = state.submissions[2].tx_hash;
-            state.mined_nonce = 1;
+            state.mined_nonces.insert(mock_signer(0), 1);
             state.receipts.insert(
                 tx_hash,
                 SweepReceipt {
@@ -4241,7 +4591,9 @@ pub(crate) mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn a_second_batch_is_never_submitted_while_one_is_in_flight(pool: PgPool) {
+    async fn a_second_batch_is_never_submitted_while_one_is_in_flight_on_the_same_signer(
+        pool: PgPool,
+    ) {
         let pending = make_invoice(100);
         let waiting = make_invoice(200);
         insert_funded(&pool, &pending, "key-1", 1).await;
@@ -4330,7 +4682,9 @@ pub(crate) mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn a_full_batch_settles_together_and_the_rest_waits(pool: PgPool) {
+    async fn a_full_batch_settles_together_and_the_rest_follows_once_the_signer_frees(
+        pool: PgPool,
+    ) {
         let invoices: Vec<Invoice> = (1..=(SWEEP_BATCH_LIMIT as u64 + 1))
             .map(|i| make_invoice(i * 100))
             .collect();
@@ -4350,30 +4704,280 @@ pub(crate) mod tests {
         worker.tick().await.unwrap();
 
         worker.sweep_tick().await.unwrap();
-        worker.sweep_tick().await.unwrap();
         let submissions = chain.submissions();
-        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions.len(), 1, "one signer, one batch at a time");
         assert_eq!(submissions[0].sweeps.len(), SWEEP_BATCH_LIMIT as usize);
         assert_eq!(
             submissions[0].gas_limit,
             sweep_batch_gas_limit(SWEEP_BATCH_LIMIT as usize)
         );
+        assert_eq!(
+            fetch(&pool, invoices.last().unwrap()).await.status,
+            "funded"
+        );
+
+        // The pass that finalizes the full batch frees its signer, which
+        // takes the one left over before the pass ends.
+        worker.sweep_tick().await.unwrap();
         let fulfilled: i64 =
             sqlx::query_scalar("SELECT count(*) FROM invoices WHERE status = 'fulfilled'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(fulfilled, SWEEP_BATCH_LIMIT);
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(submissions[1].sweeps.len(), 1);
         assert_eq!(
             fetch(&pool, invoices.last().unwrap()).await.status,
-            "funded"
+            "deploying"
         );
 
-        worker.sweep_tick().await.unwrap();
         worker.sweep_tick().await.unwrap();
         assert_eq!(
             fetch(&pool, invoices.last().unwrap()).await.status,
             "fulfilled"
+        );
+    }
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn two_signers_carry_two_batches_concurrently(pool: PgPool) {
+        let pending = make_invoice(100);
+        let waiting = make_invoice(200);
+        insert_funded(&pool, &pending, "key-1", 1).await;
+        let chain = Arc::new(
+            MockChain::new(7)
+                .with(|state| state.mine_at = None)
+                .with_signers(2),
+        );
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        insert_funded(&pool, &waiting, "key-2", 2).await;
+        worker.sweep_tick().await.unwrap();
+
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(submissions[0].signer, mock_signer(0));
+        assert_eq!(submissions[1].signer, mock_signer(1));
+        assert!(
+            submissions.iter().all(|submission| submission.nonce == 0),
+            "each signer has its own nonce stream"
+        );
+        assert_eq!(open_batches(&pool).await, 2);
+        assert_eq!(fetch(&pool, &waiting).await.status, "deploying");
+        assert_eq!(
+            worker
+                .repo
+                .sweep_queue_stats(CHAIN_ID)
+                .await
+                .unwrap()
+                .in_flight,
+            2
+        );
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions().len(), 2, "both signers are busy");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_stalled_signer_does_not_stop_the_other_signer(pool: PgPool) {
+        let stuck = make_invoice(100);
+        let fresh = make_invoice(200);
+        insert_funded(&pool, &stuck, "key-1", 1).await;
+        let chain = Arc::new(
+            MockChain::new(7)
+                .with(|state| state.mine_at = None)
+                .with_signers(2),
+        );
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+        for _ in 0..2 {
+            set_submitted_at_in_the_past(&pool).await;
+            worker.sweep_tick().await.unwrap();
+        }
+        assert_eq!(chain.submissions().len(), 3);
+        assert!(
+            chain
+                .submissions()
+                .iter()
+                .all(|submission| submission.signer == mock_signer(0)),
+            "replacements stay on the batch's own signer"
+        );
+
+        insert_funded(&pool, &fresh, "key-2", 2).await;
+        set_submitted_at_in_the_past(&pool).await;
+        let error = worker.sweep_tick().await.unwrap_err();
+        assert!(matches!(error, IndexerError::SweepStalled(_)));
+        assert!(error.requires_halt());
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 4, "the other signer still submits");
+        assert_eq!(submissions[3].signer, mock_signer(1));
+        assert_eq!(fetch(&pool, &fresh).await.status, "deploying");
+        assert_eq!(open_batches(&pool).await, 2);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn fill_first_claiming_keeps_batches_full(pool: PgPool) {
+        let invoices: Vec<Invoice> = (1..=(SWEEP_BATCH_LIMIT as u64 + 1))
+            .map(|i| make_invoice(i * 100))
+            .collect();
+        for (index, invoice) in invoices.iter().enumerate() {
+            insert_funded(&pool, invoice, &format!("key-{index}"), 1).await;
+        }
+        let chain = Arc::new(MockChain::new(7).with_signers(2));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(submissions[0].sweeps.len(), SWEEP_BATCH_LIMIT as usize);
+        assert_eq!(submissions[1].sweeps.len(), 1);
+        assert_ne!(submissions[0].signer, submissions[1].signer);
+        assert_eq!(
+            chain.state.lock().unwrap().fee_requests,
+            1,
+            "one fee estimate per pass"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn submissions_rotate_across_the_pool(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(7).with_signers(3));
+        let worker = indexer(&pool, chain.clone());
+        for index in 0..4u64 {
+            let invoice = make_invoice((index + 1) * 100);
+            insert_funded(&pool, &invoice, &format!("key-{index}"), 1).await;
+            worker.sweep_tick().await.unwrap();
+        }
+        let signers: Vec<Address> = chain
+            .submissions()
+            .iter()
+            .map(|submission| submission.signer)
+            .collect();
+        assert_eq!(
+            signers,
+            vec![
+                mock_signer(0),
+                mock_signer(1),
+                mock_signer(2),
+                mock_signer(0)
+            ]
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn an_open_batch_signed_outside_the_pool_halts_the_sweep_worker(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.mine_at = None));
+        let worker = indexer(&pool, chain.clone());
+        worker.sweep_tick().await.unwrap();
+
+        chain.set(|state| state.signers = vec![mock_signer(1)]);
+        let error = worker.sweep_tick().await.unwrap_err();
+        assert!(matches!(error, IndexerError::Configuration(_)));
+        assert!(error.requires_halt());
+        assert!(error.to_string().contains(&mock_signer(0).to_string()));
+        assert_eq!(
+            chain.submissions().len(),
+            1,
+            "nothing is signed for a stray row"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn low_balance_warning_is_per_signer(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(7).with_signers(2).with(|state| {
+            state.balances.insert(mock_signer(1), U256::ZERO);
+        }));
+        let worker = indexer_with(
+            &pool,
+            chain,
+            IndexerConfig {
+                signer_low_balance_wei: U256::from(1),
+                ..config()
+            },
+        );
+        let health = worker.report_sweep_health().await.unwrap();
+        assert_eq!(
+            health,
+            vec![
+                SignerHealth {
+                    signer: mock_signer(0),
+                    balance: U256::from(10u64).pow(U256::from(18u64)),
+                    low: false,
+                },
+                SignerHealth {
+                    signer: mock_signer(1),
+                    balance: U256::ZERO,
+                    low: true,
+                },
+            ]
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_failing_signer_does_not_hold_the_head_of_the_queue(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with_signers(2).with(|state| {
+            state.prepare_errors.insert(mock_signer(0));
+        }));
+        let worker = indexer_with(
+            &pool,
+            chain.clone(),
+            IndexerConfig {
+                // Real deployments back off in hours; a zero backoff would
+                // hand the row straight back within the same pass and hide
+                // the rotation bug this test pins.
+                sweep_backoff_base_secs: 3600.0,
+                sweep_backoff_cap_secs: 3600.0,
+                ..config()
+            },
+        );
+
+        // The head of the rotation claims the only invoice and fails to sign
+        // it; the released row backs off, so the healthy signer idles.
+        assert!(worker.sweep_tick().await.is_err());
+        assert!(chain.submissions().is_empty());
+
+        // Once the backoff lapses, the pass must start behind the failed
+        // signer: the healthy one takes the work.
+        sqlx::query("UPDATE invoices SET last_attempt_at = now() - interval '12 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0].signer,
+            mock_signer(1),
+            "the queue moves to the healthy signer, not back to the failed one"
+        );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_failed_balance_read_does_not_hide_the_other_signers(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(7).with_signers(2).with(|state| {
+            state.balance_errors.insert(mock_signer(0));
+            state.balances.insert(mock_signer(1), U256::ZERO);
+        }));
+        let worker = indexer_with(
+            &pool,
+            chain,
+            IndexerConfig {
+                signer_low_balance_wei: U256::from(1),
+                ..config()
+            },
+        );
+        let health = worker.report_sweep_health().await.unwrap();
+        assert_eq!(
+            health,
+            vec![SignerHealth {
+                signer: mock_signer(1),
+                balance: U256::ZERO,
+                low: true,
+            }],
+            "the failed read costs only its own signer's entry"
         );
     }
 }

@@ -189,9 +189,10 @@ Payday AWS account.
    Review the plan as for production. Because `infra/.terraform` is shared,
    run `terraform init -reconfigure -backend-config=backend.hcl` before the
    next production command.
-5. **Signers.** Derive and fund the sweep signer with a little MON on
-   Monad and ETH on Base and Arbitrum One, and derive the attestation
-   signer, as in the production runbook §8; note
+5. **Signers.** Derive and fund every sweep signer in the pool
+   (`sweep_signer_count`, two on staging) with a little MON on Monad and
+   ETH on Base and Arbitrum One, and derive the attestation signer, as in
+   the production runbook §8; note
    staging's attestor address in the team's records, since proofs from
    staging are signed by it and `PAYDAY_ATTESTOR` in the smoke test checks
    it.
@@ -219,7 +220,7 @@ Payday AWS account.
 
 Staging is billed like a small production: one Fargate task each for the
 API and indexer, a single-AZ `db.t4g.small`, the ALB, WAF, and the public
-IPs. Its sweep signer needs only a little gas on each chain, and idle
+IPs. Its two sweep signers need only a little gas each on each chain, and idle
 chains cost the indexer two RPC calls every five minutes. Keep only what a test needs in
 the payer wallet; the payout defaults to that same wallet, so a smoke run
 costs gas alone.

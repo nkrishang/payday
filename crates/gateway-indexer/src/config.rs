@@ -65,12 +65,14 @@ pub struct Config {
     relay_api_key: Option<String>,
 }
 
-/// Sweep signer selected at startup. Local keys keep Anvil fully self-contained;
-/// production uses a non-exportable AWS KMS key through the ECS task role. The
-/// same key signs on every chain: one address, one nonce stream per chain.
+/// The sweep signer pool selected at startup: one or more keys, each with
+/// one helper transaction in flight at a time. Local keys keep Anvil fully
+/// self-contained; production uses non-exportable AWS KMS keys through the
+/// ECS task role. The same keys sign on every chain: one address each,
+/// everywhere, with a nonce stream per chain.
 pub enum SignerConfig {
-    Local(String),
-    AwsKms(String),
+    Local(Vec<String>),
+    AwsKms(Vec<String>),
 }
 
 impl Config {
@@ -111,16 +113,16 @@ impl Config {
         let rpc_max_rps = parse_u64_env("PAYDAY_INDEXER_RPC_MAX_RPS", DEFAULT_RPC_MAX_RPS);
 
         let signer = match (
-            std::env::var("PAYDAY_SIGNER_KEY").ok(),
-            std::env::var("PAYDAY_KMS_KEY_ID").ok(),
+            parse_list_env("PAYDAY_SIGNER_KEYS"),
+            parse_list_env("PAYDAY_KMS_KEY_IDS"),
         ) {
-            (Some(key), None) => SignerConfig::Local(key),
-            (None, Some(key_id)) => SignerConfig::AwsKms(key_id),
+            (Some(keys), None) => SignerConfig::Local(keys),
+            (None, Some(key_ids)) => SignerConfig::AwsKms(key_ids),
             (None, None) => {
-                panic!("exactly one of PAYDAY_SIGNER_KEY or PAYDAY_KMS_KEY_ID must be set")
+                panic!("exactly one of PAYDAY_SIGNER_KEYS or PAYDAY_KMS_KEY_IDS must be set")
             }
             (Some(_), Some(_)) => {
-                panic!("PAYDAY_SIGNER_KEY and PAYDAY_KMS_KEY_ID cannot both be set")
+                panic!("PAYDAY_SIGNER_KEYS and PAYDAY_KMS_KEY_IDS cannot both be set")
             }
         };
 
@@ -279,6 +281,20 @@ fn derive_ws_url(rpc_url: &str) -> Option<String> {
                 .strip_prefix("http://")
                 .map(|rest| format!("ws://{rest}"))
         })
+}
+
+/// A comma-separated list; `None` when the variable is unset. An empty list
+/// is a configuration error, not "unset": a pool needs at least one key.
+fn parse_list_env(name: &str) -> Option<Vec<String>> {
+    let value = std::env::var(name).ok()?;
+    let items: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(!items.is_empty(), "{name} must list at least one key");
+    Some(items)
 }
 
 fn parse_u64_env(name: &str, default: u64) -> u64 {

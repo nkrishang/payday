@@ -182,7 +182,12 @@ USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   export PAYDAY_INDEXER_IDLE_INTERVAL_MS="${PAYDAY_INDEXER_IDLE_INTERVAL_MS:-2000}"
   # Anvil has no request budget to trip, so the indexer paces nothing locally.
   export PAYDAY_INDEXER_RPC_MAX_RPS="${PAYDAY_INDEXER_RPC_MAX_RPS:-0}"
-  export PAYDAY_SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+  # Anvil account #0 deploys the local fixtures (Bootstrap.s.sol) and is the
+  # first sweep signer; mnemonic accounts #10 and #11 (funded because Anvil
+  # starts with twelve accounts below) complete a three-key signer pool so
+  # several helper transactions can be in flight at once, as in production.
+  BOOTSTRAP_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+  export PAYDAY_SIGNER_KEYS="${PAYDAY_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82}"
   # The web dev server hosts both dashboard and checkout; gatewayd remains on
   # PAYDAY_API_URL and is called cross-origin by the browser.
   export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
@@ -197,8 +202,8 @@ USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   # brand new merchant sees a real transfer settle before doing anything else.
   # Anvil account #1 (0x70997970C51812dc3A010C7d01b50e0d17dc79C8), already
   # minted 1,000,000 test USDC by Bootstrap.s.sol and otherwise unused
-  # locally — a different account than PAYDAY_SIGNER_KEY so the two never
-  # contend for a nonce.
+  # locally — an account outside PAYDAY_SIGNER_KEYS so it never contends
+  # with a sweep signer for a nonce.
   export PAYDAY_ONBOARDING_PAYER_KEY="${PAYDAY_ONBOARDING_PAYER_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
   # Payer email verification against the development provider's payer client
   # and audience.
@@ -303,14 +308,14 @@ start_minio
 prefix postgres docker logs -f "$container"
 prefix minio docker logs -f "$minio_container"
 prefix scan-stub start_scan_stub
-prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --port "${PAYDAY_RPC_URL##*:}" --slots-in-an-epoch 1 --mixed-mining --block-time 1
-prefix anvil2 anvil --chain-id "$PAYDAY_SECOND_CHAIN_ID" --port "${PAYDAY_SECOND_RPC_URL##*:}" --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --port "${PAYDAY_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil2 anvil --chain-id "$PAYDAY_SECOND_CHAIN_ID" --port "${PAYDAY_SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
 wait_for_anvil "$PAYDAY_RPC_URL"
 wait_for_anvil "$PAYDAY_SECOND_RPC_URL"
 echo "[bootstrap] deploying deterministic local fixtures on both chains"
 for rpc_url in "$PAYDAY_RPC_URL" "$PAYDAY_SECOND_RPC_URL"; do
   forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
-    --rpc-url "$rpc_url" --private-key "$PAYDAY_SIGNER_KEY" --broadcast
+    --rpc-url "$rpc_url" --private-key "$BOOTSTRAP_KEY" --broadcast
 done
 build_chain_registry
 # The Relay stand-in's solver (a fixed key outside Anvil's ten accounts) fills from its own USDC on

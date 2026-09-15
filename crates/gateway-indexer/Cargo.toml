@@ -36,4 +36,5 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+alloy-consensus = { workspace = true }
 gateway-core = { path = "../gateway-core", features = ["test-helpers"] }

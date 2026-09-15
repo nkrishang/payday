@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_network::{EthereumWallet, TxSigner};
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use alloy_signer_aws::AwsSigner;
 use alloy_signer_local::PrivateKeySigner;
 use gateway_core::{ChainConfig, ChainId, FinalitySource};
@@ -48,8 +48,9 @@ async fn main() {
         .expect("failed to connect to database");
 
     // One worker per chain, each with its own RPC, signal, cursor, and nonce
-    // stream; the signer key is shared, so its address is the same on every
-    // chain. Connections are made together: the endpoints are independent.
+    // streams; the signer pool is shared, so each signer's address is the
+    // same on every chain. Connections are made together: the endpoints are
+    // independent.
     let aws = match config.signer() {
         SignerConfig::AwsKms(_) => {
             Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
@@ -189,29 +190,19 @@ async fn connect_client(
     chain: &ChainConfig,
 ) -> Arc<dyn ChainClient> {
     let chain_id = chain.chain_id;
-    let wallet = match config.signer() {
-        SignerConfig::Local(key) => {
-            let signer: PrivateKeySigner = key.parse().expect("invalid PAYDAY_SIGNER_KEY");
-            tracing::info!(chain_id, address = %signer.address(), signer = "local", "configured sweep signer");
-            EthereumWallet::from(signer)
-        }
-        SignerConfig::AwsKms(key_id) => {
-            let kms = aws_sdk_kms::Client::new(aws.expect("AWS configuration is loaded for KMS"));
-            let signer = AwsSigner::new(kms, key_id.clone(), Some(chain_id))
-                .await
-                .expect("failed to initialize PAYDAY_KMS_KEY_ID");
-            tracing::info!(chain_id, address = %signer.address(), signer = "aws-kms", "configured sweep signer");
-            EthereumWallet::from(signer)
-        }
-    };
+    let (wallet, signers) = signer_pool(config, aws, chain_id).await;
 
     // Connect to the chain and assert the RPC endpoint serves the configured
     // chain — a proven-invariant startup check, so a misconfigured node fails
     // fast instead of silently indexing the wrong chain.
-    let chain_client =
-        chain::AlloyChainClient::connect(config.rpc_url(chain_id), wallet, config.rpc_max_rps())
-            .await
-            .unwrap_or_else(|error| panic!("failed to connect to chain {chain_id}: {error}"));
+    let chain_client = chain::AlloyChainClient::connect(
+        config.rpc_url(chain_id),
+        wallet,
+        signers,
+        config.rpc_max_rps(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("failed to connect to chain {chain_id}: {error}"));
     let node_chain_id = chain_client
         .get_chain_id()
         .await
@@ -259,6 +250,57 @@ async fn connect_client(
     }
 
     Arc::new(chain_client)
+}
+
+/// Every configured key as one wallet for `chain_id`, and the pool's
+/// addresses in configuration order. Two keys with one address would be
+/// two lanes on one nonce stream, so duplicates refuse to start.
+async fn signer_pool(
+    config: &config::Config,
+    aws: Option<&aws_config::SdkConfig>,
+    chain_id: u64,
+) -> (EthereumWallet, Vec<Address>) {
+    let mut wallet: Option<EthereumWallet> = None;
+    let mut signers: Vec<Address> = Vec::new();
+    let mut register = |signer: Box<dyn TxSigner<alloy_primitives::Signature> + Send + Sync>,
+                        kind: &str| {
+        let address = signer.address();
+        assert!(
+            !signers.contains(&address),
+            "sweep signer {address} is configured twice"
+        );
+        tracing::info!(chain_id, address = %address, signer = kind, "configured sweep signer");
+        match wallet.as_mut() {
+            None => wallet = Some(EthereumWallet::new(signer)),
+            Some(wallet) => wallet.register_signer(signer),
+        }
+        signers.push(address);
+    };
+    match config.signer() {
+        SignerConfig::Local(keys) => {
+            for key in keys {
+                let signer: PrivateKeySigner =
+                    key.parse().expect("invalid PAYDAY_SIGNER_KEYS entry");
+                register(Box::new(signer), "local");
+            }
+        }
+        SignerConfig::AwsKms(key_ids) => {
+            let kms = aws_sdk_kms::Client::new(aws.expect("AWS configuration is loaded for KMS"));
+            for key_id in key_ids {
+                let signer = AwsSigner::new(kms.clone(), key_id.clone(), Some(chain_id))
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to initialize KMS key {key_id}: {error}")
+                    });
+                register(Box::new(signer), "aws-kms");
+            }
+        }
+    }
+    tracing::info!(chain_id, signers = signers.len(), "sweep signer pool ready");
+    (
+        wallet.expect("the signer pool has at least one key"),
+        signers,
+    )
 }
 
 /// One chain's worker over an already-connected client.

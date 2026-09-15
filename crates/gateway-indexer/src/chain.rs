@@ -554,16 +554,22 @@ pub trait ChainClient: Send + Sync {
         batch_sweeper: Address,
     ) -> Result<Option<SweepReceipt>, ChainError>;
 
-    /// The signer's mined (`latest`) or queued (`pending`) transaction count.
-    async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError>;
+    /// The signer pool: every address this client can sign for, in the
+    /// order they were configured. Never empty. Each signer keeps one helper
+    /// transaction in flight; the pool is what lets several run at once.
+    fn signers(&self) -> Vec<Address>;
 
-    async fn signer_balance(&self) -> Result<U256, ChainError>;
+    /// A pool signer's mined (`latest`) or queued (`pending`) transaction count.
+    async fn signer_nonce(&self, signer: Address, pending: bool) -> Result<u64, ChainError>;
+
+    async fn signer_balance(&self, signer: Address) -> Result<U256, ChainError>;
 
     async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError>;
 
-    /// Sign one helper transaction without broadcasting it.
+    /// Sign one helper transaction from `signer` without broadcasting it.
     async fn prepare_sweep_batch(
         &self,
+        signer: Address,
         batch_sweeper: Address,
         sweeps: &[SweepRequest],
         nonce: u64,
@@ -577,11 +583,12 @@ pub trait ChainClient: Send + Sync {
         transaction: &PreparedSweepTransaction,
     ) -> Result<(), ChainError>;
 
-    /// Sign one arbitrary call from the signer without broadcasting it: a
+    /// Sign one arbitrary call from `signer` without broadcasting it: a
     /// withdrawal relay step (`transferWithAuthorization`, the forwarder's
     /// `bridge`, `receiveMessage`). Same nonce discipline as a sweep batch.
     async fn prepare_call(
         &self,
+        signer: Address,
         to: Address,
         calldata: Bytes,
         nonce: u64,
@@ -677,12 +684,14 @@ pub trait ChainClient: Send + Sync {
     async fn batch_sweeper_factory(&self, batch_sweeper: Address) -> Result<Address, ChainError>;
 }
 
-/// Production [`ChainClient`] backed by an Alloy HTTP provider with a signing
-/// wallet for the sweep transactions.
+/// Production [`ChainClient`] backed by an Alloy HTTP provider with a wallet
+/// holding every pool signer's key for the helper transactions.
 pub struct AlloyChainClient {
     provider: DynProvider,
     wallet: EthereumWallet,
-    signer: Address,
+    /// The pool, in configuration order; every address is registered in
+    /// `wallet`, which picks the key from a request's `from`.
+    signers: Vec<Address>,
     chain_id: u64,
     pacer: RpcPacer,
     /// Whether this node has been seen omitting `blockTimestamp` from logs,
@@ -730,16 +739,25 @@ impl RpcPacer {
 
 impl AlloyChainClient {
     /// Connect to the RPC endpoint at `rpc_url` (e.g. `http://127.0.0.1:8545`),
-    /// signing sweep transactions with `signer` (the backend key). Reads work
-    /// the same as an unsigned provider; the wallet only adds send capability.
+    /// signing helper transactions with the keys in `wallet`; `signers` lists
+    /// their addresses in configuration order (the wallet's own map is
+    /// unordered) and must all be registered in the wallet. Reads work the
+    /// same as an unsigned provider; the wallet only adds send capability.
     /// `rpc_max_rps` paces outgoing calls (0 disables pacing).
     pub async fn connect(
         rpc_url: &str,
         wallet: EthereumWallet,
+        signers: Vec<Address>,
         rpc_max_rps: u64,
     ) -> Result<Self, ChainError> {
+        assert!(!signers.is_empty(), "the signer pool cannot be empty");
+        for signer in &signers {
+            assert!(
+                NetworkWallet::<Ethereum>::has_signer_for(&wallet, signer),
+                "wallet holds no key for pool signer {signer}"
+            );
+        }
         let pacer = RpcPacer::new(rpc_max_rps);
-        let signer = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
         let provider = ProviderBuilder::new()
             .wallet(wallet.clone())
             .connect(rpc_url)
@@ -755,7 +773,7 @@ impl AlloyChainClient {
         Ok(Self {
             provider,
             wallet,
-            signer,
+            signers,
             chain_id,
             pacer,
             timestamp_fallback_logged: AtomicBool::new(false),
@@ -860,6 +878,22 @@ pub fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
     SWEEP_BATCH_BASE_GAS.saturating_add(
         SWEEP_GAS_PER_ITEM.saturating_mul(u64::try_from(sweep_count).unwrap_or(u64::MAX)),
     )
+}
+
+/// Sign a fully specified request with the key `wallet` holds for its
+/// `from`, returning the raw bytes and their hash without broadcasting.
+async fn sign_request(
+    wallet: &EthereumWallet,
+    tx: TransactionRequest,
+) -> Result<PreparedSweepTransaction, ChainError> {
+    let envelope = tx.build(wallet).await.map_err(|error| {
+        ChainError::Transient(format!("could not sign helper transaction: {error}"))
+    })?;
+    let raw: Bytes = envelope.encoded_2718().into();
+    Ok(PreparedSweepTransaction {
+        hash: keccak256(&raw),
+        raw,
+    })
 }
 
 #[async_trait]
@@ -1155,9 +1189,13 @@ impl ChainClient for AlloyChainClient {
         }))
     }
 
-    async fn signer_nonce(&self, pending: bool) -> Result<u64, ChainError> {
+    fn signers(&self) -> Vec<Address> {
+        self.signers.clone()
+    }
+
+    async fn signer_nonce(&self, signer: Address, pending: bool) -> Result<u64, ChainError> {
         self.pacer.acquire().await;
-        let count = self.provider.get_transaction_count(self.signer);
+        let count = self.provider.get_transaction_count(signer);
         if pending {
             count.pending().await
         } else {
@@ -1166,10 +1204,10 @@ impl ChainClient for AlloyChainClient {
         .map_err(|error| ChainError::rpc("eth_getTransactionCount", error))
     }
 
-    async fn signer_balance(&self) -> Result<U256, ChainError> {
+    async fn signer_balance(&self, signer: Address) -> Result<U256, ChainError> {
         self.pacer.acquire().await;
         self.provider
-            .get_balance(self.signer)
+            .get_balance(signer)
             .await
             .map_err(|error| ChainError::rpc("eth_getBalance", error))
     }
@@ -1188,6 +1226,7 @@ impl ChainClient for AlloyChainClient {
 
     async fn prepare_sweep_batch(
         &self,
+        signer: Address,
         batch_sweeper: Address,
         sweeps: &[SweepRequest],
         nonce: u64,
@@ -1195,6 +1234,7 @@ impl ChainClient for AlloyChainClient {
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError> {
         self.prepare_call(
+            signer,
             batch_sweeper,
             Self::execute_batch_calldata(sweeps),
             nonce,
@@ -1206,13 +1246,17 @@ impl ChainClient for AlloyChainClient {
 
     async fn prepare_call(
         &self,
+        signer: Address,
         to: Address,
         calldata: Bytes,
         nonce: u64,
         gas_limit: u64,
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError> {
+        // `from` selects the key: the wallet signs with the registered
+        // signer for that address (`pool_signer_is_selected_by_from`).
         let tx = TransactionRequest::default()
+            .with_from(signer)
             .with_to(to)
             .with_chain_id(self.chain_id)
             .with_nonce(nonce)
@@ -1220,14 +1264,7 @@ impl ChainClient for AlloyChainClient {
             .with_max_fee_per_gas(fees.max_fee_per_gas)
             .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
             .with_input(calldata);
-        let envelope = tx.build(&self.wallet).await.map_err(|error| {
-            ChainError::Transient(format!("could not sign helper transaction: {error}"))
-        })?;
-        let raw: Bytes = envelope.encoded_2718().into();
-        Ok(PreparedSweepTransaction {
-            hash: keccak256(&raw),
-            raw,
-        })
+        sign_request(&self.wallet, tx).await
     }
 
     async fn transaction_receipt(
@@ -1530,6 +1567,41 @@ mod tests {
                 .transpose()
                 .unwrap(),
         })
+    }
+
+    /// The pool relies on alloy picking the key from a request's `from`:
+    /// a wallet holding two keys signs with the one the request names.
+    #[tokio::test]
+    async fn pool_signer_is_selected_by_from() {
+        use alloy_consensus::transaction::SignerRecoverable;
+        use alloy_eips::eip2718::Decodable2718;
+        use alloy_signer_local::PrivateKeySigner;
+
+        let first = PrivateKeySigner::random();
+        let second = PrivateKeySigner::random();
+        let (first_address, second_address) = (first.address(), second.address());
+        let mut wallet = EthereumWallet::new(first);
+        wallet.register_signer(second);
+        let request = |from: Address| {
+            TransactionRequest::default()
+                .with_from(from)
+                .with_to(Address::ZERO)
+                .with_chain_id(31337)
+                .with_nonce(0)
+                .with_gas_limit(21_000)
+                .with_max_fee_per_gas(1)
+                .with_max_priority_fee_per_gas(1)
+        };
+        for expected in [second_address, first_address] {
+            let prepared = sign_request(&wallet, request(expected)).await.unwrap();
+            let envelope =
+                alloy_consensus::TxEnvelope::decode_2718(&mut &prepared.raw[..]).unwrap();
+            assert_eq!(envelope.recover_signer().unwrap(), expected);
+            assert_eq!(*envelope.hash(), prepared.hash);
+        }
+        // An address the wallet holds no key for cannot be signed for.
+        let stranger = Address::repeat_byte(0x99);
+        assert!(sign_request(&wallet, request(stranger)).await.is_err());
     }
 
     #[test]

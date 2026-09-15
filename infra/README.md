@@ -155,7 +155,7 @@ The API execution role can read only the database, RPC, webhook encryption,
 and generated operator credential secrets; its task role can send mail only
 from the verified SES identity, work the attachment bucket as described above,
 and `kms:GetPublicKey`/`kms:Sign` with the attestation key alone. Indexer execution can read only database/RPC secrets. The
-indexer task role can only `kms:GetPublicKey` and `kms:Sign` on the signer
+indexer task role can only `kms:GetPublicKey` and `kms:Sign` on the sweep signer pool's
 key. No role at all can sign with the legacy recovery key. RDS
 connections use hostname and certificate verification against the
 checksum-pinned AWS global RDS CA bundle in the image. Secrets Manager version
@@ -163,10 +163,10 @@ rotation is not observed by running ECS tasks. Force a new API deployment after
 rotating the webhook key, and retain prior application key material until
 ciphertext associated with its key ID has been re-encrypted.
 
-KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use. KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gateway_core::verify_proof`).
+KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use, for every key in `kms_key_arns` (the sweep signer pool, `sweep_signer_count` keys; each address needs gas on every chain). KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gateway_core::verify_proof`).
 
 WAF request sampling is disabled because samples can contain the bearer `Authorization` header. Fatal indexer safety errors and loss of its database lock exit the process and publish a log-derived CloudWatch alarm. RDS Multi-AZ, ALB, WAF, public IPv4 addresses, Container Insights, logs, Secrets Manager, and KMS incur ongoing charges. Public IPv4 and cross-AZ traffic are billed. This stack has no autoscaling, VPC endpoints, bastion, or automatic finality-reorg recovery.
 
 ## Destroy protection
 
-RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. All four KMS keys (sweep signer, recovery, attestation, attachments) have Terraform `prevent_destroy`; the legacy recovery key may still hold USDC recovered before deposits returned funds to the payer's own wallet, so confirm it is empty before removing that guard and the resource, and the attachment key is the only way to read stored PDFs. The attachment bucket is not force-destroyed: empty it deliberately, after confirming no deposit request still references its objects, before a teardown. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.
+RDS deletion protection defaults to true and final snapshots default on, so normal `terraform destroy` intentionally fails. Every KMS key (the sweep signer pool, recovery, attestation, attachments) has Terraform `prevent_destroy`; the legacy recovery key may still hold USDC recovered before deposits returned funds to the payer's own wallet, so confirm it is empty before removing that guard and the resource, and the attachment key is the only way to read stored PDFs. The attachment bucket is not force-destroyed: empty it deliberately, after confirming no deposit request still references its objects, before a teardown. For a deliberate teardown, preserve required data, set `db_deletion_protection = false`, apply that change, and separately review removal of the KMS lifecycle guards before destroying. KMS deletion has a 30-day waiting period; secret recovery and retained snapshots may continue to incur cost.

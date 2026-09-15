@@ -34,7 +34,8 @@ through its nonce, and CCTP mints to the recipient inside Circle's message.
 ```bash
 psql "$DATABASE_URL" -c "
   SELECT l.id, l.kind, l.state, l.source_chain_id, l.destination_chain_id, l.amount, w.currency,
-         l.valid_before, l.step_chain_id, l.step_nonce, cardinality(l.step_tx_hashes) AS submissions,
+         l.valid_before, l.step_chain_id, '0x' || encode(l.step_signer, 'hex') AS step_signer,
+         l.step_nonce, cardinality(l.step_tx_hashes) AS submissions,
          l.step_submitted_at, l.attestation_next_check_at, l.failure_reason,
          encode(l.burn_tx_hash, 'hex') AS burn_tx, encode(l.mint_tx_hash, 'hex') AS mint_tx
   FROM withdrawal_legs l JOIN withdrawals w ON w.id = l.withdrawal_id
@@ -45,8 +46,10 @@ The indexer's sweep-worker health line (every five minutes) carries
 `withdrawal_legs_authorized`, `withdrawal_legs_awaiting_attestation`,
 `withdrawal_legs_attested`, and `withdrawal_step_in_flight` per chain; a
 `sweep worker paused` error naming a withdrawal leg means a step exceeded
-`PAYDAY_SWEEP_MAX_SUBMISSIONS` and needs the same treatment as a stalled
-sweep batch (`indexer-fatal-halt.md`: signer balance and fee market first).
+`PAYDAY_SWEEP_MAX_SUBMISSIONS` on the signer it names and needs the same
+treatment as a stalled sweep batch (`stuck-deposit-request.md`, "Sweep
+worker paused": that signer's balance and the fee market first; the other
+pool signers keep relaying and sweeping meanwhile).
 
 ## `burned` for longer than expected
 
@@ -95,8 +98,8 @@ A `relaying` step whose signer nonce was spent without any visible receipt
 its transaction history stays on the leg while the relayer reconciles every
 tick, and it completes by itself once the consuming transaction surfaces in
 the finalized event search. If nothing has surfaced after 24 hours, the
-worker reports itself `paused` with the leg id and nonce until an operator
-resolves it.
+worker reports itself `paused` with the leg id, signer, and nonce until an
+operator resolves it.
 
 A reverted transfer or burn left
 the funds in the Payday wallet; the merchant creates a new withdrawal. A

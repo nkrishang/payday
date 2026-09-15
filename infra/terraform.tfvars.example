@@ -79,3 +79,8 @@ chains = [
 # One paid endpoint per chain, keyed by chain id. Prefer TF_VAR_rpc_urls from a
 # secure environment rather than placing them in a file:
 # export TF_VAR_rpc_urls='{"143":"https://…","8453":"https://…","42161":"https://…"}'
+
+# Sweep signer pool size: five KMS keys per chain, so five helper transactions
+# can be in flight at once. Every key needs gas on every chain
+# (docs/production-runbook.md §8); the default is 1.
+sweep_signer_count = 5

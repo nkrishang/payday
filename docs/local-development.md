@@ -505,9 +505,14 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   to its solver on the second Anvil and fills it on the first
 - `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
   default 0.05 native tokens; a chain's `signer_low_balance_wei` overrides it
-- `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
-- `PAYDAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
-  uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
+- `PAYDAY_SIGNER_KEYS` — the local/Anvil sweep signer pool, comma-separated
+  private keys; every key keeps one helper transaction in flight, so N keys
+  let N sweep batches or withdrawal steps run at once per chain. The runner
+  uses Anvil account #0 plus mnemonic accounts #10 and #11 (Anvil starts
+  with twelve accounts). Mutually exclusive with KMS
+- `PAYDAY_KMS_KEY_IDS` — production AWS KMS secp256k1 key ARNs,
+  comma-separated, one per pool signer; the worker uses its ambient ECS task
+  role for `kms:GetPublicKey` and `kms:Sign` on each
 - `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding deposit request PDFs;
   `payday-attachments-local` on the runner's MinIO
 - `PAYDAY_ATTACHMENT_S3_ENDPOINT`, `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE` —
@@ -541,9 +546,10 @@ Terraform source is under `infra/`.
   (`docs/runbooks/wrong-network-deposit.md`).
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.
-- One helper transaction is in flight at a time; replacements share its nonce.
-  After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed submissions the sweep
-  worker pauses and alarms while block indexing continues.
+- One helper transaction is in flight per pool signer; replacements share
+  its nonce. After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed submissions
+  that signer's lane pauses and alarms while the other signers and block
+  indexing continue.
 - `blocked` deposit requests are released by an operator (`docs/runbooks/stuck-deposit-request.md`);
   the worker never retries them on its own.
 - Deposit listing is cursor-paginated and bounded to 100 records per request.
