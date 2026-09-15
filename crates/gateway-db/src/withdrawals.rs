@@ -709,7 +709,7 @@ impl WithdrawalRepository {
                    OR (l.state = 'authorized' AND l.source_chain_id = $1
                        AND l.valid_before > extract(epoch FROM now()) + $2))
                ORDER BY (l.state = 'attested') DESC, l.created_at, l.position
-               LIMIT 1"#
+               LIMIT 1"#,
         )
         .bind(chain_id as i64)
         .bind(min_validity.as_secs_f64())

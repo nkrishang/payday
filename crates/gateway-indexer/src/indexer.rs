@@ -40,8 +40,8 @@ use gateway_db::{
     InvoiceRepository, MinedBatch, PaymentObservation, RecoveredFundsInput, RecoveryReason,
     SweepBatch, WatchFingerprint, WithdrawalRepository,
 };
-use sqlx::types::chrono::Utc;
 use sqlx::types::Uuid;
+use sqlx::types::chrono::Utc;
 use thiserror::Error;
 use tokio::sync::{Notify, OnceCell, watch};
 use tokio::task::JoinSet;
@@ -49,9 +49,9 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 
 use crate::chain::{
-    BlockHeader, BroadcastOutcome, ChainClient, ChainError, FeeEstimate,
-    PreparedSweepTransaction, SettlementEvent, SweepOutcome, SweepReceipt, SweepRequest,
-    TransactionOutcome, sweep_batch_gas_limit,
+    BlockHeader, BroadcastOutcome, ChainClient, ChainError, FeeEstimate, PreparedSweepTransaction,
+    SettlementEvent, SweepOutcome, SweepReceipt, SweepRequest, TransactionOutcome,
+    sweep_batch_gas_limit,
 };
 use crate::iris::AttestationSource;
 use crate::relay::MIN_AUTHORIZATION_VALIDITY;
@@ -170,7 +170,9 @@ enum BatchSubmission {
 
 /// The durable result of a step submission.
 pub(crate) enum StepSubmission {
-    Submitted { flow: BroadcastFlow },
+    Submitted {
+        flow: BroadcastFlow,
+    },
     /// The leg left the queue, was already minted by another party, or was
     /// cancelled between the read and the write.
     NotNeeded,
@@ -279,8 +281,7 @@ impl Coordinator {
     /// Whether a signer may take work right now: no job of its own is
     /// running, and it is not deferring an observation to the future.
     fn signer_free(&self, signer: Address, now: Instant) -> bool {
-        !self.running.contains(&signer)
-            && self.observe_at.get(&signer).is_none_or(|at| *at <= now)
+        !self.running.contains(&signer) && self.observe_at.get(&signer).is_none_or(|at| *at <= now)
     }
 
     /// A lane finished work that confirms its signer has recovered.
@@ -532,7 +533,13 @@ impl Indexer {
         // the coordinator's turn.
         let housekeeping_loop = Arc::clone(&worker).run_relay_housekeeping_loop();
         let health_loop = Arc::clone(&worker).run_sweep_health_loop();
-        tokio::pin!(index_loop, sweep_loop, relay_loop, housekeeping_loop, health_loop);
+        tokio::pin!(
+            index_loop,
+            sweep_loop,
+            relay_loop,
+            housekeeping_loop,
+            health_loop
+        );
 
         tokio::select! {
             result = &mut index_loop => result,
@@ -891,7 +898,6 @@ impl Indexer {
         }
     }
 
-
     /// A `block_header` read that backs off and retries throttle-shaped
     /// failures instead of aborting the work it belongs to.
     pub(crate) async fn retried_header(
@@ -1179,9 +1185,7 @@ impl Indexer {
             // dispatch; missing one costs a recovery cadence of latency.
             // Coalesced: one permit dispatches, and the dispatch reaps the
             // whole queue.
-            if !outcome.funded.is_empty()
-                || !outcome.expired.is_empty()
-                || !observations.is_empty()
+            if !outcome.funded.is_empty() || !outcome.expired.is_empty() || !observations.is_empty()
             {
                 self.sweep_wake.notify_one();
             }
@@ -1264,7 +1268,9 @@ impl Indexer {
             // The helper dispatches after every completion regardless of
             // runnability; the production loop is what gates a deferred
             // signer's dispatch on the clock.
-            let _runnable = self.handle_lane_done(&mut coordinator, done, &mut report).await;
+            let _runnable = self
+                .handle_lane_done(&mut coordinator, done, &mut report)
+                .await;
             self.dispatch(&mut coordinator, &mut report, now).await;
         }
         report.into_result()
@@ -1317,7 +1323,9 @@ impl Indexer {
                 continue;
             }
             coordinator.running.insert(batch.signer);
-            coordinator.jobs.spawn(self.clone().observe_batch(batch, Arc::clone(&reads)));
+            coordinator
+                .jobs
+                .spawn(self.clone().observe_batch(batch, Arc::clone(&reads)));
         }
         for leg in steps {
             let Some(signer) = leg.step.as_ref().map(|step| step.signer) else {
@@ -1328,7 +1336,9 @@ impl Indexer {
                 continue;
             }
             coordinator.running.insert(signer);
-            coordinator.jobs.spawn(self.clone().observe_step(leg, Arc::clone(&reads)));
+            coordinator
+                .jobs
+                .spawn(self.clone().observe_step(leg, Arc::clone(&reads)));
         }
 
         let start = self.sweep_cursor.load(Ordering::Relaxed) % pool.len();
@@ -1342,16 +1352,22 @@ impl Indexer {
             // as it did when one signer did both.
             match self
                 .withdrawals
-                .next_relayable(chain_id, MIN_AUTHORIZATION_VALIDITY, &coordinator.reserved_legs_list())
+                .next_relayable(
+                    chain_id,
+                    MIN_AUTHORIZATION_VALIDITY,
+                    &coordinator.reserved_legs_list(),
+                )
                 .await
             {
                 Ok(Some(leg)) => {
                     coordinator.reserved_legs.insert(leg.id);
                     coordinator.running.insert(signer);
                     self.sweep_cursor.store(index + 1, Ordering::Relaxed);
-                    coordinator
-                        .jobs
-                        .spawn(self.clone().submit_step_on(signer, leg, Arc::clone(&reads)));
+                    coordinator.jobs.spawn(self.clone().submit_step_on(
+                        signer,
+                        leg,
+                        Arc::clone(&reads),
+                    ));
                     // This signer now owns the leg's transaction; the next
                     // free signer in the rotation looks at the queue.
                     continue;
@@ -1379,9 +1395,12 @@ impl Indexer {
                     coordinator.reserved.extend(ids.iter().copied());
                     coordinator.running.insert(signer);
                     self.sweep_cursor.store(index + 1, Ordering::Relaxed);
-                    coordinator
-                        .jobs
-                        .spawn(self.clone().submit_batch_on(signer, claimed, ids, Arc::clone(&reads)));
+                    coordinator.jobs.spawn(self.clone().submit_batch_on(
+                        signer,
+                        claimed,
+                        ids,
+                        Arc::clone(&reads),
+                    ));
                 }
                 Err(error) => {
                     report.push(Some(signer), error.into());
@@ -1554,7 +1573,10 @@ impl Indexer {
     /// lanes ask, failures cached like successes. A single attempt: the
     /// dispatch clock retries after a failure, so the range reader's
     /// backoff-and-retry loop has no place on the sweep path.
-    pub(crate) async fn shared_boundary(&self, reads: &SweepReads) -> Result<BlockHeader, ChainError> {
+    pub(crate) async fn shared_boundary(
+        &self,
+        reads: &SweepReads,
+    ) -> Result<BlockHeader, ChainError> {
         reads
             .boundary
             .get_or_init(|| self.read_sweep_boundary())
@@ -1590,15 +1612,16 @@ impl Indexer {
     async fn observe_batch(self: Arc<Self>, batch: SweepBatch, reads: Arc<SweepReads>) -> LaneDone {
         let signer = batch.signer;
         let outcome = self.advance_batch(batch, reads).await;
-        LaneDone::Reconciled {
-            signer,
-            outcome,
-        }
+        LaneDone::Reconciled { signer, outcome }
     }
 
     /// A lane job: reconcile one open withdrawal step. Never fails the
     /// coordinator; errors travel inside the report.
-    async fn observe_step(self: Arc<Self>, leg: DbWithdrawalLeg, reads: Arc<SweepReads>) -> LaneDone {
+    async fn observe_step(
+        self: Arc<Self>,
+        leg: DbWithdrawalLeg,
+        reads: Arc<SweepReads>,
+    ) -> LaneDone {
         let signer = leg
             .step
             .as_ref()
@@ -1732,10 +1755,7 @@ impl Indexer {
         }
     }
 
-    async fn broadcast_batch(
-        &self,
-        batch: &SweepBatch,
-    ) -> Result<BroadcastFlow, IndexerError> {
+    async fn broadcast_batch(&self, batch: &SweepBatch) -> Result<BroadcastFlow, IndexerError> {
         let transaction = PreparedSweepTransaction {
             hash: *batch.tx_hashes.last().ok_or_else(|| {
                 IndexerError::Configuration(format!("sweep batch {} has no transaction", batch.id))
@@ -5501,8 +5521,7 @@ pub(crate) mod tests {
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
-    async fn a_failing_signer_keeps_the_worker_degraded_while_the_other_signer_works(pool: PgPool)
-    {
+    async fn a_failing_signer_keeps_the_worker_degraded_while_the_other_signer_works(pool: PgPool) {
         let failing = make_invoice(100);
         let working = make_invoice(200);
         insert_funded(&pool, &failing, "key-1", 1).await;
@@ -5606,20 +5625,16 @@ pub(crate) mod tests {
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
     async fn a_failed_fee_read_is_cached_for_the_whole_dispatch(pool: PgPool) {
-        let chain = Arc::new(
-            MockChain::new(7).with(|state| {
-                state.failing_fee_reads = 1;
-            }),
-        );
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.failing_fee_reads = 1;
+        }));
         let worker = indexer(&pool, chain.clone());
         // Two lanes of one dispatch ask for the fees concurrently: the failed
         // read is cached like a success, so a struggling RPC costs one round
         // trip per dispatch rather than one per lane.
         let reads = SweepReads::default();
-        let (first, second) = tokio::join!(
-            worker.tick_fees(&reads.fees),
-            worker.tick_fees(&reads.fees),
-        );
+        let (first, second) =
+            tokio::join!(worker.tick_fees(&reads.fees), worker.tick_fees(&reads.fees),);
         assert!(first.is_err() && second.is_err());
         assert_eq!(
             chain.state.lock().unwrap().fee_requests,

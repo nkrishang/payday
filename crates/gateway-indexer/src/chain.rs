@@ -283,10 +283,7 @@ fn is_method_not_found(err: &TransportError) -> bool {
 /// answer is a dropped connection, which gives no answer at all. Any other
 /// error is the node (or its proxy) answering and refusing.
 fn is_sync_send_outcome_unknown(err: &TransportError) -> bool {
-    if err
-        .as_error_resp()
-        .is_some_and(|payload| payload.code == 4)
-    {
+    if err.as_error_resp().is_some_and(|payload| payload.code == 4) {
         return true;
     }
     err.as_error_resp().is_none()
@@ -1528,7 +1525,8 @@ impl ChainClient for AlloyChainClient {
         {
             match tokio::time::timeout(
                 timeout,
-                self.provider.send_raw_transaction_sync(transaction.raw.as_ref()),
+                self.provider
+                    .send_raw_transaction_sync(transaction.raw.as_ref()),
             )
             .await
             {
@@ -1536,8 +1534,7 @@ impl ChainClient for AlloyChainClient {
                     if receipt.transaction_hash != transaction.hash {
                         return Err(ChainError::FinalityViolation(format!(
                             "synchronous send returned transaction hash {} for signed transaction {}",
-                            receipt.transaction_hash,
-                            transaction.hash
+                            receipt.transaction_hash, transaction.hash
                         )));
                     }
                     return Ok(BroadcastOutcome::Included(transaction_outcome(

@@ -34,11 +34,11 @@ use tracing::{info, warn};
 
 use crate::chain::{BroadcastOutcome, ChainError, FeeEstimate, PreparedSweepTransaction};
 use crate::indexer::{
-    BroadcastFlow, Indexer, IndexerError, LaneOutcome, RANGE_RETRY_BACKOFF, SweepReads,
-    StepSubmission,
+    BroadcastFlow, Indexer, IndexerError, LaneOutcome, RANGE_RETRY_BACKOFF, StepSubmission,
+    SweepReads,
 };
-use std::sync::Arc;
 use crate::iris::AttestationStatus;
+use std::sync::Arc;
 
 sol! {
     function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature);
@@ -259,7 +259,9 @@ impl Indexer {
             for &tx_hash in step.tx_hashes.iter().rev() {
                 if let Some(outcome) = self.chain.transaction_receipt(tx_hash).await? {
                     info!(leg_id = %leg.id, %tx_hash, "unacknowledged withdrawal step has a receipt; reconciling it instead of broadcasting again");
-                    return self.apply_step_receipt(&leg, &step, tx_hash, outcome, &reads).await;
+                    return self
+                        .apply_step_receipt(&leg, &step, tx_hash, outcome, &reads)
+                        .await;
                 }
             }
             let transaction = PreparedSweepTransaction {
