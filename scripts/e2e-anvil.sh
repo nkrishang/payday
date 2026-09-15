@@ -622,7 +622,7 @@ exact_issued="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_
 exact_id="$(jq -er .id <<<"$exact_issued")"
 assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request already has an address"
 assert_eq null "$(jq -r .payer_wallet <<<"$exact_issued")" "a freshly issued request already names a payer wallet"
-assert_eq 3 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
+assert_eq 4 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
 # No network until the payer chooses; the offer lists both local chains.
 assert_eq null "$(jq -r .chain <<<"$exact_issued")" "a freshly issued request already names a chain"
 assert_eq "$CHAIN_ID $SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$exact_issued")" \
@@ -1156,7 +1156,7 @@ documented_id="$(jq -er .id <<<"$documented")"
 assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
   "issued invoice does not carry the attachment commitment"
 assert_eq "$customer_id" "$(jq -r .customer_id <<<"$documented")" "issued invoice lost its customer"
-assert_eq 3 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
+assert_eq 4 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
 descriptor="$(api_json GET "/v1/deposit-requests/$documented_id/attachment")"
 downloaded="$logs/downloaded.pdf"
 curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"

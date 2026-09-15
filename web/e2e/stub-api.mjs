@@ -659,10 +659,12 @@ function proofFor(payment) {
     version: "payday.proof.v4",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
-      schema: "payday.invoice.v3",
+      schema: "payday.invoice.v4",
       canonicalization: "RFC8785",
       issuer: payment.issuer,
       payer: payment.payer,
+      currency: payment.currency,
+      decimals: "6",
       amount_base_units: payment.amount_base_units,
       notes: payment.notes,
       heading: payment.heading,
