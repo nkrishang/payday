@@ -30,12 +30,15 @@ use chrono::Utc;
 use gateway_db::{
     DbWithdrawal, DbWithdrawalLeg, LegKind, LegState, MinedStep, RetryStep, StepOutcome,
 };
-use tokio::sync::OnceCell;
 use tracing::{info, warn};
 
-use crate::chain::{FeeEstimate, PreparedSweepTransaction};
-use crate::indexer::{Indexer, IndexerError, LaneOutcome, RANGE_RETRY_BACKOFF};
+use crate::chain::{BroadcastOutcome, ChainError, FeeEstimate, PreparedSweepTransaction};
+use crate::indexer::{
+    BroadcastFlow, Indexer, IndexerError, LaneOutcome, RANGE_RETRY_BACKOFF, StepSubmission,
+    SweepReads,
+};
 use crate::iris::AttestationStatus;
+use std::sync::Arc;
 
 sol! {
     function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature);
@@ -67,12 +70,6 @@ const MAX_STEP_REVERTS: u32 = 5;
 /// worker reports itself stalled for an operator. The step and its history
 /// are untouched either way; the wait only keeps reporting honest.
 const UNRESOLVED_EXECUTION_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// How many legs a free signer will look at in one pass before giving up
-/// on finding one that needs a transaction: a leg can leave the queue
-/// without one (minted by somebody else, cancelled between the read and the
-/// write), and the next leg may still need the signer.
-const MAX_RELAY_CANDIDATES: usize = 8;
 
 /// Offset of the message nonce in a CCTP V2 message header
 /// (version 4, sourceDomain 4, destinationDomain 4, then the nonce).
@@ -246,17 +243,27 @@ impl Indexer {
         Ok(())
     }
 
-    /// Advance one open step: broadcast it if its newest signed transaction
-    /// never left, otherwise reconcile it against the chain.
-    pub(crate) async fn step_lane(
+    /// Advance one open step: reconcile it against the chain, or put its
+    /// durable-but-unacknowledged transaction on the wire — looking for its
+    /// receipt first, because the broadcast's acknowledgment may have been
+    /// lost while the transaction landed anyway.
+    pub(crate) async fn advance_step(
         &self,
         leg: DbWithdrawalLeg,
-        fees: &OnceCell<FeeEstimate>,
+        reads: Arc<SweepReads>,
     ) -> Result<LaneOutcome, IndexerError> {
         let step = leg.step.clone().ok_or_else(|| {
             IndexerError::Configuration(format!("open relay step on leg {} has no step", leg.id))
         })?;
         if step.broadcast_at.is_none() {
+            for &tx_hash in step.tx_hashes.iter().rev() {
+                if let Some(outcome) = self.chain.transaction_receipt(tx_hash).await? {
+                    info!(leg_id = %leg.id, %tx_hash, "unacknowledged withdrawal step has a receipt; reconciling it instead of broadcasting again");
+                    return self
+                        .apply_step_receipt(&leg, &step, tx_hash, outcome, &reads)
+                        .await;
+                }
+            }
             let transaction = PreparedSweepTransaction {
                 hash: *step.tx_hashes.last().ok_or_else(|| {
                     IndexerError::Configuration(format!(
@@ -271,62 +278,58 @@ impl Indexer {
                     ))
                 })?,
             };
-            self.broadcast_step(&leg, &transaction).await?;
-            return Ok(LaneOutcome::Open);
-        }
-        self.reconcile_step(&leg, &step, fees).await
-    }
-
-    /// Give a free signer the next leg to relay. Returns true when a step
-    /// was signed and broadcast on it, false when nothing needed one.
-    pub(crate) async fn take_relay_step(
-        &self,
-        signer: Address,
-        fees: &OnceCell<FeeEstimate>,
-    ) -> Result<bool, IndexerError> {
-        for _ in 0..MAX_RELAY_CANDIDATES {
-            let Some(leg) = self
-                .withdrawals
-                .next_relayable(self.cfg.chain_id.0, MIN_AUTHORIZATION_VALIDITY)
-                .await?
-            else {
-                return Ok(false);
-            };
-            if self.submit_step(signer, &leg, fees).await? {
-                return Ok(true);
+            // Re-sending the exact bytes is safe, but not forever: past the
+            // pending timeout the replacement and stalled machinery takes
+            // over, so a persistently rejected or invisible transaction ends
+            // up reported instead of retried at the recovery cadence
+            // indefinitely.
+            let age = Utc::now()
+                .signed_duration_since(step.submitted_at)
+                .to_std()
+                .unwrap_or_default();
+            if age >= self.cfg.sweep_pending_timeout {
+                warn!(leg_id = %leg.id, signer = %step.signer, "unacknowledged withdrawal step is past the pending timeout without a receipt or an acknowledgment; handing it to the replacement machinery");
+                return self.handle_unmined_step(&leg, &step, &reads).await;
             }
+            let flow = self.broadcast_step(&leg, &transaction).await?;
+            // An included receipt rides the next dispatch: a runnable
+            // completion observes a synchronously-sent transaction
+            // immediately, without waiting out a receipt poll.
+            return Ok(LaneOutcome::Broadcast(flow));
         }
-        warn!(
-            chain_id = self.cfg.chain_id.0,
-            "relayable legs kept leaving the queue without a transaction; trying again next pass"
-        );
-        Ok(false)
+        self.reconcile_step(&leg, &step, &reads).await
     }
 
-    /// Sign and broadcast `leg`'s next step from `signer`. False when the
-    /// leg needed no transaction after all (already minted by another party,
-    /// or gone from the queue before the step was recorded).
-    async fn submit_step(
+    /// Sign and broadcast `leg`'s next step from `signer`. The leg was
+    /// selected in dispatch; everything from the nonce read onward runs in
+    /// this lane's own job. Not-needed results (already minted by another
+    /// party, or the leg left the queue) come back as `NotNeeded`, never as
+    /// failures.
+    pub(crate) async fn prepare_and_submit_step(
         &self,
         signer: Address,
-        leg: &DbWithdrawalLeg,
-        fees: &OnceCell<FeeEstimate>,
-    ) -> Result<bool, IndexerError> {
+        leg: DbWithdrawalLeg,
+        reads: &SweepReads,
+    ) -> Result<StepSubmission, IndexerError> {
         if leg.state == LegState::Attested {
             // `receiveMessage` is permissionless: somebody may have minted
             // already, in which case submitting our own would only revert
             // once it finalizes. The check reads at the finalized boundary,
             // so it can only ever complete a leg whose mint is itself final.
-            if self.message_nonce_used(leg).await? {
+            if self.message_nonce_used(&leg).await? {
                 self.withdrawals.complete_minted_elsewhere(leg.id).await?;
                 info!(leg_id = %leg.id, "withdrawal mint already executed by another party; leg complete");
-                return Ok(false);
+                return Ok(StepSubmission::NotNeeded);
             }
         }
-        let withdrawal = self.withdrawal_of(leg).await?;
-        let call = self.step_call(leg, &withdrawal)?;
-        let nonce = self.chain.signer_nonce(signer, true).await?;
-        let fees = self.tick_fees(fees).await?;
+        let withdrawal = self.withdrawal_of(&leg).await?;
+        let call = self.step_call(&leg, &withdrawal)?;
+        // The nonce and the fee estimate are independent reads; they wait in
+        // parallel, and signing waits for both.
+        let (nonce, fees) = tokio::try_join!(
+            async { Ok(self.chain.signer_nonce(signer, true).await?) },
+            self.tick_fees(&reads.fees)
+        )?;
         let transaction = self
             .chain
             .prepare_call(signer, call.to, call.calldata, nonce, call.gas_limit, fees)
@@ -349,44 +352,71 @@ impl Indexer {
             // Cancelled or expired between the read and the write: the signed
             // bytes are dropped, never broadcast.
             info!(leg_id = %leg.id, "withdrawal leg left the queue before its step was recorded");
-            return Ok(false);
+            return Ok(StepSubmission::NotNeeded);
         }
-        self.broadcast_step(leg, &transaction).await?;
+        // Past this point the durable step owns the leg's nonce; an unknown
+        // broadcast outcome is observation's business, never a re-sign.
+        let flow = self.broadcast_step(&leg, &transaction).await?;
         info!(leg_id = %leg.id, state = leg.state.as_str(), tx_hash = %transaction.hash, %signer, nonce, "withdrawal step broadcast");
-        Ok(true)
+        Ok(StepSubmission::Submitted { flow })
     }
 
     async fn broadcast_step(
         &self,
         leg: &DbWithdrawalLeg,
         transaction: &PreparedSweepTransaction,
-    ) -> Result<(), IndexerError> {
-        self.chain.broadcast_sweep_transaction(transaction).await?;
-        if !self
-            .withdrawals
-            .record_step_broadcast(leg.id, transaction.hash)
-            .await?
-        {
-            return Err(IndexerError::Configuration(format!(
-                "durable transaction {} is not the pending broadcast for withdrawal leg {}",
-                transaction.hash, leg.id
-            )));
+    ) -> Result<BroadcastFlow, IndexerError> {
+        match self.chain.broadcast_sweep_transaction(transaction).await {
+            Ok(BroadcastOutcome::Accepted) => {
+                if !self
+                    .withdrawals
+                    .record_step_broadcast(leg.id, transaction.hash)
+                    .await?
+                {
+                    return Err(IndexerError::Configuration(format!(
+                        "durable transaction {} is not the pending broadcast for withdrawal leg {}",
+                        transaction.hash, leg.id
+                    )));
+                }
+                Ok(BroadcastFlow::Sent)
+            }
+            Ok(BroadcastOutcome::Included(outcome)) => {
+                if !self
+                    .withdrawals
+                    .record_step_broadcast(leg.id, transaction.hash)
+                    .await?
+                {
+                    return Err(IndexerError::Configuration(format!(
+                        "durable transaction {} is not the pending broadcast for withdrawal leg {}",
+                        transaction.hash, leg.id
+                    )));
+                }
+                Ok(BroadcastFlow::Included(outcome))
+            }
+            Err(ChainError::BroadcastUnknown(reason)) => {
+                // Neither accepted nor rejected: leave the acknowledgment
+                // unset and let observation decide.
+                warn!(leg_id = %leg.id, tx_hash = %transaction.hash, %reason, "withdrawal step broadcast outcome is unknown; reconciling instead of re-signing");
+                Ok(BroadcastFlow::Unknown)
+            }
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 
     async fn reconcile_step(
         &self,
         leg: &DbWithdrawalLeg,
         step: &gateway_db::RelayStep,
-        fees: &OnceCell<FeeEstimate>,
+        reads: &SweepReads,
     ) -> Result<LaneOutcome, IndexerError> {
         for &tx_hash in step.tx_hashes.iter().rev() {
             if let Some(receipt) = self.chain.transaction_receipt(tx_hash).await? {
-                return self.apply_step_receipt(leg, step, tx_hash, receipt).await;
+                return self
+                    .apply_step_receipt(leg, step, tx_hash, receipt, reads)
+                    .await;
             }
         }
-        self.handle_unmined_step(leg, step, fees).await
+        self.handle_unmined_step(leg, step, reads).await
     }
 
     async fn apply_step_receipt(
@@ -395,6 +425,7 @@ impl Indexer {
         step: &gateway_db::RelayStep,
         tx_hash: B256,
         receipt: crate::chain::TransactionOutcome,
+        reads: &SweepReads,
     ) -> Result<LaneOutcome, IndexerError> {
         let mined = MinedStep {
             tx_hash,
@@ -404,11 +435,11 @@ impl Indexer {
         if step.mined != Some(mined) {
             self.withdrawals.record_step_mined(leg.id, mined).await?;
         }
-        let mut attempt = 0u32;
-        let mut backoff = RANGE_RETRY_BACKOFF;
-        if receipt.block > self.finality_boundary(&mut attempt, &mut backoff).await? {
+        if receipt.block > self.shared_boundary(reads).await?.number {
             return Ok(LaneOutcome::Open);
         }
+        let mut attempt = 0u32;
+        let mut backoff = RANGE_RETRY_BACKOFF;
         let header = self
             .retried_header(receipt.block, &mut attempt, &mut backoff)
             .await?;
@@ -458,7 +489,7 @@ impl Indexer {
         &self,
         leg: &DbWithdrawalLeg,
         step: &gateway_db::RelayStep,
-        fees: &OnceCell<FeeEstimate>,
+        reads: &SweepReads,
     ) -> Result<LaneOutcome, IndexerError> {
         let age = Utc::now()
             .signed_duration_since(step.submitted_at)
@@ -512,7 +543,7 @@ impl Indexer {
             max_fee_per_gas: step.max_fee_per_gas,
             max_priority_fee_per_gas: step.max_priority_fee_per_gas,
         };
-        let fees = self.tick_fees(fees).await?.max(previous.bumped());
+        let fees = self.tick_fees(&reads.fees).await?.max(previous.bumped());
         let withdrawal = self.withdrawal_of(leg).await?;
         let call = self.step_call(leg, &withdrawal)?;
         let transaction = self
@@ -542,9 +573,12 @@ impl Indexer {
                 leg.id
             )));
         }
-        self.broadcast_step(leg, &transaction).await?;
+        let flow = self.broadcast_step(leg, &transaction).await?;
         warn!(leg_id = %leg.id, signer = %step.signer, nonce = step.nonce, tx_hash = %transaction.hash, submission = step.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed withdrawal step");
-        Ok(LaneOutcome::Open)
+        // The replacement's broadcast outcome schedules the observation like
+        // a first submission's: an included receipt is settled on the next
+        // dispatch, which a runnable completion runs at once.
+        Ok(LaneOutcome::Broadcast(flow))
     }
 
     async fn withdrawal_of(&self, leg: &DbWithdrawalLeg) -> Result<DbWithdrawal, IndexerError> {
@@ -989,7 +1023,7 @@ mod tests {
         chain: Arc<MockChain>,
         chain_id: u64,
         iris: Arc<FakeIris>,
-    ) -> Indexer {
+    ) -> Arc<Indexer> {
         indexer_with_relay(pool, chain, relay_config(chain_id), iris)
     }
 
@@ -1020,14 +1054,22 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let submissions = chain.submissions();
         assert_eq!(submissions.len(), 2);
-        // The first free signer relays; the next one sweeps.
-        assert_eq!(submissions[0].to, Some(usdc()));
-        assert_eq!(submissions[0].signer, mock_signer(0));
-        assert_eq!(submissions[1].to, None);
-        assert_eq!(submissions[1].signer, mock_signer(1));
+        // The first free signer relays; the next one sweeps. The lanes
+        // broadcast concurrently, so the order they land in the mock is
+        // whichever broadcast finishes first.
+        let relay = submissions
+            .iter()
+            .find(|submission| submission.to == Some(usdc()))
+            .expect("the relay leg was submitted");
+        let sweep = submissions
+            .iter()
+            .find(|submission| submission.to.is_none())
+            .expect("the sweep batch was submitted");
+        assert_eq!(relay.signer, mock_signer(0));
+        assert_eq!(sweep.signer, mock_signer(1));
         assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Relaying);
         assert_eq!(invoice_status(&pool, &invoice).await, "deploying");
     }
@@ -1046,14 +1088,14 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let submissions = chain.submissions();
         assert_eq!(submissions.len(), 1);
         assert_eq!(submissions[0].to, Some(usdc()));
         assert_eq!(invoice_status(&pool, &invoice).await, "funded");
 
         // The step finalizes and frees the signer, which sweeps in the same pass.
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert_eq!(
             leg_state(&repo, withdrawal).await.state,
             LegState::Completed
@@ -1062,7 +1104,7 @@ mod tests {
         assert_eq!(submissions.len(), 2);
         assert_eq!(submissions[1].to, None);
         assert_eq!(invoice_status(&pool, &invoice).await, "deploying");
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert_eq!(invoice_status(&pool, &invoice).await, "fulfilled");
     }
 
@@ -1083,7 +1125,7 @@ mod tests {
             CHAIN_ID,
             Arc::new(FakeIris::default()),
         );
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert_eq!(chain.submissions().len(), 2);
 
         // Corrupt the ledger: the batch now claims the step's signer.
@@ -1092,7 +1134,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let error = worker.sweep_tick().await.unwrap_err();
+        let error = worker.clone().sweep_tick().await.unwrap_err();
         assert!(matches!(error, IndexerError::Configuration(_)));
         assert!(
             error
@@ -1118,7 +1160,7 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let submissions = chain.submissions();
         assert_eq!(submissions.len(), 1);
         assert_eq!(submissions[0].to, Some(usdc()));
@@ -1135,7 +1177,7 @@ mod tests {
         assert!(leg.step.as_ref().unwrap().broadcast_at.is_some());
 
         // The mock mined it in the finalized block; the next tick concludes.
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
         assert_eq!(leg.transfer_tx_hash, Some(submissions[0].tx_hash));
@@ -1148,14 +1190,14 @@ mod tests {
                 .completed_at
                 .is_some()
         );
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert_eq!(chain.submissions().len(), 1, "nothing left to relay");
     }
 
     async fn burned_bridge_leg(
         pool: &PgPool,
         iris: Arc<FakeIris>,
-    ) -> (WithdrawalRepository, Uuid, B256, Indexer) {
+    ) -> (WithdrawalRepository, Uuid, B256, Arc<Indexer>) {
         let (repo, withdrawal, _) = authorized_leg(
             pool,
             LegKind::Bridge,
@@ -1166,9 +1208,9 @@ mod tests {
         .await;
         let source = Arc::new(MockChain::new(10));
         let worker = indexer(pool, source.clone(), CHAIN_ID, iris);
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let burn = source.submissions().remove(0);
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Burned);
         (repo, withdrawal, burn.tx_hash, worker)
     }
@@ -1191,7 +1233,7 @@ mod tests {
             .unwrap()
             .insert(burn, complete_attestation(foreign.clone()));
         tokio::time::sleep(Duration::from_millis(15)).await;
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(
             leg.state,
@@ -1213,7 +1255,7 @@ mod tests {
             },
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(
             leg.state,
@@ -1240,16 +1282,16 @@ mod tests {
         let iris = Arc::new(FakeIris::default());
         let source = Arc::new(MockChain::new(10));
         let source_worker = indexer(&pool, source.clone(), CHAIN_ID, iris.clone());
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         let burn = source.submissions().remove(0);
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         let message_nonce = B256::repeat_byte(0x77);
         iris.answers.lock().unwrap().insert(
             burn.tx_hash,
             complete_attestation(message_with_nonce(15, 6, message_nonce)),
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Attested);
 
         // `receiveMessage` is permissionless: another party's mint consumed
@@ -1270,7 +1312,7 @@ mod tests {
             );
         }));
         let destination_worker = indexer(&pool, destination.clone(), OTHER_CHAIN_ID, iris);
-        destination_worker.sweep_tick().await.unwrap();
+        destination_worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
         assert_eq!(leg.mint_tx_hash, None, "no mint of our own landed");
@@ -1305,10 +1347,10 @@ mod tests {
         let destination_worker = indexer(&pool, destination.clone(), OTHER_CHAIN_ID, iris.clone());
 
         // The destination chain has nothing to do yet.
-        destination_worker.sweep_tick().await.unwrap();
+        destination_worker.clone().sweep_tick().await.unwrap();
         assert!(destination.submissions().is_empty());
 
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         let burn = source.submissions().remove(0);
         assert_eq!(burn.to, Some(FORWARDER));
         assert_eq!(burn.gas_limit, BRIDGE_GAS);
@@ -1320,14 +1362,14 @@ mod tests {
         assert_eq!(call.salt, B256::repeat_byte(0x55));
         assert_eq!(call.value, U256::from(2_500_000u64));
 
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Burned);
         assert_eq!(leg.burn_tx_hash, Some(burn.tx_hash));
 
         // Circle has not indexed it: polled from the source domain, deferred.
         tokio::time::sleep(Duration::from_millis(15)).await;
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         assert_eq!(iris.polls.lock().unwrap().as_slice(), &[(15, burn.tx_hash)]);
         assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Burned);
 
@@ -1337,7 +1379,7 @@ mod tests {
             complete_attestation(message_with_nonce(15, 6, message_nonce)),
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Attested);
         assert_eq!(
@@ -1346,7 +1388,7 @@ mod tests {
             "the source chain does not mint"
         );
 
-        destination_worker.sweep_tick().await.unwrap();
+        destination_worker.clone().sweep_tick().await.unwrap();
         let mint = destination.submissions().remove(0);
         assert_eq!(mint.to, Some(TRANSMITTER));
         assert_eq!(mint.gas_limit, MINT_GAS);
@@ -1358,7 +1400,7 @@ mod tests {
         assert_eq!(call.attestation.as_ref(), &[0xAA; 65][..]);
         assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Minting);
 
-        destination_worker.sweep_tick().await.unwrap();
+        destination_worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
         assert_eq!(leg.mint_tx_hash, Some(mint.tx_hash));
@@ -1384,8 +1426,8 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         // The transfer reverted, but its authorization is unconsumed and the
         // merchant's signature still stands: the leg is queued again with a
         // backoff, not failed.
@@ -1480,8 +1522,8 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
         assert_eq!(leg.mint_tx_hash, None, "no mint of our own landed");
@@ -1523,8 +1565,8 @@ mod tests {
         let destination = Arc::new(MockChain::new(10));
         let destination_worker = indexer(&pool, destination.clone(), OTHER_CHAIN_ID, iris.clone());
 
-        source_worker.sweep_tick().await.unwrap();
-        source_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Burned);
         assert_eq!(
@@ -1541,9 +1583,9 @@ mod tests {
             complete_attestation(message_with_nonce(15, 6, message_nonce)),
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
-        source_worker.sweep_tick().await.unwrap();
-        destination_worker.sweep_tick().await.unwrap();
-        destination_worker.sweep_tick().await.unwrap();
+        source_worker.clone().sweep_tick().await.unwrap();
+        destination_worker.clone().sweep_tick().await.unwrap();
+        destination_worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
         assert!(
@@ -1580,8 +1622,8 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Completed);
         assert_eq!(
@@ -1611,7 +1653,7 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert!(chain.submissions().is_empty());
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Expired);
@@ -1637,17 +1679,17 @@ mod tests {
             Arc::new(FakeIris::default()),
         );
 
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let first = chain.submissions().remove(0);
         // Not yet timed out: nothing happens.
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         assert_eq!(chain.submissions().len(), 1);
 
         sqlx::query("UPDATE withdrawal_legs SET step_submitted_at = now() - interval '1 hour'")
             .execute(&pool)
             .await
             .unwrap();
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let submissions = chain.submissions();
         assert_eq!(submissions.len(), 2, "a same-nonce replacement");
         assert_eq!(submissions[1].nonce, first.nonce);
@@ -1664,7 +1706,7 @@ mod tests {
         chain.set(|state| {
             state.mined_nonces.insert(first.signer, first.nonce + 1);
         });
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Relaying, "no evidence yet, no touch");
         let step = leg.step.clone().unwrap();
@@ -1681,7 +1723,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let error = worker.sweep_tick().await.unwrap_err();
+        let error = worker.clone().sweep_tick().await.unwrap_err();
         assert!(matches!(error, IndexerError::SweepStalled(_)));
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Relaying);
@@ -1700,7 +1742,7 @@ mod tests {
                 .authorization_events
                 .insert(B256::repeat_byte(0x42), 9);
         });
-        worker.sweep_tick().await.unwrap();
+        worker.clone().sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(
             leg.state,

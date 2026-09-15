@@ -178,7 +178,7 @@ async fn main() {
 /// One chain's worker and, if configured, its transfer signal.
 struct ChainWorker {
     chain_id: u64,
-    indexer: indexer::Indexer,
+    indexer: Arc<indexer::Indexer>,
     signal: Option<signal::TransferSignal>,
 }
 
@@ -200,6 +200,9 @@ async fn connect_client(
         wallet,
         signers,
         config.rpc_max_rps(),
+        config
+            .sweep_sync_send_enabled(chain_id)
+            .then_some(config.sweep_sync_send_timeout()),
     )
     .await
     .unwrap_or_else(|error| panic!("failed to connect to chain {chain_id}: {error}"));
@@ -316,9 +319,45 @@ fn build_worker(
     peers: Arc<HashMap<u64, Arc<dyn ChainClient>>>,
 ) -> ChainWorker {
     let chain_id = chain.chain_id;
+    // One event per chain, at startup, naming every effective knob: the
+    // operator's first question about latency or spend is "what was it
+    // actually configured with", and this answers it without log archaeology.
+    // Secrets (signer keys, RPC URLs, API keys) are deliberately absent.
+    tracing::info!(
+        chain_id,
+        factory = %chain.factory,
+        batch_sweeper = %chain.batch_sweeper,
+        usdc = %chain.usdc,
+        finality_source = ?chain.finality_source,
+        finality_confirmations = chain.finality_confirmations,
+        block_time_ms = chain.block_time_ms,
+        log_range_size = chain.log_range_size,
+        max_ranges_per_tick = config.max_ranges_per_tick(),
+        poll_interval_ms = config.indexer_poll_interval().as_millis() as u64,
+        reconcile_interval_ms = config.indexer_reconcile_interval().as_millis() as u64,
+        idle_interval_ms = config.indexer_idle_interval().as_millis() as u64,
+        late_watch_window_secs = config.late_watch_window().as_secs(),
+        rpc_max_rps = config.rpc_max_rps(),
+        sweep_batch_limit = indexer::SWEEP_BATCH_LIMIT,
+        sweep_receipt_poll_interval_ms =
+            config.sweep_receipt_poll_interval().as_millis() as u64,
+        sweep_sync_send_enabled = config.sweep_sync_send_enabled(chain_id),
+        sweep_sync_send_timeout_ms = config.sweep_sync_send_timeout().as_millis() as u64,
+        sweep_pending_timeout_secs = config.sweep_pending_timeout().as_secs(),
+        sweep_max_submissions = config.sweep_max_submissions(),
+        sweep_max_attempts = config.sweep_max_attempts(),
+        signer_low_balance_wei = %chain
+            .signer_low_balance_wei
+            .map(U256::from)
+            .unwrap_or_else(|| config.signer_low_balance_wei()),
+        signal_ws = config.rpc_ws_url(chain_id).is_some(),
+        cctp_enabled = chain.cctp.is_some(),
+        relay_enabled = config.relay_api_key().is_some(),
+        "effective indexer configuration"
+    );
     let repo = gateway_db::InvoiceRepository::new(pool.clone());
     let cursor = gateway_db::CursorRepository::new(pool);
-    let indexer = indexer::Indexer::new(
+    let indexer = Arc::new(indexer::Indexer::new(
         repo,
         cursor,
         client,
@@ -338,6 +377,7 @@ fn build_worker(
             idle_interval: config.indexer_idle_interval(),
             late_watch_window: config.late_watch_window(),
             sweep_pending_timeout: config.sweep_pending_timeout(),
+            sweep_receipt_poll_interval: config.sweep_receipt_poll_interval(),
             sweep_max_submissions: config.sweep_max_submissions(),
             sweep_max_attempts: config.sweep_max_attempts(),
             sweep_backoff_base_secs: SWEEP_BACKOFF_BASE_SECS,
@@ -358,7 +398,7 @@ fn build_worker(
         registry,
         relay,
         peers,
-    );
+    ));
     let signal = config
         .rpc_ws_url(chain_id)
         .map(|ws_url| signal::TransferSignal::new(ws_url.to_string(), chain_id, chain.usdc));

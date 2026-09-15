@@ -690,15 +690,19 @@ impl WithdrawalRepository {
     /// The next leg this chain's signer should act on: an attested leg to
     /// mint here first (its burn already happened), then the oldest
     /// authorized leg whose authorization still has `min_validity` left.
+    /// `excluded_ids` keeps legs another concurrent preparation already
+    /// claimed out of the selection until their submission is durable.
     pub async fn next_relayable(
         &self,
         chain_id: u64,
         min_validity: Duration,
+        excluded_ids: &[Uuid],
     ) -> Result<Option<DbWithdrawalLeg>, sqlx::Error> {
         sqlx::query_as::<_, LegRow>(
             r#"SELECT l.* FROM withdrawal_legs l
                JOIN withdrawals w ON w.id = l.withdrawal_id
                WHERE w.cancelled_at IS NULL
+                 AND NOT (l.id = ANY($3))
                  AND (l.step_retry_at IS NULL OR l.step_retry_at <= now())
                  AND (
                    (l.state = 'attested' AND l.destination_chain_id = $1)
@@ -709,6 +713,7 @@ impl WithdrawalRepository {
         )
         .bind(chain_id as i64)
         .bind(min_validity.as_secs_f64())
+        .bind(excluded_ids)
         .fetch_optional(&self.pool)
         .await?
         .map(DbWithdrawalLeg::try_from)
@@ -779,7 +784,10 @@ impl WithdrawalRepository {
         }
     }
 
-    /// Persist a signed same-nonce replacement before broadcasting it.
+    /// Persist a signed same-nonce replacement before broadcasting it. The
+    /// pending-timeout clock restarts with the replacement: an unacknowledged
+    /// predecessor's expired timeout must not immediately consume the
+    /// replacement's replacement budget.
     pub async fn record_step_replacement(
         &self,
         leg_id: Uuid,
@@ -793,7 +801,7 @@ impl WithdrawalRepository {
                SET step_tx_hashes = array_append(step_tx_hashes, $2),
                    step_raw_transactions = array_append(step_raw_transactions, $3),
                    step_max_fee_per_gas = $4, step_max_priority_fee_per_gas = $5,
-                   step_broadcast_at = NULL, updated_at = now()
+                   step_broadcast_at = NULL, step_submitted_at = now(), updated_at = now()
                WHERE id = $1 AND step_chain_id IS NOT NULL"#,
         )
         .bind(leg_id)
@@ -1404,7 +1412,7 @@ mod tests {
         let legs = repo.legs(input.id).await.unwrap();
         assert!(legs.iter().all(|leg| leg.state == LegState::Cancelled));
         assert!(
-            repo.next_relayable(143, Duration::ZERO)
+            repo.next_relayable(143, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .is_none()
@@ -1442,7 +1450,7 @@ mod tests {
         // Nothing is relayable before a signature, and an expiring
         // authorization is not relayable either.
         assert!(
-            repo.next_relayable(143, Duration::ZERO)
+            repo.next_relayable(143, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .is_none()
@@ -1454,7 +1462,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            repo.next_relayable(143, Duration::ZERO)
+            repo.next_relayable(143, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .unwrap()
@@ -1462,7 +1470,7 @@ mod tests {
             bridge
         );
         assert_eq!(
-            repo.next_relayable(8453, Duration::ZERO)
+            repo.next_relayable(8453, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .unwrap()
@@ -1470,13 +1478,13 @@ mod tests {
             transfer
         );
         assert!(
-            repo.next_relayable(143, Duration::from_secs(10_000_000_000))
+            repo.next_relayable(143, Duration::from_secs(10_000_000_000), &[])
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(
-            repo.next_relayable(42_161, Duration::ZERO)
+            repo.next_relayable(42_161, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .is_none()
@@ -1644,13 +1652,13 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            repo.next_relayable(143, Duration::ZERO)
+            repo.next_relayable(143, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .is_none()
         );
         let mintable = repo
-            .next_relayable(8453, Duration::ZERO)
+            .next_relayable(8453, Duration::ZERO, &[])
             .await
             .unwrap()
             .unwrap();
@@ -1908,7 +1916,7 @@ mod tests {
         let retry_at = retry_at.expect("the retry carries a backoff");
         assert!(retry_at > Utc::now() + chrono::TimeDelta::try_seconds(500).unwrap());
         assert!(
-            repo.next_relayable(8453, Duration::ZERO)
+            repo.next_relayable(8453, Duration::ZERO, &[])
                 .await
                 .unwrap()
                 .is_none(),

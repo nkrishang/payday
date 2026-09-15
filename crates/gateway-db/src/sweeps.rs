@@ -256,6 +256,7 @@ impl InvoiceRepository {
         limit: i64,
         backoff_base_secs: f64,
         backoff_cap_secs: f64,
+        excluded_ids: &[Uuid],
     ) -> Result<Vec<DbInvoice>, sqlx::Error> {
         sqlx::query_as::<_, DbInvoice>(
             r#"
@@ -266,6 +267,7 @@ impl InvoiceRepository {
                   AND invoice.uncollected_count > 0
                   AND invoice.sweep_batch_id IS NULL
                   AND invoice.blocked_reason IS NULL
+                  AND NOT (invoice.id = ANY($5))
                   AND (
                     invoice.status IN ('expired', 'fulfilled', 'recovered')
                     OR (
@@ -309,6 +311,7 @@ impl InvoiceRepository {
         .bind(limit)
         .bind(backoff_base_secs)
         .bind(backoff_cap_secs)
+        .bind(excluded_ids)
         .fetch_all(self.pool())
         .await
     }
@@ -441,7 +444,27 @@ impl InvoiceRepository {
         .await
     }
 
-    /// Persist a signed same-nonce replacement before broadcasting it.
+    /// The open batch by id, for applying a synchronous send's receipt the
+    /// moment the broadcast returns it. `None` for a batch that resolved
+    /// meanwhile — its receipt is then a poll's concern, not a settlement.
+    pub async fn sweep_batch_by_id(
+        &self,
+        batch_id: Uuid,
+    ) -> Result<Option<SweepBatch>, sqlx::Error> {
+        sqlx::query_as::<_, SweepBatchRow>(
+            r#"SELECT * FROM sweep_batches WHERE id = $1 AND resolved_at IS NULL"#,
+        )
+        .bind(batch_id)
+        .fetch_optional(self.pool())
+        .await?
+        .map(SweepBatch::try_from)
+        .transpose()
+    }
+
+    /// Persist a signed same-nonce replacement before broadcasting it. The
+    /// pending-timeout clock restarts with the replacement, so an
+    /// unacknowledged predecessor's expired timeout does not consume the
+    /// replacement's replacement budget.
     pub async fn record_batch_replacement(
         &self,
         batch_id: Uuid,
@@ -457,7 +480,8 @@ impl InvoiceRepository {
                 raw_transactions = array_append(raw_transactions, $3),
                 max_fee_per_gas = $4,
                 max_priority_fee_per_gas = $5,
-                broadcast_at = NULL
+                broadcast_at = NULL,
+                submitted_at = now()
             WHERE id = $1 AND resolved_at IS NULL
             "#,
         )
@@ -1213,7 +1237,7 @@ mod tests {
     }
 
     async fn claimed(repo: &InvoiceRepository) -> Vec<Uuid> {
-        repo.claim_sweep_batch(CHAIN_ID, 10, 1.0, 60.0)
+        repo.claim_sweep_batch(CHAIN_ID, 10, 1.0, 60.0, &[])
             .await
             .unwrap()
             .into_iter()

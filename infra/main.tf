@@ -764,7 +764,10 @@ resource "aws_ecs_task_definition" "indexer" {
       { name = "PAYDAY_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
       { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
       { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
-      { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
+      { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) },
+      { name = "PAYDAY_SWEEP_RECEIPT_POLL_INTERVAL_MS", value = tostring(var.sweep_receipt_poll_interval_ms) },
+      { name = "PAYDAY_SWEEP_SYNC_SEND_CHAIN_IDS", value = var.sweep_sync_send_chain_ids },
+      { name = "PAYDAY_SWEEP_SYNC_SEND_TIMEOUT_MS", value = tostring(var.sweep_sync_send_timeout_ms) }
     ]),
     secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets, local.relay_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }

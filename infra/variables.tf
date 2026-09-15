@@ -112,12 +112,38 @@ variable "image_tag" {
 
 
 variable "indexer_poll_interval_ms" {
-  description = "Sweep worker cadence, and the block indexer's reconcile cadence only while its WebSocket transfer signal is disconnected. While the signal is connected the indexer reconciles every indexer_reconcile_interval_ms and immediately on a wake, so this value no longer sets the request budget."
+  description = "Recovery backstop cadence: the dispatch clock for sweep lanes deferred by an unknown broadcast outcome (timeouts, connection loss), and the block indexer's reconcile cadence only while its WebSocket transfer signal is disconnected. While the signal is connected the indexer reconciles every indexer_reconcile_interval_ms and immediately on a wake, so this value no longer sets the request budget."
   type        = number
   default     = 5000
   validation {
     condition     = var.indexer_poll_interval_ms >= 1000 && var.indexer_poll_interval_ms <= 300000 && floor(var.indexer_poll_interval_ms) == var.indexer_poll_interval_ms
     error_message = "indexer_poll_interval_ms must be an integer from 1000 through 300000."
+  }
+}
+
+variable "sweep_receipt_poll_interval_ms" {
+  description = "Wait between receipt checks for a sweep or relay leg already known to be in flight. Kept small because each check is one cheap eth_getTransactionReceipt; eligible work is submitted immediately regardless."
+  type        = number
+  default     = 250
+  validation {
+    condition     = var.sweep_receipt_poll_interval_ms >= 50 && var.sweep_receipt_poll_interval_ms <= 60000 && floor(var.sweep_receipt_poll_interval_ms) == var.sweep_receipt_poll_interval_ms
+    error_message = "sweep_receipt_poll_interval_ms must be an integer from 50 through 60000."
+  }
+}
+
+variable "sweep_sync_send_chain_ids" {
+  description = "Chain ids whose sweeps and relay legs broadcast with eth_sendRawTransactionSync, getting inclusion (or definite failure) in one call instead of waiting for the next receipt poll. Use 'off' or an empty string to disable. Chains that reject the method fall back automatically."
+  type        = string
+  default     = "143,10143"
+}
+
+variable "sweep_sync_send_timeout_ms" {
+  description = "Timeout for eth_sendRawTransactionSync broadcasts; on timeout the submission is left in place and reconciled by the recovery cadence rather than re-signed."
+  type        = number
+  default     = 2000
+  validation {
+    condition     = var.sweep_sync_send_timeout_ms >= 100 && var.sweep_sync_send_timeout_ms <= 120000 && floor(var.sweep_sync_send_timeout_ms) == var.sweep_sync_send_timeout_ms
+    error_message = "sweep_sync_send_timeout_ms must be an integer from 100 through 120000."
   }
 }
 
