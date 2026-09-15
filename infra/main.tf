@@ -418,11 +418,11 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.resend_api_key[*].arn, aws_secretsmanager_secret.privy_app_secret[*].arn) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.resend_api_key[*].arn, aws_secretsmanager_secret.privy_app_secret[*].arn, aws_secretsmanager_secret.relay_api_key[*].arn) }] })
 }
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.relay_api_key[*].arn) }] })
 }
 
 resource "aws_iam_role" "api_task" {
