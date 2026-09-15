@@ -1,6 +1,9 @@
 mod chain;
 pub use chain::*;
 
+mod currency;
+pub use currency::*;
+
 mod salt;
 pub use salt::*;
 

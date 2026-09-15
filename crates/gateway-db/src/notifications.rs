@@ -30,6 +30,8 @@ pub struct NotificationEvent {
     pub reason: String,
     pub email: Option<String>,
     pub attempts: i32,
+    /// The invoice's currency code, so a merchant notice can name the issuer.
+    pub currency: String,
 }
 
 #[derive(Clone)]
@@ -62,7 +64,8 @@ impl NotificationRepository {
                      AND ((email IS NOT NULL AND delivered_at IS NULL)
                        OR (email IS NULL AND missing_email_reported_at IS NULL))
                    ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1)
-               RETURNING id, invoice_id, recipient, reason, email, attempts"#,
+               RETURNING id, invoice_id, recipient, reason, email, attempts,
+                 (SELECT currency FROM invoices WHERE invoices.id = notification_outbox.invoice_id) AS currency"#,
         )
         .bind(recipients)
         .fetch_optional(&self.pool)

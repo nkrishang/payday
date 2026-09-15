@@ -8,7 +8,7 @@ block range per request.
 Indexer logs show repeated warnings:
 
 ```
-provider rejected USDC log range; splitting it from_block=... to_block=...
+provider rejected the log range; splitting it from_block=... to_block=...
 error=HTTP error 413 with body: {"jsonrpc":"2.0","id":...,"error":{"code":-32615,
 "message":"eth_getLogs is limited to a N range, upgrade from ... plan ..."}}
 ```
@@ -36,8 +36,10 @@ when switching to a provider with a larger window.
 
 ## Fix: request budget
 
-The indexer runs one worker per chain in `PAYDAY_CHAINS`, and each worker
-scans only while it has something to watch (an open bound request,
+The indexer runs one worker per chain in `PAYDAY_CHAINS`, watching every
+contract in the entry's `tokens` with one cursor and one `eth_getLogs` per
+range (an address array), and each worker scans only while it has
+something to watch (an open bound request,
 uncollected funds, or a request settled within `PAYDAY_INDEXER_LATE_WATCH_DAYS`).
 An idle chain costs two calls (boundary header and cursor check) every
 `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes), fast-forwards its cursor
@@ -51,14 +53,14 @@ without `eth_getLogs`, and holds no WebSocket. Per chain, per day:
 | Transfer signal notifications | ≈ 0 | one per commit state per payment to us |
 
 Three idle chains are about 2.6k calls a day. Every `eth_getLogs` is
-filtered to the watch list, so a chain's USDC volume never enters the
+filtered to the watch list, so a chain's stablecoin volume never enters the
 budget; only the number of watched addresses does, one extra call per 500
 per range. An active chain returns to idle as soon as its last watched
 request leaves the late-watch window (a year by default).
 Detection latency does not come from the cadence: the WebSocket transfer
 signal wakes a pass the moment a payment finalizes (Monad) or lands
 (`latest` chains, which then wait `finality_confirmations` blocks). A block
-that carries USDC transfers costs nothing extra when the log carries
+that carries stablecoin transfers costs nothing extra when the log carries
 `blockTimestamp`; a node that omits it costs one header per distinct block.
 
 If credits climb well above that, check in this order:
@@ -89,7 +91,7 @@ Since the 2026-09 livelock (below), the indexer defends itself in two ways:
 
 ### The catch-up livelock this replaces
 
-Before that fix, a large backlog (fresh database, new `usdc_start_block`)
+Before that fix, a large backlog (fresh database, new `start_block`)
 made each 5 s tick attempt its whole remaining catch-up at once. The burst
 tripped QuickNode's 50 requests/second budget, the resulting 429 aborted the
 tick, and the next tick re-fetched the same ranges — 4.3M requests in one day
@@ -125,7 +127,7 @@ restart — see [service-restart.md](service-restart.md).
 aws logs tail /ecs/payday/indexer --since 5m --region "$AWS_REGION" \
   | grep -E "413|rejected|splitting|lagging"
 
-# Test the RPC directly with a 100-block range
+# Test the RPC directly with a 100-block range (Monad's USDC; any configured token works)
 FROM=$(python3 -c "print(hex($(cast block-number --rpc-url "$MONAD_RPC_URL") - 100))")
 TO=$(python3 -c "print(hex($(cast block-number --rpc-url "$MONAD_RPC_URL") - 1))")
 curl -s -X POST "$MONAD_RPC_URL" \

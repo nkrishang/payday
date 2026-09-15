@@ -463,14 +463,33 @@ mod tests {
 
     /// One chain of the test deployment.
     fn test_chain(chain_id: u64, usdc: Address, factory: Address) -> gateway_core::ChainConfig {
+        test_chain_with(
+            chain_id,
+            vec![(gateway_core::Currency::Usdc, usdc)],
+            factory,
+        )
+    }
+
+    /// The USDT contract the test deployment serves on chain 1 alone.
+    pub(crate) const TEST_USDT: Address = Address::repeat_byte(0x1D);
+
+    /// One chain of the test deployment serving the given currencies.
+    fn test_chain_with(
+        chain_id: u64,
+        tokens: Vec<(gateway_core::Currency, Address)>,
+        factory: Address,
+    ) -> gateway_core::ChainConfig {
         gateway_core::ChainConfig {
             chain_id,
-            usdc,
+            tokens: tokens
+                .into_iter()
+                .map(|(currency, address)| gateway_core::TokenConfig { currency, address })
+                .collect(),
             factory,
             batch_sweeper: Address::repeat_byte(0x55),
             factory_code_hash: alloy_primitives::B256::ZERO,
             batch_sweeper_code_hash: alloy_primitives::B256::ZERO,
-            usdc_start_block: 0,
+            start_block: 0,
             finality_source: gateway_core::FinalitySource::Finalized,
             finality_confirmations: 0,
             block_time_ms: 1000,
@@ -490,10 +509,18 @@ mod tests {
     }
 
     /// The deployment under test offers two networks through one factory:
-    /// chain 1 with the zero token, chain 2 with another.
+    /// chain 1 with the zero token as USDC and `TEST_USDT` as USDT, chain 2
+    /// with another USDC and no USDT.
     fn test_networks(factory: Address) -> Arc<gateway_core::ChainRegistry> {
         test_networks_on(vec![
-            test_chain(1, Address::ZERO, factory),
+            test_chain_with(
+                1,
+                vec![
+                    (gateway_core::Currency::Usdc, Address::ZERO),
+                    (gateway_core::Currency::Usdt, TEST_USDT),
+                ],
+                factory,
+            ),
             test_chain(2, Address::repeat_byte(0x02), factory),
         ])
     }
@@ -1309,10 +1336,10 @@ mod tests {
         assert!(unbound["as_of"].is_null());
         assert!(unbound["indexer_freshness"]["last_indexed_block"].is_null());
         bind_wallet(&app, &id, None, &PAYER_KEY).await;
-        sqlx::query("INSERT INTO indexer_cursor(chain_id,token_address,last_block,last_block_hash,last_block_timestamp) VALUES(1,$1,117,$2,1700000000)")
-            .bind(Address::ZERO.as_slice()).bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO indexer_status(chain_id,token_address,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,$1,120,$2,1700000012)")
-            .bind(Address::ZERO.as_slice()).bind([2_u8; 32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO indexer_cursor(chain_id,last_block,last_block_hash,last_block_timestamp) VALUES(1,117,$1,1700000000)")
+            .bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO indexer_status(chain_id,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,120,$1,1700000012)")
+            .bind([2_u8; 32].as_slice()).execute(&pool).await.unwrap();
 
         let response = app
             .oneshot(
@@ -1363,7 +1390,8 @@ mod tests {
         assert_eq!(created["issuer"]["name"], "Acme");
         assert_eq!(created["payer"]["name"], "Globex");
         assert_eq!(created["payer_policy"]["mode"], "permissionless");
-        assert_eq!(created["attribution"]["version"], 3);
+        assert_eq!(created["attribution"]["version"], 4);
+        assert_eq!(created["currency"], "USDC");
         assert!(created["attachment"].is_null());
         assert_eq!(created["expires_in"], 86_400);
         // The address exists once the payer binds a wallet, and it is the
@@ -2363,8 +2391,8 @@ mod tests {
         assert_eq!(ready["relay_available"], true);
         assert!(ready["relay"].is_null());
 
-        // The origin chains: every chain Relay takes USDC on, except the
-        // request's own and those not taking deposits.
+        // The origin chains: every chain Relay takes a known stablecoin on,
+        // except the request's own and those not taking deposits.
         let chains = json_body(
             app.clone()
                 .oneshot(payer_get(
@@ -2383,8 +2411,9 @@ mod tests {
             .collect();
         assert_eq!(offered, ["8453", "2"]);
         assert_eq!(chains["chains"][0]["name"], "Base");
+        assert_eq!(chains["chains"][0]["tokens"][0]["currency"], "USDC");
         assert_eq!(
-            chains["chains"][0]["usdc_address"],
+            chains["chains"][0]["tokens"][0]["address"],
             relay_origin_usdc().to_checksum(None)
         );
         assert!(chains["chains"][0]["rpc_url"].is_string());
@@ -4461,10 +4490,9 @@ mod tests {
         let fetched = json_body(fetched).await;
         assert_eq!(fetched["name"], "Globex");
         // Only `get` carries stats, and a customer with no invoices yet reads
-        // as zero rather than null.
+        // as zero with no currency totals rather than null.
         assert_eq!(fetched["stats"]["request_count"], 0);
-        assert_eq!(fetched["stats"]["collected_base_units"], "0");
-        assert_eq!(fetched["stats"]["pending_base_units"], "0");
+        assert_eq!(fetched["stats"]["totals"], json!([]));
 
         // Update is partial: a field left out keeps its value, and only an
         // explicit null clears one.
@@ -6793,7 +6821,7 @@ mod tests {
             valid_before: typed.message.valid_before.parse().unwrap(),
             nonce: typed.message.nonce.parse().unwrap(),
         };
-        let domain = gateway_core::UsdcDomain {
+        let domain = gateway_core::TokenDomain {
             name: typed.domain.name,
             version: typed.domain.version,
             chain_id: typed.domain.chain_id,
@@ -7185,5 +7213,186 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_cursor.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// USDT has no 1:1 bridge for the merchant, so a request in it names the
+    /// chain it settles on; the deployment offers it only where the registry
+    /// lists its contract, and everything downstream reads the currency.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn usdt_requests_pin_a_chain_that_serves_it(pool: PgPool) {
+        let TestApp { router: app, .. } = test_app(pool.clone()).await;
+
+        let mut unpinned = valid_body();
+        unpinned["currency"] = json!("USDT");
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "usdt-unpinned", &unpinned))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(response).await;
+        assert_eq!(error["error"]["code"], "invalid_request");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("chain_id")
+        );
+
+        let mut unknown = valid_body();
+        unknown["currency"] = json!("AUSD");
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "usdt-unknown", &unknown))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Chain 2 serves USDC alone.
+        let mut elsewhere = valid_body();
+        elsewhere["currency"] = json!("USDT");
+        elsewhere["chain_id"] = json!("2");
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "usdt-chain-2", &elsewhere))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "unsupported_chain"
+        );
+
+        let mut pinned = valid_body();
+        pinned["currency"] = json!("USDT");
+        pinned["chain_id"] = json!("1");
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "usdt-chain-1", &pinned))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        assert_eq!(created["currency"], "USDT");
+        assert_eq!(created["networks"].as_array().unwrap().len(), 1);
+        assert_eq!(created["token"]["symbol"], "USDT");
+        assert_eq!(created["token"]["address"], TEST_USDT.to_checksum(None));
+        assert_eq!(created["token"]["decimals"], 6);
+        assert_eq!(created["attribution"]["version"], 4);
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        // The list summary and the payer view carry the currency too.
+        let listed = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, "/v1/deposit-requests?limit=5"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let summary = listed["deposit_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == id)
+            .expect("listed");
+        assert_eq!(summary["currency"], "USDT");
+        let payer = json_body(
+            app.clone()
+                .oneshot(payer_get(&format!("/v1/payer/deposit-requests/{id}"), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(payer["currency"], "USDT");
+        assert_eq!(payer["token"]["symbol"], "USDT");
+
+        // A USDC request without a pin still offers every network.
+        let response = app
+            .clone()
+            .oneshot(create_request(KEY, "usdc-open", &valid_body()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        assert_eq!(created["currency"], "USDC");
+        assert_eq!(created["networks"].as_array().unwrap().len(), 2);
+    }
+
+    /// A USDT withdrawal moves the destination chain's balance and nothing
+    /// else: no bridge leg exists for it, and a balance on another chain is
+    /// named so the merchant withdraws it there.
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn usdt_withdrawals_stay_on_the_destination_chain(pool: PgPool) {
+        let TestApp {
+            router: app, chain, ..
+        } = test_app(pool.clone()).await;
+        let account = test_account(&pool).await;
+        let wallet = give_wallet(&pool, account).await;
+        chain.set_token_balance(1, TEST_USDT, wallet, 7_000_000);
+        chain.set_balance(2, wallet, 1_000_000);
+
+        let withdraw = |key: &str, chain_id: &str| {
+            Request::post("/v1/withdrawals")
+                .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", key)
+                .body(Body::from(
+                    json!({"currency": "USDT", "destination": {"chain_id": chain_id, "address": WITHDRAWAL_DESTINATION}})
+                        .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // Chain 2 does not serve USDT: not a destination for it.
+        let response = app.clone().oneshot(withdraw("u1", "2")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(response).await["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("USDT")
+        );
+
+        // Chain 1 holds it: one transfer leg under the USDT contract's own
+        // domain, and the USDC on chain 2 is untouched.
+        let response = app.clone().oneshot(withdraw("u1", "1")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        assert_eq!(created["currency"], "USDT");
+        let legs = created["legs"].as_array().unwrap();
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0]["kind"], "transfer");
+        assert_eq!(legs[0]["source_chain"]["id"], "1");
+        assert_eq!(legs[0]["amount"], "7.000000");
+        assert_eq!(legs[0]["token"]["address"], TEST_USDT.to_checksum(None));
+        assert_eq!(legs[0]["token"]["symbol"], "USDT");
+        let typed = &legs[0]["authorization"]["typed_data"];
+        assert_eq!(typed["domain"]["name"], "USDT0");
+        assert_eq!(typed["domain"]["version"], "1");
+        assert_eq!(
+            typed["domain"]["verifyingContract"],
+            TEST_USDT.to_checksum(None)
+        );
+
+        // Cancel it and drain chain 1: nothing USDT left to move to chain
+        // 1, and the USDC on chain 2 is still not it.
+        let id = created["id"].as_str().unwrap().to_owned();
+        let cancelled = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                KEY,
+                &format!("/v1/withdrawals/{id}/cancel"),
+                &json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        chain.set_token_balance(1, TEST_USDT, wallet, 0);
+        let response = app.clone().oneshot(withdraw("u2", "1")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = json_body(response).await;
+        assert_eq!(error["error"]["code"], "nothing_to_withdraw");
+        assert!(error["error"]["message"].as_str().unwrap().contains("USDT"));
     }
 }

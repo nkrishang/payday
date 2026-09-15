@@ -3,16 +3,16 @@ pragma solidity ^0.8.13;
 
 import {Test} from "foundry/lib/forge-std/src/Test.sol";
 import {CREATE3} from "foundry/lib/solady/src/utils/CREATE3.sol";
-import {MockUSDC} from "foundry/src/MockUSDC.sol";
+import {MockStablecoin} from "foundry/src/MockStablecoin.sol";
 import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
 /// @notice Pins the observable CREATE3 failures used by the backend.
 contract ExecuteRevertTest is Test {
-    MockUSDC private token;
+    MockStablecoin private token;
     PaymentFactory private factory;
 
     function setUp() public {
-        token = new MockUSDC();
+        token = new MockStablecoin("Mock USD Coin", "USDC");
         factory = new PaymentFactory();
     }
 

@@ -28,6 +28,75 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
+- USDT, alongside USDC. A deposit request is denominated in one `currency`
+  (`POST /v1/deposit-requests` takes `currency`, `USDC` by default or
+  `USDT`), and every network it offers is that currency's contract on its
+  chain: Circle's native USDC on Monad, Base and Arbitrum One as before;
+  Tether's USDT0 on Monad (`0xe7cd86e13AC4309349F30B3435a9d337750fC82D`)
+  and Arbitrum One (`0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`), which
+  `token.symbol` names as `USDT0`. Base's USDT is a bridge wrapper without
+  EIP-3009 and is not served. Payday never gives a merchant a rate worse
+  than 1:1, and only USDC has a 1:1 path between chains (CCTP), so a USDT
+  request must pin `chain_id` to a network serving it (`400
+  invalid_request` naming `chain_id` when it is missing; `422
+  unsupported_chain` when the chain does not serve the currency; `422
+  unsupported_currency` when no chain does) and settles where it is paid.
+  `currency` is carried by every deposit request response, the list
+  summary, the payer view, webhook payloads, the payer email and the
+  request PDF; blocked-payout attention text names the currency's issuer.
+  `GET /v1/customers/{id}` reports `stats.totals`, one entry per currency,
+  in place of flat totals that would have added two currencies together.
+- Withdrawals per currency. `POST /v1/withdrawals` takes `currency`
+  (`USDC` by default); the destination chain must serve it. A USDC
+  withdrawal is unchanged: one leg per network holding it, bridged through
+  CCTP where needed. A USDT withdrawal moves the destination network's
+  balance in one `TransferWithAuthorization` leg and nothing else; a
+  balance elsewhere is withdrawn separately to an address on that network,
+  and `409 nothing_to_withdraw` names it. Every leg carries `token`, the
+  contract its authorization is signed under. gatewayd reads each contract's
+  `decimals()`, `name()`, `version()` and `DOMAIN_SEPARATOR()` at startup and
+  refuses to start on a mismatch; USDT0 exposes no `version()`, and its
+  separator hashes under `"1"`, which the reader settles by trying it. The
+  SDK's `signWithdrawal` takes a trusted registry of `{ tokens: { USDC,
+  USDT? }, cctp }` per chain and refuses a bridge leg for any currency but
+  USDC. `just forge-fork` proves the authorization against the real USDT0 on
+  Monad and Arbitrum.
+- Paying a request from another network with another stablecoin. `GET
+  /v1/payer/deposit-requests/{id}/relay/chains` lists, per origin network,
+  the stablecoins a payer may send (`tokens`, replacing `usdc_address`:
+  USDC, and USDT where Relay takes it, Base's included); `POST …/relay/quotes`
+  takes `origin_token` (default the network's USDC) and the quote carries
+  `origin_token`, with `amount_in` in it. Relay swaps into the request's
+  currency; the spread is the payer's. The hosted checkout's "pay from
+  another network" menu offers one entry per network and token.
+- The canonical issuance snapshot is `payday.invoice.v4`: it states
+  `currency` and `decimals`, and the attribution hash domain is
+  `PAYDAY_ATTRIBUTION_V4`. The proof version is unchanged; a proof verifies
+  only against a v4 snapshot.
+- Configuration. `PAYDAY_CHAINS` entries list `tokens` (`[{"currency",
+  "address"}]`) and `start_block` in place of `usdc` and `usdc_start_block`;
+  a `cctp` block needs USDC on its chain, and some chain must list USDC (the
+  onboarding demo pays it). `NEXT_PUBLIC_CHAINS` entries list `tokens`
+  (`[{currency, address, symbol?, decimals?}]`) in place of `usdcAddress`.
+  Terraform's `chains` variable follows. The indexer runs one worker per
+  chain watching every configured contract with one cursor per chain
+  (`indexer_cursor` and `indexer_status` are keyed by chain alone), and a
+  transfer of another configured stablecoin to a request's address is not a
+  payment: it stays at the address for `recover(address)` to return. Adding
+  a currency to a live chain is not a contract generation change and needs
+  no backfill. The local stack deploys a second mock stablecoin as USDT
+  (`PAYDAY_USDT_ADDRESS`, account #0 nonce 3) on the first chain only; the
+  Relay stand-in quotes between the two tokens; `just e2e` issues, pays,
+  relays into and withdraws USDT; `scripts/live-smoke.sh` takes
+  `PAYDAY_CURRENCY=USDT`. `MockUSDC.sol` is `MockStablecoin.sol`, built with
+  a name and symbol.
+- The dashboard composer takes a Currency before the Network, with no
+  "Payer's choice" for USDT; the account section shows each network's
+  balance in every stablecoin it serves; the withdraw panel takes a Currency
+  and offers only the networks serving it. The checkout heading, notice and
+  pay button name the contract's own symbol, and say that USDT0 is USDT on
+  the chosen network.
+
 - A merchant may pin the network. `POST /v1/deposit-requests` takes an
   optional `chain_id` (a decimal chain id string; `422 unsupported_chain`
   for one the deployment does not serve). A pinned request offers that

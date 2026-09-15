@@ -2,7 +2,7 @@
 
 import type { AccountMetadata, Customer, Issuer, DepositRequest } from "@payday/sdk";
 import { ArrowUpRight } from "lucide-react";
-import Image from "next/image";
+import { CurrencyMark } from "@/components/ui/amount";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -336,13 +336,7 @@ function Issued({
       <p className="dash-rise dash-delay-3 mx-auto mt-3 max-w-[420px] text-[15px] text-muted">
         <span className="tabular inline-flex items-center gap-1 text-ink">
           {formatDisplayAmount(payment.amount)}
-          <Image
-            src="/payment-icons/usdc.svg"
-            width={64}
-            height={64}
-            alt=""
-            className="size-4 shrink-0 rounded-full"
-          />
+          <CurrencyMark currency={payment.currency} className="size-4" />
           {payment.currency}
         </span>{" "}
         from {payment.payer.name}

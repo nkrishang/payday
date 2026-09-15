@@ -6,8 +6,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachmentId, CustomerId, Invoice, InvoiceStatus, IssuerId, NetworkTerms, Party, PayerPolicy,
-    PayerPolicyMode, USDC_DECIMALS, chain_name, native_symbol,
+    AttachmentId, Currency, CustomerId, Invoice, InvoiceStatus, IssuerId, NetworkTerms, Party,
+    PayerPolicy, PayerPolicyMode, chain_name, native_symbol,
 };
 
 /// The only attachment type Payday accepts (product plan §4.2).
@@ -21,10 +21,12 @@ pub fn rfc3339(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// By default the payer chooses the network they pay on among the
-/// deployment's supported ones, so a request names no token: only the
-/// amount and where it settles. A merchant may pin the network with
-/// `chain_id`; the request then offers that one alone.
+/// A request names a currency (USDC unless told otherwise) and the amount
+/// of it that settles at `payout_address`. For USDC the payer chooses the
+/// network they pay on among the deployment's supported ones, unless the
+/// merchant pins one with `chain_id`; a currency without a 1:1 bridge for
+/// the merchant (USDT) must be pinned, so the merchant is paid where they
+/// asked to be.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateDepositRequest {
@@ -33,8 +35,12 @@ pub struct CreateDepositRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payout_address: Option<String>,
     pub amount: String,
+    /// `USDC` (the default) or `USDT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
     /// The one network the payer must pay on, as a decimal chain id string.
-    /// Absent, the payer picks among every network the deployment offers.
+    /// Absent, the payer picks among every network the deployment offers
+    /// the currency on; required for a currency that must be pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_id: Option<String>,
     /// The issuing party as the document will carry it. Optional when
@@ -103,6 +109,17 @@ pub struct TransferRelayDto {
     pub origin_transaction_hash: Option<String>,
 }
 
+/// A stablecoin a payer may send from a Relay origin chain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayOriginTokenDto {
+    /// The currency it is: `USDC` or `USDT`.
+    pub currency: String,
+    /// The contract's own symbol, as the payer's wallet shows it.
+    pub symbol: String,
+    pub address: String,
+    pub decimals: u8,
+}
+
 /// A chain a payer may pay from through Relay, as the checkout lists it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayOriginChainDto {
@@ -110,8 +127,9 @@ pub struct RelayOriginChainDto {
     pub chain_id: String,
     pub name: String,
     pub native_symbol: Option<String>,
-    /// USDC on that chain: what the payer sends.
-    pub usdc_address: String,
+    /// What the payer may send from this chain; Relay swaps it into the
+    /// request's currency on the way. At least one entry.
+    pub tokens: Vec<RelayOriginTokenDto>,
     pub explorer_url: Option<String>,
     pub icon_url: Option<String>,
     /// A public RPC, so a wallet that lacks the chain can be asked to add it.
@@ -133,7 +151,9 @@ pub struct RelayQuoteResponse {
     /// Relay's request id.
     pub request_id: String,
     pub origin: RelayOriginChainDto,
-    /// What the payer sends on the origin chain, in USDC.
+    /// The stablecoin the payer sends on the origin chain.
+    pub origin_token: RelayOriginTokenDto,
+    /// What the payer sends on the origin chain, in `origin_token`.
     pub amount_in: String,
     pub amount_in_base_units: String,
     /// What lands on the payment address: exactly the amount still due.
@@ -466,6 +486,8 @@ pub struct PayerDepositRequestResponse {
     /// Safety guidance shown only when payout needs operator attention.
     pub payer_message: Option<String>,
     pub content_unlocked: bool,
+    /// The request's currency (`USDC`, `USDT`); gated with the content.
+    pub currency: Option<String>,
     /// The networks the payer may choose from; gated with the content. One
     /// entry when the merchant pinned the network.
     pub networks: Option<Vec<NetworkDto>>,
@@ -512,6 +534,7 @@ pub struct DepositRequestSummaryResponse {
     pub status: DepositRequestStatus,
     pub amount: String,
     pub received: String,
+    pub currency: String,
     pub payer_policy_mode: PayerPolicyMode,
     pub customer_id: Option<String>,
     pub issuer_id: Option<String>,
@@ -587,6 +610,9 @@ impl std::str::FromStr for DepositRequestStatus {
     }
 }
 
+/// The request's currency as one chain's contract: `symbol` is what the
+/// payer's wallet shows there (USDT0 for USDT on Monad), never a second
+/// currency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenDto {
     pub symbol: String,
@@ -600,7 +626,8 @@ pub struct ChainDto {
     /// The gas token's symbol on this chain.
     pub native_symbol: String,
 }
-/// One network a request can be paid on: the chain and its USDC contract.
+/// One network a request can be paid on: the chain and the request's
+/// currency's contract there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkDto {
     pub chain: ChainDto,
@@ -614,7 +641,7 @@ pub struct SelfSettlementDto {
 }
 
 impl NetworkDto {
-    pub fn from_terms(network: &NetworkTerms) -> Self {
+    pub fn from_terms(network: &NetworkTerms, currency: Currency) -> Self {
         Self {
             chain: ChainDto {
                 id: network.chain_id.to_string(),
@@ -622,9 +649,9 @@ impl NetworkDto {
                 native_symbol: native_symbol(network.chain_id.0).into(),
             },
             token: TokenDto {
-                symbol: "USDC".into(),
+                symbol: currency.symbol_on(network.chain_id.0).into(),
                 address: network.token.0.to_checksum(None),
-                decimals: USDC_DECIMALS,
+                decimals: currency.decimals(),
             },
         }
     }
@@ -659,18 +686,22 @@ impl DepositRequestResponse {
     /// (timestamps, transfers, the customer link, the attachment's filename)
     /// are filled in by the handler.
     pub fn from_invoice(inv: Invoice, expires_in: Option<u64>) -> Self {
-        let human = |units| format_units(units, USDC_DECIMALS).unwrap_or_default();
+        let currency = inv.currency();
+        let human = |units| format_units(units, currency.decimals()).unwrap_or_default();
         let remaining = inv.amount.0.saturating_sub(inv.received.0);
         let status = payment_status(&inv);
-        let attention = inv.blocked_reason.as_deref().map(attention);
+        let attention = inv
+            .blocked_reason
+            .as_deref()
+            .map(|code| attention(code, currency));
         let snapshot = inv.issuance_snapshot;
         let binding = inv.binding.as_ref();
         // A request offering one network is on it before any wallet binds;
         // the address still waits for the binding.
         let chosen = binding
-            .map(|b| NetworkDto::from_terms(&b.network))
+            .map(|b| NetworkDto::from_terms(&b.network, currency))
             .or_else(|| match inv.networks.as_slice() {
-                [only] => Some(NetworkDto::from_terms(only)),
+                [only] => Some(NetworkDto::from_terms(only, currency)),
                 _ => None,
             });
         Self {
@@ -693,13 +724,17 @@ impl DepositRequestResponse {
             received_base_units: inv.received.0.to_string(),
             remaining: human(remaining),
             remaining_base_units: remaining.to_string(),
-            currency: "USDC".into(),
+            currency: currency.code().into(),
             fee_amount: "0".into(),
             fee_amount_base_units: "0".into(),
             net_amount: human(inv.amount.0),
             net_amount_base_units: inv.amount.0.to_string(),
             status,
-            networks: inv.networks.iter().map(NetworkDto::from_terms).collect(),
+            networks: inv
+                .networks
+                .iter()
+                .map(|network| NetworkDto::from_terms(network, currency))
+                .collect(),
             token: chosen.as_ref().map(|network| network.token.clone()),
             chain: chosen.map(|network| network.chain),
             settlement_tx_hash: inv.execute_tx_hash.map(|h| h.to_string()),
@@ -763,32 +798,37 @@ fn payment_status(inv: &Invoice) -> DepositRequestStatus {
         InvoiceStatus::Blocked => DepositRequestStatus::NeedsAttention,
     }
 }
-fn attention(code: &str) -> AttentionDto {
+/// The merchant-facing explanation of a `blocked_reason`, naming the
+/// currency's issuer where an address restriction is the cause.
+pub fn attention(code: &str, currency: Currency) -> AttentionDto {
+    let issuer = currency.issuer_name();
     let (message, action) = match code {
         "beneficiary_blacklisted" => (
-            "Circle has blacklisted the payout address.",
+            format!("{issuer} has blacklisted the payout address."),
             "Contact support to provide a compliant payout address.",
         ),
         "recovery_blacklisted" => (
-            "The payer's wallet, where excess funds return, is restricted by the USDC issuer.",
+            format!(
+                "The payer's wallet, where excess funds return, is restricted by {issuer}, the {currency} issuer."
+            ),
             "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
-            "Circle has blacklisted the deposit address.",
+            format!("{issuer} has blacklisted the deposit address."),
             "Contact support; do not send additional funds.",
         ),
         "balance_below_amount" => (
-            "The deposit address balance is lower than the confirmed amount.",
+            "The deposit address balance is lower than the confirmed amount.".into(),
             "Contact support so Payday can investigate safely.",
         ),
         _ => (
-            "Automatic settlement has paused.",
+            "Automatic settlement has paused.".into(),
             "Funds remain safe at the deposit address; contact support.",
         ),
     };
     AttentionDto {
         code: code.into(),
-        message: message.into(),
+        message,
         action: action.into(),
     }
 }
@@ -836,6 +876,7 @@ mod tests {
             party("Acme"),
             party("Globex"),
             policy,
+            Currency::Usdc,
             &networks(),
             beneficiary,
             amount,
@@ -843,7 +884,15 @@ mod tests {
         );
         snapshot.heading = Some("March retainer".into());
         snapshot.reference = Some("INV-7".into());
-        Invoice::issue(&networks(), beneficiary, amount, 1_900_000_000, snapshot).unwrap()
+        Invoice::issue(
+            Currency::Usdc,
+            &networks(),
+            beneficiary,
+            amount,
+            1_900_000_000,
+            snapshot,
+        )
+        .unwrap()
     }
 
     fn bound(mut invoice: Invoice) -> Invoice {
@@ -987,7 +1036,7 @@ mod tests {
         assert_eq!(json["heading"], "March retainer");
         assert_eq!(json["reference"], "INV-7");
         assert_eq!(json["payer_policy"]["mode"], "permissionless");
-        assert_eq!(json["attribution"]["version"], 3);
+        assert_eq!(json["attribution"]["version"], 4);
         assert!(
             json["attribution"]["hash"]
                 .as_str()
@@ -997,6 +1046,7 @@ mod tests {
 
         let summary = DepositRequestSummaryResponse {
             id: payment.id,
+            currency: payment.currency.clone(),
             deposit_url: payment.deposit_url,
             heading: payment.heading,
             payer_name: payment.payer.name,

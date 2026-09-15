@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! canonical_bytes    = JCS(canonical_issuance_snapshot)          (RFC 8785)
-//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V3" || canonical_bytes)
+//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V4" || canonical_bytes)
 //! attestation_digest = EIP-712 signing hash of the payer's PayerAttestation
 //! salt               = keccak256("PAYDAY_SALT_V3" || attribution_hash || attestation_digest)
 //! ```
@@ -25,15 +25,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{Amount, BeneficiaryAddress, NetworkTerms, Salt};
+use crate::{Amount, BeneficiaryAddress, Currency, NetworkTerms, Salt};
 
-pub const ATTRIBUTION_VERSION: u16 = 3;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V3";
+pub const ATTRIBUTION_VERSION: u16 = 4;
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V4";
 pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V3";
 /// `CanonicalIssuanceSnapshot::schema`; a new schema means a new version.
 /// v3 commits to the list of networks the request may be paid on instead of
-/// one chain: the payer's attestation selects one of them.
-pub const SNAPSHOT_SCHEMA: &str = "payday.invoice.v3";
+/// one chain: the payer's attestation selects one of them. v4 names the
+/// currency and its decimals, so a document states what it asks for in its
+/// own words rather than only through each network's contract address.
+pub const SNAPSHOT_SCHEMA: &str = "payday.invoice.v4";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
@@ -314,6 +316,12 @@ pub struct CanonicalIssuanceSnapshot {
     pub canonicalization: String,
     pub issuer: Party,
     pub bill_to: Party,
+    /// The currency's wire code (`USDC`, `USDT`); every network below is
+    /// that currency's contract on its chain.
+    pub currency: String,
+    /// Decimal: base units per whole unit, so `amount_base_units` reads
+    /// without a registry.
+    pub decimals: String,
     pub amount_base_units: String,
     pub notes: Option<String>,
     pub heading: Option<String>,
@@ -331,10 +339,12 @@ impl CanonicalIssuanceSnapshot {
     /// parameters into their canonical string form, so
     /// [`crate::Invoice::issue`] can check a snapshot against the same rules.
     /// Networks are sorted by chain id whatever order they arrive in.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         issuer: Party,
         bill_to: Party,
         payer_policy: PayerPolicy,
+        currency: Currency,
         networks: &[NetworkTerms],
         receiver: BeneficiaryAddress,
         amount: Amount,
@@ -347,6 +357,8 @@ impl CanonicalIssuanceSnapshot {
             canonicalization: CANONICALIZATION.into(),
             issuer,
             bill_to,
+            currency: currency.code().into(),
+            decimals: currency.decimals().to_string(),
             amount_base_units: amount.0.to_string(),
             notes: None,
             heading: None,
@@ -364,6 +376,12 @@ impl CanonicalIssuanceSnapshot {
     /// issuance, so that is a corrupted row, not a request.
     pub fn networks(&self) -> Option<Vec<NetworkTerms>> {
         self.networks.iter().map(SnapshotNetwork::terms).collect()
+    }
+
+    /// The typed currency, if the code is one this build knows. A snapshot
+    /// naming another is a row from a newer build, not a request.
+    pub fn currency(&self) -> Option<Currency> {
+        self.currency.parse().ok()
     }
 }
 
@@ -466,6 +484,7 @@ mod tests {
             PayerPolicy::VerifiedEmail {
                 expected_email: "alice@example.com".into(),
             },
+            Currency::Usdc,
             &networks(),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")),
             Amount(U256::from(1_000_000)),
@@ -502,9 +521,10 @@ mod tests {
         // whitespace, then reversed keys, an escaped character, and the
         // absent party fields spelled out as null.
         let natural = r#"{
-            "schema": "payday.invoice.v3", "canonicalization": "RFC8785",
+            "schema": "payday.invoice.v4", "canonicalization": "RFC8785",
             "issuer": {"name": "Acme Corp", "email": "billing@acme.example"},
             "bill_to": {"name": "Globex", "details": "1 Main St"},
+            "currency": "USDC", "decimals": "6",
             "amount_base_units": "1000000", "notes": "Thanks", "heading": null,
             "reference": "INV-1", "expiration_timestamp": "1900000000",
             "payer_policy": {"mode": "verified_email", "expected_email": "alice@example.com"},
@@ -528,10 +548,11 @@ mod tests {
                 "byte_length":"1234","id":"0198f80c-8d2f-7dc1-a369-90556a64f700"},
             "payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},
             "expiration_timestamp":"1900000000","reference":"INV-1","heading":null,
-            "notes":"\u0054hanks","amount_base_units":"1000000",
+            "notes":"\u0054hanks","amount_base_units":"1000000","decimals":"6",
             "bill_to":{"details":"1 Main St","email":null,"name":"Globex"},
             "issuer":{"details":null,"email":"billing@acme.example","name":"Acme Corp"},
-            "canonicalization":"RFC8785","schema":"payday.invoice.v3"}"#;
+            "currency":"USDC",
+            "canonicalization":"RFC8785","schema":"payday.invoice.v4"}"#;
         let a: CanonicalIssuanceSnapshot = serde_json::from_str(natural).unwrap();
         let b: CanonicalIssuanceSnapshot = serde_json::from_str(reversed).unwrap();
         assert_eq!(a, snapshot());
@@ -551,7 +572,8 @@ mod tests {
             r#""attachment":{"byte_length":"1234","id":"0198f80c-8d2f-7dc1-a369-90556a64f700","#,
             r#""sha256":"0xabababababababababababababababababababababababababababababababab"},"#,
             r#""bill_to":{"details":"1 Main St","name":"Globex"},"#,
-            r#""canonicalization":"RFC8785","expiration_timestamp":"1900000000","heading":null,"#,
+            r#""canonicalization":"RFC8785","currency":"USDC","decimals":"6","#,
+            r#""expiration_timestamp":"1900000000","heading":null,"#,
             r#""issuer":{"email":"billing@acme.example","name":"Acme Corp"},"#,
             r#""networks":[{"chain_id":"143","factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","#,
             r#""token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},"#,
@@ -559,21 +581,39 @@ mod tests {
             r#""token_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}],"notes":"Thanks","#,
             r#""payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},"#,
             r#""receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","#,
-            r#""reference":"INV-1","schema":"payday.invoice.v3"}"#,
+            r#""reference":"INV-1","schema":"payday.invoice.v4"}"#,
         );
         let bytes = canonical_bytes(&snapshot()).unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
         assert_eq!(
             attribution_hash(&bytes).to_string(),
-            "0x6f71820539f6876e12aa81e36e09d9d5b8d0c87c03c73ba82a464765a9f82235"
+            "0x9508e57f3fafab805408b7301cb5c84988758aea6fa50d5c5d47aa0627376e62"
         );
         let attestation_digest = B256::repeat_byte(0x11);
         assert_eq!(
             recompute_salt(attribution_hash(&bytes), attestation_digest)
                 .0
                 .to_string(),
-            "0x2ad64ccc40637d28f2b9a0b4c800254ef46970b20156e444f935900c7689b7ff"
+            "0x1394b6b0c2eaf02fdadd147547667e4af5b477d4ac9c4cc324549862cd4ea009"
         );
+    }
+
+    #[test]
+    fn the_currency_is_part_of_the_document() {
+        // Same amount, same networks, USDT instead of USDC: a different
+        // request, a different hash, a different address.
+        let usdc = snapshot();
+        let mut usdt = snapshot();
+        usdt.currency = "USDT".into();
+        assert_eq!(usdc.currency(), Some(Currency::Usdc));
+        assert_eq!(usdt.currency(), Some(Currency::Usdt));
+        assert_ne!(
+            derive_attribution(&usdc).unwrap().attribution_hash,
+            derive_attribution(&usdt).unwrap().attribution_hash
+        );
+        let mut unknown = snapshot();
+        unknown.currency = "AUSD".into();
+        assert_eq!(unknown.currency(), None);
     }
 
     #[test]

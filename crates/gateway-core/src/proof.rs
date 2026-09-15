@@ -8,7 +8,7 @@
 //! into the address.
 //!
 //! ```text
-//! attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V3" || JCS(snapshot))
+//! attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V4" || JCS(snapshot))
 //! digest           = EIP-712 signing hash of payer_wallet.typed_data
 //! salt             = keccak256("PAYDAY_SALT_V3" || attribution_hash || digest)
 //! network          = snapshot.networks[chain_id == payer_wallet.typed_data.domain.chainId]
@@ -16,14 +16,15 @@
 //!                            payer_wallet, salt, network.chain_id)
 //! ```
 //!
-//! The request commits to every network it may be paid on; the payer's
+//! The request commits to one currency and to every network it may be paid
+//! on, each being that currency's contract on its chain; the payer's
 //! attestation domain names the one they chose, and the proof states it as
 //! `chain_id`. A verifier accepts the proof only if that chain is one the
 //! request offered and the proof's factory and token are that network's.
 //!
 //! A transfer may have been made by Relay's solver rather than the wallet,
 //! when the payer paid across chains through the hosted checkout: the
-//! wallet sent USDC on another chain and Relay delivered it here. Such a
+//! wallet sent a stablecoin on another chain and Relay delivered it here. Such a
 //! transfer carries a `relay` block naming the origin chain, the origin
 //! transaction, and the wallet that sent it. Offline, that block is accepted
 //! only if it appears verbatim in Payday's signed attestation (`relay_fills`)
@@ -554,9 +555,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        AttachmentCommitment, FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation,
-        PayerPolicy, PayerPolicyMode, PaymentBinding, TokenAddress, derive_attribution,
-        sign_payer_attestation, wallet_of,
+        AttachmentCommitment, Currency, FactoryAddress, Invoice, NetworkTerms, Party,
+        PayerAttestation, PayerPolicy, PayerPolicyMode, PaymentBinding, TokenAddress,
+        derive_attribution, sign_payer_attestation, wallet_of,
     };
 
     const MONAD: ChainId = ChainId(143);
@@ -631,6 +632,7 @@ mod tests {
             PayerPolicy::VerifiedEmail {
                 expected_email: expected_email.into(),
             },
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
@@ -642,8 +644,15 @@ mod tests {
             byte_length: ATTACHMENT.len().to_string(),
             sha256: hex::encode_prefixed(digest),
         });
-        let mut invoice =
-            Invoice::issue(&networks, beneficiary, amount, 1_900_000_000, snapshot).unwrap();
+        let mut invoice = Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            1_900_000_000,
+            snapshot,
+        )
+        .unwrap();
         let message = PayerAttestation::new(
             invoice.attribution_hash,
             wallet_of(payer_key),

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { DepositFlowDiagram } from "@/components/docs/diagrams";
 import {
@@ -29,13 +30,13 @@ export default function IntroductionPage() {
           Stablecoin deposits that settle themselves<span className="text-brand-yellow">.</span>
         </>
       }
-      lead="Payday turns USDC transfers into verified customer deposits. You state what you are owed and by whom; Payday gives that one payer a one-time address, watches the chain, and moves exactly the requested amount to your wallet."
+      lead="Payday turns USDC and USDT transfers into verified customer deposits. You state what you are owed and by whom; Payday gives that one payer a one-time address, watches the chain, and moves exactly the requested amount to your wallet."
     >
       <p>
         You create a <strong>deposit request</strong> through a small API or the dashboard. Payday
         gives you a link. The payer opens it, proves whatever your policy asks of them, and signs
         once from the wallet they will pay from. That signature creates the one-time address they
-        pay into. When finalized USDC reaches it, Payday settles exactly the amount you asked for to
+        pay into. When finalized funds reach it, Payday settles exactly the amount you asked for to
         your wallet, and anything left over goes straight back to the payer&apos;s own wallet
         on-chain.
       </p>
@@ -48,7 +49,8 @@ export default function IntroductionPage() {
       <Steps>
         <Step title="You issue a deposit request">
           <p>
-            An amount in USDC, who is asking, who should pay, a deadline, and a payer policy. From
+            An amount in USDC or USDT, who is asking, who should pay, a deadline, and a payer
+            policy. From
             the dashboard, or with one API call. You get back an id and a <code>deposit_url</code>.
           </p>
         </Step>
@@ -66,10 +68,11 @@ export default function IntroductionPage() {
             payer&apos;s, and anything returned goes back to it.
           </p>
         </Step>
-        <Step title="USDC arrives and is finalized">
+        <Step title="Funds arrive and are finalized">
           <p>
-            Payday credits only finalized transfers of the exact USDC contract on the configured
-            chain. Partial transfers accumulate. The request moves through{" "}
+            Payday credits only finalized transfers of the request&apos;s currency, as its
+            issuer&apos;s exact contract on the chosen chain. Partial transfers accumulate. The
+            request moves through{" "}
             <code>awaiting_deposit</code>, <code>partially_deposited</code>, and{" "}
             <code>deposited</code>, and webhooks report each step.
           </p>
@@ -121,12 +124,16 @@ export default function IntroductionPage() {
           There are no line items, tax fields, or fiat conversions. Attach a PDF when you need an
           itemised breakdown; Payday stores and hashes it but never parses it.
         </li>
-        <li>
-          <strong>Not multi-asset.</strong> Each environment accepts Circle-issued native USDC on
-          its supported networks, and the payer picks one. Bridged USDC, look-alike tokens, and
-          other networks do not count.
-        </li>
       </ul>
+
+      <Callout title="Currencies">
+        USDC on every supported network, and USDT (as Tether&apos;s USDT0) on Monad and Arbitrum
+        One. A request is denominated in one currency, USDC unless you say otherwise, and Payday
+        never gives you a rate worse than 1:1: USDC bridges through Circle&apos;s CCTP at exactly
+        1:1, so a USDC request may be paid on any network and withdrawn to whichever you choose; USDT
+        has no such path, so a USDT request pins its network. Bridged or wrapped versions and
+        look-alike tokens do not count. See <Link href="/docs/environments">Environments</Link>.
+      </Callout>
 
       <Callout title="Free while in beta">
         Payday is free to use today. When pricing is introduced it will not disrupt an integration
@@ -139,7 +146,7 @@ export default function IntroductionPage() {
           Issue your first deposit request in five minutes, from the shell or from TypeScript.
         </Card>
         <Card href="/docs/concepts" title="Deposit requests and deposits">
-          The two primitives, every status, and where each unit of USDC ends up.
+          The two primitives, every status, and where each unit ends up.
         </Card>
         <Card href="/docs/payer-verification" title="Verifying the payer">
           Choose between open links, emailed codes, and your own sign-in.

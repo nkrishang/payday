@@ -1,10 +1,12 @@
-# USDC deposit indexer architecture
+# Deposit indexer architecture
 
 ## Decision
 
-Support only Circle-issued native USDC, on every network a payer may choose
-(Monad, Base, Arbitrum One), and own a **confirmation-gated ERC-20 log
-indexer** that runs one worker per chain in one process. Use a QuickNode
+Support only each stablecoin's canonical contract — Circle's native USDC on
+Monad, Base, and Arbitrum One; Tether's USDT0 on Monad and Arbitrum One —
+and own a **confirmation-gated ERC-20 log indexer** that runs one worker per
+chain in one process, watching every contract the chain serves behind one
+cursor. Use a QuickNode
 standard EVM endpoint per chain as the primary JSON-RPC provider. Add an
 independent fallback provider when production availability or
 cross-provider verification requirements justify it.
@@ -16,15 +18,16 @@ the request budget follows demand, not the number of chains supported. See
 "Chain registry" and "Demand-driven scanning".
 
 Do not ingest full blocks. Query contiguous block ranges with `eth_getLogs`,
-filtered by the exact USDC proxy address and
-`Transfer(address,address,uint256)` topic. A successful USDC transfer always
-emits this log, including transfers initiated inside smart-contract calls,
+filtered by the chain's configured token addresses (one address array per
+call) and the `Transfer(address,address,uint256)` topic. A successful
+transfer of either asset always emits this log, including transfers initiated inside smart-contract calls,
 `transferFrom`, and relayed authorization flows. Reverted execution leaves no
 logs, so receipts and traces are unnecessary.
 
 Detection latency comes from a push path, not from the poll cadence: a
 WebSocket log subscription (`monadLogs` on Monad, `logs` elsewhere)
-filtered to USDC transfers addressed to our own payment addresses wakes the
+filtered to transfers of the configured contracts addressed to our own
+payment addresses wakes the
 range scan the moment such a transfer finalizes. The scan is the only writer
 and also runs on a slow timer, so on an active chain the request budget is
 set by the `eth_getLogs` range cap and the block rate, and nothing else. See
@@ -34,7 +37,8 @@ the managed products lose on these chains.
 ## What changes from native currency
 
 Native currency has no event for an ordinary transfer, and full blocks omit
-internal calls. USDC has a standard event emitted by the token contract:
+internal calls. An ERC-20 stablecoin has a standard event emitted by the
+token contract:
 
 ```solidity
 event Transfer(address indexed from, address indexed to, uint256 value);
@@ -61,10 +65,14 @@ Consequences:
 
 ## Asset identity and configuration
 
-USDC is identified by `(chain_id, proxy_address)`, never by symbol, name, or
-implementation address. Circle publishes a different authoritative native-USDC
-address per chain. Bridged assets such as `USDC.e` are not interchangeable with
-Circle-issued native USDC.
+An asset is identified by `(chain_id, currency, contract_address)`, never by
+symbol, name, or implementation address. Circle publishes a different
+authoritative native-USDC address per chain; Tether publishes USDT0's
+(omnichain USDT backed 1:1 by USDT locked on Ethereum; wallet symbol
+`USDT0`, EIP-712 name `USDT0` on Monad and `USD₮0` on Arbitrum, version
+`"1"`, no `version()` getter — verified 2026-09-15). Bridged assets such as
+`USDC.e`, or Base's bridged USDT (no EIP-3009), are not interchangeable with
+the issuer's contract and are not served; Base carries USDC only.
 
 ### Chain registry
 
@@ -74,10 +82,12 @@ parsed by `gateway_core::ChainRegistry` with one entry per network:
 | Field | Meaning |
 |---|---|
 | `chain_id` | EVM chain id; the entry's identity and the `PAYDAY_RPC_URL_<chain_id>` secret it reads |
-| `usdc` | Circle's native-USDC proxy on that chain |
+| `tokens` | the currencies the chain serves, each `{currency, address}` naming the issuer's canonical contract; a currency absent here is not offered on that chain. At least one chain must list USDC |
 | `factory`, `batch_sweeper` | the contract generation, at the same addresses on every chain |
 | `factory_code_hash`, `batch_sweeper_code_hash` | keccak256 of the runtime bytecode, verified at startup on every chain |
-| `usdc_start_block` | where a fresh database starts indexing |
+| `start_block` | where a fresh database starts indexing the chain; a currency added later needs no earlier block, since no request could have offered it before |
+| `cctp` | optional; Circle's `domain`, `token_messenger`, `message_transmitter`, and the `forwarder` with its `forwarder_code_hash` for USDC withdrawals across networks. Requires USDC in `tokens` |
+| `signer_low_balance_wei` | the sweep signer balance below which the chain alarms |
 | `finality_source` | `finalized` (Monad: the tag is irreversible) or `latest` (Base, Arbitrum: the sequencer's head) |
 | `finality_confirmations` | blocks subtracted from the source; 0 with `finalized`, the accepted reorg margin with `latest` |
 | `block_time_ms` | paces the wake catch-up (below) |
@@ -90,34 +100,47 @@ stay out of the registry: `PAYDAY_RPC_URL_<chain_id>` per chain, with
 `off` disabling the signal on that chain. Chain display names and native
 gas symbols are a table in `gateway_core::chain`, not configuration.
 
-Every deposit request is issued against the whole registry: its canonical
-snapshot lists each network's chain id, USDC, and factory. The payer's
+Every deposit request is issued in one currency against every registry
+chain that serves it (a USDT request pins one, because USDT has no 1:1
+bridge between networks): its canonical snapshot names the currency and its
+decimals and lists each network's chain id, the currency's contract, and
+factory. The payer's
 chain choice enters the EIP-712 domain (`chainId`, `verifyingContract` =
 that chain's factory) and the CREATE3 deployment salt, and the `Payment`
 constructor refuses to route funds on any other `block.chainid`, so one
 address can never settle on an unintended network.
 
-USDC is upgradeable. Calls execute through a proxy and logs remain emitted from
-the stable proxy address, so implementation upgrades do not require changing the
+Both issuers' contracts are upgradeable. Calls execute through a proxy and
+logs remain emitted from the stable proxy address, so implementation upgrades do not require changing the
 log filter. Monitor the proxy's `Upgraded` event and halt at an unreviewed upgrade
 until its transfer/log invariants have been checked.
 
-Deposit request creation carries no token or chain field; the payer chooses
-among the registry's networks and the token is always that chain's
-native-USDC proxy. Parse and display six decimal places while storing and
-comparing only integer atomic units.
+Deposit request creation carries a `currency` (USDC by default) and, for
+USDT, a `chain_id`; a USDC request offers every registry network and the
+payer chooses among them. The token is always that chain's configured
+contract for the currency. gatewayd reads each contract's `decimals()`,
+`name()`, and `version()` at startup (a missing getter is tolerated by
+trying `"1"` then `"2"` against `DOMAIN_SEPARATOR`) and refuses to start
+on a mismatch. Every served stablecoin has six decimals: parse and display
+six decimal places while storing and comparing only integer atomic units.
 
 Authoritative references:
 
 - [Circle USDC contract addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses)
 - [Circle stablecoin EVM contracts](https://github.com/circlefin/stablecoin-evm)
+- [USDT0 deployments](https://docs.usdt0.to/technical-documentation/deployments)
 
 ## Funding predicate
 
 Credit an observation only when:
 
 1. The log belongs to the configured chain.
-2. `log.address` exactly equals the allowlisted USDC proxy.
+2. `log.address` exactly equals the allowlisted contract of the recipient
+   request's currency. A transfer of another served stablecoin to a watched
+   address is seen (the filter carries every configured contract) but never
+   credited: it stays at the address and the permissionless
+   `recover(token)` on the deployed Payment returns it to the payer's
+   wallet.
 3. `topic0` equals `keccak256("Transfer(address,address,uint256)")`.
 4. The recipient is a known deposit address for that chain and token.
 5. The value is valid `uint256` data.
@@ -125,9 +148,9 @@ Credit an observation only when:
 7. The containing block's timestamp is no later than the deposit request deadline.
 8. The observation has not already been recorded.
 
-Any genuine nonzero inbound USDC credit to a `created` or `funded` deposit request,
-including a mint with `from == address(0)`, is credited because the resulting
-USDC is spendable by the deposit contract. A zero-value transfer is retained
+Any genuine nonzero inbound transfer of the request's token to a `created` or
+`funded` deposit request, including a mint with `from == address(0)`, is
+credited because the resulting balance is spendable by the deposit contract. A zero-value transfer is retained
 with an `error` disposition. A transfer to a deposit request in any other status is
 retained with a `late` disposition: it never counts toward the amount, but it
 sits at the address and is queued for return to the payer through
@@ -142,8 +165,9 @@ quote whose origin chain this deployment serves is followed: attribution
 reads the chain, so an intent from an unserved chain is deferred and never
 attributes. For a `sent` intent the destination chain's worker polls Relay,
 and on `success` it verifies the origin transaction on the origin chain —
-a succeeded receipt whose sender is the attested wallet and whose USDC
-`Transfer` log debited that wallet by exactly the quoted amount. The
+a succeeded receipt whose sender is the attested wallet and whose
+`Transfer` log of the quoted origin token debited that wallet by exactly
+the quoted amount. The
 verified hash is kept on the intent (`verified_origin_tx_hash`, unique per
 origin chain) and the parked transfer is attributed (`relay_intent_id`,
 `attribution_source: receipt`); anything else Relay's answer could claim —
@@ -160,7 +184,7 @@ address. If payer identity or compliance policy requires a nonzero sender, make
 that an explicit product rule rather than an indexer assumption.
 
 Use `(chain_id, token_address, tx_hash, log_index)` as the observation identity.
-A transaction can emit multiple USDC transfers, so transaction hash alone is not
+A transaction can emit multiple transfers, so transaction hash alone is not
 unique.
 
 ## Acquisition loop
@@ -176,7 +200,7 @@ finalized observations, `funded` transitions, and `expired` transitions by
 block timestamp, while the sweep worker claims eligible rows without delaying
 the next log poll. It sends one BatchSweeper transaction for each claimed group
 of up to 20 deposit requests; the finalized receipt's events determine each deposit request's
-outcome (see "Sweep architecture under USDC").
+outcome (see "Sweep architecture").
 
 The finality boundary is the chain's `finality_source` minus
 `finality_confirmations`: the node's `finalized` tag with no margin on
@@ -194,7 +218,8 @@ Acquisition has two halves that never trust each other:
   `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s in production) and immediately
   when the signal wakes it.
 - **The transfer signal** (`signal.rs`) holds a WebSocket to the same node
-  subscribed to `monadLogs` with the USDC address, the `Transfer` topic, and
+  subscribed to `monadLogs` with the chain's token addresses, the `Transfer`
+  topic, and
   the current payment addresses in `topics[2]` (chunked, 500 per
   subscription; the node accepts thousands). Every matching log is delivered
   once per commit state; the `Finalized`/`Verified` deliveries record the
@@ -228,8 +253,9 @@ For each pass:
    observations, so expiry transitions and the chain clock still advance,
    and stop: no `eth_getLogs` is issued.
 6. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
-   the range-end header, request `eth_getLogs` for the USDC `Transfer`
-   topic with `topics[2]` = the watch list (500 addresses per call), sort
+   the range-end header, request `eth_getLogs` for the `Transfer` topic
+   from the chain's configured contracts (one address array) with
+   `topics[2]` = the watch list (500 addresses per call), sort
    by block number, transaction index, and log
    index, decode and validate strictly, then read the range-end header
    again and require the same hash (a change while the logs were in flight
@@ -278,9 +304,10 @@ The list decides three things:
   signal is connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
 - **The filter.** Every range fetch puts the list in `topics[2]`, 500
   addresses per call, on every chain. The cost of a range therefore grows
-  with the addresses Payday watches and never with the chain's USDC volume,
+  with the addresses Payday watches and never with the chain's stablecoin
+  volume,
   which no measurement today can bound for tomorrow (an unfiltered scan on
-  a chain whose USDC volume outgrew the provider's result cap would shrink
+  a chain whose stablecoin volume outgrew the provider's result cap would shrink
   to one-block ranges and multiply the call count by the range cap). The
   list is loaded *after* the boundary read so the race-freedom argument
   below still holds. The trade is that a transfer to an address outside
@@ -334,7 +361,7 @@ deposit requests.
 
 Filter at the provider by:
 
-- exact USDC proxy address;
+- the chain's configured contract addresses, as one array;
 - exact `Transfer` topic0.
 
 - the watch list in `topics[2]`, ≤500 addresses per call (see
@@ -353,15 +380,16 @@ message; that list is a latency optimisation with no ledger authority (see
 ### `chain_assets`
 
 - chain ID and genesis hash;
-- USDC proxy and deployment block;
-- decimals;
+- the served contracts: currency, address, and decimals;
+- start block;
 - finality configuration;
 - config version;
 - running/halted state.
 
 ### `indexer_cursor`
 
-- chain ID and token address;
+- chain ID (one cursor per chain covers every configured contract; the
+  `indexer_status` row is keyed the same way);
 - last finalized block number and hash;
 - config version;
 - updated timestamp.
@@ -483,7 +511,7 @@ the batch, so a replayed receipt cannot double-count and the ledger is never
 ahead of or behind the deposit request state. A trigger raises one
 `deposit_request.recovered_funds` webhook per row.
 
-## Sweep architecture under USDC
+## Sweep architecture
 
 Every deposit request with uncollected funds at its deposit address is queued,
 whatever its status: `funded` (settle), `expired` (recover the balance), and
@@ -629,8 +657,8 @@ Benefits:
 
 - the request budget is set by the range cap and the block rate, not by
   how fast payments must be noticed;
-- provider-native filtering: one contract, one event, and our own recipient
-  set on every scan and subscription, so spend follows Payday's activity and
+- provider-native filtering: the chain's few contracts, one event, and our
+  own recipient set on every scan and subscription, so spend follows Payday's activity and
   not the chain's, and an idle chain issues no scan and holds no socket;
 - exact control over finality and failure policy; the socket has no ledger
   authority, so its outages degrade latency only;
@@ -677,9 +705,10 @@ Required tests:
 
 - `transfer`, `transferFrom`, relayed/internal-call transfer detection;
 - reverted and zero-value transfers ignored;
-- multiple USDC logs in one transaction;
+- multiple transfer logs in one transaction;
 - same-block and cross-block partial deposit, exact deposit, and overpayment;
-- wrong token, bridged USDC, wrong chain, and fake `Transfer` emitter ignored;
+- unconfigured tokens, bridged wrappers, wrong chain, and fake `Transfer`
+  emitter ignored; the other served stablecoin observed but never credited;
 - an idle chain fast-forwards without scanning and never holds a socket;
 - every range fetch filters by the list loaded after the boundary read;
 - a wrong-chain `Payment` deployment routes nothing and `recover(token)`
@@ -687,9 +716,9 @@ Required tests:
 - duplicate range replay and crashes around every cursor transaction boundary;
 - adaptive range shrinking, provider failover, and provider disagreement;
 - deposit request creation concurrent with range ingestion;
-- unreviewed USDC proxy upgrade halts ingestion;
+- unreviewed token proxy upgrade halts ingestion;
 - finalized cursor hash mismatch halts ingestion;
-- USDC pause, source/beneficiary blacklist, and underfunded sweep classification;
+- token pause, source/beneficiary blacklist, and underfunded sweep classification;
 - sweep submission crash, replacement, third-party execution, and finalization;
 - full projection rebuild equals materialized deposit request totals.
 
@@ -698,14 +727,14 @@ Monitor:
 - finalized-head and cursor lag;
 - logs and ranges processed, range size, response bytes, and provider errors;
 - provider hash disagreement;
-- observations, funded deposit requests, partial-deposit age, and unmatched USDC logs;
+- observations, funded deposit requests, partial-deposit age, and unmatched transfer logs;
 - chain halted state and proxy upgrades;
 - oldest funded-unswept deposit request;
 - sweep nonce, receipt, and finality lag.
 
 Hard invariants:
 
-- only exact allowlisted native-USDC logs are credited;
+- only logs from the allowlisted contract of the request's currency are credited;
 - every observation is durable at most once;
 - cursor and range effects commit atomically;
 - only finalized cumulative credit funds a deposit request;

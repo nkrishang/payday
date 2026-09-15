@@ -30,6 +30,7 @@ const READY: ReadyPayerDepositRequest = {
   settlement_explorer_url: null,
   payer_message: null,
   content_unlocked: true,
+  currency: "USDC",
   networks: NETWORKS,
   chain: { id: "143", name: "Monad", native_symbol: "MON" },
   token: { symbol: "USDC", address: TOKEN, decimals: 6 },
@@ -57,6 +58,24 @@ const READY: ReadyPayerDepositRequest = {
 
 export function payment(overrides: Partial<ReadyPayerDepositRequest> = {}): ReadyPayerDepositRequest {
   return { ...READY, ...overrides };
+}
+
+/** USDT is served on Monad alone, as Tether's USDT0. */
+export const USDT_TOKEN = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D";
+export const USDT_NETWORK = {
+  chain: { id: "143", name: "Monad", native_symbol: "MON" },
+  token: { symbol: "USDT0", address: USDT_TOKEN, decimals: 6 },
+};
+
+/** A USDT request pinned to Monad, bound and ready to pay in USDT0. */
+export function usdtPayment(overrides: Partial<ReadyPayerDepositRequest> = {}): ReadyPayerDepositRequest {
+  return payment({
+    currency: "USDT",
+    networks: [USDT_NETWORK],
+    token: USDT_NETWORK.token,
+    deposit_uri: `ethereum:@143/transfer?address=&uint256=25000000`,
+    ...overrides,
+  });
 }
 
 /**
@@ -94,6 +113,7 @@ export function lockedDepositRequest(overrides: Partial<PayerDepositRequest> = {
     payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
     requirements: { email: "pending", wallet: "pending", merchant_session: "not_required", complete: false },
     content_unlocked: false,
+    currency: null,
     networks: null,
     chain: null,
     token: null,

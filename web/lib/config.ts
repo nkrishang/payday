@@ -26,11 +26,26 @@ function defaultNativeSymbol(chainId: number): string {
 }
 
 /**
+ * One stablecoin the deployment serves on a chain: the issuer's exact contract
+ * (Circle's native USDC; Tether's USDT0 on Monad and Arbitrum), which the pay
+ * button refuses to sign a transfer for anything but.
+ */
+export interface PublicToken {
+  /** `USDC` or `USDT`: the currency a request is priced in. */
+  currency: string;
+  /** The contract's own symbol, as a wallet shows it (`USDT0` on Monad). */
+  symbol: string;
+  /** Lowercased for comparison. */
+  address: string;
+  decimals: number;
+}
+
+/**
  * One network the deployment offers. The API is the authority on which
  * networks a deposit request can be paid on and what each is called; this
  * carries only what the browser needs on its own: a public RPC for wallet
- * reads, the explorer, the gas token, and the exact USDC contract the pay
- * button refuses to sign a transfer for anything but.
+ * reads, the explorer, the gas token, and the exact stablecoin contracts
+ * served there.
  */
 export interface PublicChain {
   id: number;
@@ -38,8 +53,8 @@ export interface PublicChain {
   rpcUrl: string;
   explorerUrl: string | null;
   nativeSymbol: string;
-  /** The chain's exact Circle-issued native USDC contract, lowercased for comparison. */
-  usdcAddress: string;
+  /** The stablecoins served on this chain, in the order the dashboard offers them. */
+  tokens: PublicToken[];
   /** How long a deposit typically takes to be credited, shown next to the choice. */
   confirmation: string;
   /**
@@ -60,9 +75,11 @@ export interface PublicCctp {
 }
 
 /**
- * `NEXT_PUBLIC_CHAINS`: a JSON array of `{id, name, rpcUrl, usdcAddress,
- * explorerUrl?, nativeSymbol?, confirmation?}`, in the order the checkout
- * offers the networks. Must list the same chains as gatewayd's PAYDAY_CHAINS.
+ * `NEXT_PUBLIC_CHAINS`: a JSON array of `{id, name, rpcUrl, tokens,
+ * explorerUrl?, nativeSymbol?, confirmation?, cctp?}`, in the order the
+ * checkout offers the networks, where `tokens` is `[{currency, address,
+ * symbol?, decimals?}]`. Must list the same chains and contracts as
+ * gatewayd's PAYDAY_CHAINS.
  */
 function parseChains(raw: string): PublicChain[] {
   let parsed: unknown;
@@ -89,12 +106,16 @@ function parseChains(raw: string): PublicChain[] {
     };
     const explorer = typeof item.explorerUrl === "string" && item.explorerUrl ? item.explorerUrl : null;
     const cctp = parseCctp(item.cctp, index);
+    const tokens = parseTokens(item.tokens, id, index);
+    if (cctp && !tokens.some((token) => token.currency === "USDC")) {
+      throw new Error(`NEXT_PUBLIC_CHAINS[${index}].cctp needs USDC on the chain; CCTP bridges USDC alone`);
+    }
     return {
       cctp,
       id,
       name: text("name"),
       rpcUrl: text("rpcUrl"),
-      usdcAddress: text("usdcAddress").toLowerCase(),
+      tokens,
       explorerUrl: explorer ? trimTrailingSlash(explorer) : null,
       nativeSymbol:
         typeof item.nativeSymbol === "string" && item.nativeSymbol
@@ -106,6 +127,46 @@ function parseChains(raw: string): PublicChain[] {
           : "Credited within a minute",
     };
   });
+}
+
+/** `tokens: [{currency, address, symbol?, decimals?}]`: at least one, no currency twice. */
+function parseTokens(raw: unknown, chainId: number, index: number): PublicToken[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`NEXT_PUBLIC_CHAINS[${index}].tokens must list at least one stablecoin`);
+  }
+  const tokens = raw.map((entry, position) => {
+    const item = entry as Record<string, unknown>;
+    const where = `NEXT_PUBLIC_CHAINS[${index}].tokens[${position}]`;
+    const currency = item.currency;
+    if (currency !== "USDC" && currency !== "USDT") {
+      throw new Error(`${where}.currency must be USDC or USDT`);
+    }
+    const address = item.address;
+    if (typeof address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+      throw new Error(`${where}.address must be an EVM address`);
+    }
+    const decimals = item.decimals === undefined ? 6 : Number(item.decimals);
+    if (!Number.isSafeInteger(decimals) || decimals < 0 || decimals > 255) {
+      throw new Error(`${where}.decimals must be an integer`);
+    }
+    return {
+      currency,
+      symbol:
+        typeof item.symbol === "string" && item.symbol ? item.symbol : defaultSymbol(currency, chainId),
+      address: address.toLowerCase(),
+      decimals,
+    };
+  });
+  const currencies = new Set(tokens.map((token) => token.currency));
+  if (currencies.size !== tokens.length) {
+    throw new Error(`NEXT_PUBLIC_CHAINS[${index}].tokens lists a currency twice`);
+  }
+  return tokens;
+}
+
+/** Tether's USDT on Monad and Arbitrum is the omnichain USDT0; elsewhere a contract shows its currency's code. */
+function defaultSymbol(currency: string, chainId: number): string {
+  return currency === "USDT" && (chainId === 143 || chainId === 42161) ? "USDT0" : currency;
 }
 
 /** `cctp: {domain, forwarder, tokenMessenger, messageTransmitter}`, optional per chain. */
@@ -165,4 +226,31 @@ export function chainById(id: string | number | null | undefined): PublicChain |
   if (id === null || id === undefined) return null;
   const wanted = typeof id === "number" ? id : Number(id);
   return chains.find((chain) => chain.id === wanted) ?? null;
+}
+
+/** The configured stablecoin behind a contract address on a chain, if the deployment serves it there. */
+export function tokenFor(chainId: string | number | null | undefined, address: string | null | undefined): PublicToken | null {
+  if (!address) return null;
+  const wanted = address.toLowerCase();
+  return chainById(chainId)?.tokens.find((token) => token.address === wanted) ?? null;
+}
+
+/** The chain's contract for a currency, if it serves it. */
+export function tokenOn(chain: PublicChain, currency: string): PublicToken | null {
+  return chain.tokens.find((token) => token.currency === currency) ?? null;
+}
+
+/** The chains serving a currency, in configured order. */
+export function chainsFor(currency: string): PublicChain[] {
+  return chains.filter((chain) => tokenOn(chain, currency) !== null);
+}
+
+/** Every currency at least one configured chain serves, in code order. */
+export function currencies(): string[] {
+  return ["USDC", "USDT"].filter((currency) => chainsFor(currency).length > 0);
+}
+
+/** The currencies that bridge between chains for the merchant at 1:1: USDC through CCTP. A request in any other must pin its chain and withdraws on that chain alone. */
+export function bridges(currency: string): boolean {
+  return currency === "USDC";
 }

@@ -326,8 +326,8 @@ fn build_worker(
             chain_id: ChainId(chain_id),
             factory: chain.factory,
             batch_sweeper: chain.batch_sweeper,
-            usdc: chain.usdc,
-            usdc_start_block: chain.usdc_start_block,
+            tokens: chain.token_addresses(),
+            start_block: chain.start_block,
             finality_source: chain.finality_source,
             finality_confirmations: chain.finality_confirmations,
             block_time: Duration::from_millis(chain.block_time_ms),
@@ -359,9 +359,9 @@ fn build_worker(
         relay,
         peers,
     );
-    let signal = config
-        .rpc_ws_url(chain_id)
-        .map(|ws_url| signal::TransferSignal::new(ws_url.to_string(), chain_id, chain.usdc));
+    let signal = config.rpc_ws_url(chain_id).map(|ws_url| {
+        signal::TransferSignal::new(ws_url.to_string(), chain_id, chain.token_addresses())
+    });
     ChainWorker {
         chain_id,
         indexer,

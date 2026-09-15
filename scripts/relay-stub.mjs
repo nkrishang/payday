@@ -3,16 +3,20 @@
 // `/chains`, `/quote/v2`, `/intents/status/v3`, and `/requests/v3` for
 // gatewayd to quote a cross-chain payment and for gateway-indexer to follow
 // it, plus the solver's side, which Relay itself never exposes: once the
-// payer's deposit is seen on the origin Anvil, the stub sends USDC from its
-// own solver key to the recipient on the destination Anvil, exactly as a
-// Relay solver fills a request.
+// payer's deposit is seen on the origin Anvil, the stub sends the quoted
+// destination token from its own solver key to the recipient on the
+// destination Anvil, exactly as a Relay solver fills a request.
 //
 // Origin chain: PAYDAY_SECOND_CHAIN_ID at PAYDAY_SECOND_RPC_URL (31338).
 // Destination chain: PAYDAY_CHAIN_ID at PAYDAY_RPC_URL (31337). Both hold
-// the same MockUSDC at RELAY_STUB_USDC; the solver key holds USDC on the
-// destination chain (the suite funds its USDC; the stub gives it gas with anvil_setBalance) and is a fixed key outside Anvil's ten accounts, which the suite uses as beneficiaries.
+// the same mock USDC and USDT at RELAY_STUB_USDC and RELAY_STUB_USDT; the
+// solver key holds both on the destination chain (the suite funds it; the
+// stub gives it gas with anvil_setBalance) and is a fixed key outside Anvil's
+// ten accounts, which the suite uses as beneficiaries. A quote names its
+// origin and destination currencies, so USDC on one chain can pay a USDT
+// request on the other.
 //
-// The quote's one step is a plain USDC `transfer` from the payer to the
+// The quote's one step is a plain `transfer` of the origin token from the payer to the
 // solver on the origin chain for the quoted input amount. A real quote is
 // an approve and a router call; the page treats every step as an opaque
 // transaction, so a transfer exercises the same path.
@@ -20,7 +24,7 @@
 // Every call must carry `x-api-key`, as Relay requires from 2026-10-02.
 //
 // Environment: RELAY_STUB_PORT (4020), RELAY_STUB_API_KEY (local),
-// RELAY_STUB_USDC, RELAY_STUB_SOLVER_KEY, PAYDAY_RPC_URL, PAYDAY_CHAIN_ID,
+// RELAY_STUB_USDC, RELAY_STUB_USDT, RELAY_STUB_SOLVER_KEY, PAYDAY_RPC_URL, PAYDAY_CHAIN_ID,
 // PAYDAY_SECOND_RPC_URL, PAYDAY_SECOND_CHAIN_ID. Needs `cast` on the PATH.
 //
 // Control endpoints for the suite: `POST /__fail/{requestId}` makes the stub
@@ -33,6 +37,7 @@ import { createServer } from "node:http";
 const PORT = Number(process.env.RELAY_STUB_PORT ?? 4020);
 const API_KEY = process.env.RELAY_STUB_API_KEY ?? "local";
 const USDC = (process.env.RELAY_STUB_USDC ?? "").toLowerCase();
+const USDT = (process.env.RELAY_STUB_USDT ?? "").toLowerCase();
 const SOLVER_KEY =
   process.env.RELAY_STUB_SOLVER_KEY ??
   "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -46,10 +51,15 @@ const ORIGIN = {
 };
 /** What the solver charges on top of the exact output, in base units. */
 const FEE = 20_000n;
-if (!/^0x[0-9a-f]{40}$/.test(USDC)) {
-  console.error("RELAY_STUB_USDC must be the local USDC address");
+if (![USDC, USDT].every((address) => /^0x[0-9a-f]{40}$/.test(address))) {
+  console.error("RELAY_STUB_USDC and RELAY_STUB_USDT must be the local token addresses");
   process.exit(1);
 }
+/** The tokens the solver takes and delivers: symbol by lowercase address. */
+const TOKENS = new Map([
+  [USDC, { id: "usdc", symbol: "USDC" }],
+  [USDT, { id: "usdt", symbol: "USDT" }],
+]);
 
 const solver = cast(["wallet", "address", "--private-key", SOLVER_KEY]).trim();
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -80,7 +90,7 @@ function chainRecord(chain, name) {
     depositEnabled: true,
     disabled: false,
     currency: { symbol: "ETH", decimals: 18 },
-    solverCurrencies: [{ id: "usdc", symbol: "USDC", address: USDC, decimals: 6 }],
+    solverCurrencies: [...TOKENS].map(([address, token]) => ({ ...token, address, decimals: 6 })),
   };
 }
 
@@ -98,7 +108,7 @@ function findDeposit(request) {
     {
       fromBlock: "0x0",
       toBlock: "latest",
-      address: USDC,
+      address: request.originCurrency,
       topics: [TRANSFER_TOPIC, word32(request.user), word32(solver)],
     },
   ]);
@@ -111,7 +121,7 @@ function findDeposit(request) {
   return null;
 }
 
-/** The fill: USDC from the solver to the recipient on the destination chain. */
+/** The fill: the destination token from the solver to the recipient on the destination chain. */
 function fill(request) {
   const out = cast([
     "send",
@@ -120,7 +130,7 @@ function fill(request) {
     "--private-key",
     SOLVER_KEY,
     "--json",
-    USDC,
+    request.destinationCurrency,
     "transfer(address,uint256)",
     request.recipient,
     request.amountOut.toString(),
@@ -203,6 +213,11 @@ createServer(async (req, res) => {
       if (originChainId !== ORIGIN.id || destinationChainId !== DESTINATION.id) {
         return send(res, 400, { message: "No solver for this route", errorCode: "NO_QUOTES" });
       }
+      const originCurrency = String(body.originCurrency ?? "").toLowerCase();
+      const destinationCurrency = String(body.destinationCurrency ?? "").toLowerCase();
+      if (!TOKENS.has(originCurrency) || !TOKENS.has(destinationCurrency)) {
+        return send(res, 400, { message: "No solver for this currency pair", errorCode: "NO_QUOTES" });
+      }
       if (body.tradeType !== "EXACT_OUTPUT") {
         return send(res, 400, { message: "only EXACT_OUTPUT is supported here", errorCode: "UNSUPPORTED" });
       }
@@ -216,6 +231,8 @@ createServer(async (req, res) => {
         recipient: String(body.recipient),
         originChainId,
         destinationChainId,
+        originCurrency,
+        destinationCurrency,
         amountIn,
         amountOut,
         inTx: null,
@@ -235,7 +252,7 @@ createServer(async (req, res) => {
             items: [
               {
                 status: "incomplete",
-                data: { from: body.user, to: USDC, data: calldata, value: "0", chainId: originChainId, gas: "80000" },
+                data: { from: body.user, to: originCurrency, data: calldata, value: "0", chainId: originChainId, gas: "80000" },
                 check: { endpoint: `/intents/status/v3?requestId=${id}`, method: "GET" },
               },
             ],

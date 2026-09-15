@@ -450,12 +450,12 @@ mod tests {
         let chain = |id: u64| {
             serde_json::json!({
                 "chain_id": id,
-                "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+                "tokens": [{"currency": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"}],
                 "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
                 "batch_sweeper": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
                 "factory_code_hash": format!("0x{}", "ab".repeat(32)),
                 "batch_sweeper_code_hash": format!("0x{}", "cd".repeat(32)),
-                "usdc_start_block": 0,
+                "start_block": 0,
                 "finality_source": "finalized",
                 "finality_confirmations": 0,
                 "block_time_ms": 300,

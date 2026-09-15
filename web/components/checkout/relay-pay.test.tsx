@@ -22,7 +22,7 @@ const BASE: RelayOriginChain = {
   chain_id: "8453",
   name: "Base",
   native_symbol: "ETH",
-  usdc_address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  tokens: [{ currency: "USDC", symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }],
   explorer_url: "https://basescan.example",
   icon_url: null,
   rpc_url: null,
@@ -35,6 +35,7 @@ function quoteFor(origin: RelayOriginChain, amountIn: string): RelayQuote {
     id: `rli_${origin.chain_id}`,
     request_id: `0x${origin.chain_id.padStart(64, "0")}`,
     origin,
+    origin_token: origin.tokens[0]!,
     amount_in: amountIn,
     amount_in_base_units: "1020000",
     amount_out: "1.00",
@@ -45,7 +46,7 @@ function quoteFor(origin: RelayOriginChain, amountIn: string): RelayQuote {
     steps: [
       {
         id: "approve",
-        transaction: { chain_id: origin.chain_id, to: origin.usdc_address, data: "0x095ea7b3", value: "0", gas: "80000" },
+        transaction: { chain_id: origin.chain_id, to: origin.tokens[0]!.address, data: "0x095ea7b3", value: "0", gas: "80000" },
       },
       {
         id: "deposit",
@@ -145,7 +146,7 @@ describe("RelayPay", () => {
     render(<RelayPay payment={payment()} payerSession={null} onSent={onSent} />);
 
     await chooseBase(user);
-    const pay = screen.getByRole("button", { name: /Pay from Base/ });
+    const pay = screen.getByRole("button", { name: /Pay USDC from Base/ });
     // Two clicks in the same tick: the second must meet the execution lock,
     // not a second run of the whole route.
     fireEvent.click(pay);
@@ -165,7 +166,7 @@ describe("RelayPay", () => {
     render(<RelayPay payment={payment()} payerSession={null} onSent={vi.fn()} />);
 
     await chooseBase(user);
-    fireEvent.click(screen.getByRole("button", { name: /Pay from Base/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Pay USDC from Base/ }));
     await waitFor(() => expect(sent).toHaveLength(2));
     // 8453 in hex: the origin chain, not whatever network the wallet happens
     // to be on after the switch.
@@ -185,7 +186,7 @@ describe("RelayPay", () => {
     // The switch request "succeeds" but the wallet reports another chain
     // afterwards — a guard must catch it before any transaction is built.
     setChainId("0x1");
-    fireEvent.click(screen.getByRole("button", { name: /Pay from Base/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Pay USDC from Base/ }));
 
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/different network/i));
     expect(sent).toHaveLength(0);

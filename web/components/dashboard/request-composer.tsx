@@ -8,13 +8,13 @@ import {
   PaydayError,
 } from "@payday/sdk";
 import { ArrowLeft, ArrowRight, Loader2 } from "lucide-react";
-import Image from "next/image";
 import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { controlStyles } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
-import { chainById, config } from "@/lib/config";
+import { CurrencyMark } from "@/components/ui/amount";
+import { bridges, chainById, chainsFor, currencies, tokenOn } from "@/lib/config";
 import { clampWords, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { AttachmentUpload } from "./attachment-upload";
@@ -40,8 +40,26 @@ import { useMerchant } from "./session";
 
 /** The `payoutAddressId` that means the account's own wallet. */
 const ACCOUNT_WALLET = "account";
-/** The `chainId` that leaves the network to the payer: the default. */
+/** The `chainId` that leaves the network to the payer: the default for a currency that bridges. */
 const PAYER_CHOICE = "";
+
+/** Where a currency starts: the payer's choice when it bridges, else the first network serving it. */
+function defaultChain(currency: string): string {
+  if (bridges(currency)) return PAYER_CHOICE;
+  return String(chainsFor(currency)[0]?.id ?? "");
+}
+
+/** The network choices for a currency: the payer's choice first when it bridges, then every network serving it, each with the contract's own symbol. */
+function networkOptions(currency: string): Array<{ id: string; title: string; detail: string }> {
+  const chains = chainsFor(currency).map((chain) => ({
+    id: String(chain.id),
+    title: chain.name,
+    detail: tokenOn(chain, currency)?.symbol ?? currency,
+  }));
+  return bridges(currency)
+    ? [{ id: PAYER_CHOICE, title: "Payer's choice", detail: "any supported network" }, ...chains]
+    : chains;
+}
 
 /** How the network reads once set, for the preview and the review. */
 function networkLabel(draft: Draft): string {
@@ -51,6 +69,8 @@ function networkLabel(draft: Draft): string {
 
 interface Draft {
   amount: string;
+  /** `USDC` or `USDT`. */
+  currency: string;
   /** A saved customer, or "" while the payer is being typed fresh. */
   customerId: string;
   /** The chosen issuer identity, whose party the deposit request snapshots. */
@@ -133,6 +153,7 @@ function emptyDraft(
   const customer = billed ? customers.find((entry) => entry.id === billed) : undefined;
   return {
     amount: "",
+    currency: "USDC",
     customerId: customer?.id ?? "",
     issuerId: first?.id ?? "",
     payoutAddressId: defaultPayout(first, accountWallet),
@@ -159,11 +180,16 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
   if (step === 0) {
     const amount = draft.amount.trim();
     if (!amount) errors.amount = "Required.";
-    else if (!AMOUNT.test(amount)) errors.amount = "USDC takes up to six decimals.";
+    else if (!AMOUNT.test(amount)) errors.amount = ` takes up to six decimals.`;
     // A decimal string is above zero exactly when it holds a non-zero digit,
     // which is a test we can make without going through a float.
     else if (!/[1-9]/.test(amount)) errors.amount = "Must be more than zero.";
     if (!draft.issuerId) errors.issuerId = "Required.";
+    // A currency without a 1:1 bridge for the merchant settles on one
+    // network, so the request must name it.
+    if (!bridges(draft.currency) && !chainById(draft.chainId)) {
+      errors.chainId = ` settles on one network; choose it.`;
+    }
     if (!draft.payoutAddressId)
       errors.payoutAddressId =
         "Your Payday wallet is still being created. Try again in a moment, or add a saved wallet to this identity.";
@@ -364,6 +390,7 @@ export function RequestComposer({
             // edit to it cannot reach a request already issued.
             payoutAddress,
             chainId: draft.chainId,
+            currency: draft.currency,
             expiresInHours: draft.expiry === CUSTOM ? "" : draft.expiry,
             expiresAt: chosenMoment(draft),
             issuerName: issuer?.name ?? "",
@@ -462,17 +489,33 @@ export function RequestComposer({
                       aria-hidden="true"
                       className="absolute top-1/2 right-4 flex -translate-y-1/2 items-center gap-1.5 text-[13px] text-faint"
                     >
-                      <Image
-                        src="/payment-icons/usdc.svg"
-                        width={64}
-                        height={64}
-                        alt=""
-                        className="size-4 shrink-0 rounded-full"
-                      />
-                      USDC
+                      <CurrencyMark currency={draft.currency} className="size-4" />
+                      {draft.currency}
                     </span>
                   </span>
                 </Labeled>
+
+                {/* The currency comes before the network: what is offered on
+                    which network follows from it, and USDT, which does not
+                    bridge for the merchant, must name the one it settles on. */}
+                {currencies().length > 1 ? (
+                  <Choice
+                    label="Currency"
+                    required
+                    options={currencies().map((currency) => ({
+                      id: currency,
+                      title: currency,
+                      detail: bridges(currency)
+                        ? "any supported network; withdraws to any"
+                        : "one network, chosen here; withdraws on it",
+                    }))}
+                    selected={draft.currency}
+                    onSelect={(currency) => {
+                      set("currency", currency);
+                      set("chainId", defaultChain(currency));
+                    }}
+                  />
+                ) : null}
 
                 {issuers.length > 1 ? (
                   <Choice
@@ -509,18 +552,15 @@ export function RequestComposer({
 
                 {/* The payer normally picks the network when they sign; a
                     merchant who needs the funds on one network pins it here
-                    and the checkout offers nothing else. */}
-                {config.chains.length > 1 ? (
+                    and the checkout offers nothing else. A currency that does
+                    not bridge has no payer's choice: it settles where it is
+                    paid, so the merchant always names the network. */}
+                {networkOptions(draft.currency).length > 1 || !bridges(draft.currency) ? (
                   <Choice
                     label="Network"
-                    options={[
-                      { id: PAYER_CHOICE, title: "Payer's choice", detail: "any supported network" },
-                      ...config.chains.map((chain) => ({
-                        id: String(chain.id),
-                        title: chain.name,
-                        detail: "USDC",
-                      })),
-                    ]}
+                    required={!bridges(draft.currency)}
+                    error={shown("chainId")}
+                    options={networkOptions(draft.currency)}
                     selected={draft.chainId}
                     onSelect={(id) => set("chainId", id)}
                   />
@@ -719,14 +759,8 @@ export function RequestComposer({
                   <Row label="Amount">
                     <span className="tabular inline-flex items-center justify-end gap-1">
                       {formatDisplayAmount(draft.amount.trim())}
-                      <Image
-                        src="/payment-icons/usdc.svg"
-                        width={64}
-                        height={64}
-                        alt=""
-                        className="size-3.5 shrink-0 rounded-full"
-                      />
-                      USDC
+                      <CurrencyMark currency={draft.currency} className="size-3.5" />
+                      {draft.currency}
                     </span>
                   </Row>
                   <Row label="Issued by">{issuer?.name}</Row>
@@ -842,14 +876,8 @@ function Preview({
           {amount && AMOUNT.test(amount) ? formatDisplayAmount(amount) : "0.00"}
         </span>
         <span className="flex items-center gap-1 text-[13px] text-faint">
-          <Image
-            src="/payment-icons/usdc.svg"
-            width={64}
-            height={64}
-            alt=""
-            className="size-4 shrink-0 rounded-full"
-          />
-          USDC
+          <CurrencyMark currency={draft.currency} className="size-4" />
+          {draft.currency}
         </span>
       </p>
       {title ? <p className="mt-1.5 text-[13px] text-muted">{title}</p> : null}

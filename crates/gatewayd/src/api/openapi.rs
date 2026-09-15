@@ -123,6 +123,10 @@ struct Attribution {
 #[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"payer":{"name":"Globex"},"payer_policy":{"mode":"permissionless"},"expires_in":3600,"reference":"INV-42","customer_id":"cus_0198f80c-1111-7dc1-a369-90556a64f700","metadata":{"po":"PO-77"}}))]
 struct CreateDepositRequest {
     amount: String,
+    /// `USDC` (the default) or `USDT`: the one currency the request is
+    /// denominated in. `USDT` requires `chain_id`: it settles on the pinned
+    /// chain and does not bridge.
+    currency: Option<String>,
     /// Where exactly `amount` settles. May be left out when `issuer_id`
     /// names an identity with a saved payout address; its first one is used.
     payout_address: Option<String>,
@@ -486,12 +490,25 @@ struct CustomerPage {
 }
 #[derive(Serialize, ToSchema)]
 struct CustomerStats {
-    /// Deposit requests addressed to this customer, of any status.
+    /// Deposit requests addressed to this customer, of any status, in every
+    /// currency together.
     request_count: i64,
-    /// Confirmed on chain across all of this customer's deposit requests. Base units,
-    /// like a deposit request's own `amount_base_units` — scale for display.
+    /// One entry per currency the customer has been asked for: two currencies
+    /// never add up.
+    totals: Vec<CustomerCurrencyTotal>,
+}
+#[derive(Serialize, ToSchema)]
+struct CustomerCurrencyTotal {
+    /// The currency's wire code (`USDC`, `USDT`).
+    currency: String,
+    /// Deposit requests in this currency addressed to the customer, of any status.
+    request_count: i64,
+    /// Confirmed on chain across this currency's deposit requests for the
+    /// customer. Base units, like a deposit request's own `amount_base_units`
+    /// — scale by the currency's decimals for display.
     collected_base_units: String,
-    /// Outstanding on the ones still open — awaiting deposit or partially paid. Base units.
+    /// Outstanding on this currency's requests still open — awaiting deposit
+    /// or partially paid. Base units.
     pending_base_units: String,
 }
 /// `getCustomer` only: a list of many customers would mean one aggregate
@@ -618,6 +635,12 @@ struct CanonicalIssuanceSnapshot {
     canonicalization: String,
     issuer: Party,
     payer: Party,
+    /// The currency's wire code (`USDC`, `USDT`); every network below is
+    /// that currency's contract on its chain.
+    currency: String,
+    /// Decimal: base units per whole unit, so `amount_base_units` reads
+    /// without a registry.
+    decimals: String,
     amount_base_units: String,
     notes: Option<String>,
     heading: Option<String>,
@@ -629,7 +652,7 @@ struct CanonicalIssuanceSnapshot {
     networks: Vec<SnapshotNetwork>,
     receiver_address: String,
 }
-/// One committed network: decimal chain id, EIP-55 USDC and factory.
+/// One committed network: decimal chain id, EIP-55 token and factory.
 #[derive(Serialize, ToSchema)]
 struct SnapshotNetwork {
     chain_id: String,
@@ -855,6 +878,10 @@ struct WithdrawalDestinationRequest {
 }
 #[derive(Deserialize, ToSchema)]
 struct CreateWithdrawal {
+    /// `USDC` (the default) or `USDT`: the one currency the withdrawal moves.
+    /// Every network holding USDC is swept into the destination; USDT moves
+    /// the destination chain's balance alone.
+    currency: Option<String>,
     destination: WithdrawalDestinationRequest,
 }
 #[derive(Deserialize, ToSchema)]
@@ -884,7 +911,8 @@ struct WithdrawalNoncePreimage {
     salt: String,
 }
 /// What the merchant signs for one leg: an EIP-3009 authorization under the
-/// source chain's USDC, ready for `eth_signTypedData_v4`.
+/// source chain's contract for the withdrawal's currency, ready for
+/// `eth_signTypedData_v4`.
 #[derive(Serialize, ToSchema)]
 struct WithdrawalAuthorization {
     /// `TransferWithAuthorization` (same-chain leg) or
@@ -908,6 +936,9 @@ struct WithdrawalLeg {
     /// `bridge` when they cross through CCTP.
     kind: String,
     source_chain: Chain,
+    /// The contract the leg is signed under: the withdrawal's currency on
+    /// the source chain.
+    token: Token,
     amount: String,
     amount_base_units: String,
     /// `awaiting_signature`, `authorized`, `relaying`, `burned`, `attested`,
@@ -927,8 +958,10 @@ struct Withdrawal {
     status: String,
     /// The Payday wallet every leg is signed from.
     wallet_address: String,
+    /// `USDC` or `USDT`: the one currency every leg moves.
+    currency: String,
     destination: WithdrawalDestination,
-    /// One per network the wallet held USDC on when the withdrawal was created.
+    /// One per network the wallet held the currency on when the withdrawal was created.
     legs: Vec<WithdrawalLeg>,
     created_at: String,
     completed_at: Option<String>,
@@ -942,7 +975,7 @@ struct WithdrawalPage {
 }
 
 #[utoipa::path(post, path="/v1/withdrawals", operation_id="createWithdrawal", tag="withdrawals",
- request_body(content=CreateWithdrawal, description="Snapshot the Payday wallet's USDC on every network into legs towards one destination. Each leg carries the typed data to sign; nothing moves until it is signed. A reused Idempotency-Key with the same destination replays the withdrawal; with another destination it is a 409 idempotency_conflict."),
+ request_body(content=CreateWithdrawal, description="Snapshot the Payday wallet's balance in one currency (USDC unless named) into legs towards one destination: every network for USDC, which bridges through CCTP at 1:1; the destination network alone for USDT, which does not bridge. Each leg carries the typed data to sign; nothing moves until it is signed. A reused Idempotency-Key with the same destination replays the withdrawal; with another destination it is a 409 idempotency_conflict."),
  params(("Idempotency-Key"=String, Header, description="Required, 1-255 bytes")),
  responses((status=201, description="Created; every leg is awaiting_signature", body=Withdrawal), (status=200, description="Idempotent replay", body=Withdrawal, headers(("Idempotency-Replayed"=String, description="true"))), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=409, description="wallet_not_ready, withdrawal_in_progress, nothing_to_withdraw, or idempotency_conflict", body=ErrorResponse), (status=422, description="withdrawal_exceeds_bridge_limit: a bridge leg is above Circle's 10,000,000 USDC per-message burn limit", body=ErrorResponse), (status=429, body=ErrorResponse), (status=503, description="withdrawals_unavailable: a balance could not be read, or a chain the wallet holds funds on cannot bridge on this deployment", body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_withdrawal() {}
@@ -964,7 +997,7 @@ fn cancel_withdrawal() {}
 #[derive(OpenApi)]
 #[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
  components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
- modifiers(&Security), tags((name="withdrawals",description="Moving the Payday wallet's USDC, across every network, to an address the merchant names"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
+ modifiers(&Security), tags((name="withdrawals",description="Moving the Payday wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
 struct Security;

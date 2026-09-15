@@ -5,18 +5,25 @@
 # Staging by default (docs/staging.md); production with PAYDAY_API_URL and a
 # live key, as the launch check in docs/production-runbook.md.
 #
-# The payout address defaults to the paying wallet, so the USDC comes straight
+# The payout address defaults to the paying wallet, so the stablecoin comes straight
 # back and the run costs only gas. Required:
 #   PAYDAY_API_KEY   a merchant API key minted in the dashboard
 #   PAYDAY_RPC_URL   an HTTPS Monad RPC the payer wallet sends through
-#   PAYER_KEY        the private key of a wallet holding USDC and MON
+#   PAYER_KEY        the private key of a wallet holding the currency and MON
+#   PAYDAY_CURRENCY  USDC (default) or USDT; USDT pins the request to CHAIN_ID
 set -euo pipefail
 
 API_URL="${PAYDAY_API_URL:-https://api.staging.payday.sh}"
 RPC_URL="${PAYDAY_RPC_URL:?set PAYDAY_RPC_URL to an HTTPS Monad RPC endpoint}"
 : "${PAYDAY_API_KEY:?set PAYDAY_API_KEY to a merchant key minted in the dashboard}"
-PAYER_KEY="${PAYER_KEY:?set PAYER_KEY to the private key of a wallet holding USDC and MON}"
-USDC="${PAYDAY_USDC_ADDRESS:-0x754704Bc059F8C67012fEd69BC8A327a5aafb603}"
+PAYER_KEY="${PAYER_KEY:?set PAYER_KEY to the private key of a wallet holding the currency and MON}"
+CURRENCY="${PAYDAY_CURRENCY:-USDC}"
+case "$CURRENCY" in
+  USDC) TOKEN="${PAYDAY_TOKEN_ADDRESS:-0x754704Bc059F8C67012fEd69BC8A327a5aafb603}" ;;  # Monad USDC
+  USDT) TOKEN="${PAYDAY_TOKEN_ADDRESS:-0xe7cd86e13AC4309349F30B3435a9d337750fC82D}" ;;  # Monad USDT0
+  *) echo "PAYDAY_CURRENCY must be USDC or USDT" >&2; exit 1 ;;
+esac
+USDC="$TOKEN"
 CHAIN_ID="${PAYDAY_CHAIN_ID:-143}"
 # The origin the hosted checkout runs on; the wallet routes answer only it.
 CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-http://127.0.0.1:3002}"
@@ -101,10 +108,10 @@ wait_for() {
 
 echo "Payday live smoke test"
 echo "  API:     $API_URL"
-echo "  chain:   $CHAIN_ID, USDC $USDC"
+echo "  chain:   $CHAIN_ID, $CURRENCY $TOKEN"
 echo "  payer:   $PAYER"
 echo "  payout:  $PAYOUT_ADDRESS"
-echo "  amount:  $AMOUNT USDC"
+echo "  amount:  $AMOUNT $CURRENCY"
 
 # 0. The API is up, the key works, and the wallet can pay.
 merchant GET /health >/dev/null
@@ -117,15 +124,17 @@ if [[ "$LATE_TRANSFER" == 1 ]]; then
 fi
 usdc_before="$(token_balance "$PAYER")"
 mon_before="$(cast balance "$PAYER" --rpc-url "$RPC_URL")"
-((usdc_before >= needed)) || fail "payer holds $usdc_before base units of USDC, needs $needed"
+((usdc_before >= needed)) || fail "payer holds $usdc_before base units of $CURRENCY, needs $needed"
 [[ "$mon_before" != 0 ]] || fail "payer holds no MON for gas"
 
 # 1. Issue: no address until the payer binds a wallet.
 run_id="live-smoke-$(date +%s)-$RANDOM"
 body="$(jq -cn --arg payout "$PAYOUT_ADDRESS" --arg amount "$AMOUNT" --arg ref "$run_id" \
-  '{amount: $amount, payout_address: $payout, expires_in: 3600, reference: $ref,
+  --arg currency "$CURRENCY" --arg chain "$CHAIN_ID" \
+  '{amount: $amount, currency: $currency, payout_address: $payout, expires_in: 3600, reference: $ref,
     issuer: {name: "Payday"}, payer: {name: "Live smoke test"},
-    payer_policy: {mode: "permissionless"}}')"
+    payer_policy: {mode: "permissionless"}}
+   + (if $currency == "USDT" then {chain_id: $chain} else {} end)')"
 created="$(curl --fail --silent --show-error --request POST \
   --header "Authorization: Bearer $PAYDAY_API_KEY" \
   --header "Content-Type: application/json" \

@@ -5,9 +5,6 @@ use alloy_primitives::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Circle-issued USDC uses six decimal places on supported EVM chains.
-pub const USDC_DECIMALS: u8 = 6;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Amount(pub U256);
 
@@ -55,13 +52,13 @@ mod tests {
 
     #[test]
     fn parse_whole_amount() {
-        let amount = Amount::from_decimal_str("123", USDC_DECIMALS).unwrap();
+        let amount = Amount::from_decimal_str("123", 6).unwrap();
         assert_eq!(amount.0.to_string(), "123000000");
     }
 
     #[test]
     fn parse_decimal_amount() {
-        let amount = Amount::from_decimal_str("123.456", USDC_DECIMALS).unwrap();
+        let amount = Amount::from_decimal_str("123.456", 6).unwrap();
         assert_eq!(amount.0.to_string(), "123456000");
     }
 
@@ -73,7 +70,7 @@ mod tests {
 
     #[test]
     fn parse_too_many_decimal_points() {
-        let result = Amount::from_decimal_str("100.1.33", USDC_DECIMALS);
+        let result = Amount::from_decimal_str("100.1.33", 6);
         assert!(result.is_err());
     }
 
@@ -84,7 +81,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    Amount::from_decimal_str(invalid, USDC_DECIMALS),
+                    Amount::from_decimal_str(invalid, 6),
                     Err(AmountParseError::InvalidFormat)
                 ),
                 "{invalid:?} must be rejected as malformed"
@@ -95,9 +92,7 @@ mod tests {
     #[test]
     fn zero_parses_and_is_left_to_the_caller_to_reject() {
         assert_eq!(
-            Amount::from_decimal_str("0.000000", USDC_DECIMALS)
-                .unwrap()
-                .0,
+            Amount::from_decimal_str("0.000000", 6).unwrap().0,
             U256::ZERO
         );
     }

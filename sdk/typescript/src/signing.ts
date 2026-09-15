@@ -29,7 +29,9 @@ export interface WithdrawalKeccak {
   encodeAbiParameters: EncodeAbiParameters;
 }
 export interface TrustedWithdrawalChain {
-  usdc: string;
+  /** The trusted contract per currency code (`USDC`, `USDT`) on this chain. */
+  tokens: Record<string, string>;
+  /** Circle's CCTP on this chain; only USDC ever bridges through it. */
   cctp: { domain: number; forwarder: string } | null;
 }
 export interface SignWithdrawalOptions {
@@ -96,6 +98,13 @@ export function assertLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLe
   if (typed.primaryType !== expectedType) throw problem(`is a ${typed.primaryType} for a ${leg.kind} leg`);
   if (!sameAddress(typed.message.from, withdrawal.wallet_address)) throw problem("is not signed from the Payday wallet");
   if (typed.domain.chainId !== Number(leg.source_chain.id)) throw problem("is under another chain's domain");
+  // A transfer leg must move funds on the chain the withdrawal settles on:
+  // the planner never puts one elsewhere, so a leg sourced from another
+  // chain — under that chain's perfectly legitimate token — would send the
+  // balance where the merchant is not.
+  if (leg.kind === "transfer" && leg.source_chain.id !== withdrawal.destination.chain.id) {
+    throw problem("moves funds on a chain the withdrawal does not settle on");
+  }
   if (typed.message.value !== leg.amount_base_units) throw problem("does not authorize the leg's amount");
   if (typed.message.validAfter !== "0") throw problem("has a non-zero validAfter");
   if (BigInt(typed.message.validBefore) <= BigInt(Math.floor(Date.now() / 1000))) {
@@ -140,10 +149,20 @@ export async function signWithdrawal(
     const typed = assertLegAuthorization(withdrawal, leg);
     const source = options.chains?.(Number(leg.source_chain.id));
     if (options.chains && !source) throw new Error(`leg ${leg.id}: source chain is not trusted`);
-    if (source && !sameAddress(typed.domain.verifyingContract, source.usdc)) {
-      throw new Error(`leg ${leg.id}: typed data is not under the trusted USDC contract`);
+    const trustedToken = source?.tokens[withdrawal.currency];
+    if (source && !trustedToken) {
+      throw new Error(`leg ${leg.id}: ${withdrawal.currency} is not trusted on the source chain`);
+    }
+    if (trustedToken && !sameAddress(typed.domain.verifyingContract, trustedToken)) {
+      throw new Error(`leg ${leg.id}: typed data is not under the trusted ${withdrawal.currency} contract`);
+    }
+    if (!sameAddress(typed.domain.verifyingContract, leg.token.address)) {
+      throw new Error(`leg ${leg.id}: typed data is not under the leg's own token`);
     }
     if (leg.kind === "bridge") {
+      if (withdrawal.currency !== "USDC") {
+        throw new Error(`leg ${leg.id}: only USDC bridges; a ${withdrawal.currency} withdrawal has no bridge leg`);
+      }
       if (!source?.cctp) throw new Error(`leg ${leg.id}: source chain has no trusted CCTP configuration`);
       if (!sameAddress(leg.authorization.forwarder ?? "", source.cctp.forwarder)) {
         throw new Error(`leg ${leg.id}: authorization names an untrusted forwarder`);

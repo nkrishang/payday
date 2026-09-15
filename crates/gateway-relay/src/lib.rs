@@ -72,15 +72,26 @@ pub struct RelayChain {
 }
 
 impl RelayChain {
-    /// Whether a payer may pay from this chain with USDC: an EVM chain
-    /// taking deposits whose solvers hold USDC.
-    pub fn usdc(&self) -> Option<&RelayCurrency> {
-        if self.vm_type != "evm" || !self.deposit_enabled || self.disabled {
+    /// Whether a payer may pay from this chain at all: an EVM chain taking
+    /// deposits.
+    pub fn accepts_deposits(&self) -> bool {
+        self.vm_type == "evm" && self.deposit_enabled && !self.disabled
+    }
+
+    /// The solver currency listed under `symbol` on a chain a payer may pay
+    /// from, if any.
+    pub fn currency(&self, symbol: &str) -> Option<&RelayCurrency> {
+        if !self.accepts_deposits() {
             return None;
         }
         self.solver_currencies
             .iter()
-            .find(|currency| currency.symbol == "USDC")
+            .find(|currency| currency.symbol == symbol)
+    }
+
+    /// Whether a payer may pay from this chain with USDC.
+    pub fn usdc(&self) -> Option<&RelayCurrency> {
+        self.currency("USDC")
     }
 }
 

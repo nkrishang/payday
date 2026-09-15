@@ -8,7 +8,7 @@ created → funded → deploying → fulfilled
    └──► expired ◄───────┘──► recovered
 ```
 
-- `created`: awaiting finalized USDC.
+- `created`: awaiting finalized funds in the request's stablecoin.
 - `funded`: finalized credit reached the amount; queued for a helper transaction.
 - `deploying`: claimed by the sweep worker; a helper transaction is in flight
   or being retried.
@@ -47,7 +47,10 @@ Note the customer-facing `status`, `received_base_units`, `attention`, and
 `address` from the response. Database queries below use the UUID portion after
 the `dr_` prefix and expose internal lifecycle names intentionally.
 
-## Step 2: Verify the USDC transfer landed on-chain
+## Step 2: Verify the transfer landed on-chain
+
+Query the request's own `token.address` (Monad's USDC below; a USDT request
+on Monad is `0xe7cd86e13AC4309349F30B3435a9d337750fC82D`):
 
 ```bash
 cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
@@ -56,10 +59,12 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 ```
 
 If the balance is 0 and `received_base_units` is 0, the payer has not sent
-USDC yet (or sent to the wrong address). The deposit request will remain in `created`
-until a transfer is detected by the indexer.
+the request's stablecoin yet (or sent to the wrong address). The deposit
+request will remain in `created` until a transfer is detected by the indexer.
+A balance in another configured stablecoin (USDC at a USDT address) is
+never credited; see [wrong-network-deposit.md](wrong-network-deposit.md).
 
-## Step 3: Stuck in `created` (USDC was sent)
+## Step 3: Stuck in `created` (the stablecoin was sent)
 
 The indexer hasn't processed the block containing the transfer yet.
 
@@ -78,8 +83,8 @@ The indexer hasn't processed the block containing the transfer yet.
    itself is wrong.
 
 4. If the indexer is running, caught up, and still not detecting the transfer,
-   verify the transfer actually exists by searching for USDC Transfer logs to
-   the deposit address:
+   verify the transfer actually exists by searching for Transfer logs from
+   the request's `token.address` to the deposit address:
 
    ```bash
    RECIPIENT_TOPIC=$(python3 -c "print('0x' + '<DEPOSIT_ADDRESS>'.lower()[2:].zfill(64))")
@@ -109,7 +114,7 @@ Possible causes:
   with fees bumped by 12.5% every `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS`, up to
   `PAYDAY_SWEEP_MAX_SUBMISSIONS` times, then pauses and raises
   `payday-indexer-sweep-paused`. See "Sweep worker paused" below.
-- **Transient item failure** (USDC paused, unknown revert): the deposit request stays
+- **Transient item failure** (token paused, unknown revert): the deposit request stays
   `deploying` with `sweep_attempts` incrementing behind exponential backoff
   (2 s doubling, capped at 5 minutes). After `PAYDAY_SWEEP_MAX_ATTEMPTS` it
   becomes `blocked` with reason `retries_exhausted`.
@@ -123,9 +128,9 @@ The worker stopped trying. `blocked_reason` is one of:
 
 | Reason | Meaning | Action |
 |--------|---------|--------|
-| `beneficiary_blacklisted` | Circle blacklisted the beneficiary | Agree a new destination with the merchant; after expiry the balance returns to the payer's wallet instead |
-| `recovery_blacklisted` | Circle blacklisted the payer's attested wallet, the address's recovery term | Only the payer can resolve this with Circle. The wallet is committed into the address, so nothing can redirect the return; contact the merchant so they can reach the payer. An exact, on-time balance never touches the recovery term, so an exact deposit still settles |
-| `payment_address_blacklisted` | Circle blacklisted the deposit address itself | Compliance escalation; nothing can move the funds |
+| `beneficiary_blacklisted` | The issuer (Circle or Tether) blacklisted the beneficiary | Agree a new destination with the merchant; after expiry the balance returns to the payer's wallet instead |
+| `recovery_blacklisted` | The issuer blacklisted the payer's attested wallet, the address's recovery term | Only the payer can resolve this with the issuer. The wallet is committed into the address, so nothing can redirect the return; contact the merchant so they can reach the payer. An exact, on-time balance never touches the recovery term, so an exact deposit still settles |
+| `payment_address_blacklisted` | The issuer blacklisted the deposit address itself | Compliance escalation; nothing can move the funds |
 | `balance_below_amount` | The chain balance is below the credited amount | Finalized history disagreed with the ledger; investigate the RPC provider before anything else |
 | `retries_exhausted` | Repeated unclassified failures | Read the receipts of the batches in `sweep_batches` for this deposit request |
 | `parameters_mismatch` | The row no longer derives its own deposit address | Database corruption or tampering; do not touch the funds until understood |

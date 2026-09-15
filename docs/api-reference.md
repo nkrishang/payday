@@ -87,7 +87,8 @@ refill one request per second. Responses include `X-RateLimit-Limit`,
 dashboard and its client do so on their own.
 
 Block numbers, log indexes, and exact base-unit amounts are decimal strings. Human
-USDC values are decimal strings with six-decimal precision. Every timestamp
+amounts are decimal strings with six-decimal precision: every supported
+stablecoin has six decimals. Every timestamp
 is RFC 3339 in UTC to the second with a `Z` suffix (`2026-09-06T12:00:00Z`),
 in API responses and webhook payloads alike, unless explicitly described as
 Unix seconds.
@@ -117,7 +118,9 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 
 | Field | Rules |
 |---|---|
-| `amount` | Required positive USDC decimal; at most six fractional digits. Used directly; nothing is summed or reconciled |
+| `amount` | Required positive decimal in the request's currency; at most six fractional digits. Used directly; nothing is summed or reconciled |
+| `currency` | Optional; `USDC` (default) or `USDT`. USDC bridges 1:1, so a USDC request may be paid on any network and withdrawn to any; USDT has no such path, so a USDT request must pin `chain_id` to a network serving USDT (`400 invalid_request` naming `chain_id` when missing). `422 unsupported_currency` when no network serves it |
+| `chain_id` | Optional decimal chain id (`"143"`) pinning the network the payer must pay on; `networks` then holds that one entry and `chain` and `token` name it from issuance. Left out, the payer chooses among every network serving the currency when they sign. `422 unsupported_chain` when the chain does not serve the currency |
 | `payout_address` | Nonzero EVM address; receives exactly `amount`. Optional when `issuer_id` names an identity with a saved payout address, whose first address is then used |
 | `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is optional when `issuer_id` is given and `payer` when `customer_id` is given: the saved record's name, email (`contact_email` for an identity), and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Payday emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
 | `payer_policy` | Required; one of the three modes below |
@@ -172,7 +175,7 @@ Recovery is not a request field: it is the payer's attested wallet, bound
 after issuance. Expiry defaults to 24 hours and must be 10 minutes to 366 days
 ahead. A first request returns `201`; an identical retry returns the original
 deposit with `200` and `Idempotency-Replayed: true`. Reuse with any changed
-immutable field — parties, amount, notes, heading, reference, metadata,
+immutable field — parties, amount, currency, notes, heading, reference, metadata,
 customer, policy mode or assertions, expiry intent, the networks offered
 (each chain with its token and factory), or the attachment's ID, length, or
 SHA-256 — returns
@@ -205,8 +208,8 @@ Returns `{ "deposit_requests": [DepositRequestSummary], "next_cursor": null | "d
 Summaries contain `id`, `deposit_url`, `heading`, `payer_name`, `reference`,
 `metadata`, `payer_policy_mode`, `customer_id`, `issuer_id`,
 `has_attachment`, `verification_completed_at`, `likely_unsolicited_at`,
-`created_at`, `updated_at`, `expires_at`, `status`, `amount`, `received`, and
-`cancellation_requested_at`: what a list needs to render and link each row
+`created_at`, `updated_at`, `expires_at`, `status`, `amount`, `received`,
+`currency`, and `cancellation_requested_at`: what a list needs to render and link each row
 without a second read.
 
 ### `GET /v1/deposit-requests/{reference}`
@@ -297,7 +300,7 @@ EIP-712 document the payer's wallet signed, its signing digest, and the
 signature), salt, the chosen chain with its factory and token (one of the
 `networks` the snapshot offered, whose entry must match), deposit and
 recovery addresses (the recovery address is the attested wallet), every
-credited USDC transfer
+credited transfer of the request's token
 into the deposit address, and `settlement_transaction_hash`: the fulfilment
 transaction that executed the `Payment` contract — the same hash the
 `DepositRequest` object reports as `settlement_tx_hash`, whether Payday's batch or a
@@ -325,9 +328,13 @@ The full deposit request response contains:
 - identity and instructions: `id`, `deposit_url`, `address`, optional
   `address_explorer_url`, `networks`, `chain`, `token`, `currency`,
   `payout_address`, `payer_wallet`, `recovery_address`, `wallet_bound_at`,
-  and `expires_at`. `networks` lists every chain the payer may pay on, each
-  as `{chain: {id, name}, token: {symbol, address, decimals}}`, in the order
-  the checkout offers them; the merchant does not choose. `chain`, `token`,
+  and `expires_at`. `currency` is `USDC` or `USDT`. `networks` lists every
+  chain the payer may pay on, each as
+  `{chain: {id, name}, token: {symbol, address, decimals}}`, in the order the
+  checkout offers them; each `token` is the currency's contract on that
+  chain and `token.symbol` is what a wallet shows there (`USDT0` for USDT on
+  Monad and Arbitrum). The merchant chooses only by pinning `chain_id`, which
+  USDT requires. `chain`, `token`,
   `address`, `payer_wallet`, `recovery_address`, and `wallet_bound_at` are
   `null` until the payer's wallet is bound, which also fixes the network:
   `chain` and `token` then name the payer's choice, and `recovery_address`
@@ -362,7 +369,9 @@ rejected.
 - `GET /v1/customers?limit=1..100&starting_after={id}` →
   `{ "customers": [Customer], "next_cursor": null | id }`;
 - `GET /v1/customers/{id}` → `Customer` plus `stats {request_count,
-  collected_base_units, pending_base_units}`; cross-account IDs are
+  totals: [{currency, request_count, collected_base_units,
+  pending_base_units}]}` — one entry per currency the customer has been
+  asked for, since totals never add across currencies; cross-account IDs are
   `404 customer_not_found`;
 - `PATCH /v1/customers/{id}` with any subset of `name`, `email`, and
   `details` → updated `Customer`. A field left out keeps its value; `email`
@@ -541,23 +550,32 @@ and retry policy.
 
 ## Withdrawals
 
-The Payday wallet's whole USDC balance, on every network, to one address.
+The Payday wallet's whole balance in one currency to one address: every
+network's USDC, or the destination network's USDT.
 Prepare, sign, submit, poll: the API snapshots the balances into legs, the
 merchant signs each leg's EIP-712 document with the wallet's key (Privy's
 `useSignTypedData` in the dashboard, or the key exported once from the
 dashboard on a server), and gateway-indexer relays. A transfer leg (funds
-already on the destination network) is one USDC `transferWithAuthorization`;
-a bridge leg is `WithdrawalForwarder.bridge` (a CCTP V2 burn) and, once
-Circle attests it, `MessageTransmitterV2.receiveMessage` on the destination.
+already on the destination network) is one EIP-3009 `transferWithAuthorization`
+on the currency's contract there (USDC or USDT0); a bridge leg, USDC only, is
+`WithdrawalForwarder.bridge` (a CCTP V2 burn) and, once Circle attests it,
+`MessageTransmitterV2.receiveMessage` on the destination. USDT has no 1:1
+bridge, so a USDT withdrawal moves the destination network's balance alone;
+USDT held on another network is withdrawn separately, to an address there.
 Payday pays gas; the signature fixes where each leg's funds may land. One
 withdrawal may be open per account. The full guide, the signer's checklist,
 and TypeScript/Rust/Go samples are on the docs site under Withdrawals.
 
 ### `POST /v1/withdrawals`
 
-`Idempotency-Key` required. Body `{"destination": {"chain_id": "8453",
-"address": "0x…"}}`. Answers `201` with the withdrawal, every leg
-`awaiting_signature` and carrying `authorization`:
+`Idempotency-Key` required. Body `{"currency": "USDC", "destination":
+{"chain_id": "8453", "address": "0x…"}}`; `currency` defaults to `USDC`, and
+the destination must serve it (`400 invalid_request` naming the chain
+otherwise). Answers `201` with the withdrawal (`currency`,
+`wallet_address`, `destination`, `legs`), every leg `awaiting_signature`,
+naming its `source_chain` and `token {symbol, address, decimals}` (the
+currency's contract the document is signed under), and carrying
+`authorization`:
 
 ```json
 {
@@ -571,13 +589,15 @@ and TypeScript/Rust/Go samples are on the docs site under Withdrawals.
 }
 ```
 
-Every `uint256` is a decimal string. A bridge leg's nonce is
+Every `uint256` is a decimal string. A USDT0 leg's domain is `{name: "USDT0"
+(Monad) or "USD₮0" (Arbitrum), version: "1"}`. A bridge leg's nonce is
 `keccak256(abi.encode(uint32 destination_domain, bytes32(mint_recipient), bytes32 salt))`;
 the forwarder recomputes it, so the signature commits to the destination. A
 bridge leg is capped by Circle's per-message burn limit: a wallet balance
 above 10,000,000 USDC on a source chain cannot be bridged in one withdrawal.
 Errors: `409 wallet_not_ready`, `409 withdrawal_in_progress`,
-`409 nothing_to_withdraw`, `409 idempotency_conflict`,
+`409 nothing_to_withdraw` (for USDT, the message names balances held on
+other networks), `409 idempotency_conflict`, `422 unsupported_currency`,
 `422 withdrawal_exceeds_bridge_limit`, `503 withdrawals_unavailable`.
 
 ### `POST /v1/withdrawals/{id}/authorizations`
@@ -631,8 +651,8 @@ The payer response discloses progressively. It always carries `id`,
 alone), `status`, `payable`, `expires_at`, `server_timestamp`,
 `settlement_tx_hash`, `settlement_explorer_url`, `payer_message`, and
 `content_unlocked`. For a `permissionless` deposit request `content_unlocked` is true
-and the response includes `networks`, `amount`, `received`, `remaining`
-(each with base units), and
+and the response includes `currency`, `networks`, `amount`, `received`,
+`remaining` (each with base units), and
 `details {amount, amount_base_units, payer, notes, reference, attachment}`.
 `chain`, `token`, `payer_wallet`, `address`, `address_explorer_url`, and
 `deposit_uri` are present only once the payer's wallet is bound on a chosen
@@ -709,8 +729,8 @@ otherwise), and binds: the chain, its token and factory, the salt, the
 recovery term (the wallet), and the deposit address are written together,
 once, and the unlocked payer deposit is returned with `chain`, `token`,
 `address`, and `payer_wallet` set. The address commits to the chain: the
-`Payment` contract refuses to settle on any other network, so USDC sent to
-it elsewhere is refused rather than lost and is returned by hand
+`Payment` contract refuses to settle on any other network, so the token sent
+to it elsewhere is refused rather than lost and is returned by hand
 (`docs/runbooks/wrong-network-deposit.md`). A request already bound
 to another wallet answers `409 wallet_already_bound` naming it; attesting
 without an outstanding challenge answers `409 wallet_challenge_required`;
@@ -719,6 +739,29 @@ a request past `created` or past its deadline answers
 
 Email routes on a `merchant_session` deposit answer
 `409 verification_method_not_applicable`: that mode sends no codes.
+
+### Paying from another network
+
+```text
+GET  /v1/payer/deposit-requests/{id}/relay/chains
+POST /v1/payer/deposit-requests/{id}/relay/quotes                  {"origin_chain_id": "8453", "origin_token": "0x…"}
+POST /v1/payer/deposit-requests/{id}/relay/quotes/{quote_id}/sent  {"transaction_hash": "0x…"}
+```
+
+Once the address exists and while the request is payable
+(`relay_available` on the payer view), the attested wallet may pay from
+another network through Relay. `chains` lists every origin network, each
+with `tokens: [{currency, symbol, address, decimals}]`, the stablecoins the
+payer may send there (USDC, and USDT where served). `quotes` takes the
+origin chain and optionally one of those addresses as `origin_token` (the
+network's USDC by default) and answers a `RelayQuote` carrying `origin`,
+`origin_token`, `amount_in` in that token, `amount_out` in the request's
+currency (exactly the amount still due), and the transactions to send from
+the wallet; Relay swaps between currencies and the payer carries the
+spread. `sent` reports the origin transaction. `404 relay_unavailable` on a
+deployment without Relay, `422 relay_unsupported_origin` for a network or
+token not offered, `502 relay_quote_failed` when Relay has no route,
+`409 relay_report_conflict` for a conflicting report.
 
 ### Merchant sessions
 
@@ -799,7 +842,7 @@ limited to 8 KiB.
 | `withdrawal_leg_not_found` | 404 | A `leg_id` that is not a leg of the withdrawal |
 | `wallet_not_ready` | 409 | The account's Payday wallet is not known yet; sign in to the dashboard once |
 | `withdrawal_in_progress` | 409 | Another withdrawal is open; finish or cancel it |
-| `nothing_to_withdraw` | 409 | The Payday wallet holds no USDC on any network |
+| `nothing_to_withdraw` | 409 | The Payday wallet holds none of the currency where this withdrawal could move it: no USDC on any network, or no USDT on the destination (the message names USDT held elsewhere) |
 | `signature_invalid` | 400 | A leg's signature is malformed or was not made by the Payday wallet; the message names the leg |
 | `leg_not_awaiting_signature` | 409 | The leg already carries another signature or has moved past signing |
 | `authorization_expired` | 409 | The leg's 24-hour authorization window passed; create a new withdrawal |
@@ -807,7 +850,12 @@ limited to 8 KiB.
 | `withdrawal_finished` | 409 | The withdrawal already completed, failed, or was cancelled |
 | `withdrawals_unavailable` | 503 | A balance could not be read, or a chain holding funds cannot bridge on this deployment |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
-| `unsupported_chain` | 422 | Wallet challenge named a chain the request does not offer |
+| `unsupported_chain` | 422 | Wallet challenge named a chain the request does not offer, or a `chain_id` pin named a chain that does not serve the request's currency |
+| `unsupported_currency` | 422 | No network on this deployment serves the requested `currency`, on a deposit request or a withdrawal |
+| `relay_unavailable` | 404 | The deployment has no Relay integration |
+| `relay_unsupported_origin` | 422 | A relay quote named a network or token `relay/chains` does not offer |
+| `relay_quote_failed` | 502 | Relay has no route for the quote |
+| `relay_report_conflict` | 409 | The reported origin transaction conflicts with an earlier report |
 | `deposit_request_not_found` | 404 | Missing or cross-account deposit request |
 | `customer_not_found` | 404 | Missing or cross-account customer |
 | `issuer_not_found` | 404 | Missing or cross-account issuer identity |

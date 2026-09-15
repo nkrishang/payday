@@ -15,11 +15,11 @@ use uuid::Uuid;
 
 use gateway_core::{
     Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
-    CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
+    Currency, CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
     DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, IssuerId,
     OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
     PayerPolicyMode, PaymentBinding, SnapshotNetwork, TransferDto, TransferListResponse,
-    TransferRelayDto, USDC_DECIMALS, parse_expiration, payer_wallet_attestation, rfc3339,
+    TransferRelayDto, parse_expiration, payer_wallet_attestation, rfc3339,
     validate_expiration_window,
 };
 use serde::Deserialize;
@@ -144,7 +144,7 @@ fn enrich_response(
             };
             Ok(TransferDto {
                 timestamp: rfc3339(timestamp),
-                amount: format_units(units, USDC_DECIMALS).unwrap_or_default(),
+                amount: format_units(units, invoice.currency().decimals()).unwrap_or_default(),
                 amount_base_units: t.amount,
                 sender: sender.to_checksum(None),
                 transaction_hash: hash.to_string(),
@@ -163,9 +163,9 @@ fn enrich_response(
         .collect::<Result<_, ApiError>>()?;
     // Freshness is per chain: an unbound request has no chain yet, so it
     // reports none.
-    let cursor = freshness.into_iter().find(|f| {
-        Some(f.chain_id) == row.chain_id && Some(&f.token_address) == row.token_address.as_ref()
-    });
+    let cursor = freshness
+        .into_iter()
+        .find(|f| Some(f.chain_id) == row.chain_id);
     response.as_of = cursor.as_ref().and_then(|cursor| {
         Some(AsOfDto {
             block: cursor.last_block.to_string(),
@@ -305,20 +305,38 @@ pub async fn create_deposit_request(
     .map_err(|error| ApiError::invalid_request(error.to_string()))?;
     let expiration_timestamp = expiration.timestamp;
 
-    // 3. The request is payable on every network this deployment offers,
-    // each with Circle's native USDC there, and the payer picks one when
-    // they sign; or on the one network the merchant pinned, in which case
-    // the payer's choice is already made. A chain this deployment does not
-    // serve is refused the way a payer's wrong chain is: 422.
-    let networks = match req.chain_id.as_deref() {
-        None => state.networks.networks(),
+    // 3. The currency: USDC unless named. One this build does not know is a
+    // malformed request; one no chain here serves is 422, like a chain.
+    let currency = match req.currency.as_deref().map(str::trim) {
+        None | Some("") => Currency::Usdc,
+        Some(code) => code
+            .parse::<Currency>()
+            .map_err(|_| ApiError::invalid_request("currency must be USDC or USDT"))?,
+    };
+    let offered = state.networks.networks(currency);
+    if offered.is_empty() {
+        return Err(ApiError::unsupported_currency(currency));
+    }
+
+    // The request is payable on every network this deployment offers the
+    // currency on, and the payer picks one when they sign; or on the one
+    // network the merchant pinned, in which case the payer's choice is
+    // already made. A currency the merchant could not later move between
+    // chains at 1:1 must be pinned: they are paid where they asked to be. A
+    // chain this deployment does not serve the currency on is refused the
+    // way a payer's wrong chain is: 422.
+    let networks = match req.chain_id.as_deref().map(str::trim) {
+        None | Some("") if currency.requires_pinned_chain() => {
+            return Err(ApiError::invalid_request(format!(
+                "chain_id is required for {currency}: it settles on one network and does not bridge, so the request must name where it is paid"
+            )));
+        }
+        None | Some("") => offered,
         Some(value) => {
-            let chain_id: u64 = value.trim().parse().map_err(|_| {
+            let chain_id: u64 = value.parse().map_err(|_| {
                 ApiError::invalid_request("chain_id must be a decimal chain id string")
             })?;
-            state
-                .networks
-                .networks()
+            offered
                 .into_iter()
                 .filter(|network| network.chain_id == ChainId(chain_id))
                 .collect::<Vec<_>>()
@@ -328,8 +346,8 @@ pub async fn create_deposit_request(
         return Err(ApiError::unsupported_chain());
     }
 
-    // 4. Parse amount using token decimals.
-    let decimals = USDC_DECIMALS;
+    // 4. Parse amount using the currency's decimals.
+    let decimals = currency.decimals();
     let amount = Amount::from_decimal_str(&req.amount, decimals)
         .map_err(|e| ApiError::invalid_amount(e.to_string()))?;
 
@@ -360,6 +378,7 @@ pub async fn create_deposit_request(
         networks.iter().map(SnapshotNetwork::from).collect();
     let requested = IssuanceRequest {
         networks: &committed_networks,
+        currency: currency.code(),
         token_decimals: decimals,
         beneficiary: beneficiary_addr.as_slice(),
         amount: amount.0,
@@ -431,6 +450,7 @@ pub async fn create_deposit_request(
         issuer.clone(),
         payer.clone(),
         payer_policy.clone(),
+        currency,
         &networks,
         beneficiary,
         amount,
@@ -441,6 +461,7 @@ pub async fn create_deposit_request(
     snapshot.reference = req.reference.clone();
     snapshot.attachment = requested.attachment.cloned();
     let invoice = Invoice::issue(
+        currency,
         &networks,
         beneficiary,
         amount,
@@ -717,6 +738,7 @@ pub async fn list_deposit_requests(
             let response = DepositRequestResponse::from_invoice(invoice, None);
             Ok(DepositRequestSummaryResponse {
                 id: response.id,
+                currency: response.currency,
                 deposit_url,
                 heading: response.heading,
                 payer_name: response.payer.name,

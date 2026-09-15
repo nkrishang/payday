@@ -18,9 +18,9 @@ const DESTINATION = "0x000000000000000000000000000000000000d00d";
 const NONCE = "0x18b79105e486e10f626b71939a0226c47316949b7c24ff1c397661ea861fafaa";
 const DIGEST = "0xfe0bcc7d9e69ee02881011f29a4156caa15e02b8e94c2e0c9f40e66711651993";
 const chains = (id) => id === 143
-  ? { usdc: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", cctp: { domain: 15, forwarder: FORWARDER } }
+  ? { tokens: { USDC: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", USDT: "0xe7cd86e13AC4309349F30B3435a9d337750fC82D" }, cctp: { domain: 15, forwarder: FORWARDER } }
   : id === 8453
-    ? { usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", cctp: { domain: 6, forwarder: "0x3333333333333333333333333333333333333333" } }
+    ? { tokens: { USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }, cctp: { domain: 6, forwarder: "0x3333333333333333333333333333333333333333" } }
     : null;
 const signingOptions = { chains, keccak: { encodeAbiParameters, keccak256 } };
 
@@ -28,6 +28,7 @@ const bridgeLeg = {
   id: "wdl_1",
   kind: "bridge",
   source_chain: { id: "143", name: "Monad", native_symbol: "MON" },
+  token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 },
   amount: "1.234567",
   amount_base_units: "1234567",
   state: "awaiting_signature",
@@ -84,6 +85,7 @@ const withdrawal = {
   id: "wd_1",
   status: "awaiting_signature",
   wallet_address: WALLET,
+  currency: "USDC",
   destination: { chain: { id: "8453", name: "Base", native_symbol: "ETH" }, address: DESTINATION },
   legs: [bridgeLeg],
   created_at: "2027-01-14T08:00:00Z",
@@ -109,6 +111,70 @@ test("assertLegAuthorization refuses a document that strays from the leg", () =>
   assert.throws(tampered((leg) => (leg.authorization.typed_data.domain.chainId = 8453)), /domain/);
   assert.throws(tampered((leg) => (leg.authorization.nonce_preimage.mint_recipient = FORWARDER)), /destination/);
   assert.throws(tampered((leg) => (leg.authorization.typed_data.message.validAfter = "1")), /validAfter/);
+});
+
+test("a transfer leg must move funds on the destination chain", () => {
+  // The same leg as a same-chain transfer on Monad while the withdrawal
+  // settles on Base: a legitimate token on a legitimate chain, but not one
+  // the withdrawal can settle through.
+  const straying = structuredClone(bridgeLeg);
+  straying.kind = "transfer";
+  straying.authorization.primary_type = "TransferWithAuthorization";
+  straying.authorization.typed_data.primaryType = "TransferWithAuthorization";
+  straying.authorization.typed_data.message.to = DESTINATION;
+  delete straying.authorization.forwarder;
+  delete straying.authorization.nonce_preimage;
+  assert.throws(
+    () => assertLegAuthorization(withdrawal, straying),
+    /does not settle on/,
+  );
+
+  // The same withdrawal as a same-chain transfer under Base's own USDC
+  // contract is a complete, signable document.
+  const matching = structuredClone(bridgeLeg);
+  matching.kind = "transfer";
+  matching.source_chain = { id: "8453", name: "Base", native_symbol: "ETH" };
+  matching.token = { symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 };
+  matching.authorization = {
+    primary_type: "TransferWithAuthorization",
+    typed_data: {
+      domain: {
+        name: "USD Coin",
+        version: "2",
+        chainId: 8453,
+        verifyingContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      },
+      primaryType: "TransferWithAuthorization",
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        TransferWithAuthorization: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      message: {
+        from: WALLET,
+        to: DESTINATION,
+        value: "1234567",
+        validAfter: "0",
+        validBefore: "1800000000",
+        nonce: `0x${"42".repeat(32)}`,
+      },
+    },
+    expires_at: "2027-01-15T08:00:00Z",
+    forwarder: null,
+    nonce_preimage: null,
+  };
+  assertLegAuthorization(withdrawal, matching);
 });
 
 test("privateKeySigner signs every awaiting leg for the wallet and checks the nonce commitment", async () => {

@@ -6,7 +6,9 @@ production networks with Circle's test USDC: Monad testnet (chain ID `10143`,
 `0xf817257fed379853cDe0fa4F97AB987181B1E5Ea`), Base Sepolia (`84532`,
 `0x036CbD53842c5426634e7929541eC2318f3dCF7e`), and Arbitrum Sepolia
 (`421614`, `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`); verify each against
-Circle's contract-address page before applying.
+Circle's contract-address page before applying. USDT is not offered in the
+sandbox: every sandbox chain lists USDC only, and a `USDT` deposit request is
+refused with `422 unsupported_currency`.
 It must have separate Auth0 resources, database, signer, alarms, and Terraform
 state; it is not a workspace layered onto production state.
 

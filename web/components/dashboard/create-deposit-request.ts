@@ -29,7 +29,9 @@ export interface DepositRequestValues {
   billDetails: string;
   amount: string;
   payoutAddress: string;
-  /** The pinned network's decimal chain id; empty leaves the choice to the payer. */
+  /** `USDC` or `USDT`. */
+  currency: string;
+  /** The pinned network's decimal chain id; empty leaves the choice to the payer (USDC only). */
   chainId: string;
   /** Hours; empty means the API's default deadline. */
   expiresInHours: string;
@@ -53,6 +55,7 @@ export const EMPTY_VALUES: DepositRequestValues = {
   billDetails: "",
   amount: "",
   payoutAddress: "",
+  currency: "USDC",
   chainId: "",
   expiresInHours: "",
   expiresAt: "",
@@ -101,6 +104,7 @@ export function buildCreateDepositRequest(
 
   return {
     amount: values.amount.trim(),
+    currency: values.currency,
     payout_address: values.payoutAddress.trim(),
     issuer: party(values.issuerName, values.issuerEmail, values.issuerDetails),
     payer: party(values.billName, values.billEmail, values.billDetails),

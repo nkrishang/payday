@@ -2,6 +2,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type DepositRequestStatus = "awaiting_deposit" | "partially_deposited" | "deposited" | "settled" | "expired" | "returned" | "needs_attention";
 
 export interface Chain { id: string; name: string; /** The gas token's symbol on this chain. */ native_symbol: string }
+/** The request's currency as one chain's contract; `symbol` is what a wallet shows there (USDT0 for USDT on Monad). */
 export interface Token { symbol: string; address: string; decimals: number }
 /** One network a deposit request can be paid on: the chain and its exact native USDC contract. */
 export interface Network { chain: Chain; token: Token }
@@ -44,6 +45,12 @@ export interface AttachmentDescriptor {
 export interface CreateDepositRequest {
   amount: string;
   /**
+   * `USDC` (the default) or `USDT`. USDT has no 1:1 bridge for the merchant,
+   * so a USDT request must pin `chain_id` to a network that serves it; the
+   * payer may still pay it from another network through Relay.
+   */
+  currency?: string;
+  /**
    * Where exactly `amount` settles. May be left out when `issuer_id` names an
    * identity with a saved payout address: its first one is used.
    */
@@ -51,8 +58,8 @@ export interface CreateDepositRequest {
   /**
    * Pin the network the payer must pay on: one of the deployment's chain ids
    * as a decimal string (`"143"`). Left out, the payer chooses among every
-   * network when they sign. A chain Payday does not serve is refused with
-   * `422 unsupported_chain`.
+   * network serving the currency when they sign; required for USDT. A chain
+   * Payday does not serve the currency on is refused with `422 unsupported_chain`.
    */
   chain_id?: string;
   /**
@@ -305,6 +312,8 @@ export interface PayerDepositRequest {
   /** Safety guidance shown only when payout needs operator attention. */
   payer_message: string | null;
   content_unlocked: boolean;
+  /** The request's currency (`USDC`, `USDT`); null while locked. */
+  currency: string | null;
   /** The networks the payer may choose from; null while locked. One entry when pinned. */
   networks: Network[] | null;
   /**
@@ -336,14 +345,24 @@ export interface PayerDepositRequest {
   relay: PayerRelayIntent | null;
 }
 
-/** A network a payer may pay from through Relay, with its USDC. */
+/** A stablecoin a payer may send from a Relay origin network. */
+export interface RelayOriginToken {
+  /** `USDC` or `USDT`. */
+  currency: string;
+  /** The contract's own symbol, as the payer's wallet shows it. */
+  symbol: string;
+  address: string;
+  decimals: number;
+}
+
+/** A network a payer may pay from through Relay, with the stablecoins they may send there. */
 export interface RelayOriginChain {
   /** Decimal chain id. */
   chain_id: string;
   name: string;
   native_symbol: string | null;
-  /** USDC on that network: what the payer sends. */
-  usdc_address: string;
+  /** What the payer may send from this network; Relay swaps it into the request's currency. At least one entry. */
+  tokens: RelayOriginToken[];
   explorer_url: string | null;
   icon_url: string | null;
   /** A public RPC, so a wallet that lacks the network can be asked to add it. */
@@ -384,6 +403,9 @@ export interface RelayQuote {
   id: string;
   request_id: string;
   origin: RelayOriginChain;
+  /** The stablecoin the payer sends on the origin network. */
+  origin_token: RelayOriginToken;
+  /** What the payer sends, in `origin_token`. */
   amount_in: string;
   amount_in_base_units: string;
   amount_out: string;
@@ -453,6 +475,8 @@ export interface DepositRequestSummary {
   status: DepositRequestStatus;
   amount: string;
   received: string;
+  /** `USDC` or `USDT`. */
+  currency: string;
   cancellation_requested_at: string | null;
 }
 /** Verification is a separate fact from the deposit request's status, so it filters separately. */
@@ -548,11 +572,17 @@ export interface CreateCustomer { name: string; email?: string; details?: string
 export interface UpdateCustomer { name?: string; email?: string | null; details?: string | null }
 export interface ListCustomersParams { starting_after?: string; limit?: number }
 export interface CustomerPage { customers: Customer[]; next_cursor: string | null }
-/** Base units, like a deposit request's own `amount_base_units` — scale for display. */
-export interface CustomerStats {
+/** One currency's totals: base units, like a deposit request's own `amount_base_units`, scaled for display by that currency's decimals. */
+export interface CustomerCurrencyTotal {
+  currency: string;
   request_count: number;
   collected_base_units: string;
   pending_base_units: string;
+}
+/** Totals never add across currencies, so there is one entry per currency the customer has been asked for. */
+export interface CustomerStats {
+  request_count: number;
+  totals: CustomerCurrencyTotal[];
 }
 /** Only `customers.get` carries stats; a list of many would mean one aggregate query per row. */
 export interface CustomerDetail extends Customer {
@@ -576,10 +606,14 @@ export interface AttachmentCommitment { id: string; byte_length: string; sha256:
  * attestation rather than through this document.
  */
 export interface CanonicalIssuanceSnapshot {
-  schema: "payday.invoice.v3";
+  schema: "payday.invoice.v4";
   canonicalization: "RFC8785";
   issuer: Party;
   bill_to: Party;
+  /** The currency's wire code (`USDC`, `USDT`); every network below is that currency's contract on its chain. */
+  currency: string;
+  /** Decimal: base units per whole unit, so `amount_base_units` reads without a registry. */
+  decimals: string;
   amount_base_units: string;
   notes: string | null;
   heading: string | null;
@@ -902,7 +936,7 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 
 // --- Withdrawals ---
 
-/** EIP-712 typed data for one withdrawal leg: an EIP-3009 authorization under the source chain's USDC. Every `uint256` is a decimal string. */
+/** EIP-712 typed data for one withdrawal leg: an EIP-3009 authorization under the source chain's token contract. Every `uint256` is a decimal string. */
 export interface WithdrawalTypedData {
   domain: { name: string; version: string; chainId: number; verifyingContract: string };
   primaryType: "TransferWithAuthorization" | "ReceiveWithAuthorization";
@@ -955,6 +989,8 @@ export interface WithdrawalLeg {
   /** `transfer` when the funds already sit on the destination chain, `bridge` when they cross through CCTP. */
   kind: "transfer" | "bridge";
   source_chain: Chain;
+  /** The contract the leg is signed under: the withdrawal's currency on the source network. */
+  token: Token;
   amount: string;
   amount_base_units: string;
   state: WithdrawalLegState;
@@ -972,8 +1008,10 @@ export interface Withdrawal {
   status: WithdrawalStatus;
   /** The Payday wallet every leg is signed from. */
   wallet_address: string;
+  /** `USDC` or `USDT`: what every leg moves. */
+  currency: string;
   destination: { chain: Chain; address: string };
-  /** One per network the wallet held USDC on when the withdrawal was created. */
+  /** One per network the withdrawal moves the currency from: every network holding USDC, the destination alone for USDT. */
   legs: WithdrawalLeg[];
   created_at: string;
   completed_at: string | null;
@@ -987,8 +1025,10 @@ export interface WithdrawalPage {
 }
 
 export interface CreateWithdrawal {
+  /** `USDC` (the default) or `USDT`. */
+  currency?: string;
   destination: {
-    /** Decimal chain id of one of the deployment's networks. */
+    /** Decimal chain id of one of the deployment's networks serving the currency. */
     chain_id: string;
     address: string;
   };
@@ -1248,10 +1288,10 @@ export class PaydayClient {
   };
 
   /**
-   * Withdrawals: the Payday wallet's whole USDC balance, on every network,
-   * to one address. Prepare, sign, submit, poll. `create` snapshots the
-   * balances into legs, each carrying the EIP-712 document to sign under
-   * that chain's USDC (an EIP-3009 authorization); nothing moves until it is
+   * Withdrawals: the Payday wallet's whole balance in one currency to one
+   * address. Prepare, sign, submit, poll. `create` snapshots the balances
+   * into legs, each carrying the EIP-712 document to sign under that
+   * chain's token contract (an EIP-3009 authorization); nothing moves until it is
    * signed. Sign with `@payday/sdk/signing` or any EIP-712 signer holding
    * the wallet's key, then `authorize`. Payday relays and pays gas; the
    * signature itself fixes where the funds may land. One withdrawal may be
@@ -1438,21 +1478,27 @@ export class PaydayPayerClient {
    * `410 deposit_request_not_payable` afterwards.
    */
   readonly relay = {
-    /** The networks USDC may be paid from: every one Relay takes deposits on, except the request's own. */
+    /** The networks a payer may pay from, and the stablecoins they may send on each: every one Relay takes deposits on that Payday serves, except the request's own. */
     chains: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayOriginChains> =>
       request<RelayOriginChains>(
         this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/chains`,
         payerOptions(options),
       ),
     /**
-     * A quote from `originChainId`'s USDC. Answers `422 relay_unsupported_origin`
-     * for a network not offered and `502 relay_quote_failed` when Relay has no
-     * route; ask again after `expires_at`.
+     * A quote from `originToken` on `originChainId` (the network's USDC when no
+     * token is given): one of the addresses `chains` offers there, swapped by
+     * Relay into the request's currency. Answers `422 relay_unsupported_origin`
+     * for a network or token not offered and `502 relay_quote_failed` when
+     * Relay has no route; ask again after `expires_at`.
      */
-    quote: (id: string, originChainId: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayQuote> =>
+    quote: (id: string, originChainId: string, options: { originToken?: string; signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayQuote> =>
       request<RelayQuote>(
         this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/quotes`,
-        { method: "POST", body: { origin_chain_id: originChainId }, ...payerOptions(options) },
+        {
+          method: "POST",
+          body: { origin_chain_id: originChainId, ...(options.originToken ? { origin_token: options.originToken } : {}) },
+          ...payerOptions(options),
+        },
       ),
     /**
      * The wallet sent the quote's deposit: report its hash. Late and repeated

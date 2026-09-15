@@ -7,8 +7,8 @@ the funds that answer it.
 
 A **deposit request** is the document a merchant issues: an issuer and a payer party
 (name, optional email, optional free-text details), one amount specified
-directly, optional notes, heading, reference, and metadata, a payer policy,
-and at most one PDF attachment. A **deposit** is the on-chain fulfilment of
+directly in one currency, optional notes, heading, reference, and metadata,
+a payer policy, and at most one PDF attachment. A **deposit** is the on-chain fulfilment of
 that deposit request — the virtual account, the transfers that reach it, and its
 settlement. The API, the dashboard, and this documentation use the same two words: deposit
 request for the document, deposit for the funds.
@@ -20,12 +20,29 @@ snapshot: changing the amount, parties, policy, or attachment means cancelling
 and reissuing. A `customer` is a reusable counterparty record that can supply
 defaults; each deposit request still stores its own `payer` snapshot.
 
+## Currency
+
+A deposit request is denominated in exactly one `currency`: `USDC` (the
+default) or `USDT`. Each network in `networks` lists the currency's canonical
+contract there as `token`; `token.symbol` is what a wallet shows, so a USDT
+request on Monad or Arbitrum One shows `USDT0`, Tether's omnichain USDT on
+those chains (backed 1:1 by USDT locked on Ethereum). Every supported
+stablecoin has six decimals.
+
+The rule behind the two models is that Payday never gives a merchant a rate
+worse than 1:1. USDC bridges through CCTP at 1:1, so a USDC request may be
+paid on any supported network and withdrawn to any. USDT has no such path, so
+a USDT request must pin `chain_id` to a network that serves USDT — Monad or
+Arbitrum One; Base carries USDC only — and a USDT withdrawal moves that
+network's balance alone. A payer may still pay a USDT request from another
+network through Relay; Relay swaps, and the payer carries the spread.
+
 ## One deposit request, one virtual account, one payer wallet
 
 Every Payday deposit request receives a unique EVM address once its payer has attested
 the wallet they will pay from. The address is *counterfactual*: Payday
-calculates it before deploying the deposit contract, so the payer can send USDC
-to it as soon as it exists. Until the payer's wallet is bound, the deposit request has
+calculates it before deploying the deposit contract, so the payer can send the
+request's stablecoin to it as soon as it exists. Until the payer's wallet is bound, the deposit request has
 no address at all (`address` is null), because the address commits to that
 wallet.
 
@@ -91,8 +108,8 @@ and the transfers from that wallet are anyone's to recompute.
 
 | Status | Meaning |
 |---|---|
-| `awaiting_deposit` | No finalized, on-time USDC has been credited. |
-| `partially_deposited` | Some finalized USDC is credited, but less than the requested amount. |
+| `awaiting_deposit` | No finalized, on-time transfer of the request's token has been credited. |
+| `partially_deposited` | Some finalized funds are credited, but less than the requested amount. |
 | `deposited` | Finalized credits reached the amount; settlement is queued or pending finality. |
 | `settled` | Exactly the requested amount reached the payout address at on-time execution; any remainder went back to the payer's wallet. |
 | `expired` | The deadline passed before successful settlement; the return to the payer's wallet is pending. |
@@ -108,8 +125,9 @@ settlement terms. A transfer sent afterward is still detected and routed.
 
 ## Finality and freshness
 
-Payday credits only finalized transfers from the configured Circle-issued
-native USDC contract. A wallet may display a submitted, included, or confirmed
+Payday credits only finalized transfers from the request's `token.address`:
+the canonical contract of its currency on the chosen chain (Circle's native
+USDC, or Tether's USDT0). A wallet may display a submitted, included, or confirmed
 transaction before `received` changes. There is intentionally no privileged
 “mark deposited” endpoint.
 
@@ -139,7 +157,7 @@ whether a transfer and eventual execution are on time.
 | Partial total remains short at expiry | The complete balance goes back to the payer's wallet after expiry. |
 | More than requested is present at on-time execution | Payout receives exactly the requested amount; the remainder goes back to the payer's wallet. |
 | Execution occurs after the deadline | The complete balance goes back to the payer's wallet, even if the requested amount arrived earlier. |
-| USDC arrives after execution | It is forwarded to the payer's wallet and does not repeat the payout. |
+| Funds arrive after execution | They are forwarded to the payer's wallet and do not repeat the payout. |
 
 Execution at the exact expiration timestamp is on time; a later block timestamp
 is expired. Leave room for inclusion, finality, and sweeping rather than paying
@@ -157,12 +175,13 @@ attested wallet, not the sending one.
 ## Proof of Payment
 
 A settled deposit request can be exported as a Proof of Payment (`payday.proof.v4`):
-the canonical issuance snapshot (which lists every network the request
-offered, each with its USDC contract and factory), the canonicalization
+the canonical issuance snapshot (`payday.invoice.v4`, which names the
+currency and its decimals and lists every network the request offered, each
+with the currency's contract and factory), the canonicalization
 version, the attribution hash, the payer's wallet attestation (the exact
 EIP-712 document the wallet signed, its digest, and the signature), the salt,
 the chain the payer chose with its factory and token, the deposit and
-recovery addresses, the credited USDC transfers, the fulfilment
+recovery addresses, the credited transfers, the fulfilment
 transaction that executed the deposit contract, the attachment's hash, and a
 Payday-signed attestation of the verification facts. From it anyone —
 merchant, payer, or auditor — can recompute the hash, verify the wallet
@@ -191,17 +210,21 @@ stand behind. The proof is available to the merchant
 
 ## Safety boundaries
 
-- Only the exact `token.address` on the chosen `chain.id` is monitored.
-  Bridged USDC, look-alike tokens, and native gas do not count and may be
-  unrecoverable. The address commits to its chain: on any other supported
-  network the contract refuses to settle, and the funds are returned to the
-  payer's wallet by hand (`runbooks/wrong-network-deposit.md`).
+- Only the exact `token.address` on the chosen `chain.id` is credited.
+  Bridged wrappers, look-alike tokens, and native gas do not count and may be
+  unrecoverable. A transfer of another Payday-served stablecoin (USDC to a
+  USDT address, say) is observed but never credited; it stays at the address
+  and `recover(address)` on the deployed contract returns it to the payer's
+  wallet. The address commits to its chain: on any other supported network
+  the contract refuses to settle, and the funds are returned to the payer's
+  wallet by hand (`runbooks/wrong-network-deposit.md`).
 - A deposit link grants read access to the deposit page. Share it with the
   payer. It never exposes merchant data or policy assertions.
 - `needs_attention` pauses automatic settlement and recovery, including later
   transfers, until an operator safely resolves and releases the deposit request.
-- Amounts have six USDC decimals. Use decimal or integer arithmetic, never
-  binary floating point; exact base-unit fields are provided on the API.
+- Every supported stablecoin has six decimals. Use decimal or integer
+  arithmetic, never binary floating point; exact base-unit fields are
+  provided on the API.
 
 See [Deposit safety](deposit-safety.md) for payer-facing instructions and the
 [FAQ](faq.md) for operational decisions.

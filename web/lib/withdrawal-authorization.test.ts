@@ -52,6 +52,7 @@ const LEG: WithdrawalLeg = {
   id: "wdl_1",
   kind: "bridge",
   source_chain: { id: "143", name: "Monad", native_symbol: "MON" },
+  token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 },
   amount: "1.234567",
   amount_base_units: "1234567",
   state: "awaiting_signature",
@@ -72,6 +73,7 @@ const WITHDRAWAL: Withdrawal = {
   id: "wd_1",
   status: "awaiting_signature",
   wallet_address: "0x1111111111111111111111111111111111111111",
+  currency: "USDC",
   destination: { chain: { id: "8453", name: "Base", native_symbol: "ETH" }, address: DESTINATION },
   legs: [LEG],
   created_at: "2027-01-14T08:00:00Z",
@@ -109,6 +111,28 @@ describe("withdrawalAuthorizationDefinition", () => {
 describe("checkLegAuthorization", () => {
   it("accepts the document the API describes", () => {
     expect(checkLegAuthorization(WITHDRAWAL, LEG)).toBeNull();
+  });
+
+  it("refuses a transfer leg that moves funds on another chain", () => {
+    // The same leg as a same-chain transfer on Monad while the withdrawal
+    // settles on Base: a legitimate token on a legitimate chain, but not
+    // one the withdrawal can settle through.
+    const straying: WithdrawalLeg = {
+      ...LEG,
+      kind: "transfer",
+      authorization: {
+        ...LEG.authorization!,
+        primary_type: "TransferWithAuthorization",
+        typed_data: {
+          ...TYPED,
+          primaryType: "TransferWithAuthorization",
+          message: { ...TYPED.message, to: DESTINATION },
+        },
+        forwarder: null,
+        nonce_preimage: null,
+      },
+    };
+    expect(checkLegAuthorization(WITHDRAWAL, straying)).toMatch(/does not settle on/);
   });
 
   it("names what strayed", () => {

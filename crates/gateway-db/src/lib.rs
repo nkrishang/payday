@@ -24,7 +24,7 @@ pub use attachments::{
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
 pub use invoices::{
-    BindPayerWallet, CreateInvoiceInput, CustomerInvoiceStats, DbIndexerFreshness, DbInvoice,
+    BindPayerWallet, CreateInvoiceInput, CustomerCurrencyStats, DbIndexerFreshness, DbInvoice,
     DbInvoiceError, DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError,
     InvoiceRepository, IssuanceRequest, PaymentObservation, RangeOutcome, ReleasePaymentError,
     WatchFingerprint, same_issuance,

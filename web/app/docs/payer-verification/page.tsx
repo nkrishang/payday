@@ -161,7 +161,7 @@ export default function PayerVerificationPage() {
             { from: 1, to: 2, label: "exchange client_secret", note: "spent on first use" },
             { from: 2, to: 1, label: "payer_session, page unlocked", reply: true, accent: "green" },
             { from: 1, to: 2, label: "wallet challenge → sign → attest" },
-            { from: 1, to: 2, label: "USDC transfer to the address", accent: "yellow" },
+            { from: 1, to: 2, label: "transfer to the address", accent: "yellow" },
             {
               from: 2,
               to: 0,

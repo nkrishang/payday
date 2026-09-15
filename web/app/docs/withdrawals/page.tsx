@@ -20,7 +20,7 @@ import { config } from "@/lib/config";
 export const metadata: Metadata = {
   title: "Withdrawals",
   description:
-    "Move the Payday wallet's USDC, on every network, to one address: from the dashboard, or from your own server with the wallet key.",
+    "Move the Payday wallet's USDC or USDT to one address: from the dashboard, or from your own server with the wallet key.",
 };
 
 const EXPORT_NOTE = `PAYDAY_WALLET_KEY=0x…   # exported once from the dashboard; store it in a secret manager`;
@@ -31,7 +31,7 @@ export default function WithdrawalsPage() {
     <DocsPage
       eyebrow="Using Payday"
       title="Withdrawals"
-      lead="Deposits settle to the Payday wallet on whichever network the payer chose. A withdrawal moves everything it holds, on every network, to one address you name, with nothing deducted. Payday relays and pays the gas; your signature decides where each leg's funds may land."
+      lead="Deposits settle to the Payday wallet on whichever network the payer chose. A withdrawal moves everything it holds in one currency to one address you name, with nothing deducted: USDC from every network at once, USDT from the destination network alone. Payday relays and pays the gas; your signature decides where each leg's funds may land."
     >
       <H2 id="how">How a withdrawal works</H2>
       <p>
@@ -42,13 +42,16 @@ export default function WithdrawalsPage() {
       </p>
       <Steps>
         <Step title="Prepare">
-          <code>POST /v1/withdrawals</code> reads the wallet&apos;s USDC on every network and
-          answers with one <em>leg</em> per network that holds any. A leg is a <code>transfer</code>{" "}
-          when the funds already sit on the destination network, and a <code>bridge</code> when
-          they cross through Circle&apos;s CCTP. Each leg carries the EIP-712 document to sign.
+          <code>POST /v1/withdrawals</code> names a <code>currency</code> (USDC by default) and a
+          destination. For USDC it reads the wallet&apos;s balance on every network and answers
+          with one <em>leg</em> per network that holds any: a <code>transfer</code> when the funds
+          already sit on the destination network, a <code>bridge</code> when they cross through
+          Circle&apos;s CCTP. For USDT it answers with one transfer leg, on the destination network.
+          Each leg names its <code>token</code> and carries the EIP-712 document to sign.
         </Step>
         <Step title="Sign">
-          The document is an EIP-3009 authorization under that network&apos;s USDC contract:{" "}
+          The document is an EIP-3009 authorization under the leg&apos;s token, the currency&apos;s
+          contract on that network:{" "}
           <code>TransferWithAuthorization</code> naming your destination as the payee, or{" "}
           <code>ReceiveWithAuthorization</code> naming Payday&apos;s <code>WithdrawalForwarder</code>{" "}
           as the payee with a nonce that commits to your destination. The dashboard signs with
@@ -64,8 +67,9 @@ export default function WithdrawalsPage() {
         </Step>
       </Steps>
       <Callout title="Why the relayer cannot redirect anything">
-        USDC&apos;s <code>transferWithAuthorization</code> pays exactly the payee in the signature.
-        The forwarder is the payee of a bridge leg, and USDC only lets the payee itself submit a{" "}
+        EIP-3009&apos;s <code>transferWithAuthorization</code> pays exactly the payee in the
+        signature. The forwarder is the payee of a bridge leg, and USDC only lets the payee itself
+        submit a{" "}
         <code>receiveWithAuthorization</code>; the forwarder then calls CCTP with the recipient
         it was told, after recomputing the authorization&apos;s nonce from that recipient. Told a
         different recipient, it computes a nonce you never signed, and the token reverts before
@@ -111,13 +115,36 @@ export default function WithdrawalsPage() {
         bridging it. The dashboard and API refuse an oversized bridge leg.
       </Callout>
 
+      <H2 id="only-usdc-bridges">Only USDC bridges</H2>
+      <p>
+        Payday never gives you a rate worse than 1:1, and CCTP is the one bridge that holds to it.
+        So bridge legs exist for USDC alone, and Circle&apos;s per-message limit applies to them
+        alone. A USDT withdrawal is one <code>transfer</code> leg on the destination network, which
+        must serve USDT (Monad or Arbitrum One; <code>400 invalid_request</code> otherwise); USDT
+        on another network is withdrawn separately, to an address on that network, and{" "}
+        <code>409 nothing_to_withdraw</code> names those networks when the destination holds none.
+      </p>
+      <p>
+        A leg&apos;s document is signed under its <code>token</code>. The EIP-712 domain of a USDT0
+        leg is <code>name = &quot;USDT0&quot;</code> on Monad or <code>&quot;USD₮0&quot;</code> on
+        Arbitrum One with <code>version = &quot;1&quot;</code>; USDC stays{" "}
+        <code>&quot;USDC&quot;</code> on Monad or <code>&quot;USD Coin&quot;</code> elsewhere with{" "}
+        <code>version = &quot;2&quot;</code>. Read the domain from the leg rather than hard-coding
+        it, but check its <code>verifyingContract</code> against your own registry: the SDK
+        signer&apos;s trusted registry is{" "}
+        <code>{`{ tokens: { USDC: address, USDT?: address }, cctp }`}</code> per chain, it checks
+        every leg against the entry for the withdrawal&apos;s currency, and it refuses a bridge leg
+        for any currency but USDC.
+      </p>
+
       <H2 id="dashboard">From the dashboard</H2>
       <p>
         The <Link href="/docs/dashboard#account-and-api-key">Account section</Link> shows the
-        wallet&apos;s balance on each network and a <strong>Withdraw</strong> control beneath
-        them. Pick the destination network, enter the address, review the legs, and sign once per
-        network. The page checks each document against its leg before it asks the wallet, then
-        tracks every leg until it lands; you can leave while a bridge waits for Circle.
+        wallet&apos;s balance in each stablecoin on each network and a <strong>Withdraw</strong>{" "}
+        control beneath them. Pick the currency, then the destination network among those serving
+        it, enter the address, review the legs, and sign once per leg. The page checks each
+        document against its leg before it asks the wallet, then tracks every leg until it lands;
+        you can leave while a bridge waits for Circle.
       </p>
 
       <H2 id="server">From your server</H2>

@@ -184,13 +184,13 @@ function Svg({
   );
 }
 
-/** One deposit, end to end: who does what, and where the USDC goes. */
+/** One deposit, end to end: who does what, and where the funds go. */
 export function DepositFlowDiagram() {
   return (
     <Svg
       viewBox="0 0 960 330"
       minWidth={760}
-      label="A deposit from creation to settlement: your server creates a request, the payer opens the link and attests a wallet, the one-time address receives USDC, and Payday settles exactly the amount to your wallet while any remainder returns to the payer."
+      label="A deposit from creation to settlement: your server creates a request, the payer opens the link and attests a wallet, the one-time address receives the funds, and Payday settles exactly the amount to your wallet while any remainder returns to the payer."
     >
       {/* Row one: issuing and opening. */}
       <Node x={20} y={40} w={170} title="Your server" subtitle="or the dashboard" />
@@ -241,7 +241,7 @@ export function DepositFlowDiagram() {
         fill="var(--muted)"
         fontFamily="var(--font-mono)"
       >
-        USDC, from the attested wallet
+        the currency, from the attested wallet
       </text>
 
       {/* Row two: detection and settlement. */}
@@ -346,7 +346,7 @@ export function LifecycleDiagram() {
           [190, row + 28],
           [290, row + 28],
         ]}
-        label="some USDC"
+        label="some funds"
       />
       <Node x={290} y={row} w={190} title="partially_deposited" mono accent="blue" />
       <Arrow
@@ -671,9 +671,9 @@ export function IndexerDiagram() {
     <Svg
       viewBox="0 0 960 230"
       minWidth={760}
-      label="Payday reads finalized USDC transfer logs from the chain into a durable ledger, updates each deposit request's state from that ledger, and queues eligible requests for one settlement transaction that moves the funds under the address's own terms."
+      label="Payday reads finalized transfer logs from the chain into a durable ledger, updates each deposit request's state from that ledger, and queues eligible requests for one settlement transaction that moves the funds under the address's own terms."
     >
-      <Node x={20} y={40} w={160} title="Chain" subtitle="USDC Transfer logs" />
+      <Node x={20} y={40} w={160} title="Chain" subtitle="Transfer logs" />
       <Arrow
         points={[
           [180, 68],

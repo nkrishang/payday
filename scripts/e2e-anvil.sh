@@ -20,6 +20,7 @@ API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
 FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
 BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
 USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
+USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
 # Anvil account #0: deploys the fixtures, is the first sweep signer, and
 # sends the manual wrong-chain recovery below. Mnemonic accounts #10 and #11
 # (both Anvils start with twelve accounts) complete the signer pool, so the
@@ -211,7 +212,7 @@ tag_object_scanned() {
 # running chain. Finality is per chain so the second local chain exercises
 # the L2-shaped path (`latest` plus confirmations).
 chain_entry() {
-  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 factory_code sweeper_code
+  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 tokens=$5 factory_code sweeper_code
   factory_code="$(cast code "$FACTORY" --rpc-url "$rpc_url")"
   sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$rpc_url")"
   [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
@@ -222,13 +223,13 @@ chain_entry() {
     echo "no code at BatchSweeper $BATCH_SWEEPER on chain $chain_id; the bootstrap did not deploy it" >&2
     return 1
   }
-  jq -cn --argjson chain_id "$chain_id" --arg usdc "$USDC" --arg factory "$FACTORY" \
+  jq -cn --argjson chain_id "$chain_id" --argjson tokens "$tokens" --arg factory "$FACTORY" \
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
     --argjson confirmations "$confirmations" \
-    '{chain_id: $chain_id, usdc: $usdc, factory: $factory, batch_sweeper: $sweeper,
+    '{chain_id: $chain_id, tokens: $tokens, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
-      usdc_start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
+      start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
       block_time_ms: 1000, log_range_size: 100}'
 }
 
@@ -237,8 +238,12 @@ chain_entry() {
 # the registry is built from the freshly bootstrapped chains.
 build_chain_registry() {
   local first second
-  first="$(chain_entry "$CHAIN_ID" "$RPC_URL" finalized 0)"
-  second="$(chain_entry "$SECOND_CHAIN_ID" "$SECOND_RPC_URL" latest 2)"
+  # The first chain serves USDC and USDT, the second USDC alone, so a USDT
+  # request pins the first and the second stands for a chain without it.
+  first="$(chain_entry "$CHAIN_ID" "$RPC_URL" finalized 0 \
+    "$(jq -cn --arg usdc "$USDC" --arg usdt "$USDT" '[{currency: "USDC", address: $usdc}, {currency: "USDT", address: $usdt}]')")"
+  second="$(chain_entry "$SECOND_CHAIN_ID" "$SECOND_RPC_URL" latest 2 \
+    "$(jq -cn --arg usdc "$USDC" '[{currency: "USDC", address: $usdc}]')")"
   PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
   export PAYDAY_CHAINS
 }
@@ -248,7 +253,7 @@ build_chain_registry() {
 # re-read after the binding, as an integration polling for `address` would.
 create_invoice() {
   local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 issued id
-  issued="$(issue_invoice "$amount" "$beneficiary" "$expires_in" "$idempotency_key")"
+  issued="$(issue_invoice "$amount" "$beneficiary" "$expires_in" "$idempotency_key" "${5:-}" "${6:-}")"
   id="$(jq -er .id <<<"$issued")"
   if [[ "$(jq -r .address <<<"$issued")" == null ]]; then
     bind_payer_wallet "$id" >/dev/null
@@ -257,12 +262,16 @@ create_invoice() {
 }
 
 # Issue only: no address until a payer binds a wallet. A fifth argument pins
-# the network the merchant wants the deposit on.
+# the network the merchant wants the deposit on; a sixth names the currency
+# (USDC unless given).
 issue_invoice() {
-  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 chain_id=${5:-} body
+  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 chain_id=${5:-} currency=${6:-} body
   body="$(invoice_body "$amount" "$beneficiary" "$expires_in")"
   if [[ -n "$chain_id" ]]; then
     body="$(jq -c --arg chain "$chain_id" '. + {chain_id: $chain}' <<<"$body")"
+  fi
+  if [[ -n "$currency" ]]; then
+    body="$(jq -c --arg currency "$currency" '. + {currency: $currency}' <<<"$body")"
   fi
   curl --fail --silent \
     --header "Authorization: Bearer $PAYDAY_API_KEY" \
@@ -354,6 +363,15 @@ send_usdc() {
   local rpc_url=${3:-$RPC_URL}
   cast send "$USDC" 'transfer(address,uint256)' "$1" "$2" \
     --private-key "$PAYER_KEY" --rpc-url "$rpc_url" >/dev/null
+}
+
+usdt_balance() {
+  cast call "$USDT" 'balanceOf(address)(uint256)' "$1" --rpc-url "$RPC_URL" | awk '{print $1}'
+}
+
+send_usdt() {
+  cast send "$USDT" 'transfer(address,uint256)' "$1" "$2" \
+    --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
 }
 
 set_paused() {
@@ -533,7 +551,7 @@ echo "Starting the Relay stand-in"
 RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
 export PAYDAY_RELAY_URL="${PAYDAY_RELAY_URL:-http://127.0.0.1:4020}"
 export PAYDAY_RELAY_API_KEY="local"
-RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \
+RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \
   node scripts/relay-stub.mjs >"$logs/relay-stub.log" 2>&1 &
 relay_stub_pid=$!
 pids+=("$relay_stub_pid")
@@ -545,8 +563,9 @@ curl --fail --silent --output /dev/null --header "x-api-key: $PAYDAY_RELAY_API_K
   echo "the Relay stand-in did not become ready" >&2
   exit 1
 }
-# The solver fills from its own USDC on the destination chain.
+# The solver fills from its own USDC and USDT on the destination chain.
 send_usdc "$RELAY_SOLVER" 100000000
+send_usdt "$RELAY_SOLVER" 100000000
 
 echo "Starting gateway services"
 ./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
@@ -560,7 +579,10 @@ curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known
   echo "development identity provider did not become ready" >&2
   exit 1
 }
-./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
+# The suite makes hundreds of API calls in a few minutes, well past a
+# production account's allowance; the scenario asserts on 429s only where the
+# limiter is the subject, so open the bucket up rather than pace every read.
+PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
@@ -608,7 +630,7 @@ exact_issued="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_
 exact_id="$(jq -er .id <<<"$exact_issued")"
 assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request already has an address"
 assert_eq null "$(jq -r .payer_wallet <<<"$exact_issued")" "a freshly issued request already names a payer wallet"
-assert_eq 3 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
+assert_eq 4 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
 # No network until the payer chooses; the offer lists both local chains.
 assert_eq null "$(jq -r .chain <<<"$exact_issued")" "a freshly issued request already names a chain"
 assert_eq "$CHAIN_ID $SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$exact_issued")" \
@@ -1151,7 +1173,7 @@ documented_id="$(jq -er .id <<<"$documented")"
 assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
   "issued invoice does not carry the attachment commitment"
 assert_eq "$customer_id" "$(jq -r .customer_id <<<"$documented")" "issued invoice lost its customer"
-assert_eq 3 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
+assert_eq 4 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
 descriptor="$(api_json GET "/v1/deposit-requests/$documented_id/attachment")"
 downloaded="$logs/downloaded.pdf"
 curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"
@@ -1389,6 +1411,109 @@ sleep 1.2
 empty_withdrawal="$(merchant_curl POST /v1/withdrawals "$withdrawal_body" --header "Idempotency-Key: withdrawal-empty-$run_id")"
 assert_eq nothing_to_withdraw "$(jq -r .error.code <<<"$empty_withdrawal")" \
   "an empty wallet produced a withdrawal"
+
+echo "Testing USDT: pinned issuance, the wrong asset at an address, and settlement"
+# USDT has no 1:1 bridge for the merchant, so a request in it names the chain
+# it settles on, and only a chain listing USDT will do (the second local
+# chain serves USDC alone).
+usdt_body="$(jq -c '. + {currency: "USDT"}' <<<"$(invoice_body 2 "$BENEFICIARY_EXACT" 3600)")"
+usdt_unpinned="$(merchant_curl POST /v1/deposit-requests "$usdt_body" --header "Idempotency-Key: usdt-unpinned-$run_id")"
+assert_eq invalid_request "$(jq -r .error.code <<<"$usdt_unpinned")" "an unpinned USDT request was issued"
+usdt_elsewhere="$(merchant_curl POST /v1/deposit-requests \
+  "$(jq -c --arg chain "$SECOND_CHAIN_ID" '. + {chain_id: $chain}' <<<"$usdt_body")" \
+  --header "Idempotency-Key: usdt-elsewhere-$run_id")"
+assert_eq unsupported_chain "$(jq -r .error.code <<<"$usdt_elsewhere")" \
+  "a USDT request was issued on a chain that does not serve USDT"
+usdt="$(create_invoice 2 "$BENEFICIARY_EXACT" 3600 "usdt-$run_id" "$CHAIN_ID" USDT)"
+usdt_id="$(jq -r .id <<<"$usdt")"
+assert_eq USDT "$(jq -r .currency <<<"$usdt")" "the request does not carry its currency"
+assert_eq 1 "$(jq '.networks | length' <<<"$usdt")" "a pinned USDT request offers more than its chain"
+assert_eq "$(lowercase "$USDT")" "$(jq -r '.token.address | ascii_downcase' <<<"$usdt")" \
+  "the request's token is not the chain's USDT"
+assert_eq USDT "$(jq -r .token.symbol <<<"$usdt")" "the token symbol is not USDT"
+usdt_address="$(jq -r .address <<<"$usdt")"
+usdt_before="$(usdt_balance "$BENEFICIARY_EXACT")"
+# USDC sent to a USDT address is not a payment: the indexer sees the log
+# (it watches every configured contract) and credits nothing.
+send_usdc "$usdt_address" 1000000
+send_usdt "$usdt_address" 2000000
+wait_for_invoice "$usdt_id" '.received_base_units == "2000000"' "the USDT deposit was not detected"
+wait_for_status "$usdt_id" settled
+assert_eq "$((usdt_before + 2000000))" "$(usdt_balance "$BENEFICIARY_EXACT")" \
+  "the beneficiary did not receive the USDT"
+assert_eq 1000000 "$(token_balance "$usdt_address")" \
+  "the stray USDC did not stay at the address for the wrong-asset runbook"
+assert_eq 1 "$(jq '.transfers | length' <<<"$(get_invoice "$usdt_id")")" \
+  "the stray USDC was recorded as a transfer"
+# The runbook's recovery: anyone may return a foreign token from a deployed
+# Payment to the payer's wallet.
+payer_usdc_before="$(token_balance "$PAYER")"
+cast send "$usdt_address" 'recover(address)' "$USDC" --private-key "$STRANGER_KEY" --rpc-url "$RPC_URL" >/dev/null
+assert_eq "$((payer_usdc_before + 1000000))" "$(token_balance "$PAYER")" \
+  "recover(address) did not return the stray USDC to the payer"
+
+echo "Testing a USDT request paid with USDC from another chain through Relay"
+usdt_relay="$(create_invoice 2 "$BENEFICIARY_PARTIAL" 3600 "usdt-relay-$run_id" "$CHAIN_ID" USDT)"
+usdt_relay_id="$(jq -r .id <<<"$usdt_relay")"
+usdt_relay_chains="$(curl --fail --silent --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" \
+  "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/chains")"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r '.chains[0].chain_id' <<<"$usdt_relay_chains")" "the origin chain is not offered"
+assert_eq USDC "$(jq -r '.chains[0].tokens[0].currency' <<<"$usdt_relay_chains")" \
+  "the origin chain does not offer USDC"
+usdt_origin_token="$(jq -r '.chains[0].tokens[0].address' <<<"$usdt_relay_chains")"
+usdt_quote="$(curl --fail --silent --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" --arg token "$usdt_origin_token" '{origin_chain_id: $chain, origin_token: $token}')" \
+  "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/quotes")"
+usdt_rli="$(jq -er .id <<<"$usdt_quote")"
+assert_eq USDC "$(jq -r .origin_token.currency <<<"$usdt_quote")" "the quote does not name the origin currency"
+assert_eq 2000000 "$(jq -r .amount_out_base_units <<<"$usdt_quote")" "the quote does not land the USDT due"
+usdt_relay_tx="$(cast send "$(jq -r .steps[0].transaction.to <<<"$usdt_quote")" \
+  "$(jq -r .steps[0].transaction.data <<<"$usdt_quote")" \
+  --private-key "$PAYER_KEY" --rpc-url "$SECOND_RPC_URL" --json | jq -r .transactionHash)"
+curl --fail --silent --output /dev/null --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg hash "$usdt_relay_tx" '{transaction_hash: $hash}')" \
+  "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/quotes/$usdt_rli/sent"
+wait_for_status "$usdt_relay_id" settled
+assert_eq "$(lowercase "$RELAY_SOLVER")" \
+  "$(jq -r '.transfers[0].sender | ascii_downcase' <<<"$(get_invoice "$usdt_relay_id")")" \
+  "the USDT delivery did not come from the solver"
+
+echo "Testing a USDT withdrawal: the destination chain's balance and nothing else"
+send_usdt "$MERCHANT_WALLET" 2500000
+usdt_withdrawal_body="$(jq -cn --arg chain "$CHAIN_ID" --arg address "$WITHDRAW_DESTINATION" \
+  '{currency: "USDT", destination: {chain_id: $chain, address: $address}}')"
+sleep 1.2
+usdt_elsewhere_withdrawal="$(merchant_curl POST /v1/withdrawals \
+  "$(jq -c --arg chain "$SECOND_CHAIN_ID" '.destination.chain_id = $chain' <<<"$usdt_withdrawal_body")" \
+  --header "Idempotency-Key: usdt-withdrawal-elsewhere-$run_id")"
+assert_eq invalid_request "$(jq -r .error.code <<<"$usdt_elsewhere_withdrawal")" \
+  "a USDT withdrawal to a chain without USDT was created"
+usdt_withdrawal="$(api_json POST /v1/withdrawals "$usdt_withdrawal_body" --header "Idempotency-Key: usdt-withdrawal-$run_id")"
+usdt_withdrawal_id="$(jq -r .id <<<"$usdt_withdrawal")"
+assert_eq USDT "$(jq -r .currency <<<"$usdt_withdrawal")" "the withdrawal does not carry its currency"
+assert_eq 1 "$(jq '.legs | length' <<<"$usdt_withdrawal")" "USDT on one chain should make one leg"
+assert_eq transfer "$(jq -r '.legs[0].kind' <<<"$usdt_withdrawal")" "a USDT leg is never a bridge"
+assert_eq "$(lowercase "$USDT")" "$(jq -r '.legs[0].token.address | ascii_downcase' <<<"$usdt_withdrawal")" \
+  "the leg is not under the USDT contract"
+assert_eq "Mock Tether USD" "$(jq -r '.legs[0].authorization.typed_data.domain.name' <<<"$usdt_withdrawal")" \
+  "the leg's domain is not the USDT contract's own"
+usdt_typed="$logs/usdt-withdrawal-typed-data.json"
+jq '.legs[0].authorization.typed_data' <<<"$usdt_withdrawal" >"$usdt_typed"
+usdt_leg_id="$(jq -r '.legs[0].id' <<<"$usdt_withdrawal")"
+usdt_signature="$(cast wallet sign --private-key "$MERCHANT_WALLET_KEY" --data --from-file "$usdt_typed")"
+usdt_signed_body="$(jq -cn --arg leg "$usdt_leg_id" --arg sig "$usdt_signature" '{authorizations: [{leg_id: $leg, signature: $sig}]}')"
+usdt_authorized="$(api_json POST "/v1/withdrawals/$usdt_withdrawal_id/authorizations" "$usdt_signed_body")"
+assert_eq in_progress "$(jq -r .status <<<"$usdt_authorized")" "a signed USDT withdrawal is not in progress"
+for _ in {1..300}; do
+  usdt_withdrawal_status="$(merchant_curl GET "/v1/withdrawals/$usdt_withdrawal_id" | jq -r '.status // empty')"
+  [[ "$usdt_withdrawal_status" == "completed" || "$usdt_withdrawal_status" == "failed" ]] && break
+  sleep 1.5
+done
+assert_eq completed "$usdt_withdrawal_status" "the USDT withdrawal did not complete"
+assert_eq 2500000 "$(usdt_balance "$WITHDRAW_DESTINATION")" "the destination did not receive the USDT"
+assert_eq 0 "$(usdt_balance "$MERCHANT_WALLET")" "the merchant wallet still holds USDT"
 
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive "second Anvil" "$second_anvil_pid"

@@ -185,8 +185,10 @@ pub struct IndexerConfig {
     pub chain_id: ChainId,
     pub factory: Address,
     pub batch_sweeper: Address,
-    pub usdc: Address,
-    pub usdc_start_block: u64,
+    /// Every stablecoin contract the chain serves: one log filter, one
+    /// cursor, one WebSocket subscription for all of them.
+    pub tokens: Vec<Address>,
+    pub start_block: u64,
     pub finality_source: FinalitySource,
     pub finality_confirmations: u64,
     /// The chain's block interval; paces the catch-up after a wake.
@@ -365,7 +367,7 @@ impl Indexer {
     ) -> Result<(), IndexerError> {
         info!(
             chain_id = self.cfg.chain_id.0,
-            usdc = %self.cfg.usdc,
+            tokens = ?self.cfg.tokens,
             finality_source = ?self.cfg.finality_source,
             finality_confirmations = self.cfg.finality_confirmations,
             reconcile_interval_ms = self.cfg.reconcile_interval.as_millis() as u64,
@@ -464,7 +466,7 @@ impl Indexer {
                 .unwrap_or_else(|_| ChronoDuration::days(30));
         let fingerprint = self
             .repo
-            .watch_fingerprint(self.cfg.chain_id.0, self.cfg.usdc, since)
+            .watch_fingerprint(self.cfg.chain_id.0, since)
             .await?;
         if *self
             .watch_fingerprint
@@ -476,7 +478,7 @@ impl Indexer {
         }
         let addresses: WatchList = Arc::new(
             self.repo
-                .watch_addresses(self.cfg.chain_id.0, self.cfg.usdc, since)
+                .watch_addresses(self.cfg.chain_id.0, since)
                 .await?,
         );
         self.watch_tx.send_if_modified(|current| {
@@ -669,13 +671,12 @@ impl Indexer {
         self.cursor
             .record_finalized_head(
                 self.cfg.chain_id.0,
-                self.cfg.usdc,
                 boundary,
                 boundary_header.hash,
                 boundary_header.timestamp,
             )
             .await?;
-        let mut cursor = self.cursor.get(self.cfg.chain_id.0, self.cfg.usdc).await?;
+        let mut cursor = self.cursor.get(self.cfg.chain_id.0).await?;
 
         if let Some(cursor) = cursor {
             let canonical = self
@@ -703,9 +704,8 @@ impl Indexer {
             if behind {
                 let outcome = self
                     .repo
-                    .apply_finalized_usdc_range(
+                    .apply_finalized_range(
                         self.cfg.chain_id.0,
-                        self.cfg.usdc,
                         cursor,
                         boundary,
                         boundary_header.hash,
@@ -717,7 +717,7 @@ impl Indexer {
                     info!(%invoice_id, block = boundary, block_timestamp = boundary_header.timestamp, "invoice expired");
                 }
                 info!(
-                    from = cursor.map_or(self.cfg.usdc_start_block, |cursor| cursor.block + 1),
+                    from = cursor.map_or(self.cfg.start_block, |cursor| cursor.block + 1),
                     to = boundary,
                     "nothing watched; cursor fast-forwarded without scanning"
                 );
@@ -732,7 +732,7 @@ impl Indexer {
         for _ in 0..self.cfg.max_ranges_per_tick {
             let from_block = cursor
                 .map(|cursor| cursor.block.saturating_add(1))
-                .unwrap_or(self.cfg.usdc_start_block);
+                .unwrap_or(self.cfg.start_block);
             if from_block > boundary {
                 break;
             }
@@ -742,7 +742,7 @@ impl Indexer {
             );
         }
 
-        let indexed = cursor.map_or(self.cfg.usdc_start_block, |cursor| cursor.block);
+        let indexed = cursor.map_or(self.cfg.start_block, |cursor| cursor.block);
         let lag = boundary.saturating_sub(indexed);
         if lag > CURSOR_LAG_WARN_BLOCKS {
             warn!(
@@ -796,7 +796,7 @@ impl Indexer {
             }
             let mut transfers = match self
                 .chain
-                .usdc_transfers(self.cfg.usdc, from_block, to_block, recipients)
+                .token_transfers(&self.cfg.tokens, from_block, to_block, recipients)
                 .await
             {
                 Ok(transfers) => transfers,
@@ -804,7 +804,7 @@ impl Indexer {
                     let smaller = (range_size / 2).max(1);
                     self.current_log_range_size
                         .store(smaller, Ordering::Relaxed);
-                    warn!(from_block, to_block, smaller, error = %message, "provider rejected USDC log range; splitting it");
+                    warn!(from_block, to_block, smaller, error = %message, "provider rejected the log range; splitting it");
                     continue;
                 }
                 // A throttled or transiently failing read backs off and retries
@@ -833,13 +833,14 @@ impl Indexer {
                 .await?;
             if confirmed_end.hash != end.hash {
                 return Err(ChainError::Transient(format!(
-                    "block {to_block} changed while fetching USDC logs and headers"
+                    "block {to_block} changed while fetching logs and headers"
                 ))
                 .into());
             }
             let observations: Vec<PaymentObservation> = transfers
                 .into_iter()
                 .map(|transfer| PaymentObservation {
+                    token: transfer.token,
                     block_number: transfer.block_number,
                     block_hash: transfer.block_hash,
                     block_timestamp: transfer.block_timestamp,
@@ -853,9 +854,8 @@ impl Indexer {
                 .collect();
             let outcome = self
                 .repo
-                .apply_finalized_usdc_range(
+                .apply_finalized_range(
                     self.cfg.chain_id.0,
-                    self.cfg.usdc,
                     cursor,
                     to_block,
                     end.hash,
@@ -864,7 +864,7 @@ impl Indexer {
                 )
                 .await?;
             for invoice_id in &outcome.funded {
-                info!(%invoice_id, block = to_block, "invoice funded by finalized USDC transfers");
+                info!(%invoice_id, block = to_block, "invoice funded by finalized transfers");
             }
             for invoice_id in &outcome.expired {
                 info!(%invoice_id, block = to_block, block_timestamp = end.timestamp, "invoice expired");
@@ -1256,7 +1256,7 @@ impl Indexer {
                     .repo
                     .first_observed_block(row.id)
                     .await?
-                    .unwrap_or(self.cfg.usdc_start_block);
+                    .unwrap_or(self.cfg.start_block);
                 let (settlement, settlement_timestamp) = if invoice.status.is_terminal()
                     && row.settlement_tx_hash.is_some()
                 {
@@ -1290,7 +1290,7 @@ impl Indexer {
                         let end = start.saturating_add(chunk - 1).min(header.number);
                         found = match self
                             .chain
-                            .payment_settlement_tx(payment, self.cfg.usdc, start, end)
+                            .payment_settlement_tx(payment, binding.network.token.0, start, end)
                             .await
                         {
                             Ok(found) => found,
@@ -1355,6 +1355,7 @@ impl Indexer {
                 let probe = self
                     .chain
                     .probe_failure(
+                        invoice.currency(),
                         binding.network.token.0,
                         payment,
                         invoice.beneficiary.0,
@@ -1517,7 +1518,7 @@ impl Indexer {
             if network.is_none_or(|network| {
                 network.chain_id != self.cfg.chain_id
                     || network.factory.0 != self.cfg.factory
-                    || network.token.0 != self.cfg.usdc
+                    || !self.cfg.tokens.contains(&network.token.0)
             }) || !invoice.address_matches_parameters()
             {
                 self.repo
@@ -1717,13 +1718,13 @@ pub(crate) mod tests {
     use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
     use async_trait::async_trait;
     use gateway_core::{
-        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-        NetworkTerms, Party, PayerAttestation, PayerPolicy, RecoveryAddress, TokenAddress,
-        USDC_DECIMALS, sign_payer_attestation, wallet_of,
+        Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, Currency, FactoryAddress,
+        Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy, RecoveryAddress, TokenAddress,
+        sign_payer_attestation, wallet_of,
     };
     use sqlx::PgPool;
 
-    use crate::chain::{FailureProbe, SettlementEvent, UsdcTransfer};
+    use crate::chain::{FailureProbe, SettlementEvent, WatchedTransfer};
     use gateway_db::{
         BindPayerWallet, CreateInvoiceInput, InvoiceRepository, PAYER_SESSION_TTL,
         PayerSessionRepository,
@@ -1831,7 +1832,7 @@ pub(crate) mod tests {
         pub(crate) chain_id: u64,
         latest: u64,
         finalized: u64,
-        transfers: Vec<UsdcTransfer>,
+        transfers: Vec<WatchedTransfer>,
         max_log_range: Option<u64>,
         /// Every `eth_getLogs` the worker made: the range and the recipient
         /// filter it carried.
@@ -1988,13 +1989,13 @@ pub(crate) mod tests {
             })
         }
 
-        async fn usdc_transfers(
+        async fn token_transfers(
             &self,
-            _token: Address,
+            _tokens: &[Address],
             from_block: u64,
             to_block: u64,
             recipients: &[Address],
-        ) -> Result<Vec<UsdcTransfer>, ChainError> {
+        ) -> Result<Vec<WatchedTransfer>, ChainError> {
             let mut state = self.state.lock().unwrap();
             let requested = to_block - from_block + 1;
             if state.max_log_range.is_some_and(|max| requested > max) {
@@ -2325,6 +2326,7 @@ pub(crate) mod tests {
 
         async fn probe_failure(
             &self,
+            _currency: gateway_core::Currency,
             _token: Address,
             payment: Address,
             _receiver: Address,
@@ -2372,8 +2374,8 @@ pub(crate) mod tests {
             chain_id: ChainId(CHAIN_ID),
             factory: factory().0,
             batch_sweeper: batch_sweeper(),
-            usdc: usdc(),
-            usdc_start_block: 0,
+            tokens: vec![usdc()],
+            start_block: 0,
             finality_source: FinalitySource::Finalized,
             finality_confirmations: 0,
             block_time: Duration::from_millis(25),
@@ -2403,12 +2405,15 @@ pub(crate) mod tests {
     pub(crate) fn test_registry(cctp: Option<CctpConfig>) -> Arc<ChainRegistry> {
         let chain = |chain_id: u64, cctp: Option<CctpConfig>| gateway_core::ChainConfig {
             chain_id,
-            usdc: usdc(),
+            tokens: vec![gateway_core::TokenConfig {
+                currency: Currency::Usdc,
+                address: usdc(),
+            }],
             factory: factory().0,
             batch_sweeper: batch_sweeper(),
             factory_code_hash: mock_code_hash(factory().0),
             batch_sweeper_code_hash: mock_code_hash(batch_sweeper()),
-            usdc_start_block: 0,
+            start_block: 0,
             finality_source: FinalitySource::Finalized,
             finality_confirmations: 0,
             block_time_ms: 25,
@@ -2511,12 +2516,21 @@ pub(crate) mod tests {
             party("Acme"),
             party("Globex"),
             PayerPolicy::Permissionless,
+            Currency::Usdc,
             &networks,
             beneficiary,
             amount,
             expiration,
         );
-        Invoice::issue(&networks, beneficiary, amount, expiration, snapshot).unwrap()
+        Invoice::issue(
+            Currency::Usdc,
+            &networks,
+            beneficiary,
+            amount,
+            expiration,
+            snapshot,
+        )
+        .unwrap()
     }
 
     /// Issue and bind the test payer's wallet on `chain_id` in memory;
@@ -2536,7 +2550,7 @@ pub(crate) mod tests {
         invoice
     }
 
-    fn transfer(recipient: Address, amount: u64, block: u64, log_index: u64) -> UsdcTransfer {
+    fn transfer(recipient: Address, amount: u64, block: u64, log_index: u64) -> WatchedTransfer {
         transfer_at(recipient, amount, block, 0, log_index)
     }
 
@@ -2546,8 +2560,9 @@ pub(crate) mod tests {
         block: u64,
         transaction_index: u64,
         log_index: u64,
-    ) -> UsdcTransfer {
-        UsdcTransfer {
+    ) -> WatchedTransfer {
+        WatchedTransfer {
+            token: usdc(),
             block_number: block,
             block_hash: block_hash(block),
             block_timestamp: block_timestamp(block),
@@ -2579,7 +2594,7 @@ pub(crate) mod tests {
             invoice,
             gateway_db::AccountId(account_id),
             key.to_string(),
-            USDC_DECIMALS,
+            6,
             invoice.expiration_timestamp,
             format!("at:{}", invoice.expiration_timestamp),
         );
@@ -2604,7 +2619,7 @@ pub(crate) mod tests {
             invoice,
             gateway_db::AccountId(account_id),
             key.to_string(),
-            USDC_DECIMALS,
+            6,
             invoice.expiration_timestamp,
             format!("at:{}", invoice.expiration_timestamp),
         );
@@ -2633,7 +2648,7 @@ pub(crate) mod tests {
     pub(crate) async fn insert_funded(pool: &PgPool, invoice: &Invoice, key: &str, block: u64) {
         insert(pool, invoice, key).await;
         let block = CursorRepository::new(pool.clone())
-            .get(CHAIN_ID, usdc())
+            .get(CHAIN_ID)
             .await
             .unwrap()
             .map_or(block, |cursor| block.max(cursor.block + 1));
@@ -2737,7 +2752,7 @@ pub(crate) mod tests {
         assert_eq!(fetch(&pool, &invoice).await.status, "created");
         assert_eq!(
             CursorRepository::new(pool.clone())
-                .get(CHAIN_ID, usdc())
+                .get(CHAIN_ID)
                 .await
                 .unwrap()
                 .unwrap()
@@ -2786,20 +2801,11 @@ pub(crate) mod tests {
         let cursor = CursorRepository::new(pool.clone());
 
         worker.tick().await.unwrap();
-        assert_eq!(
-            cursor.get(CHAIN_ID, usdc()).await.unwrap().unwrap().block,
-            399
-        );
+        assert_eq!(cursor.get(CHAIN_ID).await.unwrap().unwrap().block, 399);
         worker.tick().await.unwrap();
-        assert_eq!(
-            cursor.get(CHAIN_ID, usdc()).await.unwrap().unwrap().block,
-            799
-        );
+        assert_eq!(cursor.get(CHAIN_ID).await.unwrap().unwrap().block, 799);
         worker.tick().await.unwrap();
-        assert_eq!(
-            cursor.get(CHAIN_ID, usdc()).await.unwrap().unwrap().block,
-            1_000
-        );
+        assert_eq!(cursor.get(CHAIN_ID).await.unwrap().unwrap().block, 1_000);
         let requests_before = chain.state.lock().unwrap().header_requests;
         worker.tick().await.unwrap();
         assert_eq!(
@@ -2903,7 +2909,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             CursorRepository::new(pool.clone())
-                .get(CHAIN_ID, usdc())
+                .get(CHAIN_ID)
                 .await
                 .unwrap()
                 .unwrap()
@@ -2928,7 +2934,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             CursorRepository::new(pool.clone())
-                .get(CHAIN_ID, usdc())
+                .get(CHAIN_ID)
                 .await
                 .unwrap()
                 .unwrap()
@@ -2950,7 +2956,7 @@ pub(crate) mod tests {
 
         worker.tick().await.unwrap();
         let cursor = CursorRepository::new(pool.clone())
-            .get(CHAIN_ID, usdc())
+            .get(CHAIN_ID)
             .await
             .unwrap()
             .unwrap();
@@ -3180,7 +3186,7 @@ pub(crate) mod tests {
         assert_eq!(observations, 0);
         assert!(
             CursorRepository::new(pool)
-                .get(CHAIN_ID, usdc())
+                .get(CHAIN_ID)
                 .await
                 .unwrap()
                 .is_none(),
@@ -3215,7 +3221,7 @@ pub(crate) mod tests {
         worker.tick().await.expect("range should split and succeed");
 
         let cursor = CursorRepository::new(pool)
-            .get(CHAIN_ID, usdc())
+            .get(CHAIN_ID)
             .await
             .unwrap()
             .unwrap();
@@ -3242,7 +3248,7 @@ pub(crate) mod tests {
             .expect("a throttled read should back off and retry, not abort the tick");
 
         let cursor = CursorRepository::new(pool)
-            .get(CHAIN_ID, usdc())
+            .get(CHAIN_ID)
             .await
             .unwrap()
             .unwrap();
@@ -4089,11 +4095,13 @@ pub(crate) mod tests {
     async fn failure_classification_retries_transient_and_blocks_permanent_causes(pool: PgPool) {
         let paused = make_invoice(100);
         let blacklisted = make_invoice(200);
+        let sender_blocked = make_invoice(500);
         let underfunded = make_invoice(300);
         let unknown = make_invoice(400);
         for (invoice, key) in [
             (&paused, "a"),
             (&blacklisted, "b"),
+            (&sender_blocked, "e"),
             (&underfunded, "c"),
             (&unknown, "d"),
         ] {
@@ -4103,7 +4111,13 @@ pub(crate) mod tests {
             revert_data: Bytes::from_static(&[0x30, 0x11, 0x64, 0x25]),
         };
         let chain = Arc::new(MockChain::new(7).with(|state| {
-            for invoice in [&paused, &blacklisted, &underfunded, &unknown] {
+            for invoice in [
+                &paused,
+                &blacklisted,
+                &sender_blocked,
+                &underfunded,
+                &unknown,
+            ] {
                 state
                     .next_outcomes
                     .insert(payment_address(invoice), failed.clone());
@@ -4120,6 +4134,16 @@ pub(crate) mod tests {
                 FailureProbe {
                     paused: Some(false),
                     receiver_blacklisted: Some(true),
+                    ..FailureProbe::default()
+                },
+            );
+            state.probes.insert(
+                payment_address(&sender_blocked),
+                FailureProbe {
+                    paused: Some(false),
+                    // USDT0's shape: the sender alone is blocked; a transfer
+                    // to the beneficiary would still succeed.
+                    payment_blacklisted: Some(true),
                     ..FailureProbe::default()
                 },
             );
@@ -4146,6 +4170,13 @@ pub(crate) mod tests {
         assert_eq!(
             blacklisted_row.blocked_reason.as_deref(),
             Some("beneficiary_blacklisted")
+        );
+
+        let sender_blocked_row = fetch(&pool, &sender_blocked).await;
+        assert_eq!(sender_blocked_row.status, "blocked");
+        assert_eq!(
+            sender_blocked_row.blocked_reason.as_deref(),
+            Some("payment_address_blacklisted")
         );
 
         let underfunded_row = fetch(&pool, &underfunded).await;

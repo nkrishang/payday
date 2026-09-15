@@ -1,7 +1,8 @@
 # Wrong-network deposit
 
-A payer chose one network at the wallet step (say Monad) and then sent USDC
-to the deposit address on another supported network (say Base). Nothing
+A payer chose one network at the wallet step (say Monad) and then sent the
+request's stablecoin to the deposit address on another supported network
+(say Base). Nothing
 happens on its own: the request stays `awaiting_deposit`, the indexer on
 the other chain does not watch that address (it is bound to Monad), and the
 funds sit at an address with no code on Base. This runbook returns them to
@@ -48,15 +49,18 @@ req=$(curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<dr_id>" \
 echo "$req" | jq '{status, chain, token, address, payer_wallet, payout_address, amount_base_units, expires_at, self_settlement}'
 ```
 
-Then check the address's USDC balance on the chain the payer says they
-used, with that chain's native USDC (the `usdc` of its `PAYDAY_CHAINS`
-entry; the table in the production runbook lists them):
+Then check the address's balance on the chain the payer says they used,
+with that chain's contract for the request's `currency` (the matching
+`tokens` entry of its `PAYDAY_CHAINS` entry; the table in the production
+runbook lists them). USDT0 is served on Monad and Arbitrum only, so a USDT
+request's funds on Base sit in whatever contract the payer's wallet used
+there; `recover` takes that contract's address either way:
 
 ```bash
 export WRONG_RPC_URL='https://your-rpc-for-that-chain'
-export WRONG_USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # Base's native USDC, for example
+export WRONG_TOKEN=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913   # Base's native USDC, for example
 ADDRESS=$(echo "$req" | jq -r .address)
-cast call "$WRONG_USDC" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"
+cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"
 cast code "$ADDRESS" --rpc-url "$WRONG_RPC_URL"     # 0x: nothing deployed there yet
 ```
 
@@ -77,7 +81,7 @@ branch.
 FACTORY=$(echo "$req" | jq -r .self_settlement.factory)
 SALT=$(echo "$req" | jq -r .self_settlement.salt)
 BOUND_CHAIN=$(echo "$req" | jq -r .chain.id)
-BOUND_USDC=$(echo "$req" | jq -r .token.address)
+BOUND_TOKEN=$(echo "$req" | jq -r .token.address)
 AMOUNT=$(echo "$req" | jq -r .amount_base_units)
 RECEIVER=$(echo "$req" | jq -r .payout_address)
 PAYER=$(echo "$req" | jq -r .payer_wallet)
@@ -85,7 +89,7 @@ EXPIRATION=$(echo "$req" | jq -r '.expires_at | fromdateiso8601')
 
 cast send "$FACTORY" \
   'execute(address,uint256,address,uint64,address,bytes32,uint256)' \
-  "$BOUND_USDC" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$PAYER" "$SALT" "$BOUND_CHAIN" \
+  "$BOUND_TOKEN" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$PAYER" "$SALT" "$BOUND_CHAIN" \
   --private-key <FUNDED_KEY_ON_THAT_CHAIN> --rpc-url "$WRONG_RPC_URL"
 ```
 
@@ -95,10 +99,10 @@ and did not settle:
 ```bash
 cast call "$FACTORY" \
   'paymentAddress(address,uint256,address,uint64,address,bytes32,uint256)(address)' \
-  "$BOUND_USDC" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$PAYER" "$SALT" "$BOUND_CHAIN" \
+  "$BOUND_TOKEN" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$PAYER" "$SALT" "$BOUND_CHAIN" \
   --rpc-url "$WRONG_RPC_URL"                                           # must equal $ADDRESS
 cast call "$ADDRESS" 'settled()(bool)' --rpc-url "$WRONG_RPC_URL"     # false
-cast call "$WRONG_USDC" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"   # unchanged
+cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"   # unchanged
 ```
 
 The receipt carries a `WrongChain(expected, actual)` event. If
@@ -107,15 +111,15 @@ that chain is not this generation, and nothing below can move the funds.
 
 ## Step 3: Return the balance to the payer
 
-`recover` takes the token to move: the wrong chain's USDC, not the
-request's `token.address`.
+`recover` takes the token to move: the contract the funds sit in on the
+wrong chain, not the request's `token.address`.
 
 ```bash
-cast send "$ADDRESS" 'recover(address)' "$WRONG_USDC" \
+cast send "$ADDRESS" 'recover(address)' "$WRONG_TOKEN" \
   --private-key <FUNDED_KEY_ON_THAT_CHAIN> --rpc-url "$WRONG_RPC_URL"
 
-cast call "$WRONG_USDC" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"   # 0
-cast call "$WRONG_USDC" 'balanceOf(address)(uint256)' "$PAYER" --rpc-url "$WRONG_RPC_URL"     # increased
+cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"   # 0
+cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$PAYER" --rpc-url "$WRONG_RPC_URL"     # increased
 ```
 
 The receipt carries `Recovered(recovery, token, amount)` with `recovery`
@@ -125,6 +129,20 @@ network they chose (`deposit_url`, which shows it). The request itself is
 untouched: it stays `awaiting_deposit` until paid or expired, and nothing
 about this appears in `transfers` or `recovered_funds`, because the
 indexer on the bound chain never saw a transfer.
+
+## Wrong asset on the right network
+
+The same `recover` call handles a payer who sent another configured
+stablecoin to the address on the chain the request is bound to (USDC to a
+USDT request's address, say). The indexer sees transfers of every
+configured contract to a watched address but credits only the request's
+own `token.address`, so the stray balance stays at the address and the
+request does not advance. Once the sweep has deployed the `Payment` on
+`chain.id` (at settlement or expiry; do not deploy it by hand there, the
+constructor would route the committed token), call `recover(address)` with
+the stray contract on that chain: it is permissionless and forwards that
+token's whole balance to the payer's wallet. Nothing about it appears in
+`transfers` or `recovered_funds`.
 
 ## Why this is safe
 

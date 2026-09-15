@@ -2,7 +2,8 @@
 
 Staging is the middle ground between `just dev` and production: a second,
 fully separate copy of the production stack that always runs the newest
-commit on `main`, on Monad, Base, and Arbitrum One with real USDC, that you
+commit on `main`, on Monad, Base, and Arbitrum One with real USDC and
+USDT0, that you
 drive from your own machine. The web app runs locally against it, `curl` and the SDK reach it
 with a key you mint in that local dashboard, and the deposits it settles are
 real transfers of a few cents through real RPC, real finality, real KMS
@@ -12,7 +13,7 @@ signing, real S3 scanning, and real email.
 |---|---|---|---|
 | Code | your working tree | every commit on `main` that passes CI | the `image_tag` in the production tfvars, applied by hand |
 | API, indexer, database | on this machine | AWS, `api.staging.payday.sh` | AWS, `api.payday.sh` |
-| Chains and USDC | two Anvils, mock USDC | Monad, Base, Arbitrum One; Circle USDC | Monad, Base, Arbitrum One; Circle USDC |
+| Chains and stablecoins | two Anvils, mock USDC and USDT | Monad, Base, Arbitrum One; Circle USDC, Tether USDT0 on Monad and Arbitrum | Monad, Base, Arbitrum One; Circle USDC, Tether USDT0 on Monad and Arbitrum |
 | Contracts | bootstrapped on Anvil each run | staging's own `PaymentFactory` generation | production's generation |
 | Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `payday.sh` |
 | Merchant sign-in | development Privy app | development Privy app | production Privy app |
@@ -30,8 +31,9 @@ to ship. Nobody else can open those links, and that is fine for staging.
 
 The configuration lives in `infra/environments/staging.tfvars` (tracked,
 public identifiers only), `infra/environments/staging.backend.hcl`, and
-`web/.env.staging`. The deployment workflow is
-`.github/workflows/deploy-staging.yml`.
+`web/.env.staging`, whose `NEXT_PUBLIC_CHAINS` lists each chain's `tokens`
+(`{currency, address, symbol?, decimals?}`) to match the tfvars. The
+deployment workflow is `.github/workflows/deploy-staging.yml`.
 
 ## Using it
 
@@ -45,9 +47,9 @@ Open the dashboard, sign in with an emailed code (the development Privy app,
 so the same mailbox you use locally), and mint an API key in the API key
 section. It is a `payday_test_` key that only staging accepts. Issue a
 deposit request from the dashboard, open its link in the same browser,
-choose a network, connect a wallet holding a little USDC and gas there,
-and pay it; everything from the wallet attestation to the Proof of Payment
-happens on the live stack.
+choose a network, connect a wallet holding a little of the request's
+currency and gas there, and pay it; everything from the wallet attestation
+to the Proof of Payment happens on the live stack.
 
 Scripts and the SDK use the staging origin and that key:
 
@@ -64,22 +66,30 @@ The scripted end-to-end check is a real deposit that costs only gas:
 ```bash
 export PAYDAY_CHAIN_ID=143    # the network to pay on: 143, 8453, or 42161
 export PAYDAY_RPC_URL='https://your-rpc-endpoint'   # any HTTPS RPC for that chain
-export PAYDAY_USDC_ADDRESS=0x754704Bc059F8C67012fEd69BC8A327a5aafb603   # that chain's USDC
+export PAYDAY_TOKEN_ADDRESS=0x754704Bc059F8C67012fEd69BC8A327a5aafb603   # that chain's USDC
 export PAYER_KEY='0x...'      # a wallet holding at least 0.01 USDC and some gas there
 just live-smoke
 ```
 
-Run it once per network; only the three exports change.
+Run it once per network; only the three exports change. `PAYDAY_CURRENCY=USDT`
+runs it in USDT0 instead: the request is pinned to `PAYDAY_CHAIN_ID` (Monad
+or Arbitrum One) and `PAYDAY_TOKEN_ADDRESS` names that chain's USDT0
+contract (the Monad address is the default), so run it once more on each
+chain that serves USDT.
 
 It issues a permissionless request paid out to the paying wallet itself,
 binds that wallet with an EIP-712 attestation signed by `cast` exactly as
-the checkout does, transfers the USDC, waits for finalized settlement,
+the checkout does, transfers the stablecoin, waits for finalized settlement,
 checks that the payout arrived and the deposit address is empty, and
 validates the Proof of Payment. `LATE_TRANSFER=1` also sends one base unit
 after settlement and waits for it to come back. `PAYDAY_ATTESTOR=0x…` makes
 it check the proof's signer against the address you published. The same
 script runs against production with `PAYDAY_API_URL=https://api.payday.sh`
-and a live key; that is the launch check in the production runbook.
+and a live key; that is the launch check in the production runbook. Before
+the first withdrawal on a chain, `just forge-fork` runs the forwarder's fork
+tests and the USDT0 authorization fork tests (`MonadUsdt0ForkTest`,
+`ArbitrumUsdt0ForkTest`) against the real USDT0 contracts on Monad and
+Arbitrum.
 
 Webhooks: staging delivers to any public HTTPS endpoint, and cannot reach
 your machine. Use a request-capture service or a tunnel for a local
@@ -154,11 +164,13 @@ Payday AWS account.
    for staging on Monad, Base, and Arbitrum One exactly as in the
    production runbook §2, from one fresh deployment wallet with a little
    gas on each chain so the addresses match everywhere, and record the
-   addresses and runtime code hashes in each `chains` entry of the tfvars.
+   addresses and runtime code hashes in each `chains` entry of the tfvars,
+   beside that chain's `tokens` (USDC everywhere, USDT0 on Monad and
+   Arbitrum One, the addresses from the production runbook's table).
    Never point staging at production's contracts: every deposit address is
    derived from its factory, and the two databases must not share one.
 3. **Start blocks.** `cast block-number` on each chain immediately before
-   the first apply, into that entry's `usdc_start_block`.
+   the first apply, into that entry's `start_block`.
 4. **State and images.** With `TF_VAR_rpc_urls` exported (a JSON object of
    endpoints keyed by chain id, as in the production runbook §6):
 

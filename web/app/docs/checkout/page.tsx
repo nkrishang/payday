@@ -72,10 +72,11 @@ export default function CheckoutPage() {
           name, notes, and the attached PDF through a short-lived link.
         </li>
         <li>
-          <strong>The network step</strong>: the networks the request may be paid on (Monad, Base,
-          Arbitrum One), each with its gas token and rough confirmation time. Choosing one is
-          mandatory before the wallet step, and the choice is final once signed. A request whose
-          merchant pinned the network (<code>chain_id</code> at creation) states it instead of
+          <strong>The network step</strong>: the networks the request&apos;s currency may be paid
+          on (Monad, Base, Arbitrum One for USDC; Monad and Arbitrum One for USDT), each with its
+          gas token and rough confirmation time. Choosing one is mandatory before the wallet step,
+          and the choice is final once signed. A request whose merchant pinned the network (
+          <code>chain_id</code> at creation, always the case for USDT) states it instead of
           offering a choice.
         </li>
         <li>
@@ -113,20 +114,23 @@ export default function CheckoutPage() {
             <td>
               The page discovers installed browser wallets and, with WalletConnect, phone wallets.
               It switches the wallet to the chosen chain, checks the token contract, then sends a
-              plain USDC transfer of the
-              amount still due, re-read at the moment of signing. No approval, no contract call. It
+              plain transfer of the request&apos;s currency for the amount still due, re-read at
+              the moment of signing. No approval, no contract call. It
               refuses to send from any wallet but the attested one.
             </td>
           </tr>
           <tr>
             <td>From another network</td>
             <td>
-              For USDC the payer holds on a chain the request is not on. The page lists the
-              networks Relay takes USDC from, Payday quotes the route pinned to the attested wallet,
-              the payment address, and exactly the amount due, and the wallet sends the quote&apos;s
-              transactions on that network; Relay delivers the USDC to the address in seconds and
-              Payday credits it to the payer once it finalizes. The route&apos;s fee is added to what
-              the payer sends. Offered only on deployments with a Relay key.
+              For stablecoins the payer holds on a chain the request is not on. The page lists the
+              networks Relay takes deposits from and, per network, what the payer may send there
+              (USDC, and USDT where Relay takes it, Base&apos;s included); Payday quotes the route
+              pinned to the attested wallet, the payment address, and exactly the amount due in the
+              request&apos;s currency, and the wallet sends the quote&apos;s transactions on that
+              network; Relay swaps into the request&apos;s currency, delivers it to the address in
+              seconds, and Payday credits it to the payer once it finalizes. The route&apos;s fee
+              and any spread are added to what the payer sends. Offered only on deployments with a
+              Relay key.
             </td>
           </tr>
           <tr>
@@ -153,9 +157,10 @@ export default function CheckoutPage() {
       </p>
 
       <Callout tone="warning" title="What the payer must get right">
-        Exactly the displayed amount, of the exact USDC contract, on the network they chose, from
-        the wallet they signed with, and not at the deadline boundary. Bridged USDC, look-alike
-        tokens, another network, and native gas do not count. The address refuses to settle on any
+        Exactly the displayed amount, of the request&apos;s currency as the exact contract shown,
+        on the network they chose, from the wallet they signed with, and not at the deadline
+        boundary. Another stablecoin, a bridged or wrapped version, look-alike tokens, another
+        network, and native gas do not count. The address refuses to settle on any
         other chain, so a wrong-network deposit is not lost, but returning it is a manual
         support case. The checkout says all
         of this; if you build your own, repeat it.

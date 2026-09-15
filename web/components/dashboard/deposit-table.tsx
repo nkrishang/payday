@@ -360,7 +360,7 @@ export function DepositTable({
                     </td>
                   )}
                   <td className="px-4 py-3 text-right">
-                    <Amount value={request.amount} />
+                    <Amount value={request.amount} currency={request.currency} />
                     {lockedCustomerId ? null : (
                       <span className="mt-1.5 flex justify-end md:hidden">
                         <StatusBadge status={request.status} />

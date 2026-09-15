@@ -1,6 +1,7 @@
-//! Persistent finalized USDC log cursor.
+//! Persistent finalized log cursor, one per chain: every token contract the
+//! chain serves is indexed in the same ranges.
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use sqlx::PgPool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,21 +28,16 @@ impl CursorRepository {
         Self { pool }
     }
 
-    /// Last finalized range committed for this chain and USDC contract.
-    pub async fn get(
-        &self,
-        chain_id: u64,
-        token: Address,
-    ) -> Result<Option<IndexerCursor>, sqlx::Error> {
+    /// Last finalized range committed for this chain.
+    pub async fn get(&self, chain_id: u64) -> Result<Option<IndexerCursor>, sqlx::Error> {
         let row: Option<(i64, Vec<u8>, Option<i64>)> = sqlx::query_as(
             r#"
             SELECT last_block, last_block_hash, last_block_timestamp
             FROM indexer_cursor
-            WHERE chain_id = $1 AND token_address = $2
+            WHERE chain_id = $1
             "#,
         )
         .bind(chain_id as i64)
-        .bind(token.as_slice())
         .fetch_optional(&self.pool)
         .await?;
 
@@ -61,11 +57,10 @@ impl CursorRepository {
     pub async fn finalized_head(
         &self,
         chain_id: u64,
-        token: Address,
     ) -> Result<Option<FinalizedHead>, sqlx::Error> {
         let row: Option<(i64, Vec<u8>, Option<i64>)> = sqlx::query_as(
-            "SELECT finalized_block, finalized_block_hash, finalized_block_timestamp FROM indexer_status WHERE chain_id = $1 AND token_address = $2"
-        ).bind(chain_id as i64).bind(token.as_slice()).fetch_optional(&self.pool).await?;
+            "SELECT finalized_block, finalized_block_hash, finalized_block_timestamp FROM indexer_status WHERE chain_id = $1"
+        ).bind(chain_id as i64).fetch_optional(&self.pool).await?;
         row.map(|(block, hash, timestamp)| {
             Ok(FinalizedHead {
                 block: block as u64,
@@ -81,13 +76,12 @@ impl CursorRepository {
     pub async fn record_finalized_head(
         &self,
         chain_id: u64,
-        token: Address,
         block: u64,
         hash: B256,
         timestamp: u64,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO indexer_status (chain_id, token_address, finalized_block, finalized_block_hash, finalized_block_timestamp) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (chain_id, token_address) DO UPDATE SET finalized_block=EXCLUDED.finalized_block, finalized_block_hash=EXCLUDED.finalized_block_hash, finalized_block_timestamp=EXCLUDED.finalized_block_timestamp, observed_at=now()")
-            .bind(chain_id as i64).bind(token.as_slice()).bind(block as i64).bind(hash.as_slice()).bind(timestamp as i64)
+        sqlx::query("INSERT INTO indexer_status (chain_id, finalized_block, finalized_block_hash, finalized_block_timestamp) VALUES ($1,$2,$3,$4) ON CONFLICT (chain_id) DO UPDATE SET finalized_block=EXCLUDED.finalized_block, finalized_block_hash=EXCLUDED.finalized_block_hash, finalized_block_timestamp=EXCLUDED.finalized_block_timestamp, observed_at=now()")
+            .bind(chain_id as i64).bind(block as i64).bind(hash.as_slice()).bind(timestamp as i64)
             .execute(&self.pool).await.map(drop)
     }
 }

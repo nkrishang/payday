@@ -15,7 +15,7 @@ import {
 } from "wagmi";
 import { Button } from "@/components/ui/button";
 import { wagmiChain } from "@/lib/chain";
-import { chainById } from "@/lib/config";
+import { chainById, tokenFor } from "@/lib/config";
 import { formatBaseUnits, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { ConnectSheet } from "./connect-sheet";
 import { walletErrorMessage } from "./wallet-errors";
@@ -58,8 +58,15 @@ export function WalletPay({
 
   const configured = chainById(payment.chain.id);
   const target = wagmiChain(payment.chain.id);
+  // The response's token must be this deployment's contract for the request's
+  // own currency on the chosen chain — not merely any configured token there
+  // — and must carry the same decimals, so a tampered response can never get
+  // a transfer of the wrong asset or at a wrong scale.
+  const configuredToken = tokenFor(payment.chain.id, payment.token.address);
   const tokenMatches =
-    configured !== null && payment.token.address.toLowerCase() === configured.usdcAddress;
+    configuredToken !== null &&
+    configuredToken.currency === payment.currency &&
+    configuredToken.decimals === payment.token.decimals;
   const supported = configured !== null && target !== null && tokenMatches;
   const targetId = target?.id ?? 0;
   const walletMatches =

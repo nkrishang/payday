@@ -40,6 +40,9 @@ const NETWORKS = [
   { chain: MONAD, token: { symbol: "USDC", address: TOKEN, decimals: 6 } },
   { chain: BASE, token: { symbol: "USDC", address: BASE_TOKEN, decimals: 6 } },
 ];
+/** USDT is served on Monad alone, as Tether's USDT0; a USDT request offers that one network. */
+const USDT_TOKEN = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D";
+const USDT_NETWORK = { chain: MONAD, token: { symbol: "USDT0", address: USDT_TOKEN, decimals: 6 } };
 /** The chosen network's own fields, once a payer has bound a wallet on `chainId`. */
 function chosen(chainId = "143") {
   const network = NETWORKS.find((entry) => entry.chain.id === chainId) ?? NETWORKS[0];
@@ -132,6 +135,7 @@ function base(overrides = {}) {
     settlement_explorer_url: null,
     payer_message: null,
     content_unlocked: true,
+    currency: "USDC",
     networks: NETWORKS,
     ...chosen(),
     amount: "25.000000",
@@ -307,6 +311,7 @@ function locked(mode, facts = requirements(mode)) {
     },
     requirements: facts,
     content_unlocked: false,
+    currency: null,
     networks: null,
     chain: null,
     token: null,
@@ -351,12 +356,14 @@ const SETTLED = {
 /** Reads counted per id, so one scenario can change between polls. */
 const reads = new Map();
 
-/** The chains the stub's Relay takes USDC from, as the API lists them. */
+/** The chains the stub's Relay takes stablecoins from, as the API lists them, each with what a payer may send there. */
+const usdcToken = (address) => ({ currency: "USDC", symbol: "USDC", address, decimals: 6 });
 const RELAY_CHAINS = [
-  { chain_id: "137", name: "Polygon", native_symbol: "POL", usdc_address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", explorer_url: "https://polygonscan.com", icon_url: "https://assets.relay.link/icons/137/light.png", rpc_url: "https://polygon-rpc.com" },
-  { chain_id: "8453", name: "Base", native_symbol: "ETH", usdc_address: BASE_TOKEN, explorer_url: "https://basescan.org", icon_url: "https://assets.relay.link/icons/8453/light.png", rpc_url: "https://mainnet.base.org" },
-  { chain_id: "42161", name: "Arbitrum One", native_symbol: "ETH", usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", explorer_url: "https://arbiscan.io", icon_url: "https://assets.relay.link/icons/42161/light.png", rpc_url: "https://arb1.arbitrum.io/rpc" },
-  { chain_id: "143", name: "Monad", native_symbol: "MON", usdc_address: TOKEN, explorer_url: "https://monadvision.com", icon_url: "https://assets.relay.link/icons/143/light.png", rpc_url: "https://rpc.monad.xyz" },
+  { chain_id: "137", name: "Polygon", native_symbol: "POL", tokens: [usdcToken("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")], explorer_url: "https://polygonscan.com", icon_url: "https://assets.relay.link/icons/137/light.png", rpc_url: "https://polygon-rpc.com" },
+  // Base's USDT is a bridge wrapper Payday does not serve, but Relay takes it, so a payer may send it.
+  { chain_id: "8453", name: "Base", native_symbol: "ETH", tokens: [usdcToken(BASE_TOKEN), { currency: "USDT", symbol: "USDT", address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", decimals: 6 }], explorer_url: "https://basescan.org", icon_url: "https://assets.relay.link/icons/8453/light.png", rpc_url: "https://mainnet.base.org" },
+  { chain_id: "42161", name: "Arbitrum One", native_symbol: "ETH", tokens: [usdcToken("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")], explorer_url: "https://arbiscan.io", icon_url: "https://assets.relay.link/icons/42161/light.png", rpc_url: "https://arb1.arbitrum.io/rpc" },
+  { chain_id: "143", name: "Monad", native_symbol: "MON", tokens: [usdcToken(TOKEN)], explorer_url: "https://monadvision.com", icon_url: "https://assets.relay.link/icons/143/light.png", rpc_url: "https://rpc.monad.xyz" },
 ];
 /** Relay's deposit router, where the quote's deposit step goes. */
 const RELAY_ROUTER = "0x4cd00e387622c35bddb9b4c962c136462338bc31";
@@ -392,6 +399,17 @@ const scenarios = {
     session?.walletBound
       ? base({ networks: [NETWORKS[1]], ...chosen("8453") })
       : base({ ...UNBOUND, networks: [NETWORKS[1]], chain: BASE, token: NETWORKS[1].token }),
+  // A USDT request: pinned to Monad at issuance (USDT does not bridge for the
+  // merchant), bound already, and paid in the contract the wallet shows as
+  // USDT0.
+  usdt: () =>
+    base({
+      currency: "USDT",
+      networks: [USDT_NETWORK],
+      chain: MONAD,
+      token: USDT_NETWORK.token,
+      deposit_uri: `ethereum:${USDT_TOKEN}@143/transfer?address=${ADDRESS}&uint256=25000000`,
+    }),
   // Opened by the merchant's app with a client secret in the fragment; the
   // bare link stays locked with nothing for the payer to do here.
   "gated-merchant": (id, session) => gatedFor("merchant_session", session),
@@ -508,10 +526,12 @@ function merchantDepositRequest(input, extra = {}) {
   // A pinned network narrows the offer to that one entry and names it from
   // issuance, as the API does; the default offer is every network with the
   // stub payer bound on the first.
+  const currency = input.currency ?? "USDC";
+  const offered = currency === "USDT" ? [USDT_NETWORK] : NETWORKS;
   const pinned = input.chain_id
-    ? NETWORKS.find((network) => network.chain.id === input.chain_id)
+    ? offered.find((network) => network.chain.id === input.chain_id)
     : undefined;
-  const network = pinned ?? NETWORKS[0];
+  const network = pinned ?? offered[0];
   return {
     id,
     deposit_url: `http://127.0.0.1:3003/pay/${id}`,
@@ -531,13 +551,13 @@ function merchantDepositRequest(input, extra = {}) {
     received_base_units: receivedUnits,
     remaining: fromBaseUnits(remainingUnits),
     remaining_base_units: remainingUnits,
-    currency: "USDC",
+    currency,
     fee_amount: "0.000000",
     fee_amount_base_units: "0",
     net_amount: fromBaseUnits(amountUnits),
     net_amount_base_units: amountUnits,
     status: "awaiting_deposit",
-    networks: pinned ? [pinned] : NETWORKS,
+    networks: pinned ? [pinned] : offered,
     token: network.token,
     chain: network.chain,
     settlement_tx_hash: null,
@@ -639,10 +659,12 @@ function proofFor(payment) {
     version: "payday.proof.v4",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
-      schema: "payday.invoice.v3",
+      schema: "payday.invoice.v4",
       canonicalization: "RFC8785",
       issuer: payment.issuer,
       payer: payment.payer,
+      currency: payment.currency,
+      decimals: "6",
       amount_base_units: payment.amount_base_units,
       notes: payment.notes,
       heading: payment.heading,
@@ -1146,7 +1168,15 @@ async function payer(req, res, url) {
     const body = await readJson(req);
     const origin = RELAY_CHAINS.find((chain) => chain.chain_id === String(body.origin_chain_id));
     if (!origin || origin.chain_id === payment.chain.id) {
-      return fail(res, 422, "relay_unsupported_origin", "USDC cannot be paid from that network");
+      return fail(res, 422, "relay_unsupported_origin", "This request cannot be paid from that network");
+    }
+    // The origin token defaults to the chain's USDC, as the API does.
+    const wanted = body.origin_token ? String(body.origin_token).toLowerCase() : null;
+    const originToken = wanted
+      ? origin.tokens.find((token) => token.address.toLowerCase() === wanted)
+      : origin.tokens.find((token) => token.currency === "USDC");
+    if (!originToken) {
+      return fail(res, 422, "relay_unsupported_origin", "This request cannot be paid with that token");
     }
     const rli = `rli_${randomUUID()}`;
     const due = BigInt(payment.remaining_base_units);
@@ -1155,6 +1185,7 @@ async function payer(req, res, url) {
       id: rli,
       request_id: hex32(`relay:${rli}`),
       origin,
+      origin_token: originToken,
       amount_in: fromBaseUnits(amountIn.toString()),
       amount_in_base_units: amountIn.toString(),
       amount_out: fromBaseUnits(due.toString()),
@@ -1165,7 +1196,7 @@ async function payer(req, res, url) {
       steps: [
         {
           id: "approve",
-          transaction: { chain_id: origin.chain_id, to: origin.usdc_address, data: "0x095ea7b3", value: "0", gas: "73112" },
+          transaction: { chain_id: origin.chain_id, to: originToken.address, data: "0x095ea7b3", value: "0", gas: "73112" },
         },
         {
           id: "deposit",
@@ -1377,19 +1408,29 @@ async function objectStore(req, res, url) {
  */
 function customerStats(customerId) {
   const own = [...store.depositRequests.values()].filter((payment) => payment.customer_id === customerId);
-  let collected = 0;
-  let pending = 0;
+  // One total per currency: two currencies never add up.
+  const byCurrency = new Map();
   for (const payment of own) {
-    collected += Number(payment.received);
+    const currency = payment.currency ?? "USDC";
+    const total = byCurrency.get(currency) ?? { count: 0, collected: 0, pending: 0 };
+    total.count += 1;
+    total.collected += Number(payment.received);
     if (payment.status === "awaiting_deposit" || payment.status === "partially_deposited") {
-      pending += Number(payment.amount) - Number(payment.received);
+      total.pending += Number(payment.amount) - Number(payment.received);
     }
+    byCurrency.set(currency, total);
   }
   const baseUnits = (decimal) => Math.round(decimal * 1_000_000).toString();
   return {
     request_count: own.length,
-    collected_base_units: baseUnits(collected),
-    pending_base_units: baseUnits(pending),
+    totals: [...byCurrency]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([currency, total]) => ({
+        currency,
+        request_count: total.count,
+        collected_base_units: baseUnits(total.collected),
+        pending_base_units: baseUnits(total.pending),
+      })),
   };
 }
 
@@ -1855,8 +1896,19 @@ async function payments(req, res, url) {
  * signature is accepted.
  */
 const STUB_CHAINS = [
-  { id: "143", name: "Monad", native_symbol: "MON", domain: 15, usdc: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", balance: 5_000_000n },
-  { id: "8453", name: "Base", native_symbol: "ETH", domain: 6, usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", balance: 1_250_000n },
+  {
+    id: "143", name: "Monad", native_symbol: "MON", domain: 15,
+    tokens: {
+      USDC: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", balance: 5_000_000n, domain: { name: "USDC", version: "2" } },
+      USDT: { symbol: "USDT0", address: USDT_TOKEN, balance: 3_000_000n, domain: { name: "USDT0", version: "1" } },
+    },
+  },
+  {
+    id: "8453", name: "Base", native_symbol: "ETH", domain: 6,
+    tokens: {
+      USDC: { symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", balance: 1_250_000n, domain: { name: "USD Coin", version: "2" } },
+    },
+  },
 ];
 const STUB_FORWARDER = "0xF0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0";
 const AUTHORIZATION_FIELDS = [
@@ -1922,11 +1974,13 @@ function shapeWithdrawal(row) {
     id: row.id,
     status: withdrawalStatus(row),
     wallet_address: row.wallet_address,
+    currency: row.currency,
     destination: row.destination,
     legs: row.legs.map((leg) => ({
       id: leg.id,
       kind: leg.kind,
       source_chain: leg.source_chain,
+      token: leg.token,
       amount: leg.amount,
       amount_base_units: leg.amount_base_units,
       state: leg.state,
@@ -1960,8 +2014,13 @@ async function withdrawals(req, res, url) {
     if (!idempotencyKey) return fail(res, 400, "missing_idempotency_key", "Idempotency-Key header is required");
     const body = await readJson(req);
     const destination = body.destination ?? {};
+    const currency = body.currency ?? "USDC";
+    if (!["USDC", "USDT"].includes(currency)) return fail(res, 400, "invalid_request", "currency must be USDC or USDT");
     const chain = STUB_CHAINS.find((entry) => entry.id === String(destination.chain_id));
     if (!chain) return fail(res, 400, "invalid_request", "destination.chain_id must be one of this deployment's networks");
+    if (!chain.tokens[currency]) {
+      return fail(res, 400, "invalid_request", `destination.chain_id must be a network serving ${currency}; ${chain.name} does not`);
+    }
     if (!/^0x[0-9a-fA-F]{40}$/.test(String(destination.address ?? ""))) {
       return fail(res, 400, "invalid_request", "invalid destination.address");
     }
@@ -1977,11 +2036,17 @@ async function withdrawals(req, res, url) {
       id: `wd_${randomUUID()}`,
       idempotency_key: idempotencyKey,
       wallet_address: session.wallet,
+      currency,
       destination: {
         chain: { id: chain.id, name: chain.name, native_symbol: chain.native_symbol },
         address: destination.address,
       },
-      legs: STUB_CHAINS.map((source, position) => {
+      // USDC bridges from every network holding it; anything else moves from
+      // the destination network alone.
+      legs: STUB_CHAINS.filter(
+        (source) => source.tokens[currency] && (currency === "USDC" || source.id === chain.id),
+      ).map((source, position) => {
+        const held = source.tokens[currency];
         const bridge = source.id !== chain.id;
         const salt = bridge ? hex32(randomUUID()) : null;
         const recipient = `0x${destination.address.slice(2).toLowerCase().padStart(64, "0")}`;
@@ -1997,13 +2062,14 @@ async function withdrawals(req, res, url) {
           position,
           kind: bridge ? "bridge" : "transfer",
           source_chain: { id: source.id, name: source.name, native_symbol: source.native_symbol },
-          amount: formatUsdc(source.balance),
-          amount_base_units: source.balance.toString(),
+          token: { symbol: held.symbol, address: held.address, decimals: 6 },
+          amount: formatUsdc(held.balance),
+          amount_base_units: held.balance.toString(),
           state: "awaiting_signature",
           authorization: {
             primary_type: bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization",
             typed_data: {
-              domain: { name: source.id === "143" ? "USDC" : "USD Coin", version: "2", chainId: Number(source.id), verifyingContract: source.usdc },
+              domain: { ...held.domain, chainId: Number(source.id), verifyingContract: held.address },
               primaryType: bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization",
               types: {
                 EIP712Domain: [
@@ -2014,7 +2080,7 @@ async function withdrawals(req, res, url) {
                 ],
                 [bridge ? "ReceiveWithAuthorization" : "TransferWithAuthorization"]: AUTHORIZATION_FIELDS,
               },
-              message: { from: session.wallet, to, value: source.balance.toString(), validAfter: "0", validBefore, nonce },
+              message: { from: session.wallet, to, value: held.balance.toString(), validAfter: "0", validBefore, nonce },
             },
             expires_at: new Date(now + 24 * 3600 * 1000).toISOString(),
             forwarder: bridge ? STUB_FORWARDER : null,
@@ -2136,11 +2202,16 @@ for (const [index, port] of RPC_PORTS.entries()) {
         const request = JSON.parse(body);
         id = request.id ?? null;
         const call = request.params?.[0] ?? {};
+        // A balance read names the token contract; the stub answers with that
+        // token's balance, and zero for a contract it does not know.
+        const held = Object.values(chain.tokens).find(
+          (token) => token.address.toLowerCase() === String(call.to ?? "").toLowerCase(),
+        );
         const result =
           request.method === "eth_chainId"
             ? toHex(Number(chain.id))
             : request.method === "eth_call" && String(call.data ?? "").startsWith(BALANCE_OF)
-              ? toHex(chain.balance, { size: 32 })
+              ? toHex(held?.balance ?? 0n, { size: 32 })
               : null;
         res.writeHead(200, { "Content-Type": "application/json", ...CORS });
         res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));

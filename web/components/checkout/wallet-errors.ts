@@ -18,7 +18,7 @@ export function walletErrorMessage(error: unknown): string {
     return "Not enough gas in this wallet to send the transfer.";
   }
   if (/transfer amount exceeds balance|exceeds balance/i.test(message)) {
-    return "This wallet does not hold enough USDC for the remaining amount.";
+    return "This wallet does not hold enough of the token for the remaining amount.";
   }
   if (/chain mismatch|does not match the target chain/i.test(message)) {
     return "Your wallet is on a different network. Switch networks and try again.";

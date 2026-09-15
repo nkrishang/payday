@@ -9,7 +9,7 @@
 //!
 //! The intent is what keeps the solver's transfer from being flagged as
 //! likely unsolicited. While a `sent` intent is pending, the crediting path
-//! (`InvoiceRepository::apply_finalized_usdc_range`) parks a transfer from
+//! (`InvoiceRepository::apply_finalized_range`) parks a transfer from
 //! an unknown sender for the quoted amount instead of flagging it; the
 //! resolution here either attributes the parked transfer to the intent or
 //! unparks it into the ordinary flagging path. Only `sent` intents park: a
@@ -668,6 +668,7 @@ mod tests {
         block: u64,
     ) -> PaymentObservation {
         PaymentObservation {
+            token: token(row),
             block_number: block,
             block_hash: B256::repeat_byte(block as u8),
             block_timestamp: block * 100,
@@ -699,7 +700,7 @@ mod tests {
     /// cursor the previous call left (ranges here are one block apart).
     async fn apply(
         repo: &InvoiceRepository,
-        row: &DbInvoice,
+        _row: &DbInvoice,
         block: u64,
         cursor_block: Option<u64>,
         observations: &[PaymentObservation],
@@ -709,9 +710,8 @@ mod tests {
             block_hash: B256::repeat_byte(block as u8),
             block_timestamp: Some(block * 100),
         });
-        repo.apply_finalized_usdc_range(
+        repo.apply_finalized_range(
             CHAIN,
-            token(row),
             cursor,
             block,
             B256::repeat_byte(block as u8),

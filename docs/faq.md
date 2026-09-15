@@ -45,20 +45,34 @@ with payers or auditors at your discretion; it is not a public link.
 
 ## Which asset and networks can pay?
 
-Circle-issued native USDC on Monad, Base, or Arbitrum One (their testnets in
-the sandbox). The payer chooses the network on the hosted checkout before
-signing; the merchant does not. Read `networks` from the deposit request,
-then `chain` and `token` once the payer has chosen. A matching symbol is not
-enough: bridged USDC, look-alike tokens, and the chain's gas currency do not
-count and may be unrecoverable. USDC sent to the address on a different
-supported network is refused by the contract and returned to the payer by
-hand.
+A deposit request is denominated in one `currency`: `USDC` (default) or
+`USDT`. USDC is Circle's native USDC on Monad, Base, or Arbitrum One (their
+testnets in the sandbox); USDT is Tether's USDT0 on Monad or Arbitrum One
+only, and is not offered in the sandbox. For a USDC request the payer chooses
+the network on the hosted checkout before signing; a USDT request pins
+`chain_id` at creation. Read `networks` from the deposit request, then
+`chain` and `token` once the payer has chosen. A matching symbol is not
+enough: bridged wrappers, look-alike tokens, and the chain's gas currency do
+not count and may be unrecoverable. The other Payday stablecoin sent to the
+address is never credited; anyone can return it to the payer with
+`recover(address)` on the deposit contract. The right token sent to the
+address on a different supported network is refused by the contract and
+returned to the payer by hand.
+
+## Why must a USDT request name its network?
+
+Payday never gives a merchant a rate worse than 1:1. USDC bridges through
+CCTP at 1:1, so a USDC request can be paid on any network and withdrawn to
+any. USDT has no such path, so a USDT request is paid on the network it
+names and a USDT withdrawal moves that network's balance only. A payer can
+still pay a USDT request from another network through the checkout's Relay
+route; Relay swaps and the payer carries the spread.
 
 ## What is the deposit address?
 
 It is a unique counterfactual smart-contract address for one deposit request and one
 payer wallet. It exists once the payer has signed the request's attestation
-from the wallet they will pay from; USDC can then arrive before the contract
+from the wallet they will pay from; funds can then arrive before the contract
 exists, and deployment later routes its balance under the amount, payout,
 expiry, and recovery terms committed into that address, the recovery term
 being the payer's own wallet. Never reuse it for another order.
@@ -73,7 +87,7 @@ integrating your own UI, reproduce all safety guidance in
 
 ## Why has a wallet transaction not appeared?
 
-Payday credits only finalized native-USDC transfers. Inclusion or wallet
+Payday credits only finalized transfers of the request's token. Inclusion or wallet
 confirmation can precede Payday's finality boundary and indexing cursor. Check
 `as_of`, `indexer_freshness`, transfer provenance, and `/v1/status`; poll
 `GET /v1/deposit-requests/{id}` or register a webhook rather than treating submission
@@ -88,13 +102,13 @@ as a deposit request.
   back to the payer's attested wallet in the same transaction; it is never
   forwarded to the merchant.
 - If execution happens after expiry, the complete balance goes back to the
-  payer's attested wallet—even if enough USDC arrived earlier.
+  payer's attested wallet—even if enough arrived earlier.
 
 Leave time for inclusion, finality, and settlement before the deadline.
 
 ## Where do expired or late funds go?
 
-An underpaid address is returned after expiry. Native USDC sent after expiry
+An underpaid address is returned after expiry. Funds sent after expiry
 or after the deposit contract executes is forwarded to the payer's attested
 wallet (`recovery_address` on the deposit request, always equal to `payer_wallet`).
 Payday holds nothing: every return is on-chain and recorded against the
@@ -138,7 +152,7 @@ lost or delivered.
 
 ## How are amounts and deadlines encoded?
 
-USDC uses six decimals. API human amounts are decimal strings and exact atomic
+Every supported stablecoin has six decimals. API human amounts are decimal strings and exact atomic
 values are strings ending in `_base_units`; never use binary floating point.
 Create requests accept `expires_in` as integer seconds or `expires_at` as RFC
 3339, not both. The default is 24 hours and the accepted range is 10 minutes to
@@ -156,7 +170,7 @@ shown only at issuance. See [Authentication and API keys](authentication.md).
 ## What is available in sandbox?
 
 `https://api.sandbox.payday.sh` is an isolated service on Monad testnet, Base
-Sepolia, and Arbitrum Sepolia with test USDC and `payday_test_…`
+Sepolia, and Arbitrum Sepolia with test USDC (no USDT) and `payday_test_…`
 credentials. It exercises real indexing/finality rather than a
 fake “mark deposited” endpoint. See [Sandbox](sandbox.md).
 

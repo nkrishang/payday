@@ -333,7 +333,7 @@ test("a payer can pay from another network through Relay", async ({ page }) => {
   const reported = page.waitForRequest(
     (request) => request.method() === "POST" && /\/relay\/quotes\/rli_[^/]+\/sent$/.test(request.url()),
   );
-  await page.getByRole("button", { name: /pay from polygon/i }).click();
+  await page.getByRole("button", { name: /pay usdc from polygon/i }).click();
   const sentReport = await reported;
   const sent = await page.evaluate(() => (window as unknown as { __sent: unknown[] }).__sent);
   expect(sent).toHaveLength(2);
@@ -774,4 +774,20 @@ test("a merchant-session deposit request opened without its app asks for the app
 
   await expectAppRequired(page, html);
   expect(errors).toEqual([]);
+});
+
+test("a USDT request is paid in the contract the wallet shows as USDT0", async ({ page }) => {
+  await installFakeWallet(page);
+  await page.goto("/pay/dr_usdt");
+
+  // The amount is due in USDT; on Monad that is Tether's USDT0, which is
+  // what the heading, the notice, and the pay button all say.
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("25.00");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("USDT0");
+  await expect(page.getByText(/USDT0 is USDT on Monad/)).toBeVisible();
+  await expect(page.getByText("Monad · 143")).toBeVisible();
+  await expect(page.getByText(ADDRESS)).toBeVisible();
+  await expect(page.getByRole("button", { name: /pay with wallet/i })).toBeVisible();
+  // The request is pinned: no network choice is offered.
+  await expect(page.getByRole("radiogroup", { name: /network to pay on/i })).toHaveCount(0);
 });

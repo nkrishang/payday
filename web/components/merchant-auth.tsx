@@ -31,7 +31,7 @@ const privyChains = viemChains as unknown as [PrivyChain, ...PrivyChain[]];
  * a no-op here regardless of its value. The dialog calls `useCreateWallet`
  * itself instead, which is the one thing that actually ever creates it.
  *
- * The wallet signs withdrawal authorizations under each network's USDC
+ * The wallet signs withdrawal authorizations under each network's stablecoin contract
  * domain, so Privy is told every network the deployment serves; without
  * that it would refuse to sign for a chain it does not know (Monad).
  */

@@ -21,17 +21,17 @@ alarm_email      = "operator@example.com"
 # The testnets behind production's three networks, with Circle's test USDC on
 # each. Fill the addresses and hashes from the sandbox contract deployment
 # output (one generation, same addresses on every chain); zero or guessed
-# values are refused. Set each usdc_start_block to the chain's block
+# values are refused. Set each start_block to the chain's block
 # immediately before deploying the services.
 chains = [
   {
     chain_id                = 10143
-    usdc                    = "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea"
+    tokens = [{ currency = "USDC", address = "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea" }]
     factory                 = "0x0000000000000000000000000000000000000001"
     batch_sweeper           = "0x0000000000000000000000000000000000000002"
     factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
     batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
-    usdc_start_block        = 0
+    start_block        = 0
     finality_source         = "finalized"
     finality_confirmations  = 0
     block_time_ms           = 300
@@ -40,12 +40,12 @@ chains = [
   },
   {
     chain_id                = 84532
-    usdc                    = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    tokens = [{ currency = "USDC", address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" }]
     factory                 = "0x0000000000000000000000000000000000000001"
     batch_sweeper           = "0x0000000000000000000000000000000000000002"
     factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
     batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
-    usdc_start_block        = 0
+    start_block        = 0
     finality_source         = "latest"
     finality_confirmations  = 10
     block_time_ms           = 2000
@@ -54,12 +54,12 @@ chains = [
   },
   {
     chain_id                = 421614
-    usdc                    = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
+    tokens = [{ currency = "USDC", address = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d" }]
     factory                 = "0x0000000000000000000000000000000000000001"
     batch_sweeper           = "0x0000000000000000000000000000000000000002"
     factory_code_hash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
     batch_sweeper_code_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
-    usdc_start_block        = 0
+    start_block        = 0
     finality_source         = "latest"
     finality_confirmations  = 40
     block_time_ms           = 250

@@ -4,7 +4,7 @@ pragma solidity ^0.8.13;
 import {Script} from "foundry/lib/forge-std/src/Script.sol";
 import {console} from "foundry/lib/forge-std/src/console.sol";
 import {BatchSweeper} from "foundry/src/BatchSweeper.sol";
-import {MockUSDC} from "foundry/src/MockUSDC.sol";
+import {MockStablecoin} from "foundry/src/MockStablecoin.sol";
 import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
 /// @notice Deploys deterministic local payment fixtures on a fresh Anvil.
@@ -14,10 +14,12 @@ import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 /// script refuses to run against a stale generation instead of leaving the
 /// services pinned to bytecode that no longer matches this build.
 contract BootstrapScript is Script {
-    // Account #0's nonce-0, nonce-1 and nonce-2 CREATE addresses, respectively.
+    // Account #0's nonce-0, nonce-1, nonce-2 and nonce-3 CREATE addresses,
+    // respectively. USDT came last, so the earlier fixtures keep their addresses.
     address internal constant FACTORY = 0x5FbDB2315678afecb367f032d93F642f64180aa3;
     address internal constant USDC = 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512;
     address internal constant BATCH_SWEEPER = 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0;
+    address internal constant USDT = 0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9;
     address internal constant ANVIL_ACCOUNT_0 = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
     address internal constant ANVIL_ACCOUNT_1 = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
     uint256 internal constant FIXTURE_BALANCE = 1_000_000 * 1e6;
@@ -39,9 +41,9 @@ contract BootstrapScript is Script {
 
         if (USDC.code.length == 0) {
             vm.broadcast();
-            MockUSDC token = new MockUSDC();
+            MockStablecoin token = new MockStablecoin("Mock USD Coin", "USDC");
             require(address(token) == USDC, "USDC address mismatch; use fresh Anvil account #0");
-            console.log("MockUSDC deployed at", USDC);
+            console.log("MockStablecoin USDC deployed at", USDC);
         }
 
         if (BATCH_SWEEPER.code.length == 0) {
@@ -68,22 +70,31 @@ contract BootstrapScript is Script {
             );
         }
 
+        if (USDT.code.length == 0) {
+            vm.broadcast();
+            MockStablecoin usdt = new MockStablecoin("Mock Tether USD", "USDT");
+            require(address(usdt) == USDT, "USDT address mismatch; restart Anvil so the fixtures deploy in order");
+            console.log("MockStablecoin USDT deployed at", USDT);
+        }
+
         // The services pin the generation by these hashes; print them on every
         // run so a developer can copy them into the environment.
         console.log("PAYDAY_FACTORY_CODE_HASH=%s", vm.toString(FACTORY.codehash));
         console.log("PAYDAY_BATCH_SWEEPER_CODE_HASH=%s", vm.toString(BATCH_SWEEPER.codehash));
 
-        _topUp(ANVIL_ACCOUNT_0);
-        _topUp(ANVIL_ACCOUNT_1);
+        _topUp(USDC, ANVIL_ACCOUNT_0);
+        _topUp(USDC, ANVIL_ACCOUNT_1);
+        _topUp(USDT, ANVIL_ACCOUNT_0);
+        _topUp(USDT, ANVIL_ACCOUNT_1);
     }
 
-    function _topUp(address account) internal {
-        MockUSDC token = MockUSDC(USDC);
+    function _topUp(address tokenAddress, address account) internal {
+        MockStablecoin token = MockStablecoin(tokenAddress);
         uint256 balance = token.balanceOf(account);
         if (balance < FIXTURE_BALANCE) {
             vm.broadcast();
             token.mint(account, FIXTURE_BALANCE - balance);
-            console.log("MockUSDC funded", account);
+            console.log("MockStablecoin funded", tokenAddress, account);
         }
     }
 }

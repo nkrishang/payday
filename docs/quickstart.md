@@ -1,6 +1,6 @@
 # Payday quickstart
 
-Issue a USDC deposit request, share its hosted checkout, and watch finalized funds
+Issue a deposit request, share its hosted checkout, and watch finalized funds
 settle to your wallet. The deposit request is the document; the deposit request is its on-chain
 fulfilment. Everything below is also available in the dashboard at
 `payday.sh/dashboard`, which signs in with an emailed code and needs no API
@@ -44,7 +44,8 @@ curl -fsS "$API/v1/deposit-requests" \
   }' | jq
 ```
 
-- `amount` is the requested amount, used directly. There are no line items;
+- `amount` is the requested amount, used directly, in the request's
+  `currency` — `USDC` when omitted, as here, or `USDT`. There are no line items;
   attach a PDF when you need an itemized breakdown (one PDF, at most 5 MiB,
   reserved through `POST /v1/attachments`, uploaded to the presigned URL, and
   finalized once the malware scan admits it; the SDK's `attachments.upload`
@@ -62,10 +63,12 @@ curl -fsS "$API/v1/deposit-requests" \
   choose it, and Payday never holds them.
 - Expiry defaults to 24 hours. Use `expires_in` in seconds or an RFC 3339
   `expires_at`. The allowed window is 10 minutes to 366 days.
-- You do not choose a network. The request offers every supported one
-  (`networks`, each with its exact Circle-issued native USDC contract) and
-  the payer picks where to pay when they sign; `chain` and `token` are set
-  from then on.
+- For a USDC request you do not choose a network. The request offers every
+  supported one (`networks`, each with the currency's exact contract there)
+  and the payer picks where to pay when they sign; `chain` and `token` are
+  set from then on. A USDT request must instead pin `chain_id` to Monad
+  (`143`) or Arbitrum One (`42161`), because USDT has no 1:1 bridge between
+  networks; see [Deposit concepts](concepts.md#currency).
 
 The response includes a `dr_…` ID, one-time address, amount, deadline, current
 status, and a `deposit_url`.

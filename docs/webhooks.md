@@ -75,6 +75,7 @@ API's `amount`, and parse every timestamp the same way:
   "amount_base_units": "10500000",
   "received": "10.500000",
   "received_base_units": "10500000",
+  "currency": "USDC",
   "heading": "March retainer",
   "reference": "INV-1042",
   "metadata": {"po": "PO-77"},
@@ -94,7 +95,8 @@ API's `amount`, and parse every timestamp the same way:
 ```
 
 The `dr_` id, the decimal `amount` and `received` beside their
-`_base_units`, EIP-55 addresses, and RFC 3339 UTC timestamps to the second
+`_base_units`, `currency` (`USDC` or `USDT`, the stablecoin those amounts
+are in), EIP-55 addresses, and RFC 3339 UTC timestamps to the second
 are exactly what the API returns. `payer_wallet`, `address`, and
 `wallet_bound_at` are null before `deposit_request.ready`. `chain_id` is the
 network the payment is on, as the API's decimal string: known from issuance

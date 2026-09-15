@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { formatBaseUnits } from "@/lib/format";
 import { CustomerForm } from "./customer-form";
@@ -9,8 +9,6 @@ import { formatDate } from "./labels";
 import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";
 
-/** The product's only currency; stats span every deposit request, so no one row's own token names it. */
-const USDC_DECIMALS = 6;
 
 export function CustomerDetail({ id }: { id: string }) {
   const customer = useResource(`customer:${id}`, (client) => client.customers.get(id));
@@ -51,12 +49,18 @@ export function CustomerDetail({ id }: { id: string }) {
             {record.stats.request_count}{" "}
             {record.stats.request_count === 1 ? "request" : "requests"}
           </Stat>
-          <Stat tone="success">
-            {formatBaseUnits(record.stats.collected_base_units, USDC_DECIMALS)} USDC collected
-          </Stat>
-          <Stat tone="warning">
-            {formatBaseUnits(record.stats.pending_base_units, USDC_DECIMALS)} USDC pending
-          </Stat>
+          {/* One pair per currency: totals never add across currencies. Every
+              supported stablecoin has six decimals. */}
+          {record.stats.totals.map((total) => (
+            <Fragment key={total.currency}>
+              <Stat tone="success">
+                {formatBaseUnits(total.collected_base_units, 6)} {total.currency} collected
+              </Stat>
+              <Stat tone="warning">
+                {formatBaseUnits(total.pending_base_units, 6)} {total.currency} pending
+              </Stat>
+            </Fragment>
+          ))}
         </div>
       </div>
 

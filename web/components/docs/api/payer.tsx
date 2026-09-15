@@ -48,6 +48,7 @@ const UNLOCKED = `{
   "settlement_explorer_url": null,
   "payer_message": null,
   "content_unlocked": true,
+  "currency": "USDC",
   "networks": [
     { "chain": { "id": "143", "name": "Monad" }, "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 } },
     { "chain": { "id": "8453", "name": "Base" }, "token": { "symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 } },
@@ -135,16 +136,21 @@ export const PAYER: EndpointGroup = {
           },
           { name: "content_unlocked", type: "boolean", description: "" },
           {
+            name: "currency",
+            type: "string | null",
+            description: "USDC or USDT. Gated: null while locked.",
+          },
+          {
             name: "networks, amount, received, remaining",
             type: "| null",
             description:
-              "Gated. networks lists the chains the payer may choose, each with its USDC contract. Base-unit counterparts included.",
+              "Gated. networks lists the chains the payer may choose, each with the currency's contract there. Base-unit counterparts included.",
           },
           {
             name: "chain, token",
             type: "object | null",
             description:
-              "The payment's network and its USDC contract. Present once bound, or from issuance when the merchant pinned it.",
+              "The payment's network and the currency's contract on it. Present once bound, or from issuance when the merchant pinned it.",
           },
           {
             name: "relay_available",
@@ -505,13 +511,15 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       method: "GET",
       path: "/v1/payer/deposit-requests/{id}/relay/chains",
       auth: "payer_session",
-      summary: "The networks USDC may be paid from through Relay.",
+      summary: "The networks a payer may pay from through Relay, and what they may send there.",
       body: (
         <p>
-          Every network Relay takes USDC deposits on, except the request&apos;s own. Requires the
+          Every network Relay takes deposits on, except the request&apos;s own. Requires the
           address (<code>409 wallet_required</code> before) and a payable request. Each entry
-          carries the network&apos;s USDC contract, a public RPC and explorer, and an icon, so a
-          wallet that lacks the network can be asked to add it.
+          carries the stablecoins the payer may send from that network (USDC, and USDT where Relay
+          takes it, Base&apos;s included), which Relay swaps into the request&apos;s currency, plus
+          a public RPC and explorer and an icon, so a wallet that lacks the network can be asked
+          to add it.
         </p>
       ),
       headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
@@ -522,7 +530,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
             name: "chains[]",
             type: "object",
             description:
-              "{ chain_id, name, native_symbol, usdc_address, explorer_url, icon_url, rpc_url }.",
+              "{ chain_id, name, native_symbol, tokens: [{ currency, symbol, address, decimals }], explorer_url, icon_url, rpc_url }. tokens has at least one entry.",
           },
         ],
       },
@@ -537,7 +545,10 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
         response: `{
   "chains": [
     { "chain_id": "8453", "name": "Base", "native_symbol": "ETH",
-      "usdc_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "tokens": [
+        { "currency": "USDC", "symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 },
+        { "currency": "USDT", "symbol": "USDT", "address": "0x…", "decimals": 6 }
+      ],
       "explorer_url": "https://basescan.org", "icon_url": "https://assets.relay.link/icons/8453/light.png",
       "rpc_url": "https://mainnet.base.org" }
   ]
@@ -554,11 +565,12 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       body: (
         <p>
           Payday makes the quote, never the page: it pins the attested wallet as the sender, the
-          payment address as the recipient, USDC on the request&apos;s network as what lands, and
-          exactly the amount still due as the output. The answer is the transactions the wallet
-          sends on the origin network, in order (an ERC-20 approve, then Relay&apos;s deposit),
-          and what they cost. Ask again after <code>expires_at</code>. Every quote is a{" "}
-          <code>rli_</code> record; only one reported as sent is followed.
+          payment address as the recipient, the request&apos;s currency on its network as what
+          lands, and exactly the amount still due as the output. The payer sends any of the
+          origin&apos;s listed tokens; Relay swaps it, and the payer bears the spread. The answer is
+          the transactions the wallet sends on the origin network, in order (an ERC-20 approve,
+          then Relay&apos;s deposit), and what they cost. Ask again after <code>expires_at</code>.
+          Every quote is a <code>rli_</code> record; only one reported as sent is followed.
         </p>
       ),
       headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
@@ -570,6 +582,11 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
           required: true,
           description: "Decimal chain id, one of the networks to pay from.",
         },
+        {
+          name: "origin_token",
+          type: "string",
+          description: "An address from that network's tokens. Default: its USDC.",
+        },
       ],
       response: {
         fields: [
@@ -577,10 +594,15 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
           { name: "request_id", type: "string", description: "Relay's request id." },
           { name: "origin", type: "object", description: "The network, as listed." },
           {
+            name: "origin_token",
+            type: "object",
+            description: "{ currency, symbol, address, decimals }. What the wallet sends.",
+          },
+          {
             name: "amount_in, amount_out",
             type: "string",
             description:
-              "USDC the wallet sends on the origin network, and exactly what lands on the payment address (the amount due). Base-unit counterparts included.",
+              "amount_in: what the wallet sends on the origin network, in origin_token. amount_out: exactly what lands on the payment address, in the request's currency (the amount due). Base-unit counterparts included.",
           },
           { name: "relayer_fee_usd, time_estimate_seconds, expires_at", type: "", description: "" },
           {
@@ -597,15 +619,16 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
         {
           status: 422,
           code: "relay_unsupported_origin",
-          when: "Not one of the networks to pay from, or the request's own.",
+          when: "Not one of the networks to pay from, or the request's own; or origin_token is not one of its tokens.",
         },
         { status: 502, code: "relay_quote_failed", when: "Relay has no route, or is unreachable." },
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/relay/quotes" \\
   -H "Content-Type: application/json" \\
-  -d '{ "origin_chain_id": "8453" }'`,
-        ts: `const quote = await payer.relay.quote(id, "8453", { payerSession });
+  -d '{ "origin_chain_id": "8453", "origin_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }'`,
+        ts: `// originToken: an address from the origin's tokens; omitted, its USDC.
+const quote = await payer.relay.quote(id, "8453", { originToken, payerSession });
 for (const step of quote.steps) {
   await wallet.sendTransaction({ account, to: step.transaction.to, data: step.transaction.data, value: BigInt(step.transaction.value) });
 }`,
@@ -613,6 +636,7 @@ for (const step of quote.steps) {
   "id": "rli_0198f80c-8d2f-7dc1-a369-90556a64f7b1",
   "request_id": "0x1789…",
   "origin": { "chain_id": "8453", "name": "Base", "…": "…" },
+  "origin_token": { "currency": "USDC", "symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 },
   "amount_in": "10.520798", "amount_in_base_units": "10520798",
   "amount_out": "10.500000", "amount_out_base_units": "10500000",
   "relayer_fee_usd": "0.02", "time_estimate_seconds": 1,
@@ -634,7 +658,7 @@ for (const step of quote.steps) {
       body: (
         <p>
           Once. From then on the indexer asks Relay what became of the request, attributes the
-          delivered USDC to the attested wallet when Relay names it as the depositor, and the payer
+          delivered funds to the attested wallet when Relay names it as the depositor, and the payer
           view&apos;s <code>relay</code> block shows where it stands. The hash is advisory; the
           origin transaction Relay records is what the proof names.
         </p>

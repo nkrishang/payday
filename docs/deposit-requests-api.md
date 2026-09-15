@@ -17,7 +17,7 @@ names the expected email, and the merchant-session mode names the user your
 own application has signed in, by your `payer_reference`, and returns a
 single-use `client_secret` your server hands that user — see
 [Merchant sessions](api-reference.md#merchant-sessions)). Optional
-fields are `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
+fields are `currency`, `chain_id`, `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 `customer_id`, an `issuer_id`, and one finalized `attachment_id` for a scanned
 PDF. A request that names a saved customer may leave `payer` out, and one
 that names a saved issuer identity may leave `issuer` and `payout_address`
@@ -33,10 +33,17 @@ term (`recovery_address`), where overpayment remainders, expired balances,
 and late transfers return on-chain. The binding raises a `deposit_request.ready`
 webhook. Recovery is never a request field, so a request carrying
 `refund_address` is rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
-both for a 24-hour lifetime. There is no chain or token field: the request
-offers every supported network (`networks`), and the payer chooses one on
-the hosted checkout when they sign; `chain` and `token` are `null` until
-then.
+both for a 24-hour lifetime. `currency` is `USDC` (the default) or `USDT`,
+and every response carries it. There is no token field: a USDC request
+offers every supported network (`networks`) and the payer chooses one on
+the hosted checkout when they sign, unless `chain_id` pins it; `chain` and
+`token` are `null` until the network is fixed. USDC bridges 1:1, so a USDC
+request may be paid on any network and the merchant withdraws to any. USDT
+has no such path, so a USDT request must pin `chain_id` to a network
+serving USDT (Monad or Arbitrum One; `400 invalid_request` naming
+`chain_id` otherwise, `422 unsupported_chain` for a chain that does not
+serve it), and its USDT is withdrawn on that network. The payer may still
+pay either from another network through Relay, carrying the spread.
 
 Every immutable field, including the attachment's hash, takes part in
 idempotency: reusing a key with a different document returns
@@ -47,7 +54,8 @@ through the salt, which is what makes the Proof of Payment
 document, the wallet, the address, and the transfers from that wallet.
 
 Deposit requests expose the public states `awaiting_deposit`, `partially_deposited`, `deposited`,
-`settled`, `expired`, `returned`, and `needs_attention`; amounts are trimmed USDC strings and are
+`settled`, `expired`, `returned`, and `needs_attention`; amounts are trimmed decimal strings in the
+request's `currency` (every supported stablecoin has six decimals) and are
 also returned in integer base units. The current fee is explicitly zero, so
 `net_amount` equals `amount`. Every read includes the indexer's committed
 `as_of` block and timestamp once the indexer has committed its first range. Cancellation only changes API presentation: it

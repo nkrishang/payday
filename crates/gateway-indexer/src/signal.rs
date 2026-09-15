@@ -191,9 +191,9 @@ impl SubscriptionKind {
 }
 
 /// Build the subscription filter for one chunk of the watch list.
-fn transfer_filter(token: Address, recipients: &[Address]) -> Filter {
+fn transfer_filter(tokens: &[Address], recipients: &[Address]) -> Filter {
     Filter::new()
-        .address(token)
+        .address(tokens.to_vec())
         .event_signature(keccak256("Transfer(address,address,uint256)"))
         .topic2(
             recipients
@@ -265,7 +265,7 @@ fn ending_is_current(chunks: &[ActiveChunk], id: B256, generation: u64) -> bool 
 pub struct TransferSignal {
     ws_url: String,
     chain_id: u64,
-    token: Address,
+    tokens: Vec<Address>,
     fallback_logged: AtomicBool,
     /// Source of session-unique chunk generations. Process-unique is more
     /// than the session needs, but it costs nothing and keeps every chunk
@@ -324,11 +324,11 @@ fn is_unsupported_subscription(error: &str) -> bool {
 }
 
 impl TransferSignal {
-    pub fn new(ws_url: String, chain_id: u64, token: Address) -> Self {
+    pub fn new(ws_url: String, chain_id: u64, tokens: Vec<Address>) -> Self {
         Self {
             ws_url,
             chain_id,
-            token,
+            tokens,
             fallback_logged: AtomicBool::new(false),
             next_generation: AtomicU64::new(0),
         }
@@ -455,7 +455,7 @@ impl TransferSignal {
         // silently drop.
         let mut call = client.request::<(&'static str, Filter), B256>(
             "eth_subscribe",
-            (kind.method(), transfer_filter(self.token, chunk)),
+            (kind.method(), transfer_filter(&self.tokens, chunk)),
         );
         call.set_is_subscription();
         let id = tokio::time::timeout(SUBSCRIBE_TIMEOUT, call)
@@ -953,7 +953,7 @@ mod tests {
         let token = address!("0x754704Bc059F8C67012fEd69BC8A327a5aafb603");
         let a = address!("0x0000000000000000000000000000000000000001");
         let b = address!("0x0000000000000000000000000000000000000002");
-        let json = serde_json::to_value(transfer_filter(token, &[a, b])).unwrap();
+        let json = serde_json::to_value(transfer_filter(&[token], &[a, b])).unwrap();
         assert_eq!(
             json["address"],
             serde_json::json!("0x754704bc059f8c67012fed69bc8a327a5aafb603")

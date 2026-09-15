@@ -44,8 +44,8 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<ServiceStatus>, A
     let cursors = CursorRepository::new(state.repo.pool().clone());
     let mut chains = Vec::with_capacity(state.networks.chains().len());
     for chain in state.networks.chains() {
-        let finalized = cursors.finalized_head(chain.chain_id, chain.usdc).await?;
-        let cursor = cursors.get(chain.chain_id, chain.usdc).await?;
+        let finalized = cursors.finalized_head(chain.chain_id).await?;
+        let cursor = cursors.get(chain.chain_id).await?;
         let queue = state.repo.sweep_queue_stats(chain.chain_id).await?;
         let worker = state.repo.sweeper_status(chain.chain_id).await?;
         chains.push(ChainStatus {

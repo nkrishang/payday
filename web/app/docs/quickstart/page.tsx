@@ -64,6 +64,7 @@ const CREATE_RESPONSE = `{
     { "chain": { "id": "42161", "name": "Arbitrum One" }, "token": { "symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6 } }
   ],
   "chain": null,
+  "currency": "USDC",
   "token": null,
   "expires_at": "2026-09-06T13:00:00Z",
   "created_at": "2026-09-06T12:00:00Z",

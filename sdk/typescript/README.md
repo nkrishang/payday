@@ -58,6 +58,14 @@ remainders, expired balances, and late transfers return to the payer. Wait for
 the `deposit_request.ready` webhook, or poll until `address` is set, before quoting an
 address anywhere. A create request carrying `refund_address` is rejected.
 
+`currency` is `USDC` unless given. USDC bridges 1:1, so a USDC request may
+leave the network to the payer or pin one with `chain_id`; a `USDT` request
+must pin `chain_id` to a network that serves USDT, since USDT has no 1:1
+bridge for the merchant. Every deposit request and summary carries
+`currency`; each `token` is that currency's contract on its chain, and
+`token.symbol` is what a wallet shows there (`USDT0` for USDT on Monad and
+Arbitrum).
+
 ## Payer policy
 
 `payer_policy` is one of three presets. The verified mode names the expected
@@ -133,7 +141,11 @@ also exposed separately as `attachments.create({ filename })` and
 (`name`, optional `email` and `details`). `update` is partial: a field left
 out keeps its value, and `email: null` or `details: null` clears one. Pass a
 customer's `id` as `customer_id` when creating a deposit request; the deposit
-request still stores its own immutable `payer` snapshot.
+request still stores its own immutable `payer` snapshot. `customers.get`
+alone carries `stats`: `{ request_count, totals: [{ currency,
+request_count, collected_base_units, pending_base_units }] }`, one entry per
+currency the customer has been asked for, since totals never add across
+currencies.
 
 ## Issuer identities
 
@@ -177,8 +189,10 @@ Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never
 
 ## Withdrawing from your server
 
-The Payday wallet's whole USDC balance, on every network, to one address:
-prepare, sign, submit, poll. Signing needs the wallet's key, exported once from
+The Payday wallet's whole balance in one currency to one address — every
+network's USDC, or the destination network's USDT, since USDT has no 1:1
+bridge and is withdrawn per network: prepare, sign, submit, poll. Signing
+needs the wallet's key, exported once from
 the dashboard's Account section. `@payday/sdk/signing` signs with it through
 `viem` (an optional peer dependency: `npm install viem`), after checking every
 document against its leg so a wrong document is refused rather than signed.
@@ -191,10 +205,11 @@ const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
 const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
 
 let withdrawal = await payday.withdrawals.create(
-  { destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
+  { currency: "USDC", destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
   crypto.randomUUID(),
 );
-const chains = (id: number) => deploymentChains.get(id) ?? null; // trusted USDC/CCTP registry
+// trusted registry per chain: { tokens: { USDC: address, USDT?: address }, cctp: { domain, forwarder } | null }
+const chains = (id: number) => deploymentChains.get(id) ?? null;
 const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
 withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
 while (withdrawal.status === "in_progress") {
@@ -206,9 +221,14 @@ while (withdrawal.status === "in_progress") {
 Any object with `signTypedData(typedData)` works as the signer (a KMS-backed
 viem account, ethers' `Wallet` through a one-line adapter); `toSignableTypedData`
 converts the API's document (decimal strings) into the bigint form those take.
-Bridge signing requires a trusted `chains` callback and always recomputes the
-nonce; it also verifies the USDC contract, forwarder, destination CCTP domain,
-and expiry before calling the signer. These checks are the security boundary.
+`currency` defaults to `USDC`; the withdrawal and each leg carry `currency`
+and `token {symbol, address, decimals}`. With a `chains` registry,
+`signWithdrawal` checks every leg's contract against the trusted address for
+the withdrawal's currency. Bridge signing requires that registry and always
+recomputes the nonce; it also verifies the forwarder, destination CCTP
+domain, and expiry before calling the signer, and refuses a bridge leg for
+anything but USDC — a USDT withdrawal has a single transfer leg on the
+destination network. These checks are the security boundary.
 `withdrawals.list`, `withdrawals.get`, and `withdrawals.cancel` round out the
 namespace. The full guide, with Rust and Go samples, is at
 https://payday.sh/docs/withdrawals.
@@ -226,6 +246,7 @@ const deposit = await payer.depositRequests.get("dr_0198f80c-8d2f-7dc1-a369-9055
 deposit.issuer_name;          // always shown, with `heading`
 deposit.content_unlocked;     // false while a gated deposit request awaits verification
 deposit.requirements;         // email status and whether the policy is complete
+deposit.currency;             // "USDC" or "USDT" — what every amount is in; null while locked
 deposit.remaining_base_units; // exact integer string — the only value to do arithmetic on
 deposit.deposit_uri;          // EIP-681 request for the amount still due, or null
 deposit.details;              // amount, payer, notes, reference, attachment — or null while locked
@@ -248,7 +269,7 @@ const opened = await payer.verification.exchangeClientSecret(deposit.id, clientS
 ```
 
 For `permissionless` deposit requests everything is unlocked immediately. For
-`verified_email`, `networks`, the amounts, `address`, `deposit_uri`, and
+`verified_email`, `currency`, `networks`, the amounts, `address`, `deposit_uri`, and
 `details` are `null` until the payer's session satisfies the policy; `chain`
 and `token` are `null` until the payer has chosen a network and bound their
 wallet (`payer.wallet.challenge(id, wallet, chainId, options)`, then
@@ -259,7 +280,12 @@ pass the
 session token from verification as `payerSession` and it travels in the
 `Payday-Payer-Session` header. The response deliberately carries no merchant
 data — no payout or recovery address, metadata, customer, or policy
-assertions; only a masked `expected_email_hint`. Pass an `AbortSignal` to
+assertions; only a masked `expected_email_hint`. Once the address exists,
+`payer.relay.chains(id)` lists the networks the attested wallet may pay
+from through Relay, each with `tokens` (the stablecoins it may send there),
+and `payer.relay.quote(id, originChainId, { originToken? })` quotes one of
+them (the network's USDC by default) swapped into the request's currency;
+`payer.relay.sent` reports the origin transaction. Pass an `AbortSignal` to
 cancel a poll. If you build your own checkout, reproduce the guidance in
 [Deposit safety](../../docs/deposit-safety.md): payers must send the exact
 amount of the exact token on the network they chose, and must not pay at

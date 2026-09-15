@@ -49,6 +49,8 @@ sol! {
     function settled() view returns (bool);
     function paused() view returns (bool);
     function isBlacklisted(address account) view returns (bool);
+    /// Tether's restriction getter (USDT0); Circle's is `isBlacklisted`.
+    function isBlocked(address account) view returns (bool);
     function balanceOf(address account) view returns (uint256);
     function authorizationState(address authorizer, bytes32 nonce) view returns (bool);
 
@@ -62,14 +64,18 @@ sol! {
 
 /// Recipients per `eth_getLogs` call: one OR-array in `topics[2]`. Every
 /// range scan is filtered by the watch list, so the cost of a range grows
-/// with the addresses Payday watches and never with the chain's USDC volume.
+/// with the addresses Payday watches and never with the chain's transfer volume.
 /// Providers accept thousands; 500 keeps every request small and matches the
 /// signal's subscription chunk.
 pub const LOG_FILTER_CHUNK: usize = 500;
 
-/// A validated USDC `Transfer` log with the metadata needed for durable ordering.
+/// A validated `Transfer` log from one of the chain's configured token
+/// contracts to a watched address, with the metadata needed for durable
+/// ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsdcTransfer {
+pub struct WatchedTransfer {
+    /// The contract that emitted it.
+    pub token: Address,
     pub block_number: u64,
     pub block_hash: B256,
     /// The containing block's timestamp, carried by the log itself
@@ -490,6 +496,16 @@ pub struct FailureProbe {
     pub balance: Option<U256>,
 }
 
+/// Whether `currency`'s contract can refuse a transfer *to* a blocked
+/// recipient. Circle's FiatToken reverts when either side of a transfer is
+/// blacklisted; USDT0's hook restricts the sender alone, so a blocked
+/// beneficiary or recovery wallet cannot fail a settlement or recovery
+/// transfer, and probing their restriction would only invite a false
+/// `beneficiary_blacklisted` / `recovery_blacklisted` classification.
+fn recipient_restriction_matters(currency: gateway_core::Currency) -> bool {
+    matches!(currency, gateway_core::Currency::Usdc)
+}
+
 /// The transaction that deployed a `Payment` somebody else executed, with
 /// the amounts its constructor routed. `settled` is the `Settled` amount when
 /// the deployment paid the receiver; `recovered` is what went to the recovery
@@ -520,16 +536,16 @@ pub trait ChainClient: Send + Sync {
     /// Canonical header at an exact height; `Transient` if the node lacks it.
     async fn block_header(&self, number: u64) -> Result<BlockHeader, ChainError>;
 
-    /// Successful USDC `Transfer` logs in an inclusive block range addressed
-    /// to `recipients` (chunked into as many calls as the list needs). An
-    /// empty list fetches nothing.
-    async fn usdc_transfers(
+    /// Successful `Transfer` logs of any of `tokens` in an inclusive block
+    /// range addressed to `recipients` (chunked into as many calls as the
+    /// list needs). An empty list fetches nothing.
+    async fn token_transfers(
         &self,
-        token: Address,
+        tokens: &[Address],
         from_block: u64,
         to_block: u64,
         recipients: &[Address],
-    ) -> Result<Vec<UsdcTransfer>, ChainError>;
+    ) -> Result<Vec<WatchedTransfer>, ChainError>;
 
     /// Mined receipt for a helper transaction, or `None` while unmined.
     async fn sweep_receipt(
@@ -646,9 +662,12 @@ pub trait ChainClient: Send + Sync {
     ) -> Result<Option<SettlementEvent>, ChainError>;
 
     /// Read the token facts that distinguish a transient failure from a
-    /// permanent one, at a block whose hash the caller verified.
+    /// permanent one, at a block whose hash the caller verified. The
+    /// currency selects the token's restriction getter: Circle's
+    /// `isBlacklisted` or Tether's `isBlocked`.
     async fn probe_failure(
         &self,
+        currency: gateway_core::Currency,
         token: Address,
         payment: Address,
         receiver: Address,
@@ -815,14 +834,14 @@ impl AlloyChainClient {
     /// validated but not yet timestamped.
     async fn transfer_logs(
         &self,
-        token: Address,
+        tokens: &[Address],
         from_block: u64,
         to_block: u64,
         recipients: &[Address],
     ) -> Result<Vec<Log>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
         let filter = Filter::new()
-            .address(token)
+            .address(tokens.to_vec())
             .event_signature(signature)
             .from_block(from_block)
             .to_block(to_block)
@@ -899,20 +918,20 @@ impl ChainClient for AlloyChainClient {
         self.header(BlockNumberOrTag::Number(number)).await
     }
 
-    async fn usdc_transfers(
+    async fn token_transfers(
         &self,
-        token: Address,
+        tokens: &[Address],
         from_block: u64,
         to_block: u64,
         recipients: &[Address],
-    ) -> Result<Vec<UsdcTransfer>, ChainError> {
+    ) -> Result<Vec<WatchedTransfer>, ChainError> {
         let signature = keccak256("Transfer(address,address,uint256)");
         // An empty list is a scan for nothing; the caller fast-forwards
         // instead, but answer honestly if asked.
         let mut logs = Vec::new();
         for chunk in recipients.chunks(LOG_FILTER_CHUNK) {
             logs.extend(
-                self.transfer_logs(token, from_block, to_block, chunk)
+                self.transfer_logs(tokens, from_block, to_block, chunk)
                     .await?,
             );
         }
@@ -944,56 +963,57 @@ impl ChainClient for AlloyChainClient {
         logs.into_iter()
             .map(|log| {
                 let topics = log.topics();
-                if log.address() != token
+                if !tokens.contains(&log.address())
                     || log.removed
                     || topics.len() != 3
                     || topics[0] != signature
                 {
                     return Err(ChainError::Transient(
-                        "RPC returned a malformed USDC Transfer log".to_string(),
+                        "RPC returned a malformed Transfer log".to_string(),
                     ));
                 }
                 let data = &log.inner.data.data;
                 if data.len() != 32 {
                     return Err(ChainError::Transient(
-                        "RPC returned a USDC Transfer with invalid amount data".to_string(),
+                        "RPC returned a Transfer with invalid amount data".to_string(),
                     ));
                 }
 
                 let block_number = log.block_number.ok_or_else(|| {
-                    ChainError::Transient("USDC log missing block number".to_string())
+                    ChainError::Transient("log missing block number".to_string())
                 })?;
                 if !(from_block..=to_block).contains(&block_number) {
                     return Err(ChainError::Transient(format!(
-                        "RPC returned USDC log from block {block_number} outside requested range {from_block}..={to_block}"
+                        "RPC returned a log from block {block_number} outside requested range {from_block}..={to_block}"
                     )));
                 }
                 if !recipients.contains(&Address::from_word(topics[2])) {
                     return Err(ChainError::Transient(
-                        "RPC returned a USDC Transfer outside the requested recipient filter"
+                        "RPC returned a Transfer outside the requested recipient filter"
                             .to_string(),
                     ));
                 }
 
-                Ok(UsdcTransfer {
+                Ok(WatchedTransfer {
+                    token: log.address(),
                     block_number,
                     block_hash: log.block_hash.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing block hash".to_string())
+                        ChainError::Transient("log missing block hash".to_string())
                     })?,
                     block_timestamp: log
                         .block_timestamp
                         .or_else(|| timestamps.get(&block_number).copied())
                         .ok_or_else(|| {
-                            ChainError::Transient("USDC log missing block timestamp".to_string())
+                            ChainError::Transient("log missing block timestamp".to_string())
                         })?,
                     transaction_hash: log.transaction_hash.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing transaction hash".to_string())
+                        ChainError::Transient("log missing transaction hash".to_string())
                     })?,
                     transaction_index: log.transaction_index.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing transaction index".to_string())
+                        ChainError::Transient("log missing transaction index".to_string())
                     })?,
                     log_index: log.log_index.ok_or_else(|| {
-                        ChainError::Transient("USDC log missing log index".to_string())
+                        ChainError::Transient("log missing log index".to_string())
                     })?,
                     sender: Address::from_word(topics[1]),
                     recipient: Address::from_word(topics[2]),
@@ -1444,6 +1464,7 @@ impl ChainClient for AlloyChainClient {
 
     async fn probe_failure(
         &self,
+        currency: gateway_core::Currency,
         token: Address,
         payment: Address,
         receiver: Address,
@@ -1466,21 +1487,41 @@ impl ChainClient for AlloyChainClient {
             .await
             .ok()
             .and_then(|output| balanceOfCall::abi_decode_returns(&output).ok());
-        let blacklisted = |account: Address| {
-            self.optional_bool(
+        // Each issuer names its own addresses: Circle's FiatToken exposes
+        // `isBlacklisted`, Tether's USDT0 `isBlocked`. A getter the token
+        // does not have reverts, and `optional_bool` answers that with
+        // `None`, so the wrong getter would blind the classifier — pick the
+        // one the currency's contract actually has.
+        let restricted = |account: Address| match currency {
+            gateway_core::Currency::Usdc => self.optional_bool(
                 token,
                 isBlacklistedCall { account }.abi_encode().into(),
                 block,
-            )
+            ),
+            gateway_core::Currency::Usdt => {
+                self.optional_bool(token, isBlockedCall { account }.abi_encode().into(), block)
+            }
         };
+        let payment_blacklisted = restricted(payment).await;
+        // Circle reverts a transfer touching a blocked party on either side;
+        // USDT0's hook restricts the sender alone, so a transfer *to* a
+        // blocked address succeeds and a blocked beneficiary or recovery
+        // wallet cannot be why a sweep failed. Reporting those as blocked
+        // would permanently stall a sweep that failed for another reason.
+        let (receiver_blacklisted, recovery_blacklisted) =
+            if recipient_restriction_matters(currency) {
+                (restricted(receiver).await, restricted(recovery).await)
+            } else {
+                (None, None)
+            };
         Ok(FailureProbe {
             code_present: !code.is_empty(),
             paused: self
                 .optional_bool(token, pausedCall {}.abi_encode().into(), block)
                 .await,
-            payment_blacklisted: blacklisted(payment).await,
-            receiver_blacklisted: blacklisted(receiver).await,
-            recovery_blacklisted: blacklisted(recovery).await,
+            payment_blacklisted,
+            receiver_blacklisted,
+            recovery_blacklisted,
             balance,
         })
     }
@@ -1561,6 +1602,12 @@ mod tests {
         // An address the wallet holds no key for cannot be signed for.
         let stranger = Address::repeat_byte(0x99);
         assert!(sign_request(&wallet, request(stranger)).await.is_err());
+    }
+
+    #[test]
+    fn usdt0_blocks_senders_not_recipients() {
+        assert!(recipient_restriction_matters(gateway_core::Currency::Usdc));
+        assert!(!recipient_restriction_matters(gateway_core::Currency::Usdt));
     }
 
     #[test]
