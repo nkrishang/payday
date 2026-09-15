@@ -276,8 +276,24 @@ impl Indexer {
                     ))
                 })?,
             };
-            self.broadcast_step(&leg, &transaction).await?;
-            return Ok(LaneOutcome::Open);
+            // Re-sending the exact bytes is safe, but not forever: past the
+            // pending timeout the replacement and stalled machinery takes
+            // over, so a persistently rejected or invisible transaction ends
+            // up reported instead of retried at the recovery cadence
+            // indefinitely.
+            let age = Utc::now()
+                .signed_duration_since(step.submitted_at)
+                .to_std()
+                .unwrap_or_default();
+            if age >= self.cfg.sweep_pending_timeout {
+                warn!(leg_id = %leg.id, signer = %step.signer, "unacknowledged withdrawal step is past the pending timeout without a receipt or an acknowledgment; handing it to the replacement machinery");
+                return self.handle_unmined_step(&leg, &step, &reads).await;
+            }
+            let flow = self.broadcast_step(&leg, &transaction).await?;
+            // An included receipt rides the next dispatch: a runnable
+            // completion observes a synchronously-sent transaction
+            // immediately, without waiting out a receipt poll.
+            return Ok(LaneOutcome::Broadcast(flow));
         }
         self.reconcile_step(&leg, &step, &reads).await
     }
@@ -555,9 +571,12 @@ impl Indexer {
                 leg.id
             )));
         }
-        self.broadcast_step(leg, &transaction).await?;
+        let flow = self.broadcast_step(leg, &transaction).await?;
         warn!(leg_id = %leg.id, signer = %step.signer, nonce = step.nonce, tx_hash = %transaction.hash, submission = step.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed withdrawal step");
-        Ok(LaneOutcome::Open)
+        // The replacement's broadcast outcome schedules the observation like
+        // a first submission's: an included receipt is settled on the next
+        // dispatch, which a runnable completion runs at once.
+        Ok(LaneOutcome::Broadcast(flow))
     }
 
     async fn withdrawal_of(&self, leg: &DbWithdrawalLeg) -> Result<DbWithdrawal, IndexerError> {

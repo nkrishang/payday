@@ -275,6 +275,26 @@ fn is_method_not_found(err: &TransportError) -> bool {
         .is_some_and(|payload| payload.code == -32601)
 }
 
+/// Whether a synchronous send's failure leaves the transaction's fate
+/// unknown — the node may hold the signed bytes — as opposed to a definite
+/// refusal it reported. EIP-7966 `code: 4` means the node accepted the
+/// transaction into its mempool but the receipt wait timed out, so it may
+/// still mine it; a failure with neither a JSON-RPC answer nor an HTTP
+/// answer is a dropped connection, which gives no answer at all. Any other
+/// error is the node (or its proxy) answering and refusing.
+fn is_sync_send_outcome_unknown(err: &TransportError) -> bool {
+    if err
+        .as_error_resp()
+        .is_some_and(|payload| payload.code == 4)
+    {
+        return true;
+    }
+    err.as_error_resp().is_none()
+        && err
+            .as_transport_err()
+            .is_none_or(|transport| transport.as_http_error().is_none())
+}
+
 /// Validate a mined transaction's inclusion metadata and reduce it to the
 /// outcome both the sweep and withdrawal paths reconcile on.
 fn transaction_outcome(
@@ -1535,12 +1555,23 @@ impl ChainClient for AlloyChainClient {
                         );
                     }
                 }
-                // A receipt-wait timeout or dropped connection: the node
-                // may still have the transaction. Nothing is known.
-                Ok(Err(error)) => {
+                // A receipt-wait timeout (EIP-7966 code 4) or a dropped
+                // connection: the node may still have the transaction.
+                // Nothing is known.
+                Ok(Err(error)) if is_sync_send_outcome_unknown(&error) => {
                     return Err(ChainError::BroadcastUnknown(redact_urls(&format!(
                         "eth_sendRawTransactionSync: {error}"
                     ))));
+                }
+                // The node answered and refused the bytes. Surface the
+                // definite error through the ordinary RPC classification —
+                // which keeps its retry policy — instead of swallowing it as
+                // an unknown outcome, where a persistent rejection would
+                // never reach the health report or the stalled-row escape
+                // hatch. The signed bytes stay durable either way, and a
+                // receipt check precedes any rebroadcast of them.
+                Ok(Err(error)) => {
+                    return Err(ChainError::rpc("eth_sendRawTransactionSync", error));
                 }
                 Err(_elapsed) => {
                     return Err(ChainError::BroadcastUnknown(
@@ -1713,6 +1744,37 @@ mod tests {
             "replacement transaction underpriced",
             None
         )));
+    }
+
+    #[test]
+    fn sync_send_errors_are_unknown_only_when_the_node_may_hold_the_bytes() {
+        // EIP-7966 code 4: accepted into the mempool, receipt wait timed out.
+        assert!(is_sync_send_outcome_unknown(&rpc_error(
+            4,
+            "the transaction was accepted but the receipt wait timed out",
+            None
+        )));
+        // A dropped connection gives neither a JSON-RPC answer nor an HTTP one.
+        assert!(is_sync_send_outcome_unknown(&TransportErrorKind::custom(
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection closed before message"
+            )
+        )));
+        // Definite refusals: the node answered and declined the bytes.
+        assert!(!is_sync_send_outcome_unknown(&rpc_error(
+            -32000,
+            "insufficient funds for gas * price + value",
+            None
+        )));
+        assert!(!is_sync_send_outcome_unknown(&rpc_error(
+            5,
+            "transaction not added to the mempool",
+            None
+        )));
+        assert!(!is_sync_send_outcome_unknown(
+            &TransportErrorKind::http_error(503, "Service Unavailable".to_string())
+        ));
     }
 
     #[test]

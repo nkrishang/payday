@@ -108,10 +108,20 @@ impl PassSummary {
     }
 }
 
-/// Whether a lane's row is still in flight after this pass's work on it.
+/// Whether a lane's row is still in flight after this pass's work on it, and
+/// what a broadcast performed during the lane's own work taught the
+/// coordinator about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LaneOutcome {
+    /// The row stays open; its next observation runs on the receipt-poll
+    /// cadence.
     Open,
+    /// The lane broadcast during its work (a first submission's bytes, a
+    /// replay, or a replacement): the flow says what the wire taught us, and
+    /// the coordinator schedules the row's next observation from it exactly
+    /// as it would for a fresh submission.
+    Broadcast(BroadcastFlow),
+    /// The row left the worker's hands (settled, requeued, or cancelled).
     Resolved,
 }
 
@@ -167,6 +177,7 @@ pub(crate) enum StepSubmission {
 }
 
 /// What the wire said about a durable transaction's broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BroadcastFlow {
     /// Accepted (or already known): the receipt is a poll's business.
     Sent,
@@ -182,22 +193,40 @@ pub(crate) enum BroadcastFlow {
 /// round rather than one per lane.
 #[derive(Default)]
 pub(crate) struct SweepReads {
-    pub(crate) fees: OnceCell<FeeEstimate>,
+    pub(crate) fees: OnceCell<Result<FeeEstimate, ChainError>>,
     pub(crate) boundary: OnceCell<Result<BlockHeader, ChainError>>,
+}
+
+/// How a signer's last lane failure classifies for the health report: a
+/// degraded condition an operator should look at, or one that requires the
+/// worker to pause. The failure itself lives in the tick report's log; this
+/// is the retained classification that keeps the report honest until the
+/// lane actually recovers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LaneHealth {
+    Degraded,
+    Paused,
 }
 
 /// The sweep coordinator's state across dispatches: its lane jobs, the
 /// signers those jobs occupy, the claims made before their ownership became
-/// durable, and each signer's next observation deadline.
-#[derive(Default)]
+/// durable, each signer's next observation deadline, the recovery cadence's
+/// absolute due time, and the health each signer's last lane failure left.
 struct Coordinator {
     jobs: JoinSet<LaneDone>,
     /// Signers with a running job. A signer owns at most one in-flight
     /// transaction, so at most one job runs on it.
     running: HashSet<Address>,
-    /// When each signer's next chain observation (receipt poll, rebroadcast,
-    /// retry) may run; a signer deferred to the future is not free work.
+    /// When each deferred signer's next chain observation (receipt poll,
+    /// rebroadcast, retry) may run. A deadline is consumed the moment a
+    /// dispatch acts on it, so only signers waiting for the future appear
+    /// here; `running` covers the jobs in flight.
     observe_at: HashMap<Address, Instant>,
+    /// When the next recovery dispatch is due: the backstop cadence for lost
+    /// pokes, API-side eligibility changes, and backoff expiries. Advanced
+    /// only when a wake services it, so notifications and completions can
+    /// never postpone a retry.
+    recovery_at: Instant,
     /// Claimed invoice ids whose durable batch does not exist yet. Claims are
     /// made sequentially in dispatch, so this set is what keeps a concurrent
     /// claim from re-grabbing another job's rows while they sign.
@@ -206,21 +235,45 @@ struct Coordinator {
     reserved_legs: HashSet<Uuid>,
     /// A configuration error paused the worker; only a dispatch tick clears it.
     halted: bool,
+    /// Each signer's last lane failure, retained until that lane completes
+    /// work that confirms recovery. A pass that dispatches successfully
+    /// without the failing lane must not report the worker healthy again.
+    lane_health: HashMap<Address, LaneHealth>,
 }
 
 impl Coordinator {
+    fn new(recovery_at: Instant) -> Self {
+        Self {
+            jobs: JoinSet::new(),
+            running: HashSet::new(),
+            observe_at: HashMap::new(),
+            recovery_at,
+            reserved: HashSet::new(),
+            reserved_legs: HashSet::new(),
+            halted: false,
+            lane_health: HashMap::new(),
+        }
+    }
+
     /// When the coordinator should next dispatch on the clock: the earliest
     /// observation deadline among deferred signers, else the recovery
-    /// cadence. The latter is the backstop cadence and what an idle worker
-    /// ticks on.
-    fn next_dispatch(&self, indexer: &Indexer) -> Instant {
-        let recovery = Instant::now() + indexer.cfg.poll_interval;
+    /// cadence.
+    fn next_dispatch(&self) -> Instant {
         self.observe_at
             .values()
-            .filter(|at| **at < recovery)
             .copied()
             .min()
-            .unwrap_or(recovery)
+            .unwrap_or(self.recovery_at)
+            .min(self.recovery_at)
+    }
+
+    /// Service the recovery clock on a wake: if the wake is (also) the
+    /// recovery tick coming due, schedule the next one. Wakes that only
+    /// deliver an observation deadline or a poke leave it alone.
+    fn service_recovery(&mut self, now: Instant, poll_interval: Duration) {
+        if self.recovery_at <= now {
+            self.recovery_at = now + poll_interval;
+        }
     }
 
     /// Whether a signer may take work right now: no job of its own is
@@ -228,6 +281,28 @@ impl Coordinator {
     fn signer_free(&self, signer: Address, now: Instant) -> bool {
         !self.running.contains(&signer)
             && self.observe_at.get(&signer).is_none_or(|at| *at <= now)
+    }
+
+    /// A lane finished work that confirms its signer has recovered.
+    fn note_lane_recovered(&mut self, signer: Address) {
+        self.lane_health.remove(&signer);
+    }
+
+    /// A lane failed: retain the failure's classification so the worker's
+    /// health stays honest until this lane recovers, however many
+    /// successful dispatches for other signers happen meanwhile.
+    fn note_lane_failure(&mut self, signer: Address, error: &IndexerError) {
+        let health = if error.requires_halt() {
+            LaneHealth::Paused
+        } else {
+            LaneHealth::Degraded
+        };
+        self.lane_health.insert(signer, health);
+    }
+
+    /// The worst health any lane's unrecovered failure implies.
+    fn worst_lane_health(&self) -> Option<LaneHealth> {
+        self.lane_health.values().copied().max()
     }
 
     /// The reserved invoice ids, in a stable order, for the claim query.
@@ -631,31 +706,47 @@ impl Indexer {
 
     async fn run_sweep_loop(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
         info!(batch_sweeper = %self.cfg.batch_sweeper, "sweep worker started");
-        let mut coordinator = Coordinator::default();
+        let mut coordinator = Coordinator::new(Instant::now() + self.cfg.poll_interval);
         // One dispatch clock for the whole worker: an observation deadline
         // while helper transactions are in flight (the latency path), else
         // the recovery cadence, which is the backstop for lost pokes,
         // API-side eligibility changes, and backoff expiries — never the
         // latency path.
-        let wake = tokio::time::sleep_until(coordinator.next_dispatch(&self));
+        let wake = tokio::time::sleep_until(coordinator.next_dispatch());
         tokio::pin!(wake);
+        // The sweeper status last written. Health is persisted when it
+        // changes, or whenever a dispatch ran (the heartbeat cadence), so a
+        // recovery is visible on the very completion that produced it.
+        let mut last_health: Option<&'static str> = None;
 
         loop {
             let mut report = TickReport::default();
-            let dispatch = tokio::select! {
+            let mut dispatched = false;
+            tokio::select! {
                 _ = &mut wake => {
                     coordinator.halted = false;
-                    true
+                    coordinator.service_recovery(Instant::now(), self.cfg.poll_interval);
+                    dispatched = true;
                 }
-                _ = self.sweep_wake.notified() => !coordinator.halted,
+                _ = self.sweep_wake.notified() => {
+                    if !coordinator.halted {
+                        dispatched = true;
+                    }
+                }
                 done = coordinator.jobs.join_next(), if !coordinator.jobs.is_empty() => {
-                    match done.map(|done| done.expect("a lane job does not panic")) {
-                        Some(done) => {
-                            self.handle_lane_done(&mut coordinator, done, &mut report).await;
-                            false
+                    // The set cannot be empty between the guard and here.
+                    if let Some(done) = done.map(|done| done.expect("a lane job does not panic")) {
+                        // A completion that leaves its signer runnable
+                        // dispatches at once, so a synchronously-sent
+                        // transaction is reconciled in the round that
+                        // submitted it; a deferred, unacknowledged, or
+                        // failed lane waits for the clock it installed.
+                        let runnable = self
+                            .handle_lane_done(&mut coordinator, done, &mut report)
+                            .await;
+                        if runnable && !coordinator.halted {
+                            dispatched = true;
                         }
-                        // The set cannot be empty between the guard and here.
-                        None => false,
                     }
                 }
                 changed = shutdown.changed() => {
@@ -669,29 +760,43 @@ impl Indexer {
                     }
                     continue;
                 }
-            };
-            if dispatch || !report.errors.is_empty() {
-                if dispatch {
-                    self.dispatch(&mut coordinator, &mut report, Instant::now())
-                        .await;
-                }
-                match report.into_result() {
-                    Ok(()) => self.persist_sweeper_health("running").await,
-                    // Logged every pass so the alarm stays raised until the
-                    // condition clears; the next dispatch re-evaluates it.
-                    // Wakes and completions hold their fire meanwhile.
-                    Err(error) if error.requires_halt() => {
-                        coordinator.halted = true;
-                        self.persist_sweeper_health("paused").await;
-                        error!(error = %error, "sweep worker paused");
-                    }
-                    Err(error) => {
-                        self.persist_sweeper_health("degraded").await;
-                        warn!(error = %error, "sweep pass failed; retrying next pass");
-                    }
-                }
-                wake.as_mut().reset(coordinator.next_dispatch(&self));
             }
+            if dispatched {
+                self.dispatch(&mut coordinator, &mut report, Instant::now())
+                    .await;
+            }
+            // Health from this pass's errors plus every lane failure not yet
+            // recovered: a successful dispatch for other signers does not
+            // report a failing lane healthy again, and a failing lane does
+            // not stay degraded after work that confirms its recovery.
+            let state = match report.into_result() {
+                // Logged every pass so the alarm stays raised until the
+                // condition clears; the clock's retry re-evaluates it.
+                Err(error) if error.requires_halt() => {
+                    coordinator.halted = true;
+                    error!(error = %error, "sweep worker paused");
+                    "paused"
+                }
+                // Logged every pass for the same reason.
+                Err(error) => {
+                    warn!(error = %error, "sweep pass failed; retrying next pass");
+                    "degraded"
+                }
+                Ok(()) if coordinator.halted => "paused",
+                Ok(()) => match coordinator.worst_lane_health() {
+                    Some(LaneHealth::Paused) => "paused",
+                    Some(LaneHealth::Degraded) => "degraded",
+                    None => "running",
+                },
+            };
+            if last_health != Some(state) || dispatched {
+                self.persist_sweeper_health(state).await;
+                last_health = Some(state);
+            }
+            // Every scheduling-state change re-arms the clock: completions
+            // install or clear observation deadlines, and the wake serviced
+            // the recovery tick.
+            wake.as_mut().reset(coordinator.next_dispatch());
         }
     }
 
@@ -1066,10 +1171,18 @@ impl Indexer {
             for invoice_id in &outcome.expired {
                 info!(%invoice_id, block = to_block, block_timestamp = end.timestamp, "invoice expired");
             }
-            if !outcome.funded.is_empty() {
-                // Eligibility just committed durably; the sweep loop need not
-                // wait out its recovery cadence to see it. Coalesced: one
-                // permit dispatches, and the dispatch reaps the whole queue.
+            // Any committed observation can have changed sweep eligibility:
+            // funding is the obvious case, but an expiration makes an
+            // invoice recoverable, and a late transfer can give a fulfilled
+            // or recovered invoice uncollected funds. The claim query
+            // re-checks eligibility, so a wake that finds nothing costs one
+            // dispatch; missing one costs a recovery cadence of latency.
+            // Coalesced: one permit dispatches, and the dispatch reaps the
+            // whole queue.
+            if !outcome.funded.is_empty()
+                || !outcome.expired.is_empty()
+                || !observations.is_empty()
+            {
                 self.sweep_wake.notify_one();
             }
 
@@ -1139,7 +1252,7 @@ impl Indexer {
         // was deferred mid-round cannot sneak back in while the round's later
         // dispatches run, however fast the database answers.
         let now = Instant::now();
-        let mut coordinator = Coordinator::default();
+        let mut coordinator = Coordinator::new(now);
         self.dispatch(&mut coordinator, &mut report, now).await;
         while !coordinator.jobs.is_empty() {
             let done = coordinator
@@ -1148,8 +1261,10 @@ impl Indexer {
                 .await
                 .expect("the job set is not empty")
                 .expect("a lane job does not panic");
-            self.handle_lane_done(&mut coordinator, done, &mut report)
-                .await;
+            // The helper dispatches after every completion regardless of
+            // runnability; the production loop is what gates a deferred
+            // signer's dispatch on the clock.
+            let _runnable = self.handle_lane_done(&mut coordinator, done, &mut report).await;
             self.dispatch(&mut coordinator, &mut report, now).await;
         }
         report.into_result()
@@ -1171,6 +1286,12 @@ impl Indexer {
         report: &mut TickReport,
         now: Instant,
     ) {
+        // Consume every due observation deadline up front, before any
+        // fallible read: a deadline whose dispatch finds no work — the queue
+        // emptied, the rows are under database backoff, the read failed —
+        // must not linger in the past and spin the loop at database speed.
+        // Completion handlers install any later deferral.
+        coordinator.observe_at.retain(|_, at| *at > now);
         let chain_id = self.cfg.chain_id.0;
         let pool = self.chain.signers();
         let (batches, steps) = match tokio::try_join!(
@@ -1270,32 +1391,46 @@ impl Indexer {
     }
 
     /// Fold a finished lane back into the coordinator: free or re-defer its
-    /// signer, drain its reservations, and schedule the next observation.
+    /// signer, drain its reservations, update the signer's retained health,
+    /// and schedule the next observation. Returns whether the signer is
+    /// runnable right now — the production loop dispatches immediately on a
+    /// runnable completion instead of waiting out the clock.
     async fn handle_lane_done(
         &self,
         coordinator: &mut Coordinator,
         done: LaneDone,
         report: &mut TickReport,
-    ) {
+    ) -> bool {
         match done {
             LaneDone::Reconciled { signer, outcome } => {
                 coordinator.running.remove(&signer);
                 match outcome {
                     Ok(LaneOutcome::Open) => {
+                        coordinator.note_lane_recovered(signer);
                         coordinator.observe_at.insert(
                             signer,
                             Instant::now() + self.cfg.sweep_receipt_poll_interval,
                         );
+                        false
                     }
-                    Ok(LaneOutcome::Resolved) => {}
+                    Ok(LaneOutcome::Broadcast(flow)) => {
+                        self.schedule_flow(coordinator, signer, flow)
+                    }
+                    Ok(LaneOutcome::Resolved) => {
+                        coordinator.note_lane_recovered(signer);
+                        true
+                    }
                     Err(error) => {
                         warn!(signer = %signer, error = %error, "sweep lane failed");
                         // The row's state is unknown; keep it off the chain
-                        // until the recovery cadence.
+                        // until the recovery cadence, and keep the failure in
+                        // the worker's health until the lane recovers.
+                        coordinator.note_lane_failure(signer, &error);
                         coordinator
                             .observe_at
                             .insert(signer, Instant::now() + self.cfg.poll_interval);
                         report.push(Some(signer), error);
+                        false
                     }
                 }
             }
@@ -1309,40 +1444,26 @@ impl Indexer {
                     coordinator.reserved.remove(id);
                 }
                 match outcome {
-                    Ok(BatchSubmission::Submitted { flow, .. }) => {
-                        match flow {
-                            BroadcastFlow::Included(outcome) => {
-                                debug!(signer = %signer, block = outcome.block, succeeded = outcome.succeeded, "helper transaction's receipt came with its broadcast; settling on the next dispatch");
-                                coordinator.observe_at.remove(&signer);
-                            }
-                            BroadcastFlow::Sent => {
-                                coordinator.observe_at.insert(
-                                    signer,
-                                    Instant::now() + self.cfg.sweep_receipt_poll_interval,
-                                );
-                            }
-                            // Unknown outcomes re-broadcast no faster than
-                            // the recovery cadence; the row's receipt is
-                            // checked first.
-                            BroadcastFlow::Unknown => {
-                                coordinator
-                                    .observe_at
-                                    .insert(signer, Instant::now() + self.cfg.poll_interval);
-                            }
-                        }
+                    Ok(BatchSubmission::Submitted { flow }) => {
+                        self.schedule_flow(coordinator, signer, flow)
                     }
-                    // The signer is free now; the next dispatch reaps the
+                    // The signer is free now; a runnable completion reaps the
                     // queue behind the blocked rows.
-                    Ok(BatchSubmission::Blocked) => {}
+                    Ok(BatchSubmission::Blocked) => {
+                        coordinator.note_lane_recovered(signer);
+                        true
+                    }
                     Err(error) => {
                         warn!(signer = %signer, error = %error, "sweep submission failed");
                         // The submission's rows may or may not be durable;
                         // either way this signer can sign again on the
                         // recovery cadence, and the failure is reported.
+                        coordinator.note_lane_failure(signer, &error);
                         coordinator
                             .observe_at
                             .insert(signer, Instant::now() + self.cfg.poll_interval);
                         report.push(Some(signer), error);
+                        false
                     }
                 }
             }
@@ -1355,51 +1476,78 @@ impl Indexer {
                 coordinator.reserved_legs.remove(&leg_id);
                 match outcome {
                     Ok(StepSubmission::Submitted { flow }) => {
-                        match flow {
-                            BroadcastFlow::Included(outcome) => {
-                                debug!(signer = %signer, leg_id = %leg_id, block = outcome.block, succeeded = outcome.succeeded, "withdrawal step's receipt came with its broadcast; settling on the next dispatch");
-                                coordinator.observe_at.remove(&signer);
-                            }
-                            BroadcastFlow::Sent => {
-                                coordinator.observe_at.insert(
-                                    signer,
-                                    Instant::now() + self.cfg.sweep_receipt_poll_interval,
-                                );
-                            }
-                            BroadcastFlow::Unknown => {
-                                coordinator
-                                    .observe_at
-                                    .insert(signer, Instant::now() + self.cfg.poll_interval);
-                            }
-                        }
+                        self.schedule_flow(coordinator, signer, flow)
                     }
-                    Ok(StepSubmission::NotNeeded) => {}
+                    Ok(StepSubmission::NotNeeded) => {
+                        coordinator.note_lane_recovered(signer);
+                        true
+                    }
                     Err(error) => {
                         warn!(signer = %signer, leg_id = %leg_id, error = %error, "withdrawal step submission failed");
                         // The step's rows may or may not be durable; either
                         // way this signer can sign again on the recovery
                         // cadence, and the failure is reported.
+                        coordinator.note_lane_failure(signer, &error);
                         coordinator
                             .observe_at
                             .insert(signer, Instant::now() + self.cfg.poll_interval);
                         report.push(Some(signer), error);
+                        false
                     }
                 }
             }
         }
     }
 
-    /// The pass's shared fee estimate, read from the node once.
+    /// Schedule a signer's next observation from what its broadcast taught
+    /// the coordinator, and say whether the signer is runnable right now: an
+    /// included receipt rides the next dispatch, which a runnable completion
+    /// triggers immediately; an acknowledged broadcast waits for a receipt
+    /// poll; an unknown outcome re-observes no faster than the recovery
+    /// cadence, and its row's receipt is checked first.
+    fn schedule_flow(
+        &self,
+        coordinator: &mut Coordinator,
+        signer: Address,
+        flow: BroadcastFlow,
+    ) -> bool {
+        match flow {
+            BroadcastFlow::Included(outcome) => {
+                debug!(signer = %signer, block = outcome.block, succeeded = outcome.succeeded, "receipt came with the broadcast; settling on the next dispatch");
+                coordinator.note_lane_recovered(signer);
+                coordinator.observe_at.remove(&signer);
+                true
+            }
+            BroadcastFlow::Sent => {
+                coordinator.note_lane_recovered(signer);
+                coordinator.observe_at.insert(
+                    signer,
+                    Instant::now() + self.cfg.sweep_receipt_poll_interval,
+                );
+                false
+            }
+            BroadcastFlow::Unknown => {
+                // Not a confirmed recovery: keep any retained failure.
+                coordinator
+                    .observe_at
+                    .insert(signer, Instant::now() + self.cfg.poll_interval);
+                false
+            }
+        }
+    }
+
+    /// The pass's shared fee estimate, read from the node once. A failed read
+    /// is cached like a success, so concurrent lanes do not each retry a
+    /// struggling RPC; the next dispatch's fresh `SweepReads` retries it.
     pub(crate) async fn tick_fees(
         &self,
-        cache: &OnceCell<FeeEstimate>,
+        cache: &OnceCell<Result<FeeEstimate, ChainError>>,
     ) -> Result<FeeEstimate, IndexerError> {
         cache
-            .get_or_try_init(|| async {
-                self.chain.estimate_fees().await.map_err(IndexerError::from)
-            })
+            .get_or_init(|| self.chain.estimate_fees())
             .await
-            .copied()
+            .clone()
+            .map_err(IndexerError::from)
     }
 
     /// The round's shared finality boundary, read once no matter how many
@@ -1407,16 +1555,11 @@ impl Indexer {
     /// dispatch clock retries after a failure, so the range reader's
     /// backoff-and-retry loop has no place on the sweep path.
     pub(crate) async fn shared_boundary(&self, reads: &SweepReads) -> Result<BlockHeader, ChainError> {
-        let stored = reads
+        reads
             .boundary
-            .get_or_try_init(|| async {
-                Ok::<Result<BlockHeader, ChainError>, std::convert::Infallible>(
-                    self.read_sweep_boundary().await,
-                )
-            })
+            .get_or_init(|| self.read_sweep_boundary())
             .await
-            .expect("the boundary read never fails its cell's initializer");
-        stored.clone()
+            .clone()
     }
 
     /// One attempt at the finality boundary, with the same semantics as
@@ -1520,10 +1663,24 @@ impl Indexer {
                     return self.apply_receipt(&batch, tx_hash, receipt, &reads).await;
                 }
             }
-            self.broadcast_batch(&batch).await?;
-            // An included receipt rides the next dispatch: the coordinator
-            // observes a synchronously-sent transaction immediately.
-            return Ok(LaneOutcome::Open);
+            // Re-sending the exact bytes is safe, but not forever: past the
+            // pending timeout the replacement and stalled machinery takes
+            // over, so a persistently rejected or invisible transaction ends
+            // up reported instead of retried at the recovery cadence
+            // indefinitely.
+            let age = Utc::now()
+                .signed_duration_since(batch.submitted_at)
+                .to_std()
+                .unwrap_or_default();
+            if age >= self.cfg.sweep_pending_timeout {
+                warn!(batch_id = %batch.id, signer = %batch.signer, "unacknowledged helper transaction is past the pending timeout without a receipt or an acknowledgment; handing it to the replacement machinery");
+                return self.handle_unmined(&batch, &reads).await;
+            }
+            let flow = self.broadcast_batch(&batch).await?;
+            // An included receipt rides the next dispatch: a runnable
+            // completion observes a synchronously-sent transaction
+            // immediately, without waiting out a receipt poll.
+            return Ok(LaneOutcome::Broadcast(flow));
         }
         self.reconcile_batch(batch, reads).await
     }
@@ -1974,9 +2131,12 @@ impl Indexer {
                 batch.id
             )));
         }
-        self.broadcast_prepared(batch.id, &transaction).await?;
+        let flow = self.broadcast_prepared(batch.id, &transaction).await?;
         warn!(batch_id = %batch.id, signer = %batch.signer, nonce = batch.nonce, tx_hash = %transaction.hash, submission = batch.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed helper transaction");
-        Ok(LaneOutcome::Open)
+        // The replacement's broadcast outcome schedules the observation like
+        // a first submission's: an included receipt is settled on the next
+        // dispatch, which a runnable completion runs at once.
+        Ok(LaneOutcome::Broadcast(flow))
     }
 
     /// Sign and broadcast a claimed batch of sweeps from `signer`. The claim
@@ -2373,6 +2533,14 @@ pub(crate) mod tests {
         /// Mined transaction count per signer; a missing entry is 0.
         pub(crate) mined_nonces: HashMap<Address, u64>,
         submit_error: Option<fn() -> ChainError>,
+        /// Definite broadcast failures still owed per signer: a signer with a
+        /// positive count fails its next submissions with a definite RPC
+        /// error that many times before succeeding, for health-retention and
+        /// unacknowledged-row tests.
+        pub(crate) failing_submissions: HashMap<Address, u32>,
+        /// `estimate_fees` reads that still fail with a retryable error
+        /// before succeeding; see the fee-cache test.
+        failing_fee_reads: u32,
         pub(crate) fees: FeeEstimate,
         /// `estimate_fees` calls, for the once-per-pass assertion.
         pub(crate) fee_requests: usize,
@@ -2573,6 +2741,10 @@ pub(crate) mod tests {
         async fn estimate_fees(&self) -> Result<FeeEstimate, ChainError> {
             let mut state = self.state.lock().unwrap();
             state.fee_requests += 1;
+            if state.failing_fee_reads > 0 {
+                state.failing_fee_reads -= 1;
+                return Err(ChainError::Transient("fee read throttled".to_string()));
+            }
             Ok(state.fees)
         }
 
@@ -2750,6 +2922,24 @@ pub(crate) mod tests {
             if let Some(error) = state.submit_error.take() {
                 return Err(error());
             }
+            let submission = state.prepared[&transaction.hash].clone();
+            let tx_hash = submission.tx_hash;
+            let signer = submission.signer;
+            // A definite refusal still owed to this signer: the signed bytes
+            // are already durable (the submission was recorded), so this
+            // models the node answering and rejecting.
+            if state
+                .failing_submissions
+                .get(&signer)
+                .is_some_and(|count| *count > 0)
+            {
+                *state.failing_submissions.get_mut(&signer).unwrap() -= 1;
+                return Err(ChainError::Transient(format!(
+                    "signer {signer}'s broadcast was refused"
+                )));
+            }
+            // Re-sending the exact signed bytes is idempotent: the mock
+            // acknowledges them without recording a second submission.
             if state
                 .submissions
                 .iter()
@@ -2757,9 +2947,6 @@ pub(crate) mod tests {
             {
                 return Ok(BroadcastOutcome::Accepted);
             }
-            let submission = state.prepared[&transaction.hash].clone();
-            let tx_hash = submission.tx_hash;
-            let signer = submission.signer;
             let nonce = submission.nonce;
             let sweeps = submission.sweeps.clone();
             state.submissions.push(submission);
@@ -5258,6 +5445,191 @@ pub(crate) mod tests {
             "fulfilled",
             "the receipt that rode the broadcast settles the sweep this round"
         );
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn the_production_loop_settles_a_synchronous_broadcast_on_its_completion(pool: PgPool) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| state.sync_send = true));
+        // A recovery cadence the test could never wait out, and no receipt
+        // poll either: only the funding wake and the completion dispatches
+        // can settle the sweep.
+        let mut cfg = config();
+        cfg.poll_interval = Duration::from_secs(3600);
+        cfg.sweep_receipt_poll_interval = Duration::from_secs(3600);
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(worker.clone().run_sweep_loop(shutdown_rx));
+
+        // One funding-style poke: eligibility just committed durably.
+        worker.sweep_wake.notify_one();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while fetch(&pool, &invoice).await.status != "fulfilled" {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the synchronous broadcast's sweep did not settle without the recovery timer"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(chain.submissions().len(), 1);
+        shutdown.send(true).ok();
+        let _ = task.await;
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_past_deadline_does_not_survive_a_dispatch_that_finds_no_work(pool: PgPool) {
+        let chain = Arc::new(MockChain::new(7));
+        let worker = indexer(&pool, chain.clone());
+        let mut coordinator = Coordinator::new(Instant::now());
+        let mut report = TickReport::default();
+        // A signer deferred into the past whose queue has since emptied.
+        coordinator
+            .observe_at
+            .insert(mock_signer(0), Instant::now() - Duration::from_secs(1));
+        worker
+            .dispatch(&mut coordinator, &mut report, Instant::now())
+            .await;
+        assert!(report.errors.is_empty());
+        assert!(
+            coordinator.observe_at.is_empty(),
+            "the past deadline is consumed even though no work was claimable"
+        );
+        // The clock falls back to the recovery cadence instead of firing
+        // again on the expired deadline.
+        assert_eq!(coordinator.next_dispatch(), coordinator.recovery_at);
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_failing_signer_keeps_the_worker_degraded_while_the_other_signer_works(pool: PgPool)
+    {
+        let failing = make_invoice(100);
+        let working = make_invoice(200);
+        insert_funded(&pool, &failing, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with_signers(2).with(|state| {
+            state.failing_submissions.insert(mock_signer(0), 10_000);
+        }));
+        let mut cfg = config();
+        cfg.poll_interval = Duration::from_millis(25);
+        cfg.sweep_receipt_poll_interval = Duration::from_millis(25);
+        let worker = indexer_with(&pool, chain.clone(), cfg);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(worker.clone().run_sweep_loop(shutdown_rx));
+        async fn sweeper_state(worker: &Indexer) -> String {
+            worker
+                .repo
+                .sweeper_status(CHAIN_ID)
+                .await
+                .unwrap()
+                .map(|status| status.state)
+                .unwrap_or_else(|| "unwritten".to_string())
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        // The failing signer's batch is claimed and refused: the worker goes
+        // degraded…
+        loop {
+            if sweeper_state(&worker).await == "degraded" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the failing signer's lane never showed up in the health"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // …a second invoice lands in the queue and the rotation hands it to
+        // the other signer, whose settlement must not report the worker
+        // healthy again…
+        insert_funded(&pool, &working, "key-2", 2).await;
+        while fetch(&pool, &working).await.status != "fulfilled" {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the healthy signer's sweep never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            sweeper_state(&worker).await,
+            "degraded",
+            "a successful dispatch for another signer is not a recovery"
+        );
+        // …and once the refusal is lifted, the failing lane recovers and the
+        // worker's health follows it.
+        chain.set(|state| {
+            state.failing_submissions.clear();
+        });
+        loop {
+            if sweeper_state(&worker).await == "running"
+                && fetch(&pool, &failing).await.status == "fulfilled"
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the recovered lane never restored the worker's health"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        shutdown.send(true).ok();
+        let _ = task.await;
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn an_overdue_unacknowledged_row_is_replaced_instead_of_rebroadcast_forever(
+        pool: PgPool,
+    ) {
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(7).with(|state| {
+            state.mine_at = None;
+            state.failing_submissions.insert(mock_signer(0), 1);
+        }));
+        let worker = indexer(&pool, chain.clone());
+        // The node refuses the broadcast after the batch went durable: the
+        // row keeps its claim, unacknowledged, and the tick reports it.
+        worker.clone().sweep_tick().await.unwrap_err();
+        assert_eq!(open_batches(&pool).await, 1);
+        // Past the pending timeout, the exact bytes are not re-sent
+        // forever: the replacement machinery takes the row over (its
+        // receipts were checked first, and there are none).
+        set_submitted_at_in_the_past(&pool).await;
+        worker.clone().sweep_tick().await.unwrap();
+        assert_eq!(
+            chain.submissions().len(),
+            1,
+            "the replacement, not a replay of the refused bytes"
+        );
+        assert_eq!(open_batches(&pool).await, 1);
+        assert_eq!(fetch(&pool, &invoice).await.status, "deploying");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_failed_fee_read_is_cached_for_the_whole_dispatch(pool: PgPool) {
+        let chain = Arc::new(
+            MockChain::new(7).with(|state| {
+                state.failing_fee_reads = 1;
+            }),
+        );
+        let worker = indexer(&pool, chain.clone());
+        // Two lanes of one dispatch ask for the fees concurrently: the failed
+        // read is cached like a success, so a struggling RPC costs one round
+        // trip per dispatch rather than one per lane.
+        let reads = SweepReads::default();
+        let (first, second) = tokio::join!(
+            worker.tick_fees(&reads.fees),
+            worker.tick_fees(&reads.fees),
+        );
+        assert!(first.is_err() && second.is_err());
+        assert_eq!(
+            chain.state.lock().unwrap().fee_requests,
+            1,
+            "one fee read shared by every lane of the dispatch"
+        );
+        // A fresh dispatch's fresh reads retry the read.
+        let reads = SweepReads::default();
+        worker.tick_fees(&reads.fees).await.unwrap();
+        assert_eq!(chain.state.lock().unwrap().fee_requests, 2);
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
