@@ -16,8 +16,8 @@ A stuck *sweep* is not fatal: the sweep worker pauses on its own and raises
 | `FinalityViolation` / `cursor hash mismatch` | A finalized block changed hash (reorg). The cursor no longer matches the canonical chain. |
 | `RPC error (…)` marked permanent (HTTP 400/401/403/404/413) | The provider rejected the request outright; usually a rotated or exhausted endpoint. |
 | `sweep transaction … targeted …, not configured BatchSweeper` | A recorded helper transaction hash points at a foreign transaction; the database was edited. |
-| Deployment verification failure at startup (factory or BatchSweeper code hash differs from that chain's `factory_code_hash` / `batch_sweeper_code_hash` in `PAYDAY_CHAINS`, or `BatchSweeper.factory()` is not its `factory`) | That chain does not carry the contract generation this build was configured for; see step 2a. `gatewayd` refuses to start on the same check, for every chain. |
-| Any one chain's worker halts | The process exits and ECS restarts it; every chain's worker restarts. The halting chain's `chain_id` is on the fatal log line. |
+| Deployment verification failure at startup (factory or BatchSweeper code hash differs from that chain's `factory_code_hash` / `batch_sweeper_code_hash` in `PAYDAY_CHAINS`, or `BatchSweeper.factory()` is not its `factory`) | That chain does not carry the contract generation this build was configured for; see step 2a. `gatewayd` refuses to start on the same check, for every chain, and also when a `tokens` entry's `decimals()`, `name()`, or EIP-712 version disagrees with the configured currency. |
+| Any one chain's worker halts | The process exits and ECS restarts it; every chain's worker restarts. One worker per chain watches every configured stablecoin with one cursor; the halting chain's `chain_id` is on the fatal log line. |
 | `exclusive indexer database lock` failure | Another indexer process is running or the lock is stuck. |
 | `indexer fatal` | Generic fatal error from the poll loop. |
 
@@ -78,7 +78,8 @@ cast call <BATCH_SWEEPER_ADDRESS> 'factory()(address)' --rpc-url "$MONAD_RPC_URL
 Fix the configuration, never the check. If the contracts really changed, that
 is a new contract generation and needs the fresh-database procedure in
 [production-runbook.md](../production-runbook.md); do not repoint a running
-database at different contracts.
+database at different contracts. Adding a stablecoin to a chain's `tokens`
+is not a generation change: the contracts take the token per call.
 
 ## Step 3: Database lock issue
 

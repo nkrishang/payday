@@ -79,19 +79,23 @@ into setup.
 The foot of `/dashboard` is the account itself. The **Account** section shows
 the mailbox the merchant signed in with and their Payday wallet — the
 embedded EVM wallet Privy created for the account — in full, ready to copy or
-open in each network's explorer, with its USDC and gas balance on every
-supported network read straight from the public RPCs (`NEXT_PUBLIC_CHAINS`),
+open in each network's explorer, with its balance of every stablecoin the
+network serves and its gas balance on every supported network read straight
+from the public RPCs (`NEXT_PUBLIC_CHAINS`),
 and a Sign out. The wallet is the same address on every chain, so a settled
 deposit lands there on whichever network the payer chose. A
 wallet that Privy is still creating shows as such with a *Check again*; the
 API records it as soon as a session carries it. **Withdraw**, beneath the
-balances, moves everything the wallet holds on every network to one address
-the merchant names: the API snapshots the balances into one leg per network,
-the merchant signs each leg's EIP-712 authorization with the wallet Privy
-holds (no gas, no delegation), and the relayer carries the legs to the
-destination while the panel tracks them; funds on another network cross
-through Circle's CCTP, which takes seconds from Monad and about twenty
-minutes from Base or Arbitrum. **Export wallet key** shows the wallet's key
+balances, moves one currency to one address the merchant names. For USDC it
+moves everything the wallet holds on every network: the API snapshots the
+balances into one leg per network, the merchant signs each leg's EIP-712
+authorization with the wallet Privy holds (no gas, no delegation), and the
+relayer carries the legs to the destination while the panel tracks them;
+funds on another network cross through Circle's CCTP, which takes seconds
+from Monad and about twenty minutes from Base or Arbitrum. USDT has no 1:1
+bridge, so a USDT withdrawal is a single leg moving the destination
+network's balance; USDT held on another network is withdrawn separately to
+an address there. **Export wallet key** shows the wallet's key
 once, through Privy's own dialog, for a merchant who wants to withdraw from
 their own server (`docs/api-reference.md`, Withdrawals). The **API key**
 section below it generates, rolls, and revokes the key the merchant's own
@@ -196,7 +200,9 @@ Payday wallet still the default — so the common case is no clicks at all. A
 customer's own page links here with `?customer=`, which opens the composer on
 that customer.
 
-1. *Amount*: the amount in USDC, used directly (there are no line items), the
+1. *Amount*: the amount, used directly (there are no line items), its
+   currency — USDC, or USDT, which also pins the request to a network that
+   serves it (Monad or Arbitrum One) — the
    identity when there is more than one and the destination when the identity
    offers more than one, and the deadline — 24 hours, 7 days, 30 days, or a moment picked from a date
    and time control. A preset is sent as `expires_in`; a picked moment is sent
@@ -212,6 +218,7 @@ that customer.
 
 The whole document, exactly as `POST /v1/deposit-requests` takes it:
 
+- the amount and its `currency`, with `chain_id` when the currency is USDT;
 - issuer and payer parties (name, optional email, optional free-text
   details, rendered verbatim on the deposit request);
 - heading, reference, and notes;

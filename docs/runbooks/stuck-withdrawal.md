@@ -1,8 +1,14 @@
 # Stuck withdrawal
 
 A merchant's withdrawal (`wd_…`) has a leg that is not progressing, or has
-failed, and the merchant asks where their USDC is. Read the leg's state first;
-each state says exactly which party is next and where the funds are.
+failed, and the merchant asks where their funds are. Read the leg's state
+first; each state says exactly which party is next and where the funds are.
+The withdrawal's `currency` decides which legs exist: a USDC withdrawal may
+bridge through CCTP, a USDT withdrawal moves the destination network's
+balance only and has no bridge stage, so its leg goes `authorized →
+relaying → completed` and never reaches `burned`, `attested`, or `minting`.
+Every same-chain leg, USDC or USDT0, is an EIP-3009
+`TransferWithAuthorization` the relayer submits to the leg's `token`.
 
 ## Where the funds are, by leg state
 
@@ -10,7 +16,7 @@ each state says exactly which party is next and where the funds are.
 |---|---|---|
 | `awaiting_signature` | In the Payday wallet, untouched | The merchant (sign, or cancel). Expires 24 h after creation. |
 | `authorized` | In the Payday wallet, untouched | gateway-indexer on the source chain (`relay_step`). |
-| `relaying` | Moving: a `transferWithAuthorization` or `WithdrawalForwarder.bridge` is in flight | gateway-indexer: receipt, fee bump, or reconciliation of a consumed nonce. |
+| `relaying` | Moving: a `transferWithAuthorization` or (USDC only) `WithdrawalForwarder.bridge` is in flight | gateway-indexer: receipt, fee bump, or reconciliation of a consumed nonce. |
 | `burned` | Burned on the source chain; Circle owes the mint | Circle's attestation service (Iris). Monad: seconds. Base/Arbitrum: ~15–19 minutes. |
 | `attested` | Burned; attestation stored on the leg | gateway-indexer on the **destination** chain (`receiveMessage`). |
 | `minting` | The mint is in flight on the destination chain | gateway-indexer: receipt or fee bump. |
@@ -20,14 +26,14 @@ each state says exactly which party is next and where the funds are.
 
 Nothing Payday runs can send a leg's funds anywhere but the destination the
 merchant signed: a transfer leg's authorization names the destination, a
-bridge leg's names the forwarder and commits to the destination through its
-nonce, and CCTP mints to the recipient inside Circle's message.
+bridge leg's (USDC only) names the forwarder and commits to the destination
+through its nonce, and CCTP mints to the recipient inside Circle's message.
 
 ## Look
 
 ```bash
 psql "$DATABASE_URL" -c "
-  SELECT l.id, l.kind, l.state, l.source_chain_id, l.destination_chain_id, l.amount,
+  SELECT l.id, l.kind, l.state, l.source_chain_id, l.destination_chain_id, l.amount, w.currency,
          l.valid_before, l.step_chain_id, l.step_nonce, cardinality(l.step_tx_hashes) AS submissions,
          l.step_submitted_at, l.attestation_next_check_at, l.failure_reason,
          encode(l.burn_tx_hash, 'hex') AS burn_tx, encode(l.mint_tx_hash, 'hex') AS mint_tx

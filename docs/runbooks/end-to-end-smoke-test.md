@@ -1,14 +1,21 @@
 # End-to-end smoke test
 
 Verify the full deposit request lifecycle: create a deposit request, fund it with real USDC,
-and confirm the funds reach the beneficiary.
+and confirm the funds reach the beneficiary. `scripts/live-smoke.sh` runs the
+same flow unattended; `PAYDAY_CURRENCY=USDT` makes it a USDT request pinned
+to `CHAIN_ID` (Monad or Arbitrum, where USDT0 is served) and
+`PAYDAY_TOKEN_ADDRESS` overrides the contract it pays from.
 
 ## Prerequisites
 
 - API key, `curl`, and `jq` configured (see [README.md](README.md) prerequisites)
 - A wallet with USDC on the network you will test and its private key (the
   commands below use Monad; substitute the chain's endpoint and USDC address
-  for Base or Arbitrum One, and choose that network on the checkout)
+  for Base or Arbitrum One, and choose that network on the checkout). For a
+  USDT smoke test add `"currency":"USDT"` and `"chain_id":"143"` to the
+  request body and pay with Monad's USDT0
+  (`0xe7cd86e13AC4309349F30B3435a9d337750fC82D`) wherever the USDC contract
+  appears below.
 - The indexer running and caught up (see [daily-monitoring.md](daily-monitoring.md))
 
 ## Step 1: Create a deposit request
@@ -26,8 +33,8 @@ curl -fsS "$PAYDAY_API_URL/v1/deposit-requests" \
        "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
 ```
 
-Copy `id` and `deposit_url` from the JSON output; `address` is null until the
-payer's wallet is bound. Open `deposit_url` in a browser, connect the wallet
+Copy `id` and `deposit_url` from the JSON output; `currency` is `USDC`
+(the default) and `address` is null until the payer's wallet is bound. Open `deposit_url` in a browser, connect the wallet
 you will pay from, and sign the attestation it offers. Then re-read the
 deposit and confirm `address` is set, `payer_wallet` is your wallet, and
 `recovery_address` equals it:

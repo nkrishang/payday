@@ -188,9 +188,8 @@ LIMIT 10;
 One row per chain; the example is Monad.
 
 ```sql
-INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash)
-VALUES (143, decode('754704bc059f8c67012fed69bc8a327a5aafb603', 'hex'),
-  <BLOCK_NUMBER>, decode('<BLOCK_HASH_NO_0X>', 'hex'))
+INSERT INTO indexer_cursor (chain_id, last_block, last_block_hash)
+VALUES (143, <BLOCK_NUMBER>, decode('<BLOCK_HASH_NO_0X>', 'hex'))
 ON CONFLICT (chain_id) DO UPDATE SET
   last_block = <BLOCK_NUMBER>,
   last_block_hash = decode('<BLOCK_HASH_NO_0X>', 'hex'),

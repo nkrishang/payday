@@ -11,7 +11,7 @@ indexer only scans forward.
 
 ## When to reset
 
-- After a fresh deployment where `usdc_start_block` was set too early
+- After a fresh deployment where a chain's `start_block` was set too early
 - After the indexer was down for a long time and no deposit requests are pending
 - After a cursor hash mismatch (see [indexer-fatal-halt.md](indexer-fatal-halt.md))
 
@@ -19,8 +19,8 @@ indexer only scans forward.
 
 Every chain has its own cursor row (`chain_id`); reset only the chain that
 is behind, against that chain's endpoint. Pick a block to reset to. This
-should be a few blocks before the earliest unprocessed USDC transfer you
-care about.
+should be a few blocks before the earliest unprocessed stablecoin transfer
+you care about. One cursor covers every token configured on the chain.
 
 ```bash
 CURRENT=$(cast block-number --rpc-url "$MONAD_RPC_URL")
@@ -48,12 +48,11 @@ with a Postgres image to run SQL inside the VPC. See [db-access.md](db-access.md
 for the full procedure. The SQL is:
 
 ```sql
--- 143 and Monad's USDC here; use the chain id and that chain's USDC
--- address (the `usdc` of its PAYDAY_CHAINS entry) for Base or Arbitrum.
-INSERT INTO indexer_cursor (chain_id, token_address, last_block, last_block_hash)
+-- 143 is Monad; use 8453 or 42161 for Base or Arbitrum. The cursor is per
+-- chain, not per token: every contract in the entry's `tokens` shares it.
+INSERT INTO indexer_cursor (chain_id, last_block, last_block_hash)
 VALUES (
   143,
-  decode('754704bc059f8c67012fed69bc8a327a5aafb603', 'hex'),
   <TARGET_BLOCK>,
   decode('<BLOCK_HASH_WITHOUT_0X>', 'hex')
 )

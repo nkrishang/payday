@@ -1047,7 +1047,7 @@ The intended invoice amount still moves directly to the merchant, but the prior 
 - Typed attachment roles in the initial product.
 - Cross-merchant KYC reuse.
 - Deep SaaS integrations before customer demand.
-- Multi-currency or FX.
+- FX and non-USD currencies. Several USD stablecoins are in scope; conversion between them is not.
 - Escrow or discretionary custody of the intended invoice amount.
 - Quarantining addresses that receive pre-verification funds.
 - A claim that KYC cryptographically identifies the sending wallet.
@@ -1086,6 +1086,7 @@ The intended invoice amount still moves directly to the merchant, but the prior 
 | Sanctions screening | Deferred; will use Didit AML/PEP capability or separate screening in the future |
 | Schema rollout | One consolidated pre-production migration, optionally squashed into baseline |
 | Vocabulary | Invoice for the document; payment for fulfillment |
+| Currency model | One `currency` per request (USDC default, USDT; more later), the currency's canonical contract per chain; Payday never gives the merchant a rate worse than 1:1, so USDC (CCTP) is payable and withdrawable on any network while USDT pins a network at creation and withdraws per network |
 | Dashboard MVP | Create/list/detail invoices and customers, payer-policy state, verification review, recovered-funds visibility, and proof downloads |
 
 ---

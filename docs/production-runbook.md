@@ -18,7 +18,7 @@ One thing Payday holds and two it never does: the sweep signer holds only
 gas (MON on Monad, ETH on Base and Arbitrum One); the requested amount moves directly from the deposit address to the
 merchant; and overpayment remainders, expired balances, and late transfers
 go back on-chain to the payer's own attested wallet, which is every deposit
-address's recovery term. Payday custodies no USDC.
+address's recovery term. Payday custodies no stablecoin.
 
 ## What runs where
 
@@ -26,7 +26,7 @@ address's recovery term. Payday custodies no USDC.
 |---|---|---|---|
 | Landing page, hosted checkout (`/pay/{id}`), merchant dashboard (`/dashboard`) | Vercel project rooted at `web/` | `payday.sh`, `www.payday.sh` | `web/` |
 | Merchant and payer API (`gatewayd`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gatewayd` |
-| USDC indexer and sweep worker | ECS Fargate service `indexer`, one task running one worker per network, no inbound access | none | `crates/gateway-indexer` |
+| Stablecoin indexer and sweep worker | ECS Fargate service `indexer`, one task running one worker per network watching every configured token contract, no inbound access | none | `crates/gateway-indexer` |
 | Database | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA | none | `crates/gateway-db/migrations` |
 | Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
 | Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
@@ -67,9 +67,9 @@ tagged `git-<full SHA>`.
    created for this purpose is the simplest way to guarantee that. The KMS
    sweep signer also needs a deliberately small gas balance on each chain
    after deployment.
-7. **A wallet with a small amount of native USDC** on each network for the
-   production smoke deposits. USDC can come from a supported exchange or
-   bridge.
+7. **A wallet with a small amount of native USDC** on each network, and of
+   USDT0 on Monad and Arbitrum One, for the production smoke deposits. Both
+   can come from a supported exchange or bridge.
 8. **A Privy app** for merchant sign-in, an **Auth0 tenant**, and a **Resend
    account** for the embedded passwordless email code that payers and issuer
    mailboxes prove themselves with, all configured as described in
@@ -112,13 +112,14 @@ delegation is publicly visible.
 ## Fixed values per network
 
 The `chains` list in the tfvars carries these; the payer sees the networks
-in that order. USDC has six decimals on all of them.
+in that order. Every served stablecoin has six decimals on all of them.
 
 | | Monad | Base | Arbitrum One |
 |---|---|---|---|
 | Chain ID | `143` | `8453` | `42161` |
 | Gas token | `MON` | `ETH` | `ETH` |
-| Circle native USDC | `0x754704Bc059F8C67012fEd69BC8A327a5aafb603` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
+| Circle native USDC (`USDC`) | `0x754704Bc059F8C67012fEd69BC8A327a5aafb603` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
+| Tether USDT0 (`USDT`) | `0xe7cd86e13AC4309349F30B3435a9d337750fC82D` | not served | `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9` |
 | `finality_source` / `finality_confirmations` | `finalized` / `0` | `latest` / `10` | `latest` / `40` |
 | `block_time_ms` | `300` | `2000` | `250` |
 | `log_range_size` | `100` | `10000` | `10000` |
@@ -135,13 +136,16 @@ in that order. USDC has six decimals on all of them.
   to twenty minutes behind, and the product decision is to trust the
   sequencer's ordering, as exchange deposits do, with the margin absorbing
   the sequencer's own reorgs. On every chain `eth_getLogs` is filtered to
-  the addresses Payday is watching, 500 per call, so RPC spend follows
-  Payday's activity and not the chain's USDC volume.
+  the addresses Payday is watching, 500 per call, with every configured
+  token contract in one address array, so RPC spend follows Payday's
+  activity and not the chain's stablecoin volume. One worker, one cursor,
+  and one socket serve a chain however many currencies it lists.
 - Detection is push-driven on every chain: while a chain has something to
   watch, the indexer holds a WebSocket to that chain's QuickNode endpoint
-  (`wss://` derived from `PAYDAY_RPC_URL_<chain_id>`) subscribed to USDC
-  transfers to its own payment addresses (`monadLogs` on Monad, `logs`
-  elsewhere), and wakes a range scan the moment one lands. The scan also
+  (`wss://` derived from `PAYDAY_RPC_URL_<chain_id>`) subscribed to
+  transfers of its configured tokens to its own payment addresses
+  (`monadLogs` on Monad, `logs` elsewhere), and wakes a range scan the
+  moment one lands. The scan also
   runs every `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s) as the backstop
   and the only writer; the socket has no ledger authority. A chain with
   nothing to watch holds no socket and only advances its cursor every
@@ -163,7 +167,17 @@ in that order. USDC has six decimals on all of them.
 
 Reconfirm every USDC address against
 [Circle's official contract-address page](https://developers.circle.com/stablecoins/usdc-contract-addresses)
-before every new production environment.
+and every USDT0 address against
+[Tether's USDT0 deployments page](https://docs.usdt0.to/technical-documentation/deployments)
+before every new production environment. USDT0 is Tether's omnichain USDT,
+backed 1:1 by USDT locked on Ethereum; Base carries USDC only, because
+Base's USDT is a bridge wrapper without EIP-3009 and is not served as a
+deposit currency (payers may still pay from it through Relay). Both services
+also read each contract's `decimals()`, `name()`, and `version()` at
+startup (a missing `version()` getter is tolerated by trying `"1"` then
+`"2"` against `DOMAIN_SEPARATOR`; USDT0 has none, and hashes under the name
+`USDT0` on Monad and `USD₮0` on Arbitrum with version `"1"`) and refuse to
+start if the chain disagrees with the configured currency.
 
 ## Order of operations
 
@@ -209,8 +223,8 @@ post-deployment authority.
 
 The generation must sit at the **same addresses on every chain**. A deposit
 address commits to the chain the payer chose, and the `Payment` contract
-refuses to route funds anywhere else; if a payer nevertheless sends USDC to
-that address on another network, it can be returned only by deploying the
+refuses to route funds anywhere else; if a payer nevertheless sends the
+token to that address on another network, it can be returned only by deploying the
 `Payment` there through a factory at the identical address
 (`runbooks/wrong-network-deposit.md`). The deployment script enforces the
 precondition: the deployer must have nonce 0 on the target chain, so the
@@ -229,7 +243,11 @@ factory. Always deploy the two together with the same script, and never point
 a new factory at an old sweeper. Both services pin the generation by the
 keccak256 of each contract's runtime bytecode and by the sweeper's bound
 factory, and refuse to start if the chain disagrees; a change of generation
-needs a fresh database, not a configuration edit.
+needs a fresh database, not a configuration edit. The token is not part of
+the generation: `PaymentFactory`, `BatchSweeper`, and `Payment` take it per
+call, so adding a currency to a live chain is a `tokens` entry in that
+chain's configuration, with no redeploy and no backfill (no request could
+have offered the currency before it was configured).
 
 For an encrypted Foundry keystore:
 
@@ -280,10 +298,14 @@ addresses as `factory` and `batch_sweeper` and the hashes as
 
 ### The WithdrawalForwarder
 
-Withdrawals that cross networks burn through `WithdrawalForwarder`
+USDC withdrawals that cross networks burn through `WithdrawalForwarder`
 (`foundry/src/WithdrawalForwarder.sol`), a stateless, ownerless contract
 bound to Circle's `TokenMessengerV2` (`0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d`
-on Monad, Base, and Arbitrum). It is deployed like the factory, from a
+on Monad, Base, and Arbitrum). CCTP, the forwarder, and its 10,000,000
+per-message limit exist for USDC only: a USDT withdrawal moves the
+destination network's balance in one same-chain leg, and balances on other
+networks are withdrawn separately to an address there. It is deployed like
+the factory, from a
 second fresh key at nonce 0, so it has one address everywhere and one runtime
 code hash to pin:
 
@@ -305,12 +327,14 @@ done
 
 Put the address and hash in each chain's `cctp` block in `terraform.tfvars`,
 with Circle's domain (Monad 15, Base 6, Arbitrum 3) and the two CCTP
-contracts, which are the same on all three chains. Both services verify the
+contracts, which are the same on all three chains. A `cctp` block requires
+USDC among that chain's `tokens`. Both services verify the
 forwarder's code hash at startup like the factory's. A chain without a
 `cctp` block still serves same-network withdrawals; `POST /v1/withdrawals`
-answers `withdrawals_unavailable` when a leg would have to bridge from or to
-it. Before the first production withdrawal, run the forwarder's fork tests
-against the live chains (`just forge-fork`) and one real withdrawal on
+answers `withdrawals_unavailable` when a USDC leg would have to bridge from
+or to it. Before the first production withdrawal, run the fork tests
+against the live chains (`just forge-fork`, which also proves the USDT0
+contracts accept the withdrawal authorization) and one real withdrawal on
 staging (`docs/staging.md`).
 
 ## 3. Configure Privy, Resend, and Auth0
@@ -379,8 +403,8 @@ cast block-number --rpc-url "$BASE_RPC_URL"
 cast block-number --rpc-url "$ARBITRUM_RPC_URL"
 ```
 
-Use each value as that entry's `usdc_start_block`. No deposit requests can
-predate the first launch, so scanning older USDC transfers would waste RPC
+Use each value as that entry's `start_block`. No deposit requests can
+predate the first launch, so scanning older transfers would waste RPC
 requests without finding a payable deposit request.
 
 ```bash
@@ -395,8 +419,13 @@ Replace every placeholder in `terraform.tfvars`, including:
 - `image_tag = "git-<full commit SHA>"` of the commit you will build in §7
 - the `chains` list: one entry per network with the deployed `factory`
   and `batch_sweeper`, their `factory_code_hash` and
-  `batch_sweeper_code_hash` from §2, that chain's `usdc_start_block`, and
-  the fixed values from the table above
+  `batch_sweeper_code_hash` from §2, that chain's `start_block`, its
+  `tokens` (`[{currency = "USDC", address = …}, {currency = "USDT",
+  address = …}]`; at least one chain must list USDC, which the onboarding
+  demo pays), and the fixed values from the table above. Both tasks receive
+  the list as `PAYDAY_CHAINS`, whose entries carry
+  `tokens: [{"currency":"USDC","address":"0x…"},{"currency":"USDT","address":"0x…"}]`
+  and `start_block`
 - `privy_app_id`, `auth0_issuer`, `payer_auth0_audience`, and
   `payer_auth0_client_id` from §3
 - `admin_reviewer_id`, who operator decisions are recorded against
@@ -519,7 +548,7 @@ cast wallet address --aws
 The two addresses must match. It is one address on every chain, and it
 sweeps on every chain, so fund it on each: only enough MON on Monad and ETH
 on Base and Arbitrum One for expected sweeps. The worker alarms per chain
-below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. The signer does not custody USDC; it
+below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. The signer custodies no stablecoin; it
 pays gas to invoke the permissionless factory.
 
 ### Attestation signer
@@ -574,7 +603,7 @@ Vercel and a changed value needs a redeploy.
    | Variable | Production value |
    |---|---|
    | `NEXT_PUBLIC_PAYDAY_API_URL` | `https://api.payday.sh` |
-   | `NEXT_PUBLIC_CHAINS` | the same three networks as `chains`, as a JSON array of `{id, name, rpcUrl, usdcAddress, explorerUrl, confirmation}` with *public* RPCs (`https://rpc.monad.xyz`, `https://mainnet.base.org`, `https://arb1.arbitrum.io/rpc`), never the QuickNode endpoints; `web/.env.staging` has the exact value |
+   | `NEXT_PUBLIC_CHAINS` | the same three networks as `chains`, as a JSON array of `{id, name, rpcUrl, tokens, explorerUrl, confirmation}`, each `tokens` entry `{currency, address, symbol?, decimals?}` matching that chain's `PAYDAY_CHAINS` tokens, with *public* RPCs (`https://rpc.monad.xyz`, `https://mainnet.base.org`, `https://arb1.arbitrum.io/rpc`), never the QuickNode endpoints; `web/.env.staging` has the exact value |
    | `NEXT_PUBLIC_PRIVY_APP_ID` | the production Privy app ID from §3 |
    | `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` | `https://<attachment_bucket_name>.s3.<region>.amazonaws.com`, from `terraform -chdir=infra output -raw attachment_bucket_name` |
    | `NEXT_PUBLIC_PAYER_APPEAL_EMAIL` | a monitored support address |
@@ -671,13 +700,15 @@ wallet you will pay from (the page switches it to that chain), and sign the
 attestation; `GET /v1/deposit-requests/{id}` then carries `chain`, `token`,
 `address`, `payer_wallet`, and `recovery_address` (the same wallet), and a
 `deposit_request.ready` webhook fires. Pay exactly 0.01 native USDC to that
-address from that wallet on that chain. Repeat once per network before
-accepting real deposits. Confirm that:
+address from that wallet on that chain. Repeat once per network, and once
+more with `"currency":"USDT","chain_id":"143"` (and `42161`) paid in USDT0,
+before accepting real deposits. Confirm that:
 
 1. `GET /v1/deposit-requests/{id}` progresses `awaiting_deposit → deposited →
    settled`, with `received_base_units`, `settlement_tx_hash`, `settled_at`,
    and `settled_block` set.
-2. The beneficiary receives exactly the USDC amount.
+2. The beneficiary receives exactly the requested amount of the request's
+   currency.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
 5. A second, small deposit to the same address comes back to the paying
@@ -777,6 +808,16 @@ build configured for one generation refuses to start against another, so a
 half-updated configuration fails closed rather than settling against the
 wrong contracts.
 
+### Adding a currency
+
+Adding a stablecoin to a live chain is a configuration change, not a
+generation change: append `{currency, address}` to that chain's `tokens`
+(and the matching entry to `NEXT_PUBLIC_CHAINS`), verify the address against
+the issuer's page, and apply. The contracts take the token per call, the
+database needs no backfill, and the indexer's single per-chain cursor
+simply starts watching the new contract. A currency served on no chain
+answers `422 unsupported_currency`.
+
 ## Sandbox
 
 The same stack can be instantiated a second time against the testnets
@@ -815,4 +856,5 @@ against production state.
   task as an additional control.
 - A finalized cursor hash mismatch requires operator investigation; the
   worker intentionally exits and alerts rather than silently skipping or
-  rewriting observations.
+  rewriting observations. `indexer_cursor` and `indexer_status` hold one
+  row per chain, whatever the chain's currencies.

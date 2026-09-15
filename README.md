@@ -1,6 +1,6 @@
 # Payday
 
-Payday is a stablecoin deposit gateway for merchants: create a deposit request through a small API, share its payer link, and let Payday bind the payer's attested wallet to a one-time USDC address, detect finalized transfers from that wallet, and settle exactly the requested amount to your wallet automatically. Partial deposits accumulate; overpayment remainders, expired balances, and late transfers go back to the payer's own wallet on-chain and are recorded per request; every observed transfer remains in an auditable PostgreSQL ledger; and every settled request yields an offline-verifiable Proof of Payment tying the document, the wallet, the address, and the transfers together.
+Payday is a stablecoin deposit gateway for merchants: create a deposit request through a small API, share its payer link, and let Payday bind the payer's attested wallet to a one-time stablecoin address (USDC or USDT), detect finalized transfers from that wallet, and settle exactly the requested amount to your wallet automatically. Partial deposits accumulate; overpayment remainders, expired balances, and late transfers go back to the payer's own wallet on-chain and are recorded per request; every observed transfer remains in an auditable PostgreSQL ledger; and every settled request yields an offline-verifiable Proof of Payment tying the document, the wallet, the address, and the transfers together.
 
 ## 60-second local quickstart
 
@@ -51,7 +51,7 @@ Markdown below is the engineering record it draws on.
 - [Deposit requests API](docs/deposit-requests-api.md)
 - [Authentication and API keys](docs/authentication.md)
 - [Merchant dashboard](docs/dashboard.md)
-- [USDC indexer architecture](docs/usdc-indexer-architecture.md)
+- [Indexer architecture](docs/indexer-architecture.md)
 - [Production deployment runbook](docs/production-runbook.md)
 - [Operational runbook index](docs/runbooks/README.md)
 - [End-to-end production smoke test](docs/runbooks/end-to-end-smoke-test.md)

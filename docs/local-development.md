@@ -6,8 +6,10 @@ The API creates a deposit request; its counterfactual CREATE3 deposit address is
 derived once the payer attests, from the hosted page, the wallet they will
 pay from (`POST /v1/payer/deposit-requests/{id}/wallet/challenge` and `/attest`),
 because the address commits to that wallet as its recovery term and to the
-signature through the salt. The payer transfers USDC to that address. The indexer reads finalized ranges of
-`Transfer(address,address,uint256)` logs from the configured USDC contract,
+signature through the salt. The payer transfers the request's currency to
+that address. The indexer reads finalized ranges of
+`Transfer(address,address,uint256)` logs from every stablecoin contract
+configured on the chain, credits only the request's own token,
 attributes matching recipients in one database query, and advances deposit requests
 from `created` to `funded` when cumulative transfers reach the requested
 amount, or to `expired` when the finalized block timestamp passes the deadline.
@@ -37,26 +39,33 @@ created → funded → deploying → fulfilled
    └──► expired ◄───────┘──► recovered        blocked (operator review)
 ```
 
-Only the exact `usdc` of each `PAYDAY_CHAINS` entry is accepted, on that
-chain. USDC amounts use six decimal places. Production configures Circle's
-chain-specific native USDC proxy per network; the local setup deploys a
-mintable six-decimal fixture with the same `paused()`/`isBlacklisted()`
-views on each of its two Anvils.
+A deposit request is denominated in one `currency`, `USDC` (default) or
+`USDT`, and only the exact contract the chain's `PAYDAY_CHAINS` entry lists
+for that currency is credited, on that chain; a transfer of another
+configured stablecoin to the address stays there for `recover(address)` to
+return. Every served stablecoin uses six decimal places. Production
+configures Circle's native USDC proxy per network and Tether's USDT0 on
+Monad and Arbitrum One; the local setup deploys mintable six-decimal
+`MockStablecoin` fixtures with the same `paused()`/`isBlacklisted()` views
+on its two Anvils.
 
-A deposit request has no chain until the payer chooses one at the wallet
-step: the request offers every registry network, the challenge names the
+A USDC deposit request has no chain until the payer chooses one at the wallet
+step: the request offers every registry network serving USDC, the challenge names the
 chosen `chain_id`, and the binding writes the chain, token, factory, and
-address together. The local stack runs two chains so that step has a real
-choice: Anvil on 8545 (chain 31337, the Monad-shaped `finalized` path) and
-Anvil on 8546 (chain 31338, the L2-shaped `latest` plus confirmations
-path).
+address together. A USDT request has no 1:1 bridge, so it must pin
+`chain_id` at creation to a chain that serves USDT. The local stack runs two chains so that step has a real
+choice: Anvil on 8545 (chain 31337, the Monad-shaped `finalized` path,
+serving USDC and USDT) and Anvil on 8546 (chain 31338, the L2-shaped
+`latest` plus confirmations path, USDC only).
 
 ## Indexing and finality
 
 The acquisition path has two halves over standard EVM JSON-RPC:
 
 The indexer runs one worker per `PAYDAY_CHAINS` entry, each with its own
-RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal.
+RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal,
+watching every token contract the entry lists; `indexer_cursor` and
+`indexer_status` are keyed by chain alone.
 
 - **The reconciler** (the only writer) runs a pass every
   `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` and immediately on a wake. A pass is
@@ -64,7 +73,8 @@ RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal.
   `latest`, minus `finality_confirmations` blocks), one header read to
   verify the stored cursor hash, then, if the chain has anything to watch,
   per bounded range one range-end header read, one `eth_getLogs` filtered
-  to the USDC address, the `Transfer` topic, and the watched recipients
+  to the chain's token addresses (one address array), the `Transfer` topic,
+  and the watched recipients
   (500 per call), and a second range-end read that proves nothing
   moved while the logs were fetched. A chain with nothing to watch
   fast-forwards its cursor instead and sleeps
@@ -74,7 +84,8 @@ RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal.
   per pass, so a backlog clears independently of the cadence.
 - **The transfer signal** is a WebSocket `eth_subscribe` on the same node
   (`PAYDAY_RPC_WS_URL_<chain_id>`, derived from the HTTP URL when unset)
-  for USDC transfers whose recipient is one of our payment addresses, held
+  for transfers of the chain's configured tokens whose recipient is one of
+  our payment addresses, one subscription per chain, held
   only while the chain has something to watch. On Monad it uses `monadLogs`
   and wakes the reconciler when a matching log reaches the `Finalized`
   commit state; Anvil, Base, and Arbitrum lack `monadLogs`, so the signal
@@ -127,8 +138,8 @@ attachment store, and Anvil chains so their indexed histories cannot drift.
 After the bootstrap deploys the contracts on both Anvils, the runner reads
 their runtime bytecode from each chain and builds `PAYDAY_CHAINS` from it
 (overriding any `.env` value), because both services verify the deployed
-contract generation on every chain at startup and refuse to start on a
-mismatch.
+contract generation, and each token's `decimals()`, `name()`, and
+`version()`, on every chain at startup and refuse to start on a mismatch.
 
 To open a created deposit, run the hosted checkout in a third shell:
 
@@ -186,7 +197,7 @@ key. Never use it on a real network.
 anvil --chain-id 31337 --slots-in-an-epoch 1 --mixed-mining --block-time 1
 ```
 
-### 2. Bootstrap PaymentFactory and MockUSDC
+### 2. Bootstrap PaymentFactory and the mock stablecoins
 
 Run against a fresh Anvil. The script is safe to repeat on the same node, but
 it will not redeploy changed contract code over existing addresses: restart
@@ -204,12 +215,19 @@ forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
 It deploys:
 
 - `PaymentFactory`: `0x5FbDB2315678afecb367f032d93F642f64180aa3`
-- `MockUSDC`: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
+- `MockStablecoin` as USDC: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
 - `BatchSweeper`: `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`
+- `MockStablecoin` as USDT: `0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9`
+  (account #0's nonce-3 CREATE address; `PAYDAY_USDT_ADDRESS` to the
+  runner)
 
-Anvil accounts #0 and #1 are topped up to 1,000,000 test USDC. Account #1 is
+`MockStablecoin` (`foundry/src/MockStablecoin.sol`, formerly `MockUSDC`)
+takes its name and symbol in the constructor. Anvil accounts #0 and #1 are
+topped up to 1,000,000 of each test stablecoin. Account #1 is
 the end-to-end suite's payer, whose wallet every request is bound to; account
-#5 plays the stranger who pays from an unattested wallet.
+#5 plays the stranger who pays from an unattested wallet. The runner lists
+both tokens on the first chain and USDC alone on the second, and hands the
+Relay stand-in both addresses as `RELAY_STUB_USDC` and `RELAY_STUB_USDT`.
 
 Pin the deployed generation for both services (the runner does this for
 you, per chain, when it builds `PAYDAY_CHAINS`); these are the two hashes
@@ -243,9 +261,9 @@ docker run --rm --network host \
 ### 4. Build and start the services manually
 
 Ensure `.env` contains the database URL, `PAYDAY_CHAINS` (one entry per
-Anvil, with the fixture addresses, the two code hashes above, finality
-settings, and start block; `scripts/local-runner.sh`'s `chain_entry` builds
-one), `PAYDAY_RPC_URL_31337` and `PAYDAY_RPC_URL_31338`, signer and
+Anvil, with the fixture addresses, its `tokens`, the two code hashes above,
+finality settings, and start block; `scripts/local-runner.sh`'s
+`chain_entry` builds one), `PAYDAY_RPC_URL_31337` and `PAYDAY_RPC_URL_31338`, signer and
 attestation keys, attachment store, and identity settings (the
 `.env.example` hash placeholders are zero and will be refused).
 Start the identity provider:
@@ -288,7 +306,9 @@ curl -fsS http://127.0.0.1:3000/v1/deposit-requests \
        "payer_policy": {"mode": "permissionless"}, "expires_in": 3600}'
 ```
 
-The response's `chain`, `token`, and `address` are null and `networks` lists
+The response's `currency` is `USDC` (pass `"currency": "USDT"` with
+`"chain_id": "31337"` for a USDT request, which the first Anvil alone
+serves); `chain`, `token`, and `address` are null and `networks` lists
 both Anvils: bind the payer's wallet first, as the hosted checkout does
 (challenge with `{"wallet", "chain_id": "31337"}`, sign the typed data with
 `cast wallet sign --data --from-file`, attest; `scripts/e2e-anvil.sh`'s
@@ -413,19 +433,32 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   only; the provider refuses to bind anything but loopback, and Auth0 issues
   the real codes
 - `PAYDAY_CHAINS` — the network registry both services read: a JSON array
-  of `{chain_id, usdc, factory, batch_sweeper, factory_code_hash,
-  batch_sweeper_code_hash, usdc_start_block, finality_source,
+  of `{chain_id, tokens, factory, batch_sweeper, factory_code_hash,
+  batch_sweeper_code_hash, start_block, finality_source,
   finality_confirmations, block_time_ms, log_range_size,
-  explorer_base_url?}`, in the order the checkout offers networks. The
-  code hashes are keccak256 of the runtime bytecode at the two addresses
+  signer_low_balance_wei?, explorer_base_url?, cctp?}`, in the order the
+  checkout offers networks. `tokens` is
+  `[{"currency":"USDC","address":"0x…"},{"currency":"USDT","address":"0x…"}]`,
+  the currencies served on that chain by their exact contracts (Circle's
+  native USDC proxy and Tether's USDT0 in production); a currency absent
+  there is not offered on that chain, and at least one chain must list
+  USDC. The code hashes are keccak256 of the runtime bytecode at the two
+  addresses
   (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both
   services compare them with each live chain at startup, also checking that
-  `BatchSweeper.factory()` is the entry's `factory`, and refuse to start on
+  `BatchSweeper.factory()` is the entry's `factory` and that each token's
+  `decimals()`, `name()`, and `version()` match its currency (a missing
+  `version()` getter, as on USDT0, is tolerated by trying `"1"` then `"2"`
+  against `DOMAIN_SEPARATOR`), and refuse to start on
   a mismatch. `just dev` and `just e2e` build the two local entries from
   the running Anvils (`build_chain_registry` in `scripts/local-runner.sh`).
-  `usdc` is the exact Circle native-USDC proxy in production;
+  `signer_low_balance_wei` overrides `PAYDAY_SIGNER_LOW_BALANCE_WEI` for
+  that chain. `cctp` is `{domain, token_messenger, message_transmitter,
+  forwarder, forwarder_code_hash}`, Circle's CCTP V2 and the deployed
+  `WithdrawalForwarder`; it requires USDC among the chain's `tokens`, and
+  a chain without it (the local Anvils) serves same-chain withdrawals only.
   `finality_source` is `finalized` or `latest` (see
-  `docs/usdc-indexer-architecture.md`)
+  `docs/indexer-architecture.md`)
 - `PAYDAY_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
   (QuickNode in production, an Anvil locally); read by both services
   (`gatewayd` uses it for deployment verification)
@@ -468,9 +501,10 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   and `gateway-indexer` (following reported quotes) read them. Unset key:
   the hosted checkout does not offer it. `just dev` and `just e2e` point
   them at `scripts/relay-stub.mjs`, a stand-in on port 4020 that quotes a
-  USDC transfer to its solver on the second Anvil and fills it on the first
+  transfer of the local USDC or USDT (`RELAY_STUB_USDC`, `RELAY_STUB_USDT`)
+  to its solver on the second Anvil and fills it on the first
 - `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
-  default 0.05 native tokens
+  default 0.05 native tokens; a chain's `signer_low_balance_wei` overrides it
 - `PAYDAY_SIGNER_KEY` — local/Anvil sweep signer; mutually exclusive with KMS
 - `PAYDAY_KMS_KEY_ID` — production AWS KMS secp256k1 key ID or ARN; the worker
   uses its ambient ECS task role for `kms:GetPublicKey` and `kms:Sign`
@@ -500,8 +534,9 @@ Terraform source is under `infra/`.
 
 ## Current constraints
 
-- One exact native-USDC contract per configured chain; the payer chooses the
-  chain, the merchant does not. A deposit sent to an address on another
+- One exact contract per currency per configured chain; for USDC the payer
+  chooses the chain, the merchant does not, while a USDT request is pinned
+  to a chain serving USDT at creation. A deposit sent to an address on another
   supported chain is refused by the contract and returned by hand
   (`docs/runbooks/wrong-network-deposit.md`).
 - A finalized cursor hash mismatch requires operator intervention; there is no
