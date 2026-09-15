@@ -19,7 +19,9 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, Log, TransactionRequest};
+use alloy_rpc_types_eth::{
+    BlockId, BlockNumberOrTag, Filter, Log, TransactionReceipt, TransactionRequest,
+};
 use alloy_sol_types::{SolCall, SolEvent, sol};
 use alloy_transport::TransportError;
 use async_trait::async_trait;
@@ -119,7 +121,7 @@ impl FeeEstimate {
 }
 
 /// Errors from talking to the chain over RPC.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ChainError {
     /// A provider or transport failure. Retryability is retained so callers do
     /// not turn infrastructure failures into permanent payment failures.
@@ -144,6 +146,14 @@ pub enum ChainError {
     /// A read failed for a non-deterministic reason and should be retried.
     #[error("transient chain failure: {0}")]
     Transient(String),
+
+    /// A synchronous broadcast (`eth_sendRawTransactionSync`) neither returned
+    /// a receipt nor reported a rejection: the client-side deadline passed or
+    /// the connection dropped while the node may still have the transaction.
+    /// The signed bytes are durable, so the outcome is unknown, not failed:
+    /// keep the row's ownership and reconcile receipts instead of re-signing.
+    #[error("broadcast outcome is unknown: {0}")]
+    BroadcastUnknown(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +264,66 @@ fn is_known_transaction(err: &TransportError) -> bool {
     err.as_error_resp().is_some_and(|payload| {
         let message = payload.message.to_ascii_lowercase();
         message.contains("already known") || message.contains("known transaction")
+    })
+}
+
+/// Whether the node rejected the method itself rather than the transaction,
+/// so a synchronous-send fallback is worth one attempt (-32601, method not
+/// found).
+fn is_method_not_found(err: &TransportError) -> bool {
+    err.as_error_resp()
+        .is_some_and(|payload| payload.code == -32601)
+}
+
+/// Validate a mined transaction's inclusion metadata and reduce it to the
+/// outcome both the sweep and withdrawal paths reconcile on.
+fn transaction_outcome(
+    receipt: &TransactionReceipt,
+    expected_tx_hash: B256,
+) -> Result<TransactionOutcome, ChainError> {
+    let block = receipt.block_number.ok_or_else(|| {
+        ChainError::Transient(format!(
+            "transaction {expected_tx_hash} receipt has no block number"
+        ))
+    })?;
+    let block_hash = receipt.block_hash.ok_or_else(|| {
+        ChainError::Transient(format!(
+            "transaction {expected_tx_hash} receipt has no block hash"
+        ))
+    })?;
+    Ok(TransactionOutcome {
+        succeeded: receipt.status(),
+        block,
+        block_hash,
+    })
+}
+
+/// Validate one `BatchSweeper` receipt in full: destination, inclusion
+/// metadata, and the per-payment outcomes its logs describe. Both the receipt
+/// poll and a synchronous send's receipt go through this, so neither path can
+/// accept what the other would reject.
+fn decode_sweep_receipt(
+    receipt: &TransactionReceipt,
+    expected_tx_hash: B256,
+    batch_sweeper: Address,
+) -> Result<SweepReceipt, ChainError> {
+    if receipt.to != Some(batch_sweeper) {
+        return Err(ChainError::FinalityViolation(format!(
+            "sweep transaction {expected_tx_hash} targeted {:?}, not configured BatchSweeper {batch_sweeper}",
+            receipt.to
+        )));
+    }
+    let transaction_index = receipt.transaction_index.ok_or_else(|| {
+        ChainError::Transient("execute receipt has no transaction index".to_string())
+    })?;
+    let outcome = transaction_outcome(receipt, expected_tx_hash)?;
+    let outcomes = decode_sweep_outcomes(receipt.logs(), batch_sweeper, expected_tx_hash)?;
+    Ok(SweepReceipt {
+        succeeded: outcome.succeeded,
+        block: outcome.block,
+        block_hash: outcome.block_hash,
+        transaction_index,
+        outcomes,
     })
 }
 
@@ -448,6 +518,16 @@ pub struct TransactionOutcome {
     pub block_hash: B256,
 }
 
+/// What a broadcast did. `Accepted` means the node took the signed bytes and
+/// returned only their hash; `Included` means the synchronous send waited for
+/// and returned the receipt, saving a receipt poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroadcastOutcome {
+    Accepted,
+    /// The receipt, already validated to belong to the broadcast transaction.
+    Included(TransactionOutcome),
+}
+
 /// One ERC-20 `Transfer` log a transaction emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenTransfer {
@@ -561,11 +641,15 @@ pub trait ChainClient: Send + Sync {
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError>;
 
-    /// Idempotently broadcast a transaction that is already durable.
+    /// Idempotently broadcast a transaction that is already durable. Where
+    /// the endpoint serves it, the synchronous send returns the receipt;
+    /// otherwise acceptance is all the caller learns. A
+    /// [`ChainError::BroadcastUnknown`] means neither: reconcile, do not
+    /// re-sign.
     async fn broadcast_sweep_transaction(
         &self,
         transaction: &PreparedSweepTransaction,
-    ) -> Result<(), ChainError>;
+    ) -> Result<BroadcastOutcome, ChainError>;
 
     /// Sign one arbitrary call from `signer` without broadcasting it: a
     /// withdrawal relay step (`transferWithAuthorization`, the forwarder's
@@ -675,6 +759,13 @@ pub struct AlloyChainClient {
     signers: Vec<Address>,
     chain_id: u64,
     pacer: RpcPacer,
+    /// Client-side deadline for the synchronous send's receipt wait; `None`
+    /// disables the synchronous send on this chain entirely.
+    sync_send_timeout: Option<Duration>,
+    /// Whether the endpoint has been seen rejecting the synchronous send
+    /// (`method not found`), so the fallback is announced once and never
+    /// attempted again for this process.
+    sync_send_unsupported: AtomicBool,
     /// Whether this node has been seen omitting `blockTimestamp` from logs,
     /// so the header fallback is announced once rather than per range.
     timestamp_fallback_logged: AtomicBool,
@@ -724,12 +815,14 @@ impl AlloyChainClient {
     /// their addresses in configuration order (the wallet's own map is
     /// unordered) and must all be registered in the wallet. Reads work the
     /// same as an unsigned provider; the wallet only adds send capability.
-    /// `rpc_max_rps` paces outgoing calls (0 disables pacing).
+    /// `rpc_max_rps` paces outgoing calls (0 disables pacing). `sync_send_timeout`
+    /// bounds the synchronous send's receipt wait; `None` disables it.
     pub async fn connect(
         rpc_url: &str,
         wallet: EthereumWallet,
         signers: Vec<Address>,
         rpc_max_rps: u64,
+        sync_send_timeout: Option<Duration>,
     ) -> Result<Self, ChainError> {
         assert!(!signers.is_empty(), "the signer pool cannot be empty");
         for signer in &signers {
@@ -757,6 +850,8 @@ impl AlloyChainClient {
             signers,
             chain_id,
             pacer,
+            sync_send_timeout,
+            sync_send_unsupported: AtomicBool::new(false),
             timestamp_fallback_logged: AtomicBool::new(false),
         })
     }
@@ -867,10 +962,19 @@ async fn sign_request(
     wallet: &EthereumWallet,
     tx: TransactionRequest,
 ) -> Result<PreparedSweepTransaction, ChainError> {
+    let started = Instant::now();
+    let from = tx.from;
     let envelope = tx.build(wallet).await.map_err(|error| {
         ChainError::Transient(format!("could not sign helper transaction: {error}"))
     })?;
     let raw: Bytes = envelope.encoded_2718().into();
+    // The KMS round trip is the one off-node step of every submission; its
+    // cost is invisible inside "preparation" unless logged separately.
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        from = ?from,
+        "helper transaction signed"
+    );
     Ok(PreparedSweepTransaction {
         hash: keccak256(&raw),
         raw,
@@ -1144,29 +1248,7 @@ impl ChainClient for AlloyChainClient {
         else {
             return Ok(None);
         };
-        if receipt.to != Some(batch_sweeper) {
-            return Err(ChainError::FinalityViolation(format!(
-                "sweep transaction {tx_hash} targeted {:?}, not configured BatchSweeper {batch_sweeper}",
-                receipt.to
-            )));
-        }
-        let block = receipt.block_number.ok_or_else(|| {
-            ChainError::Transient("execute receipt has no block number".to_string())
-        })?;
-        let block_hash = receipt.block_hash.ok_or_else(|| {
-            ChainError::Transient("execute receipt has no block hash".to_string())
-        })?;
-        let transaction_index = receipt.transaction_index.ok_or_else(|| {
-            ChainError::Transient("execute receipt has no transaction index".to_string())
-        })?;
-        let outcomes = decode_sweep_outcomes(receipt.logs(), batch_sweeper, tx_hash)?;
-        Ok(Some(SweepReceipt {
-            succeeded: receipt.status(),
-            block,
-            block_hash,
-            transaction_index,
-            outcomes,
-        }))
+        decode_sweep_receipt(&receipt, tx_hash, batch_sweeper).map(Some)
     }
 
     fn signers(&self) -> Vec<Address> {
@@ -1414,18 +1496,73 @@ impl ChainClient for AlloyChainClient {
     async fn broadcast_sweep_transaction(
         &self,
         transaction: &PreparedSweepTransaction,
-    ) -> Result<(), ChainError> {
+    ) -> Result<BroadcastOutcome, ChainError> {
         self.pacer.acquire().await;
+        // Where the endpoint serves the synchronous send, the receipt comes
+        // back with the acceptance and the lane can settle without waiting
+        // for the next receipt poll. A deadline or connection failure there
+        // is an unknown outcome, not a rejected transaction: the signed bytes
+        // are durable either way.
+        if let Some(timeout) = self.sync_send_timeout
+            && !self.sync_send_unsupported.load(Ordering::Relaxed)
+        {
+            match tokio::time::timeout(
+                timeout,
+                self.provider.send_raw_transaction_sync(transaction.raw.as_ref()),
+            )
+            .await
+            {
+                Ok(Ok(receipt)) => {
+                    if receipt.transaction_hash != transaction.hash {
+                        return Err(ChainError::FinalityViolation(format!(
+                            "synchronous send returned transaction hash {} for signed transaction {}",
+                            receipt.transaction_hash,
+                            transaction.hash
+                        )));
+                    }
+                    return Ok(BroadcastOutcome::Included(transaction_outcome(
+                        &receipt,
+                        transaction.hash,
+                    )?));
+                }
+                // The endpoint does not know the method: fall through to
+                // the ordinary broadcast, once per process.
+                Ok(Err(error)) if is_method_not_found(&error) => {
+                    if !self.sync_send_unsupported.swap(true, Ordering::Relaxed) {
+                        tracing::info!(
+                            chain_id = self.chain_id,
+                            "RPC endpoint does not serve eth_sendRawTransactionSync; using the ordinary broadcast"
+                        );
+                    }
+                }
+                // A receipt-wait timeout or dropped connection: the node
+                // may still have the transaction. Nothing is known.
+                Ok(Err(error)) => {
+                    return Err(ChainError::BroadcastUnknown(redact_urls(&format!(
+                        "eth_sendRawTransactionSync: {error}"
+                    ))));
+                }
+                Err(_elapsed) => {
+                    return Err(ChainError::BroadcastUnknown(
+                        "eth_sendRawTransactionSync receipt wait timed out".to_string(),
+                    ));
+                }
+            }
+        }
         match self.provider.send_raw_transaction(&transaction.raw).await {
-            Ok(pending) if *pending.tx_hash() == transaction.hash => Ok(()),
+            Ok(pending) if *pending.tx_hash() == transaction.hash => Ok(BroadcastOutcome::Accepted),
             Ok(pending) => Err(ChainError::FinalityViolation(format!(
                 "RPC returned transaction hash {} for signed transaction {}",
                 pending.tx_hash(),
                 transaction.hash
             ))),
             // Resending the exact signed bytes after a crash is successful if
-            // the node already knows them or has mined their nonce.
-            Err(error) if is_known_transaction(&error) || is_nonce_consumed(&error) => Ok(()),
+            // the node already knows them or has mined their nonce. An
+            // already-known transaction whose receipt a synchronous send just
+            // missed is likewise accepted for reconciliation.
+            Err(error) if is_known_transaction(&error) || is_nonce_consumed(&error) => {
+                Ok(BroadcastOutcome::Accepted)
+            }
             Err(error) => Err(ChainError::rpc("eth_sendRawTransaction", error)),
         }
     }

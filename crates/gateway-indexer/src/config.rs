@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use alloy_primitives::U256;
@@ -27,6 +27,22 @@ const DEFAULT_MAX_RANGES_PER_TICK: u64 = 20;
 /// that keeps catch-up bursts from tripping them. 0 disables pacing.
 const DEFAULT_RPC_MAX_RPS: u64 = 40;
 const DEFAULT_SWEEP_PENDING_TIMEOUT_SECS: u64 = 60;
+/// Active observation cadence for a helper transaction that has been broadcast
+/// and is waiting to mine and finalize: the wake picks new work up instantly,
+/// and this clock is what turns a mined sweep into a settled one without
+/// waiting out the recovery timer. Five signers at 250 ms cost about 20
+/// receipt reads a second against the provider's budget; 100 ms alone would
+/// spend 50 RPS before indexing is counted.
+const DEFAULT_SWEEP_RECEIPT_POLL_INTERVAL_MS: u64 = 250;
+/// Chains where a synchronous send (`eth_sendRawTransactionSync`, which
+/// returns the receipt) is attempted on broadcast. Monad serves the
+/// one-argument form; endpoints that do not know the method fall back to the
+/// ordinary broadcast after the first `method not found`. Empty disables it.
+const DEFAULT_SWEEP_SYNC_SEND_CHAIN_IDS: &[u64] = &[143, 10143];
+/// Client-side deadline for the synchronous send's receipt wait. A timeout is
+/// an unknown outcome, never a failed broadcast: the durable bytes are
+/// reconciled and rebroadcast instead of re-signed.
+const DEFAULT_SWEEP_SYNC_SEND_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_SWEEP_MAX_SUBMISSIONS: u32 = 5;
 const DEFAULT_SWEEP_MAX_ATTEMPTS: u32 = 8;
 /// 0.05 native tokens: roughly a hundred batches at Monad's fee levels, and
@@ -52,6 +68,10 @@ pub struct Config {
     max_ranges_per_tick: u64,
     rpc_max_rps: u64,
     sweep_pending_timeout: Duration,
+    sweep_receipt_poll_interval: Duration,
+    /// Chains (by id) where the synchronous send is attempted on broadcast.
+    sweep_sync_send_chain_ids: HashSet<u64>,
+    sweep_sync_send_timeout: Duration,
     sweep_max_submissions: u32,
     sweep_max_attempts: u32,
     signer_low_balance_wei: U256,
@@ -153,6 +173,18 @@ impl Config {
                 "PAYDAY_SWEEP_PENDING_TIMEOUT_SECS",
                 DEFAULT_SWEEP_PENDING_TIMEOUT_SECS,
             )),
+            sweep_receipt_poll_interval: Duration::from_millis(parse_u64_env(
+                "PAYDAY_SWEEP_RECEIPT_POLL_INTERVAL_MS",
+                DEFAULT_SWEEP_RECEIPT_POLL_INTERVAL_MS,
+            )),
+            sweep_sync_send_chain_ids: parse_u64_list_env(
+                "PAYDAY_SWEEP_SYNC_SEND_CHAIN_IDS",
+                DEFAULT_SWEEP_SYNC_SEND_CHAIN_IDS,
+            ),
+            sweep_sync_send_timeout: Duration::from_millis(parse_u64_env(
+                "PAYDAY_SWEEP_SYNC_SEND_TIMEOUT_MS",
+                DEFAULT_SWEEP_SYNC_SEND_TIMEOUT_MS,
+            )),
             sweep_max_submissions: parse_u64_env(
                 "PAYDAY_SWEEP_MAX_SUBMISSIONS",
                 DEFAULT_SWEEP_MAX_SUBMISSIONS as u64,
@@ -253,6 +285,18 @@ impl Config {
         self.sweep_pending_timeout
     }
 
+    pub fn sweep_receipt_poll_interval(&self) -> Duration {
+        self.sweep_receipt_poll_interval
+    }
+
+    pub fn sweep_sync_send_enabled(&self, chain_id: u64) -> bool {
+        self.sweep_sync_send_chain_ids.contains(&chain_id)
+    }
+
+    pub fn sweep_sync_send_timeout(&self) -> Duration {
+        self.sweep_sync_send_timeout
+    }
+
     pub fn sweep_max_submissions(&self) -> u32 {
         self.sweep_max_submissions
     }
@@ -303,6 +347,27 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
             .parse()
             .unwrap_or_else(|e| panic!("invalid {name}: {e}")),
         Err(_) => default,
+    }
+}
+
+/// A comma-separated chain-id list, defaulting to `default`; `PAYDAY_...=off`
+/// or an empty value disables every entry. Duplicates and unknown chains are
+/// configuration errors rather than silently ignored text.
+fn parse_u64_list_env(name: &str, default: &[u64]) -> HashSet<u64> {
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() || value.trim().eq_ignore_ascii_case("off") => {
+            HashSet::new()
+        }
+        Ok(value) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                item.parse()
+                    .unwrap_or_else(|e| panic!("invalid {name} entry {item:?}: {e}"))
+            })
+            .collect(),
+        Err(_) => default.iter().copied().collect(),
     }
 }
 
