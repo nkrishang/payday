@@ -61,6 +61,9 @@ pub struct AppState {
     pub webhook_encryption_key: Option<[u8; 32]>,
     pub api_key_prefix: String,
     pub rate_limits: Arc<Mutex<HashMap<Uuid, (f64, Instant)>>>,
+    /// Bucket capacity, and tokens refilled per second, of the per-account
+    /// rate limiter: `PAYDAY_RATE_LIMIT_PER_MINUTE`, 60 by default.
+    pub rate_limit_per_minute: f64,
     proof_cache: Arc<StdMutex<HashMap<(Uuid, Uuid, Address), ProofOfPayment>>>,
     /// The attachment bucket and the attestation key; the service configures
     /// both at startup, and a route that needs one answers 500 without it.
@@ -122,6 +125,11 @@ impl AppState {
             webhook_encryption_key,
             api_key_prefix,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit_per_minute: std::env::var("PAYDAY_RATE_LIMIT_PER_MINUTE")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|limit| *limit > 0.0)
+                .unwrap_or(60.0),
             proof_cache: Arc::new(StdMutex::new(HashMap::new())),
             attachment_store,
             attestor,

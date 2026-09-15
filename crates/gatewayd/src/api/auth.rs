@@ -566,14 +566,17 @@ pub async fn require_account(
         let (account, merchant) = session_account(&state, supplied).await?;
         (account, Some(merchant))
     };
-    // One independently refilled bucket per authenticated account. Authentication
-    // failures cannot consume another customer's allowance.
-    const LIMIT: f64 = 60.0;
+    // One independently refilled bucket per authenticated account: a token
+    // per second at the default 60, scaled with the configured capacity.
+    // Authentication failures cannot consume another customer's allowance.
+    let limit = state.rate_limit_per_minute;
+    let refill_per_second = limit / 60.0;
     let now = Instant::now();
     let (allowed, remaining, seconds_until_full) = {
         let mut buckets = state.rate_limits.lock().await;
-        let bucket = buckets.entry(account.0).or_insert((LIMIT, now));
-        bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64()).min(LIMIT);
+        let bucket = buckets.entry(account.0).or_insert((limit, now));
+        bucket.0 =
+            (bucket.0 + now.duration_since(bucket.1).as_secs_f64() * refill_per_second).min(limit);
         bucket.1 = now;
         let allowed = bucket.0 >= 1.0;
         if allowed {
@@ -582,7 +585,7 @@ pub async fn require_account(
         (
             allowed,
             bucket.0.floor() as u64,
-            (LIMIT - bucket.0).ceil() as u64,
+            ((limit - bucket.0) / refill_per_second).ceil() as u64,
         )
     };
     request.extensions_mut().insert(account);
@@ -595,9 +598,10 @@ pub async fn require_account(
     } else {
         ApiError::rate_limited().into_response()
     };
-    response
-        .headers_mut()
-        .insert("x-ratelimit-limit", HeaderValue::from_static("60"));
+    response.headers_mut().insert(
+        "x-ratelimit-limit",
+        HeaderValue::from_str(&format!("{}", state.rate_limit_per_minute as u64)).unwrap(),
+    );
     response.headers_mut().insert(
         "x-ratelimit-remaining",
         HeaderValue::from_str(&remaining.to_string()).unwrap(),

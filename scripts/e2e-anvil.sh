@@ -574,7 +574,10 @@ curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known
   echo "development identity provider did not become ready" >&2
   exit 1
 }
-./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
+# The suite makes hundreds of API calls in a few minutes, well past a
+# production account's allowance; the scenario asserts on 429s only where the
+# limiter is the subject, so open the bucket up rather than pace every read.
+PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
 gatewayd_pid=$!
 pids+=("$gatewayd_pid")
 wait_for_api
