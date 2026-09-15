@@ -167,10 +167,10 @@ unique.
 
 One `Indexer` runs per registry chain, in one process, each with its own
 RPC client, transfer signal, cursor row, advisory lock
-(`INDEXER_ADVISORY_LOCK_ID ^ chain_id`), and sweep signer nonce stream (the
-same KMS key, so the same address, on every chain). Any worker's fatal halt
-ends the process and ECS restarts it. Within a chain, block acquisition and
-sweeping run as independently scheduled workers. The
+(`INDEXER_ADVISORY_LOCK_ID ^ chain_id`), and a nonce stream per sweep
+signer (the same KMS keys, so the same addresses, on every chain). Any
+worker's fatal halt ends the process and ECS restarts it. Within a chain,
+block acquisition and sweeping run as independently scheduled workers. The
 deposit request table is their durable queue: the acquisition worker atomically commits
 finalized observations, `funded` transitions, and `expired` transitions by
 block timestamp, while the sweep worker claims eligible rows without delaying
@@ -487,15 +487,55 @@ ahead of or behind the deposit request state. A trigger raises one
 
 Every deposit request with uncollected funds at its deposit address is queued,
 whatever its status: `funded` (settle), `expired` (recover the balance), and
-`fulfilled`/`recovered` (forward a late transfer). One helper transaction is in
-flight per signer. Each exact signed transaction is persisted in its
+`fulfilled`/`recovered` (forward a late transfer).
+
+The worker signs with a **pool** of keys (`PAYDAY_KMS_KEY_IDS`, or
+`PAYDAY_SIGNER_KEYS` locally), the same keys on every chain. One helper
+transaction is in flight per signer: `sweep_batches.signer` and
+`withdrawal_legs.step_signer` record the owner, and the partial unique
+indexes `sweep_batches_open (chain_id, signer)` and `withdrawal_steps_open
+(step_chain_id, step_signer)` refuse a second open row on a signer. Each
+pass of the sweep worker:
+
+1. reconciles every open batch and relay step concurrently, one lane per
+   signer (a lane's error keeps its signer busy for the pass and never stops
+   the other lanes);
+2. walks the free signers from a rotating cursor, so gas spend spreads over
+   the pool, and gives each one the next piece of work: a withdrawal leg to
+   relay first, else a batch of up to 20 sweeps. Claiming is sequential, so
+   a short queue becomes one full batch rather than one batch per signer
+   (Monad bills the gas limit: an extra batch is an extra 100k base gas),
+   and a submission attaches its rows before the next claim runs, so two
+   signers can never claim the same row;
+3. reports `paused` if any lane is stalled (the alarm string is unchanged
+   and the log line names the signer), `degraded` on any other lane error,
+   else `running`. A stalled signer costs one lane of capacity, not the
+   chain; an open row whose signer is not in the pool, or a signer owning
+   both a batch and a step, halts the pass as a configuration error.
+
+The open-lane discovery of a pass is two database reads; a pass also runs
+several small statements that cost no RPC (stale-claim expiry, the open-row
+reads, the next relayable leg, an empty claim, the attestation queue, the
+status write). Per open row it reads one receipt per submitted hash until
+one is mined (issued concurrently, still under the per-chain RPC pacer), and
+a mined receipt costs the finality re-reads and header checks of
+classification. Per pass one `eth_feeHistory` serves every signature of the
+pass, as long as the estimate succeeds — a failed estimate leaves the cache
+empty and the next signer that needs one reads it again — and per submission
+there is one nonce read, one KMS `Sign`, and one `eth_sendRawTransaction`.
+Health reads one `eth_getBalance` per signer every five minutes and warns per
+signer below the chain's low-balance level; a balance read that fails costs
+only its own signer's entry.
+
+Each exact signed transaction is persisted in its
 `sweep_batches` outbox before broadcast, so a crash can only cause an
-idempotent resend of the same bytes. The row owns the nonce, raw transactions,
-and every hash submitted for it, so a receipt for any submission resolves the
-batch. A batch
+idempotent resend of the same bytes. The row owns the signer, the nonce, raw
+transactions, and every hash submitted for it, so a receipt for any submission
+resolves the batch. A batch
 without a receipt after the pending timeout is replaced on the same nonce with
-fees bumped by 12.5%, and after the configured number of submissions the sweep
-worker pauses and alarms while block indexing continues. A mined nonce ahead of
+fees bumped by 12.5%, and after the configured number of submissions that
+signer's lane pauses and alarms while the other signers and block indexing
+continue. A mined nonce ahead of
 the batch's nonce without a visible receipt means nothing it sent can mine any
 more (Monad returns no receipt for an in-flight transaction and forgets dropped
 ones), so the batch is abandoned and its deposit requests re-queued.
@@ -545,7 +585,8 @@ batch path. The API
 refuses deadlines closer than ten minutes so a deposit request always has room to
 settle before the contract starts routing to recovery.
 
-Use a separate per-chain/per-signer leader lock. Persist nonce ownership and the
+Use a separate per-chain leader lock, and within it one lane per pool signer.
+Persist signer and nonce ownership and the
 exact signed bytes before broadcast so replicas cannot race retries and a crash
 cannot lose the only copy of an already-submitted transaction. Prefer a direct
 safe ERC-20 transfer from the Deposit contract over self-approval followed by

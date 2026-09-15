@@ -256,6 +256,18 @@ variable "api_memory" {
   type    = number
   default = 512
 }
+# How many KMS keys the indexer sweeps with. Each is one address with one
+# helper transaction in flight at a time; N keys let N batches or
+# withdrawal steps run at once on every chain. Every key needs gas on
+# every chain, so raise it deliberately.
+variable "sweep_signer_count" {
+  type    = number
+  default = 1
+  validation {
+    condition     = var.sweep_signer_count >= 1 && floor(var.sweep_signer_count) == var.sweep_signer_count
+    error_message = "sweep_signer_count must be a whole number of at least 1."
+  }
+}
 variable "indexer_cpu" {
   type    = number
   default = 256

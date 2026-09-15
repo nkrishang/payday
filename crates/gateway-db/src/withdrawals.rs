@@ -3,10 +3,10 @@
 //! A withdrawal snapshots the Payday wallet's USDC on every chain into legs.
 //! The merchant signs each leg's EIP-3009 authorization; `gateway-indexer`
 //! relays the signed legs on the chains it serves. A leg's relay step keeps
-//! the same durable shape as a sweep batch (one signer nonce, every
-//! same-nonce replacement, the receipt once seen) and the same rule: one
-//! step in flight per chain, enforced by `withdrawal_steps_open` next to
-//! `sweep_batches_open`.
+//! the same durable shape as a sweep batch (one nonce of one pool signer,
+//! every same-nonce replacement, the receipt once seen) and the same rule:
+//! one step in flight per chain and signer, enforced by
+//! `withdrawal_steps_open` next to `sweep_batches_open`.
 //!
 //! Leg states:
 //!
@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -122,6 +122,8 @@ pub struct DbWithdrawal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayStep {
     pub chain_id: u64,
+    /// The pool signer whose nonce this step owns.
+    pub signer: Address,
     pub nonce: u64,
     pub gas_limit: u64,
     pub max_fee_per_gas: u128,
@@ -197,6 +199,7 @@ struct LegRow {
     signature: Option<Vec<u8>>,
     authorized_at: Option<DateTime<Utc>>,
     step_chain_id: Option<i64>,
+    step_signer: Option<Vec<u8>>,
     step_nonce: Option<i64>,
     step_gas_limit: Option<i64>,
     step_max_fee_per_gas: Option<String>,
@@ -257,8 +260,20 @@ impl TryFrom<LegRow> for DbWithdrawalLeg {
                     }),
                     _ => None,
                 };
+                let signer = row
+                    .step_signer
+                    .as_deref()
+                    .ok_or_else(|| {
+                        decode_error("missing step_signer in withdrawal leg step".into())
+                    })
+                    .and_then(|bytes| {
+                        Address::try_from(bytes).map_err(|_| {
+                            decode_error("invalid step_signer length in withdrawal leg step".into())
+                        })
+                    })?;
                 Some(RelayStep {
                     chain_id: chain_id as u64,
+                    signer,
                     nonce: row.step_nonce.unwrap_or_default() as u64,
                     gas_limit: row.step_gas_limit.unwrap_or_default() as u64,
                     max_fee_per_gas: fee("step_max_fee_per_gas", row.step_max_fee_per_gas)?,
@@ -659,14 +674,17 @@ impl WithdrawalRepository {
 
     // --- Relayer side -----------------------------------------------------
 
-    /// The chain's single in-flight step, if any.
-    pub async fn open_step(&self, chain_id: u64) -> Result<Option<DbWithdrawalLeg>, sqlx::Error> {
-        sqlx::query_as::<_, LegRow>("SELECT * FROM withdrawal_legs WHERE step_chain_id = $1")
-            .bind(chain_id as i64)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(DbWithdrawalLeg::try_from)
-            .transpose()
+    /// The chain's in-flight steps, at most one per pool signer, oldest first.
+    pub async fn open_steps(&self, chain_id: u64) -> Result<Vec<DbWithdrawalLeg>, sqlx::Error> {
+        sqlx::query_as::<_, LegRow>(
+            "SELECT * FROM withdrawal_legs WHERE step_chain_id = $1 ORDER BY step_submitted_at, id",
+        )
+        .bind(chain_id as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(DbWithdrawalLeg::try_from)
+        .collect()
     }
 
     /// The next leg this chain's signer should act on: an attested leg to
@@ -710,6 +728,7 @@ impl WithdrawalRepository {
         &self,
         leg_id: Uuid,
         chain_id: u64,
+        signer: Address,
         nonce: u64,
         gas_limit: u64,
         max_fee_per_gas: u128,
@@ -733,7 +752,7 @@ impl WithdrawalRepository {
         let recorded = sqlx::query(
             r#"UPDATE withdrawal_legs
                SET state = CASE state WHEN 'authorized' THEN 'relaying' ELSE 'minting' END,
-                   step_chain_id = $2, step_nonce = $3, step_gas_limit = $4,
+                   step_chain_id = $2, step_signer = $9, step_nonce = $3, step_gas_limit = $4,
                    step_max_fee_per_gas = $5, step_max_priority_fee_per_gas = $6,
                    step_tx_hashes = ARRAY[$7::bytea], step_raw_transactions = ARRAY[$8::bytea],
                    step_submitted_at = now(), step_broadcast_at = NULL, updated_at = now()
@@ -747,6 +766,7 @@ impl WithdrawalRepository {
         .bind(max_priority_fee_per_gas.to_string())
         .bind(tx_hash.as_slice())
         .bind(raw_transaction)
+        .bind(signer.as_slice())
         .execute(&mut *tx)
         .await
         .map(|result| result.rows_affected() > 0);
@@ -892,7 +912,7 @@ impl WithdrawalRepository {
                    burn_tx_hash = CASE WHEN $6 = 'burn' THEN $3 ELSE burn_tx_hash END,
                    mint_tx_hash = CASE WHEN $6 = 'mint' THEN $3 ELSE mint_tx_hash END,
                    attestation_next_check_at = $4,
-                   step_chain_id = NULL, step_nonce = NULL, step_gas_limit = NULL,
+                   step_chain_id = NULL, step_signer = NULL, step_nonce = NULL, step_gas_limit = NULL,
                    step_max_fee_per_gas = NULL, step_max_priority_fee_per_gas = NULL,
                    step_tx_hashes = NULL, step_raw_transactions = NULL, step_submitted_at = NULL,
                    step_broadcast_at = NULL, step_mined_tx_hash = NULL, step_mined_block = NULL,
@@ -926,7 +946,7 @@ impl WithdrawalRepository {
         let updated: Option<Uuid> = sqlx::query_scalar(
             r#"UPDATE withdrawal_legs
                SET state = 'failed', failure_reason = $2,
-                   step_chain_id = NULL, step_nonce = NULL, step_gas_limit = NULL,
+                   step_chain_id = NULL, step_signer = NULL, step_nonce = NULL, step_gas_limit = NULL,
                    step_max_fee_per_gas = NULL, step_max_priority_fee_per_gas = NULL,
                    step_tx_hashes = NULL, step_raw_transactions = NULL, step_submitted_at = NULL,
                    step_broadcast_at = NULL, step_mined_tx_hash = NULL, step_mined_block = NULL,
@@ -1009,7 +1029,7 @@ impl WithdrawalRepository {
         let reverted: Option<(Uuid, i16)> = sqlx::query_as(
             r#"UPDATE withdrawal_legs
                SET state = CASE state WHEN 'relaying' THEN 'authorized' ELSE 'attested' END,
-                   step_chain_id = NULL, step_nonce = NULL, step_gas_limit = NULL,
+                   step_chain_id = NULL, step_signer = NULL, step_nonce = NULL, step_gas_limit = NULL,
                    step_max_fee_per_gas = NULL, step_max_priority_fee_per_gas = NULL,
                    step_tx_hashes = NULL, step_raw_transactions = NULL, step_submitted_at = NULL,
                    step_broadcast_at = NULL, step_mined_tx_hash = NULL, step_mined_block = NULL,
@@ -1225,11 +1245,31 @@ mod tests {
         }
     }
 
+    const SIGNER: Address = Address::repeat_byte(0xA0);
+
+    /// A withdrawal of `key` for a fresh account whose transfer leg on 8453
+    /// is authorized; returns the account and that leg's id.
+    async fn authorized_transfer_leg(
+        pool: &PgPool,
+        repo: &WithdrawalRepository,
+        key: &str,
+    ) -> (AccountId, Uuid) {
+        let account = new_account(pool, key.bytes().map(u128::from).sum::<u128>() + 1000).await;
+        let input = withdrawal(account, key);
+        repo.create(&input).await.unwrap();
+        let transfer = input.legs[1].id;
+        repo.authorize(account, input.id, transfer, &[0x11u8; 65])
+            .await
+            .unwrap();
+        (account, transfer)
+    }
+
     async fn relay_transfer_leg(repo: &WithdrawalRepository, leg_id: Uuid) {
         assert!(
             repo.record_step_submission(
                 leg_id,
                 8453,
+                SIGNER,
                 7,
                 90_000,
                 100,
@@ -1444,20 +1484,31 @@ mod tests {
 
         // Transfer leg: submit, broadcast, mine, complete.
         relay_transfer_leg(&repo, transfer).await;
-        let open = repo.open_step(8453).await.unwrap().unwrap();
+        let open = repo.open_steps(8453).await.unwrap().remove(0);
         assert_eq!(open.id, transfer);
         assert_eq!(open.state, LegState::Relaying);
         let step = open.step.unwrap();
+        assert_eq!(step.signer, SIGNER);
         assert_eq!(step.nonce, 7);
         assert_eq!(step.tx_hashes, vec![B256::repeat_byte(0xA1)]);
         assert_eq!(step.raw_transactions, vec![Bytes::from_static(b"raw")]);
         assert!(step.broadcast_at.is_some());
         assert!(
             !repo
-                .record_step_submission(bridge, 8453, 8, 1, 1, 1, B256::repeat_byte(0xA2), b"x")
+                .record_step_submission(
+                    bridge,
+                    8453,
+                    SIGNER,
+                    8,
+                    1,
+                    1,
+                    1,
+                    B256::repeat_byte(0xA2),
+                    b"x"
+                )
                 .await
                 .is_ok_and(|ok| ok),
-            "a second step on the chain is refused: the leg is not the chain's, and the index would block it anyway"
+            "a second step on the chain's signer is refused by the open-step index"
         );
         assert!(
             repo.record_step_replacement(transfer, B256::repeat_byte(0xA3), 200, 20, b"raw2")
@@ -1476,10 +1527,10 @@ mod tests {
         };
         assert!(repo.record_step_mined(transfer, mined).await.unwrap());
         assert_eq!(
-            repo.open_step(8453)
+            repo.open_steps(8453)
                 .await
                 .unwrap()
-                .unwrap()
+                .remove(0)
                 .step
                 .unwrap()
                 .mined,
@@ -1497,7 +1548,7 @@ mod tests {
             .await
             .unwrap()
         );
-        assert!(repo.open_step(8453).await.unwrap().is_none());
+        assert!(repo.open_steps(8453).await.unwrap().is_empty());
         let legs = repo.legs(input.id).await.unwrap();
         assert_eq!(legs[1].state, LegState::Completed);
         assert_eq!(legs[1].transfer_tx_hash, Some(B256::repeat_byte(0xA3)));
@@ -1516,6 +1567,7 @@ mod tests {
             repo.record_step_submission(
                 bridge,
                 143,
+                SIGNER,
                 3,
                 250_000,
                 50,
@@ -1543,6 +1595,7 @@ mod tests {
             repo.record_step_submission(
                 bridge,
                 143,
+                SIGNER,
                 4,
                 250_000,
                 50,
@@ -1611,6 +1664,7 @@ mod tests {
             repo.record_step_submission(
                 bridge,
                 8453,
+                SIGNER,
                 8,
                 200_000,
                 50,
@@ -1721,6 +1775,7 @@ mod tests {
             repo.record_step_submission(
                 bridge,
                 143,
+                SIGNER,
                 3,
                 250_000,
                 50,
@@ -1784,6 +1839,7 @@ mod tests {
                 .record_step_submission(
                     transfer,
                     8453,
+                    SIGNER,
                     7,
                     90_000,
                     100,
@@ -1821,6 +1877,7 @@ mod tests {
             repo.record_step_submission(
                 transfer,
                 8453,
+                SIGNER,
                 7,
                 90_000,
                 100,
@@ -1868,6 +1925,7 @@ mod tests {
             repo.record_step_submission(
                 transfer,
                 8453,
+                SIGNER,
                 7,
                 90_000,
                 100,
@@ -1892,6 +1950,7 @@ mod tests {
             repo.record_step_submission(
                 transfer,
                 8453,
+                SIGNER,
                 7,
                 90_000,
                 100,
@@ -1916,5 +1975,113 @@ mod tests {
         );
         let row = repo.get(account, input.id).await.unwrap().unwrap();
         assert!(row.failed_at.is_some());
+    }
+
+    #[sqlx::test]
+    async fn open_steps_are_unique_per_chain_and_signer(pool: PgPool) {
+        let repo = WithdrawalRepository::new(pool.clone());
+        let other = Address::repeat_byte(0xA1);
+        let (account_a, transfer_a) = authorized_transfer_leg(&pool, &repo, "pool-a").await;
+        let (_account_b, transfer_b) = authorized_transfer_leg(&pool, &repo, "pool-b").await;
+
+        relay_transfer_leg(&repo, transfer_a).await;
+        assert!(
+            !repo
+                .record_step_submission(
+                    transfer_b,
+                    8453,
+                    SIGNER,
+                    7,
+                    90_000,
+                    100,
+                    10,
+                    B256::repeat_byte(0xB1),
+                    b"raw"
+                )
+                .await
+                .is_ok_and(|ok| ok),
+            "one signer cannot own two open steps on a chain"
+        );
+        assert!(
+            repo.record_step_submission(
+                transfer_b,
+                8453,
+                other,
+                0,
+                90_000,
+                100,
+                10,
+                B256::repeat_byte(0xB1),
+                b"raw"
+            )
+            .await
+            .unwrap()
+        );
+        let open = repo.open_steps(8453).await.unwrap();
+        assert_eq!(
+            open.iter()
+                .map(|leg| (leg.id, leg.step.as_ref().unwrap().signer))
+                .collect::<Vec<_>>(),
+            vec![(transfer_a, SIGNER), (transfer_b, other)]
+        );
+
+        assert!(
+            repo.complete_step(
+                transfer_a,
+                StepOutcome::Transferred {
+                    tx_hash: B256::repeat_byte(0xA1)
+                }
+            )
+            .await
+            .unwrap()
+        );
+        let open = repo.open_steps(8453).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, transfer_b);
+        let _ = account_a;
+    }
+
+    /// An upgrade test, not a fresh-schema one: the database starts at
+    /// migration 0001 with a relay step already open, exactly the state a
+    /// production deploy has when 0002 applies. The rewritten
+    /// `withdrawal_legs_step_complete` constraint requires `step_signer` to
+    /// be null exactly when `step_chain_id` is, so without the backfill the
+    /// migration fails on every open step and takes both services down.
+    #[sqlx::test(migrations = false)]
+    async fn migration_0002_backfills_the_signer_of_a_step_open_before_the_pool(
+        pool: sqlx::PgPool,
+    ) {
+        crate::MIGRATOR.run_to(1, &pool).await.unwrap();
+
+        let repo = WithdrawalRepository::new(pool.clone());
+        let (account, transfer) = authorized_transfer_leg(&pool, &repo, "pre-pool").await;
+        // Open the relay step the way the pre-pool code did: no signer column
+        // exists yet to record the owner in.
+        sqlx::query(
+            r#"UPDATE withdrawal_legs SET state = 'relaying', step_chain_id = 8453,
+               step_nonce = 7, step_gas_limit = 90000,
+               step_max_fee_per_gas = '100', step_max_priority_fee_per_gas = '10',
+               step_tx_hashes = ARRAY['\xa1'::bytea],
+               step_raw_transactions = ARRAY['\xa1'::bytea],
+               step_submitted_at = now()
+               WHERE id = $1"#,
+        )
+        .bind(transfer)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::MIGRATOR.run(&pool).await.unwrap();
+        let signer: Vec<u8> =
+            sqlx::query_scalar("SELECT step_signer FROM withdrawal_legs WHERE id = $1")
+                .bind(transfer)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            signer, [0u8; 20],
+            "the open step gets the zero-address sentinel, which halts the worker until an operator names the signer that submitted it"
+        );
+        let _ = account;
     }
 }

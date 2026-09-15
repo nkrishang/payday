@@ -1,20 +1,21 @@
-//! The withdrawal relayer: the signer's other job besides sweeping.
+//! The withdrawal relayer: the signer pool's other job besides sweeping.
 //!
 //! A merchant's signed legs (`gateway_db::WithdrawalRepository`) are relayed
 //! by the chain worker that owns the chain they act on, with the very same
-//! transaction discipline as a sweep batch: one signer nonce per step,
-//! signed-then-persisted-then-broadcast, same-nonce fee bumps, and a
-//! finalized receipt before anything is concluded. `Indexer::sweep_tick`
-//! gives a relay step priority over a new sweep batch and never runs either
-//! while the other is in flight, so the signer's nonce stream has one owner.
+//! transaction discipline as a sweep batch: one nonce of one pool signer
+//! per step, signed-then-persisted-then-broadcast, same-nonce fee bumps, and
+//! a finalized receipt before anything is concluded. A signer owns at most
+//! one open step or batch; `Indexer::sweep_pass` gives a free signer a relay
+//! step before a new sweep batch, and steps and batches run side by side on
+//! different signers.
 //!
-//! Per chain, each tick:
+//! Per chain, each pass:
 //! - housekeeping: expire authorizations that ran out unsigned or unrelayed;
 //!   poll Circle for the attestation of every burn made from this chain;
-//! - one step: reconcile the in-flight step if there is one, otherwise sign
-//!   and broadcast the next: a mint for an attested leg whose destination is
-//!   this chain, else a transfer or burn for an authorized leg whose source
-//!   is this chain.
+//! - lanes: reconcile every in-flight step, one per signer;
+//! - submission: a free signer signs and broadcasts the next step: a mint
+//!   for an attested leg whose destination is this chain, else a transfer or
+//!   burn for an authorized leg whose source is this chain.
 //!
 //! The relayer decides nothing about where funds go. A transfer leg's
 //! authorization names the destination; a bridge leg's names the forwarder
@@ -29,10 +30,11 @@ use chrono::Utc;
 use gateway_db::{
     DbWithdrawal, DbWithdrawalLeg, LegKind, LegState, MinedStep, RetryStep, StepOutcome,
 };
+use tokio::sync::OnceCell;
 use tracing::{info, warn};
 
 use crate::chain::{FeeEstimate, PreparedSweepTransaction};
-use crate::indexer::{Indexer, IndexerError, RANGE_RETRY_BACKOFF};
+use crate::indexer::{Indexer, IndexerError, LaneOutcome, RANGE_RETRY_BACKOFF};
 use crate::iris::AttestationStatus;
 
 sol! {
@@ -65,6 +67,12 @@ const MAX_STEP_REVERTS: u32 = 5;
 /// worker reports itself stalled for an operator. The step and its history
 /// are untouched either way; the wait only keeps reporting honest.
 const UNRESOLVED_EXECUTION_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How many legs a free signer will look at in one pass before giving up
+/// on finding one that needs a transaction: a leg can leave the queue
+/// without one (minted by somebody else, cancelled between the read and the
+/// write), and the next leg may still need the signer.
+const MAX_RELAY_CANDIDATES: usize = 8;
 
 /// Offset of the message nonce in a CCTP V2 message header
 /// (version 4, sourceDomain 4, destinationDomain 4, then the nonce).
@@ -238,50 +246,72 @@ impl Indexer {
         Ok(())
     }
 
-    /// Advance this chain's relay by one step. Returns true when a step is
-    /// in flight or was just submitted, in which case the signer's nonce is
-    /// spoken for and no sweep batch may be submitted this tick.
-    pub(crate) async fn relay_step(&self) -> Result<bool, IndexerError> {
-        if let Some(leg) = self.withdrawals.open_step(self.cfg.chain_id.0).await? {
-            let step = leg.step.clone().ok_or_else(|| {
-                IndexerError::Configuration(format!(
-                    "open relay step on leg {} has no step",
-                    leg.id
-                ))
-            })?;
-            if step.broadcast_at.is_none() {
-                let transaction = PreparedSweepTransaction {
-                    hash: *step.tx_hashes.last().ok_or_else(|| {
-                        IndexerError::Configuration(format!(
-                            "relay step on leg {} has no transaction",
-                            leg.id
-                        ))
-                    })?,
-                    raw: step.raw_transactions.last().cloned().ok_or_else(|| {
-                        IndexerError::Configuration(format!(
-                            "relay step on leg {} has no raw transaction",
-                            leg.id
-                        ))
-                    })?,
-                };
-                self.broadcast_step(&leg, &transaction).await?;
-                return Ok(true);
-            }
-            self.reconcile_step(&leg, &step).await?;
-            return Ok(true);
+    /// Advance one open step: broadcast it if its newest signed transaction
+    /// never left, otherwise reconcile it against the chain.
+    pub(crate) async fn step_lane(
+        &self,
+        leg: DbWithdrawalLeg,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<LaneOutcome, IndexerError> {
+        let step = leg.step.clone().ok_or_else(|| {
+            IndexerError::Configuration(format!("open relay step on leg {} has no step", leg.id))
+        })?;
+        if step.broadcast_at.is_none() {
+            let transaction = PreparedSweepTransaction {
+                hash: *step.tx_hashes.last().ok_or_else(|| {
+                    IndexerError::Configuration(format!(
+                        "relay step on leg {} has no transaction",
+                        leg.id
+                    ))
+                })?,
+                raw: step.raw_transactions.last().cloned().ok_or_else(|| {
+                    IndexerError::Configuration(format!(
+                        "relay step on leg {} has no raw transaction",
+                        leg.id
+                    ))
+                })?,
+            };
+            self.broadcast_step(&leg, &transaction).await?;
+            return Ok(LaneOutcome::Open);
         }
-        let Some(leg) = self
-            .withdrawals
-            .next_relayable(self.cfg.chain_id.0, MIN_AUTHORIZATION_VALIDITY)
-            .await?
-        else {
-            return Ok(false);
-        };
-        self.submit_step(&leg).await?;
-        Ok(true)
+        self.reconcile_step(&leg, &step, fees).await
     }
 
-    async fn submit_step(&self, leg: &DbWithdrawalLeg) -> Result<(), IndexerError> {
+    /// Give a free signer the next leg to relay. Returns true when a step
+    /// was signed and broadcast on it, false when nothing needed one.
+    pub(crate) async fn take_relay_step(
+        &self,
+        signer: Address,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<bool, IndexerError> {
+        for _ in 0..MAX_RELAY_CANDIDATES {
+            let Some(leg) = self
+                .withdrawals
+                .next_relayable(self.cfg.chain_id.0, MIN_AUTHORIZATION_VALIDITY)
+                .await?
+            else {
+                return Ok(false);
+            };
+            if self.submit_step(signer, &leg, fees).await? {
+                return Ok(true);
+            }
+        }
+        warn!(
+            chain_id = self.cfg.chain_id.0,
+            "relayable legs kept leaving the queue without a transaction; trying again next pass"
+        );
+        Ok(false)
+    }
+
+    /// Sign and broadcast `leg`'s next step from `signer`. False when the
+    /// leg needed no transaction after all (already minted by another party,
+    /// or gone from the queue before the step was recorded).
+    async fn submit_step(
+        &self,
+        signer: Address,
+        leg: &DbWithdrawalLeg,
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<bool, IndexerError> {
         if leg.state == LegState::Attested {
             // `receiveMessage` is permissionless: somebody may have minted
             // already, in which case submitting our own would only revert
@@ -290,22 +320,23 @@ impl Indexer {
             if self.message_nonce_used(leg).await? {
                 self.withdrawals.complete_minted_elsewhere(leg.id).await?;
                 info!(leg_id = %leg.id, "withdrawal mint already executed by another party; leg complete");
-                return Ok(());
+                return Ok(false);
             }
         }
         let withdrawal = self.withdrawal_of(leg).await?;
         let call = self.step_call(leg, &withdrawal)?;
-        let nonce = self.chain.signer_nonce(true).await?;
-        let fees = self.chain.estimate_fees().await?;
+        let nonce = self.chain.signer_nonce(signer, true).await?;
+        let fees = self.tick_fees(fees).await?;
         let transaction = self
             .chain
-            .prepare_call(call.to, call.calldata, nonce, call.gas_limit, fees)
+            .prepare_call(signer, call.to, call.calldata, nonce, call.gas_limit, fees)
             .await?;
         let recorded = self
             .withdrawals
             .record_step_submission(
                 leg.id,
                 self.cfg.chain_id.0,
+                signer,
                 nonce,
                 call.gas_limit,
                 fees.max_fee_per_gas,
@@ -318,11 +349,11 @@ impl Indexer {
             // Cancelled or expired between the read and the write: the signed
             // bytes are dropped, never broadcast.
             info!(leg_id = %leg.id, "withdrawal leg left the queue before its step was recorded");
-            return Ok(());
+            return Ok(false);
         }
         self.broadcast_step(leg, &transaction).await?;
-        info!(leg_id = %leg.id, state = leg.state.as_str(), tx_hash = %transaction.hash, nonce, "withdrawal step broadcast");
-        Ok(())
+        info!(leg_id = %leg.id, state = leg.state.as_str(), tx_hash = %transaction.hash, %signer, nonce, "withdrawal step broadcast");
+        Ok(true)
     }
 
     async fn broadcast_step(
@@ -348,13 +379,14 @@ impl Indexer {
         &self,
         leg: &DbWithdrawalLeg,
         step: &gateway_db::RelayStep,
-    ) -> Result<(), IndexerError> {
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<LaneOutcome, IndexerError> {
         for &tx_hash in step.tx_hashes.iter().rev() {
             if let Some(receipt) = self.chain.transaction_receipt(tx_hash).await? {
                 return self.apply_step_receipt(leg, step, tx_hash, receipt).await;
             }
         }
-        self.handle_unmined_step(leg, step).await
+        self.handle_unmined_step(leg, step, fees).await
     }
 
     async fn apply_step_receipt(
@@ -363,7 +395,7 @@ impl Indexer {
         step: &gateway_db::RelayStep,
         tx_hash: B256,
         receipt: crate::chain::TransactionOutcome,
-    ) -> Result<(), IndexerError> {
+    ) -> Result<LaneOutcome, IndexerError> {
         let mined = MinedStep {
             tx_hash,
             block: receipt.block,
@@ -375,7 +407,7 @@ impl Indexer {
         let mut attempt = 0u32;
         let mut backoff = RANGE_RETRY_BACKOFF;
         if receipt.block > self.finality_boundary(&mut attempt, &mut backoff).await? {
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
         let header = self
             .retried_header(receipt.block, &mut attempt, &mut backoff)
@@ -383,7 +415,7 @@ impl Indexer {
         if header.hash != receipt.block_hash {
             self.withdrawals.clear_step_mined(leg.id).await?;
             warn!(leg_id = %leg.id, %tx_hash, block = receipt.block, "withdrawal step receipt is no longer canonical; waiting for a new receipt");
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
         if !receipt.succeeded {
             // Interpret the revert only once it is final: the reads below
@@ -393,10 +425,10 @@ impl Indexer {
             // the retries of a step somebody else already completed.
             let finalized = self.chain.finalized_header().await?;
             if receipt.block > finalized.number {
-                return Ok(());
+                return Ok(LaneOutcome::Open);
             }
             if self.reconcile_executed_elsewhere(leg).await? {
-                return Ok(());
+                return Ok(LaneOutcome::Resolved);
             }
             let reason = match leg.state {
                 LegState::Minting => "the mint transaction reverted",
@@ -404,7 +436,7 @@ impl Indexer {
                 _ => "the burn transaction reverted",
             };
             self.retry_or_fail(leg, reason).await?;
-            return Ok(());
+            return Ok(LaneOutcome::Resolved);
         }
         let outcome = match (leg.state, leg.kind) {
             (LegState::Minting, _) => StepOutcome::Minted {
@@ -419,22 +451,23 @@ impl Indexer {
         };
         self.withdrawals.complete_step(leg.id, outcome).await?;
         info!(leg_id = %leg.id, %tx_hash, block = receipt.block, ?outcome, "withdrawal step finalized");
-        Ok(())
+        Ok(LaneOutcome::Resolved)
     }
 
     async fn handle_unmined_step(
         &self,
         leg: &DbWithdrawalLeg,
         step: &gateway_db::RelayStep,
-    ) -> Result<(), IndexerError> {
+        fees: &OnceCell<FeeEstimate>,
+    ) -> Result<LaneOutcome, IndexerError> {
         let age = Utc::now()
             .signed_duration_since(step.submitted_at)
             .to_std()
             .unwrap_or_default();
         if age < self.cfg.sweep_pending_timeout {
-            return Ok(());
+            return Ok(LaneOutcome::Open);
         }
-        if self.chain.signer_nonce(false).await? > step.nonce {
+        if self.chain.signer_nonce(step.signer, false).await? > step.nonce {
             // The nonce was spent without a visible receipt: one of our
             // submissions mined (this RPC lost its receipt) or somebody
             // consumed the authorization first. Establish where the funds
@@ -444,30 +477,32 @@ impl Indexer {
             // the next tick reconciles again: the consuming transaction
             // enters the finalized window the moment it is final.
             if self.reconcile_executed_elsewhere(leg).await? {
-                return Ok(());
+                return Ok(LaneOutcome::Resolved);
             }
             let unresolved_for = Utc::now()
                 .signed_duration_since(step.submitted_at)
                 .to_std()
                 .unwrap_or_default();
             if unresolved_for < UNRESOLVED_EXECUTION_LIMIT {
-                tracing::debug!(leg_id = %leg.id, nonce = step.nonce, "withdrawal step nonce was spent without a visible receipt; waiting for the execution to surface");
-                return Ok(());
+                tracing::debug!(leg_id = %leg.id, signer = %step.signer, nonce = step.nonce, "withdrawal step nonce was spent without a visible receipt; waiting for the execution to surface");
+                return Ok(LaneOutcome::Open);
             }
             // The wait has run out of patience: report the worker stalled —
             // it retries every tick — without touching the step, whose
             // history is the operator's evidence.
             return Err(IndexerError::SweepStalled(format!(
-                "withdrawal leg {} step (nonce {}) has been unexplained for {} s: the nonce is spent but no receipt or consuming transaction has surfaced; check the signer's nonce history and the leg, then resolve manually",
+                "withdrawal leg {} step (signer {}, nonce {}) has been unexplained for {} s: the nonce is spent but no receipt or consuming transaction has surfaced; check the signer's nonce history and the leg, then resolve manually",
                 leg.id,
+                step.signer,
                 step.nonce,
                 unresolved_for.as_secs()
             )));
         }
         if step.tx_hashes.len() as u32 >= self.cfg.sweep_max_submissions {
             return Err(IndexerError::SweepStalled(format!(
-                "withdrawal leg {} step (nonce {}) is unconfirmed after {} submissions; check the signer balance and fee market, then replace or cancel nonce {} manually",
+                "withdrawal leg {} step (signer {}, nonce {}) is unconfirmed after {} submissions; check the signer balance and fee market, then replace or cancel nonce {} manually",
                 leg.id,
+                step.signer,
                 step.nonce,
                 step.tx_hashes.len(),
                 step.nonce
@@ -477,12 +512,19 @@ impl Indexer {
             max_fee_per_gas: step.max_fee_per_gas,
             max_priority_fee_per_gas: step.max_priority_fee_per_gas,
         };
-        let fees = self.chain.estimate_fees().await?.max(previous.bumped());
+        let fees = self.tick_fees(fees).await?.max(previous.bumped());
         let withdrawal = self.withdrawal_of(leg).await?;
         let call = self.step_call(leg, &withdrawal)?;
         let transaction = self
             .chain
-            .prepare_call(call.to, call.calldata, step.nonce, step.gas_limit, fees)
+            .prepare_call(
+                step.signer,
+                call.to,
+                call.calldata,
+                step.nonce,
+                step.gas_limit,
+                fees,
+            )
             .await?;
         if !self
             .withdrawals
@@ -501,8 +543,8 @@ impl Indexer {
             )));
         }
         self.broadcast_step(leg, &transaction).await?;
-        warn!(leg_id = %leg.id, nonce = step.nonce, tx_hash = %transaction.hash, submission = step.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed withdrawal step");
-        Ok(())
+        warn!(leg_id = %leg.id, signer = %step.signer, nonce = step.nonce, tx_hash = %transaction.hash, submission = step.tx_hashes.len() + 1, max_fee_per_gas = fees.max_fee_per_gas, "replaced unconfirmed withdrawal step");
+        Ok(LaneOutcome::Open)
     }
 
     async fn withdrawal_of(&self, leg: &DbWithdrawalLeg) -> Result<DbWithdrawal, IndexerError> {
@@ -811,8 +853,8 @@ mod tests {
 
     use super::*;
     use crate::indexer::tests::{
-        CHAIN_ID, FakeIris, MockChain, OTHER_CHAIN_ID, config, indexer_with_relay,
-        mock_authorization_tx_hash, usdc,
+        CHAIN_ID, FakeIris, MockChain, OTHER_CHAIN_ID, config, indexer_with_relay, insert_funded,
+        make_invoice, mock_authorization_tx_hash, mock_signer, usdc,
     };
     use crate::indexer::{Indexer, IndexerConfig};
     use crate::iris::AttestationStatus;
@@ -949,6 +991,119 @@ mod tests {
         iris: Arc<FakeIris>,
     ) -> Indexer {
         indexer_with_relay(pool, chain, relay_config(chain_id), iris)
+    }
+
+    /// The invoice's row, for the sweep side of a mixed pass.
+    async fn invoice_status(pool: &PgPool, invoice: &gateway_core::Invoice) -> String {
+        sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice.id.0)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_relay_step_and_a_sweep_batch_share_a_pass_on_different_signers(pool: PgPool) {
+        let (repo, withdrawal, _) =
+            authorized_leg(&pool, LegKind::Transfer, CHAIN_ID, CHAIN_ID, far_future()).await;
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(
+            MockChain::new(10)
+                .with(|state| state.mine_at = None)
+                .with_signers(2),
+        );
+        let worker = indexer(
+            &pool,
+            chain.clone(),
+            CHAIN_ID,
+            Arc::new(FakeIris::default()),
+        );
+
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        // The first free signer relays; the next one sweeps.
+        assert_eq!(submissions[0].to, Some(usdc()));
+        assert_eq!(submissions[0].signer, mock_signer(0));
+        assert_eq!(submissions[1].to, None);
+        assert_eq!(submissions[1].signer, mock_signer(1));
+        assert_eq!(leg_state(&repo, withdrawal).await.state, LegState::Relaying);
+        assert_eq!(invoice_status(&pool, &invoice).await, "deploying");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn with_one_signer_the_relay_step_takes_priority_and_the_batch_waits(pool: PgPool) {
+        let (repo, withdrawal, _) =
+            authorized_leg(&pool, LegKind::Transfer, CHAIN_ID, CHAIN_ID, far_future()).await;
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(MockChain::new(10));
+        let worker = indexer(
+            &pool,
+            chain.clone(),
+            CHAIN_ID,
+            Arc::new(FakeIris::default()),
+        );
+
+        worker.sweep_tick().await.unwrap();
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].to, Some(usdc()));
+        assert_eq!(invoice_status(&pool, &invoice).await, "funded");
+
+        // The step finalizes and frees the signer, which sweeps in the same pass.
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(
+            leg_state(&repo, withdrawal).await.state,
+            LegState::Completed
+        );
+        let submissions = chain.submissions();
+        assert_eq!(submissions.len(), 2);
+        assert_eq!(submissions[1].to, None);
+        assert_eq!(invoice_status(&pool, &invoice).await, "deploying");
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(invoice_status(&pool, &invoice).await, "fulfilled");
+    }
+
+    #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
+    async fn a_signer_with_an_open_batch_and_an_open_step_halts(pool: PgPool) {
+        let (_repo, _withdrawal, _) =
+            authorized_leg(&pool, LegKind::Transfer, CHAIN_ID, CHAIN_ID, far_future()).await;
+        let invoice = make_invoice(100);
+        insert_funded(&pool, &invoice, "key-1", 1).await;
+        let chain = Arc::new(
+            MockChain::new(10)
+                .with(|state| state.mine_at = None)
+                .with_signers(2),
+        );
+        let worker = indexer(
+            &pool,
+            chain.clone(),
+            CHAIN_ID,
+            Arc::new(FakeIris::default()),
+        );
+        worker.sweep_tick().await.unwrap();
+        assert_eq!(chain.submissions().len(), 2);
+
+        // Corrupt the ledger: the batch now claims the step's signer.
+        sqlx::query("UPDATE sweep_batches SET signer = $1")
+            .bind(mock_signer(0).as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = worker.sweep_tick().await.unwrap_err();
+        assert!(matches!(error, IndexerError::Configuration(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("more than one open helper transaction")
+        );
+        assert_eq!(
+            chain.submissions().len(),
+            2,
+            "nothing is signed while the ledger is inconsistent"
+        );
     }
 
     #[sqlx::test(migrator = "gateway_db::MIGRATOR")]
@@ -1271,6 +1426,7 @@ mod tests {
             repo.record_step_submission(
                 leg_id,
                 OTHER_CHAIN_ID,
+                crate::indexer::tests::mock_signer(0),
                 1,
                 1,
                 1,
@@ -1505,7 +1661,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        chain.set(|state| state.mined_nonce = first.nonce + 1);
+        chain.set(|state| {
+            state.mined_nonces.insert(first.signer, first.nonce + 1);
+        });
         worker.sweep_tick().await.unwrap();
         let leg = leg_state(&repo, withdrawal).await;
         assert_eq!(leg.state, LegState::Relaying, "no evidence yet, no touch");

@@ -20,7 +20,12 @@ API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
 FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
 BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
 USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
-SIGNER_KEY="${PAYDAY_SIGNER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+# Anvil account #0: deploys the fixtures, is the first sweep signer, and
+# sends the manual wrong-chain recovery below. Mnemonic accounts #10 and #11
+# (both Anvils start with twelve accounts) complete the signer pool, so the
+# suite runs the same several-signers-per-chain sweeper as production.
+SIGNER_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+SIGNER_POOL="$SIGNER_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82"
 PAYER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 PAYER="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 BENEFICIARY_EXACT="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
@@ -66,7 +71,7 @@ export PAYDAY_INDEXER_IDLE_INTERVAL_MS="${PAYDAY_INDEXER_IDLE_INTERVAL_MS:-2000}
 # deliberately slow here so the flows below prove the wake path works: a
 # deposit that only the timer would catch takes visibly longer.
 export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-15000}"
-export PAYDAY_SIGNER_KEY="$SIGNER_KEY"
+export PAYDAY_SIGNER_KEYS="${PAYDAY_SIGNER_KEYS:-$SIGNER_POOL}"
 export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
 export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
 export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
@@ -502,11 +507,11 @@ assert_process_alive() {
 }
 
 echo "Starting two Anvils (finalized = latest - 2, one block per second) and deploying local fixtures on both"
-anvil --chain-id "$CHAIN_ID" --port "${RPC_URL##*:}" --slots-in-an-epoch 1 --block-time 1 --silent \
+anvil --chain-id "$CHAIN_ID" --port "${RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --block-time 1 --silent \
   >"$logs/anvil.log" 2>&1 &
 anvil_pid=$!
 pids+=("$anvil_pid")
-anvil --chain-id "$SECOND_CHAIN_ID" --port "${SECOND_RPC_URL##*:}" --slots-in-an-epoch 1 --block-time 1 --silent \
+anvil --chain-id "$SECOND_CHAIN_ID" --port "${SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --block-time 1 --silent \
   >"$logs/anvil-second.log" 2>&1 &
 second_anvil_pid=$!
 pids+=("$second_anvil_pid")
@@ -1084,6 +1089,15 @@ echo "Checking that every helper transaction batch resolved"
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM sweep_batches WHERE resolved_at IS NULL
 ")" "a sweep batch is still open"
+# The pool rotates: consecutive batches leave from different signers even
+# when they never overlap, so a suite this long must have used several.
+distinct_signers="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(DISTINCT signer) FROM sweep_batches
+")"
+[[ "$distinct_signers" -ge 2 ]] || {
+  echo "expected sweep batches from at least two pool signers, found $distinct_signers" >&2
+  exit 1
+}
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
   SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND blocked_reason IS NULL
 ")" "collectable funds remain queued"

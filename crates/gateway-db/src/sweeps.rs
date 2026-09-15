@@ -3,10 +3,11 @@
 //! The invoice table is the durable queue: every invoice with uncollected
 //! funds at its payment address is eligible, whatever its status, because the
 //! helper contract settles, recovers, or collects as appropriate. A
-//! `sweep_batches` row owns one signer nonce; replacements for that nonce
-//! append their hashes so a receipt for any of them resolves the batch.
+//! `sweep_batches` row owns one nonce of one pool signer; replacements for
+//! that nonce append their hashes so a receipt for any of them resolves the
+//! batch. `sweep_batches_open` keeps one open batch per chain and signer.
 
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use gateway_core::InvoiceStatus;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -28,6 +29,8 @@ pub const SWEEPABLE_STATUSES: [InvoiceStatus; 5] = [
 pub struct SweepBatch {
     pub id: Uuid,
     pub chain_id: u64,
+    /// The pool signer whose nonce this batch owns.
+    pub signer: Address,
     pub nonce: u64,
     pub gas_limit: u64,
     pub max_fee_per_gas: u128,
@@ -151,6 +154,7 @@ pub struct SweeperStatus {
 struct SweepBatchRow {
     id: Uuid,
     chain_id: i64,
+    signer: Vec<u8>,
     nonce: i64,
     gas_limit: i64,
     max_fee_per_gas: String,
@@ -199,9 +203,12 @@ impl TryFrom<SweepBatchRow> for SweepBatch {
             }
             _ => None,
         };
+        let signer = Address::try_from(row.signer.as_slice())
+            .map_err(|_| sqlx::Error::Decode("invalid signer length in sweep batch".into()))?;
         Ok(SweepBatch {
             id: row.id,
             chain_id: row.chain_id as u64,
+            signer,
             nonce: row.nonce as u64,
             gas_limit: row.gas_limit as u64,
             max_fee_per_gas: fee("max_fee_per_gas", &row.max_fee_per_gas)?,
@@ -350,12 +357,13 @@ impl InvoiceRepository {
 
     /// Open a batch for a signed helper transaction and attach every
     /// claimed invoice to it. The partial unique index on open batches makes a
-    /// second in-flight batch per chain impossible; a partial attachment rolls
-    /// back so batch membership is never ambiguous.
+    /// second in-flight batch per chain and signer impossible; a partial
+    /// attachment rolls back so batch membership is never ambiguous.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_batch_submission(
         &self,
         chain_id: u64,
+        signer: Address,
         invoice_ids: &[Uuid],
         nonce: u64,
         gas_limit: u64,
@@ -369,9 +377,9 @@ impl InvoiceRepository {
         sqlx::query(
             r#"
             INSERT INTO sweep_batches
-                (id, chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas,
+                (id, chain_id, signer, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas,
                  tx_hashes, raw_transactions)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $9, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(id)
@@ -382,6 +390,7 @@ impl InvoiceRepository {
         .bind(max_priority_fee_per_gas.to_string())
         .bind(vec![tx_hash.to_vec()])
         .bind(vec![raw_transaction])
+        .bind(signer.as_slice())
         .execute(&mut *tx)
         .await?;
 
@@ -408,16 +417,19 @@ impl InvoiceRepository {
         Ok(id)
     }
 
-    /// The chain's single in-flight batch, if any.
-    pub async fn open_sweep_batch(&self, chain_id: u64) -> Result<Option<SweepBatch>, sqlx::Error> {
+    /// The chain's in-flight batches, at most one per pool signer, oldest
+    /// first.
+    pub async fn open_sweep_batches(&self, chain_id: u64) -> Result<Vec<SweepBatch>, sqlx::Error> {
         sqlx::query_as::<_, SweepBatchRow>(
-            r#"SELECT * FROM sweep_batches WHERE chain_id = $1 AND resolved_at IS NULL"#,
+            r#"SELECT * FROM sweep_batches WHERE chain_id = $1 AND resolved_at IS NULL
+               ORDER BY submitted_at, id"#,
         )
         .bind(chain_id as i64)
-        .fetch_optional(self.pool())
+        .fetch_all(self.pool())
         .await?
+        .into_iter()
         .map(SweepBatch::try_from)
-        .transpose()
+        .collect()
     }
 
     pub async fn batch_invoices(&self, batch_id: Uuid) -> Result<Vec<DbInvoice>, sqlx::Error> {
@@ -833,6 +845,7 @@ mod tests {
     use crate::{AccountId, CreateInvoiceInput};
 
     const CHAIN_ID: u64 = 31337;
+    const SIGNER: Address = Address::repeat_byte(0xA0);
     const TX_HASH: B256 = B256::repeat_byte(0xA1);
     const BLOCK: u64 = 7;
     const BLOCK_TIMESTAMP: u64 = 1_800_000_070;
@@ -898,7 +911,7 @@ mod tests {
     }
 
     async fn open_batch(repo: &InvoiceRepository, ids: &[Uuid]) -> Uuid {
-        repo.record_batch_submission(CHAIN_ID, ids, 0, 500_000, 100, 2, TX_HASH, &[0xAB])
+        repo.record_batch_submission(CHAIN_ID, SIGNER, ids, 0, 500_000, 100, 2, TX_HASH, &[0xAB])
             .await
             .unwrap()
     }
@@ -1347,5 +1360,65 @@ mod tests {
             .unwrap();
         assert_eq!(claimed(&repo).await, [invoice.id.0]);
         assert_eq!(status(&pool, &invoice).await, "expired");
+    }
+
+    #[sqlx::test]
+    async fn open_batches_are_unique_per_chain_and_signer(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let first = insert_invoice(&pool, 1_000_000).await;
+        let second = insert_invoice(&pool, 2_000_000).await;
+        let third = insert_invoice(&pool, 3_000_000).await;
+        let other = Address::repeat_byte(0xA1);
+
+        let batch = open_batch(&repo, &[first.id.0]).await;
+        // The same signer cannot own a second open batch on the chain.
+        let refused = repo
+            .record_batch_submission(
+                CHAIN_ID,
+                SIGNER,
+                &[second.id.0],
+                1,
+                500_000,
+                100,
+                2,
+                B256::repeat_byte(0xA2),
+                &[0xAC],
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a second open batch on one signer must be refused"
+        );
+        // Another signer may: independent nonce streams, independent rows.
+        let on_other = repo
+            .record_batch_submission(
+                CHAIN_ID,
+                other,
+                &[third.id.0],
+                0,
+                500_000,
+                100,
+                2,
+                B256::repeat_byte(0xA3),
+                &[0xAD],
+            )
+            .await
+            .unwrap();
+
+        let open = repo.open_sweep_batches(CHAIN_ID).await.unwrap();
+        assert_eq!(
+            open.iter()
+                .map(|batch| (batch.id, batch.signer))
+                .collect::<Vec<_>>(),
+            vec![(batch, SIGNER), (on_other, other)]
+        );
+        assert!(repo.open_sweep_batches(8453).await.unwrap().is_empty());
+
+        repo.resolve_batch(batch, BatchResolution::Abandoned)
+            .await
+            .unwrap();
+        let open = repo.open_sweep_batches(CHAIN_ID).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].signer, other);
     }
 }

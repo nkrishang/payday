@@ -158,8 +158,8 @@ in that order. USDC has six decimals on all of them.
   `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
   detects a consumed nonce from the signer's mined transaction count.
 - Monad bills the gas *limit*: every helper transaction reserves
-  `100k + 400k × items` gas of MON from the sweep signer. Base and
-  Arbitrum bill gas used plus the L1 data fee.
+  `100k + 400k × items` gas of MON from the pool signer that sends it.
+  Base and Arbitrum bill gas used plus the L1 data fee.
 
 Reconfirm every USDC address against
 [Circle's official contract-address page](https://developers.circle.com/stablecoins/usdc-contract-addresses)
@@ -500,27 +500,62 @@ resource.
 
 ## 8. Verify and fund the KMS signers
 
-### Sweep signer
+### Sweep signer pool
 
-The indexer logs the Ethereum address derived from the KMS public key:
+The indexer sweeps with `sweep_signer_count` KMS keys (five in production),
+each an address that keeps one helper transaction in flight, so several
+sweep batches and withdrawal steps run at once on every chain. At boot it
+logs one line per key and chain with the Ethereum address derived from the
+KMS public key:
 
 ```bash
 aws logs tail /ecs/payday/indexer --since 15m \
   --filter-pattern 'configured sweep signer'
 ```
 
-Independently derive the same address with Foundry's AWS KMS support:
+Independently derive every address with Foundry's AWS KMS support:
 
 ```bash
-export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw kms_key_arn)"
-cast wallet address --aws
+for arn in $(terraform -chdir=infra output -json kms_key_arns | jq -r '.[]'); do
+  AWS_KMS_KEY_ID="$arn" cast wallet address --aws
+done
 ```
 
-The two addresses must match. It is one address on every chain, and it
-sweeps on every chain, so fund it on each: only enough MON on Monad and ETH
-on Base and Arbitrum One for expected sweeps. The worker alarms per chain
-below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. The signer does not custody USDC; it
-pays gas to invoke the permissionless factory.
+The addresses must match the log, in order. Each is one address on every
+chain, and each sweeps on every chain, so fund **every** address on each
+chain: only enough MON on Monad and ETH on Base and Arbitrum One for expected
+sweeps, spread over the pool (the worker rotates through the signers, so
+they drain evenly). The worker alarms per signer and chain below the chain's
+`signer_low_balance_wei` (`PAYDAY_SIGNER_LOW_BALANCE_WEI` as the fallback),
+and the `sweep signer balance low` line names the address. The signers do
+not custody USDC; they pay gas to invoke the permissionless factory.
+
+Raising `sweep_signer_count` adds keys at the end of the pool; lowering it
+is refused by Terraform's `prevent_destroy`, and a key removed from the
+pool while it owns an open batch or withdrawal step halts the sweep worker
+until that row is resolved by hand (`docs/runbooks/stuck-deposit-request.md`,
+`docs/runbooks/stuck-withdrawal.md`). Deploy a release that changes the pool
+with no sweep batch or withdrawal relay step open, or set the open batch's
+`signer` / open step's `step_signer` column to the address that signed it.
+
+### Deploying the signer pool (0002) to a database with real data
+
+Migration `0002_signer_pool.sql` is the one post-freeze migration that is
+*not* compatible with the previous image: batch submissions from the old
+indexer omit `signer` (whose default the migration drops) and step
+submissions omit `step_signer`, so an old task running against the migrated
+schema fails on every submission. Deploy it in a coordinated window, in this
+order:
+
+1. Stop the indexer task (`ecs update-service --desired-count 0`) and wait
+   for any open sweep batch or withdrawal step to resolve — a row open when
+   the migration applies gets the zero address and halts the new worker
+   until an operator sets its `signer`/`step_signer` column by hand.
+2. Deploy the new API image; its startup runs the migration. The old indexer
+   must already be stopped so it cannot write the columns the migration is
+   about to require.
+3. Fund the new signer addresses on every chain (above), then set the
+   indexer service's desired count back.
 
 ### Attestation signer
 
@@ -699,7 +734,8 @@ Do not advertise or depend on the service until this succeeds.
 For each application update, build and push a new `git-<SHA>` tag, change
 `image_tag`, review `terraform plan`, and apply it. ECS's deployment circuit
 breaker rolls back failed task startups. The indexer deployment stops the old
-task before starting the new one so two sweep nonce owners never overlap. A
+task before starting the new one so two owners of a sweep signer's nonce
+stream never overlap. A
 manual rollback sets `image_tag` to a previous known-good image and applies
 again. Secrets Manager rotation is not observed by running tasks; force a new
 deployment after rotating a secret.
@@ -713,7 +749,8 @@ database, which the staging deploy does on its own
 ([staging.md](staging.md)) and production does as in §7. Once real data
 exists, the baseline is frozen and a change is a new numbered file,
 reviewed for compatibility with the image still running while the new one
-starts.
+starts. The exception so far is `0002_signer_pool.sql`, which the previous
+image cannot write against; §8 documents its coordinated deploy window.
 
 #### Rolling back after a new migration has applied
 
@@ -729,6 +766,14 @@ to it. Do not delete the row from `_sqlx_migrations` to force the old image
 to start: its notion of the schema is then missing an index it never reads,
 and the next migration to assume the table shape will not be the last thing
 to disagree.
+
+For `0002_signer_pool.sql` the second option is only half a rollback: an
+image built from the pre-pool commit runs against the migrated schema, but
+its submissions omit the `signer`/`step_signer` columns, so it can serve
+reads yet cannot submit a sweep batch or relay step. If a rollback is
+required while that migration is the newest one, roll the application back
+and accept a paused sweeper, or repair the open rows by hand; the durable
+rollback is rolling forward to the post-migration commit.
 
 #### Concurrent index builds
 

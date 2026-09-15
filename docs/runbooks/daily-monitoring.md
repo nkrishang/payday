@@ -20,8 +20,8 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 | `payday-api-task-count` | API container is not running | [service-restart.md](service-restart.md) |
 | `payday-indexer-task-count` | Indexer container is not running | [service-restart.md](service-restart.md) |
 | `payday-indexer-fatal` | Block indexer hit a permanent halt (cursor mismatch, etc.) | [indexer-fatal-halt.md](indexer-fatal-halt.md) |
-| `payday-indexer-sweep-paused` | Sweep worker cannot resolve its in-flight helper transaction; indexing continues | [stuck-deposit-request.md](stuck-deposit-request.md#sweep-worker-paused) |
-| `payday-indexer-signer-low-balance` | KMS sweep signer below `PAYDAY_SIGNER_LOW_BALANCE_WEI` | step 7 below |
+| `payday-indexer-sweep-paused` | One sweep signer cannot resolve its in-flight helper transaction; the other signers and indexing continue | [stuck-deposit-request.md](stuck-deposit-request.md#sweep-worker-paused) |
+| `payday-indexer-signer-low-balance` | A KMS sweep signer (the line names it) is below its chain's low-balance level | step 7 below |
 | `payday-indexer-cursor-lagging` | Cursor trails finality by more than 1,000 blocks | [stuck-deposit-request.md](stuck-deposit-request.md) step 3 |
 | `payday-indexer-sweep-backlog-stale` | Collectable funds have waited more than 15 minutes | [stuck-deposit-request.md](stuck-deposit-request.md) step 4 |
 | `payday-indexer-retryable-failures` | More than ten retryable RPC/database failures in five minutes | check the provider status page and indexer logs |
@@ -53,9 +53,10 @@ aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
   | grep -E "WARN|ERROR|fatal|paused|blocked|lagging|stale"
 ```
 
-The worker logs a `sweep worker health` line every thirty passes with the
-queue depth, in-flight count, age of the oldest uncollected transfer, and the
-signer balance; otherwise it only logs warnings, errors, and lifecycle events.
+The worker logs a `sweep worker health` line every five minutes with the
+queue depth, in-flight count, age of the oldest uncollected transfer, the
+pool size, and every signer's balance; otherwise it only logs warnings,
+errors, and lifecycle events.
 
 ## 4. Check API logs
 
@@ -94,24 +95,29 @@ pass. The worker drains up to
 outage clears on its own; a lag that keeps growing means the provider is
 rejecting requests — see [quicknode-rpc-limits.md](quicknode-rpc-limits.md).
 
-## 7. Check the KMS signer's gas balance on every chain
+## 7. Check every KMS signer's gas balance on every chain
 
-The sweep signer is one KMS key, so one address, on every chain, and needs
-gas on each: MON on Monad, ETH on Base, ETH on Arbitrum One. The indexer
-warns per chain below `PAYDAY_SIGNER_LOW_BALANCE_WEI`. On Monad the sweep
-signer needs MON for gas. Monad bills the gas *limit* of every
-helper transaction (`100k + 400k × items`), so a full batch reserves about
-8.1M gas worth of MON. If the balance runs out, submissions fail and deposit requests
-wait in the queue; the `payday-indexer-signer-low-balance` alarm fires first.
+The sweep signer pool is `sweep_signer_count` KMS keys, so that many
+addresses, each the same on every chain, and each needs gas on each: MON on
+Monad, ETH on Base, ETH on Arbitrum One. The indexer warns per signer and
+chain below the chain's low-balance level, naming the address. Monad bills
+the gas *limit* of every helper transaction (`100k + 400k × items`), so a
+full batch reserves about 8.1M gas worth of MON from the signer that sends
+it. If one signer runs out, its submissions fail and the other signers carry
+the queue more slowly; the `payday-indexer-signer-low-balance` alarm fires
+first.
 
 ```bash
-# Get the signer address from indexer logs or Terraform output
-SIGNER_ADDR=$(aws logs tail /ecs/payday/indexer --since 24h --region "$AWS_REGION" \
-  | grep "configured sweep signer" | grep -oE '0x[0-9a-fA-F]{40}' | head -1)
+# Every signer address from the indexer's boot log (one line per key and chain)
+SIGNERS=$(aws logs tail /ecs/payday/indexer --since 24h --region "$AWS_REGION" \
+  | grep "configured sweep signer" | grep -oE '0x[0-9a-fA-F]{40}' | sort -u)
 
-cast balance "$SIGNER_ADDR" --rpc-url "$MONAD_RPC_URL"
-cast balance "$SIGNER_ADDR" --rpc-url "$BASE_RPC_URL"
-cast balance "$SIGNER_ADDR" --rpc-url "$ARBITRUM_RPC_URL"
+for addr in $SIGNERS; do
+  echo "$addr"
+  cast balance "$addr" --rpc-url "$MONAD_RPC_URL"
+  cast balance "$addr" --rpc-url "$BASE_RPC_URL"
+  cast balance "$addr" --rpc-url "$ARBITRUM_RPC_URL"
+done
 ```
 
-Fund whichever chain is low with its gas token.
+Fund whichever signer and chain is low with that chain's gas token.

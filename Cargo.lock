@@ -138,6 +138,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "borsh",
+ "k256",
  "serde",
  "thiserror",
 ]
@@ -2575,6 +2576,7 @@ dependencies = [
 name = "gateway-indexer"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-eips",
  "alloy-json-rpc",
  "alloy-network",
