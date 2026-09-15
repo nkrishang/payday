@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_network::{EthereumWallet, TxSigner};
+use alloy_primitives::U256;
 use alloy_signer_aws::AwsSigner;
 use alloy_signer_local::PrivateKeySigner;
 use gateway_core::{ChainConfig, ChainId, FinalitySource};
@@ -299,7 +300,10 @@ fn build_worker(
             sweep_max_attempts: config.sweep_max_attempts(),
             sweep_backoff_base_secs: SWEEP_BACKOFF_BASE_SECS,
             sweep_backoff_cap_secs: SWEEP_BACKOFF_CAP_SECS,
-            signer_low_balance_wei: config.signer_low_balance_wei(),
+            signer_low_balance_wei: chain
+                .signer_low_balance_wei
+                .map(U256::from)
+                .unwrap_or_else(|| config.signer_low_balance_wei()),
             cctp: chain.cctp.clone(),
             // Circle attests a finality-tagged chain's burn within seconds and
             // an L2's once ~65 Ethereum blocks have passed (~15–19 minutes).

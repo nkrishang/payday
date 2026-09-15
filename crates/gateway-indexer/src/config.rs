@@ -30,13 +30,14 @@ const DEFAULT_SWEEP_PENDING_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_SWEEP_MAX_SUBMISSIONS: u32 = 5;
 const DEFAULT_SWEEP_MAX_ATTEMPTS: u32 = 8;
 /// 0.05 native tokens: roughly a hundred batches at Monad's fee levels, and
-/// far more at an L2's.
+/// far more at an L2's. The fallback for chains whose registry entry carries
+/// no `signer_low_balance_wei` of its own.
 const DEFAULT_SIGNER_LOW_BALANCE_WEI: u128 = 50_000_000_000_000_000;
 
 /// One process indexes and sweeps every chain in the registry. What differs
-/// per chain (USDC, contracts, finality, range cap) is in the
-/// registry; what is operational policy (cadences, sweep limits, the signer)
-/// is shared and lives here.
+/// per chain (USDC, contracts, finality, range cap, the low-balance alarm
+/// level) is in the registry; what is operational policy (cadences, sweep
+/// limits, the signer) is shared and lives here.
 pub struct Config {
     database_url: String,
     networks: ChainRegistry,

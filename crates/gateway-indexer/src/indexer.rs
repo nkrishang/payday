@@ -2081,6 +2081,7 @@ pub(crate) mod tests {
             finality_confirmations: 0,
             block_time_ms: 25,
             log_range_size: 100,
+            signer_low_balance_wei: None,
             explorer_base_url: None,
             cctp,
         };

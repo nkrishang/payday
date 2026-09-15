@@ -171,7 +171,11 @@ variable "chains" {
     finality_confirmations  = number
     block_time_ms           = number
     log_range_size          = number
-    explorer_base_url       = optional(string)
+    # The sweep signer's low-balance alarm level on the chain, in wei of its
+    # native token. Absent, the indexer's shared default (0.05 ETH) applies;
+    # an L2 whose batches cost a fraction of a cent wants far less.
+    signer_low_balance_wei = optional(number)
+    explorer_base_url      = optional(string)
     # Circle's CCTP V2 on the chain and the WithdrawalForwarder deployed
     # against it (foundry/script/WithdrawalForwarder.s.sol). Absent on a
     # chain without CCTP: withdrawals there can only stay on their network.
@@ -210,6 +214,7 @@ variable "chains" {
       && c.finality_confirmations >= 0 && c.finality_confirmations <= 10000 && floor(c.finality_confirmations) == c.finality_confirmations
       && c.block_time_ms >= 1 && floor(c.block_time_ms) == c.block_time_ms
       && c.log_range_size >= 1 && c.log_range_size <= 10000 && floor(c.log_range_size) == c.log_range_size
+      && (c.signer_low_balance_wei == null || (c.signer_low_balance_wei >= 0 && floor(c.signer_low_balance_wei) == c.signer_low_balance_wei))
       && (c.explorer_base_url == null || can(regex("^https://[^/?#]+/?$", c.explorer_base_url)))
       && (c.cctp == null || (
         c.cctp.domain >= 0 && floor(c.cctp.domain) == c.cctp.domain

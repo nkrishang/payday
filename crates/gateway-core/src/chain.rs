@@ -63,6 +63,12 @@ pub struct ChainConfig {
     pub block_time_ms: u64,
     /// `eth_getLogs` range ceiling the provider accepts on this chain.
     pub log_range_size: u64,
+    /// The sweep signer's low-balance alarm level on this chain, in wei of
+    /// its native token: one chain's hundred batches is another's dust, and
+    /// the number only means anything against the chain's own gas price.
+    /// Absent, the indexer's shared default applies.
+    #[serde(default)]
+    pub signer_low_balance_wei: Option<u64>,
     #[serde(default)]
     pub explorer_base_url: Option<String>,
     /// Circle's CCTP V2 on this chain and the withdrawal forwarder deployed
@@ -375,6 +381,20 @@ mod tests {
             ChainRegistry::parse(&serde_json::json!([partial]).to_string()).unwrap_err(),
             ChainRegistryError::Json(_)
         ));
+    }
+
+    #[test]
+    fn signer_low_balance_is_optional_per_chain() {
+        let registry = ChainRegistry::parse(&serde_json::json!([chain(143)]).to_string()).unwrap();
+        assert_eq!(registry.first().signer_low_balance_wei, None);
+
+        let mut bound = chain(8453);
+        bound["signer_low_balance_wei"] = serde_json::json!(5_000_000_000_000_000u64);
+        let registry = ChainRegistry::parse(&serde_json::json!([bound]).to_string()).unwrap();
+        assert_eq!(
+            registry.first().signer_low_balance_wei,
+            Some(5_000_000_000_000_000)
+        );
     }
 
     #[test]
