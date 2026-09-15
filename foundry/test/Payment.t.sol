@@ -4,7 +4,7 @@ pragma solidity ^0.8.13;
 import {Test} from "foundry/lib/forge-std/src/Test.sol";
 import {Vm} from "foundry/lib/forge-std/src/Vm.sol";
 import {CREATE3} from "foundry/lib/solady/src/utils/CREATE3.sol";
-import {MockUSDC} from "foundry/src/MockUSDC.sol";
+import {MockStablecoin} from "foundry/src/MockStablecoin.sol";
 import {Payment} from "foundry/src/Payment.sol";
 import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
@@ -26,14 +26,14 @@ contract PaymentTest is Test {
     event Recovered(address indexed recovery, address indexed token, uint256 amount);
     event WrongChain(uint256 expectedChainId, uint256 actualChainId);
 
-    MockUSDC public token;
+    MockStablecoin public token;
     PaymentFactory public factory;
 
     address internal constant RECEIVER = address(0xBEEF);
     address internal constant RECOVERY = address(0xCAFE);
 
     function setUp() public {
-        token = new MockUSDC();
+        token = new MockStablecoin("Mock USD Coin", "USDC");
         factory = new PaymentFactory();
     }
 
@@ -338,7 +338,7 @@ contract PaymentTest is Test {
         token.mint(paymentAddress, 10e6);
         factory.execute(address(token), 10e6, RECEIVER, expirationTimestamp, RECOVERY, salt, block.chainid);
 
-        MockUSDC other = new MockUSDC();
+        MockStablecoin other = new MockStablecoin("Mock USD Coin", "USDC");
         other.mint(paymentAddress, 2e6);
         vm.expectEmit(true, true, true, true, paymentAddress);
         emit Recovered(RECOVERY, address(other), 2e6);

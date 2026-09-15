@@ -6,7 +6,7 @@ import {Vm} from "foundry/lib/forge-std/src/Vm.sol";
 import {CREATE3} from "foundry/lib/solady/src/utils/CREATE3.sol";
 import {SafeTransferLib} from "foundry/lib/solady/src/utils/SafeTransferLib.sol";
 import {BatchSweeper} from "foundry/src/BatchSweeper.sol";
-import {MockUSDC} from "foundry/src/MockUSDC.sol";
+import {MockStablecoin} from "foundry/src/MockStablecoin.sol";
 import {Payment} from "foundry/src/Payment.sol";
 import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
@@ -19,12 +19,12 @@ contract BatchSweeperTest is Test {
     uint256 internal constant SWEEP_GAS_PER_ITEM = 400_000;
     uint256 internal constant SWEEP_BATCH_LIMIT = 20;
 
-    MockUSDC private token;
+    MockStablecoin private token;
     PaymentFactory private factory;
     BatchSweeper private batchSweeper;
 
     function setUp() public {
-        token = new MockUSDC();
+        token = new MockStablecoin("Mock USD Coin", "USDC");
         factory = new PaymentFactory();
         batchSweeper = new BatchSweeper(factory);
     }

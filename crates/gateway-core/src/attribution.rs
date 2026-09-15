@@ -339,6 +339,7 @@ impl CanonicalIssuanceSnapshot {
     /// parameters into their canonical string form, so
     /// [`crate::Invoice::issue`] can check a snapshot against the same rules.
     /// Networks are sorted by chain id whatever order they arrive in.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         issuer: Party,
         bill_to: Party,

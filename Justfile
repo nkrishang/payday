@@ -43,7 +43,8 @@ web-e2e:
     npm run test:e2e:dev --workspace @payday/web
 
 # Run the WithdrawalForwarder against the real USDC and CCTP V2 contracts on
-# forks of Monad, Base and Arbitrum. Public RPCs by default; override with
-# PAYDAY_FORK_RPC_URL_<chain id> for a paid endpoint.
+# forks of Monad, Base and Arbitrum, and the EIP-3009 authorization a USDT
+# withdrawal relays against the real USDT0 on Monad and Arbitrum. Public RPCs
+# by default; override with PAYDAY_FORK_RPC_URL_<chain id> for a paid endpoint.
 forge-fork:
-    PAYDAY_FORK_TESTS=1 forge test --match-contract ForwarderForkTest -vv
+    PAYDAY_FORK_TESTS=1 forge test --match-contract "ForwarderForkTest|Usdt0ForkTest" -vv

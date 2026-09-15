@@ -700,7 +700,7 @@ mod tests {
     /// cursor the previous call left (ranges here are one block apart).
     async fn apply(
         repo: &InvoiceRepository,
-        row: &DbInvoice,
+        _row: &DbInvoice,
         block: u64,
         cursor_block: Option<u64>,
         observations: &[PaymentObservation],

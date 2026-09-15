@@ -3,7 +3,7 @@ pragma solidity ^0.8.13;
 
 import {Test} from "foundry/lib/forge-std/src/Test.sol";
 import {Vm} from "foundry/lib/forge-std/src/Vm.sol";
-import {MockUSDC} from "foundry/src/MockUSDC.sol";
+import {MockStablecoin} from "foundry/src/MockStablecoin.sol";
 import {IERC3009, ITokenMessengerV2, WithdrawalForwarder} from "foundry/src/WithdrawalForwarder.sol";
 
 interface IFiatToken {
@@ -39,7 +39,7 @@ contract MockTokenMessenger is ITokenMessengerV2 {
         require(destinationCaller == bytes32(0), "unexpected destinationCaller");
         require(maxFee == 0, "unexpected maxFee");
         require(minFinalityThreshold == 2000, "unexpected finality threshold");
-        require(MockUSDC(burnToken).transferFrom(msg.sender, address(this), amount), "transferFrom failed");
+        require(MockStablecoin(burnToken).transferFrom(msg.sender, address(this), amount), "transferFrom failed");
         emit DepositForBurn(amount, destinationDomain, mintRecipient, burnToken);
     }
 }
@@ -89,7 +89,7 @@ abstract contract Eip3009Test is Test {
 }
 
 contract WithdrawalForwarderTest is Eip3009Test {
-    MockUSDC private token;
+    MockStablecoin private token;
     MockTokenMessenger private messenger;
     WithdrawalForwarder private forwarder;
     uint256 private merchantKey;
@@ -99,7 +99,7 @@ contract WithdrawalForwarderTest is Eip3009Test {
     bytes32 private constant SALT = bytes32(uint256(7));
 
     function setUp() public {
-        token = new MockUSDC();
+        token = new MockStablecoin("Mock USD Coin", "USDC");
         messenger = new MockTokenMessenger();
         forwarder = new WithdrawalForwarder(messenger);
         (merchant, merchantKey) = makeAddrAndKey("merchant");

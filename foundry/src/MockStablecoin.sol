@@ -4,7 +4,8 @@ pragma solidity ^0.8.13;
 import {ERC20} from "foundry/lib/solady/src/tokens/ERC20.sol";
 import {ECDSA} from "foundry/lib/solady/src/utils/ECDSA.sol";
 
-/// @notice Minimal mintable six-decimal USDC fixture for local Anvil use only.
+/// @notice Minimal mintable six-decimal stablecoin fixture for local Anvil use
+/// only: the bootstrap deploys one as USDC and one as USDT.
 ///
 /// It mirrors the two Circle FiatToken controls the sweep worker classifies
 /// failures with: a global pause and per-account blacklisting, both readable
@@ -14,7 +15,15 @@ import {ECDSA} from "foundry/lib/solady/src/utils/ECDSA.sol";
 /// and revert strings, so the withdrawal path runs unchanged against Anvil.
 /// The EIP-712 domain is solady's: `name()`, version "1", exposed through
 /// `version()` the way FiatToken exposes its "2".
-contract MockUSDC is ERC20 {
+contract MockStablecoin is ERC20 {
+    string private _name;
+    string private _symbol;
+
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
     // keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
     bytes32 public constant TRANSFER_WITH_AUTHORIZATION_TYPEHASH =
         0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267;
@@ -28,12 +37,12 @@ contract MockUSDC is ERC20 {
     mapping(address => bool) internal blacklisted;
     mapping(address => mapping(bytes32 => bool)) internal authorizationStates;
 
-    function name() public pure override returns (string memory) {
-        return "Mock USD Coin";
+    function name() public view override returns (string memory) {
+        return _name;
     }
 
-    function symbol() public pure override returns (string memory) {
-        return "USDC";
+    function symbol() public view override returns (string memory) {
+        return _symbol;
     }
 
     function decimals() public pure override returns (uint8) {

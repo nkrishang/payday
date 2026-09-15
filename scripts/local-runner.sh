@@ -169,6 +169,7 @@ load_local_env() {
   # The fixture addresses (Bootstrap.s.sol) are the same on both chains.
   FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
   USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
+USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
   export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-1000}"
   # The transfer signal derives ws://127.0.0.1:8545 from the RPC URL; Anvil
@@ -222,7 +223,7 @@ load_local_env() {
 # running chain. Finality is per chain so the second local chain exercises
 # the L2-shaped path (`latest` plus confirmations).
 chain_entry() {
-  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 factory_code sweeper_code
+  local chain_id=$1 rpc_url=$2 finality_source=$3 confirmations=$4 tokens=$5 factory_code sweeper_code
   factory_code="$(cast code "$FACTORY" --rpc-url "$rpc_url")"
   sweeper_code="$(cast code "$BATCH_SWEEPER" --rpc-url "$rpc_url")"
   [[ -n "$factory_code" && "$factory_code" != 0x ]] || {
@@ -233,21 +234,25 @@ chain_entry() {
     echo "no code at BatchSweeper $BATCH_SWEEPER on chain $chain_id; the bootstrap did not deploy it" >&2
     return 1
   }
-  jq -cn --argjson chain_id "$chain_id" --arg usdc "$USDC" --arg factory "$FACTORY" \
+  jq -cn --argjson chain_id "$chain_id" --argjson tokens "$tokens" --arg factory "$FACTORY" \
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
     --argjson confirmations "$confirmations" \
-    '{chain_id: $chain_id, usdc: $usdc, factory: $factory, batch_sweeper: $sweeper,
+    '{chain_id: $chain_id, tokens: $tokens, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
-      usdc_start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
+      start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
       block_time_ms: 1000, log_range_size: 100}'
 }
 
 # The registry both services read, built from the two bootstrapped chains.
 build_chain_registry() {
   local first second
-  first="$(chain_entry "$PAYDAY_CHAIN_ID" "$PAYDAY_RPC_URL" finalized 0)"
-  second="$(chain_entry "$PAYDAY_SECOND_CHAIN_ID" "$PAYDAY_SECOND_RPC_URL" latest 2)"
+  # The first chain serves USDC and USDT, the second USDC alone, so a USDT
+  # request pins the first and the second stands for a chain without it.
+  first="$(chain_entry "$PAYDAY_CHAIN_ID" "$PAYDAY_RPC_URL" finalized 0 \
+    "$(jq -cn --arg usdc "$USDC" --arg usdt "$USDT" '[{currency: "USDC", address: $usdc}, {currency: "USDT", address: $usdt}]')")"
+  second="$(chain_entry "$PAYDAY_SECOND_CHAIN_ID" "$PAYDAY_SECOND_RPC_URL" latest 2 \
+    "$(jq -cn --arg usdc "$USDC" '[{currency: "USDC", address: $usdc}]')")"
   PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
   export PAYDAY_CHAINS
   echo "[bootstrap] PAYDAY_CHAINS=$PAYDAY_CHAINS"
@@ -313,7 +318,7 @@ build_chain_registry
 RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
 cast send "$USDC" 'transfer(address,uint256)' "$RELAY_SOLVER" 100000000 \
   --private-key "$PAYDAY_ONBOARDING_PAYER_KEY" --rpc-url "$PAYDAY_RPC_URL" >/dev/null
-prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" \
+prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" \
   RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" node scripts/relay-stub.mjs
 prefix identity ./target/debug/payday-dev-identity
 for _ in {1..100}; do
