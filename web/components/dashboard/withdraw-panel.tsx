@@ -12,7 +12,15 @@ import { StatusDot } from "@/components/ui/status-dot";
 import { describeError } from "@/lib/attachment-upload";
 import type { CheckoutTone } from "@/lib/checkout-state";
 import { cn } from "@/lib/cn";
-import { CCTP_BURN_LIMIT_USDC, chainById, config, type PublicChain } from "@/lib/config";
+import {
+  CCTP_BURN_LIMIT_USDC,
+  bridges,
+  chainById,
+  chainsFor,
+  currencies,
+  tokenOn,
+  type PublicChain,
+} from "@/lib/config";
 import { explorerTxUrl, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { checkLegAuthorization, privyTypedData } from "@/lib/withdrawal-authorization";
 import { PAYOUT_ADDRESS } from "./field-rules";
@@ -21,13 +29,16 @@ import { useMerchant, useResource } from "./session";
 import type { BalanceSnapshot } from "./account-section";
 
 /**
- * Withdrawing: the whole USDC balance of the Payday wallet, on every network,
- * to one address the merchant names.
+ * Withdrawing: the Payday wallet's whole balance in one currency to one
+ * address the merchant names: USDC from every network, since it bridges
+ * through CCTP at 1:1; USDT from the destination network alone, since it
+ * does not bridge and Payday never quotes the merchant a rate.
  *
  * Prepare, sign, submit, poll — the same four steps the API offers a server,
  * done here with the wallet Privy holds for the merchant. The API snapshots
  * the balances into legs, one per network with funds, each with an EIP-712
- * document to sign under that network's USDC (an EIP-3009 authorization).
+ * document to sign under that network's token contract (an EIP-3009
+ * authorization).
  * The page checks each document against the leg before asking the wallet
  * for a signature, then hands the signatures back; from there Payday relays
  * and pays gas, and this panel only watches. A leg's signature fixes where
@@ -62,7 +73,14 @@ export function WithdrawPanel({
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [destinationChain, setDestinationChain] = useState<number>(config.chains[0]?.id ?? 0);
+  const [currency, setCurrency] = useState<string>(currencies()[0] ?? "USDC");
+  const [destinationChain, setDestinationChain] = useState<number>(chainsFor(currency)[0]?.id ?? 0);
+  const chooseCurrency = (next: string) => {
+    setCurrency(next);
+    if (!chainsFor(next).some((chain) => chain.id === destinationChain)) {
+      setDestinationChain(chainsFor(next)[0]?.id ?? 0);
+    }
+  };
   const [destinationAddress, setDestinationAddress] = useState("");
   const wallet = account.wallet_address;
 
@@ -73,7 +91,11 @@ export function WithdrawPanel({
         return;
       }
       if (cause instanceof PaydayError && cause.code === "nothing_to_withdraw") {
-        setFailure("Your Payday wallet holds no USDC on any network right now.");
+        setFailure(
+          bridges(currency)
+            ? `Your Payday wallet holds no ${currency} on any network right now.`
+            : `Your Payday wallet holds no ${currency} on ${chainById(destinationChain)?.name ?? "that network"}. ${currency} does not bridge: withdraw each network's balance to an address on that network.`,
+        );
       } else if (cause instanceof PaydayError && cause.code === "withdrawal_in_progress") {
         setFailure("A withdrawal is already in progress. Continue it below, or cancel it first.");
         recent.reload();
@@ -86,7 +108,7 @@ export function WithdrawPanel({
       }
       setBusy(false);
     },
-    [recent, signOut],
+    [currency, destinationChain, recent, signOut],
   );
 
   // While a withdrawal is being relayed, follow it: one read every ten
@@ -122,13 +144,17 @@ export function WithdrawPanel({
   }, [client, trackedId, trackedOpen, onBalancesChanged]);
 
   const addressValid = PAYOUT_ADDRESS.test(destinationAddress.trim());
-  const bridgeBalances = config.chains
-    .filter((chain) => chain.id !== destinationChain)
-    .map((chain) => ({ chain, balance: balances[chain.id] }));
+  // Only a bridging currency has legs on other networks to guard.
+  const bridgeBalances = bridges(currency)
+    ? chainsFor(currency)
+        .filter((chain) => chain.id !== destinationChain)
+        .map((chain) => ({ chain, balance: balances[chain.id] }))
+    : [];
   const balancesUnavailable = bridgeBalances.some(({ balance }) => !balance || balance.status !== "ready");
   const overBridgeLimit = bridgeBalances.find(
     ({ balance }) =>
-      balance?.status === "ready" && balance.usdc > CCTP_BURN_LIMIT_USDC * 1_000_000n,
+      balance?.status === "ready" &&
+      (balance.tokens[currency] ?? 0n) > CCTP_BURN_LIMIT_USDC * 1_000_000n,
   );
   const bridgeGuard = overBridgeLimit
     ? `${overBridgeLimit.chain.name} holds more than Circle's 10,000,000 USDC bridge limit. Choose ${overBridgeLimit.chain.name} as the destination.`
@@ -142,6 +168,7 @@ export function WithdrawPanel({
     try {
       const withdrawal = await client.withdrawals.create(
         {
+          currency,
           destination: { chain_id: String(destinationChain), address: destinationAddress.trim() },
         },
         crypto.randomUUID(),
@@ -150,6 +177,7 @@ export function WithdrawPanel({
       // back must be the one the merchant typed. A mismatch is refused here,
       // before anything is signed.
       if (
+        withdrawal.currency !== currency ||
         withdrawal.destination.address.toLowerCase() !== destinationAddress.trim().toLowerCase() ||
         Number(withdrawal.destination.chain.id) !== destinationChain
       ) {
@@ -247,7 +275,8 @@ export function WithdrawPanel({
       <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
         <span className="text-[14px] font-medium">Withdraw</span>
         <span className="min-w-0 flex-1 text-[12px] text-faint">
-          Move everything in your Payday wallet to your selected destination address and chain. The
+          Move everything in your Payday wallet to your selected destination address and chain.
+          USDC moves from every network; USDT moves from the destination network only. The
           wait-time depends on the destination chain.{" "}
           <span className="font-medium text-brand-green">No fees apply.</span>
         </span>
@@ -275,15 +304,34 @@ export function WithdrawPanel({
             if (addressValid && !busy && !bridgeGuard) void prepare();
           }}
         >
-          <fieldset>
+          {currencies().length > 1 ? (
+            <fieldset>
+              <legend className="text-[11px] font-medium tracking-[0.14em] text-faint uppercase">
+                Currency
+              </legend>
+              <div className="mt-2 grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Currency">
+                {currencies().map((option) => (
+                  <CurrencyChoice
+                    key={option}
+                    currency={option}
+                    checked={currency === option}
+                    onSelect={() => chooseCurrency(option)}
+                    disabled={busy}
+                  />
+                ))}
+              </div>
+            </fieldset>
+          ) : null}
+          <fieldset className={currencies().length > 1 ? "mt-4" : undefined}>
             <legend className="text-[11px] font-medium tracking-[0.14em] text-faint uppercase">
               Withdraw to
             </legend>
             <div className="mt-2 grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Withdraw to">
-              {config.chains.map((chain) => (
+              {chainsFor(currency).map((chain) => (
                 <NetworkChoice
                   key={chain.id}
                   chain={chain}
+                  currency={currency}
                   checked={destinationChain === chain.id}
                   onSelect={() => setDestinationChain(chain.id)}
                   disabled={busy}
@@ -408,7 +456,7 @@ export function WithdrawPanel({
               <StatusDot tone={withdrawalTone(withdrawal.status)} pulse={OPEN.has(withdrawal.status)} />
               <span className="font-medium">{withdrawalLabel(withdrawal.status)}</span>
               <span className="min-w-0 flex-1 truncate text-faint">
-                {withdrawal.legs.map((leg) => `${formatDisplayAmount(leg.amount)} USDC from ${leg.source_chain.name}`).join(" · ")}{" "}
+                {withdrawal.legs.map((leg) => `${formatDisplayAmount(leg.amount)} ${leg.token.symbol} from ${leg.source_chain.name}`).join(" · ")}{" "}
                 → {withdrawal.destination.chain.name} · {formatDate(withdrawal.created_at)}
               </span>
               {OPEN.has(withdrawal.status) ? (
@@ -425,13 +473,13 @@ export function WithdrawPanel({
   );
 }
 
-function NetworkChoice({
-  chain,
+function CurrencyChoice({
+  currency,
   checked,
   onSelect,
   disabled,
 }: {
-  chain: PublicChain;
+  currency: string;
   checked: boolean;
   onSelect: () => void;
   disabled: boolean;
@@ -449,9 +497,60 @@ function NetworkChoice({
       )}
     >
       <span className="min-w-0">
+        <span className="block text-[14px] font-medium">{currency}</span>
+        <span className="mt-0.5 block text-[12px] text-faint">
+          {bridges(currency) ? "from every network" : "from the destination network only"}
+        </span>
+      </span>
+      <span
+        aria-hidden
+        className={cn(
+          "flex size-5 shrink-0 items-center justify-center rounded-full border",
+          checked ? "border-ink bg-ink text-surface" : "border-line",
+        )}
+      >
+        {checked ? <Check className="size-3" /> : null}
+      </span>
+    </button>
+  );
+}
+
+function NetworkChoice({
+  chain,
+  currency,
+  checked,
+  onSelect,
+  disabled,
+}: {
+  chain: PublicChain;
+  currency: string;
+  checked: boolean;
+  onSelect: () => void;
+  disabled: boolean;
+}) {
+  const symbol = tokenOn(chain, currency)?.symbol ?? currency;
+  const reach = !bridges(currency)
+    ? " · this network's balance only"
+    : chain.cctp
+      ? ""
+      : " · same-network only";
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={onSelect}
+      className={cn(
+        "flex w-full items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3 text-left transition-colors",
+        checked ? "border-ink bg-raised" : "border-line hover:border-muted disabled:opacity-60",
+      )}
+    >
+      <span className="min-w-0">
         <span className="block text-[14px] font-medium">{chain.name}</span>
         <span className="mt-0.5 block text-[12px] text-faint">
-          USDC{chain.cctp ? "" : " · same-network only"}
+          {symbol}
+          {reach}
         </span>
       </span>
       <span
@@ -491,7 +590,9 @@ function LegRow({ leg, withdrawal }: { leg: WithdrawalLeg; withdrawal: Withdrawa
   return (
     <li className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3.5 py-2.5 text-[13px]">
       <StatusDot tone={legTone(leg.state)} pulse={!["completed", "failed", "expired", "cancelled", "awaiting_signature"].includes(leg.state)} />
-      <span className="tabular font-medium">{formatDisplayAmount(leg.amount)} USDC</span>
+      <span className="tabular font-medium">
+        {formatDisplayAmount(leg.amount)} {leg.token.symbol}
+      </span>
       <span className="text-muted">
         {leg.kind === "bridge"
           ? `${leg.source_chain.name} → ${withdrawal.destination.chain.name} via CCTP`

@@ -299,6 +299,7 @@ test("the account section shows the signed-in mailbox and the Payday wallet", as
   // One balance per network the deployment offers, each read on its own from
   // the stub RPC, which answers with each chain's stub balance.
   await expect(section.getByText(/5\.00\s*USDC/)).toBeVisible({ timeout: 20_000 });
+  await expect(section.getByText(/3\.00\s*USDT0/)).toBeVisible({ timeout: 20_000 });
   await expect(section.getByText(/1\.25\s*USDC/)).toBeVisible({ timeout: 20_000 });
 });
 
@@ -428,4 +429,51 @@ test("a withdrawal can be cancelled before it is signed", async ({ page }) => {
   await expect(section.getByRole("button", { name: "Withdraw", exact: true })).toBeVisible();
   const history = section.getByRole("list", { name: "Recent withdrawals" });
   await expect(history).toContainText("Cancelled");
+});
+
+test("a USDT request names its network, and a USDT withdrawal moves that network's balance alone", async ({
+  page,
+}) => {
+  await signIn(page, "usdt@example.com");
+
+  // The composer: USDT is a currency choice, and with it the network is not
+  // the payer's to choose — Monad, the one network serving it, is set.
+  await page.getByRole("button", { name: "New deposit request" }).click();
+  await page.getByLabel("Issued by").fill("Acme Corp");
+  await page.getByLabel("Contact address").fill("billing@acme.example");
+  await page.getByRole("button", { name: "Send code" }).click();
+  await page.getByLabel("One-time code").fill(OTP);
+  await page.getByRole("button", { name: "Confirm code" }).click();
+  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
+  await page.getByLabel("Amount").fill("40");
+  await page.getByRole("radiogroup", { name: "Currency" }).getByRole("radio", { name: /USDT/ }).check();
+  const networks = page.getByRole("radiogroup", { name: "Network" });
+  await expect(networks.getByRole("radio", { name: "Payer's choice" })).toHaveCount(0);
+  await expect(networks.getByRole("radio", { name: /Monad/ })).toBeChecked();
+  await expect(networks.getByRole("radio", { name: /Base/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  // The account section shows each network's balance in every stablecoin it
+  // serves: Monad holds USDT0 next to its USDC.
+  const section = page.getByRole("region", { name: "Account" });
+  await expect(section.getByText(/3\.00\s*USDT0/)).toBeVisible({ timeout: 20_000 });
+
+  // A USDT withdrawal offers only the network serving it, and moves that
+  // network's balance in one transfer leg: nothing bridges.
+  await section.getByRole("button", { name: "Withdraw", exact: true }).click();
+  await section.getByRole("radiogroup", { name: "Currency" }).getByRole("radio", { name: /USDT/ }).click();
+  const destinations = section.getByRole("radiogroup", { name: "Withdraw to" });
+  await expect(destinations.getByRole("radio", { name: /Monad/ })).toBeVisible();
+  await expect(destinations.getByRole("radio", { name: /Base/ })).toHaveCount(0);
+  await section
+    .getByRole("textbox", { name: "Destination address" })
+    .fill("0x000000000000000000000000000000000000d00d");
+  await section.getByRole("button", { name: "Continue" }).click();
+  await expect(section.getByText("One leg to Monad")).toBeVisible();
+  const legs = section.getByRole("list", { name: "Legs" }).getByRole("listitem");
+  await expect(legs).toHaveCount(1);
+  await expect(legs.nth(0)).toContainText("3.00 USDT0");
+  await expect(legs.nth(0)).toContainText("on Monad");
+  await section.getByRole("button", { name: "Cancel withdrawal" }).click();
+  await expect(section.getByRole("button", { name: "Withdraw", exact: true })).toBeVisible();
 });

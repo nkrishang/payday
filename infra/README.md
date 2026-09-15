@@ -27,9 +27,13 @@ connection, and the payer application setup are documented in
 operator decisions.
 
 The networks a payer may pay on are the `chains` list: one entry per chain
-with its USDC contract, the contract generation's addresses and code hashes,
+with its `tokens` (the stablecoins served there, each `{currency, address}`:
+Circle's USDC on every chain, Tether's USDT0 on Monad and Arbitrum One; at
+least one chain must list USDC, and a `cctp` block requires USDC on that
+chain), the contract generation's addresses and code hashes, `start_block`,
 finality policy, block time, log range, and explorer origin,
-passed to both tasks as `PAYDAY_CHAINS`. The paid RPC endpoints are the
+passed to both tasks as `PAYDAY_CHAINS`. Adding a currency to a live chain
+is a new `tokens` entry and an apply: no redeploy, no backfill. The paid RPC endpoints are the
 `rpc_urls` map, keyed by chain id (export `TF_VAR_rpc_urls` rather than
 writing them to a file); each becomes its own Secrets Manager secret,
 injected as `PAYDAY_RPC_URL_<chain_id>`. Gatewayd links addresses and
@@ -69,7 +73,7 @@ terraform apply deploy.tfplan
 AWS_KMS_KEY_ID="$(terraform output -raw attestation_kms_key_arn)" cast wallet address --aws
 ```
 
-Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address, code hash, or USDC start block is defaulted. Retrieve generated values from Secrets Manager rather than Terraform output.
+Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory address, code hash, token address, or start block is defaulted. Retrieve generated values from Secrets Manager rather than Terraform output.
 After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do not deliver until it is confirmed.
 The stack creates an SES identity for `notification_domain_name` with Easy
 DKIM. Its three CNAMEs are the `notification_dkim_records` output; add them in

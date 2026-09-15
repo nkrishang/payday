@@ -3,8 +3,8 @@ import { chainById } from "@/lib/config";
 import { explorerTokenUrl, truncateAddress } from "@/lib/format";
 
 /**
- * The one warning worth interrupting for: only native USDC on the chain the
- * payer chose will be credited. The token contract is linked rather than
+ * The one warning worth interrupting for: only the request's currency, as its
+ * issuer's own contract on the chain the payer chose, will be credited. The token contract is linked rather than
  * spelled out in prose — the explorer's page for it is the check that matters.
  */
 export function AssetNotice({ payment }: { payment: ReadyPayerDepositRequest }) {
@@ -17,6 +17,13 @@ export function AssetNotice({ payment }: { payment: ReadyPayerDepositRequest }) 
         <span className="font-medium text-ink">{payment.token.symbol}</span> on{" "}
         <span className="font-medium text-ink">{payment.chain.name}</span>, the network you chose.
         The same address on any other network is not this deposit.
+        {payment.token.symbol !== payment.currency ? (
+          <>
+            {" "}
+            {payment.token.symbol} is {payment.currency} on {payment.chain.name}: the contract
+            your wallet shows under that name.
+          </>
+        ) : null}
       </p>
       <dl className="mt-3 space-y-1.5 border-t border-line pt-3 text-[12px]">
         <div className="flex items-baseline justify-between gap-3">

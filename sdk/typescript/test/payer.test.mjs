@@ -27,6 +27,7 @@ const payerPayment = {
   settlement_explorer_url: null,
   payer_message: null,
   content_unlocked: true,
+  currency: "USDC",
   networks: [{ chain: { id: "143", name: "Monad", native_symbol: "MON" }, token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 } }],
   chain: { id: "143", name: "Monad", native_symbol: "MON" },
   token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 },
@@ -58,6 +59,7 @@ const lockedPayment = {
   settlement_explorer_url: null,
   payer_message: null,
   content_unlocked: false,
+  currency: null,
   networks: null, chain: null, token: null,
   amount: null, amount_base_units: null,
   received: null, received_base_units: null,
@@ -96,7 +98,7 @@ test("a locked gated deposit request carries null mechanics and no invoice conte
   assert.equal(payment.payer_policy.expected_email_hint, "a****@e***.com");
   assert.equal(payment.requirements.complete, false);
   for (const field of [
-    "networks", "chain", "token", "amount", "amount_base_units", "received", "received_base_units",
+    "currency", "networks", "chain", "token", "amount", "amount_base_units", "received", "received_base_units",
     "remaining", "remaining_base_units", "address", "address_explorer_url", "deposit_uri", "details",
   ]) {
     assert.equal(payment[field], null, `${field} must be withheld while locked`);
@@ -330,7 +332,8 @@ test("paying from another network lists chains, quotes, and reports the deposit 
   const quote = {
     id: "rli_0198f80c-8d2f-7dc1-a369-90556a64f7b1",
     request_id: `0x${"11".repeat(32)}`,
-    origin: { chain_id: "8453", name: "Base", native_symbol: "ETH", usdc_address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", explorer_url: null, icon_url: null, rpc_url: null },
+    origin: { chain_id: "8453", name: "Base", native_symbol: "ETH", tokens: [{ currency: "USDC", symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }], explorer_url: null, icon_url: null, rpc_url: null },
+    origin_token: { currency: "USDC", symbol: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 },
     amount_in: "25.020000", amount_in_base_units: "25020000",
     amount_out: "25.000000", amount_out_base_units: "25000000",
     relayer_fee_usd: "0.02", time_estimate_seconds: 5, expires_at: "2026-09-01T00:15:00Z",
@@ -345,7 +348,7 @@ test("paying from another network lists chains, quotes, and reports the deposit 
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
   const chains = await client.relay.chains("dr_1", { payerSession: "pps_relay" });
-  const quoted = await client.relay.quote("dr_1", "8453", { payerSession: "pps_relay" });
+  const quoted = await client.relay.quote("dr_1", "8453", { originToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payerSession: "pps_relay" });
   const sent = await client.relay.sent("dr_1", quoted.id, `0x${"22".repeat(32)}`, { payerSession: "pps_relay" });
 
   assert.equal(chains.chains[0].name, "Base");
@@ -353,7 +356,7 @@ test("paying from another network lists chains, quotes, and reports the deposit 
   assert.equal(sent.relay.status, "sent");
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_1/relay/chains");
   assert.equal(mock.calls[1].url, "https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes");
-  assert.deepEqual(JSON.parse(mock.calls[1].init.body), { origin_chain_id: "8453" });
+  assert.deepEqual(JSON.parse(mock.calls[1].init.body), { origin_chain_id: "8453", origin_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" });
   assert.equal(mock.calls[2].url, `https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes/${quote.id}/sent`);
   assert.deepEqual(JSON.parse(mock.calls[2].init.body), { transaction_hash: `0x${"22".repeat(32)}` });
   for (const call of mock.calls) {

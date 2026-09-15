@@ -1,6 +1,6 @@
 import type { Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "@payday/sdk";
 import { encodeAbiParameters, keccak256, type TypedDataDefinition } from "viem";
-import { chainById } from "./config";
+import { bridges, chainById, tokenOn } from "./config";
 
 /**
  * The EIP-712 document the Payday wallet signs for one withdrawal leg, in
@@ -114,12 +114,20 @@ export function checkLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLeg
     return "The document is not signed from your Payday wallet.";
   }
   if (typed.domain.chainId !== Number(leg.source_chain.id)) {
-    return "The document is under another network's USDC.";
+    return "The document is under another network's token.";
   }
   const source = chainById(leg.source_chain.id);
   if (!source) return "The source network is not trusted by this dashboard.";
-  if (!same(typed.domain.verifyingContract, source.usdcAddress)) {
-    return "The document is not under this network's trusted USDC contract.";
+  const trusted = tokenOn(source, withdrawal.currency);
+  if (!trusted) return `${withdrawal.currency} is not served on ${source.name} by this dashboard.`;
+  if (!same(typed.domain.verifyingContract, trusted.address)) {
+    return `The document is not under this network's trusted ${withdrawal.currency} contract.`;
+  }
+  if (!same(typed.domain.verifyingContract, leg.token.address)) {
+    return "The document is not under the leg's own token.";
+  }
+  if (leg.kind === "bridge" && !bridges(withdrawal.currency)) {
+    return `${withdrawal.currency} does not bridge; a bridge leg is not something to sign.`;
   }
   let validBefore: bigint;
   try {

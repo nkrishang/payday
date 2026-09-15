@@ -151,22 +151,28 @@ variable "chains" {
     on a fresh deployer key); the code hashes are keccak256 of the runtime
     bytecode, cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)", and
     both services compare them with the chain at startup and refuse to start on
-    a mismatch. usdc is Circle's native USDC proxy on that chain, never a
-    bridged variant. finality_source is "finalized" (Monad: irreversible) or
+    a mismatch. tokens lists the stablecoins served on the chain by currency
+    code (USDC, USDT), each the issuer's canonical contract there (Circle's
+    native USDC proxy; Tether's USDT0 on Monad and Arbitrum), never a bridged
+    variant; a currency absent from a chain is not offered there, and a cctp
+    block needs USDC on the chain. finality_source is "finalized" (Monad: irreversible) or
     "latest" with finality_confirmations blocks of margin (Base, Arbitrum:
     seconds, trusting the sequencer). Every range scan is filtered to the
     addresses Payday watches, so log_range_size is only the provider's cap.
-    Set usdc_start_block to the chain's block just before the services first
-    run there.
+    Set start_block to the chain's block just before the services first run
+    there; a currency added to a live chain needs no earlier block.
   EOT
   type = list(object({
-    chain_id                = number
-    usdc                    = string
+    chain_id = number
+    tokens = list(object({
+      currency = string
+      address  = string
+    }))
     factory                 = string
     batch_sweeper           = string
     factory_code_hash       = string
     batch_sweeper_code_hash = string
-    usdc_start_block        = number
+    start_block             = number
     finality_source         = string
     finality_confirmations  = number
     block_time_ms           = number
@@ -202,14 +208,17 @@ variable "chains" {
   validation {
     condition = alltrue([for c in var.chains :
       c.chain_id > 0 && floor(c.chain_id) == c.chain_id
-      && can(regex("^0x[0-9a-fA-F]{40}$", c.usdc))
+      && length(c.tokens) > 0
+      && length(distinct([for t in c.tokens : t.currency])) == length(c.tokens)
+      && alltrue([for t in c.tokens : contains(["USDC", "USDT"], t.currency) && can(regex("^0x[0-9a-fA-F]{40}$", t.address))])
+      && (c.cctp == null || contains([for t in c.tokens : t.currency], "USDC"))
       && can(regex("^0x[0-9a-fA-F]{40}$", c.factory))
       && can(regex("^0x[0-9a-fA-F]{40}$", c.batch_sweeper))
       && can(regex("^0x[0-9a-fA-F]{64}$", c.factory_code_hash))
       && can(regex("^0x[0-9a-fA-F]{64}$", c.batch_sweeper_code_hash))
       && c.factory_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
       && c.batch_sweeper_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
-      && c.usdc_start_block >= 0 && floor(c.usdc_start_block) == c.usdc_start_block
+      && c.start_block >= 0 && floor(c.start_block) == c.start_block
       && contains(["finalized", "latest"], c.finality_source)
       && c.finality_confirmations >= 0 && c.finality_confirmations <= 10000 && floor(c.finality_confirmations) == c.finality_confirmations
       && c.block_time_ms >= 1 && floor(c.block_time_ms) == c.block_time_ms
@@ -225,7 +234,7 @@ variable "chains" {
         && c.cctp.forwarder_code_hash != "0x0000000000000000000000000000000000000000000000000000000000000000"
       ))
     ])
-    error_message = "Every chain needs 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, integral whole-number block counts and times, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any. Both services also require every chain to name the same factory address; wrong-chain rescue only works when it deploys identically everywhere."
+    error_message = "Every chain needs at least one token (currency USDC or USDT, no currency twice, USDC wherever cctp is set), 20-byte addresses, non-zero 32-byte code hashes, finality_source finalized|latest, integral whole-number block counts and times, a positive block time, a log range from 1 through 10000, and an HTTPS explorer origin if any. Both services also require every chain to name the same factory address; wrong-chain rescue only works when it deploys identically everywhere."
   }
 }
 

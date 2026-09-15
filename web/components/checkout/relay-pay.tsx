@@ -1,6 +1,6 @@
 "use client";
 
-import type { RelayOriginChain, RelayQuote } from "@payday/sdk";
+import type { RelayOriginChain, RelayOriginToken, RelayQuote } from "@payday/sdk";
 import type { PendingPayment, ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { ArrowLeftRight, ChevronDown, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -24,7 +24,10 @@ const RECEIPT_POLL_MS = 2_000;
 /**
  * Paying from another network through Relay.
  *
- * The payer's USDC may sit on a chain the request is not on. Payday quotes
+ * The payer's stablecoin may sit on a chain the request is not on, and may
+ * not even be the request's currency: USDC on Base can pay a USDT request on
+ * Monad, with Relay swapping on the way and the payer carrying the spread.
+ * Payday quotes
  * the route (the quote is pinned to the attested wallet, the payment
  * address, and exactly the amount still due), and this component sends the
  * quote's transactions from the connected wallet on the origin chain, then
@@ -49,6 +52,7 @@ export function RelayPay({
   const { address, isConnected, connector } = useAccount();
   const [open, setOpen] = useState(false);
   const [chains, setChains] = useState<RelayOriginChain[] | null>(null);
+  // The origin is one (network, token) pair, keyed `chainId:address`.
   const [origin, setOrigin] = useState<string>("");
   const [quote, setQuote] = useState<{ quote: RelayQuote; at: number } | null>(null);
   const [quoting, setQuoting] = useState(false);
@@ -80,22 +84,28 @@ export function RelayPay({
     return () => controller.abort();
   }, [open, chains, payment.id, payerSession]);
 
-  const selected = chains?.find((chain) => chain.chain_id === origin) ?? null;
+  const [originChainId, originToken] = splitOrigin(origin);
+  const selected = chains?.find((chain) => chain.chain_id === originChainId) ?? null;
+  const selectedToken: RelayOriginToken | null =
+    selected?.tokens.find((token) => token.address.toLowerCase() === originToken) ?? null;
 
   const requestQuote = useCallback(
-    async (chainId: string, signal?: AbortSignal) => {
+    async (originKey: string, signal?: AbortSignal) => {
+      const [chainId, tokenAddress] = splitOrigin(originKey);
       const generation = ++quoteGeneration.current;
       const requestPaymentId = payment.id;
       setQuoting(true);
       setError(null);
       try {
         const fresh = await payerClient.relay.quote(payment.id, chainId, {
+          originToken: tokenAddress,
           ...(signal ? { signal } : {}),
           ...sessionOption(payerSession),
         });
         if (generation !== quoteGeneration.current || signal?.aborted ||
-          paymentIdRef.current !== requestPaymentId || originRef.current !== chainId ||
-          fresh.origin.chain_id !== chainId) return null;
+          paymentIdRef.current !== requestPaymentId || originRef.current !== originKey ||
+          fresh.origin.chain_id !== chainId ||
+          fresh.origin_token.address.toLowerCase() !== tokenAddress) return null;
         setQuote({ quote: fresh, at: Date.now() });
         return fresh;
       } catch (cause) {
@@ -124,7 +134,7 @@ export function RelayPay({
     executing.current = true;
     try {
       setError(null);
-      if (!selected) return;
+      if (!selected || !selectedToken) return;
       if (!isConnected || !connector) {
         setConnectOpen(true);
         return;
@@ -138,18 +148,19 @@ export function RelayPay({
       let current = quote && Date.now() - quote.at < QUOTE_FRESH_MS ? quote.quote : null;
       if (current === null) {
         setStage("Refreshing the quote…");
-        current = await requestQuote(selected.chain_id);
+        current = await requestQuote(origin);
         if (current === null) return;
       }
       if (current.origin.chain_id !== selected.chain_id ||
+        current.origin_token.address.toLowerCase() !== selectedToken.address.toLowerCase() ||
         current.steps.some((step) => step.transaction.chain_id !== selected.chain_id)) {
-        throw new Error("The Relay quote does not match the selected origin network.");
+        throw new Error("The Relay quote does not match the selected origin network and token.");
       }
       setStage("Checking your balance…");
-      const balance = await usdcBalance(provider, selected.usdc_address, address);
+      const balance = await tokenBalance(provider, selectedToken.address, address);
       if (balance < BigInt(current.amount_in_base_units)) {
         setError(
-          `This wallet holds ${formatBaseUnits(balance, 6)} USDC on ${selected.name}, less than the ${formatDisplayAmount(current.amount_in)} the route costs.`,
+          `This wallet holds ${formatBaseUnits(balance, selectedToken.decimals)} ${selectedToken.symbol} on ${selected.name}, less than the ${formatDisplayAmount(current.amount_in)} the route costs.`,
         );
         setStage(null);
         return;
@@ -159,7 +170,7 @@ export function RelayPay({
         const last = index === current.steps.length - 1;
         setStage(
           step.id === "approve"
-            ? "Approve USDC in your wallet…"
+            ? `Approve ${selectedToken.symbol} in your wallet…`
             : `Confirm the deposit in your wallet…`,
         );
         await assertWalletContext(provider, selected.chain_id, address);
@@ -205,9 +216,11 @@ export function RelayPay({
     onSent,
     payerSession,
     payment.id,
+    origin,
     quote,
     requestQuote,
     selected,
+    selectedToken,
     walletMatches,
   ]);
 
@@ -241,7 +254,8 @@ export function RelayPay({
           <span>
             <span className="block text-[14px] font-medium">Pay from another network</span>
             <span className="mt-0.5 block text-[12px] text-faint">
-              Send USDC from a chain you hold it on; Relay delivers it to {payment.chain.name}.
+              Send USDC or USDT from a chain you hold it on; Relay delivers {payment.token.symbol}{" "}
+              to {payment.chain.name}.
             </span>
           </span>
         </span>
@@ -260,15 +274,17 @@ export function RelayPay({
               onChange={setOrigin}
               options={[
                 { value: "", label: "Choose a network" },
-                ...chains.map((chain) => ({
-                  value: chain.chain_id,
-                  label: chain.name,
-                  badge: chain.icon_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={chain.icon_url} alt="" className="size-4 rounded-full" />
-                  ) : undefined,
-                  detail: "USDC",
-                })),
+                ...chains.flatMap((chain) =>
+                  chain.tokens.map((token) => ({
+                    value: originKey(chain.chain_id, token.address),
+                    label: chain.name,
+                    badge: chain.icon_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={chain.icon_url} alt="" className="size-4 rounded-full" />
+                    ) : undefined,
+                    detail: token.symbol,
+                  })),
+                ),
               ]}
               // Locked only while transactions are in flight: a quote still
               // loading must not trap the payer on that network.
@@ -276,13 +292,15 @@ export function RelayPay({
             />
           ) : null}
 
-          {selected && quote && quote.quote.origin.chain_id === selected.chain_id ? (
+          {selected && selectedToken && quote && quote.quote.origin.chain_id === selected.chain_id &&
+          quote.quote.origin_token.address.toLowerCase() === selectedToken.address.toLowerCase() ? (
             <p className="text-[13px] leading-relaxed text-muted" data-testid="relay-quote">
               You send{" "}
               <span className="tabular font-medium text-ink">
-                {formatDisplayAmount(quote.quote.amount_in)} USDC
+                {formatDisplayAmount(quote.quote.amount_in)} {selectedToken.symbol}
               </span>{" "}
-              on {selected.name}; exactly {formatDisplayAmount(quote.quote.amount_out)} USDC lands on{" "}
+              on {selected.name}; exactly {formatDisplayAmount(quote.quote.amount_out)}{" "}
+              {payment.token.symbol} lands on{" "}
               {payment.chain.name}
               {quote.quote.relayer_fee_usd ? ` · about $${quote.quote.relayer_fee_usd} in fees` : ""}
               {quote.quote.time_estimate_seconds
@@ -301,8 +319,8 @@ export function RelayPay({
                 ? "Getting a quote…"
                 : !isConnected
                   ? "Connect wallet"
-                  : selected
-                    ? `Pay from ${selected.name}`
+                  : selected && selectedToken
+                    ? `Pay ${selectedToken.symbol} from ${selected.name}`
                     : "Choose a network")}
           </Button>
 
@@ -377,7 +395,17 @@ async function switchToChain(provider: Eip1193, chain: RelayOriginChain): Promis
   }
 }
 
-async function usdcBalance(provider: Eip1193, token: string, holder: string): Promise<bigint> {
+/** One `chainId:address` key per origin option, lowercased so quotes compare exactly. */
+function originKey(chainId: string, tokenAddress: string): string {
+  return `${chainId}:${tokenAddress.toLowerCase()}`;
+}
+
+function splitOrigin(key: string): [string, string] {
+  const separator = key.indexOf(":");
+  return separator === -1 ? [key, ""] : [key.slice(0, separator), key.slice(separator + 1)];
+}
+
+async function tokenBalance(provider: Eip1193, token: string, holder: string): Promise<bigint> {
   const data = encodeFunctionData({
     abi: erc20Abi,
     functionName: "balanceOf",

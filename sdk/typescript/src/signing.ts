@@ -29,7 +29,9 @@ export interface WithdrawalKeccak {
   encodeAbiParameters: EncodeAbiParameters;
 }
 export interface TrustedWithdrawalChain {
-  usdc: string;
+  /** The trusted contract per currency code (`USDC`, `USDT`) on this chain. */
+  tokens: Record<string, string>;
+  /** Circle's CCTP on this chain; only USDC ever bridges through it. */
   cctp: { domain: number; forwarder: string } | null;
 }
 export interface SignWithdrawalOptions {
@@ -140,10 +142,20 @@ export async function signWithdrawal(
     const typed = assertLegAuthorization(withdrawal, leg);
     const source = options.chains?.(Number(leg.source_chain.id));
     if (options.chains && !source) throw new Error(`leg ${leg.id}: source chain is not trusted`);
-    if (source && !sameAddress(typed.domain.verifyingContract, source.usdc)) {
-      throw new Error(`leg ${leg.id}: typed data is not under the trusted USDC contract`);
+    const trustedToken = source?.tokens[withdrawal.currency];
+    if (source && !trustedToken) {
+      throw new Error(`leg ${leg.id}: ${withdrawal.currency} is not trusted on the source chain`);
+    }
+    if (trustedToken && !sameAddress(typed.domain.verifyingContract, trustedToken)) {
+      throw new Error(`leg ${leg.id}: typed data is not under the trusted ${withdrawal.currency} contract`);
+    }
+    if (!sameAddress(typed.domain.verifyingContract, leg.token.address)) {
+      throw new Error(`leg ${leg.id}: typed data is not under the leg's own token`);
     }
     if (leg.kind === "bridge") {
+      if (withdrawal.currency !== "USDC") {
+        throw new Error(`leg ${leg.id}: only USDC bridges; a ${withdrawal.currency} withdrawal has no bridge leg`);
+      }
       if (!source?.cctp) throw new Error(`leg ${leg.id}: source chain has no trusted CCTP configuration`);
       if (!sameAddress(leg.authorization.forwarder ?? "", source.cctp.forwarder)) {
         throw new Error(`leg ${leg.id}: authorization names an untrusted forwarder`);

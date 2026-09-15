@@ -83,6 +83,7 @@ export interface CheckoutView {
  * wallet (see `ReadyPayerDepositRequest`); until then `networks` lists the choice.
  */
 export type UnlockedPayerDepositRequest = PayerDepositRequest & {
+  currency: string;
   networks: Network[];
   amount: string;
   amount_base_units: string;
@@ -113,6 +114,7 @@ export type ReadyPayerDepositRequest = UnlockedPayerDepositRequest & {
 export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPayerDepositRequest | null {
   if (!payment.content_unlocked) return null;
   const {
+    currency,
     networks,
     amount,
     amount_base_units,
@@ -122,6 +124,7 @@ export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPa
     remaining_base_units,
   } = payment;
   if (
+    currency === null ||
     networks === null ||
     amount === null ||
     amount_base_units === null ||
@@ -134,6 +137,7 @@ export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPa
   }
   return {
     ...payment,
+    currency,
     networks,
     amount,
     amount_base_units,
@@ -158,11 +162,12 @@ export function readyDepositRequest(payment: UnlockedPayerDepositRequest): Ready
 
 /**
  * The token's symbol for an unlocked request: the chosen network's once a
- * wallet is bound, otherwise the offer's. Every offered network carries the
- * same asset (native USDC), so before the choice any entry names it.
+ * wallet is bound, otherwise the request's currency. A request has one
+ * currency, so before the choice the currency names what is due; the
+ * contract's own symbol (USDT0 on Monad) waits for the network.
  */
 export function tokenSymbol(payment: UnlockedPayerDepositRequest): string {
-  return payment.token?.symbol ?? payment.networks[0]?.token.symbol ?? "USDC";
+  return payment.token?.symbol ?? payment.currency;
 }
 
 const TERMINAL: ReadonlySet<DepositRequestStatus> = new Set<DepositRequestStatus>([

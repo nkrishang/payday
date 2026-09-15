@@ -19,10 +19,10 @@ describe("walletErrorMessage", () => {
     );
   });
 
-  it("distinguishes missing gas from missing USDC", () => {
+  it("distinguishes missing gas from a short token balance", () => {
     expect(walletErrorMessage({ shortMessage: "Insufficient funds for gas" })).toMatch(/gas/i);
     expect(walletErrorMessage({ details: "ERC20: transfer amount exceeds balance" })).toMatch(
-      /USDC/,
+      /enough of the token/,
     );
   });
 

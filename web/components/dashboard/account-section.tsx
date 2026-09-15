@@ -3,14 +3,14 @@
 import type { AccountMetadata } from "@payday/sdk";
 import { useExportWallet } from "@privy-io/react-auth";
 import { ArrowUpRight, KeyRound, LogOut, RefreshCw } from "lucide-react";
-import Image from "next/image";
+import { CurrencyMark } from "@/components/ui/amount";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPublicClient, erc20Abi, http } from "viem";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { cn } from "@/lib/cn";
-import { config, type PublicChain } from "@/lib/config";
+import { config, type PublicChain, type PublicToken } from "@/lib/config";
 import { explorerAddressUrl, formatBaseUnits } from "@/lib/format";
 import { useMerchant } from "./session";
 import { WithdrawPanel } from "./withdraw-panel";
@@ -130,8 +130,10 @@ export function AccountSection({
   );
 }
 
-/** The wallet's USDC balance on one network, with its explorer link. */
-export type BalanceSnapshot = { status: "loading" | "unavailable" } | { status: "ready"; usdc: bigint };
+/** The wallet's balance in each configured stablecoin on one network, keyed by currency code. */
+export type BalanceSnapshot =
+  | { status: "loading" | "unavailable" }
+  | { status: "ready"; tokens: Record<string, bigint> };
 
 function BalanceRow({
   chain,
@@ -143,13 +145,13 @@ function BalanceRow({
   onBalance: (chainId: number, balance: BalanceSnapshot) => void;
 }) {
   const balances = useBalances(wallet, chain);
-  const { status, usdc } =
+  const { status, tokens } =
     balances.status === "ready"
-      ? { status: balances.status, usdc: balances.usdc }
-      : { status: balances.status, usdc: null };
+      ? { status: balances.status, tokens: balances.tokens }
+      : { status: balances.status, tokens: null };
   const snapshot = useMemo<BalanceSnapshot>(
-    () => (usdc === null ? { status } : { status: "ready", usdc }),
-    [status, usdc],
+    () => (tokens === null ? { status } : { status: "ready", tokens }),
+    [status, tokens],
   );
   useEffect(() => {
     onBalance(chain.id, snapshot);
@@ -173,17 +175,16 @@ function BalanceRow({
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-          <span className="tabular inline-flex items-center gap-1.5 text-[15px] font-medium">
-            {formatBaseUnits(balances.usdc, 6)}
-            <Image
-              src="/payment-icons/usdc.svg"
-              width={64}
-              height={64}
-              alt=""
-              className="size-4 shrink-0 rounded-full"
-            />
-            USDC
-          </span>
+          {chain.tokens.map((token) => (
+            <span
+              key={token.currency}
+              className="tabular inline-flex items-center gap-1.5 text-[15px] font-medium"
+            >
+              {formatBaseUnits(balances.tokens[token.currency] ?? 0n, token.decimals)}
+              <CurrencyMark currency={token.currency} className="size-4" />
+              {token.symbol}
+            </span>
+          ))}
           <button
             type="button"
             onClick={balances.reload}
@@ -224,12 +225,12 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 type Balances =
   | { status: "loading" }
   | { status: "unavailable"; reload: () => void }
-  | { status: "ready"; usdc: bigint; reload: () => void };
+  | { status: "ready"; tokens: Record<string, bigint>; reload: () => void };
 
-type Reading = { outcome: "unavailable" } | { outcome: "ready"; usdc: bigint };
+type Reading = { outcome: "unavailable" } | { outcome: "ready"; tokens: Record<string, bigint> };
 
 /**
- * The wallet's USDC balance on one chain, read straight from the public RPC
+ * The wallet's balance in each of a chain's stablecoins, read straight from the public RPC
  * this deployment is configured with for it — the same endpoint the
  * checkout's wallet button reads through. One shot per wallet and per
  * refresh; a chain that does not answer is reported, not retried forever.
@@ -249,15 +250,22 @@ function useBalances(wallet: string | null, chain: PublicChain): Balances {
     const client = createPublicClient({
       transport: http(chain.rpcUrl, { retryCount: 1, timeout: 8_000 }),
     });
-    client
-      .readContract({
-        address: chain.usdcAddress as `0x${string}`,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [address],
-      })
-      .then((usdc) => {
-        if (!disposed) setSettled({ request, reading: { outcome: "ready", usdc } });
+    Promise.all(
+      chain.tokens.map((token: PublicToken) =>
+        client
+          .readContract({
+            address: token.address as `0x${string}`,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [address],
+          })
+          .then((balance) => [token.currency, balance] as const),
+      ),
+    )
+      .then((entries) => {
+        if (!disposed) {
+          setSettled({ request, reading: { outcome: "ready", tokens: Object.fromEntries(entries) } });
+        }
       })
       .catch(() => {
         if (!disposed) setSettled({ request, reading: { outcome: "unavailable" } });
@@ -269,6 +277,6 @@ function useBalances(wallet: string | null, chain: PublicChain): Balances {
 
   if (settled?.request !== request) return { status: "loading" };
   return settled.reading.outcome === "ready"
-    ? { status: "ready", usdc: settled.reading.usdc, reload }
+    ? { status: "ready", tokens: settled.reading.tokens, reload }
     : { status: "unavailable", reload };
 }

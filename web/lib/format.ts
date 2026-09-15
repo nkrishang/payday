@@ -1,5 +1,5 @@
 /**
- * Amount handling is exact throughout: USDC has six decimals and the API sends
+ * Amount handling is exact throughout: every supported stablecoin has six decimals and the API sends
  * every amount twice, as a display string and as integer `_base_units`. Base
  * units are the only value we do arithmetic on, always as BigInt. Nothing here
  * may touch a binary float.
@@ -33,7 +33,7 @@ export function formatBaseUnits(
 }
 
 /**
- * Presents an API display string without re-deriving it. The API sends USDC at
+ * Presents an API display string without re-deriving it. The API sends amounts at
  * full precision ("25.000000"); a payer should read "25.00", but a fraction
  * that carries real value keeps every digit.
  */

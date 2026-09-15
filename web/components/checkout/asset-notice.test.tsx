@@ -7,7 +7,7 @@ const WITH_EXPLORER = JSON.stringify([
     id: 143,
     name: "Monad",
     rpcUrl: "https://rpc.example.test",
-    usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+    tokens: [{ currency: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" }],
     explorerUrl: "https://monadvision.com",
   },
 ]);
@@ -16,7 +16,7 @@ const WITHOUT_EXPLORER = JSON.stringify([
     id: 143,
     name: "Monad",
     rpcUrl: "https://rpc.example.test",
-    usdcAddress: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+    tokens: [{ currency: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" }],
   },
 ]);
 

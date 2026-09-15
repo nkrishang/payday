@@ -18,9 +18,9 @@ const DESTINATION = "0x000000000000000000000000000000000000d00d";
 const NONCE = "0x18b79105e486e10f626b71939a0226c47316949b7c24ff1c397661ea861fafaa";
 const DIGEST = "0xfe0bcc7d9e69ee02881011f29a4156caa15e02b8e94c2e0c9f40e66711651993";
 const chains = (id) => id === 143
-  ? { usdc: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", cctp: { domain: 15, forwarder: FORWARDER } }
+  ? { tokens: { USDC: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", USDT: "0xe7cd86e13AC4309349F30B3435a9d337750fC82D" }, cctp: { domain: 15, forwarder: FORWARDER } }
   : id === 8453
-    ? { usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", cctp: { domain: 6, forwarder: "0x3333333333333333333333333333333333333333" } }
+    ? { tokens: { USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }, cctp: { domain: 6, forwarder: "0x3333333333333333333333333333333333333333" } }
     : null;
 const signingOptions = { chains, keccak: { encodeAbiParameters, keccak256 } };
 
@@ -28,6 +28,7 @@ const bridgeLeg = {
   id: "wdl_1",
   kind: "bridge",
   source_chain: { id: "143", name: "Monad", native_symbol: "MON" },
+  token: { symbol: "USDC", address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", decimals: 6 },
   amount: "1.234567",
   amount_base_units: "1234567",
   state: "awaiting_signature",
@@ -84,6 +85,7 @@ const withdrawal = {
   id: "wd_1",
   status: "awaiting_signature",
   wallet_address: WALLET,
+  currency: "USDC",
   destination: { chain: { id: "8453", name: "Base", native_symbol: "ETH" }, address: DESTINATION },
   legs: [bridgeLeg],
   created_at: "2027-01-14T08:00:00Z",
