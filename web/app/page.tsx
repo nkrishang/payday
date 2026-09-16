@@ -82,7 +82,7 @@ export default function Home() {
                 </span>
               </h1>
               <p
-                className="landing-reveal mt-8 max-w-[560px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-gum-grey"
+                className="landing-reveal mt-8 max-w-[560px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-pretty text-gum-grey"
                 style={delay(6)}
               >
                 Gum mints an address for every deposit: who can fund it, when it expires, where it
