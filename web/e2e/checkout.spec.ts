@@ -639,7 +639,10 @@ test("the landing page renders and is indexable", async ({ page }) => {
 
   await expect(page.getByRole("heading", { name: "Deposits that stick." })).toBeVisible();
   await expect(page.getByRole("button", { name: "Get Started" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Developers" })).toHaveAttribute("href", "/docs");
+  await expect(page.getByRole("link", { name: "Developers" }).first()).toHaveAttribute(
+    "href",
+    "/docs",
+  );
   await expect(page.getByRole("img", { name: "Gum" }).first()).toBeVisible();
   expect(await page.locator('meta[name="robots"]').count()).toBe(0);
   expect(response?.status()).toBe(200);
@@ -656,7 +659,10 @@ test("the landing page links to public documentation without obsolete environmen
   expect(body).not.toContain("quickstart");
   // Public documentation lives in the app itself at /docs, not the repository
   // (see "Publish customer documentation at /docs").
-  await expect(page.getByRole("link", { name: "Developers" })).toHaveAttribute("href", "/docs");
+  await expect(page.getByRole("link", { name: "Developers" }).first()).toHaveAttribute(
+    "href",
+    "/docs",
+  );
 });
 
 /* ------------------------------------------------------------------------ */

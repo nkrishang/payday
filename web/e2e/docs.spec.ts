@@ -13,7 +13,7 @@ import { API_PAGES, DOCS_PAGES } from "../components/docs/nav";
 
 test("the landing page's Developers link opens the documentation", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Developers" }).click();
+  await page.getByRole("link", { name: "Developers" }).first().click();
   await expect(page).toHaveURL(/\/docs$/);
   await expect(page.getByRole("heading", { level: 1 })).toContainText("Stablecoin deposits");
 });
