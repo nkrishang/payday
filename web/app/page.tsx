@@ -145,8 +145,9 @@ export default function Home() {
                   style={step(1)}
                   className="mt-6 max-w-[560px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-gum-white/85"
                 >
-                  No fees, no card, no plans. When pricing comes, it will not disrupt anything you
-                  have built.
+                  We&rsquo;re in beta and completely free to use right now. No fees, no card, no
+                  plans. When we do introduce pricing, we&rsquo;ll make sure it never disrupts a
+                  workflow you&rsquo;ve already built.
                 </p>
                 <div
                   data-reveal=""

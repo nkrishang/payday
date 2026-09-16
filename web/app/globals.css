@@ -191,6 +191,11 @@
   outline-color: #121212;
 }
 
+.landing-dialog ::selection {
+  background-color: #ff5ca8;
+  color: #f7f7f5;
+}
+
 .landing-dialog-scrim {
   animation: landing-dialog-scrim-in 200ms ease-out both;
 }

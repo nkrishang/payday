@@ -108,7 +108,7 @@ export function PricingDialog({
           >
             Questions in the meantime? Email{" "}
             <a
-              href="mailto:contact@payday.sh"
+              href={light ? "mailto:support@gum.money" : "mailto:contact@payday.sh"}
               className={cn(
                 "transition-colors",
                 light
@@ -116,7 +116,7 @@ export function PricingDialog({
                   : "text-brand-green hover:text-brand-green/80",
               )}
             >
-              contact@payday.sh
+              {light ? "support@gum.money" : "contact@payday.sh"}
             </a>
             .
           </p>
