@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useRef, type CSSProperties } from "react";
 import { cn } from "@/lib/cn";
 import { Stage, useInView, useLoopClock, useReducedMotion } from "./stage";
@@ -23,16 +24,96 @@ const ROW_HEIGHT = 62;
 /** Rows showing at once; one more waits above the fold and one slides out below it. */
 const ROWS = 4;
 
-const DEPOSITS = [
-  { payer: "Jordan Diaz", ref: "user_8f21", address: "0x9a3F…A0c2", amount: "250.00" },
-  { payer: "Maya Patel", ref: "user_2c9e", address: "0x41c9…7E1b", amount: "1,200.00" },
-  { payer: "Acme Corp", ref: "org_a1b2", address: "0xB70d…33fA", amount: "18,000.00" },
-  { payer: "Lena Fischer", ref: "user_d0a4", address: "0x6E5c…91C8", amount: "75.00" },
-  { payer: "Tomás Rivera", ref: "user_77be", address: "0xF2a8…0b4D", amount: "420.00" },
-  { payer: "Globex LLC", ref: "org_5e3f", address: "0x0C4e…bD12", amount: "5,000.00" },
-  { payer: "Priya Nair", ref: "user_b18c", address: "0x8d3A…4E7f", amount: "60.00" },
-  { payer: "Sam Okafor", ref: "user_e4f0", address: "0x2B9f…C6a1", amount: "980.00" },
-] as const;
+const CURRENCIES = {
+  USDC: "/payment-icons/usdc.svg",
+  USDT: "/payment-icons/usdt.svg",
+  AUSD: "/payment-icons/ausd.svg",
+} as const;
+
+/** The chains a deposit in the ledger arrived on; USDC and USDT are on many. */
+const CHAINS = {
+  Monad: "/payment-icons/monad.svg",
+  Arbitrum: "/logos/arbitrum.svg",
+  Base: "/logos/base.svg",
+  Ethereum: "/logos/ethereum.svg",
+  Solana: "/logos/solana.svg",
+  Tron: "/logos/tron.svg",
+} as const;
+
+type Currency = keyof typeof CURRENCIES;
+type Chain = keyof typeof CHAINS;
+
+const DEPOSITS: readonly {
+  payer: string;
+  ref: string;
+  address: string;
+  amount: string;
+  currency: Currency;
+  chain?: Chain;
+}[] = [
+  {
+    payer: "Jordan Diaz",
+    ref: "user_8f21",
+    address: "0x9a3F…A0c2",
+    amount: "250.00",
+    currency: "USDC",
+    chain: "Monad",
+  },
+  {
+    payer: "Maya Patel",
+    ref: "user_2c9e",
+    address: "0x41c9…7E1b",
+    amount: "1,200.00",
+    currency: "USDT",
+    chain: "Arbitrum",
+  },
+  {
+    payer: "Acme Corp",
+    ref: "org_a1b2",
+    address: "0xB70d…33fA",
+    amount: "18,000.00",
+    currency: "AUSD",
+  },
+  {
+    payer: "Lena Fischer",
+    ref: "user_d0a4",
+    address: "0x6E5c…91C8",
+    amount: "75.00",
+    currency: "USDC",
+    chain: "Base",
+  },
+  {
+    payer: "Tomás Rivera",
+    ref: "user_77be",
+    address: "0xF2a8…0b4D",
+    amount: "420.00",
+    currency: "USDT",
+    chain: "Tron",
+  },
+  {
+    payer: "Globex LLC",
+    ref: "org_5e3f",
+    address: "0x0C4e…bD12",
+    amount: "5,000.00",
+    currency: "USDC",
+    chain: "Ethereum",
+  },
+  {
+    payer: "Priya Nair",
+    ref: "user_b18c",
+    address: "0x8d3A…4E7f",
+    amount: "60.00",
+    currency: "AUSD",
+  },
+  {
+    payer: "Sam Okafor",
+    ref: "user_e4f0",
+    address: "0x2B9f…C6a1",
+    amount: "980.00",
+    currency: "USDC",
+    chain: "Solana",
+  },
+];
 
 const TOTAL_MS = PERIOD_MS * DEPOSITS.length;
 
@@ -86,9 +167,9 @@ export function DepositLedger() {
           </p>
         </div>
 
-        <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1fr)] px-6 pt-3 pb-1 text-[11px] font-medium tracking-[0.12em] text-gum-grey uppercase">
+        <div className="grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_minmax(0,1.15fr)_minmax(0,0.75fr)] px-6 pt-3 pb-1 text-[11px] font-medium tracking-[0.12em] text-gum-grey uppercase">
           <span>Payer</span>
-          <span>One-time address</span>
+          <span>Deposit address</span>
           <span className="text-right">Amount</span>
           <span className="text-right">Status</span>
         </div>
@@ -98,7 +179,7 @@ export function DepositLedger() {
             <li
               key={row.key}
               className={cn(
-                "absolute inset-x-0 top-0 grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1fr)] items-center border-t border-gum-grey/20 px-6 text-[14px]",
+                "absolute inset-x-0 top-0 grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_minmax(0,1.15fr)_minmax(0,0.75fr)] items-center border-t border-gum-grey/20 px-6 text-[14px]",
                 "transition-transform duration-[480ms] ease-[cubic-bezier(0.16,1,0.3,1)]",
               )}
               style={
@@ -120,7 +201,15 @@ export function DepositLedger() {
                 </span>
               </span>
               <span className="font-mono text-[13px]">{row.deposit.address}</span>
-              <span className="tabular text-right font-medium">{row.deposit.amount}</span>
+              <span className="flex items-center justify-end gap-2.5">
+                <CurrencyMark currency={row.deposit.currency} chain={row.deposit.chain} />
+                <span className="tabular font-medium">
+                  {row.deposit.amount}{" "}
+                  <span className="text-[12px] font-normal text-gum-grey">
+                    {row.deposit.currency}
+                  </span>
+                </span>
+              </span>
               <span className="flex justify-end">
                 {row.settled ? (
                   <span
@@ -144,5 +233,31 @@ export function DepositLedger() {
         </ol>
       </Stage>
     </div>
+  );
+}
+
+/** A currency's mark, with the chain it arrived on tucked into its corner. */
+function CurrencyMark({ currency, chain }: { currency: Currency; chain?: Chain | undefined }) {
+  return (
+    <span className="relative size-7 shrink-0">
+      <Image
+        src={CURRENCIES[currency]}
+        width={64}
+        height={64}
+        alt={currency}
+        className="size-7 rounded-full"
+      />
+      {chain ? (
+        <span className="absolute -right-1 -bottom-1 flex size-4 items-center justify-center rounded-full bg-gum-white p-[2px] ring-1 ring-gum-grey/30">
+          <Image
+            src={CHAINS[chain]}
+            width={32}
+            height={32}
+            alt={`on ${chain}`}
+            className="size-full rounded-full object-contain"
+          />
+        </span>
+      ) : null}
+    </span>
   );
 }

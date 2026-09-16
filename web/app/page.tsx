@@ -136,11 +136,11 @@ export default function Home() {
         {/* Bring your own checkout */}
         <Reveal aria-label="Checkouts" className="border-b border-gum-grey/30">
           <div data-reveal="wipe" className="bg-gum-pink text-gum-white">
-            <div className="grid items-stretch gap-8 px-5 py-8 sm:px-8 lg:grid-cols-[minmax(0,1fr)_350px_auto] lg:gap-10 lg:py-0 lg:pr-8">
+            <div className="grid items-stretch gap-8 px-5 py-8 sm:px-8 lg:grid-cols-[minmax(0,1fr)_350px_auto] lg:gap-0 lg:py-0 lg:pr-0">
               <p
                 data-reveal=""
                 style={step(1)}
-                className="self-center text-[clamp(22px,1.8vw,26px)] leading-[1.35] font-medium tracking-[-0.02em] lg:py-11"
+                className="self-center text-[clamp(22px,1.8vw,26px)] leading-[1.35] font-medium tracking-[-0.02em] lg:py-11 lg:pr-10"
               >
                 Bring your own checkout.
                 <br />

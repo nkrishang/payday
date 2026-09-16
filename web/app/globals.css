@@ -363,7 +363,7 @@
 }
 
 .landing-chain[data-active] {
-  background-color: rgb(255 92 168 / 0.12);
+  background-color: #ff5ca8;
   transition-duration: 180ms;
 }
 
