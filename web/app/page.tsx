@@ -24,8 +24,7 @@ const SUPPORT_EMAIL = "support@gum.money";
 
 /**
  * The landing page. One ruled column; the hero is the route a deposit
- * takes, under the headline, then two numbered chapters between two pink
- * bands. The whole thing is
+ * takes, under the headline, then two numbered chapters, then a pink close. The whole thing is
  * about one idea: an address that belongs to one deposit, so the deposit
  * sticks to whoever made it. A pink line down the left rule follows the
  * reader through it.
@@ -106,24 +105,6 @@ export default function Home() {
               <Router />
             </Reveal>
           </section>
-
-          {/* The idea, in one breath */}
-          <Reveal aria-label="One address per deposit" className="border-b border-gum-grey/30">
-            <div
-              data-reveal="wipe"
-              className="bg-gum-pink px-5 py-12 text-gum-white sm:px-10 lg:py-16"
-            >
-              <p
-                data-reveal=""
-                style={step(1)}
-                className="text-[clamp(30px,4.2vw,60px)] leading-[1.08] font-medium tracking-[-0.045em]"
-              >
-                One address per deposit.
-                <br />
-                One webhook when it lands.
-              </p>
-            </div>
-          </Reveal>
 
           <Chapter
             number="01"
@@ -281,7 +262,7 @@ function Chapter({
       >
         {number}
       </span>
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-end lg:gap-16">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start lg:gap-16">
         <h2
           id={id}
           data-reveal=""

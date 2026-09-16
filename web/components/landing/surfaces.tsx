@@ -27,23 +27,6 @@ deposit.hosted_url   // "https://gum.money/pay/${REQUEST_ID}"`;
 export function Surfaces() {
   return (
     <div>
-      <p
-        data-reveal=""
-        style={{ "--i": 2 } as CSSProperties}
-        className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[12.5px] text-gum-grey"
-      >
-        <span className="rounded-[6px] border border-gum-grey/30 px-2 py-1 text-gum-black">
-          {REQUEST_ID}
-        </span>
-        <span>250.00 USDC</span>
-        <span>·</span>
-        <span>{ADDRESS}</span>
-        <span>·</span>
-        <span>
-          expires in <Countdown />
-        </span>
-      </p>
-
       <div className="grid items-start gap-6 lg:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)] lg:gap-8">
         <Surface index={3} label="Hosted" note="gum.money/pay/…">
           <Phone />

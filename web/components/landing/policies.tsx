@@ -1,6 +1,7 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { CHAINS, LogoGrid } from "./chain-grid";
 import { Countdown } from "./countdown";
 
 /**
@@ -14,10 +15,10 @@ export function Policies() {
       <Cell
         index={0}
         title="Who can fund it"
-        body="Anyone with the link, a verified email, or a user signed in to your app."
+        body="Permissionless, a verified email, or a user signed in to your app."
       >
         <ul className="grid gap-1.5 text-[13px]">
-          <Option>Anyone with the link</Option>
+          <Option>Permissionless</Option>
           <Option>
             A verified email <span className="font-mono text-gum-grey">jordan@acme.co</span>
           </Option>
@@ -30,32 +31,26 @@ export function Policies() {
       <Cell
         index={1}
         title="When it expires"
-        body="Set the window. When it closes, the address closes with it."
+        body="Control the time window in which the address accepts deposits."
       >
         <p className="text-[44px] leading-none font-semibold tracking-tight">
           <Countdown />
         </p>
-        <p className="mt-2 text-[12px] text-gum-grey">then nothing lands here again</p>
       </Cell>
 
       <Cell
         index={2}
         title="Where it settles"
-        body="Your wallet, on Monad, Base or Arbitrum. Paid on one chain, settled on another."
+        body="Let users pay on any chain. Settle funds on the chain you want."
       >
-        <ul className="flex flex-wrap gap-2">
-          <Chip src="/payment-icons/monad.svg">Monad</Chip>
-          <Chip src="/logos/base.svg" selected>
-            Base
-          </Chip>
-          <Chip src="/logos/arbitrum.svg">Arbitrum</Chip>
-        </ul>
-        <p className="mt-3 font-mono text-[13px]">
-          → 0x3C44…93BC <span className="font-sans text-gum-grey">your wallet</span>
-        </p>
+        <LogoGrid logos={CHAINS} columns={5} label="Chains" className="grid-rows-2" />
       </Cell>
 
-      <Cell index={3} title="What it accepts" body="USDC, USDT or AUSD. One currency per request.">
+      <Cell
+        index={3}
+        title="What it accepts"
+        body="Accept deposits in the right currency for your app."
+      >
         <ul className="flex items-center gap-3">
           {(
             [
@@ -120,28 +115,6 @@ function Option({ selected, children }: { selected?: boolean; children: ReactNod
         )}
       />
       <span className="flex flex-wrap gap-x-1.5">{children}</span>
-    </li>
-  );
-}
-
-function Chip({
-  src,
-  selected,
-  children,
-}: {
-  src: string;
-  selected?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <li
-      className={cn(
-        "flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] font-medium",
-        selected ? "border-gum-pink bg-gum-pink text-gum-white" : "border-gum-grey/30",
-      )}
-    >
-      <Image src={src} width={32} height={32} alt="" className="size-4" />
-      {children}
     </li>
   );
 }
