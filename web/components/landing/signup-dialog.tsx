@@ -271,7 +271,7 @@ export function GetStarted({
     <Dialog.Root open={open} onOpenChange={openChange}>
       <Dialog.Trigger
         className={cn(
-          "flex h-12 items-center justify-center gap-3 rounded-[6px] px-5 text-[16px] font-medium transition-colors",
+          "flex h-11 items-center justify-center gap-2.5 rounded-[6px] px-4 text-[15px] font-medium whitespace-nowrap transition-colors sm:h-12 sm:gap-3 sm:px-5 sm:text-[16px]",
           tone === "black"
             ? "bg-gum-black text-gum-white hover:bg-gum-black/85"
             : "bg-gum-white text-gum-black hover:bg-gum-white/90",

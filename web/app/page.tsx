@@ -34,7 +34,7 @@ export default function Home() {
     <MerchantAuth>
       <div className="landing flex min-h-screen flex-col bg-gum-white text-gum-black">
         <header className="landing-reveal border-b border-gum-grey/30">
-          <nav className="mx-auto flex h-[72px] max-w-[1360px] items-center justify-between px-5 sm:h-[76px] sm:px-10">
+          <nav className="mx-auto flex h-[60px] max-w-[1360px] items-center justify-between px-4 sm:h-[76px] sm:px-10">
             <Link href="/" aria-label="Gum" className="rounded-[4px]">
               <Image
                 src="/gum/logo.png"
@@ -43,11 +43,11 @@ export default function Home() {
                 priority
                 sizes="100px"
                 alt="Gum"
-                className="h-auto w-[86px] sm:w-[96px]"
+                className="h-auto w-[70px] sm:w-[96px]"
               />
             </Link>
 
-            <div className="flex items-center gap-6 text-[16px] text-gum-grey sm:gap-8">
+            <div className="flex items-center gap-4 text-[14px] text-gum-grey sm:gap-8 sm:text-[16px]">
               <PricingDialog appearance="light" />
               <Link href="/docs" className="transition-colors hover:text-gum-black">
                 Docs
@@ -64,29 +64,29 @@ export default function Home() {
           />
 
           {/* The hero */}
-          <section className="border-b border-gum-grey/30 px-5 pt-12 pb-12 sm:px-10 lg:pt-20 lg:pb-16">
+          <section className="border-b border-gum-grey/30 px-4 pt-10 pb-10 sm:px-10 lg:pt-20 lg:pb-16">
             <div className="mx-auto flex max-w-[820px] flex-col items-center text-center">
               <p
-                className="landing-reveal text-[12px] font-medium tracking-[0.16em] text-gum-grey uppercase"
+                className="landing-reveal text-[10.5px] font-medium tracking-[0.14em] text-gum-grey uppercase sm:text-[12px] sm:tracking-[0.16em]"
                 style={delay(0)}
               >
                 Stablecoin deposits for your app
               </p>
-              <h1 className="mt-5 text-[clamp(46px,6.2vw,88px)] leading-[0.98] font-medium tracking-[-0.055em]">
+              <h1 className="mt-4 text-[clamp(32px,8.8vw,88px)] leading-[0.98] font-medium tracking-[-0.055em] whitespace-nowrap sm:mt-5">
                 <Words from={1}>Deposits that</Words>{" "}
                 <span className="landing-stick" style={delay(4)}>
                   <span className="text-gum-pink">stick</span>.
                 </span>
               </h1>
               <p
-                className="landing-reveal mt-7 max-w-[680px] text-[clamp(16px,1.35vw,20px)] leading-[1.5] text-pretty text-gum-grey"
+                className="landing-reveal mt-5 max-w-[680px] text-[15px] leading-[1.5] text-pretty text-gum-grey sm:mt-7 sm:text-[clamp(16px,1.35vw,20px)]"
                 style={delay(6)}
               >
                 Create a <Pink>unique programmable address</Pink> for <Pink>every deposit</Pink>.
                 Control who can fund it and where it settles. Let your users pay from any source.
               </p>
               <div
-                className="landing-reveal mt-8 flex flex-wrap items-center justify-center gap-3"
+                className="landing-reveal mt-7 flex items-center justify-center gap-2.5 sm:mt-8 sm:gap-3"
                 style={delay(7)}
               >
                 <GetStarted />
@@ -172,20 +172,20 @@ export default function Home() {
         </main>
 
         <footer className="bg-gum-black text-gum-white">
-          <div className="mx-auto flex max-w-[1360px] flex-col gap-4 px-5 py-5 sm:h-[64px] sm:flex-row sm:items-center sm:justify-between sm:px-10 sm:py-0">
+          <div className="mx-auto flex h-[56px] max-w-[1360px] items-center justify-between gap-3 px-4 sm:h-[64px] sm:px-10">
             <Image
               src="/gum/logo-on-dark.png"
               width={1279}
               height={465}
               sizes="90px"
               alt="Gum"
-              className="h-auto w-[86px]"
+              className="h-auto w-[62px] shrink-0 sm:w-[86px]"
             />
 
-            <div className="flex items-center gap-4">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-4">
               <a
                 href={`mailto:${SUPPORT_EMAIL}`}
-                className="mr-2 text-[15px] text-gum-pink transition-colors hover:text-gum-white"
+                className="truncate text-[13px] text-gum-pink transition-colors hover:text-gum-white sm:mr-2 sm:text-[15px]"
               >
                 {SUPPORT_EMAIL}
               </a>
@@ -204,7 +204,7 @@ export default function Home() {
 }
 
 const secondary =
-  "flex h-12 items-center justify-center gap-2.5 rounded-[6px] border border-gum-black px-5 text-[16px] font-medium text-gum-black transition-colors hover:bg-gum-black/[0.05]";
+  "flex h-11 items-center justify-center gap-2 rounded-[6px] border border-gum-black px-4 text-[15px] font-medium whitespace-nowrap text-gum-black transition-colors hover:bg-gum-black/[0.05] sm:h-12 sm:gap-2.5 sm:px-5 sm:text-[16px]";
 
 /** The load-time stagger of one thing in the hero, in steps of 90ms. */
 function delay(index: number): CSSProperties {
@@ -292,7 +292,7 @@ function SocialLink({ label, children }: { label: string; children: ReactNode })
       target="_blank"
       rel="noopener noreferrer"
       aria-label={label}
-      className="flex size-8 items-center justify-center rounded-[6px] text-gum-white transition-colors hover:text-gum-pink [&>svg]:size-[18px]"
+      className="flex size-7 shrink-0 items-center justify-center rounded-[6px] text-gum-white transition-colors hover:text-gum-pink sm:size-8 [&>svg]:size-[16px] sm:[&>svg]:size-[18px]"
     >
       {children}
     </a>
