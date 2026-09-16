@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useRef, type CSSProperties } from "react";
 import { cn } from "@/lib/cn";
+import { Highlighted } from "./hero-scenes";
 import { Stage, useInView, useLoopClock, useReducedMotion } from "./stage";
 
 /**
@@ -148,12 +149,18 @@ export function DepositLedger() {
     return { key, position, deposit: DEPOSITS[key]!, settled: age >= SETTLE_MS };
   });
 
+  // The webhook on the right is for the newest deposit that has settled.
+  const delivered = rows.find((row) => row.settled)!;
+
   return (
-    <div ref={frameRef}>
+    <div
+      ref={frameRef}
+      className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,600fr)_minmax(0,400fr)]"
+    >
       <Stage
         width={STAGE.width}
         height={STAGE.height}
-        label="A merchant's ledger of deposits: each request has its own one-time address, and settles on its own."
+        label="A merchant's ledger of deposits: each request has its own deposit address, and settles on its own."
         className="rounded-[18px] border border-gum-grey/30 bg-gum-white text-gum-black"
       >
         <div className="flex items-center justify-between border-b border-gum-grey/30 px-6 py-4">
@@ -232,8 +239,48 @@ export function DepositLedger() {
           ))}
         </ol>
       </Stage>
+
+      <Stage
+        width={400}
+        height={STAGE.height}
+        label="The webhook Gum sends when a deposit settles, one per deposit."
+        className="rounded-[18px] bg-gum-black text-gum-white"
+      >
+        <div className="flex h-full flex-col p-4">
+          <div className="flex items-center gap-2 font-mono text-[12px]">
+            <span className="rounded-[5px] bg-gum-pink px-1.5 py-0.5 text-[11px] font-semibold">
+              POST
+            </span>
+            <span className="truncate text-gum-white/85">acme.app/gum/webhook</span>
+          </div>
+          <pre
+            key={delivered.key}
+            className="landing-scene-step mt-4 min-h-0 flex-1 overflow-hidden font-mono text-[13px] leading-[1.6] tracking-[-0.02em] text-gum-white/85"
+          >
+            <Highlighted code={eventFor(delivered.deposit)} />
+          </pre>
+          <p className="flex items-center gap-2 border-t border-gum-white/[0.08] pt-3 font-mono text-[12px] text-gum-white/55">
+            <span className="size-2 rounded-full bg-gum-pink" />
+            <span className="text-gum-pink">200 OK</span> · delivered once, signed
+          </p>
+        </div>
+      </Stage>
     </div>
   );
+}
+
+/** The settled event for one deposit, as the handler sees it. */
+function eventFor(deposit: (typeof DEPOSITS)[number]): string {
+  return `{
+  "type": "deposit_request.settled",
+  "data": {
+    "payer_reference": "${deposit.ref}",
+    "address": "${deposit.address}",
+    "amount": "${deposit.amount.replace(",", "")}",
+    "currency": "${deposit.currency}",${deposit.chain ? `\n    "chain": "${deposit.chain.toLowerCase()}",` : ""}
+    "settled_at": "2026-09-16T14:20:31Z"
+  }
+}`;
 }
 
 /** A currency's mark, with the chain it arrived on tucked into its corner. */
