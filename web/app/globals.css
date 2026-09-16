@@ -25,11 +25,13 @@
   --color-brand-white: #f6f2ea;
   --color-brand-grey: #94938d;
   --color-brand-subtle: #504b4b;
-  /* Gum's four colours: the whole landing page's palette. */
+  /* Gum's four colours: the whole landing page's palette. The grey is the
+     lightest that clears 4.5:1 on the white, for the body copy; dim text on
+     the black stages is the white at alpha instead. */
   --color-gum-white: #f7f7f5;
   --color-gum-pink: #ff5ca8;
   --color-gum-black: #121212;
-  --color-gum-grey: #868585;
+  --color-gum-grey: #6f6e6e;
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-body: var(--font-albert), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -345,7 +347,7 @@
 }
 
 .landing-chain-halftone {
-  background: radial-gradient(circle, #868585 0.95px, transparent 1.15px) 0 0 / 2.5px 2.5px;
+  background: radial-gradient(circle, #6f6e6e 0.95px, transparent 1.15px) 0 0 / 2.5px 2.5px;
   -webkit-mask: var(--logo) center / contain no-repeat;
   mask: var(--logo) center / contain no-repeat;
   -webkit-mask-mode: alpha;

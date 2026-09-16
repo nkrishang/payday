@@ -64,14 +64,14 @@ export function EmbedModes() {
                   aria-selected={index === mode}
                   className={cn(
                     "relative z-10 px-5 py-1.5 text-center transition-colors duration-300",
-                    index === mode ? "text-gum-black" : "text-gum-grey",
+                    index === mode ? "text-gum-black" : "text-gum-white/55",
                   )}
                 >
                   {label}
                 </span>
               ))}
             </div>
-            <p className="font-mono text-[12px] text-gum-grey">
+            <p className="font-mono text-[12px] text-gum-white/55">
               {mode === 0 ? "gum.money/pay/dr_0198f80c…" : "server.ts"}
             </p>
           </div>

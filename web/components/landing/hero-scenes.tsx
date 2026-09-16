@@ -252,10 +252,10 @@ function Chapters({ t, chapter }: { t: number; chapter: number }) {
             <span
               className={cn(
                 "mt-2 block truncate text-[12px] font-medium transition-colors duration-300",
-                index === chapter ? "text-gum-white" : "text-gum-grey",
+                index === chapter ? "text-gum-white" : "text-gum-white/55",
               )}
             >
-              <span className="tabular mr-1.5 text-gum-grey">0{index + 1}</span>
+              <span className="tabular mr-1.5 text-gum-white/55">0{index + 1}</span>
               {entry.title}
             </span>
           </li>
@@ -381,7 +381,7 @@ export function Editor({
           <span className="size-2.5 rounded-full bg-gum-white/15" />
         </span>
         <span className="text-gum-white">{file}</span>
-        <span className="ml-auto text-gum-grey">your backend</span>
+        <span className="ml-auto text-gum-white/55">your backend</span>
       </div>
       <pre className="min-h-0 flex-1 overflow-hidden px-5 py-4 font-mono text-[14px] leading-[1.6] tracking-[-0.02em] text-gum-white/85">
         {children}
@@ -409,15 +409,15 @@ function CreateCall({ t }: { t: number }) {
               201 Created
             </span>
             <span className="truncate text-gum-white/85">
-              dr_0198f80c…f700 <span className="text-gum-grey">·</span> awaiting_deposit
+              dr_0198f80c…f700 <span className="text-gum-white/55">·</span> awaiting_deposit
             </span>
           </span>
         ) : (
-          <span className="text-gum-grey">{t >= AT.toCall ? "…" : ""}</span>
+          <span className="text-gum-white/55">{t >= AT.toCall ? "…" : ""}</span>
         )
       }
     >
-      <span className="block text-gum-grey">{CREATE_COMMENT}</span>
+      <span className="block text-gum-white/55">{CREATE_COMMENT}</span>
       {code ? <Highlighted code={code} /> : null}
       {typing || !code ? <Caret /> : null}
     </Editor>
@@ -441,12 +441,12 @@ function WebhookHandler({ t }: { t: number }) {
                 POST
               </span>
               <span className="truncate">
-                /gum/webhook <span className="text-gum-grey">·</span>{" "}
+                /gum/webhook <span className="text-gum-white/55">·</span>{" "}
                 <span className="text-gum-pink">deposit_request.settled</span>
               </span>
             </span>
           ) : (
-            <span className="text-gum-grey">listening on :3000</span>
+            <span className="text-gum-white/55">listening on :3000</span>
           )}
           {responded ? (
             <span className="landing-scene-line ml-auto flex shrink-0 items-center gap-2 text-gum-pink">
@@ -502,7 +502,7 @@ export function Highlighted({ code }: { code: string }) {
       );
     } else if (punctuation) {
       parts.push(
-        <span key={key} className="text-gum-grey">
+        <span key={key} className="text-gum-white/55">
           {text}
         </span>,
       );
