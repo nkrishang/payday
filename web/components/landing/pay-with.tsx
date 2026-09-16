@@ -10,7 +10,7 @@ import { cn } from "@/lib/cn";
  * pops in, holds, pops out, and the next pops in. Each rides a white pill,
  * so a black mark reads on the black button as well as a coloured one.
  */
-const PROVIDERS = [
+export const PROVIDERS = [
   { name: "Coinbase", src: "/logos/coinbase.svg" },
   { name: "MetaMask", src: "/logos/metamask.svg" },
   { name: "Binance", src: "/logos/binance.svg" },
@@ -38,7 +38,8 @@ const PROVIDERS = [
 const HOLD_MS = 1_100;
 const LEAVE_MS = 140;
 
-export function PayWith() {
+/** Which provider is on the button now, and whether it is on its way out. */
+export function useProviderCycle(): { index: number; leaving: boolean } {
   const [index, setIndex] = useState(0);
   const [leaving, setLeaving] = useState(false);
 
@@ -54,6 +55,10 @@ export function PayWith() {
     };
   }, [index]);
 
+  return { index, leaving };
+}
+
+export function PayWith({ index, leaving }: { index: number; leaving: boolean }) {
   const provider = PROVIDERS[index] ?? PROVIDERS[0];
 
   return (

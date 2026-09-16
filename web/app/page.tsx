@@ -3,7 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import type { CSSProperties, ReactNode } from "react";
 import { ChainGrid } from "@/components/landing/chain-grid";
-import { CheckoutCard } from "@/components/landing/checkout-card";
+import { CheckoutScene } from "@/components/landing/checkout-card";
 import { DepositLedger } from "@/components/landing/deposit-ledger";
 import { EmbedModes } from "@/components/landing/embed-modes";
 import { HeroScenes } from "@/components/landing/hero-scenes";
@@ -60,21 +60,21 @@ export default function Home() {
         {/* The hero */}
         <section className="grid items-center gap-12 border-b border-gum-grey/30 px-5 pt-12 pb-14 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,600px)] lg:gap-10 lg:py-20">
           <div>
-            <h1 className="landing-reveal text-[clamp(36px,3.6vw,52px)] leading-[1.14] font-medium tracking-[-0.035em]">
+            <h1 className="landing-reveal text-[clamp(36px,3.6vw,52px)] leading-[1.12] font-medium tracking-[-0.055em]">
               Accept stablecoin deposits
               <br className="hidden lg:block" /> into your app.
             </h1>
-            <p className="landing-reveal landing-delay-1 mt-7 max-w-[640px] text-[clamp(17px,1.55vw,22px)] leading-[1.5] text-gum-grey">
+            <p className="landing-reveal landing-delay-1 mt-6 max-w-[600px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-gum-grey">
               Create a <Pink>unique programmable address</Pink> for <Pink>every deposit</Pink>.
               Control who can fund it, when it expires and where it settles.
             </p>
-            <div className="landing-reveal landing-delay-2 mt-11 flex flex-wrap items-center gap-3">
+            <div className="landing-reveal landing-delay-2 mt-10 flex flex-wrap items-center gap-3">
               <MerchantAuth>
                 <GetStarted />
               </MerchantAuth>
               <Link
                 href="/docs"
-                className="flex h-14 items-center justify-center gap-2.5 rounded-[6px] border border-gum-black px-6 text-[17px] font-medium text-gum-black transition-colors hover:bg-gum-black/[0.05]"
+                className="flex h-12 items-center justify-center gap-2.5 rounded-[6px] border border-gum-black px-5 text-[16px] font-medium text-gum-black transition-colors hover:bg-gum-black/[0.05]"
               >
                 <BookIcon />
                 Developers
@@ -106,7 +106,7 @@ export default function Home() {
               Settle funds where you want.
             </p>
           </div>
-          <div className="min-w-0 bg-gum-grey/[0.06] pl-3 sm:pl-4">
+          <div className="min-w-0 border-t border-gum-grey/30 lg:border-t-0 lg:border-l">
             <ChainGrid />
           </div>
         </Reveal>
@@ -120,7 +120,7 @@ export default function Home() {
             <h2 id="unique-address" data-reveal="" className={sectionTitle}>
               A unique address for every
               <br />
-              <s className="text-gum-pink decoration-[3px]">user</s>{" "}
+              <s className="decoration-gum-pink decoration-[3px]">user</s>{" "}
               <span className="text-gum-pink">deposit</span>.
             </h2>
             <p data-reveal="" style={step(1)} className={sectionBody}>
@@ -136,19 +136,17 @@ export default function Home() {
         {/* Bring your own checkout */}
         <Reveal aria-label="Checkouts" className="border-b border-gum-grey/30">
           <div data-reveal="wipe" className="bg-gum-pink text-gum-white">
-            <div className="grid items-stretch gap-8 px-5 py-8 sm:px-8 lg:grid-cols-[minmax(0,1fr)_350px] lg:gap-10 lg:py-0 lg:pr-[160px]">
+            <div className="grid items-stretch gap-8 px-5 py-8 sm:px-8 lg:grid-cols-[minmax(0,1fr)_350px_auto] lg:gap-10 lg:py-0 lg:pr-8">
               <p
                 data-reveal=""
                 style={step(1)}
-                className="self-center text-[clamp(24px,2.2vw,30px)] leading-[1.35] font-medium tracking-[-0.02em] lg:py-11"
+                className="self-center text-[clamp(22px,1.8vw,26px)] leading-[1.35] font-medium tracking-[-0.02em] lg:py-11"
               >
                 Bring your own checkout.
                 <br />
                 Gum works with any payment solution.
               </p>
-              <div data-reveal="scale" style={step(2)} className="max-w-[350px]">
-                <CheckoutCard />
-              </div>
+              <CheckoutScene />
             </div>
           </div>
         </Reveal>

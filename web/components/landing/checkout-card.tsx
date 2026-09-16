@@ -1,17 +1,42 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useState } from "react";
-import { PayWith } from "./pay-with";
+import { useEffect, useState, type CSSProperties } from "react";
+import { LogoGrid } from "./chain-grid";
+import { PayWith, PROVIDERS, useProviderCycle } from "./pay-with";
 
 /**
  * A deposit as a checkout that could be anyone's shows it: the amount, the
  * one-time address it settles to, a clock, and a pay button whose provider
- * keeps changing. Gum is none of the chrome; it is the address.
+ * keeps changing. Beside it, on a wide enough screen, every provider the
+ * button will name, with the current one lit. Gum is none of the chrome; it
+ * is the address.
  */
 const EXPIRES_FROM_S = 59 * 60 + 52;
 
-export function CheckoutCard() {
+export function CheckoutScene() {
+  const { index, leaving } = useProviderCycle();
+  const active = PROVIDERS[index]?.name;
+
+  return (
+    <>
+      <div data-reveal="scale" style={{ "--i": 2 } as CSSProperties} className="max-w-[350px]">
+        <CheckoutCard index={index} leaving={leaving} />
+      </div>
+      <div className="hidden w-[378px] lg:block">
+        <LogoGrid
+          logos={PROVIDERS}
+          columns={7}
+          active={active}
+          label="Checkouts, wallets, exchanges and on-ramps"
+          className="h-full grid-rows-3 border-0"
+        />
+      </div>
+    </>
+  );
+}
+
+function CheckoutCard({ index, leaving }: { index: number; leaving: boolean }) {
   const [seconds, setSeconds] = useState(EXPIRES_FROM_S);
 
   useEffect(() => {
@@ -48,7 +73,7 @@ export function CheckoutCard() {
         <span className="font-mono">0x9a3F…A0c2</span>
       </div>
       <div className="mt-3.5">
-        <PayWith />
+        <PayWith index={index} leaving={leaving} />
       </div>
     </div>
   );

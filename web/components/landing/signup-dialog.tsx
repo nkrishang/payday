@@ -262,7 +262,7 @@ export function GetStarted() {
 
   return (
     <Dialog.Root open={open} onOpenChange={openChange}>
-      <Dialog.Trigger className="flex h-14 items-center justify-center gap-3 rounded-[8px] bg-gum-black px-6 text-[17px] font-medium text-gum-white transition-colors hover:bg-gum-black/85">
+      <Dialog.Trigger className="flex h-12 items-center justify-center gap-3 rounded-[6px] bg-gum-black px-5 text-[16px] font-medium text-gum-white transition-colors hover:bg-gum-black/85">
         Get Started
         <ArrowRight />
       </Dialog.Trigger>

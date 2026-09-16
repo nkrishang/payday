@@ -6,8 +6,8 @@ import { Stage, useInView, useLoopClock, useReducedMotion } from "./stage";
 
 /**
  * A merchant's ledger of deposits, one row per deposit request. Every few
- * seconds a new one arrives at the top with its own address, waits for its
- * payer, and settles; the rows below make room. Each row is a pure function
+ * seconds a new one slides in at the top with its own address, waits for
+ * its payer, and settles; the rows below move down to make room. Each row is a pure function
  * of the clock: which deposits are showing, how far down each sits, and
  * whether it has settled all follow from `t`, so the picture is the same
  * whether it has been running for a second or an hour.
@@ -20,7 +20,7 @@ const PERIOD_MS = 3_200;
 const SETTLE_MS = 1_800;
 
 const ROW_HEIGHT = 62;
-/** Rows showing at once; one more is drawn sliding out below the fold. */
+/** Rows showing at once; one more waits above the fold and one slides out below it. */
 const ROWS = 4;
 
 const DEPOSITS = [
@@ -52,13 +52,19 @@ export function DepositLedger() {
   // Without motion, hold a moment with one deposit still waiting.
   const t = useLoopClock(TOTAL_MS, reduced ? PERIOD_MS * 3 + 600 : null, inView);
 
-  // The newest deposit's number; the rows are it and the ones before it.
+  // The newest deposit's number; the rows are it, the ones before it, and
+  // the one after it, waiting above the fold so its arrival is a slide down
+  // like everyone else's rather than an appearance. Six rows show at once
+  // and the pool holds eight, so a number's place in the pool is a key that
+  // stays unique and, at the wrap, lets the clock's reset pass as one more
+  // period.
   const newest = Math.floor(t / PERIOD_MS);
-  const rows = Array.from({ length: ROWS + 1 }, (_, position) => {
+  const rows = Array.from({ length: ROWS + 2 }, (_, slot) => {
+    const position = slot - 1;
     const number = newest - position;
-    const deposit = DEPOSITS[((number % DEPOSITS.length) + DEPOSITS.length) % DEPOSITS.length]!;
+    const key = ((number % DEPOSITS.length) + DEPOSITS.length) % DEPOSITS.length;
     const age = t - number * PERIOD_MS;
-    return { key: number, position, deposit, settled: age >= SETTLE_MS };
+    return { key, position, deposit: DEPOSITS[key]!, settled: age >= SETTLE_MS };
   });
 
   return (
@@ -93,8 +99,7 @@ export function DepositLedger() {
               key={row.key}
               className={cn(
                 "absolute inset-x-0 top-0 grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1fr)] items-center border-t border-gum-grey/20 px-6 text-[14px]",
-                "transition-transform duration-[420ms] ease-[cubic-bezier(0.16,1,0.3,1)]",
-                row.position === 0 && "landing-row-in",
+                "transition-transform duration-[480ms] ease-[cubic-bezier(0.16,1,0.3,1)]",
               )}
               style={
                 {

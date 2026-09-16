@@ -1,13 +1,61 @@
 import Image from "next/image";
 import type { CSSProperties } from "react";
+import { cn } from "@/lib/cn";
 
 /**
- * The chains a deposit can arrive from and settle on, as a tray of tiles
- * sliding past. Each tile holds the chain's mark as a grey halftone until the
- * pointer arrives, when it lights up in colour (the `.landing-chain` rules).
- * The strip is drawn twice so the slide never runs out; the second copy is
- * hidden from assistive technology, which reads the first one as a list.
+ * A grid of marks, each a grey halftone until the pointer arrives, when it
+ * lights up in colour (the `.landing-chain` rules). The grid fills whatever
+ * it is given: the tiles stretch, and the mark sits in the middle of each.
  */
+export function LogoGrid({
+  logos,
+  columns,
+  active,
+  label,
+  className,
+}: {
+  logos: readonly { name: string; src: string }[];
+  columns: number;
+  /** The one tile lit without the pointer, if any. */
+  active?: string | undefined;
+  label: string;
+  className?: string;
+}) {
+  return (
+    <ul
+      aria-label={label}
+      className={cn("grid gap-px border border-gum-grey/30 bg-gum-grey/30", className)}
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+    >
+      {logos.map((logo, index) => (
+        <li
+          key={logo.name}
+          title={logo.name}
+          data-reveal=""
+          data-active={logo.name === active || undefined}
+          style={{ "--i": index, "--step": "28ms" } as CSSProperties}
+          className="landing-chain relative min-h-[56px] bg-gum-white"
+        >
+          {/* The mark as a grey halftone, until it is lit. */}
+          <span
+            aria-hidden="true"
+            className="landing-chain-halftone"
+            style={{ "--logo": `url(${logo.src})` } as CSSProperties}
+          />
+          <Image
+            src={logo.src}
+            width={64}
+            height={64}
+            alt={logo.name}
+            className="landing-chain-logo"
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The chains a deposit can arrive from and settle on. */
 const CHAINS = [
   { name: "Ethereum", src: "/logos/ethereum.svg" },
   { name: "Solana", src: "/logos/solana.svg" },
@@ -23,41 +71,11 @@ const CHAINS = [
 
 export function ChainGrid() {
   return (
-    <div className="h-full w-full overflow-hidden [mask-image:linear-gradient(to_right,transparent,#000_5%,#000_95%,transparent)]">
-      <div className="landing-marquee items-center py-3">
-        {[0, 1].map((copy) => (
-          <ul
-            key={copy}
-            aria-hidden={copy === 1 || undefined}
-            aria-label={copy === 0 ? "Chains" : undefined}
-            className="mr-4 grid shrink-0 grid-flow-col grid-rows-2 gap-px border border-gum-grey/30 bg-gum-grey/30"
-          >
-            {CHAINS.map((chain, index) => (
-              <li
-                key={chain.name}
-                title={chain.name}
-                data-reveal=""
-                style={{ "--i": index, "--step": "28ms" } as CSSProperties}
-                className="landing-chain relative size-[60px] bg-gum-white sm:size-[66px]"
-              >
-                {/* The mark as a grey halftone, until the pointer arrives. */}
-                <span
-                  aria-hidden="true"
-                  className="landing-chain-halftone"
-                  style={{ "--logo": `url(${chain.src})` } as CSSProperties}
-                />
-                <Image
-                  src={chain.src}
-                  width={64}
-                  height={64}
-                  alt={chain.name}
-                  className="landing-chain-logo"
-                />
-              </li>
-            ))}
-          </ul>
-        ))}
-      </div>
-    </div>
+    <LogoGrid
+      logos={CHAINS}
+      columns={5}
+      label="Chains"
+      className="h-full grid-rows-2 border-0 max-lg:aspect-[5/2]"
+    />
   );
 }
