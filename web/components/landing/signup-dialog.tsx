@@ -97,7 +97,14 @@ function countdown(ms: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function GetStarted() {
+export function GetStarted({
+  label = "Get Started",
+  tone = "black",
+}: {
+  label?: string;
+  /** Black on the page's ground; white where it stands on pink. */
+  tone?: "black" | "white";
+} = {}) {
   const router = useRouter();
   const { authenticated } = usePrivy();
   const [open, setOpen] = useState(false);
@@ -262,8 +269,15 @@ export function GetStarted() {
 
   return (
     <Dialog.Root open={open} onOpenChange={openChange}>
-      <Dialog.Trigger className="flex h-12 items-center justify-center gap-3 rounded-[6px] bg-gum-black px-5 text-[16px] font-medium text-gum-white transition-colors hover:bg-gum-black/85">
-        Get Started
+      <Dialog.Trigger
+        className={cn(
+          "flex h-12 items-center justify-center gap-3 rounded-[6px] px-5 text-[16px] font-medium transition-colors",
+          tone === "black"
+            ? "bg-gum-black text-gum-white hover:bg-gum-black/85"
+            : "bg-gum-white text-gum-black hover:bg-gum-white/90",
+        )}
+      >
+        {label}
         <ArrowRight />
       </Dialog.Trigger>
 

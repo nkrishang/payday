@@ -637,9 +637,7 @@ test("the landing page renders and is indexable", async ({ page }) => {
   const errors = watchConsole(page);
   const response = await page.goto("/");
 
-  await expect(
-    page.getByRole("heading", { name: "Accept stablecoin deposits into your app." }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deposits that stick." })).toBeVisible();
   await expect(page.getByRole("button", { name: "Get Started" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Developers" })).toHaveAttribute("href", "/docs");
   await expect(page.getByRole("img", { name: "Gum" }).first()).toBeVisible();

@@ -633,6 +633,94 @@
 }
 
 /*
+ * The mark, filling up. A halftone of the gum mark with a solid copy over
+ * it, clipped away from the bottom; the clip lifts and the mark fills, on
+ * load in the hero and on arrival in the closing.
+ */
+.landing-mark-fill {
+  clip-path: inset(100% 0 0 0);
+}
+
+.landing-mark-fill[data-fill="load"] {
+  animation: landing-fill 1200ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
+}
+
+.landing [data-in="true"] .landing-mark-fill[data-fill="reveal"] {
+  animation: landing-fill 1200ms cubic-bezier(0.16, 1, 0.3, 1) 300ms both;
+}
+
+@keyframes landing-fill {
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* The last word of the headline lands late and squashes into place. */
+.landing-stick {
+  display: inline-block;
+  transform-origin: bottom left;
+  animation: landing-stick 640ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes landing-stick {
+  from {
+    opacity: 0;
+    transform: translateY(0.35em) scale(1.06, 0.82);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/*
+ * A pink line down the left rule, as far as the reader has scrolled. A
+ * browser without scroll-driven animations never shows it.
+ */
+.landing-progress {
+  transform: scaleY(0);
+  transform-origin: top;
+}
+
+@supports (animation-timeline: scroll()) {
+  .landing-progress {
+    animation: landing-progress linear both;
+    animation-timeline: scroll(root);
+  }
+}
+
+@keyframes landing-progress {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* A packet travelling along a connector, over and over. */
+.landing-packet {
+  animation: landing-packet 1400ms cubic-bezier(0.45, 0, 0.2, 1) infinite;
+}
+
+@keyframes landing-packet {
+  0% {
+    opacity: 0;
+    transform: translateX(0);
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(var(--travel));
+  }
+}
+
+/*
  * The rest of the app, in the landing page's clothes.
  *
  * Payday is a dark product on either colour scheme — the marketing page says

@@ -55,8 +55,8 @@ export function LogoGrid({
   );
 }
 
-/** The chains a deposit can arrive from and settle on. */
-const CHAINS = [
+/** The chains a deposit can arrive from. */
+export const CHAINS = [
   { name: "Ethereum", src: "/logos/ethereum.svg" },
   { name: "Solana", src: "/logos/solana.svg" },
   { name: "Monad", src: "/payment-icons/monad.svg" },

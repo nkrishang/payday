@@ -167,7 +167,7 @@ export function DepositLedger() {
           </p>
         </div>
 
-        <div className="grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_minmax(0,1.15fr)_minmax(0,0.75fr)] px-6 pt-3 pb-1 text-[11px] font-medium tracking-[0.12em] text-gum-grey uppercase">
+        <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.05fr)_minmax(0,1.15fr)_minmax(0,0.7fr)] px-6 pt-3 pb-1 text-[11px] font-medium tracking-[0.12em] text-gum-grey uppercase">
           <span>Payer</span>
           <span>Deposit address</span>
           <span>Amount</span>
@@ -179,7 +179,7 @@ export function DepositLedger() {
             <li
               key={row.key}
               className={cn(
-                "absolute inset-x-0 top-0 grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_minmax(0,1.15fr)_minmax(0,0.75fr)] items-center border-t border-gum-grey/20 px-6 text-[14px]",
+                "absolute inset-x-0 top-0 grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.05fr)_minmax(0,1.15fr)_minmax(0,0.7fr)] items-center border-t border-gum-grey/20 px-6 text-[14px]",
                 "transition-transform duration-[480ms] ease-[cubic-bezier(0.16,1,0.3,1)]",
               )}
               style={
