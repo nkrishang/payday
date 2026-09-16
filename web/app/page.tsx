@@ -33,7 +33,7 @@ export default function Home() {
   return (
     <MerchantAuth>
       <div className="landing flex min-h-screen flex-col bg-gum-white text-gum-black">
-        <header className="landing-reveal border-b border-gum-grey/30">
+        <header className="landing-reveal relative z-40 border-b border-gum-grey/30">
           <nav className="mx-auto flex h-[60px] max-w-[1360px] items-center justify-between px-4 sm:h-[76px] sm:px-10">
             <Link href="/" aria-label="Gum" className="rounded-[4px]">
               <Image

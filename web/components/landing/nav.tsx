@@ -51,7 +51,7 @@ export function ResourcesMenu() {
         <ul
           id={menuId}
           role="menu"
-          className="landing-dialog absolute top-full right-0 z-40 mt-3 w-[168px] rounded-[10px] border border-gum-grey/30 bg-gum-white p-1.5 text-[15px] text-gum-black shadow-[0_16px_40px_-20px_rgb(18_18_18/0.35)]"
+          className="landing-dialog absolute top-full right-0 z-50 mt-3 w-[172px] rounded-[10px] border border-gum-grey/30 bg-gum-white p-1.5 text-[15px] text-gum-black shadow-[0_18px_40px_-16px_rgb(18_18_18/0.35)]"
         >
           {RESOURCES.map((entry) => (
             <li key={entry.label} role="none">
