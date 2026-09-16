@@ -2,9 +2,6 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import type { CSSProperties, ReactNode } from "react";
-import { BackendScene } from "@/components/landing/backend-scene";
-import { DepositLedger } from "@/components/landing/deposit-ledger";
-import { GumHero } from "@/components/landing/gum-hero";
 import { GumMark } from "@/components/landing/gum-mark";
 import { RESOURCES } from "@/components/landing/links";
 import { ResourcesMenu } from "@/components/landing/nav";
@@ -26,8 +23,9 @@ export const metadata: Metadata = {
 const SUPPORT_EMAIL = "support@gum.money";
 
 /**
- * The landing page. One ruled column; the hero is a film at full width,
- * then four numbered chapters between two pink bands. The whole thing is
+ * The landing page. One ruled column; the hero is the route a deposit
+ * takes, under the headline, then two numbered chapters between two pink
+ * bands. The whole thing is
  * about one idea: an address that belongs to one deposit, so the deposit
  * sticks to whoever made it. A pink line down the left rule follows the
  * reader through it.
@@ -67,42 +65,51 @@ export default function Home() {
           />
 
           {/* The hero */}
-          <section className="grid items-center gap-8 border-b border-gum-grey/30 px-5 pt-10 pb-8 sm:px-10 lg:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)] lg:gap-6 lg:py-10">
-            <div>
-              <p
-                className="landing-reveal text-[12px] font-medium tracking-[0.16em] text-gum-grey uppercase"
-                style={delay(0)}
-              >
-                Stablecoin deposits for your app
-              </p>
-              <h1 className="mt-5 text-[clamp(46px,6.2vw,88px)] leading-[0.98] font-medium tracking-[-0.055em]">
-                <Words from={1}>Deposits that</Words>{" "}
-                <span className="landing-stick text-gum-pink" style={delay(4)}>
-                  stick.
-                </span>
-              </h1>
-              <p
-                className="landing-reveal mt-8 max-w-[560px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-pretty text-gum-grey"
-                style={delay(6)}
-              >
-                Gum mints an address for every deposit: who can fund it, when it expires, where it
-                settles. Your user pays from any wallet, exchange or chain. You get one webhook, and
-                a balance that&rsquo;s right.
-              </p>
-              <div
-                className="landing-reveal mt-9 flex flex-wrap items-center gap-3"
-                style={delay(7)}
-              >
-                <GetStarted />
-                <Link href="/docs" className={secondary}>
-                  <BookIcon />
-                  Developers
-                </Link>
+          <section className="border-b border-gum-grey/30 px-5 pt-12 pb-12 sm:px-10 lg:pt-20 lg:pb-16">
+            <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-end lg:gap-16">
+              <div>
+                <p
+                  className="landing-reveal text-[12px] font-medium tracking-[0.16em] text-gum-grey uppercase"
+                  style={delay(0)}
+                >
+                  Stablecoin deposits for your app
+                </p>
+                <h1 className="mt-5 text-[clamp(46px,6.2vw,88px)] leading-[0.98] font-medium tracking-[-0.055em]">
+                  <Words from={1}>Deposits that</Words>{" "}
+                  <span className="landing-stick text-gum-pink" style={delay(4)}>
+                    stick.
+                  </span>
+                </h1>
+              </div>
+              <div>
+                <p
+                  className="landing-reveal max-w-[560px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-pretty text-gum-grey"
+                  style={delay(6)}
+                >
+                  Gum mints an address for every deposit: who can fund it, when it expires, where it
+                  settles. Your user pays from any wallet, exchange or chain. You get one webhook,
+                  and a balance that&rsquo;s right.
+                </p>
+                <div
+                  className="landing-reveal mt-8 flex flex-wrap items-center gap-3"
+                  style={delay(7)}
+                >
+                  <GetStarted />
+                  <Link href="/docs" className={secondary}>
+                    <BookIcon />
+                    Developers
+                  </Link>
+                </div>
               </div>
             </div>
-            <div className="landing-reveal" style={delay(5)}>
-              <GumHero />
-            </div>
+
+            <Reveal
+              as="div"
+              className="landing-reveal mt-14 lg:mt-20"
+              aria-label="The route a deposit takes"
+            >
+              <Router />
+            </Reveal>
           </section>
 
           {/* The idea, in one breath */}
@@ -125,21 +132,6 @@ export default function Home() {
 
           <Chapter
             number="01"
-            id="route"
-            title={
-              <>
-                In from anywhere.
-                <br />
-                Out to your chain.
-              </>
-            }
-            body="Your user pays from the wallet or exchange they already use, on the chain their funds are on. Gum takes it at the deposit's own address and settles it to your wallet, on the chain you chose."
-          >
-            <Router />
-          </Chapter>
-
-          <Chapter
-            number="02"
             id="program"
             title={
               <>
@@ -152,45 +144,13 @@ export default function Home() {
           </Chapter>
 
           <Chapter
-            number="03"
-            id="backend"
-            title={
-              <>
-                Two files.
-                <br />
-                That&rsquo;s the integration.
-              </>
-            }
-            body="Create the request from your backend and get its id back. Handle one webhook when it settles. Everything in between, the address, the watching, the attribution, is Gum's."
-          >
-            <BackendScene />
-          </Chapter>
-
-          <Chapter
-            number="04"
-            id="books"
-            title={
-              <>
-                Every deposit,
-                <br />
-                on the books.
-              </>
-            }
-            body="Because each deposit has its own address, every one of them is its own record and its own webhook: payer, address, amount, chain. Nothing to reconcile by hand, nothing to guess from a shared wallet."
-          >
-            <div data-reveal="scale" style={step(2)}>
-              <DepositLedger />
-            </div>
-          </Chapter>
-
-          <Chapter
-            number="05"
+            number="02"
             id="surfaces"
             title={
               <>
-                One request.
+                Embed in
                 <br />
-                Your surface, or ours.
+                your app.
               </>
             }
             body="Every deposit request comes with a hosted page. Send your user to it, open it inside your own app, or take the fields and build the flow yourself."

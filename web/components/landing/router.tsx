@@ -4,7 +4,7 @@ import Image from "next/image";
 import { useRef, type CSSProperties } from "react";
 import { cn } from "@/lib/cn";
 import { CHAINS, LogoGrid } from "./chain-grid";
-import { CheckoutCard } from "./checkout-card";
+import { CheckoutCard, CURRENCIES, type Currency } from "./checkout-card";
 import { PROVIDERS, useProviderCycle } from "./pay-with";
 import { useInView } from "./stage";
 
@@ -25,13 +25,35 @@ const SETTLES_ON = [
 
 const WALLET = "0x3C44…93BC";
 
+/** Where each currency can settle: USDT has no Base contract Gum will use. */
+const SETTLES_FOR: Record<Currency, readonly number[]> = {
+  USDC: [0, 1, 2],
+  USDT: [0, 2],
+  AUSD: [0, 1, 2],
+};
+
+/**
+ * A different pick each cycle that does not simply walk the list: a
+ * small integer hash, so the same cycle always gives the same picture.
+ */
+function hash(n: number, salt: number): number {
+  let x = (n + 1) * 2_654_435_761 + salt * 40_503;
+  x ^= x >>> 15;
+  x = Math.imul(x, 2_246_822_519);
+  x ^= x >>> 13;
+  return x >>> 0;
+}
+
 export function Router() {
   const frameRef = useRef<HTMLDivElement>(null);
   const inView = useInView(frameRef);
   const { index, leaving } = useProviderCycle();
   const provider = PROVIDERS[index]?.name;
-  const from = CHAINS[index % CHAINS.length]!;
-  const to = SETTLES_ON[index % SETTLES_ON.length]!;
+  const currencies = Object.keys(CURRENCIES) as Currency[];
+  const currency = currencies[hash(index, 1) % currencies.length]!;
+  const from = CHAINS[hash(index, 2) % CHAINS.length]!;
+  const settles = SETTLES_FOR[currency];
+  const to = SETTLES_ON[settles[hash(index, 3) % settles.length]!]!;
 
   return (
     <div
@@ -69,7 +91,7 @@ export function Router() {
         style={{ "--i": 1 } as CSSProperties}
         className="overflow-hidden rounded-[14px] border border-gum-grey/30 shadow-[0_24px_60px_-40px_rgb(18_18_18/0.5)]"
       >
-        <CheckoutCard index={index} leaving={leaving} />
+        <CheckoutCard index={index} leaving={leaving} currency={currency} />
         <p className="flex items-center gap-2 border-t border-gum-grey/30 bg-gum-white px-4 py-2.5 text-[11.5px] text-gum-grey">
           <span className="size-1.5 rounded-full bg-gum-pink" />
           Paid on {from.name}, settling on {to.name}
@@ -112,10 +134,10 @@ export function Router() {
         >
           +250.00
           <Image
-            src="/payment-icons/usdc.svg"
+            src={CURRENCIES[currency]}
             width={64}
             height={64}
-            alt=""
+            alt={currency}
             className="size-5 rounded-full"
           />
         </p>

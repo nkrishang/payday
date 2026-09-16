@@ -1,7 +1,7 @@
 import { Wallet } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 import { Countdown } from "./countdown";
-import { Editor, Highlighted, Monad, Usdc } from "./hero-scenes";
+import { Editor, Highlighted, Monad, Usdc } from "./code";
 
 /**
  * One deposit request, three ways to put it in front of the payer: the
