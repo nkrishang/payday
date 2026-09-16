@@ -75,8 +75,8 @@ export default function Home() {
               </p>
               <h1 className="mt-5 text-[clamp(46px,6.2vw,88px)] leading-[0.98] font-medium tracking-[-0.055em]">
                 <Words from={1}>Deposits that</Words>{" "}
-                <span className="landing-stick text-gum-pink" style={delay(4)}>
-                  stick.
+                <span className="landing-stick" style={delay(4)}>
+                  <span className="text-gum-pink">stick</span>.
                 </span>
               </h1>
               <p
@@ -84,7 +84,7 @@ export default function Home() {
                 style={delay(6)}
               >
                 Create a <Pink>unique programmable address</Pink> for <Pink>every deposit</Pink>.
-                Control who can fund it, when it expires and where it settles.
+                Control who can fund it and where it settles. Let your users pay from any source.
               </p>
               <div
                 className="landing-reveal mt-8 flex flex-wrap items-center justify-center gap-3"
@@ -130,10 +130,11 @@ export default function Home() {
             id="program"
             title={
               <>
-                Program the <span className="text-gum-pink">address</span>.
+                A unique address per <s className="decoration-gum-pink decoration-[3px]">user</s>{" "}
+                <span className="text-gum-pink">deposit</span>.
               </>
             }
-            body="A deposit address is not a wallet. It is a set of terms: who may fund it, for how long, in what, and where the money goes. Set them per deposit, from your backend."
+            body="Only credit incoming deposits that satisfy your app's payment policy. Every single deposit is configurable."
           >
             <Policies />
           </Chapter>
@@ -141,14 +142,8 @@ export default function Home() {
           <Chapter
             number="02"
             id="surfaces"
-            title={
-              <>
-                Embed in
-                <br />
-                your app.
-              </>
-            }
-            body="Every deposit request comes with a hosted page. Send your user to it, open it inside your own app, or take the fields and build the flow yourself."
+            title="Embed in your app."
+            body="Every deposit request comes with a hosted payment page. Redirect users, embed it in your app, or build the full flow yourself with our API and webhooks."
           >
             <Surfaces />
           </Chapter>
