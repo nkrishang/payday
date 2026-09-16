@@ -21,33 +21,33 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://payday.sh"),
+  metadataBase: new URL("https://gum.money"),
   title: {
-    default: "Payday — accept stablecoins on your terms.",
-    template: "%s · Payday",
+    default: "Gum — accept stablecoin deposits into your app.",
+    template: "%s · Gum",
   },
   description:
-    "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
+    "Create a unique programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
   openGraph: {
     type: "website",
-    siteName: "Payday",
-    title: "Payday — accept stablecoins on your terms.",
+    siteName: "Gum",
+    title: "Gum — accept stablecoin deposits into your app.",
     description:
-      "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
-    url: "https://payday.sh",
+      "Create a unique programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
+    url: "https://gum.money",
   },
   twitter: {
     // Large card on X, which reads these tags ahead of the OpenGraph ones.
     card: "summary_large_image",
-    title: "Payday — accept stablecoins on your terms.",
+    title: "Gum — accept stablecoin deposits into your app.",
     description:
-      "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
+      "Create a unique programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
   },
 };
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#fafafa" },
+    { media: "(prefers-color-scheme: light)", color: "#f7f7f5" },
     { media: "(prefers-color-scheme: dark)", color: "#0b0b0c" },
   ],
 };

@@ -34,7 +34,7 @@ export function PricingDialog({
         className={cn(
           triggerClassName ??
             (light
-              ? "transition-colors hover:text-brand-black"
+              ? "transition-colors hover:text-gum-black"
               : "transition-colors hover:text-brand-white"),
         )}
       >
@@ -45,31 +45,31 @@ export function PricingDialog({
         <Dialog.Overlay
           className={cn(
             "landing-dialog-scrim fixed inset-0 z-50 backdrop-blur-[3px]",
-            light ? "bg-brand-black/40" : "bg-black/75",
+            light ? "bg-gum-black/40" : "bg-black/75",
           )}
         />
         <Dialog.Content
           className={cn(
             "landing-dialog fixed top-1/2 left-1/2 z-50 w-[calc(100vw-28px)] max-w-[432px] -translate-x-1/2 -translate-y-1/2 rounded-[14px] border px-6 pt-6 pb-7 sm:px-7",
             light
-              ? "border-brand-black bg-brand-white text-brand-black"
+              ? "border-gum-black bg-gum-white text-gum-black"
               : "border-brand-grey/25 bg-[#070707] text-brand-white",
           )}
         >
           <div className="flex items-start justify-between gap-4">
             <Image
-              src={light ? "/payday-logo-full-light.svg" : "/payday-logo-full.svg"}
-              width={light ? 2800 : 2929}
-              height={1000}
-              alt="Payday"
-              className="mt-0.5 h-auto w-[84px]"
+              src={light ? "/gum/logo.png" : "/payday-logo-full.svg"}
+              width={light ? 1279 : 2929}
+              height={light ? 465 : 1000}
+              alt={light ? "Gum" : "Payday"}
+              className={light ? "mt-0.5 h-auto w-[76px]" : "mt-0.5 h-auto w-[84px]"}
             />
             <Dialog.Close
               aria-label="Close"
               className={cn(
                 "-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 transition-colors",
                 light
-                  ? "text-brand-subtle hover:bg-brand-black/[0.06] hover:text-brand-black"
+                  ? "text-gum-grey hover:bg-gum-black/[0.06] hover:text-gum-black"
                   : "text-brand-grey hover:bg-white/[0.06] hover:text-brand-white",
               )}
             >
@@ -83,16 +83,16 @@ export function PricingDialog({
           <Dialog.Description
             className={cn(
               "mt-2.5 text-[14.5px] leading-[1.6]",
-              light ? "text-brand-subtle" : "text-[#b0afa9]",
+              light ? "text-gum-grey" : "text-[#b0afa9]",
             )}
           >
-            Payday is in beta and completely free to use right now. No fees, no card, no plans.
+            {"We're in beta and completely free to use right now. No fees, no card, no plans."}
           </Dialog.Description>
 
           <p
             className={cn(
               "mt-4 text-[14.5px] leading-[1.6]",
-              light ? "text-brand-subtle" : "text-[#b0afa9]",
+              light ? "text-gum-grey" : "text-[#b0afa9]",
             )}
           >
             {
@@ -103,9 +103,7 @@ export function PricingDialog({
           <p
             className={cn(
               "mt-6 border-t pt-4 text-[12px] leading-relaxed",
-              light
-                ? "border-brand-black/15 text-brand-subtle"
-                : "border-brand-grey/20 text-brand-grey",
+              light ? "border-gum-grey/40 text-gum-grey" : "border-brand-grey/20 text-brand-grey",
             )}
           >
             Questions in the meantime? Email{" "}
@@ -114,7 +112,7 @@ export function PricingDialog({
               className={cn(
                 "transition-colors",
                 light
-                  ? "font-medium text-brand-black hover:text-brand-black/70"
+                  ? "font-medium text-gum-black hover:text-gum-black/70"
                   : "text-brand-green hover:text-brand-green/80",
               )}
             >

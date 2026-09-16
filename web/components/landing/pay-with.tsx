@@ -60,14 +60,14 @@ export function PayWith() {
     <span
       role="img"
       aria-label={`Pay with ${PROVIDERS.map((entry) => entry.name).join(", ")}`}
-      className="flex h-12 items-center justify-center gap-2.5 rounded-[10px] bg-brand-black px-4 text-[14.5px] font-medium text-brand-white"
+      className="flex h-12 items-center justify-center gap-2.5 rounded-[10px] bg-gum-black px-4 text-[14.5px] font-medium text-gum-white"
     >
       Pay with
       {/* The pill keeps one width whatever it holds, so "Pay with" and the
           button never move; only the mark and name inside it change. */}
       <span
         aria-hidden="true"
-        className="inline-flex h-8 w-[144px] items-center justify-center overflow-hidden rounded-[7px] bg-brand-white text-[13px] font-semibold text-brand-black"
+        className="inline-flex h-8 w-[144px] items-center justify-center overflow-hidden rounded-[7px] bg-gum-white text-[13px] font-semibold text-gum-black"
       >
         <span
           key={index}

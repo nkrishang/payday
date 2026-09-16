@@ -1,110 +1,201 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
+import type { CSSProperties, ReactNode } from "react";
+import { ChainGrid } from "@/components/landing/chain-grid";
+import { CheckoutCard } from "@/components/landing/checkout-card";
+import { DepositLedger } from "@/components/landing/deposit-ledger";
+import { EmbedModes } from "@/components/landing/embed-modes";
 import { HeroScenes } from "@/components/landing/hero-scenes";
-import { ProofPoints } from "@/components/landing/proof-points";
+import { RESOURCES } from "@/components/landing/links";
+import { ResourcesMenu } from "@/components/landing/nav";
+import { Reveal } from "@/components/landing/reveal";
 import { GetStarted } from "@/components/landing/signup-dialog";
 import { MerchantAuth } from "@/components/merchant-auth";
 import { PricingDialog } from "@/components/pricing-dialog";
 
 export const metadata: Metadata = {
-  title: "Payday — accept stablecoins on your terms.",
+  title: "Gum — accept stablecoin deposits into your app.",
   description:
-    "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
+    "Create a unique programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
   alternates: { canonical: "/" },
 };
 
-/** A half hour on the founder's calendar. */
-const DEMO_URL = "https://calendar.app.google/dXTDCwAEPpk25xzx8";
+const SUPPORT_EMAIL = "support@gum.money";
 
+/**
+ * The landing page: a hero, then four beats that alternate between a pink
+ * band and a section of the page's own ground, inside one column with a
+ * rule down each side. Everything below the hero arrives as it is scrolled
+ * to (`Reveal`); the hero arrives with the page.
+ */
 export default function Home() {
   return (
-    <div className="landing flex min-h-screen flex-col bg-brand-white text-brand-black">
-      <header className="landing-reveal">
-        <nav className="mx-auto flex h-[88px] max-w-[1320px] items-center justify-between px-5 sm:px-8">
-          <Link href="/" aria-label="Payday" className="rounded-[4px]">
+    <div className="landing flex min-h-screen flex-col bg-gum-white text-gum-black">
+      <header className="landing-reveal border-b border-gum-grey/30">
+        <nav className="mx-auto flex h-[72px] max-w-[1360px] items-center justify-between px-5 sm:h-[76px] sm:px-10">
+          <Link href="/" aria-label="Gum" className="rounded-[4px]">
             <Image
-              src="/payday-logo-full-light.svg"
-              width={2800}
-              height={1000}
+              src="/gum/logo.png"
+              width={1279}
+              height={465}
               priority
               sizes="100px"
-              alt="Payday"
-              className="h-auto w-[88px] sm:w-[100px]"
+              alt="Gum"
+              className="h-auto w-[86px] sm:w-[96px]"
             />
           </Link>
 
-          <div className="flex items-center gap-6 text-[15px] font-medium text-brand-subtle sm:gap-8">
+          <div className="flex items-center gap-6 text-[16px] text-gum-grey sm:gap-8">
             <PricingDialog appearance="light" />
-            <a
-              href={DEMO_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="transition-colors hover:text-brand-black"
-            >
-              Request a demo
-            </a>
+            <Link href="/docs" className="transition-colors hover:text-gum-black">
+              Docs
+            </Link>
+            <ResourcesMenu />
           </div>
         </nav>
       </header>
 
-      <main className="flex flex-1 flex-col">
-        <section className="mx-auto grid w-full max-w-[1320px] items-center gap-12 px-5 pt-6 pb-12 sm:px-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16 lg:pt-2 lg:pb-14">
+      <main className="mx-auto flex w-full max-w-[1360px] flex-1 flex-col border-gum-grey/30 xl:border-x">
+        {/* The hero */}
+        <section className="grid items-center gap-12 border-b border-gum-grey/30 px-5 pt-12 pb-14 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,600px)] lg:gap-10 lg:py-20">
           <div>
-            <h1 className="landing-reveal landing-delay-1 text-[clamp(40px,3.95vw,76px)] leading-[1.12] font-medium tracking-[-0.045em]">
-              Accept <Highlight tone="yellow">stablecoins</Highlight> on
-              <br className="hidden lg:block" /> <Highlight tone="green">your terms.</Highlight>
+            <h1 className="landing-reveal text-[clamp(36px,3.6vw,52px)] leading-[1.14] font-medium tracking-[-0.035em]">
+              Accept stablecoin deposits
+              <br className="hidden lg:block" /> into your app.
             </h1>
-            <p className="landing-reveal landing-delay-2 mt-7 max-w-[560px] text-[16px] leading-[1.6] text-brand-subtle sm:text-[18px]">
-              Create a{" "}
-              <strong className="font-medium text-brand-black">
-                one-time programmable address
-              </strong>{" "}
-              for every deposit. Control who can fund it, when it expires and where it settles.
+            <p className="landing-reveal landing-delay-1 mt-7 max-w-[640px] text-[clamp(17px,1.55vw,22px)] leading-[1.5] text-gum-grey">
+              Create a <Pink>unique programmable address</Pink> for <Pink>every deposit</Pink>.
+              Control who can fund it, when it expires and where it settles.
             </p>
-            <div className="landing-reveal landing-delay-3 mt-9 flex flex-wrap items-center gap-3.5">
+            <div className="landing-reveal landing-delay-2 mt-11 flex flex-wrap items-center gap-3">
               <MerchantAuth>
                 <GetStarted />
               </MerchantAuth>
               <Link
                 href="/docs"
-                className="flex h-14 items-center justify-center gap-2.5 rounded-[8px] border border-brand-black px-6 text-[17px] font-medium text-brand-black transition-colors hover:bg-brand-black/[0.05]"
+                className="flex h-14 items-center justify-center gap-2.5 rounded-[6px] border border-gum-black px-6 text-[17px] font-medium text-gum-black transition-colors hover:bg-gum-black/[0.05]"
               >
                 <BookIcon />
-                Read Docs
+                Developers
               </Link>
             </div>
           </div>
 
-          <div className="landing-reveal landing-delay-4">
+          <div className="landing-reveal landing-delay-3">
             <HeroScenes />
           </div>
         </section>
 
-        <div className="landing-reveal landing-delay-4 pb-14">
-          <ProofPoints />
-        </div>
+        {/* Any source in, your chain out */}
+        <Reveal
+          aria-label="Chains"
+          className="grid border-b border-gum-grey/30 lg:grid-cols-[minmax(0,47fr)_minmax(0,53fr)]"
+        >
+          <div
+            data-reveal="wipe"
+            className="bg-gum-pink px-5 py-9 text-gum-white sm:px-12 sm:py-11"
+          >
+            <p
+              data-reveal=""
+              style={step(1)}
+              className="text-[clamp(24px,2.2vw,30px)] leading-[1.35] font-medium tracking-[-0.02em]"
+            >
+              Users pay from any source.
+              <br />
+              Settle funds where you want.
+            </p>
+          </div>
+          <div className="min-w-0 bg-gum-grey/[0.06] pl-3 sm:pl-4">
+            <ChainGrid />
+          </div>
+        </Reveal>
+
+        {/* A unique address for every deposit */}
+        <Reveal
+          aria-labelledby="unique-address"
+          className="grid items-center gap-10 border-b border-gum-grey/30 px-5 py-14 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,600px)] lg:gap-10 lg:py-16"
+        >
+          <div>
+            <h2 id="unique-address" data-reveal="" className={sectionTitle}>
+              A unique address for every
+              <br />
+              <s className="text-gum-pink decoration-[3px]">user</s>{" "}
+              <span className="text-gum-pink">deposit</span>.
+            </h2>
+            <p data-reveal="" style={step(1)} className={sectionBody}>
+              Get a dedicated flow for each deposit. Track its status, link it to a user, and route
+              funds where they need to go.
+            </p>
+          </div>
+          <div data-reveal="scale" style={step(2)}>
+            <DepositLedger />
+          </div>
+        </Reveal>
+
+        {/* Bring your own checkout */}
+        <Reveal aria-label="Checkouts" className="border-b border-gum-grey/30">
+          <div data-reveal="wipe" className="bg-gum-pink text-gum-white">
+            <div className="grid items-stretch gap-8 px-5 py-8 sm:px-8 lg:grid-cols-[minmax(0,1fr)_350px] lg:gap-10 lg:py-0 lg:pr-[160px]">
+              <p
+                data-reveal=""
+                style={step(1)}
+                className="self-center text-[clamp(24px,2.2vw,30px)] leading-[1.35] font-medium tracking-[-0.02em] lg:py-11"
+              >
+                Bring your own checkout.
+                <br />
+                Gum works with any payment solution.
+              </p>
+              <div data-reveal="scale" style={step(2)} className="max-w-[350px]">
+                <CheckoutCard />
+              </div>
+            </div>
+          </div>
+        </Reveal>
+
+        {/* Hosted or headless */}
+        <Reveal
+          aria-labelledby="embed"
+          className="grid items-center gap-10 px-5 py-14 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,600px)] lg:gap-10 lg:py-16"
+        >
+          <div>
+            <h2 id="embed" data-reveal="" className={sectionTitle}>
+              Embed right into your app.
+              <br />
+              Hosted or{" "}
+              <span className="underline decoration-gum-pink decoration-[3px] underline-offset-[7px]">
+                headless
+              </span>
+              .
+            </h2>
+            <p data-reveal="" style={step(1)} className={sectionBody}>
+              Every deposit request comes with a hosted payment page. Redirect users, embed it in
+              your app, or build the full flow yourself with our API and webhooks.
+            </p>
+          </div>
+          <div data-reveal="scale" style={step(2)}>
+            <EmbedModes />
+          </div>
+        </Reveal>
       </main>
 
-      <footer className="landing-reveal landing-delay-4">
-        <div className="mx-auto flex max-w-[1320px] flex-col gap-5 px-5 pb-8 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center">
-            <Image
-              src="/payday-logo-full-light.svg"
-              width={2800}
-              height={1000}
-              sizes="72px"
-              alt="Payday"
-              className="h-auto w-[72px]"
-            />
-          </div>
+      <footer className="bg-gum-black text-gum-white">
+        <div className="mx-auto flex max-w-[1360px] flex-col gap-4 px-5 py-5 sm:h-[64px] sm:flex-row sm:items-center sm:justify-between sm:px-10 sm:py-0">
+          <Image
+            src="/gum/logo-on-dark.png"
+            width={1279}
+            height={465}
+            sizes="90px"
+            alt="Gum"
+            className="h-auto w-[86px]"
+          />
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-4">
             <a
-              href="mailto:contact@payday.sh"
-              className="mr-2 text-[15px] text-brand-subtle transition-colors hover:text-brand-black"
+              href={`mailto:${SUPPORT_EMAIL}`}
+              className="mr-2 text-[15px] text-gum-pink transition-colors hover:text-gum-white"
             >
-              contact@payday.sh
+              {SUPPORT_EMAIL}
             </a>
             <SocialLink label="X">
               <XIcon />
@@ -119,31 +210,28 @@ export default function Home() {
   );
 }
 
-/** A marker-pen block behind a run of the headline. */
-function Highlight({ tone, children }: { tone: "yellow" | "green"; children: React.ReactNode }) {
-  return (
-    <mark
-      className={
-        tone === "yellow" ? "landing-mark landing-mark-yellow" : "landing-mark landing-mark-green"
-      }
-    >
-      {children}
-    </mark>
-  );
+const sectionTitle = "text-[clamp(28px,2.5vw,34px)] leading-[1.25] font-medium tracking-[-0.03em]";
+const sectionBody = "mt-5 max-w-[540px] text-[17px] leading-[1.6] text-gum-grey";
+
+/** The reveal order of one thing inside a group; see globals.css. */
+function step(index: number): CSSProperties {
+  return { "--i": index } as CSSProperties;
 }
 
-/** Where the footer's social icons go. */
-const SOCIAL_LINKS: Record<string, string> = {
-  X: "https://x.com/paydaydotsh",
-  GitHub: "https://github.com/nkrishang/payday",
-};
+/** A run of the subhead in the brand's colour. */
+function Pink({ children }: { children: ReactNode }) {
+  return <span className="text-gum-pink">{children}</span>;
+}
 
-function SocialLink({ label, children }: { label: string; children: React.ReactNode }) {
+function SocialLink({ label, children }: { label: string; children: ReactNode }) {
+  const href = RESOURCES.find((entry) => entry.label === label)?.href;
   return (
     <a
-      href={SOCIAL_LINKS[label]}
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
       aria-label={label}
-      className="flex size-8 items-center justify-center rounded-[6px] bg-brand-black text-brand-white transition-colors hover:bg-brand-black/85 [&>svg]:size-[16px]"
+      className="flex size-8 items-center justify-center rounded-[6px] text-gum-white transition-colors hover:text-gum-pink [&>svg]:size-[18px]"
     >
       {children}
     </a>
