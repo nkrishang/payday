@@ -170,7 +170,7 @@ export function DepositLedger() {
         <div className="grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_minmax(0,1.15fr)_minmax(0,0.75fr)] px-6 pt-3 pb-1 text-[11px] font-medium tracking-[0.12em] text-gum-grey uppercase">
           <span>Payer</span>
           <span>Deposit address</span>
-          <span className="text-right">Amount</span>
+          <span>Amount</span>
           <span className="text-right">Status</span>
         </div>
 
@@ -201,7 +201,7 @@ export function DepositLedger() {
                 </span>
               </span>
               <span className="font-mono text-[13px]">{row.deposit.address}</span>
-              <span className="flex items-center justify-end gap-2.5">
+              <span className="flex items-center gap-2.5">
                 <CurrencyMark currency={row.deposit.currency} chain={row.deposit.chain} />
                 <span className="tabular font-medium">
                   {row.deposit.amount}{" "}
