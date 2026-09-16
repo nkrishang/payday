@@ -66,40 +66,35 @@ export default function Home() {
 
           {/* The hero */}
           <section className="border-b border-gum-grey/30 px-5 pt-12 pb-12 sm:px-10 lg:pt-20 lg:pb-16">
-            <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-end lg:gap-16">
-              <div>
-                <p
-                  className="landing-reveal text-[12px] font-medium tracking-[0.16em] text-gum-grey uppercase"
-                  style={delay(0)}
-                >
-                  Stablecoin deposits for your app
-                </p>
-                <h1 className="mt-5 text-[clamp(46px,6.2vw,88px)] leading-[0.98] font-medium tracking-[-0.055em]">
-                  <Words from={1}>Deposits that</Words>{" "}
-                  <span className="landing-stick text-gum-pink" style={delay(4)}>
-                    stick.
-                  </span>
-                </h1>
-              </div>
-              <div>
-                <p
-                  className="landing-reveal max-w-[560px] text-[clamp(16px,1.3vw,19px)] leading-[1.55] text-pretty text-gum-grey"
-                  style={delay(6)}
-                >
-                  Gum mints an address for every deposit: who can fund it, when it expires, where it
-                  settles. Your user pays from any wallet, exchange or chain. You get one webhook,
-                  and a balance that&rsquo;s right.
-                </p>
-                <div
-                  className="landing-reveal mt-8 flex flex-wrap items-center gap-3"
-                  style={delay(7)}
-                >
-                  <GetStarted />
-                  <Link href="/docs" className={secondary}>
-                    <BookIcon />
-                    Developers
-                  </Link>
-                </div>
+            <div className="mx-auto flex max-w-[820px] flex-col items-center text-center">
+              <p
+                className="landing-reveal text-[12px] font-medium tracking-[0.16em] text-gum-grey uppercase"
+                style={delay(0)}
+              >
+                Stablecoin deposits for your app
+              </p>
+              <h1 className="mt-5 text-[clamp(46px,6.2vw,88px)] leading-[0.98] font-medium tracking-[-0.055em]">
+                <Words from={1}>Deposits that</Words>{" "}
+                <span className="landing-stick text-gum-pink" style={delay(4)}>
+                  stick.
+                </span>
+              </h1>
+              <p
+                className="landing-reveal mt-7 max-w-[680px] text-[clamp(16px,1.35vw,20px)] leading-[1.5] text-pretty text-gum-grey"
+                style={delay(6)}
+              >
+                Create a <Pink>unique programmable address</Pink> for <Pink>every deposit</Pink>.
+                Control who can fund it, when it expires and where it settles.
+              </p>
+              <div
+                className="landing-reveal mt-8 flex flex-wrap items-center justify-center gap-3"
+                style={delay(7)}
+              >
+                <GetStarted />
+                <Link href="/docs" className={secondary}>
+                  <BookIcon />
+                  Developers
+                </Link>
               </div>
             </div>
 
@@ -242,6 +237,11 @@ function delay(index: number): CSSProperties {
 /** The reveal order of one thing inside a group; see globals.css. */
 function step(index: number): CSSProperties {
   return { "--i": index } as CSSProperties;
+}
+
+/** A run of the subhead in the brand's colour. */
+function Pink({ children }: { children: ReactNode }) {
+  return <span className="text-gum-pink">{children}</span>;
 }
 
 /** Each word of a headline arriving on its own beat. */
