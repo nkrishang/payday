@@ -67,7 +67,7 @@ export function CopyPromptButton({
       onClick={copy}
       aria-live="polite"
       className={cn(
-        "flex h-12 items-center gap-3 rounded-[12px] border px-4 text-[13.5px] font-medium transition-colors",
+        "flex h-12 items-center gap-3 rounded-[10px] border px-4 text-[13.5px] font-medium transition-colors",
         className,
       )}
     >

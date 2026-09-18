@@ -92,7 +92,7 @@ export function VerificationStatus({
       {unsolicitedAt ? (
         <p
           role="note"
-          className="mt-4 flex gap-2 rounded-[10px] border border-warning/40 px-3.5 py-3 text-[13px] leading-relaxed text-warning"
+          className="mt-4 flex gap-2 rounded-[8px] border border-warning/40 px-3.5 py-3 text-[13px] leading-relaxed text-warning"
         >
           <AlertTriangle className="mt-0.5 size-4 shrink-0" />
           <span>

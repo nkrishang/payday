@@ -11,9 +11,9 @@ import type { ReactNode } from "react";
  * its type past legibility.
  */
 
-const GREEN = "#a3d277";
-const YELLOW = "#ead26d";
-const BLUE = "#7dd3fc";
+const GREEN = "#ff5ca8";
+const YELLOW = "#f5c451";
+const BLUE = "#f7f7f5";
 
 type Accent = "none" | "green" | "yellow" | "blue";
 

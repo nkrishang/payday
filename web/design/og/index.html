@@ -1,0 +1,85 @@
+<!doctype html>
+<!--
+  The OpenGraph card, as a page: the landing page's headline over the
+  checkout that could be anyone's and the balance it lands in, on the
+  gum mark. Render it with `node design/og/render.mjs` (Playwright, from
+  web/), which writes app/opengraph-image.png at 1200x630. Assets are the
+  site's own, by relative path; the type is Inter and JetBrains Mono from
+  Google Fonts, so rendering needs the network once.
+-->
+<html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --white:#f7f7f5; --pink:#ff5ca8; --black:#121212; --grey:#6f6e6e; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { width:1200px; height:630px; overflow:hidden; background:var(--white); color:var(--black);
+    font-family:Inter, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  .card { position:relative; width:1200px; height:630px; }
+  /* the ruled column, as on the page */
+  .rule { position:absolute; top:0; bottom:0; width:1px; background:rgb(111 110 110 / .3); }
+  .rule.l { left:56px; } .rule.r { right:56px; }
+  .progress { position:absolute; left:55px; top:0; width:2px; height:100%; background:var(--pink); }
+  .logo { position:absolute; left:96px; top:52px; width:118px; }
+  .domain { position:absolute; right:96px; top:60px; font-size:16px; color:var(--grey); letter-spacing:.02em; }
+  .eyebrow { position:absolute; left:96px; top:168px; font-size:14px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--grey); }
+  h1 { position:absolute; left:92px; top:200px; font-size:118px; line-height:.96; font-weight:500; letter-spacing:-.055em; white-space:nowrap; }
+  h1 .pink { color:var(--pink); }
+  .sub { position:absolute; left:96px; top:462px; width:560px; font-size:22px; line-height:1.4; color:var(--grey); }
+  .sub b { font-weight:500; color:var(--pink); }
+  /* the mark, as a colour field the picture sits on */
+  .mark { position:absolute; right:-70px; top:92px; width:600px; height:600px; transform:rotate(-6deg); }
+  /* the checkout that could be anyone's */
+  .checkout { position:absolute; right:160px; top:196px; width:340px; background:var(--white); border:1px solid rgb(111 110 110 / .3); border-radius:14px;
+    box-shadow:0 30px 60px -30px rgb(18 18 18 / .45); }
+  .checkout .body { padding:20px 20px 18px; }
+  .row { display:flex; justify-content:space-between; align-items:baseline; }
+  .lab { font-size:11px; font-weight:500; letter-spacing:.14em; text-transform:uppercase; color:var(--grey); }
+  .exp { font-size:11px; color:var(--grey); }
+  .amt { margin-top:6px; display:flex; align-items:baseline; gap:8px; font-size:30px; font-weight:600; letter-spacing:-.02em; line-height:1; font-variant-numeric:tabular-nums; }
+  .amt .cur { display:flex; align-items:center; gap:6px; font-size:13px; font-weight:500; color:var(--grey); }
+  .amt img { width:16px; height:16px; border-radius:50%; }
+  .addr { margin-top:14px; display:flex; justify-content:space-between; font-size:12px; color:var(--grey); }
+  .addr code { font-family:"JetBrains Mono", monospace; color:var(--black); font-size:12px; }
+  .pay { margin-top:16px; height:48px; border-radius:10px; background:var(--black); color:var(--white); display:flex; align-items:center; justify-content:center; gap:10px; font-size:14.5px; font-weight:500; }
+  .pill { display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:7px; background:var(--white); color:var(--black); font-size:13px; font-weight:600; }
+  .pill img { height:18px; }
+  .foot { border-top:1px solid rgb(111 110 110 / .3); padding:12px 20px; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--grey); }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--pink); }
+  /* the balance it lands in */
+  .balance { position:absolute; right:100px; top:466px; width:300px; background:var(--white); border:1px solid rgb(111 110 110 / .3); border-radius:14px; padding:16px 18px;
+    box-shadow:0 30px 60px -30px rgb(18 18 18 / .35); }
+  .who { margin-top:6px; display:flex; align-items:center; gap:8px; font-size:14px; font-weight:500; }
+  .who .av { width:20px; height:20px; border-radius:50%; background:var(--black); color:var(--white); font-size:10px; font-weight:600; display:flex; align-items:center; justify-content:center; }
+  .plus { position:absolute; right:18px; top:16px; display:flex; align-items:center; gap:6px; font-size:20px; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .plus img { width:18px; height:18px; border-radius:50%; }
+</style></head>
+<body><div class="card">
+  <span class="rule l"></span><span class="progress"></span>
+  <img class="logo" src="../../public/gum/logo.svg" alt="">
+  <span class="domain">gum.money</span>
+
+  <p class="eyebrow">Stablecoin deposits for your app</p>
+  <h1>Deposits<br>that <span class="pink">stick</span>.</h1>
+  <p class="sub">A <b>unique programmable address</b> for every deposit. Your users pay from any wallet, exchange or chain.</p>
+
+  <img class="mark" src="../../public/gum/mark.svg" alt="">
+
+  <div class="checkout">
+    <div class="body">
+      <div class="row"><span class="lab">Deposit</span><span class="exp">Expires in 59:52</span></div>
+      <div class="amt">250.00 <span class="cur"><img src="../../public/payment-icons/usdc.svg">USDC</span></div>
+      <div class="addr"><span>Deposit address</span><code>0x9a3F…A0c2</code></div>
+      <div class="pay">Pay with <span class="pill"><img src="../../public/logos/coinbase.svg">Coinbase</span></div>
+    </div>
+    <div class="foot"><span class="dot"></span>Paid on Solana, settling on Base</div>
+  </div>
+
+  <div class="balance">
+    <span class="lab">App balance</span>
+    <div class="who"><span class="av">J</span>james@myapp.xyz</div>
+    <div class="plus">+250.00 <img src="../../public/payment-icons/usdc.svg"></div>
+  </div>
+</div>
+<script>window.__ready = document.fonts.ready.then(() => Promise.all([...document.images].map(i => i.complete ? 1 : new Promise(r => { i.onload = i.onerror = r; }))));</script>
+</body></html>

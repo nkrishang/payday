@@ -70,26 +70,26 @@ async function waitForWallet(): Promise<void> {
  * There is nothing to fill in beyond a mailbox. Privy emails a code, the code
  * signs the merchant in, and the API provisions an account the first time it
  * sees that identity — so the code that signs a returning merchant in is the
- * same code that creates a new one. The dialog is Payday's own; only the code
+ * same code that creates a new one. The dialog is Gum's own; only the code
  * exchange underneath is Privy's, and it ends in the same session the
  * dashboard runs on.
  *
  * Like the landing page around it, the dialog is light in both colour
  * schemes, so it names its colours rather than reading the theme tokens. Its
- * ground is the page's own #f6f2ea because the wordmark bakes that colour in.
+ * ground is the page's own #f7f7f5, in the landing page's four colours.
  */
 
 const fieldStyles =
-  "h-12 w-full rounded-[8px] border border-brand-black/25 bg-white px-3.5 text-[15px] " +
-  "text-brand-black transition-colors placeholder:text-brand-subtle/50 focus:border-brand-black " +
+  "h-12 w-full rounded-[8px] border border-gum-grey/50 bg-gum-white px-3.5 text-[15px] " +
+  "text-gum-black transition-colors placeholder:text-gum-grey/70 focus:border-gum-black " +
   "disabled:opacity-50";
 
-const labelStyles = "block text-[12px] font-medium text-brand-subtle";
+const labelStyles = "block text-[12px] font-medium text-gum-grey";
 
 const submitStyles =
-  "mt-4 flex h-13 w-full items-center justify-center gap-2.5 rounded-[8px] bg-brand-black " +
-  "px-5 text-[15px] font-medium text-brand-white transition-colors hover:bg-brand-black/85 " +
-  "disabled:pointer-events-none disabled:bg-brand-black/10 disabled:text-brand-subtle";
+  "mt-4 flex h-13 w-full items-center justify-center gap-2.5 rounded-[8px] bg-gum-black " +
+  "px-5 text-[15px] font-medium text-gum-white transition-colors hover:bg-gum-black/85 " +
+  "disabled:pointer-events-none disabled:bg-gum-black/10 disabled:text-gum-grey";
 
 /** m:ss, for a countdown that never shows a bare number of seconds. */
 function countdown(ms: number): string {
@@ -97,7 +97,14 @@ function countdown(ms: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function GetStarted() {
+export function GetStarted({
+  label = "Get Started",
+  tone = "black",
+}: {
+  label?: string;
+  /** Black on the page's ground; white where it stands on pink. */
+  tone?: "black" | "white";
+} = {}) {
   const router = useRouter();
   const { authenticated } = usePrivy();
   const [open, setOpen] = useState(false);
@@ -262,33 +269,40 @@ export function GetStarted() {
 
   return (
     <Dialog.Root open={open} onOpenChange={openChange}>
-      <Dialog.Trigger className="flex h-14 items-center justify-center gap-3 rounded-[8px] bg-brand-black px-6 text-[17px] font-medium text-brand-white transition-colors hover:bg-brand-black/85">
-        Get Started
+      <Dialog.Trigger
+        className={cn(
+          "flex h-11 items-center justify-center gap-2.5 rounded-[6px] px-4 text-[15px] font-medium whitespace-nowrap transition-colors sm:h-12 sm:gap-3 sm:px-5 sm:text-[16px]",
+          tone === "black"
+            ? "bg-gum-black text-gum-white hover:bg-gum-black/85"
+            : "bg-gum-white text-gum-black hover:bg-gum-white/90",
+        )}
+      >
+        {label}
         <ArrowRight />
       </Dialog.Trigger>
 
       <Dialog.Portal>
-        <Dialog.Overlay className="landing-dialog-scrim fixed inset-0 z-50 bg-brand-black/40 backdrop-blur-[3px]" />
+        <Dialog.Overlay className="landing-dialog-scrim fixed inset-0 z-50 bg-gum-black/40 backdrop-blur-[3px]" />
         <Dialog.Content
           // Radix would open on the close button; the mailbox is the point.
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             emailField.current?.focus();
           }}
-          className="landing-dialog fixed top-1/2 left-1/2 z-50 w-[calc(100vw-28px)] max-w-[432px] -translate-x-1/2 -translate-y-1/2 rounded-[14px] border border-brand-black bg-brand-white px-6 pt-6 pb-7 text-brand-black sm:px-7"
+          className="landing-dialog fixed top-1/2 left-1/2 z-50 w-[calc(100vw-28px)] max-w-[432px] -translate-x-1/2 -translate-y-1/2 rounded-[14px] border border-gum-black bg-gum-white px-6 pt-6 pb-7 text-gum-black sm:px-7"
         >
           <div className="flex items-start justify-between gap-4">
             <Image
-              src="/payday-logo-full-light.svg"
-              width={2800}
-              height={1000}
-              alt="Payday"
-              className="mt-0.5 h-auto w-[84px]"
+              src="/gum/logo.svg"
+              width={1280}
+              height={465}
+              alt="Gum"
+              className="mt-0.5 h-auto w-[76px]"
             />
             <Dialog.Close
               aria-label="Close"
               disabled={step === "wallet" || step === "signing-in"}
-              className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-brand-subtle transition-colors hover:bg-brand-black/[0.06] hover:text-brand-black disabled:pointer-events-none disabled:opacity-30"
+              className="-mt-1.5 -mr-1.5 rounded-[6px] p-1.5 text-gum-grey transition-colors hover:bg-gum-black/[0.06] hover:text-gum-black disabled:pointer-events-none disabled:opacity-30"
             >
               <X className="size-4" />
             </Dialog.Close>
@@ -304,20 +318,20 @@ export function GetStarted() {
                   : "Welcome back"}
             .
           </Dialog.Title>
-          <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-brand-subtle">
+          <Dialog.Description className="mt-2.5 text-[14.5px] leading-[1.6] text-gum-grey">
             {step === "email"
               ? "Enter your email and we'll send a one-time code. No passwords or cards."
               : step === "code"
                 ? `We sent a six-digit code to ${email.trim()}.`
                 : step === "wallet"
-                  ? "Setting up your Payday wallet. This only takes a moment."
+                  ? "Setting up your Gum wallet. This only takes a moment."
                   : "Signing you in. This only takes a moment."}
           </Dialog.Description>
 
           {step === "wallet" || step === "signing-in" ? (
             <div className="mt-8 flex flex-col items-center gap-4 py-4">
-              <Loader2 className="size-6 animate-spin text-brand-black" aria-hidden="true" />
-              <p role="status" className="text-[13px] text-brand-subtle">
+              <Loader2 className="size-6 animate-spin text-gum-black" aria-hidden="true" />
+              <p role="status" className="text-[13px] text-gum-grey">
                 {step === "wallet" ? "Creating your wallet…" : "Signing you in…"}
               </p>
             </div>
@@ -381,7 +395,7 @@ export function GetStarted() {
                     setError(null);
                     markSent(0);
                   }}
-                  className="text-brand-subtle transition-colors hover:text-brand-black disabled:opacity-50"
+                  className="text-gum-grey transition-colors hover:text-gum-black disabled:opacity-50"
                 >
                   Use a different email
                 </button>
@@ -389,7 +403,7 @@ export function GetStarted() {
                   type="button"
                   disabled={busy || !canResend}
                   onClick={resend}
-                  className="text-brand-black transition-colors hover:text-brand-black/70 disabled:cursor-default disabled:text-brand-subtle/60 disabled:hover:text-brand-subtle/60"
+                  className="text-gum-black transition-colors hover:text-gum-black/70 disabled:cursor-default disabled:text-gum-grey/60 disabled:hover:text-gum-grey/60"
                 >
                   {canResend ? "Resend code" : `Resend in ${countdown(remaining)}`}
                 </button>
@@ -398,8 +412,8 @@ export function GetStarted() {
           )}
 
           {step === "wallet" || step === "signing-in" ? null : (
-            <p className="mt-6 border-t border-brand-black/15 pt-4 text-[12px] leading-relaxed text-brand-subtle">
-              Already have an account? The same code signs you in. Payday stores no password.
+            <p className="mt-6 border-t border-gum-black/15 pt-4 text-[12px] leading-relaxed text-gum-grey">
+              Already have an account? The same code signs you in. Gum stores no password.
             </p>
           )}
         </Dialog.Content>

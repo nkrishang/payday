@@ -93,7 +93,7 @@ describe("checkoutView", () => {
     expect(view.phase).toBe("settled");
     expect(view.detail).toMatch(/Exactly the requested amount reached the merchant/);
     expect(view.detail).toMatch(/above the requested amount went back to the wallet you signed with/);
-    expect(view.detail).not.toMatch(/recovery wallet|Payday support|refund/i);
+    expect(view.detail).not.toMatch(/recovery wallet|Gum support|refund/i);
   });
 
   it("asks for the wallet signature before offering any address", () => {
@@ -175,7 +175,7 @@ describe("checkoutView", () => {
     );
     expect(funded.phase).toBe("expired_funded");
     expect(funded.detail).toMatch(/back to the wallet you signed with/);
-    expect(funded.detail).not.toMatch(/Payday support|recovery wallet/);
+    expect(funded.detail).not.toMatch(/Gum support|recovery wallet/);
   });
 
   it("says plainly where returned funds went", () => {

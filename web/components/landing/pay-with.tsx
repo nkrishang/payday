@@ -10,7 +10,7 @@ import { cn } from "@/lib/cn";
  * pops in, holds, pops out, and the next pops in. Each rides a white pill,
  * so a black mark reads on the black button as well as a coloured one.
  */
-const PROVIDERS = [
+export const PROVIDERS = [
   { name: "Coinbase", src: "/logos/coinbase.svg" },
   { name: "MetaMask", src: "/logos/metamask.svg" },
   { name: "Binance", src: "/logos/binance.svg" },
@@ -38,7 +38,8 @@ const PROVIDERS = [
 const HOLD_MS = 1_100;
 const LEAVE_MS = 140;
 
-export function PayWith() {
+/** Which provider is on the button now, and whether it is on its way out. */
+export function useProviderCycle(): { index: number; leaving: boolean } {
   const [index, setIndex] = useState(0);
   const [leaving, setLeaving] = useState(false);
 
@@ -54,20 +55,24 @@ export function PayWith() {
     };
   }, [index]);
 
+  return { index, leaving };
+}
+
+export function PayWith({ index, leaving }: { index: number; leaving: boolean }) {
   const provider = PROVIDERS[index] ?? PROVIDERS[0];
 
   return (
     <span
       role="img"
       aria-label={`Pay with ${PROVIDERS.map((entry) => entry.name).join(", ")}`}
-      className="flex h-12 items-center justify-center gap-2.5 rounded-[10px] bg-brand-black px-4 text-[14.5px] font-medium text-brand-white"
+      className="flex h-12 items-center justify-center gap-2.5 rounded-[10px] bg-gum-black px-4 text-[14.5px] font-medium text-gum-white"
     >
       Pay with
       {/* The pill keeps one width whatever it holds, so "Pay with" and the
           button never move; only the mark and name inside it change. */}
       <span
         aria-hidden="true"
-        className="inline-flex h-8 w-[144px] items-center justify-center overflow-hidden rounded-[7px] bg-brand-white text-[13px] font-semibold text-brand-black"
+        className="inline-flex h-8 w-[144px] items-center justify-center overflow-hidden rounded-[7px] bg-gum-white text-[13px] font-semibold text-gum-black"
       >
         <span
           key={index}

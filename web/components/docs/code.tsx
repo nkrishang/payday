@@ -14,7 +14,7 @@ const TOKEN_CLASS: Record<TokenType, string | undefined> = {
   string: "text-term-accent",
   key: "text-term-id",
   comment: "text-term-dim italic",
-  keyword: "text-[#c4b5fd]",
+  keyword: "text-term-warn",
   number: "text-term-warn",
   variable: "text-term-warn",
   flag: "text-term-id",
@@ -61,7 +61,7 @@ export function CodeBlock({
         <CopyButton
           value={source}
           label="code"
-          className="text-term-dim hover:bg-white/[0.06] hover:text-term-text"
+          className="text-term-dim hover:bg-ink/[0.08] hover:text-term-text"
         />
       </figcaption>
       <pre className="overflow-x-auto px-4 py-4 leading-[1.65]">

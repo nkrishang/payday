@@ -213,7 +213,7 @@ export const config = {
    */
   attachmentUploadOrigin: attachmentUploadOrigin ? trimTrailingSlash(attachmentUploadOrigin) : null,
   /** Where a payer whose identity check was declined writes to appeal. */
-  payerAppealEmail: payerAppealEmail || "support@payday.sh",
+  payerAppealEmail: payerAppealEmail || "support@gum.money",
 } as const;
 
 export type PublicConfig = typeof config;

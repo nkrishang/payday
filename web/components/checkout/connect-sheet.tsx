@@ -46,7 +46,7 @@ export function ConnectSheet({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed bottom-0 left-1/2 z-50 w-full max-w-[400px] -translate-x-1/2 rounded-t-[16px] border border-line bg-surface p-5 sm:top-1/2 sm:bottom-auto sm:-translate-y-1/2 sm:rounded-[16px]">
+        <Dialog.Content className="fixed bottom-0 left-1/2 z-50 w-full max-w-[400px] -translate-x-1/2 rounded-t-[16px] border border-line bg-surface p-5 sm:top-1/2 sm:bottom-auto sm:-translate-y-1/2 sm:rounded-[12px]">
           <div className="flex items-center justify-between">
             <Dialog.Title className="text-[15px] font-semibold tracking-tight">
               Connect a wallet
@@ -59,7 +59,7 @@ export function ConnectSheet({
             </Dialog.Close>
           </div>
           <Dialog.Description className="mt-1 text-[13px] text-muted">
-            Payday asks for one signature to prove this is your wallet, then the transfer itself.
+            Gum asks for one signature to prove this is your wallet, then the transfer itself.
             Nothing else, ever.
           </Dialog.Description>
 
@@ -80,7 +80,7 @@ export function ConnectSheet({
                         },
                       )
                     }
-                    className="flex w-full items-center gap-3 rounded-[10px] border border-transparent px-3 py-2.5 text-left transition-colors hover:border-line hover:bg-raised disabled:opacity-50"
+                    className="flex w-full items-center gap-3 rounded-[8px] border border-transparent px-3 py-2.5 text-left transition-colors hover:border-line hover:bg-raised disabled:opacity-50"
                   >
                     {connector.icon ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -105,7 +105,7 @@ export function ConnectSheet({
           </ul>
 
           {choices.length === 0 ? (
-            <p className="mt-4 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-[13px] leading-relaxed text-muted">
+            <p className="mt-4 rounded-[8px] border border-line bg-raised px-3.5 py-3 text-[13px] leading-relaxed text-muted">
               No wallet was detected in this browser. Install one, or scan the code below with a
               wallet on your phone.
             </p>

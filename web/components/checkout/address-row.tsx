@@ -22,7 +22,7 @@ export function AddressRow({ payment }: { payment: ReadyPayerDepositRequest }) {
           </a>
         ) : null}
       </div>
-      <div className="mt-2 flex items-center gap-2 rounded-[10px] border border-line bg-raised py-1.5 pr-1.5 pl-3">
+      <div className="mt-2 flex items-center gap-2 rounded-[8px] border border-line bg-raised py-1.5 pr-1.5 pl-3">
         <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
           {payment.address}
         </span>

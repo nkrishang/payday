@@ -25,6 +25,13 @@
   --color-brand-white: #f6f2ea;
   --color-brand-grey: #94938d;
   --color-brand-subtle: #504b4b;
+  /* Gum's four colours: the whole landing page's palette. The grey is the
+     lightest that clears 4.5:1 on the white, for the body copy; dim text on
+     the black stages is the white at alpha instead. */
+  --color-gum-white: #f7f7f5;
+  --color-gum-pink: #ff5ca8;
+  --color-gum-black: #121212;
+  --color-gum-grey: #6f6e6e;
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-body: var(--font-albert), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -71,19 +78,20 @@
 }
 
 /*
- * The hero's code panels are dark in both themes — they are pictures of a
- * program, and their colours only make sense on a terminal ground. Tokens are
- * fixed rather than theme-swapped for that reason.
+ * Code samples are dark in both themes — they are pictures of a program,
+ * and sit on the docs' black ground. The scheme is the landing page's
+ * editor: white text, strings and verbs in pink, the rest in a lighter or
+ * dimmer white; nothing else competes with the pink.
  */
 :root {
-  --term-bg: #0b0b0b;
-  --term-chrome: #151515;
-  --term-line: #232323;
-  --term-text: #f2f2f2;
-  --term-dim: #6e6e6e;
-  --term-accent: #a3d277;
-  --term-id: #7dd3fc;
-  --term-warn: #fcd34d;
+  --term-bg: color-mix(in srgb, #f7f7f5 4%, #121212);
+  --term-chrome: color-mix(in srgb, #f7f7f5 7%, #121212);
+  --term-line: rgb(247 247 245 / 0.1);
+  --term-text: #f7f7f5;
+  --term-dim: color-mix(in srgb, #f7f7f5 42%, #121212);
+  --term-accent: #ff5ca8;
+  --term-id: #f7f7f5;
+  --term-warn: color-mix(in srgb, #f7f7f5 75%, #121212);
 }
 
 @theme inline {
@@ -151,62 +159,18 @@
   }
 
   .landing :focus-visible {
-    outline-color: #0f0f0e;
+    outline-color: #121212;
+  }
+
+  /* Selected text on the landing page is gum pink. */
+  .landing ::selection {
+    background-color: #ff5ca8;
+    color: #f7f7f5;
   }
 
   /* The page's own ground, so an overscroll bounce is not a white flash. */
   body:has(.landing) {
-    background-color: #f6f2ea;
-  }
-
-  /*
-   * A marker-pen highlight behind a run of the headline: a plain block of
-   * colour with no rounding, sitting a hair wider than the letters it holds.
-   *
-   * The block is a pseudo-element scaled on its own layer, not an animated
-   * background: it fills in from the left edge, barely pauses, drains out
-   * towards the right edge like a health bar, and goes again almost at
-   * once. Its origin swaps from the left edge to the right one while it is
-   * full; at full width the two are the same rectangle, so the swap never
-   * shows. A transform composites on the GPU, where an animated
-   * background-size repaints the heading every frame.
-   */
-  .landing-mark {
-    position: relative;
-    display: inline-block;
-    padding: 0.06em 0.12em;
-    margin-inline: -0.06em;
-    color: inherit;
-    background: transparent;
-    isolation: isolate;
-  }
-
-  .landing-mark::before {
-    position: absolute;
-    z-index: -1;
-    inset: 0;
-    background: var(--mark);
-    content: "";
-    transform: scaleX(0);
-    transform-origin: left center;
-    animation: landing-mark-sweep 4s ease-in-out infinite both;
-    will-change: transform;
-  }
-
-  .landing-mark-yellow {
-    --mark: #ead26d;
-  }
-
-  .landing-mark-yellow::before {
-    animation-delay: 500ms;
-  }
-
-  .landing-mark-green {
-    --mark: #a3d277;
-  }
-
-  .landing-mark-green::before {
-    animation-delay: 900ms;
+    background-color: #f7f7f5;
   }
 }
 
@@ -225,7 +189,12 @@
 }
 
 .landing-dialog :focus-visible {
-  outline-color: #0f0f0e;
+  outline-color: #121212;
+}
+
+.landing-dialog ::selection {
+  background-color: #ff5ca8;
+  color: #f7f7f5;
 }
 
 .landing-dialog-scrim {
@@ -253,124 +222,28 @@
 }
 
 .landing-reveal {
-  animation: landing-reveal 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: landing-reveal 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-.landing-delay-1 {
-  animation-delay: 80ms;
-}
-
-.landing-delay-2 {
-  animation-delay: 150ms;
-}
-
-.landing-delay-3 {
-  animation-delay: 220ms;
-}
-
-.landing-delay-4 {
-  animation-delay: 300ms;
-}
-
-/* The hero's stage: one composition, faded out for a beat at the end of its loop. */
 .landing-stage-fade-in {
   animation: landing-stage-fade-in 400ms ease-out both;
 }
 
-.landing-stage-fade-out {
-  animation: landing-stage-fade-out 400ms ease-in both;
-}
-
-.landing-scene-enter {
-  animation: landing-scene-enter 450ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.landing-scene-leave {
-  animation: landing-scene-leave 450ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
-}
-
 /* A composer step arrives the way it does on the dashboard. */
-.landing-scene-step {
-  animation: landing-scene-step 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
 /* A line of the event, a ledger row, a response: each rises into place. */
-.landing-scene-line {
-  animation: landing-scene-line 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.landing-sheet-enter {
-  animation: landing-sheet-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.landing-sheet-leave {
-  animation: landing-sheet-leave 250ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
-}
-
-.landing-cursor {
-  transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.landing-caret {
-  animation: landing-caret 900ms steps(2, start) infinite;
-}
-
-.landing-sheet-up {
-  animation: landing-sheet-up 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.landing-sheet-down {
-  animation: landing-sheet-down 320ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
-}
-
-.landing-scrim-in {
-  animation: landing-scrim-in 320ms ease-out both;
-}
-
-.landing-scrim-out {
-  animation: landing-scrim-out 320ms ease-in both;
-}
-
-.landing-toast {
-  animation: landing-toast 3600ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
 /* The stage's track: three panels side by side, slid to the one in view. */
-.landing-track {
-  transition: transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.landing-dialog-in {
-  animation: landing-dialog-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.landing-dialog-out {
-  animation: landing-dialog-out 240ms cubic-bezier(0.55, 0, 0.8, 0.4) both;
-}
-
-@keyframes landing-dialog-out {
-  from {
-    opacity: 1;
-    transform: none;
-  }
-  to {
-    opacity: 0;
-    transform: translateY(8px) scale(0.985);
-  }
-}
-
 /*
- * The chain grid. Each tile holds the chain's mark twice: as a grey halftone
- * — a dot screen shown only through the mark's own shape — and in full
- * colour, hidden. The pointer swaps them: colour comes in quickly and goes
- * out slowly, the way a light does.
+ * The logo grids. Each tile holds a mark twice: as a grey halftone — a dot
+ * screen shown only through the mark's own shape — and in full colour,
+ * hidden. The pointer swaps them, or the scene does (`data-active`): colour
+ * comes in quickly and goes out slowly, the way a light does.
  */
 .landing-chain {
   transition: background-color 400ms ease-out;
 }
 
 .landing-chain:hover {
-  background-color: rgb(15 15 14 / 0.035);
+  background-color: rgb(18 18 18 / 0.04);
   transition-duration: 180ms;
 }
 
@@ -384,7 +257,7 @@
 }
 
 .landing-chain-halftone {
-  background: radial-gradient(circle, #7d7972 0.95px, transparent 1.15px) 0 0 / 2.5px 2.5px;
+  background: radial-gradient(circle, #6f6e6e 0.95px, transparent 1.15px) 0 0 / 2.5px 2.5px;
   -webkit-mask: var(--logo) center / contain no-repeat;
   mask: var(--logo) center / contain no-repeat;
   -webkit-mask-mode: alpha;
@@ -401,12 +274,19 @@
     transform 420ms ease-out;
 }
 
-.landing-chain:hover .landing-chain-halftone {
+.landing-chain[data-active] {
+  background-color: #ff5ca8;
+  transition-duration: 180ms;
+}
+
+.landing-chain:hover .landing-chain-halftone,
+.landing-chain[data-active] .landing-chain-halftone {
   opacity: 0;
   transition-duration: 160ms;
 }
 
-.landing-chain:hover .landing-chain-logo {
+.landing-chain:hover .landing-chain-logo,
+.landing-chain[data-active] .landing-chain-logo {
   opacity: 1;
   transform: none;
   transition-duration: 200ms;
@@ -470,166 +350,10 @@
   }
 }
 
-@keyframes landing-stage-fade-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes landing-sheet-up {
-  from {
-    transform: translateY(100%);
-  }
-  to {
-    transform: none;
-  }
-}
-
-@keyframes landing-sheet-down {
-  from {
-    transform: none;
-  }
-  to {
-    transform: translateY(100%);
-  }
-}
-
-@keyframes landing-scrim-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes landing-scrim-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes landing-toast {
-  0% {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  8%,
-  88% {
-    opacity: 1;
-    transform: none;
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-}
-
-@keyframes landing-scene-enter {
-  from {
-    opacity: 0;
-    transform: translateX(24px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes landing-scene-leave {
-  from {
-    opacity: 1;
-    transform: none;
-  }
-  to {
-    opacity: 0;
-    transform: translateX(-24px);
-  }
-}
-
-@keyframes landing-scene-step {
-  from {
-    opacity: 0;
-    transform: translateX(14px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes landing-scene-line {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes landing-sheet-enter {
-  from {
-    opacity: 0;
-    transform: translateY(16px) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes landing-sheet-leave {
-  from {
-    opacity: 1;
-    transform: none;
-  }
-  to {
-    opacity: 0;
-    transform: translateY(10px) scale(0.98);
-  }
-}
-
-@keyframes landing-caret {
-  to {
-    visibility: hidden;
-  }
-}
-
-@keyframes landing-mark-sweep {
-  0% {
-    transform: scaleX(0);
-    transform-origin: left center;
-    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  35% {
-    transform: scaleX(1);
-    transform-origin: left center;
-    animation-timing-function: linear;
-  }
-  42% {
-    transform: scaleX(1);
-    transform-origin: right center;
-    animation-timing-function: cubic-bezier(0.55, 0, 0.8, 0.4);
-  }
-  77%,
-  100% {
-    transform: scaleX(0);
-    transform-origin: right center;
-  }
-}
-
 @keyframes landing-reveal {
   from {
     opacity: 0;
-    transform: translateY(14px);
+    transform: translateY(18px);
   }
   to {
     opacity: 1;
@@ -645,41 +369,250 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
 
-  .landing-mark::before {
-    animation: none;
+/*
+ * Scroll reveals. A section is a group: it watches itself and, once enough
+ * of it is on screen, flips `data-in`. Everything inside it carrying
+ * `data-reveal` then arrives, each one `--i` steps after the last. The
+ * stagger is in the delays; the snap is in the curve, an expo-out that
+ * covers most of the distance in its first hundred milliseconds and settles
+ * without a bounce.
+ */
+.landing [data-reveal] {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 480ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 480ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition-delay: calc(var(--i, 0) * var(--step, 90ms));
+  will-change: opacity, transform;
+}
+
+.landing [data-reveal="scale"] {
+  transform: translateY(18px) scale(0.975);
+}
+
+/* A pink band wipes in from its left edge, ahead of the words on it. */
+.landing [data-reveal="wipe"] {
+  opacity: 1;
+  transform: none;
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 620ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition-delay: calc(var(--i, 0) * var(--step, 90ms));
+  will-change: clip-path;
+}
+
+.landing [data-in="true"] [data-reveal] {
+  opacity: 1;
+  transform: none;
+  clip-path: inset(0 0 0 0);
+}
+
+/*
+ * The mark, filling up. A halftone of the gum mark with a solid copy over
+ * it, clipped away from the bottom; the clip lifts and the mark fills, on
+ * load in the hero and on arrival in the closing.
+ */
+.landing-mark-fill {
+  clip-path: inset(100% 0 0 0);
+}
+
+.landing-mark-fill[data-fill="load"] {
+  animation: landing-fill 1200ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
+}
+
+.landing [data-in="true"] .landing-mark-fill[data-fill="reveal"] {
+  animation: landing-fill 1200ms cubic-bezier(0.16, 1, 0.3, 1) 300ms both;
+}
+
+@keyframes landing-fill {
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* The last word of the headline lands late and squashes into place. */
+.landing-stick {
+  display: inline-block;
+  transform-origin: bottom left;
+  animation: landing-stick 640ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes landing-stick {
+  from {
+    opacity: 0;
+    transform: translateY(0.35em) scale(1.06, 0.82);
+  }
+  to {
+    opacity: 1;
     transform: none;
   }
 }
 
 /*
- * The rest of the app, in the landing page's clothes.
- *
- * Payday is a dark product on either colour scheme — the marketing page says
- * so, and a merchant arriving from "Get Started" (or a payer arriving from
- * a deposit link) should not watch the ground flip to white. Rather than
- * restyle every page by hand, `.dash`/`.brand-dark` redefine the theme tokens
- * the pages already read, so a table, a form control, and a status badge all
- * follow. Both halves of each token are restated: Tailwind's `--color-*`
- * resolve `var(--*)` where they are declared, so overriding the raw value
- * alone would never reach `bg-surface`.
- *
- * `.dash` is the dashboard's own name for this and carries one thing only it
- * needs (the hero wave's overflow clipping); `.brand-dark` is the same theme
- * for anything else that wants it — currently the hosted checkout — without
- * borrowing a name that means "dashboard".
- *
- * `body:has(.dash, .brand-dark)` restates the same tokens a second time, on
- * body itself. Radix's `Dialog.Portal` (the wallet picker, the identity
- * check's confirmation) mounts to `document.body` by default, which is a
- * *sibling* of `.dash`/`.brand-dark`, not a descendant — without this, a
- * portalled dialog over a branded page would silently fall back to the
- * generic light/dark tokens instead of inheriting the brand ones, since CSS
- * custom properties only inherit down the tree they are declared on.
+ * A pink line down the left rule, as far as the reader has scrolled. A
+ * browser without scroll-driven animations never shows it.
  */
-.dash,
+.landing-progress {
+  transform: scaleY(0);
+  transform-origin: top;
+}
+
+@supports (animation-timeline: scroll()) {
+  .landing-progress {
+    animation: landing-progress linear both;
+    animation-timeline: scroll(root);
+  }
+}
+
+@keyframes landing-progress {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* A packet travelling along a connector, over and over. */
+.landing-packet {
+  animation: landing-packet 1400ms cubic-bezier(0.45, 0, 0.2, 1) infinite;
+}
+
+@keyframes landing-packet {
+  0% {
+    opacity: 0;
+    transform: translateX(0);
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(var(--travel));
+  }
+}
+
+/*
+ * The rest of the app, in Gum's clothes.
+ *
+ * The dashboard and the hosted checkout are the landing page continued: the
+ * same four colours (white, pink, black, grey), the same type, the same rules
+ * between things. Rather than restyle every page by hand, `.gum` redefines
+ * the theme tokens the pages already read, so a table, a form control and a
+ * status badge all follow. Both halves of each token are restated: Tailwind's
+ * `--color-*` resolve `var(--*)` where they are declared, so overriding the
+ * raw value alone would never reach `bg-surface`.
+ *
+ * Light on either colour scheme, like the landing page. There is no fifth
+ * colour: elevation is the black at a few percent, a line is the grey at
+ * thirty, and the pink is for the one thing on a page that is Gum's — a
+ * progress bar, the chosen option, a link.
+ *
+ * `body:has(.gum)` restates the same tokens a second time, on body itself.
+ * Radix's `Dialog.Portal` (the wallet picker, the identity check's
+ * confirmation) mounts to `document.body` by default, which is a *sibling*
+ * of `.gum`, not a descendant — without this, a portalled dialog over a
+ * branded page would silently fall back to the generic light/dark tokens
+ * instead of inheriting the brand ones, since CSS custom properties only
+ * inherit down the tree they are declared on.
+ */
+.gum,
+body:has(.gum) {
+  color-scheme: light;
+  /* `body` resolves `color: var(--ink)` outside this block, so on a dark
+     system it would keep the dark theme's off-white for everything that
+     inherits over a ground this page forces light regardless. The colour is
+     restated here, where `--ink` is the black. */
+  color: var(--ink);
+  --canvas: #f7f7f5;
+  --surface: #f7f7f5;
+  --raised: color-mix(in srgb, #121212 5%, #f7f7f5);
+  --ink: #121212;
+  --muted: #6f6e6e;
+  --faint: color-mix(in srgb, #6f6e6e 68%, #f7f7f5);
+  --line: rgb(111 110 110 / 0.3);
+  --line-strong: rgb(111 110 110 / 0.5);
+  /* Primary actions are the landing page's black button. */
+  --inverse: #121212;
+  --inverse-ink: #f7f7f5;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-inverse: var(--inverse);
+  --color-inverse-ink: var(--inverse-ink);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+.gum {
+  position: relative;
+  isolation: isolate;
+}
+
+/* The page's own ground, so an overscroll bounce is not a dark flash. */
+body:has(.gum) {
+  background-color: #f7f7f5;
+}
+
+.gum ::selection {
+  background-color: #ff5ca8;
+  color: #f7f7f5;
+}
+
+.gum :focus-visible,
+body:has(.gum) :focus-visible {
+  outline-color: #121212;
+}
+
+/* Pink where the platform would paint its own accent: checkboxes, radios,
+   progress, the native date picker. */
+.gum,
+body:has(.gum) {
+  accent-color: #ff5ca8;
+}
+
+/* A text field marks focus by its own border turning black (components/ui/
+   field.tsx), so the page's focus ring would only draw a second one. */
+.gum
+  :is(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select):focus-visible,
+body:has(.gum)
+  :is(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select):focus-visible {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.dash {
+  /* The composer's sticky preview must still stick, so `clip` and not
+     `hidden`: nothing decorative may put a horizontal scrollbar under the
+     whole dashboard. */
+  overflow-x: clip;
+}
+
+/*
+ * The documentation reads dark: `.docs` opts into `.brand-dark`
+ * (components/docs/shell.tsx). It is the same mechanism as `.gum` with the
+ * palette turned over — Gum's black for the ground, its white for the ink,
+ * the white at alpha for lines and dim text, and the same one pink.
+ */
 .brand-dark,
-body:has(.dash, .brand-dark) {
+body:has(.brand-dark) {
   color-scheme: dark;
   /* `body` resolves `color: var(--ink)` outside this block, so on a light
      system it would keep the light theme's near-black for everything that
@@ -687,17 +620,17 @@ body:has(.dash, .brand-dark) {
      forces dark regardless. The colour is restated here, where `--ink` is the
      dark one. */
   color: var(--ink);
-  --canvas: #070707;
-  --surface: #121311;
-  --raised: #1b1c19;
-  --ink: #f6f2ea;
-  --muted: #b0afa9;
-  --faint: #8b8a84;
-  --line: #232420;
-  --line-strong: #35362f;
-  /* Primary actions are the hero's green button, not an inverted slab. */
-  --inverse: #a3d277;
-  --inverse-ink: #0f0f0e;
+  --canvas: #121212;
+  --surface: color-mix(in srgb, #f7f7f5 4%, #121212);
+  --raised: color-mix(in srgb, #f7f7f5 8%, #121212);
+  --ink: #f7f7f5;
+  --muted: color-mix(in srgb, #f7f7f5 62%, #121212);
+  --faint: color-mix(in srgb, #f7f7f5 42%, #121212);
+  --line: rgb(247 247 245 / 0.1);
+  --line-strong: rgb(247 247 245 / 0.18);
+  /* Primary actions are the white button of the landing page's pink close. */
+  --inverse: #f7f7f5;
+  --inverse-ink: #121212;
   --success: #8fd6a3;
   --warning: #f5c451;
   --danger: #f87171;
@@ -716,38 +649,32 @@ body:has(.dash, .brand-dark) {
   --color-warning: var(--warning);
   --color-danger: var(--danger);
 
-  font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
-.dash,
 .brand-dark {
   position: relative;
   isolation: isolate;
 }
 
-.dash {
-  /* The hero's wave is drawn 160px wider than the page on each side and drifts
-     sideways, which is a decoration, not content: clipped rather than allowed
-     to put a horizontal scrollbar under the whole dashboard. `clip` and not
-     `hidden`, so the composer's sticky preview still sticks. */
-  overflow-x: clip;
-}
-
 /* The page's own ground, so an overscroll bounce is not a white flash. */
-body:has(.dash, .brand-dark) {
-  background-color: #070707;
+body:has(.brand-dark) {
+  background-color: #121212;
 }
 
-.dash .font-heading,
+.brand-dark ::selection {
+  background-color: #ff5ca8;
+  color: #f7f7f5;
+}
+
 .brand-dark .font-heading,
-body:has(.dash, .brand-dark) .font-heading {
+body:has(.brand-dark) .font-heading {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
-.dash :focus-visible,
 .brand-dark :focus-visible,
-body:has(.dash, .brand-dark) :focus-visible {
-  outline-color: #a3d277;
+body:has(.brand-dark) :focus-visible {
+  outline-color: #f7f7f5;
 }
 
 /*
@@ -906,7 +833,7 @@ body:has(.dash, .brand-dark) :focus-visible {
   /* Near-opaque: fields sliding under it must not read through the bar. */
   background: color-mix(in oklab, var(--canvas) 97%, transparent);
   backdrop-filter: blur(8px);
-  box-shadow: 0 -12px 16px -12px rgb(0 0 0 / 55%);
+  box-shadow: 0 -12px 16px -12px rgb(18 18 18 / 12%);
   /* Bleeds past the form's own width so nothing shows at its edges. */
   margin-inline: -12px;
   padding-inline: 12px;
@@ -1027,15 +954,15 @@ body:has(.dash, .brand-dark) :focus-visible {
 
 .docs-prose :is(p, li, td, dd, dt, figcaption, aside, summary) > a,
 .docs-prose :is(p, li, td, dd, figcaption) > strong > a {
-  color: var(--color-brand-green);
+  color: #ff5ca8;
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--color-brand-green) 35%, transparent);
+  text-decoration-color: color-mix(in oklab, #ff5ca8 35%, transparent);
   text-underline-offset: 3px;
   transition: text-decoration-color 120ms;
 }
 
 .docs-prose :is(p, li, td, dd, dt, figcaption, aside, summary) > a:hover {
-  text-decoration-color: var(--color-brand-green);
+  text-decoration-color: #ff5ca8;
 }
 
 /* Inline code, everywhere but inside a sample. */
@@ -1138,7 +1065,7 @@ body:has(.dash, .brand-dark) :focus-visible {
 }
 
 .docs-step-body a {
-  color: var(--color-brand-green);
+  color: #ff5ca8;
 }
 
 .docs-step-body ul {
@@ -1234,9 +1161,9 @@ body:has(.dash, .brand-dark) :focus-visible {
 }
 
 .docs-endpoint-body a {
-  color: var(--color-brand-green);
+  color: #ff5ca8;
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--color-brand-green) 35%, transparent);
+  text-decoration-color: color-mix(in oklab, #ff5ca8 35%, transparent);
   text-underline-offset: 3px;
 }
 

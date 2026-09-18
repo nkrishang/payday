@@ -35,10 +35,10 @@ export function ApiKeySection({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="font-heading text-[24px] leading-tight font-medium tracking-[-0.04em]">
-            API key<span className="text-brand-yellow">.</span>
+            API key.
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            Create an API key to use Payday programmatically via the API.
+            Create an API key to use Gum programmatically via the API.
           </p>
         </div>
       </div>
@@ -133,7 +133,7 @@ function ApiKeyCard({
   };
 
   return (
-    <div className="overflow-hidden rounded-[12px] border border-line bg-surface">
+    <div className="overflow-hidden rounded-[10px] border border-line bg-surface">
       <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
         <StatusDot tone={hasKey ? "success" : "neutral"} />
         <span className={cn("truncate text-[14px] font-medium", hasKey && "font-mono")}>
@@ -225,7 +225,7 @@ function ApiKeyCard({
           <p className="mt-1 text-[12.5px] text-muted">
             Copy it now — this is the only time it&apos;s shown.
           </p>
-          <div className="mt-3 flex items-center gap-2 rounded-[10px] border border-line bg-surface py-2 pr-2 pl-3">
+          <div className="mt-3 flex items-center gap-2 rounded-[8px] border border-line bg-surface py-2 pr-2 pl-3">
             <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{stage.apiKey}</code>
             <CopyButton value={stage.apiKey} label="API key" className="bg-raised" />
           </div>

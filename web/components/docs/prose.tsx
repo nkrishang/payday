@@ -28,7 +28,7 @@ export function DocsPage({
 }) {
   return (
     <article className="docs-prose">
-      <p className="mb-3 font-heading text-[12px] font-medium tracking-[0.08em] text-brand-green uppercase">
+      <p className="mb-3 font-heading text-[12px] font-medium tracking-[0.08em] text-gum-pink uppercase">
         {eyebrow}
       </p>
       <h1 className="font-heading text-[clamp(30px,4vw,40px)] leading-[1.08] font-medium tracking-[-0.045em] text-balance">
@@ -109,7 +109,7 @@ export function Callout({
         <Icon className="size-3.5" />
         {title ?? label}
       </p>
-      <div className="[&>p+p]:mt-2 [&_a]:text-brand-green">{children}</div>
+      <div className="[&>p+p]:mt-2 [&_a]:text-gum-pink">{children}</div>
     </aside>
   );
 }
@@ -160,7 +160,7 @@ export function Card({
     <>
       <span className="flex items-center justify-between gap-2 font-heading text-[15px] font-medium text-ink">
         {title}
-        <ArrowUpRight className="size-3.5 text-faint transition-colors group-hover:text-brand-green" />
+        <ArrowUpRight className="size-3.5 text-faint transition-colors group-hover:text-gum-pink" />
       </span>
       <span className="text-[13.5px] leading-[1.55] text-muted">{children}</span>
     </>
@@ -215,8 +215,8 @@ export function Pill({
       className={cn(
         "inline-flex h-6 items-center rounded-full border px-2.5 font-mono text-[11.5px] whitespace-nowrap",
         tone === "neutral" && "border-line-strong text-muted",
-        tone === "green" && "border-brand-green/50 text-brand-green",
-        tone === "yellow" && "border-brand-yellow/50 text-brand-yellow",
+        tone === "green" && "border-gum-pink/50 text-gum-pink",
+        tone === "yellow" && "border-warning/50 text-warning",
       )}
     >
       {children}

@@ -331,18 +331,24 @@ test("a payer can pay from another network through Relay", async ({ page }) => {
     .filter({ hasText: /injected/i })
     .click();
   const reported = page.waitForRequest(
-    (request) => request.method() === "POST" && /\/relay\/quotes\/rli_[^/]+\/sent$/.test(request.url()),
+    (request) =>
+      request.method() === "POST" && /\/relay\/quotes\/rli_[^/]+\/sent$/.test(request.url()),
   );
   await page.getByRole("button", { name: /pay usdc from polygon/i }).click();
   const sentReport = await reported;
   const sent = await page.evaluate(() => (window as unknown as { __sent: unknown[] }).__sent);
   expect(sent).toHaveLength(2);
-  const [approve, deposit] = sent as [[{ to: string; from: string }], [{ to: string; from: string }]];
+  const [approve, deposit] = sent as [
+    [{ to: string; from: string }],
+    [{ to: string; from: string }],
+  ];
   expect(approve[0].to.toLowerCase()).toBe("0x3c499c542cef5e3811e1192ce70d8cc03d5c3359");
   expect(deposit[0].to.toLowerCase()).toBe("0x4cd00e387622c35bddb9b4c962c136462338bc31");
   expect(deposit[0].from.toLowerCase()).toBe(PAYER_WALLET.toLowerCase());
   expect(sentReport.postDataJSON().transaction_hash).toMatch(/^0x02/);
-  const added = await page.evaluate(() => (window as unknown as { __added: { chainId: string }[] }).__added);
+  const added = await page.evaluate(
+    () => (window as unknown as { __added: { chainId: string }[] }).__added,
+  );
   expect(added.map((chain) => chain.chainId)).toEqual(["0x89"]);
   const switched = await page.evaluate(
     () => (window as unknown as { __switched: string[] }).__switched,
@@ -599,7 +605,7 @@ test("an unknown link is a clean dead end", async ({ page }) => {
 
   expect(response?.status()).toBe(404);
   await expect(page.getByText("This deposit link is not valid")).toBeVisible();
-  await expect(page.getByRole("link", { name: /What is Payday/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /What is Gum/ })).toBeVisible();
 });
 
 test("deposit pages are not indexable and cannot be framed", async ({ page }) => {
@@ -631,12 +637,13 @@ test("the landing page renders and is indexable", async ({ page }) => {
   const errors = watchConsole(page);
   const response = await page.goto("/");
 
-  await expect(
-    page.getByRole("heading", { name: "Accept stablecoins on your terms." }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deposits that stick." })).toBeVisible();
   await expect(page.getByRole("button", { name: "Get Started" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Read Docs" })).toHaveAttribute("href", "/docs");
-  await expect(page.getByRole("img", { name: "Payday" }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: "Developers" }).first()).toHaveAttribute(
+    "href",
+    "/docs",
+  );
+  await expect(page.getByRole("img", { name: "Gum" }).first()).toBeVisible();
   expect(await page.locator('meta[name="robots"]').count()).toBe(0);
   expect(response?.status()).toBe(200);
   expect(errors).toEqual([]);
@@ -652,7 +659,10 @@ test("the landing page links to public documentation without obsolete environmen
   expect(body).not.toContain("quickstart");
   // Public documentation lives in the app itself at /docs, not the repository
   // (see "Publish customer documentation at /docs").
-  await expect(page.getByRole("link", { name: "Read Docs" })).toHaveAttribute("href", "/docs");
+  await expect(page.getByRole("link", { name: "Developers" }).first()).toHaveAttribute(
+    "href",
+    "/docs",
+  );
 });
 
 /* ------------------------------------------------------------------------ */

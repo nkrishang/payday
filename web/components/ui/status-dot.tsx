@@ -3,7 +3,8 @@ import { cn } from "@/lib/cn";
 
 const tones: Record<CheckoutTone, string> = {
   neutral: "bg-faint",
-  progress: "bg-ink",
+  /* Money on the move is the one thing on a row that is Gum's. */
+  progress: "bg-gum-pink",
   success: "bg-success",
   warning: "bg-warning",
 };

@@ -42,9 +42,9 @@ export const wagmiConfig = createConfig({
             projectId: config.walletConnectProjectId,
             showQrModal: true,
             metadata: {
-              name: "Payday",
-              description: "Stablecoin deposits that settle themselves",
-              url: "https://payday.sh",
+              name: "Gum",
+              description: "Stablecoin deposits that stick",
+              url: "https://gum.money",
               icons: [],
             },
           }),

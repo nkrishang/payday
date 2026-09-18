@@ -21,35 +21,35 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://payday.sh"),
+  metadataBase: new URL("https://gum.money"),
   title: {
-    default: "Payday — accept stablecoins on your terms.",
-    template: "%s · Payday",
+    default: "Gum — stablecoin deposits that stick.",
+    template: "Gum · %s",
   },
   description:
-    "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
+    "Create a unique programmable address for every deposit. Control who can fund it and where it settles. Let your users pay from any source.",
   openGraph: {
     type: "website",
-    siteName: "Payday",
-    title: "Payday — accept stablecoins on your terms.",
+    siteName: "Gum",
+    title: "Gum — stablecoin deposits that stick.",
     description:
-      "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
-    url: "https://payday.sh",
+      "Create a unique programmable address for every deposit. Control who can fund it and where it settles. Let your users pay from any source.",
+    url: "https://gum.money",
   },
   twitter: {
     // Large card on X, which reads these tags ahead of the OpenGraph ones.
     card: "summary_large_image",
-    title: "Payday — accept stablecoins on your terms.",
+    site: "@gum_money",
+    title: "Gum — stablecoin deposits that stick.",
     description:
-      "Create a one-time programmable address for every deposit. Control who can fund it, when it expires and where it settles.",
+      "Create a unique programmable address for every deposit. Control who can fund it and where it settles. Let your users pay from any source.",
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#fafafa" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b0b0c" },
-  ],
+  // Every page a visitor or merchant lands on is Gum's white, on either
+  // colour scheme; only the docs keep a dark ground.
+  themeColor: "#f7f7f5",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -71,10 +71,10 @@ export function Toc() {
 
   return (
     <nav aria-label="On this page">
-      <p className="mb-3 font-heading text-[11px] font-medium tracking-[0.08em] text-brand-grey uppercase">
+      <p className="mb-3 font-heading text-[11px] font-medium tracking-[0.08em] text-faint uppercase">
         On this page
       </p>
-      <ul className="flex flex-col gap-0.5 border-l border-brand-grey/20">
+      <ul className="flex flex-col gap-0.5 border-l border-line">
         {headings.map((heading) => (
           <li key={heading.id}>
             <a
@@ -83,8 +83,8 @@ export function Toc() {
                 "-ml-px block border-l py-1 text-[13px] leading-snug transition-colors",
                 heading.level === 3 ? "pl-6" : "pl-3",
                 active === heading.id
-                  ? "border-brand-green text-brand-white"
-                  : "border-transparent text-[#b0afa9] hover:text-brand-white",
+                  ? "border-gum-pink text-ink"
+                  : "border-transparent text-muted hover:text-ink",
               )}
             >
               {heading.text}

@@ -9,7 +9,7 @@ export const PAYOUT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
 export const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
-/** Up to six decimals: every stablecoin Payday serves has six. */
+/** Up to six decimals: every stablecoin Gum serves has six. */
 export const AMOUNT = /^\d{1,12}(\.\d{1,6})?$/;
 
 /**

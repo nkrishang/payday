@@ -187,7 +187,7 @@ describe("useResource", () => {
       });
     }
     await waitFor(() =>
-      expect(screen.getByTestId("a")).toHaveTextContent("error:Payday is temporarily unavailable."),
+      expect(screen.getByTestId("a")).toHaveTextContent("error:Gum is temporarily unavailable."),
     );
     expect(screen.getByTestId("a")).toHaveTextContent("detail:upstream timeout (request req-9)");
     expect(screen.getByTestId("a")).not.toHaveTextContent("loading");

@@ -29,7 +29,7 @@ export function EndpointPage({ group, endpoint }: { group: EndpointGroup; endpoi
   const samples = (
     <div className="flex flex-col gap-5">
       <div>
-        <p className="mb-2 font-heading text-[11px] font-medium tracking-[0.08em] text-brand-grey uppercase">
+        <p className="mb-2 font-heading text-[11px] font-medium tracking-[0.08em] text-muted uppercase">
           Request
         </p>
         {endpoint.examples.ts ? (
@@ -45,7 +45,7 @@ export function EndpointPage({ group, endpoint }: { group: EndpointGroup; endpoi
       </div>
       {endpoint.examples.response ? (
         <div>
-          <p className="mb-2 font-heading text-[11px] font-medium tracking-[0.08em] text-brand-grey uppercase">
+          <p className="mb-2 font-heading text-[11px] font-medium tracking-[0.08em] text-muted uppercase">
             Response
           </p>
           <CodeBlock
@@ -63,7 +63,7 @@ export function EndpointPage({ group, endpoint }: { group: EndpointGroup; endpoi
     <article className="docs-prose docs-endpoint-page">
       <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_440px] xl:gap-10">
         <div className="min-w-0">
-          <p className="mb-3 font-heading text-[12px] font-medium tracking-[0.08em] text-brand-green uppercase">
+          <p className="mb-3 font-heading text-[12px] font-medium tracking-[0.08em] text-gum-pink uppercase">
             {group.title}
           </p>
           <h1 className="font-heading text-[clamp(28px,3.4vw,36px)] leading-[1.1] font-medium tracking-[-0.04em] text-balance">

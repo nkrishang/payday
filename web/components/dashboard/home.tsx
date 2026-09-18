@@ -315,7 +315,7 @@ function Issued({
           cx="32"
           cy="32"
           r="27"
-          stroke="#a3d277"
+          stroke="#ff5ca8"
           strokeWidth="2.5"
           strokeLinecap="round"
           transform="rotate(-90 32 32)"
@@ -323,7 +323,7 @@ function Issued({
         <path
           className="dash-check-mark"
           d="M21 33.5 28.5 41 43 24"
-          stroke="#a3d277"
+          stroke="#ff5ca8"
           strokeWidth="3"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -331,7 +331,7 @@ function Issued({
       </svg>
 
       <h1 className="dash-rise dash-delay-2 font-heading mt-6 text-[30px] leading-tight font-medium tracking-[-0.045em]">
-        Deposit request issued<span className="text-brand-yellow">.</span>
+        Deposit request issued.
       </h1>
       <p className="dash-rise dash-delay-3 mx-auto mt-3 max-w-[420px] text-[15px] text-muted">
         <span className="tabular inline-flex items-center gap-1 text-ink">
@@ -342,7 +342,7 @@ function Issued({
         from {payment.payer.name}
       </p>
 
-      <div className="dash-rise dash-delay-4 mt-7 flex items-center gap-2 rounded-[12px] border border-line bg-surface py-2 pr-2 pl-4 text-left">
+      <div className="dash-rise dash-delay-4 mt-7 flex items-center gap-2 rounded-[10px] border border-line bg-surface py-2 pr-2 pl-4 text-left">
         <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-muted">
           {payment.deposit_url.replace(/^https?:\/\//, "")}
         </span>
@@ -355,7 +355,7 @@ function Issued({
           target="_blank"
           rel="noreferrer noopener"
           className={cn(
-            "inline-flex h-11 items-center justify-center gap-2 rounded-[10px] bg-inverse px-4",
+            "inline-flex h-11 items-center justify-center gap-2 rounded-[8px] bg-inverse px-4",
             "text-[15px] font-medium text-inverse-ink transition-opacity hover:opacity-90",
           )}
         >
@@ -365,7 +365,7 @@ function Issued({
         <button
           type="button"
           onClick={onTrack}
-          className="inline-flex h-11 items-center justify-center rounded-[10px] border border-line-strong bg-surface px-4 text-[15px] font-medium transition-colors hover:bg-raised"
+          className="inline-flex h-11 items-center justify-center rounded-[8px] border border-line-strong bg-surface px-4 text-[15px] font-medium transition-colors hover:bg-raised"
         >
           Track this request
         </button>
@@ -384,8 +384,8 @@ function HomeSkeleton() {
       <div className="mx-auto mt-6 h-9 w-[min(420px,80%)] rounded-lg bg-raised" />
       <div className="mx-auto mt-4 h-4 w-[min(520px,90%)] rounded-full bg-raised" />
       <div className="mt-10 grid gap-4">
-        <div className="h-24 rounded-[16px] border border-line bg-surface" />
-        <div className="h-24 rounded-[16px] border border-line bg-surface" />
+        <div className="h-24 rounded-[12px] border border-line bg-surface" />
+        <div className="h-24 rounded-[12px] border border-line bg-surface" />
       </div>
     </div>
   );

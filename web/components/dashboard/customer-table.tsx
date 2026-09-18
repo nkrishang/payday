@@ -33,7 +33,7 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="font-heading text-[24px] leading-tight font-medium tracking-[-0.04em]">
-            Customers<span className="text-brand-yellow">.</span>
+            Customers.
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
             Manage customer profiles from your deposit requests.
@@ -60,7 +60,7 @@ export function CustomerTable({ onAdd }: { onAdd: () => void }) {
         />
       ) : null}
 
-      <div className="mt-6 overflow-x-auto rounded-[16px] border border-line bg-surface">
+      <div className="mt-6 overflow-x-auto rounded-[12px] border border-line bg-surface">
         {/* On a phone the date column would be too narrow for a date, so it
             goes and the two that identify a customer share the width. */}
         <table className="w-full table-fixed text-[13px]">

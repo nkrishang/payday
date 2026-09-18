@@ -22,12 +22,12 @@ export function SigningOutScreen() {
     <div role="status" aria-label="Signing out" className="dash-enter grid min-h-dvh place-items-center">
       <div className="flex flex-col items-center gap-6">
         <Image
-          src="/payday-logo-full.svg"
-          width={2929}
-          height={1000}
+          src="/gum/logo.svg"
+          width={1280}
+          height={465}
           priority
-          alt="Payday"
-          className="h-auto w-[116px] opacity-90 sm:w-[140px]"
+          alt="Gum"
+          className="h-auto w-[104px] sm:w-[124px]"
         />
         <div className="flex flex-col items-center gap-2.5">
           <Loader2 className="size-5 animate-spin text-muted" aria-hidden="true" />
@@ -49,7 +49,7 @@ function SectionSkeleton({ heading, card }: { heading: string; card: string }) {
     <section>
       <Bar className={cn("h-6", heading)} />
       <Bar className="mt-2.5 h-3.5 w-[min(440px,90%)]" />
-      <div className={cn("mt-5 rounded-[16px] border border-line bg-surface", card)}>
+      <div className={cn("mt-5 rounded-[12px] border border-line bg-surface", card)}>
         <div className="grid gap-3 px-4 py-4">
           <Bar className="h-4 w-[min(320px,80%)]" />
           <Bar className="h-4 w-[min(260px,65%)]" />

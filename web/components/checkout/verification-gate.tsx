@@ -45,7 +45,7 @@ export function VerificationGate({
 
       <section
         aria-labelledby="verification-required"
-        className="mt-6 rounded-[10px] border border-line bg-raised px-4 py-4"
+        className="mt-6 rounded-[8px] border border-line bg-surface px-4 py-4"
       >
         <h2
           id="verification-required"

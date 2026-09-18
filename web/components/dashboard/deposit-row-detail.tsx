@@ -71,9 +71,11 @@ export function DepositRowDetail({ id }: { id: string }) {
 }
 
 const MONO = "font-mono text-[12.5px] break-all";
-/** Reads as a link before it is hovered, which is the point of a link. */
+/** Reads as a link before it is hovered, which is the point of a link. The
+ *  pink is kept for the one link that is Gum's, the payer's view; a hash
+ *  that leaves for an explorer is ink with a rule under it. */
 const LINK =
-  "text-brand-green underline decoration-brand-green/40 underline-offset-2 transition-colors hover:decoration-brand-green";
+  "text-ink underline decoration-line-strong underline-offset-2 transition-colors hover:decoration-gum-pink";
 
 function Loaded({ payment }: { payment: DepositRequest }) {
   const { client } = useMerchant();
@@ -134,7 +136,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
             style={{ width: `${percent > 0 ? Math.max(percent, 2) : 0}%` }}
             className={cn(
               "h-full rounded-full transition-[width] duration-500 ease-out",
-              settled ? "bg-brand-green" : failed ? "bg-warning/70" : "bg-brand-yellow",
+              settled ? "bg-gum-pink" : failed ? "bg-warning/70" : "bg-ink",
             )}
           />
         </div>
@@ -149,7 +151,10 @@ function Loaded({ payment }: { payment: DepositRequest }) {
           href={previewHref}
           target="_blank"
           rel="noreferrer noopener"
-          className={cn(MONO, LINK, "min-w-0 truncate")}
+          className={cn(
+            MONO,
+            "min-w-0 truncate text-gum-pink underline decoration-gum-pink/40 underline-offset-2 transition-colors hover:decoration-gum-pink",
+          )}
         >
           {payment.deposit_url.replace(/^https?:\/\//, "")}
         </a>
@@ -267,7 +272,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
         {payment.attention ? (
           <p
             role="note"
-            className="mt-3 rounded-[10px] border border-warning/40 px-3 py-2.5 text-[12.5px] leading-relaxed text-warning"
+            className="mt-3 rounded-[8px] border border-warning/40 px-3 py-2.5 text-[12.5px] leading-relaxed text-warning"
           >
             {payment.attention.message} {payment.attention.action}
           </p>
@@ -311,12 +316,12 @@ function Files({ payment }: { payment: DepositRequest }) {
   return (
     <section
       aria-label="Files"
-      className="min-w-0 rounded-[16px] border border-line bg-surface p-5"
+      className="min-w-0 rounded-[12px] border border-line bg-surface p-5"
     >
       <h3 className="text-[13px] font-semibold tracking-tight">Files</h3>
 
       {attachment ? (
-        <div className="mt-3 flex items-start gap-2.5 rounded-[10px] border border-line bg-raised px-3 py-2.5">
+        <div className="mt-3 flex items-start gap-2.5 rounded-[8px] border border-line bg-raised px-3 py-2.5">
           <FileText className="mt-0.5 size-4 shrink-0 text-muted" />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[12.5px] font-medium">{attachment.filename}</span>
@@ -384,7 +389,7 @@ function Files({ payment }: { payment: DepositRequest }) {
       {payment.status !== "settled" ? (
         <p className="mt-3 text-[11.5px] leading-relaxed text-faint">
           The proof is generated once the request settles, and verifies offline
-          without Payday.
+          without Gum.
         </p>
       ) : null}
       <div className="mt-2">
@@ -416,7 +421,7 @@ function Panel({ label, children }: { label: string; children: ReactNode }) {
   return (
     <section
       aria-label={label}
-      className="min-w-0 rounded-[14px] border border-line bg-raised/60 p-4"
+      className="min-w-0 rounded-[12px] border border-line bg-surface p-4"
     >
       <h3 className="text-[11px] font-medium tracking-[0.1em] text-faint uppercase">{label}</h3>
       <div className="mt-3">{children}</div>

@@ -12,9 +12,9 @@ export default function DepositNotFound() {
         </p>
         <Link
           href="/"
-          className="mt-8 inline-flex h-10 items-center rounded-[10px] border border-line-strong px-4 text-sm font-medium transition-colors hover:bg-raised"
+          className="mt-8 inline-flex h-10 items-center rounded-[8px] border border-line-strong px-4 text-sm font-medium transition-colors hover:bg-raised"
         >
-          What is Payday?
+          What is Gum?
         </Link>
       </div>
     </CheckoutFrame>

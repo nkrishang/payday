@@ -38,7 +38,7 @@ export function LoadProblem({
       <div
         role="alert"
         className={cn(
-          "flex flex-wrap items-center gap-x-4 gap-y-3 rounded-[12px] border border-line bg-surface px-4 py-3.5",
+          "flex flex-wrap items-center gap-x-4 gap-y-3 rounded-[10px] border border-line bg-surface px-4 py-3.5",
           className,
         )}
       >

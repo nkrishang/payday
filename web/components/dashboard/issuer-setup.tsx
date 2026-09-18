@@ -203,7 +203,7 @@ export function IssuerSetup({
             <span className="block h-[3px] overflow-hidden rounded-full bg-line">
               <span
                 className={cn(
-                  "block h-full origin-left rounded-full bg-brand-green transition-transform duration-500 ease-out",
+                  "block h-full origin-left rounded-full bg-gum-pink transition-transform duration-500 ease-out",
                   index <= step ? "scale-x-100" : "scale-x-0",
                 )}
               />
@@ -296,7 +296,7 @@ export function IssuerSetup({
                   type="button"
                   disabled={busy || waiting > 0}
                   onClick={resend}
-                  className="text-[13px] font-medium text-brand-green transition-colors hover:text-brand-green/80 disabled:cursor-default disabled:text-faint"
+                  className="text-[13px] font-medium text-gum-pink transition-colors hover:text-gum-pink/80 disabled:cursor-default disabled:text-faint"
                 >
                   {waiting > 0 ? `Resend in ${countdown(waiting)}` : "Resend code"}
                 </button>
@@ -363,18 +363,18 @@ function Section({
       aria-label={title}
       aria-current={state === "current" ? "step" : undefined}
       className={cn(
-        "rounded-[16px] border p-5 transition-colors",
-        state === "current" ? "border-brand-green/45 bg-surface" : "border-line bg-surface/60",
+        "rounded-[12px] border p-5 transition-colors",
+        state === "current" ? "border-gum-pink/45 bg-surface" : "border-line bg-surface/60",
         state === "upcoming" ? "opacity-45" : "",
       )}
     >
       <div className="mb-4 flex items-center justify-between gap-3">
         <p className="flex items-center gap-2 text-[12px] font-medium tracking-[0.08em] uppercase">
-          <span className={cn("tabular", state === "current" ? "text-brand-green" : "text-faint")}>
+          <span className={cn("tabular", state === "current" ? "text-gum-pink" : "text-faint")}>
             {index + 1}
           </span>
           <span className={state === "current" ? "text-ink" : "text-faint"}>{title}</span>
-          {state === "done" ? <Check className="size-3.5 text-brand-green" /> : null}
+          {state === "done" ? <Check className="size-3.5 text-gum-pink" /> : null}
         </p>
         {state === "done" && onEdit ? (
           <button

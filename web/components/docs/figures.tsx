@@ -94,13 +94,13 @@ export function RoutingFigure() {
               <div
                 className={cn(
                   "absolute inset-y-0 left-0 rounded-full",
-                  row.late ? "bg-brand-yellow/70" : "bg-brand-green",
+                  row.late ? "bg-warning/70" : "bg-gum-pink",
                 )}
                 style={{ width: `${Math.min(row.received, 1) * 70}%` }}
               />
               {row.received > 1 ? (
                 <div
-                  className="absolute inset-y-0 rounded-r-full bg-brand-yellow/70"
+                  className="absolute inset-y-0 rounded-r-full bg-warning/70"
                   style={{ left: "70%", width: `${(row.received - 1) * 70}%` }}
                 />
               ) : null}
@@ -129,9 +129,7 @@ function Out({ tone, children }: { tone: "green" | "yellow"; children: ReactNode
     <span
       className={cn(
         "inline-flex h-6 items-center rounded-full border px-2.5 font-mono text-[11px] whitespace-nowrap",
-        tone === "green"
-          ? "border-brand-green/50 text-brand-green"
-          : "border-brand-yellow/50 text-brand-yellow",
+        tone === "green" ? "border-gum-pink/50 text-gum-pink" : "border-warning/50 text-warning",
       )}
     >
       {children}
@@ -145,16 +143,16 @@ export function SignatureFigure() {
     <div className="flex flex-col gap-4">
       <p className="overflow-x-auto font-mono text-[13px] whitespace-nowrap text-ink">
         <span className="text-faint">Payday-Signature: </span>
-        <span className="rounded bg-brand-green/15 px-1 text-brand-green">v1</span>
+        <span className="rounded bg-gum-pink/15 px-1 text-gum-pink">v1</span>
         <span className="text-faint">,</span>
-        <span className="rounded bg-brand-yellow/15 px-1 text-brand-yellow">t=1756728000</span>
+        <span className="rounded bg-warning/15 px-1 text-warning">t=1756728000</span>
         <span className="text-faint">,</span>
         <span className="rounded bg-term-id/15 px-1 text-term-id">sha256=6f1a…9c0e</span>
       </p>
       <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-[13.5px] sm:grid-cols-[max-content_1fr]">
-        <dt className="font-mono text-brand-green">v1</dt>
+        <dt className="font-mono text-gum-pink">v1</dt>
         <dd className="text-muted">The scheme. Reject anything else.</dd>
-        <dt className="font-mono text-brand-yellow">t</dt>
+        <dt className="font-mono text-warning">t</dt>
         <dd className="text-muted">
           Unix seconds when Payday signed the delivery. Reject a timestamp older than your tolerance
           (five minutes is usual).
@@ -206,19 +204,19 @@ function MockCard({
   return (
     <div className="flex flex-col gap-2">
       <p className="text-[12px] tracking-[0.04em] text-faint uppercase">{label}</p>
-      <div className="rounded-[14px] border border-brand-white/10 bg-[#111210] p-4 text-brand-white shadow-[0_18px_50px_rgb(0_0_0/28%)]">
+      <div className="rounded-[14px] border border-line bg-surface p-4 text-ink shadow-[0_18px_50px_rgb(0_0_0/28%)]">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-[11px] text-[#94938d]">{issuer} requests</p>
+            <p className="text-[11px] text-muted">{issuer} requests</p>
             <p className="font-heading mt-0.5 text-[16px] font-medium">{heading}</p>
           </div>
           {locked ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-brand-yellow/50 px-2 py-0.5 text-[11px] text-brand-yellow">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/50 px-2 py-0.5 text-[11px] text-warning">
               <Lock className="size-3" />
               Verify to view
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-[#31ae58]/60 px-2 py-0.5 text-[11px] text-[#31ae58]">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-success/60 px-2 py-0.5 text-[11px] text-success">
               <Check className="size-3" />
               Verified
             </span>
@@ -226,9 +224,9 @@ function MockCard({
         </div>
 
         <div className="mt-4 grid grid-cols-[88px_1fr] gap-4">
-          <div className="flex size-[88px] items-center justify-center overflow-hidden rounded-[8px] bg-[#f6f2ea]">
+          <div className="flex size-[88px] items-center justify-center overflow-hidden rounded-[8px] bg-gum-white">
             {locked ? (
-              <div className="size-full bg-[repeating-linear-gradient(45deg,#e4e0d8_0_6px,#f6f2ea_6px_12px)]" />
+              <div className="size-full bg-[repeating-linear-gradient(45deg,#e6e6e4_0_6px,#f7f7f5_6px_12px)]" />
             ) : (
               <Image src="/payday-qr.svg" alt="" width={88} height={88} className="size-[88px]" />
             )}
@@ -239,7 +237,7 @@ function MockCard({
             <Row k="Address" v={locked ? null : "0x8f3C…a1D2"} mono />
             <Row k="Deadline" v="in 23h 41m" />
             {locked ? null : (
-              <p className="flex items-center gap-1.5 text-[#94938d]">
+              <p className="flex items-center gap-1.5 text-muted">
                 <Paperclip className="size-3" />
                 request.pdf
               </p>
@@ -247,14 +245,14 @@ function MockCard({
           </div>
         </div>
 
-        <div className="mt-4 grid h-11 grid-cols-[1fr_96px] overflow-hidden rounded-[8px] bg-[#ebe9e4] text-[#10110f]">
+        <div className="mt-4 grid h-11 grid-cols-[1fr_96px] overflow-hidden rounded-[8px] bg-gum-white text-gum-black">
           <span className="flex items-center px-3 text-[15px] font-medium">
             {locked ? <Skeleton width={72} /> : "25.00 USDC"}
           </span>
           <span
             className={cn(
               "flex items-center justify-center text-[13px] font-semibold",
-              locked ? "bg-[#8fa079] text-[#393d36]" : "bg-brand-green text-[#10110f]",
+              locked ? "bg-gum-black/10 text-gum-grey" : "bg-gum-black text-gum-white",
             )}
           >
             {locked ? "Locked" : "Pay now"}
@@ -268,7 +266,7 @@ function MockCard({
 function Row({ k, v, mono = false }: { k: string; v: string | null; mono?: boolean }) {
   return (
     <p className="flex items-center justify-between gap-3">
-      <span className="text-[#94938d]">{k}</span>
+      <span className="text-muted">{k}</span>
       {v === null ? <Skeleton width={90} /> : <span className={cn(mono && "font-mono")}>{v}</span>}
     </p>
   );
@@ -278,7 +276,7 @@ function Skeleton({ width }: { width: number }) {
   return (
     <span
       aria-label="withheld"
-      className="inline-block h-3 rounded-full bg-[#3d3b3c]"
+      className="inline-block h-3 rounded-full bg-ink/15"
       style={{ width }}
     />
   );
@@ -313,7 +311,7 @@ export function DisclosureTable() {
             {cells.map((shown, index) => (
               <td key={index} className="py-2.5 text-center">
                 {shown ? (
-                  <Check className="mx-auto size-4 text-brand-green" aria-label="shown" />
+                  <Check className="mx-auto size-4 text-gum-pink" aria-label="shown" />
                 ) : (
                   <span className="text-faint" aria-label="withheld">
                     —

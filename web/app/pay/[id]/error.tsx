@@ -21,7 +21,7 @@ export default function DepositError({
       <div className="px-6 py-14 text-center sm:px-8">
         <h1 className="text-xl font-semibold tracking-tight">This deposit request could not be loaded</h1>
         <p className="mx-auto mt-3 max-w-[38ch] text-[15px] leading-relaxed text-muted">
-          The deposit request itself is unaffected — this page could not reach Payday. Try again in a
+          The deposit request itself is unaffected — this page could not reach Gum. Try again in a
           moment.
         </p>
         <Button onClick={reset} className="mt-8" variant="secondary">

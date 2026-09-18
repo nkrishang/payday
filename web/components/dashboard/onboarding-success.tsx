@@ -105,7 +105,7 @@ export function OnboardingSuccess({
           cx="32"
           cy="32"
           r="27"
-          stroke="#a3d277"
+          stroke="#ff5ca8"
           strokeWidth="2.5"
           strokeLinecap="round"
           transform="rotate(-90 32 32)"
@@ -113,7 +113,7 @@ export function OnboardingSuccess({
         <path
           className="dash-check-mark"
           d="M21 33.5 28.5 41 43 24"
-          stroke="#a3d277"
+          stroke="#ff5ca8"
           strokeWidth="3"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -121,7 +121,7 @@ export function OnboardingSuccess({
       </svg>
 
       <h1 className="dash-rise dash-delay-2 font-heading mt-6 text-[30px] leading-tight font-medium tracking-[-0.045em]">
-        Deposit request issued<span className="text-brand-yellow">.</span>
+        Deposit request issued.
       </h1>
       <p className="dash-rise dash-delay-3 mx-auto mt-3 max-w-[420px] text-[15px] text-muted">
         <span className="tabular inline-flex items-center gap-1 text-ink">
@@ -144,7 +144,7 @@ export function OnboardingSuccess({
         </p>
         <div className="mx-auto flex justify-center">
           {failure ? (
-            <div className="w-full max-w-[440px] rounded-[16px] border border-line bg-surface p-6 text-center">
+            <div className="w-full max-w-[440px] rounded-[12px] border border-line bg-surface p-6 text-center">
               <Problem>{failure}</Problem>
               <div className="mt-4">
                 <Button type="button" variant="secondary" size="sm" onClick={start}>
@@ -158,7 +158,7 @@ export function OnboardingSuccess({
             <div
               role="status"
               aria-label="Setting up the live preview"
-              className="flex h-[280px] w-full max-w-[440px] items-center justify-center rounded-[16px] border border-line bg-surface"
+              className="flex h-[280px] w-full max-w-[440px] items-center justify-center rounded-[12px] border border-line bg-surface"
             >
               <Loader2 className="size-5 animate-spin text-faint" />
             </div>

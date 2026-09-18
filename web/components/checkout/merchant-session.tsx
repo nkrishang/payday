@@ -139,7 +139,7 @@ function explain(issuerName: string, status: ClientSecretStatus): string {
     case "closed":
       return "This deposit request is closed and can no longer be opened.";
     case "unavailable":
-      return "Payday could not be reached. Reload to try again, or go back to the app and open the deposit request again.";
+      return "Gum could not be reached. Reload to try again, or go back to the app and open the deposit request again.";
     case "none":
     case "exchanging":
       return `This deposit request opens from ${issuerName}. Sign in there and open it again; this page cannot show it on its own.`;

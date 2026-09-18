@@ -16,7 +16,9 @@ import {
 } from "@/components/docs/prose";
 
 export const metadata: Metadata = {
-  title: "Introduction",
+  // A layout's template only reaches child segments, so the index names
+  // itself the way the rest of the docs are named.
+  title: { absolute: "Gum Docs · Introduction" },
   description:
     "What Payday does, how a deposit flows from request to settlement, and where to start.",
 };
@@ -25,11 +27,7 @@ export default function IntroductionPage() {
   return (
     <DocsPage
       eyebrow="Getting started"
-      title={
-        <>
-          Stablecoin deposits that settle themselves<span className="text-brand-yellow">.</span>
-        </>
-      }
+      title={<>Stablecoin deposits that settle themselves.</>}
       lead="Payday turns USDC and USDT transfers into verified customer deposits. You state what you are owed and by whom; Payday gives that one payer a one-time address, watches the chain, and moves exactly the requested amount to your wallet."
     >
       <p>
@@ -50,8 +48,8 @@ export default function IntroductionPage() {
         <Step title="You issue a deposit request">
           <p>
             An amount in USDC or USDT, who is asking, who should pay, a deadline, and a payer
-            policy. From
-            the dashboard, or with one API call. You get back an id and a <code>deposit_url</code>.
+            policy. From the dashboard, or with one API call. You get back an id and a{" "}
+            <code>deposit_url</code>.
           </p>
         </Step>
         <Step title="The payer opens the link and satisfies the policy">
@@ -72,9 +70,8 @@ export default function IntroductionPage() {
           <p>
             Payday credits only finalized transfers of the request&apos;s currency, as its
             issuer&apos;s exact contract on the chosen chain. Partial transfers accumulate. The
-            request moves through{" "}
-            <code>awaiting_deposit</code>, <code>partially_deposited</code>, and{" "}
-            <code>deposited</code>, and webhooks report each step.
+            request moves through <code>awaiting_deposit</code>, <code>partially_deposited</code>,
+            and <code>deposited</code>, and webhooks report each step.
           </p>
         </Step>
         <Step title="Payday settles">
@@ -130,8 +127,8 @@ export default function IntroductionPage() {
         USDC on every supported network, and USDT (as Tether&apos;s USDT0) on Monad and Arbitrum
         One. A request is denominated in one currency, USDC unless you say otherwise, and Payday
         never gives you a rate worse than 1:1: USDC bridges through Circle&apos;s CCTP at exactly
-        1:1, so a USDC request may be paid on any network and withdrawn to whichever you choose; USDT
-        has no such path, so a USDT request pins its network. Bridged or wrapped versions and
+        1:1, so a USDC request may be paid on any network and withdrawn to whichever you choose;
+        USDT has no such path, so a USDT request pins its network. Bridged or wrapped versions and
         look-alike tokens do not count. See <Link href="/docs/environments">Environments</Link>.
       </Callout>
 
