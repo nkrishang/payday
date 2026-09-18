@@ -331,12 +331,13 @@ get_invoice() {
     "$API_URL/v1/deposit-requests/$1"
 }
 
-# Poll at the documented per-account rate until a jq expression is true. A
-# 100ms loop used to be harmless, but now tests the rate limiter instead of the
-# payment transition and can starve the rest of this end-to-end suite.
+# Poll at the documented per-account rate until a jq expression is true. The
+# 90-second bound covers the sweep policy's 60-second first retry after a
+# transient item failure. A 100ms loop used to be harmless, but now tests the
+# rate limiter instead of the payment transition and can starve the suite.
 wait_for_invoice() {
   local id=$1 expression=$2 description=$3 invoice
-  for _ in {1..60}; do
+  for _ in {1..90}; do
     invoice="$(get_invoice "$id")"
     if jq -e "$expression" <<<"$invoice" >/dev/null; then
       return
