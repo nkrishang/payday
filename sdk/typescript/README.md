@@ -25,23 +25,30 @@ console.log(await payday.depositRequests.get(depositRequest.id));
 console.log(await payday.depositRequests.list({ status: "awaiting_deposit", limit: 20 }));
 ```
 
-A request may name saved records instead of retyping them: with `issuer_id`,
-`issuer` and `payout_address` may be left out (the identity's name, contact
-address, details, and first saved payout address are snapshotted), and with
-`customer_id`, `payer` may be left out. An inline party still wins:
+A request may name a saved customer instead of retyping them: with
+`customer_id`, `payer` may be left out (the customer's name, email, and
+details are snapshotted). An inline party still wins:
 
 ```ts
 await payday.depositRequests.create(
-  { amount: "10.00", issuer_id: acme.id, customer_id: globex.id, payer_policy: { mode: "permissionless" } },
+  {
+    amount: "10.00",
+    payout_address: "0x1111111111111111111111111111111111111111",
+    issuer: { name: "Acme LLC", email: "billing@acme.example" },
+    customer_id: globex.id,
+    payer_policy: { mode: "permissionless" },
+  },
   crypto.randomUUID(),
 );
 ```
 
 Every id the API hands back is a UUID behind a prefix naming the resource:
-`dr_` deposit request, `cus_` customer, `iss_` issuer identity, `pa_` payout
-address, `att_` attachment, `wh_` webhook, `whd_` delivery, `evt_` event,
-`acct_` account. Pass them back exactly as received; a bare UUID or the wrong
-prefix is refused.
+`dr_` deposit request, `cus_` customer, `att_` attachment, `wh_` webhook,
+`whd_` delivery, `evt_` event, `acct_` account. Pass them back exactly as
+received; a bare UUID or the wrong prefix is refused. `issuer_id` is the
+exception: it is an opaque, merchant-supplied string — pass any 1–255 byte
+value and it is stored verbatim, returned on every read, and filterable on
+the list endpoint.
 
 A deposit request is the document: issuer, payer, one directly specified amount,
 optional `notes`, `heading`, `reference`, and `metadata`, a payer policy, and at
@@ -146,16 +153,6 @@ alone carries `stats`: `{ request_count, totals: [{ currency,
 request_count, collected_base_units, pending_base_units }] }`, one entry per
 currency the customer has been asked for, since totals never add across
 currencies.
-
-## Issuer identities
-
-`issuers.create/get/list/update/remove` manage the party a deposit request is
-issued under, its contact mailbox (proven with `startEmailVerification` and
-`confirmEmailVerification`), and the payout wallets it settles to
-(`payoutAddresses.create/list/remove`, attached with
-`issuers.setPayoutAddresses`). `update` is partial like a customer's; a
-changed `contact_email` clears the verification, so a rename alone never
-touches a proven mailbox.
 
 ## Webhooks
 

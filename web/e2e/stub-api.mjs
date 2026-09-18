@@ -476,8 +476,6 @@ const VERIFICATION_FILTERS = ["not_required", "pending", "verified", "likely_uns
 
 const store = {
   customers: new Map(),
-  /** account key -> { issuers, payoutAddresses, issuerAddresses } */
-  issuerWorlds: new Map(),
   withdrawals: new Map(),
   /** id -> { id, filename, bytes, finalizeCalls, status, descriptor } */
   attachments: new Map(),
@@ -782,6 +780,7 @@ function seed() {
       id: "dr_seed-settled",
       created_at: "2026-08-18T10:00:00.000Z",
       status: "settled",
+      issuer_id: "acme-2026",
       received_base_units: "30000000",
       attachment: ATTACHMENT,
       verification_completed_at: "2026-08-19T08:30:00.000Z",
@@ -937,8 +936,13 @@ function authorized(req) {
   return String(req.headers.authorization ?? "").startsWith(`Bearer ${DASHBOARD_TOKEN}`);
 }
 
-/** Which merchant a request speaks for; the bare token is one account too. */
+/** Which merchant a request speaks for: the identity in the token's claims. */
 function accountKey(req) {
+  return tokenClaims(req).sub ?? token(req);
+}
+
+/** The bearer token after the stub's prefix — claims segment or a bare token. */
+function token(req) {
   return String(req.headers.authorization ?? "").slice(`Bearer ${DASHBOARD_TOKEN}`.length);
 }
 
@@ -947,29 +951,25 @@ function accountKey(req) {
  * wallet that is theirs. A bare token (no claims segment) is a session with
  * no mailbox and no wallet, which the account shape allows.
  */
-function sessionClaims(req) {
-  const claims = accountKey(req).replace(/^\./, "");
-  if (!claims) return { email: null, wallet: null };
-  try {
-    const parsed = JSON.parse(Buffer.from(claims, "base64url").toString("utf8"));
-    return {
-      email: typeof parsed.email === "string" ? parsed.email : null,
-      wallet: typeof parsed.wallet === "string" ? parsed.wallet : null,
-    };
-  } catch {
-    return { email: null, wallet: null };
+function tokenClaims(req) {
+  const claims = token(req).replace(/^\./, "");
+  if (claims) {
+    try {
+      const parsed = JSON.parse(Buffer.from(claims, "base64url").toString("utf8"));
+      // Keyed by the identity, not the whole token: Privy rotates the token
+      // and an email change rewrites it, and the same merchant keeps their
+      // account either way.
+      return {
+        sub: typeof parsed.sub === "string" ? parsed.sub : null,
+        email: typeof parsed.email === "string" ? parsed.email : null,
+        wallet: typeof parsed.wallet === "string" ? parsed.wallet : null,
+      };
+    } catch {
+      // Not claims-shaped: the bare token is one account of its own for
+      // specs that speak with a key directly.
+    }
   }
-}
-
-/** That account's issuer world, created on first sight. */
-function issuerWorld(req) {
-  const key = accountKey(req);
-  let world = store.issuerWorlds.get(key);
-  if (!world) {
-    world = { issuers: new Map(), payoutAddresses: new Map(), issuerAddresses: new Map() };
-    store.issuerWorlds.set(key, world);
-  }
-  return world;
+  return { sub: null, email: null, wallet: null };
 }
 
 /** That account's key state, created keyless on first sight — as a real dashboard account is. */
@@ -996,7 +996,7 @@ function accountRecord(req) {
 }
 
 function accountMetadata(record, req) {
-  const session = sessionClaims(req);
+  const session = tokenClaims(req);
   return {
     account_id: record.id,
     email: session.email,
@@ -1476,187 +1476,6 @@ async function customers(req, res, url) {
   return fail(res, 405, "method_not_allowed", "method not allowed");
 }
 
-/**
- * Issuer identities and payout addresses. The emailed code is the same fixed
- * OTP the issuer half of this stub accepts, and the cooldown is not modelled:
- * the specs exercise the flow, not the rate limit.
- */
-/** One name per account, however it is cased — the rule the column enforces. */
-function nameTaken(world, name, exceptId) {
-  const wanted = name.trim().toLowerCase();
-  return [...world.issuers.values()].some(
-    (row) => row.id !== exceptId && row.name.trim().toLowerCase() === wanted,
-  );
-}
-
-async function issuerIdentities(req, res, url) {
-  const world = issuerWorld(req);
-  const shape = (row) => ({
-    ...row,
-    payout_addresses: (world.issuerAddresses.get(row.id) ?? [])
-      .map((id) => world.payoutAddresses.get(id))
-      .filter(Boolean),
-  });
-
-  if (url.pathname === "/v1/issuers") {
-    if (req.method === "POST") {
-      const body = await readJson(req);
-      const name = String(body.name ?? "").trim();
-      const email = String(body.contact_email ?? "")
-        .trim()
-        .toLowerCase();
-      if (!name) return fail(res, 400, "invalid_request", "name is required");
-      if (!email.includes("@"))
-        return fail(res, 400, "invalid_request", "contact_email is required");
-      const now = new Date().toISOString();
-      const row = {
-        id: `iss_${randomUUID()}`,
-        name,
-        contact_email: email,
-        details: body.details ?? null,
-        email_verified: false,
-        email_verified_at: null,
-        created_at: now,
-        updated_at: now,
-      };
-      world.issuers.set(row.id, row);
-      return send(res, 201, shape(row));
-    }
-    if (req.method === "GET") {
-      const all = [...world.issuers.values()].sort((a, b) =>
-        b.created_at.localeCompare(a.created_at),
-      );
-      return send(res, 200, { issuers: all.map(shape), next_cursor: null });
-    }
-    return fail(res, 405, "method_not_allowed", "method not allowed");
-  }
-
-  if (url.pathname === "/v1/payout-addresses") {
-    if (req.method === "POST") {
-      const body = await readJson(req);
-      const address = String(body.address ?? "").trim();
-      if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
-        return fail(res, 400, "invalid_request", "invalid address");
-      }
-      const existing = [...world.payoutAddresses.values()].find(
-        (row) => row.address.toLowerCase() === address.toLowerCase(),
-      );
-      const label = String(body.label ?? "").trim();
-      if (label && !/^[A-Za-z0-9][A-Za-z0-9 ._'&()-]{0,19}$/.test(label)) {
-        return fail(res, 400, "invalid_request", "invalid label");
-      }
-      if (existing) return send(res, 201, existing);
-      const row = {
-        id: `pa_${randomUUID()}`,
-        address,
-        label: label || null,
-        created_at: new Date().toISOString(),
-      };
-      world.payoutAddresses.set(row.id, row);
-      return send(res, 201, row);
-    }
-    if (req.method === "GET") {
-      return send(res, 200, { payout_addresses: [...world.payoutAddresses.values()] });
-    }
-    return fail(res, 405, "method_not_allowed", "method not allowed");
-  }
-
-  const address = url.pathname.match(/^\/v1\/payout-addresses\/([^/]+)$/);
-  if (address) {
-    if (req.method !== "DELETE") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const id = decodeURIComponent(address[1]);
-    if (!world.payoutAddresses.delete(id)) {
-      return fail(res, 404, "payout_address_not_found", "No such payout address");
-    }
-    for (const [issuerId, ids] of world.issuerAddresses) {
-      world.issuerAddresses.set(
-        issuerId,
-        ids.filter((entry) => entry !== id),
-      );
-    }
-    res.writeHead(204, CORS);
-    return res.end();
-  }
-
-  const match = url.pathname.match(
-    /^\/v1\/issuers\/([^/]+)(\/verify\/email\/start|\/verify\/email\/confirm|\/payout-addresses)?$/,
-  );
-  if (!match) return false;
-  const row = world.issuers.get(decodeURIComponent(match[1]));
-  if (!row) return fail(res, 404, "issuer_not_found", "No such issuer identity");
-
-  if (match[2] === "/verify/email/start") {
-    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
-    if (row.email_verified) {
-      return fail(res, 409, "issuer_email_already_verified", "Already verified");
-    }
-    return send(res, 202, {
-      contact_email: row.contact_email,
-      resend_available_at: new Date(Date.now() + 60_000).toISOString(),
-    });
-  }
-
-  if (match[2] === "/verify/email/confirm") {
-    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const body = await readJson(req);
-    if (String(body.otp ?? "").trim() !== OTP) {
-      return fail(res, 401, "otp_invalid", "The code was not accepted");
-    }
-    row.email_verified = true;
-    row.email_verified_at = new Date().toISOString();
-    row.updated_at = row.email_verified_at;
-    return send(res, 200, shape(row));
-  }
-
-  if (match[2] === "/payout-addresses") {
-    if (req.method !== "PUT") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const body = await readJson(req);
-    const ids = Array.isArray(body.payout_address_ids) ? body.payout_address_ids : [];
-    for (const id of ids) {
-      if (!world.payoutAddresses.has(id)) {
-        return fail(res, 404, "payout_address_not_found", "No such payout address");
-      }
-    }
-    world.issuerAddresses.set(row.id, ids);
-    return send(res, 200, shape(row));
-  }
-
-  if (req.method === "GET") return send(res, 200, shape(row));
-  if (req.method === "PATCH") {
-    // Partial, like the API: a field left out keeps its value.
-    const body = await readJson(req);
-    const name = "name" in body ? String(body.name ?? "").trim() : row.name;
-    const email =
-      "contact_email" in body
-        ? String(body.contact_email ?? "")
-            .trim()
-            .toLowerCase()
-        : row.contact_email;
-    if (!name || !email.includes("@")) {
-      return fail(res, 400, "invalid_request", "name and contact_email must not be blank");
-    }
-    if (nameTaken(world, name, row.id)) {
-      return fail(res, 409, "issuer_name_taken", "Another identity already uses this name");
-    }
-    if (email !== row.contact_email) {
-      row.email_verified = false;
-      row.email_verified_at = null;
-    }
-    row.name = name;
-    row.contact_email = email;
-    if ("details" in body) row.details = body.details ?? null;
-    row.updated_at = new Date().toISOString();
-    return send(res, 200, shape(row));
-  }
-  if (req.method === "DELETE") {
-    world.issuers.delete(row.id);
-    world.issuerAddresses.delete(row.id);
-    res.writeHead(204, CORS);
-    return res.end();
-  }
-  return fail(res, 405, "method_not_allowed", "method not allowed");
-}
-
 async function attachments(req, res, url) {
   if (url.pathname === "/v1/attachments") {
     if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
@@ -1816,7 +1635,7 @@ async function payments(req, res, url) {
   }
 
   const match = url.pathname.match(
-    /^\/v1\/deposit-requests\/([^/]+)(\/attachment|\/request\.pdf|\/proof|\/transfers|\/verification|\/onboarding-deposit|\/client-secret|\/preview-session)?$/,
+    /^\/v1\/deposit-requests\/([^/]+)(\/attachment|\/request\.pdf|\/proof|\/transfers|\/verification|\/client-secret|\/preview-session)?$/,
   );
   if (!match) return false;
   const payment = store.depositRequests.get(decodeURIComponent(match[1]));
@@ -1839,27 +1658,6 @@ async function payments(req, res, url) {
     return send(res, 200, {
       payer_session: token,
       expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
-    });
-  }
-  if (match[2] === "/onboarding-deposit") {
-    // The real endpoint verifies and pays for real; the stub has no real
-    // chain to wait on, so it settles the stored deposit request immediately.
-    if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const txHash = hex32(`onboarding-tx:${payment.id}`);
-    Object.assign(payment, {
-      verification_completed_at: payment.verification_completed_at ?? new Date().toISOString(),
-      status: "settled",
-      received: payment.amount,
-      received_base_units: payment.amount_base_units,
-      remaining: "0",
-      remaining_base_units: "0",
-      settlement_tx_hash: txHash,
-      settlement_explorer_url: `https://monadvision.com/tx/${txHash}`,
-      updated_at: new Date().toISOString(),
-    });
-    return send(res, 200, {
-      payer_session: `stub-onboarding-session:${payment.id}`,
-      tx_hash: txHash,
     });
   }
   if (req.method !== "GET") return fail(res, 405, "method_not_allowed", "method not allowed");
@@ -2000,7 +1798,7 @@ function shapeWithdrawal(row) {
 async function withdrawals(req, res, url) {
   if (!url.pathname.startsWith("/v1/withdrawals")) return false;
   const world = withdrawalWorld(req);
-  const session = sessionClaims(req);
+  const session = tokenClaims(req);
 
   if (url.pathname === "/v1/withdrawals") {
     if (req.method === "GET") {
@@ -2161,7 +1959,6 @@ createServer(async (req, res) => {
     if (url.pathname.startsWith("/v1/")) {
       if (!authorized(req)) return fail(res, 401, "unauthorized", "Missing or invalid credential");
       if ((await customers(req, res, url)) !== false) return;
-      if ((await issuerIdentities(req, res, url)) !== false) return;
       if ((await attachments(req, res, url)) !== false) return;
       if ((await payments(req, res, url)) !== false) return;
       if ((await account(req, res, url)) !== false) return;

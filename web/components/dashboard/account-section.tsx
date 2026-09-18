@@ -1,7 +1,7 @@
 "use client";
 
 import type { AccountMetadata } from "@payday/sdk";
-import { useExportWallet } from "@privy-io/react-auth";
+import { useExportWallet, useUpdateEmail } from "@privy-io/react-auth";
 import { ArrowUpRight, KeyRound, LogOut, RefreshCw } from "lucide-react";
 import { CurrencyMark } from "@/components/ui/amount";
 import Link from "next/link";
@@ -9,22 +9,30 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { createPublicClient, erc20Abi, http } from "viem";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
+import { Input, Problem } from "@/components/ui/field";
+import { describeError } from "@/lib/attachment-upload";
 import { cn } from "@/lib/cn";
 import { config, type PublicChain, type PublicToken } from "@/lib/config";
 import { explorerAddressUrl, formatBaseUnits } from "@/lib/format";
+import { EMAIL } from "./field-rules";
 import { useMerchant } from "./session";
 import { WithdrawPanel } from "./withdraw-panel";
 
 /**
- * The account: who is signed in, and the wallet that is theirs.
+ * The account: who is signed in, the wallet that is theirs, and the flow that
+ * pulls its settled balance out to a chain of the merchant's choice.
  *
  * Every account gets an embedded EVM wallet from Privy at its first sign-in.
  * It is the merchant's own — Gum never holds its key — and it is where
- * deposit requests settle unless one of an identity's saved wallets is
- * chosen instead. So it is shown here with what a merchant wants to know
- * about a wallet: the full address, ready to copy, and what is in it right
- * now on every network a payer can pay on. The wallet is an ordinary
+ * settled deposits accumulate. So it is shown here with what a merchant wants
+ * to know about a wallet: the full address, ready to copy, and what is in it
+ * right now on every network a payer can pay on. The wallet is an ordinary
  * account, so it has the same address on each of them.
+ *
+ * The sign-in email lives in the same view: it is how Gum reaches the
+ * merchant, and the merchant changes it here rather than through support —
+ * Privy emails the new address a code, and the address changes only once that
+ * code is confirmed.
  */
 export function AccountSection({
   account,
@@ -50,10 +58,10 @@ export function AccountSection({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="font-heading text-[24px] leading-tight font-medium tracking-[-0.04em]">
-            Account.
+            Balance.
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            View your account details: sign-up email, Gum wallet and its balance.
+            Your sign-in email, Gum wallet, and withdrawing its balance.
           </p>
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={signOut}>
@@ -64,7 +72,7 @@ export function AccountSection({
 
       <dl className="mt-6 grid gap-px overflow-hidden rounded-[10px] border border-line bg-line">
         <Row label="Signed in as">
-          <span className="text-[14px]">{account.email ?? email ?? "—"}</span>
+          <EmailRow email={account.email ?? email} onChanged={onChanged} />
         </Row>
 
         <Row label="Gum wallet">
@@ -226,6 +234,156 @@ type Balances =
   | { status: "loading" }
   | { status: "unavailable"; reload: () => void }
   | { status: "ready"; tokens: Record<string, bigint>; reload: () => void };
+
+/**
+ * The sign-in email, and changing it.
+ *
+ * Privy owns the address — it is how the merchant proves who they are — so
+ * the change is Privy's flow: a code to the new address, and the address
+ * changes only once that code is confirmed. Until then the old address is
+ * still the signed-in one, and it is what this row shows.
+ */
+function EmailRow({ email, onChanged }: { email: string | null; onChanged: () => void }) {
+  const { sendCode, verifyCode } = useUpdateEmail();
+  const [mode, setMode] = useState<"closed" | "edit" | "code">("closed");
+  const [draft, setDraft] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const valid = EMAIL.test(draft.trim());
+
+  const close = () => {
+    setMode("closed");
+    setDraft("");
+    setCode("");
+    setProblem(null);
+  };
+
+  const send = async () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      await sendCode({ newEmailAddress: draft.trim() });
+      setMode("code");
+    } catch (cause) {
+      setProblem(describeError(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirm = async () => {
+    if (busy) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      await verifyCode({ code: code.trim() });
+      // Privy has changed the address; the account's own copy follows. The
+      // identity token rotates with it, so the next request carries the new
+      // email already.
+      onChanged();
+      close();
+    } catch (cause) {
+      // A wrong or expired code is fixable in place; anything else —
+      // including a stale token the refresh above cannot mend — sends the
+      // merchant back to the start rather than stranding them mid-flow.
+      setProblem(describeError(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (mode === "closed") {
+    return (
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-[14px]">{email ?? "—"}</span>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            setMode("edit");
+            setProblem(null);
+          }}
+        >
+          Change
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-2">
+      {mode === "edit" ? (
+        <>
+          <div className="flex max-w-[420px] flex-wrap items-center gap-2">
+            <Input
+              aria-label="New email address"
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void send();
+              }}
+              className="min-w-[240px] flex-1"
+            />
+            <Button type="button" size="sm" disabled={!valid || busy} onClick={() => void send()}>
+              Email a code
+            </Button>
+            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={close}>
+              Cancel
+            </Button>
+          </div>
+          <p className="text-[12px] text-faint">
+            A code goes to the new address. Your sign-in email changes only once
+            that code is confirmed.
+          </p>
+        </>
+      ) : (
+        <>
+          <div className="flex max-w-[420px] flex-wrap items-center gap-2">
+            <Input
+              aria-label="Verification code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="Code from your inbox"
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void confirm();
+              }}
+              className="min-w-[240px] flex-1"
+            />
+            <Button type="button" size="sm" disabled={!code.trim() || busy} onClick={() => void confirm()}>
+              Confirm
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || !valid}
+              onClick={() => void send()}
+            >
+              Resend
+            </Button>
+            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={close}>
+              Cancel
+            </Button>
+          </div>
+          <p className="text-[12px] text-faint">
+            A code was sent to <span className="text-ink">{draft.trim()}</span>. Confirm it to make
+            that your sign-in email.
+          </p>
+        </>
+      )}
+      <Problem>{problem}</Problem>
+    </div>
+  );
+}
 
 type Reading = { outcome: "unavailable" } | { outcome: "ready"; tokens: Record<string, bigint> };
 

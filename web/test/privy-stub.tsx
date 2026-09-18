@@ -184,6 +184,38 @@ export function useCreateWallet() {
   return { createWallet };
 }
 
+/** The new addresses a code was sent to, and whether each was confirmed. */
+export const emailUpdates: Array<{ newEmailAddress: string; confirmed: boolean }> = [];
+
+/**
+ * The headless email-update flow: a code to the new address, then confirm.
+ * The stub keeps the identity (sub) and wallet — a changed email is the same
+ * merchant — and rewrites the session, so a signed-in page can watch
+ * `usePrivy().user.email` move.
+ */
+export function useUpdateEmail() {
+  const sendCode = useCallback(async ({ newEmailAddress }: { newEmailAddress: string }) => {
+    const session = read();
+    if (!session) throw new Error("Not signed in");
+    if (!newEmailAddress.includes("@")) throw new Error("Invalid email address");
+    emailUpdates.push({ newEmailAddress: newEmailAddress.trim().toLowerCase(), confirmed: false });
+  }, []);
+  const verifyCode = useCallback(async ({ code }: { code: string }) => {
+    const session = read();
+    if (!session) throw new Error("Not signed in");
+    if (code !== STUB_OTP) throw new Error("Invalid verification code");
+    const last = emailUpdates[emailUpdates.length - 1];
+    if (!last || last.confirmed) throw new Error("No code was sent");
+    last.confirmed = true;
+    const email = last.newEmailAddress;
+    // Same identity, same wallet, new mailbox — and a fresh token to match.
+    const claims = base64url(JSON.stringify({ sub: session.sub, email, wallet: session.wallet }));
+    write({ email, sub: session.sub, wallet: session.wallet, identityToken: `${TOKEN_PREFIX}.${claims}` });
+    return { user: { id: session.sub, email: { address: email } } };
+  }, []);
+  return { sendCode, verifyCode, state: { status: "initial" as const } };
+}
+
 export function useUser() {
   // signup-dialog.tsx reads refreshUser's answer to tell a returning merchant
   // (wallet already made) from a new one, so it must resolve with the user

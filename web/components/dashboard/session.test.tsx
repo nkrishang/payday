@@ -38,7 +38,13 @@ function Invalidator({ prefix }: { prefix: string }) {
 
 function provider(get: (id: string) => Promise<unknown>, signOut = vi.fn()) {
   const client = { customers: { get } } as unknown as PaydayClient;
-  const value = { client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut };
+  const value = {
+    client,
+    accessToken: "eyJ.dash.token",
+    email: "merchant@example.com",
+    subject: "did:privy:stub-merchant",
+    signOut,
+  };
   return { value, signOut };
 }
 
