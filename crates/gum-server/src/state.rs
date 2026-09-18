@@ -2,8 +2,8 @@ use alloy_primitives::Address;
 use gum_core::{ChainRegistry, ProofOfPayment};
 use gum_ledger::{
     AccountRepository, AttachmentRepository, CustomerRepository, InvoiceRepository,
-    IssuerRepository, OnboardingDemoPaymentRepository, PayerSessionRepository, ProofRepository,
-    RelayIntentRepository, WebhookRepository, WithdrawalRepository,
+    PayerSessionRepository, ProofRepository, RelayIntentRepository, WebhookRepository,
+    WithdrawalRepository,
 };
 use gum_relay::{RelayApi, RelayChain, RelayError};
 use std::collections::HashMap;
@@ -25,7 +25,6 @@ use crate::api::{PrivyVerifier, payer::PayerAccess};
 use crate::attachments::AttachmentStore;
 use crate::attestation::VerificationAttestor;
 use crate::chain_reader::ChainReads;
-use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
 use crate::pregenerated_wallet::WalletPregenerator;
 
@@ -39,10 +38,8 @@ pub struct AppState {
     pub accounts: AccountRepository,
     pub attachments: AttachmentRepository,
     pub customers: CustomerRepository,
-    pub issuers: IssuerRepository,
     pub proofs: ProofRepository,
     pub payer_sessions: PayerSessionRepository,
-    pub onboarding_demo_payments: OnboardingDemoPaymentRepository,
     pub withdrawals: WithdrawalRepository,
     /// Balances and USDC domains per chain, for withdrawals; `None` leaves
     /// the withdrawal routes answering `withdrawals_unavailable`.
@@ -72,9 +69,6 @@ pub struct AppState {
     /// both at startup, and a route that needs one answers 500 without it.
     attachment_store: Option<AttachmentStore>,
     attestor: Option<VerificationAttestor>,
-    /// `None` unless a deployment has deliberately funded and configured a
-    /// wallet for the onboarding walkthrough's one demo transfer.
-    onboarding_payer: Option<OnboardingPayerSigner>,
     /// `None` unless `PAYDAY_PRIVY_APP_SECRET` is configured; wallet
     /// pregeneration (pregenerated_wallet.rs) is a latency optimization, not
     /// a dependency, so its absence never blocks sign-in.
@@ -100,7 +94,6 @@ impl AppState {
         attachment_store: Option<AttachmentStore>,
         attestor: Option<VerificationAttestor>,
         payer_verification: Option<PayerVerification>,
-        onboarding_payer: Option<OnboardingPayerSigner>,
         pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
         chain_reader: Option<Arc<dyn ChainReads>>,
         relay: Option<Arc<dyn RelayApi>>,
@@ -114,11 +107,8 @@ impl AppState {
             chain_reader,
             attachments: AttachmentRepository::new(pool.clone()),
             customers: CustomerRepository::new(pool.clone()),
-            issuers: IssuerRepository::new(pool.clone()),
             proofs: ProofRepository::new(pool.clone()),
             payer_sessions: PayerSessionRepository::new(pool.clone()),
-            onboarding_demo_payments: OnboardingDemoPaymentRepository::new(pool),
-            onboarding_payer,
             repo,
             accounts,
             merchant_verifier,
@@ -157,12 +147,6 @@ impl AppState {
         self.attestor
             .as_ref()
             .ok_or_else(|| ApiError::internal("attestation signing is not configured"))
-    }
-
-    pub fn onboarding_payer(&self) -> Result<&OnboardingPayerSigner, ApiError> {
-        self.onboarding_payer
-            .as_ref()
-            .ok_or_else(ApiError::onboarding_deposit_unavailable)
     }
 
     /// The pregenerator to call for `email`, if the deployment has one

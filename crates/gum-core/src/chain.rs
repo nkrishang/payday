@@ -195,7 +195,7 @@ pub enum ChainRegistryError {
 }
 
 /// The ordered set of supported chains. Order is the order the checkout
-/// offers them and the default (first) is where the onboarding demo pays.
+/// offers them; the first is the default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainRegistry {
     chains: Vec<ChainConfig>,
@@ -295,8 +295,8 @@ impl ChainRegistry {
         &self.chains[0]
     }
 
-    /// The first chain serving USDC, in registry order: where the onboarding
-    /// demo pays. The registry refuses to exist without one.
+    /// The first chain serving USDC, in registry order. The registry refuses
+    /// to exist without one.
     pub fn first_usdc(&self) -> (&ChainConfig, &TokenConfig) {
         self.chains
             .iter()

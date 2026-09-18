@@ -24,8 +24,8 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
-    let aws = match (config.signer(), config.onboarding_payer()) {
-        (SignerConfig::AwsKms(_), _) | (_, Some(SignerConfig::AwsKms(_))) => {
+    let aws = match config.signer() {
+        SignerConfig::AwsKms(_) => {
             Some(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
         }
         _ => None,
@@ -33,13 +33,9 @@ async fn main() {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut wakers: HashMap<u64, Arc<Notify>> = HashMap::new();
-    let mut onboarding_payers = HashMap::new();
     let mut workers = Vec::new();
     for chain in config.chains() {
-        let (client, onboarding_payer) = connect(&config, aws.as_ref(), chain).await;
-        if let Some(address) = onboarding_payer {
-            onboarding_payers.insert(chain.chain_id, address);
-        }
+        let client = connect(&config, aws.as_ref(), chain).await;
         let wake = Arc::new(Notify::new());
         wakers.insert(chain.chain_id, wake.clone());
         workers.push(ChainWorker::new(
@@ -59,7 +55,7 @@ async fn main() {
     let options = ConsumerOptions::default();
     tokio::spawn(gum_bus::run_consumer::<ExecutionCommand, _>(
         Consumer::new(CONSUMER_NAME, pool.clone(), options),
-        CommandHandler::new_with_onboarding(wakers, onboarding_payers),
+        CommandHandler::new(wakers),
         shutdown_rx.clone(),
     ));
     tokio::spawn(gum_bus::run_consumer::<ChainControl, _>(
@@ -92,9 +88,9 @@ async fn connect(
     config: &Config,
     aws: Option<&aws_config::SdkConfig>,
     chain: &ChainConfig,
-) -> (Arc<dyn ChainExecutor>, Option<Address>) {
+) -> Arc<dyn ChainExecutor> {
     let chain_id = chain.chain_id;
-    let (wallet, signers, onboarding) = signer_pool(config, aws, chain_id).await;
+    let (wallet, signers) = signer_pool(config, aws, chain_id).await;
     let client = AlloyChainClient::connect_signing(
         config.rpc_url(chain_id),
         wallet,
@@ -119,7 +115,7 @@ async fn connect(
         .unwrap_or_else(|error| {
             panic!("deployment verification failed for chain {chain_id}: {error}")
         });
-    (Arc::new(client), onboarding)
+    Arc::new(client)
 }
 
 /// Every configured key as one wallet for `chain_id`, and the pool's
@@ -129,7 +125,7 @@ async fn signer_pool(
     config: &Config,
     aws: Option<&aws_config::SdkConfig>,
     chain_id: u64,
-) -> (EthereumWallet, Vec<Address>, Option<Address>) {
+) -> (EthereumWallet, Vec<Address>) {
     let mut wallet: Option<EthereumWallet> = None;
     let mut signers: Vec<Address> = Vec::new();
     let mut register = |signer: Box<dyn TxSigner<alloy_primitives::Signature> + Send + Sync>,
@@ -166,48 +162,10 @@ async fn signer_pool(
             }
         }
     }
-    let onboarding = register_onboarding(config, aws, chain_id, &mut wallet, &signers).await;
     (
         wallet.expect("the signer pool has at least one key"),
         signers,
-        onboarding,
     )
-}
-
-async fn register_onboarding(
-    config: &Config,
-    aws: Option<&aws_config::SdkConfig>,
-    chain_id: u64,
-    wallet: &mut Option<EthereumWallet>,
-    pool: &[Address],
-) -> Option<Address> {
-    let signer: Box<dyn TxSigner<alloy_primitives::Signature> + Send + Sync> =
-        match config.onboarding_payer()? {
-            SignerConfig::Local(keys) => Box::new(
-                keys[0]
-                    .parse::<PrivateKeySigner>()
-                    .expect("invalid PAYDAY_ONBOARDING_PAYER_KEY"),
-            ),
-            SignerConfig::AwsKms(keys) => Box::new(
-                AwsSigner::new(
-                    aws_sdk_kms::Client::new(aws.expect("AWS configuration loaded")),
-                    keys[0].clone(),
-                    Some(chain_id),
-                )
-                .await
-                .expect("failed to initialize onboarding KMS key"),
-            ),
-        };
-    let address = signer.address();
-    assert!(
-        !pool.contains(&address),
-        "onboarding payer must not be in ordinary signer pool"
-    );
-    wallet
-        .as_mut()
-        .expect("ordinary wallet exists")
-        .register_signer(signer);
-    Some(address)
 }
 
 async fn shutdown_signal() {

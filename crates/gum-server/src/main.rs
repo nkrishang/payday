@@ -22,7 +22,6 @@ mod dispatcher;
 mod execution_events;
 mod internal_rpc;
 mod iris;
-mod onboarding_payer;
 mod payer_email;
 mod payer_identity;
 mod pregenerated_wallet;
@@ -113,37 +112,6 @@ async fn main() {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     tracing::info!(address = %attestor.address(), "configured attestation signer");
-    // Absent whenever a deployment hasn't deliberately funded and configured
-    // this — production may never set it.
-    let onboarding_chain = config
-        .networks()
-        .get(config.onboarding_chain_id())
-        .expect("the onboarding chain is registered");
-    let onboarding_payer = match config.onboarding_payer() {
-        Some(signer_config) => Some(
-            onboarding_payer::OnboardingPayerSigner::from_config(
-                signer_config,
-                &aws,
-                config.rpc_url(onboarding_chain.chain_id),
-                onboarding_chain.chain_id,
-                onboarding_chain
-                    .token(gum_core::Currency::Usdc)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "the onboarding chain {} does not serve USDC; the demo pays USDC",
-                            onboarding_chain.chain_id
-                        )
-                    })
-                    .address,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{error}")),
-        ),
-        None => None,
-    };
-    if let Some(onboarding_payer) = &onboarding_payer {
-        tracing::info!(address = %onboarding_payer.address(), chain_id = onboarding_chain.chain_id, "configured onboarding payer signer");
-    }
     // Absent whenever PAYDAY_PRIVY_APP_SECRET isn't set — a latency
     // optimization, not a dependency: sign-in still creates a merchant's
     // wallet itself either way (config.rs's PrivyConfig doc comment).
@@ -270,7 +238,6 @@ async fn main() {
         Some(attachment_store),
         Some(attestor),
         payer_verification,
-        onboarding_payer,
         pregenerated_wallets,
         Some(Arc::new(chain_reader)),
         relay,

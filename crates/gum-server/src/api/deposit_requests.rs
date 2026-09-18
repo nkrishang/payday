@@ -10,33 +10,26 @@ use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
 use uuid::Uuid;
 
 use gum_core::{
     Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
     Currency, CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
-    DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, IssuerId,
-    OnboardingDepositResponse, PDF_MIME_TYPE, Party, PayerAttestation, PayerPolicy,
-    PayerPolicyMode, PaymentBinding, SnapshotNetwork, TransferDto, TransferListResponse,
-    TransferRelayDto, parse_expiration, payer_wallet_attestation, rfc3339,
-    validate_expiration_window,
+    DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, PDF_MIME_TYPE, Party, PayerPolicy,
+    PayerPolicyMode, SnapshotNetwork, TransferDto, TransferListResponse, TransferRelayDto,
+    parse_expiration, rfc3339, validate_expiration_window,
 };
 use serde::Deserialize;
 
 use crate::api::error::ApiError;
 use crate::api::json::{Json, Query};
 use crate::attachments::{AttachmentError, StorageError, content_disposition};
-use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::request_pdf::render_request_pdf;
 use crate::state::AppState;
 use gum_ledger::{
-    AccountId, AttachmentStatus, BindPayerWallet, CLIENT_SECRET_TTL, CreateInvoiceInput,
-    DbAttachment, DbInvoice, InsertIssuedInvoiceError, IssuanceRequest, OnboardingClaim,
-    PAYER_SESSION_TTL, StartEmailVerificationError, same_issuance,
+    AccountId, AttachmentStatus, CLIENT_SECRET_TTL, CreateInvoiceInput, DbAttachment, DbInvoice,
+    InsertIssuedInvoiceError, IssuanceRequest, PAYER_SESSION_TTL, same_issuance,
 };
-
-use crate::api::payer_wallet::WALLET_CHALLENGE_TTL;
 
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
 const MAX_PARTY_NAME_BYTES: usize = 255;
@@ -45,10 +38,9 @@ const MAX_PARTY_DETAILS_BYTES: usize = 4000;
 const MAX_NOTES_BYTES: usize = 4000;
 const MAX_HEADING_BYTES: usize = 200;
 const MAX_REFERENCE_CHARS: usize = 128;
-/// The onboarding walkthrough's reserved, Payday-owned mailbox. The only
-/// thing `onboarding_deposit` can ever pay is an invoice addressed to this
-/// exact email — never a real payer's.
-const ONBOARDING_EMAIL: &str = "onboarding@payday.sh";
+/// The merchant-supplied `issuer_id` is opaque free text: stored and returned
+/// verbatim, never parsed or normalized. Bounded like other free text.
+const MAX_ISSUER_ID_BYTES: usize = 255;
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
@@ -92,7 +84,7 @@ fn enrich_response(
         .and_then(|(address, chain_id)| state.payer.address_url(chain_id, address));
     response.metadata = row.metadata.0.clone();
     response.customer_id = row.customer_id.map(|id| CustomerId(id).to_string());
-    response.issuer_id = row.issuer_id.map(|id| IssuerId(id).to_string());
+    response.issuer_id = row.issuer_id.clone();
     // The signed download link is added by the attachment route.
     response.attachment = attachment.as_ref().and_then(DbAttachment::descriptor);
     response.verification_completed_at = row.verification_completed_at.map(rfc3339);
@@ -207,9 +199,11 @@ pub async fn create_deposit_request(
     }
 
     // 2. Resolve the parties, then validate every request field. A saved
-    //    customer or issuer identity stands in for a party the request left
-    //    out; what is snapshotted is the same either way, and a reference to
-    //    a record that is not this account's reads as an invalid field.
+    //    customer stands in for a payer the request left out; what is
+    //    snapshotted is the same either way, and a reference to a record
+    //    that is not this account's reads as an invalid field. The issuer
+    //    side has no saved identity to fall back to since the feature was
+    //    removed: the inline party and the payout address are required.
     let customer = match req.customer_id {
         Some(customer_id) => Some(
             state
@@ -222,33 +216,7 @@ pub async fn create_deposit_request(
         ),
         None => None,
     };
-    let identity = match req.issuer_id {
-        Some(issuer_id) => Some(
-            state
-                .issuers
-                .get_for_account(account, issuer_id.0)
-                .await?
-                .ok_or_else(|| {
-                    ApiError::invalid_request(
-                        "issuer_id does not identify one of your issuer identities",
-                    )
-                })?,
-        ),
-        None => None,
-    };
-    let issuer = match (&req.issuer, &identity) {
-        (Some(party), _) => party.clone(),
-        (None, Some(identity)) => Party {
-            name: identity.name.clone(),
-            email: Some(identity.contact_email.clone()),
-            details: identity.details.clone(),
-        },
-        (None, None) => {
-            return Err(ApiError::invalid_request(
-                "issuer is required unless issuer_id names a saved issuer identity",
-            ));
-        }
-    };
+    let issuer = req.issuer.clone();
     let payer = match (&req.payer, &customer) {
         (Some(party), _) => party.clone(),
         (None, Some(customer)) => Party {
@@ -262,26 +230,16 @@ pub async fn create_deposit_request(
             ));
         }
     };
-    let payout_address = match (&req.payout_address, &identity) {
-        (Some(address), _) => address.clone(),
-        (None, Some(identity)) => state
-            .issuers
-            .addresses_for_issuer(account, identity.id)
-            .await?
-            .into_iter()
-            .next()
-            .map(|saved| saved.address)
-            .ok_or_else(|| {
-                ApiError::invalid_request(
-                    "payout_address is required unless issuer_id names an identity with a saved payout address",
-                )
-            })?,
-        (None, None) => {
-            return Err(ApiError::invalid_request(
-                "payout_address is required unless issuer_id names an identity with a saved payout address",
-            ));
-        }
-    };
+    let payout_address = req.payout_address.clone();
+    // The opaque issuer id carries no meaning of its own; only its length is
+    // bounded. It is stored and returned verbatim.
+    if let Some(issuer_id) = &req.issuer_id
+        && !(1..=MAX_ISSUER_ID_BYTES).contains(&issuer_id.len())
+    {
+        return Err(ApiError::invalid_request(format!(
+            "issuer_id must be 1 to {MAX_ISSUER_ID_BYTES} bytes when present"
+        )));
+    }
     validate_document(&issuer, &payer, &req)?;
     let payer_policy = req.payer_policy.normalized();
     payer_policy
@@ -390,7 +348,7 @@ pub async fn create_deposit_request(
         reference: req.reference.as_deref(),
         metadata: &req.metadata,
         customer_id: req.customer_id.map(Uuid::from),
-        issuer_id: req.issuer_id.map(Uuid::from),
+        issuer_id: req.issuer_id.clone(),
         payer_policy: &payer_policy,
         attachment_id: req.attachment_id.map(Uuid::from),
         attachment: attachment_commitment.as_ref(),
@@ -485,7 +443,7 @@ pub async fn create_deposit_request(
         expiration.intent.clone(),
     );
     input.customer_id = req.customer_id.map(Uuid::from);
-    input.issuer_id = req.issuer_id.map(Uuid::from);
+    input.issuer_id = req.issuer_id.clone();
     input.metadata = req.metadata.clone();
     input.payer_notification_email = payer_notification_email(&payer, &payer_policy);
 
@@ -665,7 +623,8 @@ pub struct ListQuery {
     status: Option<String>,
     reference: Option<String>,
     customer_id: Option<CustomerId>,
-    issuer_id: Option<IssuerId>,
+    /// Filtered by exact string equality against the stored, verbatim value.
+    issuer_id: Option<String>,
     /// Verification is a separate fact from the payment's status, so it is a
     /// separate filter: `not_required`, `pending`, `verified`, or
     /// `likely_unsolicited`.
@@ -720,7 +679,7 @@ pub async fn list_deposit_requests(
             status.map(DepositRequestStatus::as_str),
             query.reference.as_deref(),
             query.customer_id.map(Uuid::from),
-            query.issuer_id.map(Uuid::from),
+            query.issuer_id.as_deref(),
             query.verification.as_deref(),
             starting_after,
             limit,
@@ -752,7 +711,7 @@ pub async fn list_deposit_requests(
                 received: response.received,
                 payer_policy_mode: response.payer_policy.mode(),
                 customer_id: row.customer_id.map(|id| CustomerId(id).to_string()),
-                issuer_id: row.issuer_id.map(|id| IssuerId(id).to_string()),
+                issuer_id: row.issuer_id.clone(),
                 has_attachment,
                 verification_completed_at: row.verification_completed_at.map(rfc3339),
                 likely_unsolicited_at: row.likely_unsolicited_at.map(rfc3339),
@@ -764,28 +723,6 @@ pub async fn list_deposit_requests(
         deposit_requests: payments,
         next_cursor,
     }))
-}
-
-/// The onboarding signer pays on exactly one chain with that chain's USDC. A
-/// binding names the network the payer chose; paying it from here on any other
-/// chain would send real funds to an address no indexer of that chain is
-/// watching, so every broadcast path must pass this guard first.
-fn ensure_onboarding_network(
-    signer: &OnboardingPayerSigner,
-    binding: &PaymentBinding,
-    payment_id: Uuid,
-) -> Result<(), ApiError> {
-    let chain = ChainId(signer.chain_id());
-    if binding.network.chain_id != chain || binding.network.token.0 != signer.usdc() {
-        tracing::error!(
-            %payment_id,
-            bound_chain = binding.network.chain_id.0,
-            signer_chain = chain.0,
-            "onboarding demo payment is bound to a network the onboarding signer does not pay on"
-        );
-        return Err(ApiError::onboarding_deposit_not_eligible());
-    }
-    Ok(())
 }
 
 fn full_deposit_request_id(value: &str) -> Result<Uuid, ApiError> {
@@ -815,213 +752,12 @@ pub async fn cancel_deposit_request(
     Ok(Json(to_response(&state, account, row).await?))
 }
 
-/// The onboarding walkthrough's one real demo transfer and verification
-/// (see `docs/local-development.md`-adjacent design notes: the walkthrough
-/// issues a real, self-billed `verified_email` invoice through the normal
-/// create endpoint, then calls this one to make it real end to end).
-///
-/// This is deliberately narrow, not a general "settle any invoice" or
-/// "verify any payer" affordance: it refuses anything not addressed to
-/// Payday's own reserved mailbox, and at most one call per account ever
-/// reaches the chain (`gum_ledger::OnboardingDemoPaymentRepository`).
-/// Verification is completed the same way `payer_verification::confirm_email`
-/// does after a real Auth0 code checks out — minting a session, then
-/// approving its email fact — except there is no code to check: Payday
-/// owns `onboarding@payday.sh`, so proving control of it here would only
-/// ever be proving Payday's own address to Payday. The wallet step is real:
-/// the demo payer signs the same attestation a payer's wallet would, which
-/// is what gives the request its address.
-pub async fn onboarding_deposit(
-    State(state): State<AppState>,
-    Extension(account): Extension<AccountId>,
-    Path(reference): Path<String>,
-) -> Result<Json<OnboardingDepositResponse>, ApiError> {
-    let signer = state.onboarding_payer()?;
-    let payer_verification = state
-        .payer_verification
-        .as_ref()
-        .ok_or_else(ApiError::onboarding_deposit_unavailable)?;
-
-    let row = resolve_deposit_request(&state, account, &reference).await?;
-    let invoice = Invoice::try_from(&row)?;
-    let eligible = row.status == "created"
-        && invoice.issuance_snapshot.bill_to.email.as_deref() == Some(ONBOARDING_EMAIL)
-        && matches!(
-            &invoice.issuance_snapshot.payer_policy,
-            PayerPolicy::VerifiedEmail { expected_email } if expected_email == ONBOARDING_EMAIL
-        );
-    if !eligible {
-        return Err(ApiError::onboarding_deposit_not_eligible());
-    }
-
-    // The onboarding signer pays on exactly one chain with that chain's USDC.
-    // A request already bound on another network is not payable by it; refuse
-    // before the claim below consumes the account's one-shot demo payment, so
-    // an operator fixing the binding can still re-run the walkthrough.
-    if let Some(binding) = &invoice.binding {
-        ensure_onboarding_network(signer, binding, row.id)?;
-    }
-
-    // Minting and approving a session is cheap and safe to repeat on a retry
-    // (it only ever adds harmless extra rows for this one demo invoice); the
-    // durable execution job below is the part that must never happen twice.
-    let session = state
-        .payer_sessions
-        .create(row.id, PAYER_SESSION_TTL)
-        .await?;
-    state
-        .payer_sessions
-        .begin_email_verification(session.id, Duration::ZERO)
-        .await
-        .map_err(|error| match error {
-            StartEmailVerificationError::Cooldown { .. } => {
-                ApiError::internal("unexpected onboarding verification cooldown")
-            }
-            StartEmailVerificationError::Database(error) => error.into(),
-        })?;
-    let payer_ref = payer_verification.payer_ref(account.0, ONBOARDING_EMAIL);
-    // A fresh event id every call: unlike a real payer's OTP, there is no
-    // single external event to key on, and minting another approved session
-    // on retry is harmless, so nothing needs deduplicating here.
-    state
-        .payer_sessions
-        .approve_email(
-            session.id,
-            payer_ref,
-            Utc::now(),
-            &Uuid::now_v7().to_string(),
-        )
-        .await?;
-
-    // The demo payer attests its wallet exactly as a payer's would: a
-    // challenge on the session for the demo chain, the EIP-712 signature,
-    // the binding. A retry finds the binding already in place.
-    let chain = ChainId(signer.chain_id());
-    let binding = match &invoice.binding {
-        Some(binding) => binding.clone(),
-        None => {
-            let network = *invoice
-                .network_for(chain)
-                .ok_or_else(ApiError::onboarding_deposit_not_eligible)?;
-            let challenge = state
-                .payer_sessions
-                .issue_wallet_challenge(session.id, chain.0, WALLET_CHALLENGE_TTL)
-                .await?;
-            let message = PayerAttestation::new(
-                invoice.attribution_hash,
-                signer.address(),
-                challenge.nonce,
-                challenge.expires_at.timestamp().max(0) as u64,
-            );
-            let digest = message.digest(network.chain_id.0, network.factory.0);
-            let signature = signer.sign_hash(&digest).await.map_err(|error| {
-                tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation failed");
-                ApiError::internal("failed to sign the onboarding payer attestation")
-            })?;
-            let attestation = payer_wallet_attestation(
-                &message,
-                network.chain_id.0,
-                network.factory.0,
-                &signature,
-            );
-            let now = Utc::now();
-            let binding = invoice
-                .bind_payer_wallet(chain, attestation, rfc3339(now))
-                .map_err(|error| {
-                    tracing::error!(%error, payment_id = %row.id, "onboarding payer attestation did not verify");
-                    ApiError::internal("failed to verify the onboarding payer attestation")
-                })?;
-            match state
-                .repo
-                .bind_payer_wallet(row.id, session.id, &binding, now)
-                .await?
-            {
-                BindPayerWallet::Bound(_) => binding,
-                // A concurrent caller won the binding, possibly on another
-                // network than the one this signer pays on: keep the winner's
-                // whole binding so the network check below applies to it too.
-                BindPayerWallet::AlreadyBound(bound) => Invoice::try_from(&bound)?
-                    .binding
-                    .ok_or_else(|| ApiError::internal("bound invoice has no binding"))?,
-                BindPayerWallet::NotBindable(_) => {
-                    return Err(ApiError::deposit_request_not_payable());
-                }
-            }
-        }
-    };
-    // The guard above ran before the claim for a pre-existing binding; this
-    // one covers a binding a concurrent call just won, possibly on another
-    // network than the one this signer pays on. Paying either from here on
-    // any other chain would send real funds to an address no indexer of that
-    // chain is watching.
-    ensure_onboarding_network(signer, &binding, row.id)?;
-    let payment_address = binding.payment_address;
-    let claim = state
-        .onboarding_demo_payments
-        .claim_and_publish(
-            account,
-            row.id,
-            signer.chain_id(),
-            signer.address(),
-            signer.usdc(),
-            payment_address.0,
-            invoice.amount.0,
-        )
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, payment_id = %row.id, "failed to schedule onboarding payment");
-            ApiError::internal("failed to schedule the onboarding demo transfer")
-        })?;
-    if claim == OnboardingClaim::Conflict {
-        return Err(ApiError::onboarding_deposit_already_claimed());
-    }
-
-    let tx_hash = match claim {
-        OnboardingClaim::AlreadySubmitted(tx_hash) => tx_hash,
-        OnboardingClaim::Claimed(job_id) | OnboardingClaim::PendingRetry(job_id) => {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                if let Some(hash) = state
-                    .onboarding_demo_payments
-                    .submitted_hash(job_id)
-                    .await?
-                {
-                    break hash.to_string();
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(ApiError::internal(
-                        "onboarding demo transfer is still pending",
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-        OnboardingClaim::Conflict => unreachable!("handled above"),
-    };
-
-    Ok(Json(OnboardingDepositResponse {
-        payer_session: session.token,
-        tx_hash,
-    }))
-}
-
 #[derive(serde::Serialize)]
 pub struct PreviewSessionResponse {
     pub payer_session: String,
     pub expires_at: String,
 }
 
-/// A session that lets the deposit request's own issuing merchant open its
-/// payer view exactly as a verified payer would see it — the dashboard's
-/// "Open the payer's view" and "Track this request" links use this instead
-/// of the bare `deposit_url`, which otherwise looks exactly as locked to the
-/// issuing merchant as it does to a stranger holding the link.
-///
-/// This is deliberately not verification: it records no attempt and never
-/// touches the invoice's own `verification_completed_at` or fires a
-/// `verification.*` webhook. A merchant looking at their own request proves
-/// nothing about a payer, and must never be confused with one actually
-/// completing it — see `PayerSessionRepository::create_merchant_preview`.
 pub async fn preview_session(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
@@ -1077,14 +813,10 @@ fn unix_now() -> u64 {
 /// the request and is not compared.
 /// Whom to email the request to, if anyone: the payer the merchant named,
 /// provided the link in that email would open for them. A merchant-session
-/// request opens only from inside the merchant's own app, and the onboarding
-/// walkthrough's payer is Payday's reserved mailbox.
+/// request opens only from inside the merchant's own app.
 fn payer_notification_email(payer: &Party, policy: &PayerPolicy) -> Option<String> {
     let email = payer.email.as_deref()?.trim();
-    if email.is_empty()
-        || email.eq_ignore_ascii_case(ONBOARDING_EMAIL)
-        || policy.mode() == PayerPolicyMode::MerchantSession
-    {
+    if email.is_empty() || policy.mode() == PayerPolicyMode::MerchantSession {
         return None;
     }
     Some(email.to_owned())
@@ -1269,37 +1001,42 @@ mod tests {
 
     /// The document check on a request whose parties were given inline.
     fn validate_inline(request: &CreateDepositRequest) -> Result<(), ApiError> {
-        validate_document(
-            request.issuer.as_ref().unwrap(),
-            request.payer.as_ref().unwrap(),
-            request,
-        )
+        validate_document(&request.issuer, request.payer.as_ref().unwrap(), request)
     }
 
     #[test]
-    fn parties_and_payout_address_may_be_left_to_saved_records() {
-        let request: CreateDepositRequest = serde_json::from_value(serde_json::json!({
+    fn issuer_and_payout_address_are_required_and_issuer_id_is_opaque() {
+        // The issuer party and payout address must be given inline; there is
+        // no saved-identity fallback anymore.
+        let missing = serde_json::from_value::<CreateDepositRequest>(serde_json::json!({
             "amount": "1",
-            "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
+            "issuer_id": "merchant-acme",
             "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700",
             "payer_policy": {"mode": "permissionless"}
         }))
-        .unwrap();
-        assert!(request.issuer.is_none());
-        assert!(request.payer.is_none());
-        assert!(request.payout_address.is_none());
-        assert!(request.issuer_id.is_some() && request.customer_id.is_some());
-        // A bare UUID is refused with a message naming the form wanted.
-        let bare = serde_json::from_value::<CreateDepositRequest>(serde_json::json!({
+        .unwrap_err();
+        assert!(missing.to_string().contains("payout_address"), "{missing}");
+        let missing = serde_json::from_value::<CreateDepositRequest>(serde_json::json!({
+            "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
-            "customer_id": "0198f80c-2222-7dc1-a369-90556a64f700",
+            "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700",
             "payer_policy": {"mode": "permissionless"}
         }))
         .unwrap_err();
-        assert!(
-            bare.to_string()
-                .contains("expected a customer id like cus_"),
-            "{bare}"
+        assert!(missing.to_string().contains("issuer"), "{missing}");
+        // An opaque correlation id of any shape is accepted verbatim.
+        let request: CreateDepositRequest = serde_json::from_value(serde_json::json!({
+            "payout_address": "0x0000000000000000000000000000000000000002",
+            "amount": "1",
+            "issuer": {"name": "Acme"},
+            "payer": {"name": "Globex"},
+            "issuer_id": "merchant-acme/invoice#42 (FY26)",
+            "payer_policy": {"mode": "permissionless"}
+        }))
+        .unwrap();
+        assert_eq!(
+            request.issuer_id.as_deref(),
+            Some("merchant-acme/invoice#42 (FY26)")
         );
     }
 
@@ -1349,10 +1086,6 @@ mod tests {
         assert_eq!(payer_notification_email(&payer(Some("   ")), &open), None);
         assert_eq!(
             payer_notification_email(&payer(Some("bob@example.com")), &embedded),
-            None
-        );
-        assert_eq!(
-            payer_notification_email(&payer(Some("Onboarding@payday.sh")), &gated),
             None
         );
     }

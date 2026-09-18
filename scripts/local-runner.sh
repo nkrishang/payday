@@ -207,13 +207,6 @@ USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
   # local proof verification; production signs with a KMS key instead.
   export PAYDAY_ATTESTATION_SIGNER_KEY="${PAYDAY_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
-  # Pays the onboarding walkthrough's one self-issued deposit request, so a
-  # brand new merchant sees a real transfer settle before doing anything else.
-  # Anvil account #1 (0x70997970C51812dc3A010C7d01b50e0d17dc79C8), already
-  # minted 1,000,000 test USDC by Bootstrap.s.sol and otherwise unused
-  # locally — an account outside PAYDAY_SIGNER_KEYS so it never contends
-  # with a sweep signer for a nonce.
-  export PAYDAY_ONBOARDING_PAYER_KEY="${PAYDAY_ONBOARDING_PAYER_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
   # Payer email verification against the development provider's payer client
   # and audience.
   export PAYDAY_PAYER_AUTH0_ISSUER="${PAYDAY_PAYER_AUTH0_ISSUER:-$PAYDAY_DEV_IDENTITY_ISSUER}"
@@ -331,7 +324,7 @@ build_chain_registry
 # the first chain; the deployer's Bootstrap mint funds it.
 RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
 cast send "$USDC" 'transfer(address,uint256)' "$RELAY_SOLVER" 100000000 \
-  --private-key "$PAYDAY_ONBOARDING_PAYER_KEY" --rpc-url "$PAYDAY_RPC_URL" >/dev/null
+  --private-key "$BOOTSTRAP_KEY" --rpc-url "$PAYDAY_RPC_URL" >/dev/null
 prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" \
   RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" node scripts/relay-stub.mjs
 prefix identity ./target/debug/payday-dev-identity

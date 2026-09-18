@@ -6,8 +6,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachmentId, Currency, CustomerId, Invoice, InvoiceStatus, IssuerId, NetworkTerms, Party,
-    PayerPolicy, PayerPolicyMode, chain_name, native_symbol,
+    AttachmentId, Currency, CustomerId, Invoice, InvoiceStatus, NetworkTerms, Party, PayerPolicy,
+    PayerPolicyMode, chain_name, native_symbol,
 };
 
 /// The only attachment type Payday accepts (product plan §4.2).
@@ -30,10 +30,8 @@ pub fn rfc3339(at: DateTime<Utc>) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateDepositRequest {
-    /// Where exactly `amount` settles. Optional when `issuer_id` names an
-    /// identity with a saved payout address: the first one is used.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payout_address: Option<String>,
+    /// Where exactly `amount` settles, EIP-55 or lowercase hex. Required.
+    pub payout_address: String,
     pub amount: String,
     /// `USDC` (the default) or `USDT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,22 +41,19 @@ pub struct CreateDepositRequest {
     /// the currency on; required for a currency that must be pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_id: Option<String>,
-    /// The issuing party as the document will carry it. Optional when
-    /// `issuer_id` is given: the saved identity's name, contact address, and
-    /// details are snapshotted in its place.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer: Option<Party>,
+    /// The issuing party as the document will carry it. Required.
+    pub issuer: Party,
     /// The paying party. Optional when `customer_id` is given: the saved
     /// customer is snapshotted in its place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payer: Option<Party>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customer_id: Option<CustomerId>,
-    /// The issuer identity this is issued under. The `issuer` party above is
-    /// still the snapshot the document carries; this only records which saved
-    /// identity it came from, and survives that identity being renamed.
+    /// An opaque, merchant-supplied correlation id for this request, stored
+    /// and returned verbatim: 1 to 255 bytes of UTF-8 when present, never
+    /// parsed or normalized. Payday attaches no meaning to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer_id: Option<IssuerId>,
+    pub issuer_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -555,16 +550,6 @@ pub struct DepositRequestListResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferListResponse {
     pub transfers: Vec<TransferDto>,
-}
-
-/// The onboarding walkthrough's one real demo transfer: a payer session
-/// already proven to have verified the reserved onboarding mailbox (so the
-/// dashboard can unlock the embedded payer view immediately), and the hash
-/// of the transfer that was just broadcast.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OnboardingDepositResponse {
-    pub payer_session: String,
-    pub tx_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1089,7 +1074,7 @@ mod tests {
             let error = serde_json::from_value::<CreateDepositRequest>(rejected).unwrap_err();
             assert!(error.to_string().contains(field), "{field}: {error}");
         }
-        for required in ["amount", "payer_policy"] {
+        for required in ["amount", "payer_policy", "issuer", "payout_address"] {
             let mut missing = accepted.clone();
             missing.as_object_mut().unwrap().remove(required);
             assert!(
@@ -1097,16 +1082,25 @@ mod tests {
                 "{required} must be required"
             );
         }
-        // The parties and the payout address may be left to saved records;
-        // the handler decides whether the request named any.
-        for optional in ["issuer", "payer", "payout_address"] {
-            let mut missing = accepted.clone();
-            missing.as_object_mut().unwrap().remove(optional);
-            assert!(
-                serde_json::from_value::<CreateDepositRequest>(missing).is_ok(),
-                "{optional} is resolved by the handler"
-            );
-        }
+        // The payer may come from a saved customer instead.
+        let mut without_payer = accepted.clone();
+        without_payer.as_object_mut().unwrap().remove("payer");
+        assert!(serde_json::from_value::<CreateDepositRequest>(without_payer).is_ok());
+        // An opaque issuer_id of any shape is accepted; a saved customer
+        // remains a prefixed id.
+        let request: CreateDepositRequest = serde_json::from_value(serde_json::json!({
+            "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "amount": "1",
+            "issuer": {"name": "Acme"},
+            "payer": {"name": "Globex"},
+            "payer_policy": {"mode": "permissionless"},
+            "issuer_id": "merchant-acme/eu?region=1"
+        }))
+        .unwrap();
+        assert_eq!(
+            request.issuer_id.as_deref(),
+            Some("merchant-acme/eu?region=1")
+        );
     }
 
     #[test]
