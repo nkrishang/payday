@@ -1,4 +1,4 @@
-import type { PayerPolicyMode, DepositRequestStatus } from "@payday/sdk";
+import type { PayerPolicyMode, DepositRequestStatus } from "@gum/sdk";
 import type { ComposerMode } from "./create-deposit-request";
 import type { CheckoutTone } from "@/lib/checkout-state";
 

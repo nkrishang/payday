@@ -1,4 +1,4 @@
-import { PREVIEW_SESSION_FRAGMENT_KEY, previewUrl, type PaydayClient } from "@payday/sdk";
+import { PREVIEW_SESSION_FRAGMENT_KEY, previewUrl, type GumClient } from "@gum/sdk";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 /**
@@ -89,7 +89,7 @@ export function takePreviewSession(): string | null {
  * this is a convenience, not something sign-in or the link itself depends on.
  */
 export function usePayerPreviewUrl(
-  client: PaydayClient,
+  client: GumClient,
   payment: { id: string; deposit_url: string },
 ): string {
   const [url, setUrl] = useState(payment.deposit_url);

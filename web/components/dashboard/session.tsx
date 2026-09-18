@@ -1,6 +1,6 @@
 "use client";
 
-import { type PaydayClient, PaydayError } from "@payday/sdk";
+import { type GumClient, GumError } from "@gum/sdk";
 import { useCreateWallet, useIdentityToken, usePrivy } from "@privy-io/react-auth";
 import { useRouter } from "next/navigation";
 import {
@@ -27,7 +27,7 @@ export const HOME_PATH = "/dashboard";
 export const SIGNED_OUT_PATH = "/";
 
 export interface Merchant {
-  client: PaydayClient;
+  client: GumClient;
   /**
    * The session token itself, held only for the attachment uploader, which
    * builds its own observing client.
@@ -338,7 +338,7 @@ class ResourceCache {
         this.publish(entry, { data, failure: null, loading: false });
       })
       .catch((cause: unknown) => {
-        if (cause instanceof PaydayError && cause.status === 401) {
+        if (cause instanceof GumError && cause.status === 401) {
           // The token expired: the session ends and the landing page takes
           // over, rather than every page handling it.
           this.signOut();
@@ -392,7 +392,7 @@ function useResourceCache(): ResourceCache {
  */
 export function useResource<T>(
   key: string,
-  load: (client: PaydayClient) => Promise<T>,
+  load: (client: GumClient) => Promise<T>,
 ): Resource<T> {
   const cache = useResourceCache();
   const { client } = useMerchant();

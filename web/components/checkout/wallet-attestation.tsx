@@ -1,6 +1,6 @@
 "use client";
 
-import { PaydayError, type Network } from "@payday/sdk";
+import { GumError, type Network } from "@gum/sdk";
 import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2, PenLine, Wallet } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -154,7 +154,7 @@ export function WalletAttestation({
 }
 
 function describe(cause: unknown): string {
-  if (cause instanceof PaydayError) {
+  if (cause instanceof GumError) {
     switch (cause.code) {
       case "wallet_already_bound":
         return "Another wallet already signed for this request. Pay from that wallet, or ask the merchant for a new link.";

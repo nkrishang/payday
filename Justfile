@@ -31,8 +31,8 @@ live-smoke:
 
 # Type-check, lint, and unit-test the TypeScript SDK and web app.
 web-check:
-    npm run build --workspace @payday/sdk
-    npm test --workspace @payday/sdk
+    npm run build --workspace @gum/sdk
+    npm test --workspace @gum/sdk
     npm run typecheck --workspace @payday/web
     npm run lint --workspace @payday/web
     npm test --workspace @payday/web

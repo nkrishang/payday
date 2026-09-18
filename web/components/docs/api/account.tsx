@@ -91,7 +91,7 @@ export const ACCOUNT_GROUP: EndpointGroup = {
   -H "Authorization: Bearer $DASHBOARD_SESSION_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{ "expected_generation": 3 }'`,
-        ts: `const payday = new PaydayClient({ accessToken: identityToken });
+        ts: `const payday = new GumClient({ accessToken: identityToken });
 const issued = await payday.account.issueApiKey(account.generation);`,
         response: `{
   "api_key": "payday_live_…",

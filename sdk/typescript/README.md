@@ -1,16 +1,16 @@
-# Payday TypeScript SDK
+# Gum TypeScript SDK
 
-Zero-runtime-dependency, typed client for the Payday invoicing API. Requires Node.js 18+ (or another runtime with native `fetch`). Wire DTO fields intentionally use the API's canonical snake_case names.
+Zero-runtime-dependency, typed client for the Gum invoicing API. Requires Node.js 18+ (or another runtime with native `fetch`). Wire DTO fields intentionally use the API's canonical snake_case names.
 
 ```bash
-npm install @payday/sdk
+npm install @gum/sdk
 ```
 
 ```ts
-import { PaydayClient } from "@payday/sdk";
+import { GumClient } from "@gum/sdk";
 
-const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
-const depositRequest = await payday.depositRequests.create({
+const gum = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const depositRequest = await gum.depositRequests.create({
   amount: "10.00",
   payout_address: "0x1111111111111111111111111111111111111111",
   issuer: { name: "Acme LLC", email: "billing@acme.example" },
@@ -21,8 +21,8 @@ const depositRequest = await payday.depositRequests.create({
   expires_in: 3600,
 }, crypto.randomUUID()); // caller-supplied idempotency key is mandatory
 
-console.log(await payday.depositRequests.get(depositRequest.id));
-console.log(await payday.depositRequests.list({ status: "awaiting_deposit", limit: 20 }));
+console.log(await gum.depositRequests.get(depositRequest.id));
+console.log(await gum.depositRequests.list({ status: "awaiting_deposit", limit: 20 }));
 ```
 
 A request may name saved records instead of retyping them: with `issuer_id`,
@@ -31,7 +31,7 @@ address, details, and first saved payout address are snapshotted), and with
 `customer_id`, `payer` may be left out. An inline party still wins:
 
 ```ts
-await payday.depositRequests.create(
+await gum.depositRequests.create(
   { amount: "10.00", issuer_id: acme.id, customer_id: globex.id, payer_policy: { mode: "permissionless" } },
   crypto.randomUUID(),
 );
@@ -80,7 +80,7 @@ already signed in, by your own identifier:
 
 Gated deposit requests withhold their content from the payer page until verification
 completes; every request, gated or not, withholds its deposit address until the
-payer's wallet attestation (`PaydayPayerClient.wallet.challenge` then `attest`).
+payer's wallet attestation (`GumPayerClient.wallet.challenge` then `attest`).
 The full policy is returned only to the merchant.
 
 ### Merchant sessions: your app opens the checkout
@@ -93,7 +93,7 @@ URL fragment; the hosted checkout exchanges it and the page opens unlocked.
 No code, no vendor, nothing for the payer to type:
 
 ```ts
-const deposit = await payday.depositRequests.create(
+const deposit = await gum.depositRequests.create(
   { ...request, payer_policy: { mode: "merchant_session", payer_reference: user.id } },
   `deposit-${deposit.id}`,
 );
@@ -116,11 +116,11 @@ returned headers verbatim, then poll `finalize` with backoff while the scan is
 pending — and resolves to the descriptor whose `id` goes into `attachment_id`:
 
 ```ts
-const pdf = await payday.attachments.upload(await fs.readFile("request.pdf"), "request.pdf");
-await payday.depositRequests.create({ ...requestFields, attachment_id: pdf.id }, crypto.randomUUID());
+const pdf = await gum.attachments.upload(await fs.readFile("request.pdf"), "request.pdf");
+await gum.depositRequests.create({ ...requestFields, attachment_id: pdf.id }, crypto.randomUUID());
 ```
 
-It throws `PaydayError` with `attachment_rejected` for anything that is not a
+It throws `GumError` with `attachment_rejected` for anything that is not a
 clean PDF within limits, and `attachment_scan_timeout` if the scan outlasts the
 bound (default two minutes; `scanTimeout` overrides it) — call
 `attachments.finalize(id)` again later. Pass `signal` to cancel. The pieces are
@@ -130,10 +130,10 @@ also exposed separately as `attachments.create({ filename })` and
 ## Documents and proof
 
 - `depositRequests.attachment(id)` — the attached PDF's descriptor with a short-lived `download_url`.
-- `depositRequests.requestPdf(id)` — Payday's deterministic deposit request summary as a `Blob`; the same deposit request always renders byte-identical.
+- `depositRequests.requestPdf(id)` — Gum's deterministic deposit request summary as a `Blob`; the same deposit request always renders byte-identical.
 - `depositRequests.verification(id)` — the deposit request's verification facts (`email`, `merchant_session`, and `complete`) and every attempt made against it, with its status and times. Never the code, the client secret, or the payer's session.
 - `depositRequests.createClientSecret(id)` — a fresh single-use client secret for a `merchant_session` deposit, for a user your app signs in again; see [Merchant sessions](#merchant-sessions-your-app-opens-the-checkout).
-- `depositRequests.proof(id)` — the `ProofOfPayment` for a settled deposit request (`409 deposit_request_not_settled` before). It ties the canonical issuance snapshot, nonce, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the deposit request's `settlement_tx_hash`), carries a Payday attestation bound to that deposit request, and can be verified offline without contacting Payday (the checks live in `gateway_core::verify_proof`).
+- `depositRequests.proof(id)` — the `ProofOfPayment` for a settled deposit request (`409 deposit_request_not_settled` before). It ties the canonical issuance snapshot, nonce, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the deposit request's `settlement_tx_hash`), carries a Gum attestation bound to that deposit request, and can be verified offline without contacting Gum (the checks live in `gateway_core::verify_proof`).
 
 ## Customers
 
@@ -171,13 +171,13 @@ malformed, or foreign endpoint id throws `webhook_not_found` (404). See
 
 ## Dashboard sessions
 
-`new PaydayClient({ accessToken })` takes a dashboard session token — the
+`new GumClient({ accessToken })` takes a dashboard session token — the
 Privy identity token a signed-in dashboard holds — in place of an API key,
-exactly one of the two. This is how the Payday dashboard talks to the API from
+exactly one of the two. This is how the Gum dashboard talks to the API from
 a browser without ever holding a key; the same bearer header carries either
 credential.
 
-The client also provides long polling through `depositRequests.get(id, { waitForChange: true })`, `depositRequests.cancel` (returns the deposit request with `cancellation_requested_at` set), `depositRequests.transfers` (`{ transfers }`), and `status`. API failures throw `PaydayError`, exposing `code`, `status`, `requestId`, and a `message` that names the problem — for a body that does not fit a route, the offending field.
+The client also provides long polling through `depositRequests.get(id, { waitForChange: true })`, `depositRequests.cancel` (returns the deposit request with `cancellation_requested_at` set), `depositRequests.transfers` (`{ transfers }`), and `status`. API failures throw `GumError`, exposing `code`, `status`, `requestId`, and a `message` that names the problem — for a body that does not fit a route, the offending field.
 
 Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never expose an API key in browser-delivered code.
 
@@ -185,36 +185,36 @@ Set `baseUrl` in the constructor to target the sandbox or a local gateway. Never
 
 `account.get()` returns the signed-in account — `email`, `wallet_address` (the account's own EVM wallet, where deposits settle by default), and key metadata: `key_hint`, `generation`, `created_at`, `rotated_at`, `previous_key_expires_at`, `revoked_at` — using the client's own credential. It never returns the raw key.
 
-`account.issueApiKey(expectedGeneration)` and `account.revokeApiKey(expectedGeneration)` mint or revoke a key. They work only from a dashboard session: an API key, however valid for everything else, is refused here (`identity_unauthorized`) on purpose — whoever holds a key must not be able to mint another from it. Pass `expectedGeneration` from the account's current `generation`; a mismatch throws `PaydayError` with code `api_key_generation_conflict`, meaning something else changed the key first. `issueApiKey`'s result carries the raw key exactly once — nothing later, including `account.get()`, can return it again — and, when it replaced an earlier key, that key keeps authenticating for 24 hours.
+`account.issueApiKey(expectedGeneration)` and `account.revokeApiKey(expectedGeneration)` mint or revoke a key. They work only from a dashboard session: an API key, however valid for everything else, is refused here (`identity_unauthorized`) on purpose — whoever holds a key must not be able to mint another from it. Pass `expectedGeneration` from the account's current `generation`; a mismatch throws `GumError` with code `api_key_generation_conflict`, meaning something else changed the key first. `issueApiKey`'s result carries the raw key exactly once — nothing later, including `account.get()`, can return it again — and, when it replaced an earlier key, that key keeps authenticating for 24 hours.
 
 ## Withdrawing from your server
 
-The Payday wallet's whole balance in one currency to one address — every
+The Gum wallet's whole balance in one currency to one address — every
 network's USDC, or the destination network's USDT, since USDT has no 1:1
 bridge and is withdrawn per network: prepare, sign, submit, poll. Signing
 needs the wallet's key, exported once from
-the dashboard's Account section. `@payday/sdk/signing` signs with it through
+the dashboard's Account section. `@gum/sdk/signing` signs with it through
 `viem` (an optional peer dependency: `npm install viem`), after checking every
 document against its leg so a wrong document is refused rather than signed.
 
 ```ts
-import { PaydayClient } from "@payday/sdk";
-import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
+import { GumClient } from "@gum/sdk";
+import { privateKeySigner, signWithdrawal } from "@gum/sdk/signing";
 
-const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const gum = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
 const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
 
-let withdrawal = await payday.withdrawals.create(
+let withdrawal = await gum.withdrawals.create(
   { currency: "USDC", destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
   crypto.randomUUID(),
 );
 // trusted registry per chain: { tokens: { USDC: address, USDT?: address }, cctp: { domain, forwarder } | null }
 const chains = (id: number) => deploymentChains.get(id) ?? null;
 const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
-withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
+withdrawal = await gum.withdrawals.authorize(withdrawal.id, authorizations);
 while (withdrawal.status === "in_progress") {
   await new Promise((resolve) => setTimeout(resolve, 10_000));
-  withdrawal = await payday.withdrawals.get(withdrawal.id);
+  withdrawal = await gum.withdrawals.get(withdrawal.id);
 }
 ```
 
@@ -235,12 +235,12 @@ https://payday.sh/docs/withdrawals.
 
 ## Building your own checkout
 
-`PaydayPayerClient` reads the public routes behind a `deposit_url`. It takes no API key and is safe to run in a browser: a deposit link is open by design, because anyone holding it is allowed to fulfil the deposit request.
+`GumPayerClient` reads the public routes behind a `deposit_url`. It takes no API key and is safe to run in a browser: a deposit link is open by design, because anyone holding it is allowed to fulfil the deposit request.
 
 ```ts
-import { PaydayPayerClient } from "@payday/sdk";
+import { GumPayerClient } from "@gum/sdk";
 
-const payer = new PaydayPayerClient();
+const payer = new GumPayerClient();
 
 const deposit = await payer.depositRequests.get("dr_0198f80c-8d2f-7dc1-a369-90556a64f700");
 deposit.issuer_name;          // always shown, with `heading`

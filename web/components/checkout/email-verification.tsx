@@ -1,6 +1,6 @@
 "use client";
 
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 import { Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
@@ -45,7 +45,7 @@ export function EmailVerification({
       setStep("code");
       onCodeSent();
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.code === "otp_resend_cooldown") {
+      if (cause instanceof GumError && cause.code === "otp_resend_cooldown") {
         // Only a session that initiated that send can exchange its code.
         if (payerSession !== null) setStep("code");
         setError(
@@ -53,7 +53,7 @@ export function EmailVerification({
             ? "A code was sent a moment ago in another tab. Wait briefly, then request a new one here."
             : "A code was sent a moment ago. Check your inbox before requesting another.",
         );
-      } else if (cause instanceof PaydayError && cause.code === "payer_session_invalid") {
+      } else if (cause instanceof GumError && cause.code === "payer_session_invalid") {
         onSession(null);
         setError("This tab's verification session expired. Request a new code.");
       } else {
@@ -78,13 +78,13 @@ export function EmailVerification({
       setOtp("");
       onVerified();
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.code === "otp_invalid") {
+      if (cause instanceof GumError && cause.code === "otp_invalid") {
         setError("That code was not accepted. Check it, or request a new one.");
-      } else if (cause instanceof PaydayError && cause.code === "payer_session_invalid") {
+      } else if (cause instanceof GumError && cause.code === "payer_session_invalid") {
         onSession(null);
         setStep("send");
         setError("This tab's verification session expired. Request a new code.");
-      } else if (cause instanceof PaydayError && cause.code === "verification_not_started") {
+      } else if (cause instanceof GumError && cause.code === "verification_not_started") {
         setStep("send");
         setError("Request a new code.");
       } else {
@@ -139,7 +139,7 @@ export function EmailVerification({
 }
 
 function describe(cause: unknown, fallback: string): string {
-  return cause instanceof PaydayError && cause.code === "identity_provider_unavailable"
+  return cause instanceof GumError && cause.code === "identity_provider_unavailable"
     ? "The verification service did not respond. Try again shortly."
     : fallback;
 }

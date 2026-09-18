@@ -73,7 +73,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test --workspace @payday/sdk
+      - run: npm test --workspace @gum/sdk
       - run: npm run typecheck --workspace @payday/web
       - run: npm run lint --workspace @payday/web
       - run: npm test --workspace @payday/web

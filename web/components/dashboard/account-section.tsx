@@ -1,6 +1,6 @@
 "use client";
 
-import type { AccountMetadata } from "@payday/sdk";
+import type { AccountMetadata } from "@gum/sdk";
 import { useExportWallet } from "@privy-io/react-auth";
 import { ArrowUpRight, KeyRound, LogOut, RefreshCw } from "lucide-react";
 import { CurrencyMark } from "@/components/ui/amount";

@@ -186,9 +186,9 @@ export const PAYER: EndpointGroup = {
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-8d2f-7dc1-a369-90556a64f700" \\
   -H "Payday-Payer-Session: $PAYER_SESSION"`,
-        ts: `import { PaydayPayerClient } from "@payday/sdk";
+        ts: `import { GumPayerClient } from "@gum/sdk";
 
-const payer = new PaydayPayerClient();
+const payer = new GumPayerClient();
 const view = await payer.depositRequests.get(id, { payerSession });`,
         response: UNLOCKED,
         responseTitle: "200 OK — unlocked, bound",

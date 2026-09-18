@@ -1,4 +1,4 @@
-import type { Chain, Network, PayerDepositRequest, DepositRequestStatus, Token } from "@payday/sdk";
+import type { Chain, Network, PayerDepositRequest, DepositRequestStatus, Token } from "@gum/sdk";
 import { formatDisplayAmount } from "./format";
 
 /**

@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 const SANDBOX = `curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/dr_…" \\
   -H "Authorization: Bearer payday_test_..."`;
 
-const SANDBOX_TS = `const payday = new PaydayClient({
+const SANDBOX_TS = `const payday = new GumClient({
   apiKey: process.env.PAYDAY_TEST_API_KEY!,
   baseUrl: "https://api.sandbox.payday.sh",
 });`;

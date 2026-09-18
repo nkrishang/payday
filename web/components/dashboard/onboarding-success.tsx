@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerDepositRequest, DepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest, DepositRequest } from "@gum/sdk";
 import { Loader2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import Image from "next/image";

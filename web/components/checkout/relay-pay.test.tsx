@@ -1,4 +1,4 @@
-import type { RelayQuote, RelayOriginChain } from "@payday/sdk";
+import type { RelayQuote, RelayOriginChain } from "@gum/sdk";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";

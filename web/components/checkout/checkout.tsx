@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerDepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest } from "@gum/sdk";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { checkoutView, readyDepositRequest, unlockedDepositRequest } from "@/lib/checkout-state";
 import { takePreviewSession, usePayerSession } from "@/lib/payer-session";

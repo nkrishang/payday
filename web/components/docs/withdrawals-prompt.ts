@@ -5,10 +5,10 @@
  * agent's brief can never lag the page.
  */
 
-export const WITHDRAW_TS = `import { PaydayClient } from "@payday/sdk";
-import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing"; // needs viem installed
+export const WITHDRAW_TS = `import { GumClient } from "@gum/sdk";
+import { privateKeySigner, signWithdrawal } from "@gum/sdk/signing"; // needs viem installed
 
-const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const payday = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
 // The Payday wallet key, exported once from the dashboard's Account section.
 const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
 
@@ -259,7 +259,7 @@ ${LEG_EXAMPLE}
 
 ## Reference implementations
 
-### TypeScript (the official SDK, @payday/sdk, with @payday/sdk/signing and viem)
+### TypeScript (the official SDK, @gum/sdk, with @gum/sdk/signing and viem)
 
 ${WITHDRAW_TS}
 

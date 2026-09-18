@@ -11,9 +11,9 @@ export const metadata: Metadata = {
 };
 
 const CREDIT_CREATE = `// POST /deposits  — your route, behind your own authentication
-import { PaydayClient, checkoutUrl } from "@payday/sdk";
+import { GumClient, checkoutUrl } from "@gum/sdk";
 
-const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const payday = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
 
 app.post("/deposits", requireUser, async (req, res) => {
   const { amount } = req.body; // "250.00", validated by you

@@ -59,7 +59,7 @@ export PAYDAY_API_KEY="payday_test_..."
 curl --fail -sS "$PAYDAY_API_URL/v1/deposit-requests" -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
 ```
 
-In the SDK, pass `baseUrl: "https://api.staging.payday.sh"` to `PaydayClient`.
+In the SDK, pass `baseUrl: "https://api.staging.payday.sh"` to `GumClient`.
 
 The scripted end-to-end check is a real deposit that costs only gas:
 

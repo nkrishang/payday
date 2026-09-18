@@ -1,6 +1,6 @@
 "use client";
 
-import { type Issuer, PaydayError } from "@payday/sdk";
+import { type Issuer, GumError } from "@gum/sdk";
 import { Check, ChevronRight, Loader2, Plus, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { AddButton } from "@/components/ui/add-button";
@@ -188,7 +188,7 @@ function IssuerRow({
   };
 
   const failed = (cause: unknown) => {
-    if (cause instanceof PaydayError && cause.status === 401 && cause.code === "unauthorized") {
+    if (cause instanceof GumError && cause.status === 401 && cause.code === "unauthorized") {
       signOut();
       return;
     }
@@ -258,7 +258,7 @@ function IssuerRow({
       setBusy(false);
       onChanged();
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.code === "otp_invalid") {
+      if (cause instanceof GumError && cause.code === "otp_invalid") {
         setFailure("That code is not valid. Check the email, or send a new one.");
         setBusy(false);
         return;

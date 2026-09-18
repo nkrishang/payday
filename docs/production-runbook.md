@@ -627,7 +627,7 @@ it off for launch unless the walkthrough is wanted.
 ## 9. Deploy the web app to Vercel
 
 The web app is `web/`, a Next.js app inside the npm workspace at the
-repository root; it depends on `@payday/sdk` from `sdk/typescript`, which its
+repository root; it depends on `@gum/sdk` from `sdk/typescript`, which its
 `prebuild` hook builds. Every configuration value is `NEXT_PUBLIC_` and is
 inlined into the browser bundle at build time, so nothing secret belongs in
 Vercel and a changed value needs a redeploy.
@@ -669,7 +669,7 @@ Vercel and a changed value needs a redeploy.
    Test dashboard changes locally or on production.
 
 Vercel redeploys on every push to `main`. Because the web app and the API
-share one contract through `@payday/sdk`, deploy API changes that remove or
+share one contract through `@gum/sdk`, deploy API changes that remove or
 rename fields before the web change that stops sending them, and web changes
 that need new fields after the API that provides them.
 

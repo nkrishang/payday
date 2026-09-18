@@ -10,9 +10,9 @@ export const metadata: Metadata = {
     "What the payer sees on a Payday deposit link, how the three ways to pay work, and how to build your own checkout on the public payer routes.",
 };
 
-const PAYER_READ = `import { PaydayPayerClient } from "@payday/sdk";
+const PAYER_READ = `import { GumPayerClient } from "@gum/sdk";
 
-const payer = new PaydayPayerClient(); // no key: these routes are public
+const payer = new GumPayerClient(); // no key: these routes are public
 
 const request = await payer.depositRequests.get("dr_0198f80c-…");
 request.issuer_name;          // always present, with heading

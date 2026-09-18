@@ -1,4 +1,4 @@
-import type { PayerAttestationTypedData } from "@payday/sdk";
+import type { PayerAttestationTypedData } from "@gum/sdk";
 import { hashTypedData } from "viem";
 import { describe, expect, it } from "vitest";
 import { payerAttestationDefinition } from "./payer-attestation";

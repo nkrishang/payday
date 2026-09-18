@@ -605,7 +605,7 @@ forge test --match-contract BatchSweeperTest -vvv
 cargo fmt --all -- --check
 cargo test -p gateway-core -p gateway-db -p gateway-indexer -p gatewayd
 cargo clippy --workspace --all-targets --no-deps
-npm test --workspace @payday/sdk
+npm test --workspace @gum/sdk
 npm run typecheck --workspace @payday/web
 terraform -chdir=infra fmt -check -recursive
 terraform -chdir=infra init -backend=false
@@ -1182,7 +1182,7 @@ Add SDK clients for customers, attachments, invoice PDF, and proof.
 cargo fmt --all -- --check
 cargo test -p gateway-core -p gateway-db -p gatewayd
 cargo clippy --workspace --all-targets --no-deps
-npm test --workspace @payday/sdk
+npm test --workspace @gum/sdk
 npm run typecheck --workspace @payday/web
 npm run lint --workspace @payday/web
 npm test --workspace @payday/web
@@ -1541,7 +1541,7 @@ Before unlock, render only issuer name, heading, masked email, and verification 
 cargo fmt --all -- --check
 cargo test -p gateway-core -p gateway-db -p gatewayd -p gateway-indexer
 node --test auth0/actions/*.test.js
-npm test --workspace @payday/sdk
+npm test --workspace @gum/sdk
 just web-check
 just web-e2e
 just e2e
@@ -1911,7 +1911,7 @@ cargo fmt --all -- --check
 cargo test -p gateway-db -p gatewayd -p gateway-indexer
 cargo clippy --workspace --all-targets --no-deps
 node --test auth0/actions/*.test.js
-npm test --workspace @payday/sdk
+npm test --workspace @gum/sdk
 just web-check
 just web-e2e
 just e2e

@@ -1,6 +1,6 @@
 "use client";
 
-import type { RelayOriginChain, RelayOriginToken, RelayQuote } from "@payday/sdk";
+import type { RelayOriginChain, RelayOriginToken, RelayQuote } from "@gum/sdk";
 import type { PendingPayment, ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { ArrowLeftRight, ChevronDown, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";

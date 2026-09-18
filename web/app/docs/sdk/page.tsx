@@ -9,11 +9,11 @@ export const metadata: Metadata = {
     "A zero-dependency, typed client for the Payday API: the merchant client for your server and the payer client for a checkout of your own.",
 };
 
-const INSTALL = `npm install @payday/sdk`;
+const INSTALL = `npm install @gum/sdk`;
 
-const BASIC = `import { PaydayClient } from "@payday/sdk";
+const BASIC = `import { GumClient } from "@gum/sdk";
 
-const payday = new PaydayClient({
+const payday = new GumClient({
   apiKey: process.env.PAYDAY_API_KEY!,
   // baseUrl: "https://api.sandbox.payday.sh",   // the sandbox, or a local gateway
 });
@@ -36,7 +36,7 @@ await payday.depositRequests.get(request.id);
 await payday.depositRequests.get(request.id, { waitForChange: true, timeout: 30 });
 await payday.depositRequests.list({ status: "awaiting_deposit", limit: 20 });`;
 
-const WITHDRAW = `import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
+const WITHDRAW = `import { privateKeySigner, signWithdrawal } from "@gum/sdk/signing";
 
 const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!); // exported once from the dashboard
 let withdrawal = await payday.withdrawals.create(
@@ -47,12 +47,12 @@ const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
 withdrawal = await payday.withdrawals.authorize(withdrawal.id, authorizations);
 // then poll payday.withdrawals.get(withdrawal.id) until status leaves "in_progress"`;
 
-const ERRORS = `import { PaydayError } from "@payday/sdk";
+const ERRORS = `import { GumError } from "@gum/sdk";
 
 try {
   await payday.depositRequests.get("dr_does-not-exist");
 } catch (error) {
-  if (error instanceof PaydayError) {
+  if (error instanceof GumError) {
     error.code;      // "deposit_request_not_found"
     error.status;    // 404
     error.message;   // names the problem, and the field when a body does not fit
@@ -60,10 +60,10 @@ try {
   }
 }`;
 
-const PAYER = `import { PaydayPayerClient } from "@payday/sdk";
+const PAYER = `import { GumPayerClient } from "@gum/sdk";
 
 // No key. Safe in a browser: a deposit link is open by design.
-const payer = new PaydayPayerClient();
+const payer = new GumPayerClient();
 
 const request = await payer.depositRequests.get("dr_0198f80c-…");
 const qr = await payer.depositRequests.qr(request.id, payerSession);          // SVG blob
@@ -77,7 +77,7 @@ await payer.wallet.challenge(request.id, walletAddress, { payerSession });
 await payer.wallet.attest(request.id, walletAddress, signature, payerSession);`;
 
 const SESSION = `// The dashboard's own way in: the signed-in merchant's session token instead of a key.
-const payday = new PaydayClient({ accessToken: identityToken });
+const payday = new GumClient({ accessToken: identityToken });
 await payday.account.get();
 await payday.account.issueApiKey(account.generation); // session only; a key is refused here`;
 
@@ -90,8 +90,8 @@ export default function SdkPage() {
     >
       <CodeBlock code={INSTALL} lang="bash" />
       <p>
-        There are two clients. <code>PaydayClient</code> holds a credential and is for your server.{" "}
-        <code>PaydayPayerClient</code> holds nothing and reads the public routes behind a deposit
+        There are two clients. <code>GumClient</code> holds a credential and is for your server.{" "}
+        <code>GumPayerClient</code> holds nothing and reads the public routes behind a deposit
         link, so it can run in a browser.
       </p>
 
@@ -170,7 +170,7 @@ export default function SdkPage() {
 
       <H2 id="errors">Errors</H2>
       <p>
-        Every API failure throws <code>PaydayError</code> with the stable code, the HTTP status, the
+        Every API failure throws <code>GumError</code> with the stable code, the HTTP status, the
         request id, and a message that names the problem.
       </p>
       <CodeBlock code={ERRORS} lang="ts" />
@@ -191,7 +191,7 @@ export default function SdkPage() {
       <p>
         <code>payday.withdrawals</code> prepares, submits, polls, and cancels a withdrawal of the
         Payday wallet&apos;s USDC or USDT. Signing the legs needs the wallet&apos;s key;{" "}
-        <code>@payday/sdk/signing</code> does it with <code>viem</code> as an optional peer
+        <code>@gum/sdk/signing</code> does it with <code>viem</code> as an optional peer
         dependency, after checking every document against its leg. The flow, the signer&apos;s
         checklist, and Rust and Go equivalents are on{" "}
         <Link href="/docs/withdrawals#server">Withdrawals</Link>.
@@ -215,7 +215,7 @@ export default function SdkPage() {
       <CodeBlock code={SESSION} lang="ts" />
 
       <Callout tone="danger" title="Never ship an API key to a browser">
-        A key has full authority over the account. Browser code uses <code>PaydayPayerClient</code>,
+        A key has full authority over the account. Browser code uses <code>GumPayerClient</code>,
         which needs no credential, or calls your own server.
       </Callout>
     </DocsPage>

@@ -1,4 +1,4 @@
-import { PaydayPayerClient } from "@payday/sdk";
+import { GumPayerClient } from "@gum/sdk";
 import { config } from "./config";
 
 /**
@@ -6,4 +6,4 @@ import { config } from "./config";
  * want to render their own. It needs no API key: a deposit link is open by
  * design, because anyone holding it is allowed to fund the deposit request.
  */
-export const payerClient = new PaydayPayerClient({ baseUrl: config.apiUrl });
+export const payerClient = new GumPayerClient({ baseUrl: config.apiUrl });

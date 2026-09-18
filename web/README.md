@@ -17,7 +17,7 @@ records, and `app/docs/api/[group]/[slug]` renders every one of them with
 the same template.
 
 The checkout is built on Payday's own public payer API through
-[`@payday/sdk`](../sdk/typescript). Those routes take no API key and expose no
+[`@gum/sdk`](../sdk/typescript). Those routes take no API key and expose no
 merchant data, because a deposit link is open by design: anyone holding it is
 allowed to fund the deposit request. For a gated request the API withholds the
 amount, parties, attachment, and address until the payer verifies, and the

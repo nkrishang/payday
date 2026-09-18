@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { encodeAbiParameters, hashTypedData, keccak256, recoverTypedDataAddress } from "viem";
-import { PaydayClient } from "../dist/index.js";
+import { GumClient } from "../dist/index.js";
 import {
   assertLegAuthorization,
   privateKeySigner,
@@ -107,7 +107,7 @@ test("assertLegAuthorization refuses a document that strays from the leg", () =>
   };
   assert.throws(tampered((leg) => (leg.authorization.typed_data.message.to = DESTINATION)), /forwarder/);
   assert.throws(tampered((leg) => (leg.authorization.typed_data.message.value = "1")), /amount/);
-  assert.throws(tampered((leg) => (leg.authorization.typed_data.message.from = FORWARDER)), /Payday wallet/);
+  assert.throws(tampered((leg) => (leg.authorization.typed_data.message.from = FORWARDER)), /Gum wallet/);
   assert.throws(tampered((leg) => (leg.authorization.typed_data.domain.chainId = 8453)), /domain/);
   assert.throws(tampered((leg) => (leg.authorization.nonce_preimage.mint_recipient = FORWARDER)), /destination/);
   assert.throws(tampered((leg) => (leg.authorization.typed_data.message.validAfter = "1")), /validAfter/);
@@ -268,7 +268,7 @@ test("the client sends withdrawals the documented way", async () => {
     calls.push({ url, init });
     return new Response(JSON.stringify(withdrawal), { status: 201, headers: { "content-type": "application/json" } });
   };
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch });
   await client.withdrawals.create({ destination: { chain_id: "8453", address: DESTINATION } }, "w-1");
   assert.equal(calls[0].url, "https://example.test/v1/withdrawals");
   assert.equal(calls[0].init.headers["Idempotency-Key"], "w-1");

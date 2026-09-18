@@ -180,7 +180,7 @@ export const WITHDRAWALS: EndpointGroup = {
   -H "Authorization: Bearer $PAYDAY_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "authorizations": [ { "leg_id": "wdl_0198f80c-…", "signature": "0x…" } ] }'`,
-        ts: `import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
+        ts: `import { privateKeySigner, signWithdrawal } from "@gum/sdk/signing";
 
 const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
 const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });

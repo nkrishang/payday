@@ -26,6 +26,15 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed
+
+- The TypeScript SDK is Gum-branded: the package is `@gum/sdk` and its
+  classes are `GumClient`, `GumPayerClient`, and `GumError` (was
+  `@payday/sdk`, `PaydayClient`, `PaydayPayerClient`, `PaydayError`).
+  Import paths and identifiers change; nothing on the wire does — the API
+  host, routes, headers (`Payday-Event-Id`, `Payday-Signature`,
+  `Payday-Payer-Session`), and payload shapes are unchanged.
+
 ### Added
 
 - USDT, alongside USDC. A deposit request is denominated in one `currency`

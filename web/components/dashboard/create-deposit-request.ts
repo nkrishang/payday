@@ -1,4 +1,4 @@
-import type { CreateDepositRequest, Party, PayerPolicy, PayerPolicyMode } from "@payday/sdk";
+import type { CreateDepositRequest, Party, PayerPolicy, PayerPolicyMode } from "@gum/sdk";
 
 /**
  * The modes the composer can produce. `merchant_session` is not one of them:

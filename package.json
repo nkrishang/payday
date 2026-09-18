@@ -7,8 +7,8 @@
     "web"
   ],
   "scripts": {
-    "build:sdk": "npm run build --workspace @payday/sdk",
-    "test:sdk": "npm test --workspace @payday/sdk",
+    "build:sdk": "npm run build --workspace @gum/sdk",
+    "test:sdk": "npm test --workspace @gum/sdk",
     "dev": "npm run dev --workspace @payday/web",
     "build": "npm run build --workspace @payday/web",
     "lint": "npm run lint --workspace @payday/web",

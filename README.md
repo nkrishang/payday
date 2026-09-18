@@ -20,7 +20,7 @@ For a live local stack with multiplexed logs, run `just dev`, then sign in at th
 
 `payday.sh` — the landing page, the hosted checkout at `/pay/{id}`, and the
 merchant dashboard at `/dashboard` — lives in [`web/`](web/). It is a Next.js
-app built on `@payday/sdk`: the checkout consumes the public payer API and is
+app built on `@gum/sdk`: the checkout consumes the public payer API and is
 where every `deposit_url` points; the dashboard signs in through Privy with an
 emailed code — every account gets its own embedded wallet, where deposits
 settle by default — and uses the same merchant API as the SDK with Privy's

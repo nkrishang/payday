@@ -50,4 +50,4 @@ curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/<DEPOSIT_REQUEST_ID
   -H "Authorization: Bearer payday_test_..."
 ```
 
-In the SDK, pass `baseUrl: "https://api.sandbox.payday.sh"` to `PaydayClient`.
+In the SDK, pass `baseUrl: "https://api.sandbox.payday.sh"` to `GumClient`.

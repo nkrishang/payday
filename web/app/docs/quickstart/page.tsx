@@ -27,9 +27,9 @@ curl -fsS "$API/v1/deposit-requests" \\
     "expires_in": 3600
   }' | jq`;
 
-const CREATE_TS = `import { PaydayClient } from "@payday/sdk";
+const CREATE_TS = `import { GumClient } from "@gum/sdk";
 
-const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const payday = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
 
 const request = await payday.depositRequests.create(
   {

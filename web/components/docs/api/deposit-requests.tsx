@@ -789,7 +789,7 @@ const latest = await payday.depositRequests.get(id, { waitForChange: true, timeo
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/client-secret" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `import { checkoutUrl } from "@payday/sdk";
+        ts: `import { checkoutUrl } from "@gum/sdk";
 
 const { client_secret } = await payday.depositRequests.createClientSecret(id);
 res.redirect(303, checkoutUrl(request, client_secret));`,
@@ -827,7 +827,7 @@ res.redirect(303, checkoutUrl(request, client_secret));`,
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/preview-session" \\
   -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `import { previewUrl } from "@payday/sdk";
+        ts: `import { previewUrl } from "@gum/sdk";
 
 const { payer_session } = await payday.depositRequests.previewSession(id);
 window.open(previewUrl(request, payer_session));`,

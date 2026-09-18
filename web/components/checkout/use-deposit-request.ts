@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerDepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest } from "@gum/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PendingPayment } from "@/lib/checkout-state";
 import { backoffMs, jitter, pollDelayMs } from "@/lib/poll";

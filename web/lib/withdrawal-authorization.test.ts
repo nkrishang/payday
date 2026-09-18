@@ -1,4 +1,4 @@
-import type { Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "@payday/sdk";
+import type { Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "@gum/sdk";
 import { encodeAbiParameters, hashTypedData, keccak256 } from "viem";
 import { describe, expect, it } from "vitest";
 import { checkLegAuthorization, withdrawalAuthorizationDefinition } from "./withdrawal-authorization";

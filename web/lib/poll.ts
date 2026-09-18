@@ -1,4 +1,4 @@
-import type { DepositRequestStatus } from "@payday/sdk";
+import type { DepositRequestStatus } from "@gum/sdk";
 import { isTerminalStatus } from "./checkout-state";
 
 /**

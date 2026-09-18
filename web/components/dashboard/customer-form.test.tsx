@@ -1,4 +1,4 @@
-import type { Customer, PaydayClient } from "@payday/sdk";
+import type { Customer, GumClient } from "@gum/sdk";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +22,7 @@ const CUSTOMER: Customer = {
 function renderForm(props: { customer?: Customer; onSaved?: (customer: Customer) => void } = {}) {
   const create = vi.fn().mockResolvedValue({ ...CUSTOMER, id: "cus_0198f80c-0000-7dc1-a369-90556a64f7c2" });
   const update = vi.fn().mockResolvedValue({ ...CUSTOMER, email: null, details: null });
-  const client = { customers: { create, update } } as unknown as PaydayClient;
+  const client = { customers: { create, update } } as unknown as GumClient;
   render(
     <MerchantProvider
       value={{ client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut: vi.fn() }}

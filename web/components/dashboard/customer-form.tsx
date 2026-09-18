@@ -1,6 +1,6 @@
 "use client";
 
-import { type Customer, PaydayError } from "@payday/sdk";
+import { type Customer, GumError } from "@gum/sdk";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
@@ -66,7 +66,7 @@ export function CustomerForm({
         return;
       }
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.status === 401) {
+      if (cause instanceof GumError && cause.status === 401) {
         signOut();
         return;
       }

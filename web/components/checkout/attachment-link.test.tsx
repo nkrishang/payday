@@ -1,4 +1,4 @@
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { payerClient } from "@/lib/payday";
@@ -81,7 +81,7 @@ describe("AttachmentLink", () => {
 
   it("tells a locked payer to verify first", async () => {
     vi.spyOn(payerClient.depositRequests, "attachment").mockRejectedValue(
-      new PaydayError("Verify first", "verification_required", 401),
+      new GumError("Verify first", "verification_required", 401),
     );
 
     render(<AttachmentLink paymentId="dr_1" attachment={ATTACHMENT} />);
