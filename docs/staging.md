@@ -12,7 +12,7 @@ signing, real S3 scanning, and real email.
 | | Local (`just dev`) | Staging | Production |
 |---|---|---|---|
 | Code | your working tree | every commit on `main` that passes CI | the `image_tag` in the production tfvars, applied by hand |
-| API, indexer, database | on this machine | AWS, `api.staging.payday.sh` | AWS, `api.payday.sh` |
+| API, indexer, signers, database | on this machine | AWS, `api.staging.payday.sh` | AWS, `api.payday.sh` |
 | Chains and stablecoins | two Anvils, mock USDC and USDT | Monad, Base, Arbitrum One; Circle USDC, Tether USDT0 on Monad and Arbitrum | Monad, Base, Arbitrum One; Circle USDC, Tether USDT0 on Monad and Arbitrum |
 | Contracts | bootstrapped on Anvil each run | staging's own `PaymentFactory` generation | production's generation |
 | Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `payday.sh` |
@@ -103,14 +103,16 @@ against `environments/staging.backend.hcl`.
 ## What deploys, and when
 
 Every push to `main` runs CI. When CI succeeds, the `Deploy staging`
-workflow checks out that commit, builds both images under its immutable
-`git-<sha>` tag (or skips the build when the tag already exists), pushes
-them to staging's ECR, and applies the staging Terraform with that tag.
-The API and indexer roll over through the usual ECS deployment: the API
-with the circuit breaker, the indexer stopping the old task before the new
-one starts. The workflow then waits for both services to stabilize and
-checks `/health`. Nothing in it can reach the production state or account
-role.
+workflow checks out that commit, builds the three images (`api`,
+`indexer`, `signers`) under its immutable `git-<sha>` tag (or skips the
+build when the tag already exists), pushes them to staging's ECR, registers
+the `migrate` task definition for that tag and runs it once
+(`scripts/run-migrate-task.sh`), and only then applies the rest of the
+staging Terraform with that tag. The services roll over through the usual
+ECS deployment: the API with the circuit breaker, the indexer and signers
+each stopping the old task before the new one starts (each is a singleton).
+The workflow then waits for the three services to stabilize and checks
+`/health`. Nothing in it can reach the production state or account role.
 
 Before the stack exists, the workflow does nothing: it exits early until
 the `AWS_STAGING_DEPLOY_ROLE_ARN` and `STAGING_RPC_URLS` secrets are set
@@ -129,15 +131,18 @@ such role.
 
 ## Schema changes
 
-Payday is pre-release, so the schema is one baseline file,
-`crates/gum-ledger/migrations/0001_initial_schema.sql`, edited in place;
-there are no incremental migrations to write. A database that applied the
-old file refuses the edited one (its checksum differs), so the deploy
-workflow compares the migrations directory between the deployed commit and
-the one it is shipping and, when they differ, replaces staging's RDS
-instance in the same apply. The new tasks then create the schema from
-scratch. That is also why the staging tfvars turn off deletion protection
-and the final snapshot.
+Payday is pre-release, so the schema is three baseline files in
+`crates/gum-schema/migrations` (`0001_application.sql`, `0002_bus.sql`,
+`0003_execution.sql`), edited in place; there are no incremental migrations
+to write. A database that applied the old files refuses the edited ones
+(their checksums differ), so the deploy workflow compares the migrations
+directory between the deployed commit and the one it is shipping and, when
+they differ, replaces staging's RDS instance in the targeted apply that
+registers the migrate task. The migrate task then creates the schema from
+scratch before any service rolls; no service migrates on start, and each
+one's `/health/ready` refuses while the schema is behind its binary. That
+is also why the staging tfvars turn off deletion protection and the final
+snapshot.
 
 Everything on staging is disposable, including its accounts and keys, and a
 schema change resets all of it: sign in again and mint a new key
@@ -145,8 +150,16 @@ afterwards. To force a reset by hand:
 
 ```bash
 terraform -chdir=infra apply -var-file=environments/staging.tfvars \
-  -var image_tag=git-<sha> -replace=aws_db_instance.this
+  -var image_tag=git-<sha> -replace=aws_db_instance.this \
+  -target=aws_ecs_task_definition.migrate
+scripts/run-migrate-task.sh payday-staging
+terraform -chdir=infra apply -var-file=environments/staging.tfvars \
+  -var image_tag=git-<sha>
 ```
+
+The first apply is targeted so that the schema exists before anything
+else is touched: every service's `/health/ready` refuses against an empty
+database, and ECS restarts the tasks until the migrate task has run.
 
 ## Bootstrap (once)
 
@@ -177,10 +190,17 @@ Payday AWS account.
    ```bash
    terraform -chdir=infra init -reconfigure -backend-config=environments/staging.backend.hcl
    terraform -chdir=infra apply -var-file=environments/staging.tfvars \
-     -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer
+     -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer \
+     -target=aws_ecr_repository.signers
    api_repo=$(terraform -chdir=infra output -raw api_ecr_repository_url)
    indexer_repo=$(terraform -chdir=infra output -raw indexer_ecr_repository_url)
-   scripts/push-images.sh eu-north-1 "$api_repo" "$indexer_repo" "git-$(git rev-parse HEAD)"
+   signers_repo=$(terraform -chdir=infra output -raw signers_ecr_repository_url)
+   scripts/push-images.sh eu-north-1 "$api_repo" "$indexer_repo" "$signers_repo" "git-$(git rev-parse HEAD)"
+   terraform -chdir=infra plan -var-file=environments/staging.tfvars \
+     -var "image_tag=git-$(git rev-parse HEAD)" \
+     -target=aws_ecs_task_definition.migrate -out=migrate.tfplan
+   terraform -chdir=infra apply migrate.tfplan
+   scripts/run-migrate-task.sh payday-staging
    terraform -chdir=infra plan -var-file=environments/staging.tfvars \
      -var "image_tag=git-$(git rev-parse HEAD)" -out=staging.tfplan
    terraform -chdir=infra apply staging.tfplan
@@ -219,8 +239,8 @@ Payday AWS account.
 ## Cost and guardrails
 
 Staging is billed like a small production: one Fargate task each for the
-API and indexer, a single-AZ `db.t4g.small`, the ALB, WAF, and the public
-IPs. Its two sweep signers need only a little gas each on each chain, and idle
+API, indexer, and signers, a single-AZ `db.t4g.small`, the ALB, WAF, and
+the public IPs. Its two sweep signers need only a little gas each on each chain, and idle
 chains cost the indexer two RPC calls every five minutes. Keep only what a test needs in
 the payer wallet; the payout defaults to that same wallet, so a smoke run
 costs gas alone.

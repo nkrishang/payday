@@ -159,6 +159,15 @@ load_local_env() {
   export "PAYDAY_RPC_URL_${PAYDAY_CHAIN_ID}=$PAYDAY_RPC_URL"
   export "PAYDAY_RPC_URL_${PAYDAY_SECOND_CHAIN_ID}=$PAYDAY_SECOND_RPC_URL"
   export PAYDAY_API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
+  # The three services. gum-server's internal listener serves the indexer's
+  # RPC and its own health; the indexer and the signers each serve health
+  # only. The shared bearer token is what makes the indexer's reports
+  # trusted; any value works locally.
+  export PAYDAY_INTERNAL_BIND_ADDR="${PAYDAY_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
+  export PAYDAY_SERVER_INTERNAL_URL="${PAYDAY_SERVER_INTERNAL_URL:-http://$PAYDAY_INTERNAL_BIND_ADDR}"
+  export PAYDAY_INTERNAL_TOKEN="${PAYDAY_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
+  export PAYDAY_INDEXER_LISTEN_ADDR="${PAYDAY_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
+  export PAYDAY_SIGNERS_LISTEN_ADDR="${PAYDAY_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
   # Merchants sign in through Privy, for real, even locally: the dashboard
   # (`just web`) uses the same app id, and gum-server verifies its identity
   # tokens against Privy's published keys. Payer and issuer-mailbox codes
@@ -334,13 +343,18 @@ curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null || {
   echo "development identity provider did not become ready" >&2
   exit 1
 }
+# Migrations are an explicit step, never a side effect of a service
+# starting: every service's readiness refuses until the schema is current.
+echo "[migrate] applying schema migrations"
+./target/debug/gum-server migrate
 prefix gum-server ./target/debug/gum-server
 for _ in {1..100}; do
-  curl -fsS "$PAYDAY_API_URL/health" >/dev/null 2>&1 && break
+  curl -fsS "$PAYDAY_SERVER_INTERNAL_URL/health/ready" >/dev/null 2>&1 && break
   sleep .1
 done
-curl -fsS "$PAYDAY_API_URL/health" >/dev/null || { echo "gum-server did not become ready" >&2; exit 1; }
+curl -fsS "$PAYDAY_SERVER_INTERNAL_URL/health/ready" >/dev/null || { echo "gum-server did not become ready" >&2; exit 1; }
 prefix indexer ./target/debug/gum-indexer
+prefix signers ./target/debug/gum-signers
 echo "[runner] ready: API $PAYDAY_API_URL; 'just web' serves the dashboard, 'just seed' mints an API key"
 echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do

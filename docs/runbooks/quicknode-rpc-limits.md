@@ -47,7 +47,7 @@ without `eth_getLogs`, and holds no WebSocket. Per chain, per day:
 
 | State | Calls | Notes |
 |--------|-------|-------|
-| Idle (empty watch list) | ~900 | 288 passes × 2, plus the signer balance check |
+| Idle (empty watch list) | ~600 | 288 passes × 2 |
 | Active Monad (`finalized`) | ~14k | 1,440 passes × 2 + 2,880 ranges at the 100-block cap × (2 headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`) + 2,880 keepalives |
 | Active Base or Arbitrum (`latest` − N) | ~7–9k | 1,440 passes × 3 + per range two headers + ⌈watched ÷ 500⌉ filtered `eth_getLogs`, plus keepalives |
 | Transfer signal notifications | ≈ 0 | one per commit state per payment to us |
@@ -66,7 +66,7 @@ that carries stablecoin transfers costs nothing extra when the log carries
 If credits climb well above that, check in this order:
 
 1. `transfer signal disconnected` / `connection failed` warnings (the
-   `payday-indexer-transfer-signal-down` alarm; every log line names its
+   `payday-indexer-signal-down` alarm; every log line names its
    `chain_id`). While the socket is down on an active chain the reconciler
    runs every `indexer_poll_interval_ms` (5 s), which is the old cost
    profile: about 3.9M credits a day on Monad. Confirm that chain's `wss://`
@@ -76,7 +76,7 @@ If credits climb well above that, check in this order:
 2. `indexer cursor lagging`: a backlog is draining at
    `range × PAYDAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, three calls
    per range. This is bounded work that ends when the cursor catches up.
-3. `429` / `-32007` errors counted by `payday-indexer-retryable-failures`:
+3. `429` / `-32007` errors counted by `payday-indexer-pass-failing`:
    the pacing below should make these rare at this call volume; a sustained
    run means something else shares the endpoint's requests-per-second budget.
 

@@ -252,6 +252,12 @@ impl Indexer {
         // cursor keeps up with finality and the first payment address ever
         // bound does not trigger a scan from `start_block`.
         if cache.addresses.is_empty() {
+            info!(
+                chain_id,
+                from_block = start,
+                to_block = boundary.number,
+                "nothing watched; cursor fast-forwarded without scanning"
+            );
             return Ok(
                 match self
                     .apply(

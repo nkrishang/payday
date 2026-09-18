@@ -285,6 +285,24 @@ variable "indexer_memory" {
   type    = number
   default = 512
 }
+variable "internal_port" {
+  description = "gum-server's internal listener: the indexer's RPC and the health endpoints. Reachable only from the indexer's security group."
+  type        = number
+  default     = 8081
+}
+variable "health_port" {
+  description = "Health listener of the indexer and the signers. Neither has an inbound rule; the port exists for a future ECS health check."
+  type        = number
+  default     = 8080
+}
+variable "signers_cpu" {
+  type    = number
+  default = 512
+}
+variable "signers_memory" {
+  type    = number
+  default = 1024
+}
 variable "api_port" {
   type    = number
   default = 8080

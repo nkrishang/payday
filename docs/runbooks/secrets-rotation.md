@@ -58,22 +58,24 @@ If `PAYDAY_RPC_WS_URL_<chain_id>` is set for the chain, rotate that override
 the same way; when it is unset, restarting the indexer (Step 2) re-derives the
 WebSocket URL from the new HTTP endpoint automatically.
 
-### Step 2: Restart both services
+### Step 2: Restart all three services
 
-Both tasks read the secret (the API's onboarding payer and the indexer both
-hold a provider for every chain), so restart both:
+All three tasks read RPC secrets, so restart all three:
 
 ```bash
 aws ecs update-service --cluster payday --service indexer \
   --force-new-deployment --region "$AWS_REGION"
 aws ecs update-service --cluster payday --service api \
   --force-new-deployment --region "$AWS_REGION"
+aws ecs update-service --cluster payday --service signers \
+  --force-new-deployment --region "$AWS_REGION"
 ```
 
 ## Rotate the database password
 
 Database password rotation requires updating the RDS instance and the
-Secrets Manager secret, then restarting both services. This should be
+Secrets Manager secret, then restarting the API and signers. The indexer has
+no database connection and does not need a restart. This should be
 planned carefully as it causes a brief downtime.
 
 1. Update the RDS master password:
@@ -102,12 +104,12 @@ planned carefully as it causes a brief downtime.
      --region "$AWS_REGION"
    ```
 
-3. Wait for the RDS modification to complete, then restart both services:
+3. Wait for the RDS modification to complete, then restart the API and signers:
 
    ```bash
    aws ecs update-service --cluster payday --service api \
      --force-new-deployment --region "$AWS_REGION"
-   aws ecs update-service --cluster payday --service indexer \
+   aws ecs update-service --cluster payday --service signers \
      --force-new-deployment --region "$AWS_REGION"
    ```
 

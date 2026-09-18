@@ -1,5 +1,13 @@
 # Deposit indexer architecture
 
+> Scope: how Payday observes stablecoin deposits on a chain — asset
+> identity, the funding predicate, log acquisition, the transfer signal,
+> finality and reorg policy, and the RPC budget. Which *process* does what,
+> how a detected payment becomes a sweep, and how transactions are executed
+> and recovered is [`architecture.md`](architecture.md); this document
+> describes the observer, `gum-indexer`, and the ledger rules the server
+> applies to what it reports.
+
 ## Decision
 
 Support only each stablecoin's canonical contract — Circle's native USDC on
@@ -189,18 +197,19 @@ unique.
 
 ## Acquisition loop
 
-One `Indexer` runs per registry chain, in one process, each with its own
-RPC client, transfer signal, cursor row, advisory lock
-(`INDEXER_ADVISORY_LOCK_ID ^ chain_id`), and a nonce stream per sweep
-signer (the same KMS keys, so the same addresses, on every chain). Any
-worker's fatal halt ends the process and ECS restarts it. Within a chain,
-block acquisition and sweeping run as independently scheduled workers. The
-deposit request table is their durable queue: the acquisition worker atomically commits
-finalized observations, `funded` transitions, and `expired` transitions by
-block timestamp, while the sweep worker claims eligible rows without delaying
-the next log poll. It sends one BatchSweeper transaction for each claimed group
-of up to 20 deposit requests; the finalized receipt's events determine each deposit request's
-outcome (see "Sweep architecture").
+One `Indexer` runs per registry chain inside `gum-indexer`, each with its
+own RPC client and transfer signal. The indexer holds no durable state: the
+cursor row belongs to `gum-server`, which the indexer reads at the start of
+every pass and advances by reporting finalized ranges over the internal RPC
+(`gum_contracts::rpc`). Each range is a compare-and-set on that cursor, so a
+restart mid-pass, or two indexers by mistake, cannot skip or double-apply a
+range. The server commits each range's observations, `funded` transitions,
+and `expired` transitions by block timestamp in one transaction, and its
+scheduler turns funded requests into sweep jobs for `gum-signers`
+(`architecture.md` §6.1–6.3). A finality violation halts the chain rather
+than the process: the indexer keeps running, re-checks the chain every
+pass, and resumes on its own once an operator has repaired the cursor and
+run `gum-server chain resume`.
 
 The finality boundary is the chain's `finality_source` minus
 `finality_confirmations`: the node's `finalized` tag with no margin on
@@ -240,18 +249,21 @@ Acquisition has two halves that never trust each other:
 
 For each pass:
 
-1. Acquire a PostgreSQL advisory lock for ingestion leadership (at startup).
+1. Ask `gum-server` for the chain's cursor (`GET /chains/{id}/cursor`).
 2. Read the boundary header (`finalized`, or `latest` then the header
    `finality_confirmations` below it).
-3. Load the durable finalized cursor and verify its hash still matches the
-   provider's canonical header at that height.
-4. Expire every unbound `created` request whose deadline the boundary's
-   timestamp has passed (a request without a chain has no chain clock, so
-   any chain's pass may expire it; idempotent, indexed).
-5. Load the chain's watch list (below). If it is empty, fast-forward the
-   cursor to the boundary through the same atomic commit with no
-   observations, so expiry transitions and the chain clock still advance,
-   and stop: no `eth_getLogs` is issued.
+3. Verify the cursor block's hash still matches the provider's canonical
+   header at that height; a mismatch is reported as a chain fault and the
+   pass stops.
+4. Report the boundary header (`POST finalized-head`); the server expires
+   every unbound `created` request whose deadline the boundary's timestamp
+   has passed (a request without a chain has no chain clock, so any chain's
+   pass may expire it; idempotent, indexed).
+5. Load the chain's watch list (below) from the server, skipping the
+   transfer when its fingerprint has not changed. If it is empty,
+   fast-forward the cursor to the boundary by reporting an empty range, so
+   expiry transitions and the chain clock still advance, and stop: no
+   `eth_getLogs` is issued.
 6. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
    the range-end header, request `eth_getLogs` for the `Transfer` topic
    from the chain's configured contracts (one address array) with
@@ -264,11 +276,14 @@ For each pass:
    (served by Monad and Anvil). A node that omits it costs one header read
    per distinct transfer-bearing block in the range, cached across the
    range and warned about once per chain; never a silent zero.
-8. Intersect unique recipients with known deposit request addresses in one
-   indexed DB query; status controls projection transitions, not ledger
-   retention.
-9. Commit observations, projections, status changes, and cursor advancement in
-   one database transaction per range.
+8. Report the range (`POST finalized-ranges` with `expected_cursor`, the
+   end header, and the validated observations). The server intersects
+   recipients with known deposit request addresses in one indexed query
+   (status controls projection transitions, not ledger retention) and
+   commits observations, projections, status changes, and cursor
+   advancement in one database transaction per range, or answers
+   `CursorMismatch`, in which case the pass starts over from the cursor.
+9. Nothing is retained between passes except the watch-list cache.
 10. If the pass was a wake whose block is not yet indexed — because finality
     has not reached it, or because the per-pass range budget stopped the pass
     short of it — sleep `block_time_ms × blocks still ahead` (at least one
@@ -495,12 +510,12 @@ platform choice. A deposit request without a bound wallet has no address and not
 to sweep.
 
 Factory execution is permissionless, so anyone can recover an expired partial
-deposit; the indexer also does it automatically once the deposit request is `expired`,
+deposit; Payday also does it automatically once the deposit request is `expired`,
 reporting the outcome as `recovered`.
 
 Transfers sent after the Deposit contract has executed are forwarded to the
 payer's wallet by `Deposit.recover`, which anyone may call and which the
-sweep worker calls automatically; they are never credited to the deposit request. The
+sweep path collects automatically; they are never credited to the deposit request. The
 API still describes the address as single-use so merchants do not present it
 after settlement.
 
@@ -511,99 +526,60 @@ the batch, so a replayed receipt cannot double-count and the ledger is never
 ahead of or behind the deposit request state. A trigger raises one
 `deposit_request.recovered_funds` webhook per row.
 
-## Sweep architecture
+## From observation to sweep
 
 Every deposit request with uncollected funds at its deposit address is queued,
 whatever its status: `funded` (settle), `expired` (recover the balance), and
-`fulfilled`/`recovered` (forward a late transfer).
+`fulfilled`/`recovered` (forward a late transfer). `gum-server`'s scheduler
+groups the queue into `sweep_jobs` and publishes one `SweepBatch` command
+per job; `gum-signers` executes it with a pool of keys, one transaction in
+flight per signer per chain, and reports the finalized receipt's evidence
+back as a `SweepFinalized` event. Execution, nonce lanes, replacement,
+abandonment and crash recovery are `architecture.md` §6.3; the outcome
+policy the server applies is §6.4.
 
-The worker signs with a **pool** of keys (`PAYDAY_KMS_KEY_IDS`, or
-`PAYDAY_SIGNER_KEYS` locally), the same keys on every chain. One helper
-transaction is in flight per signer: `sweep_batches.signer` and
-`withdrawal_legs.step_signer` record the owner, and the partial unique
-indexes `sweep_batches_open (chain_id, signer)` and `withdrawal_steps_open
-(step_chain_id, step_signer)` refuse a second open row on a signer. Each
-pass of the sweep worker:
-
-1. reconciles every open batch and relay step concurrently, one lane per
-   signer (a lane's error keeps its signer busy for the pass and never stops
-   the other lanes);
-2. walks the free signers from a rotating cursor, so gas spend spreads over
-   the pool, and gives each one the next piece of work: a withdrawal leg to
-   relay first, else a batch of up to 20 sweeps. Claiming is sequential, so
-   a short queue becomes one full batch rather than one batch per signer
-   (Monad bills the gas limit: an extra batch is an extra 100k base gas),
-   and a submission attaches its rows before the next claim runs, so two
-   signers can never claim the same row;
-3. reports `paused` if any lane is stalled (the alarm string is unchanged
-   and the log line names the signer), `degraded` on any other lane error,
-   else `running`. A stalled signer costs one lane of capacity, not the
-   chain; an open row whose signer is not in the pool, or a signer owning
-   both a batch and a step, halts the pass as a configuration error.
-
-The open-lane discovery of a pass is two database reads; a pass also runs
-several small statements that cost no RPC (stale-claim expiry, the open-row
-reads, the next relayable leg, an empty claim, the attestation queue, the
-status write). Per open row it reads one receipt per submitted hash until
-one is mined (issued concurrently, still under the per-chain RPC pacer), and
-a mined receipt costs the finality re-reads and header checks of
-classification. Per pass one `eth_feeHistory` serves every signature of the
-pass, as long as the estimate succeeds — a failed estimate leaves the cache
-empty and the next signer that needs one reads it again — and per submission
-there is one nonce read, one KMS `Sign`, and one `eth_sendRawTransaction`.
-Health reads one `eth_getBalance` per signer every five minutes and warns per
-signer below the chain's low-balance level; a balance read that fails costs
-only its own signer's entry.
-
-Each exact signed transaction is persisted in its
-`sweep_batches` outbox before broadcast, so a crash can only cause an
-idempotent resend of the same bytes. The row owns the signer, the nonce, raw
-transactions, and every hash submitted for it, so a receipt for any submission
-resolves the batch. A batch
-without a receipt after the pending timeout is replaced on the same nonce with
-fees bumped by 12.5%, and after the configured number of submissions that
-signer's lane pauses and alarms while the other signers and block indexing
-continue. A mined nonce ahead of
-the batch's nonce without a visible receipt means nothing it sent can mine any
-more (Monad returns no receipt for an in-flight transaction and forgets dropped
-ones), so the batch is abandoned and its deposit requests re-queued.
+What the receipt can say, and how the signers classify it, is contract
+knowledge that holds regardless of which process does the work:
 
 The finalized receipt is the single source of truth, including for reverted
-transactions; no batch is released from a merely unfinalized revert. The worker
-checks the receipt block's canonical hash before and after its pinned
-classification reads. `BatchSweeper` deploys `DepositRequest` through the factory for
-an address without code and calls
-`Deposit.recover` for one that already has code; it never attempts the CREATE2
-collision that a second `execute` would hit, which burns every unit of gas
-forwarded to it. Per item the receipt carries one of:
+transactions; nothing is released from a merely unfinalized revert. The
+signers check the receipt block's canonical hash before and after their
+pinned classification reads. `BatchSweeper` deploys `DepositRequest` through
+the factory for an address without code and calls `Deposit.recover` for one
+that already has code; it never attempts the CREATE2 collision that a
+second `execute` would hit, which burns every unit of gas forwarded to it.
+Per item the receipt carries one of:
 
 - `Settled` from the deposit address: the deployment paid the beneficiary
-  exactly the requested amount (`fulfilled`). An overpaid deployment also emits
-  `Recovered` for the remainder in the same receipt; the parser combines the
-  two regardless of event order and rejects a duplicate or conflicting pair as
-  a malformed receipt;
+  exactly the requested amount (`SweepItemOutcome::Settled`, → `fulfilled`).
+  An overpaid deployment also emits `Recovered` for the remainder in the
+  same receipt; the parser combines the two regardless of event order and
+  rejects a duplicate or conflicting pair as a malformed receipt;
 - `Recovered` alone from the deposit address: the deployment paid the whole
-  balance back to the payer's wallet after expiry (`recovered`);
+  balance back to the payer's wallet after expiry (`Returned`, →
+  `recovered`);
 - `SweepRecovered` from the helper: the contract pre-existed and `recover`
-  forwarded the reported amount; an open deposit request in this position was executed
-  by someone else and `Deposit.settled()` at the receipt block says how;
+  forwarded the reported amount (`LateCollected`); an open deposit request
+  in this position was executed by someone else and `Deposit.settled()` at
+  the receipt block says how (`SettlementEvidence`);
 - `SweepFailed` from the helper: `execute` or `recover` reverted. Solady's
   CREATE3 reduces every constructor failure to `DeploymentFailed()`, so the
-  revert bytes cannot classify the cause; the worker reads `paused()`,
-  `isBlacklisted()` for the deposit address and its destination, `balanceOf`,
-  and code presence at the receipt block instead. A paused token or an
-  unclassified revert is retried behind exponential backoff up to a ceiling; a
-  blacklisted destination, a balance below the credited amount, or an
-  exhausted ceiling blocks the deposit request with a reason an operator can act on.
+  revert bytes cannot classify the cause; the signers read `paused()`,
+  `isBlacklisted()` for the deposit address and its destination,
+  `balanceOf`, and code presence at the receipt block instead
+  (`SweepFailureCause`). The server retries a paused token or an
+  unclassified revert behind exponential backoff up to a ceiling, and marks
+  a blacklisted destination, a balance below the credited amount, or an
+  exhausted ceiling with an `attention_reason` an operator can act on.
 
 Finalization marks every nonzero observation before the receipt's exact
 `(block number, transaction index)` position as collected and recomputes the
 deposit request's uncollected count from the ledger. A transfer indexed later from a
 position the drain already covered is recorded as collected on insert, while a
-later transaction in the same block remains queued. The lag between the two
-loops therefore cannot re-queue funds a finalized sweep already moved. A
-drained deposit request's status changes only when it was open; late collections leave
-`fulfilled`/`recovered` untouched.
+later transaction in the same block remains queued. The lag between
+observation and execution therefore cannot re-queue funds a finalized sweep
+already moved. A drained deposit request's status changes only when it was
+open; late collections leave `fulfilled`/`recovered` untouched.
 
 Expiry is decided by chain time: each observation is classified against its
 own block timestamp, independent of range boundaries. An open deposit request whose
@@ -612,13 +588,6 @@ deadline precedes the timestamp of a committed range's end block becomes
 batch path. The API
 refuses deadlines closer than ten minutes so a deposit request always has room to
 settle before the contract starts routing to recovery.
-
-Use a separate per-chain leader lock, and within it one lane per pool signer.
-Persist signer and nonce ownership and the
-exact signed bytes before broadcast so replicas cannot race retries and a crash
-cannot lose the only copy of an already-submitted transaction. Prefer a direct
-safe ERC-20 transfer from the Deposit contract over self-approval followed by
-`transferFrom`.
 
 ## Build versus QuickNode
 

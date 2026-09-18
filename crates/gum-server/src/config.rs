@@ -206,7 +206,7 @@ impl Config {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             internal_bind_addr: std::env::var("PAYDAY_INTERNAL_BIND_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:3001".into()),
+                .unwrap_or_else(|_| "127.0.0.1:3010".into()),
             internal_token: required("PAYDAY_INTERNAL_TOKEN"),
             iris_url: std::env::var("PAYDAY_CCTP_IRIS_URL")
                 .ok()

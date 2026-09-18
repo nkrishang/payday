@@ -147,6 +147,62 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- The backend is three services with one owner per kind of state
+  (`docs/architecture.md`). `gum-server` keeps the public API and becomes
+  the only process that changes deposit-request state: it owns the state
+  machine (`gum-ledger` is now a library linked only into it), schedules
+  sweeps from the `invoices` queue into `sweep_jobs`, orchestrates
+  withdrawals, and consumes execution events. `gum-indexer` is a read-only
+  chain observer with no database connection and no keys; it reports
+  cursors, finalized heads, ranges and faults to the server's new internal
+  HTTP listener (`PAYDAY_INTERNAL_BIND_ADDR`, `PAYDAY_SERVER_INTERNAL_URL`,
+  bearer `PAYDAY_INTERNAL_TOKEN`) with compare-and-set on the server-owned
+  cursor, so a restart or a duplicate indexer cannot skip or double-apply a
+  range. `gum-signers` is new and the only holder of KMS or local signing
+  keys (`PAYDAY_KMS_KEY_IDS` / `PAYDAY_SIGNER_KEYS` moved to it): it
+  consumes `SweepBatch` and `WithdrawalStep` commands, keeps one
+  transaction lane per signer per chain in the new `execution` schema,
+  persists signed bytes before broadcast, replaces, abandons and reconciles
+  transactions against the chain every pass, and publishes evidence
+  (`SweepSubmitted`, `SweepFinalized`, `SweepAbandoned`,
+  `WithdrawalStepFinalized`, `ExecutionStalled`, `ExecutionRejected`) that
+  the server turns into lifecycle transitions.
+- Services talk through typed contracts in the new `gum-contracts` crate and
+  a durable at-least-once bus in Postgres (`gum-bus`, schema `bus`): a
+  message is published in the same transaction as the state change that
+  justifies it and acknowledged in the same transaction as the consumer's
+  own write, deduplicated per topic by a producer-chosen key, retried with
+  exponential backoff and jitter, and parked as `dead` after the attempt
+  limit (`gum-server bus dead`, `gum-server bus retry <message-id>`). A
+  finality violation now halts one chain (`chain.control`) instead of
+  exiting the indexer, and `gum-server chain resume <chain-id>` lifts it.
+- Deposit-request statuses are `created`, `funded`, `fulfilled`,
+  `recovered`, `expired`; `deploying` and `blocked` are gone. Being in a
+  sweep job is `sweep_job_id`, and needing an operator is
+  `attention_reason` (public status `needs_attention`), both orthogonal to
+  the status. `sweep_batches` is replaced by `sweep_jobs` on the server side
+  and `execution.jobs` / `execution.transactions` /
+  `execution.transaction_attempts` on the signers' side.
+- Migrations moved to `crates/gum-schema/migrations` and are applied only
+  by `gum-server migrate` (on ECS, the new `migrate` task definition run by
+  `scripts/run-migrate-task.sh` before the services roll); no service
+  migrates on start, and every service's `/health/ready` refuses while its
+  schema is behind. All three services log structured `tracing` events
+  (`gum-telemetry`: JSON in production, pretty locally) carrying `service`,
+  `correlation_id`, `deposit_request_id`, `chain_id`, `tx_hash`, `signer`,
+  `job_id`, `message_id` and friends, so one deposit is one grep across the
+  three log groups; the correlation id is stored on every bus message,
+  sweep job and execution job. CloudWatch alarms key on the exact messages
+  and are renamed per service (`indexer-chain-halted`, `signers-stalled`,
+  `server-dead-letter`, …).
+- Infrastructure: a third ECS service and ECR repository (`signers`), the
+  `migrate` task definition, a Cloud Map namespace for the indexer to reach
+  the API's internal listener, a generated `internal_token` secret; the
+  indexer task loses its database secret and its KMS permission, which move
+  to `signers`; the database security group admits `api` and `signers`
+  only. `scripts/push-images.sh` takes the signers repository as a fourth
+  argument. The staging deploy registers and runs the migrate task before
+  applying the services.
 - The payer chooses the network. A deposit request no longer carries a
   chain: `POST /v1/deposit-requests` rejects `chain_id` and
   `token_address`, the request offers every supported network as

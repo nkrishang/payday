@@ -57,6 +57,18 @@ export PAYDAY_API_URL="$API_URL"
 # derive the bind from the API URL so a suite run on shifted ports needs no
 # separate bind setting.
 export PAYDAY_BIND_ADDR="${PAYDAY_API_URL#http://}"
+# gum-server's internal listener (the indexer's RPC, health) and the health
+# listeners of the other two services, on ports the suite does not otherwise
+# use. Port 3001 is the development identity provider.
+export PAYDAY_INTERNAL_BIND_ADDR="${PAYDAY_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
+export PAYDAY_SERVER_INTERNAL_URL="${PAYDAY_SERVER_INTERNAL_URL:-http://$PAYDAY_INTERNAL_BIND_ADDR}"
+export PAYDAY_INTERNAL_TOKEN="${PAYDAY_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
+export PAYDAY_INDEXER_LISTEN_ADDR="${PAYDAY_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
+export PAYDAY_SIGNERS_LISTEN_ADDR="${PAYDAY_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
+# The signers act on a sweep the moment the command lands, but their timer
+# is also what re-checks pending transactions; keep it quick.
+export PAYDAY_SIGNERS_POLL_INTERVAL_MS="${PAYDAY_SIGNERS_POLL_INTERVAL_MS:-500}"
+export PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS="${PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS:-500}"
 # The binary's EnvFilter defaults to silent when RUST_LOG is unset (production
 # sets it in infra/main.tf). The assertions below read the indexer's log
 # trail, so give every service the same level production runs at.
@@ -156,7 +168,7 @@ wait_for_rpc() {
 
 wait_for_api() {
   for _ in {1..100}; do
-    if curl --fail --silent --output /dev/null "$API_URL/health"; then
+    if curl --fail --silent --output /dev/null "$PAYDAY_SERVER_INTERNAL_URL/health/ready"; then
       return
     fi
     sleep 0.1
@@ -582,9 +594,11 @@ curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known
 # The suite makes hundreds of API calls in a few minutes, well past a
 # production account's allowance; the scenario asserts on 429s only where the
 # limiter is the subject, so open the bucket up rather than pace every read.
+echo "Applying schema migrations"
+./target/debug/gum-server migrate
 PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gum-server >"$logs/gum-server.log" 2>&1 &
-gum-server_pid=$!
-pids+=("$gum-server_pid")
+server_pid=$!
+pids+=("$server_pid")
 wait_for_api
 echo "Creating two accounts with keys minted straight into the database"
 PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test)"
@@ -593,6 +607,9 @@ SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test)"
 ./target/debug/gum-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")
+./target/debug/gum-signers >"$logs/signers.log" 2>&1 &
+signers_pid=$!
+pids+=("$signers_pid")
 
 run_id="${GITHUB_RUN_ID:-local}-$(date +%s)-$$"
 
@@ -1107,22 +1124,36 @@ assert_eq 0 "$(token_balance "$BENEFICIARY_PARTIAL" "$SECOND_RPC_URL")" "the rec
 send_usdc "$wrong_address" 500000
 wait_for_status "$wrong_id" settled
 
-echo "Checking that every helper transaction batch resolved"
+echo "Checking that every sweep job and helper transaction resolved"
+# The server's view: every job it scheduled has heard its one terminal
+# event from the signers.
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(*) FROM sweep_batches WHERE resolved_at IS NULL
-")" "a sweep batch is still open"
-# The pool rotates: consecutive batches leave from different signers even
-# when they never overlap, so a suite this long must have used several.
+  SELECT count(*) FROM sweep_jobs WHERE resolved_at IS NULL
+")" "a sweep job is still open"
+# The signers' view: no (signer, nonce) lane is still open, and no job it
+# accepted is still in progress.
+assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM execution.transactions WHERE resolved_at IS NULL
+")" "a helper transaction is still in flight"
+assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM execution.jobs WHERE resolved_at IS NULL
+")" "an execution job is still open"
+# The pool rotates: consecutive jobs leave from different signers even when
+# they never overlap, so a suite this long must have used several.
 distinct_signers="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(DISTINCT signer) FROM sweep_batches
+  SELECT count(DISTINCT signer) FROM execution.transactions
 ")"
 [[ "$distinct_signers" -ge 2 ]] || {
-  echo "expected sweep batches from at least two pool signers, found $distinct_signers" >&2
+  echo "expected helper transactions from at least two pool signers, found $distinct_signers" >&2
   exit 1
 }
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND blocked_reason IS NULL
+  SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND attention_reason IS NULL
 ")" "collectable funds remain queued"
+# Nothing the bus carried between the services was dead-lettered.
+assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM bus.deliveries WHERE state = 'dead'
+")" "a bus delivery was dead-lettered"
 
 echo "Checking that every recovery ledger row raised a deposit_request.recovered_funds event"
 ledger_rows="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
@@ -1517,7 +1548,8 @@ assert_eq 0 "$(usdt_balance "$MERCHANT_WALLET")" "the merchant wallet still hold
 
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive "second Anvil" "$second_anvil_pid"
-assert_process_alive gum-server "$gum-server_pid"
+assert_process_alive gum-server "$server_pid"
 assert_process_alive gum-indexer "$indexer_pid"
+assert_process_alive gum-signers "$signers_pid"
 
 echo "All Anvil end-to-end flows passed"

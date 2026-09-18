@@ -1,14 +1,14 @@
 # AWS deployment
 
-Small production-oriented stack: a two-AZ VPC, public-IP Fargate API and indexer tasks, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, a private versioned S3 bucket for deposit request attachments scanned by GuardDuty Malware Protection, and four KMS keys: three secp256k1 keys (the sweep signer, the Proof of Payment attestation signer, and a legacy recovery wallet kept only until its balance is returned) and one symmetric key encrypting attachments. The indexer has no inbound rule and is fixed at one task. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
+Small production-oriented stack: a two-AZ VPC, public-IP Fargate tasks for the three services (`api`, `indexer`, `signers`) plus a one-off `migrate` task definition, a Cloud Map private DNS namespace through which the indexer reaches the API's internal listener, HTTPS ALB, WAF rate limiting, private encrypted PostgreSQL RDS, ECR, Secrets Manager, CloudWatch with email alarms, a private versioned S3 bucket for deposit request attachments scanned by GuardDuty Malware Protection, and four KMS keys: three secp256k1 keys (the sweep signer, the Proof of Payment attestation signer, and a legacy recovery wallet kept only until its balance is returned) and one symmetric key encrypting attachments. The indexer and signers have no public inbound rule and are fixed at one task each; the indexer holds no database credentials and no KMS permission, and the signers task role is the only principal that can sign with the sweep pool. Public ECS subnets avoid NAT Gateway cost; the API accepts traffic only from the ALB, but public IPs and unrestricted outbound remain a deliberate cost/security tradeoff.
 
 The contract generation is pinned: `factory_code_hash` and
 `batch_sweeper_code_hash` are the keccak256 of the runtime bytecode at
 `factory_address` and `batch_sweeper_address`
 (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`), deployed together
-as one generation. Both services compare them with the chain at startup and
-refuse to start on a mismatch, which is why the API task now also reads the RPC
-secret. The `recovery` KMS key is legacy: deposits now return excess and late
+as one generation. All three services compare them with the chain at startup and
+refuse to start on a mismatch, which is why every task reads the RPC
+secrets. The `recovery` KMS key is legacy: deposits now return excess and late
 funds to the payer's own attested wallet, so gum-server no longer reads its
 address; keep it only until any balance it holds has been returned by hand
 (see `docs/production-runbook.md`). The API task definition's
@@ -32,7 +32,7 @@ Circle's USDC on every chain, Tether's USDT0 on Monad and Arbitrum One; at
 least one chain must list USDC, and a `cctp` block requires USDC on that
 chain), the contract generation's addresses and code hashes, `start_block`,
 finality policy, block time, log range, and explorer origin,
-passed to both tasks as `PAYDAY_CHAINS`. Adding a currency to a live chain
+passed to all three tasks as `PAYDAY_CHAINS`. Adding a currency to a live chain
 is a new `tokens` entry and an apply: no redeploy, no backfill. The paid RPC endpoints are the
 `rpc_urls` map, keyed by chain id (export `TF_VAR_rpc_urls` rather than
 writing them to a file); each becomes its own Secrets Manager secret,
@@ -65,8 +65,10 @@ export TF_VAR_rpc_urls='{"143":"https://…","8453":"https://…","42161":"https
 terraform init -backend-config=backend.hcl
 terraform fmt -check -recursive
 terraform validate
-terraform apply -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer
-# Build and push Dockerfile's API/indexer targets using image_tag now.
+terraform apply -target=aws_ecr_repository.api -target=aws_ecr_repository.indexer -target=aws_ecr_repository.signers
+# Build and push the Dockerfile's three targets with scripts/push-images.sh using image_tag now.
+terraform apply -target=aws_ecs_task_definition.migrate
+../scripts/run-migrate-task.sh <name>          # gum-server migrate, once; services never migrate on start
 terraform plan -out=deploy.tfplan
 terraform apply deploy.tfplan
 # Derive the Proof of Payment attestor address and publish it as the trusted attestor:
@@ -91,7 +93,7 @@ those emails queue unsent.
 Paying a deposit request from another network goes through Relay
 (relay.link). Supply a self-serve key from Relay's dashboard as
 `TF_VAR_relay_api_key`; the stack stores it in Secrets Manager and passes it
-to both the API and the indexer as `PAYDAY_RELAY_API_KEY`. Left empty, the
+to the API as `PAYDAY_RELAY_API_KEY`. Left empty, the
 hosted checkout does not offer the option.
 
 ## Sandbox deployment
@@ -154,9 +156,7 @@ plans, CI logs, and access accordingly; never commit `terraform.tfvars`,
 The API execution role can read only the database, RPC, webhook encryption,
 and generated operator credential secrets; its task role can send mail only
 from the verified SES identity, work the attachment bucket as described above,
-and `kms:GetPublicKey`/`kms:Sign` with the attestation key alone. Indexer execution can read only database/RPC secrets. The
-indexer task role can only `kms:GetPublicKey` and `kms:Sign` on the sweep signer pool's
-key. No role at all can sign with the legacy recovery key. RDS
+and `kms:GetPublicKey`/`kms:Sign` with the attestation key alone. The indexer execution role can read only the RPC secrets and the generated `internal_token` it presents to the API; its task role has no KMS permission at all. The signers execution role can read only the database and RPC secrets, and its task role is the only one that can `kms:GetPublicKey` and `kms:Sign` on the sweep signer pool's keys. The database security group admits the API and signers tasks only. No role at all can sign with the legacy recovery key. RDS
 connections use hostname and certificate verification against the
 checksum-pinned AWS global RDS CA bundle in the image. Secrets Manager version
 rotation is not observed by running ECS tasks. Force a new API deployment after
@@ -165,7 +165,7 @@ ciphertext associated with its key ID has been re-encrypted.
 
 KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use, for every key in `kms_key_arns` (the sweep signer pool, `sweep_signer_count` keys; each address needs gas on every chain). KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gum_core::verify_proof`).
 
-WAF request sampling is disabled because samples can contain the bearer `Authorization` header. Fatal indexer safety errors and loss of its database lock exit the process and publish a log-derived CloudWatch alarm. RDS Multi-AZ, ALB, WAF, public IPv4 addresses, Container Insights, logs, Secrets Manager, and KMS incur ongoing charges. Public IPv4 and cross-AZ traffic are billed. This stack has no autoscaling, VPC endpoints, bastion, or automatic finality-reorg recovery.
+WAF request sampling is disabled because samples can contain the bearer `Authorization` header. Each service's operationally significant `tracing` messages drive log-derived CloudWatch alarms (`log_alarms` in `main.tf`); a finality violation halts the affected chain until an operator runs `gum-server chain resume` (docs/architecture.md). RDS Multi-AZ, ALB, WAF, public IPv4 addresses, Container Insights, logs, Secrets Manager, and KMS incur ongoing charges. Public IPv4 and cross-AZ traffic are billed. This stack has no autoscaling, VPC endpoints, or bastion.
 
 ## Destroy protection
 

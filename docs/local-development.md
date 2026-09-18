@@ -7,37 +7,47 @@ derived once the payer attests, from the hosted page, the wallet they will
 pay from (`POST /v1/payer/deposit-requests/{id}/wallet/challenge` and `/attest`),
 because the address commits to that wallet as its recovery term and to the
 signature through the salt. The payer transfers the request's currency to
-that address. The indexer reads finalized ranges of
+that address. `gum-indexer` reads finalized ranges of
 `Transfer(address,address,uint256)` logs from every stablecoin contract
-configured on the chain, credits only the request's own token,
-attributes matching recipients in one database query, and advances deposit requests
-from `created` to `funded` when cumulative transfers reach the requested
-amount, or to `expired` when the finalized block timestamp passes the deadline.
+configured on the chain and reports each range, with its observations, to
+`gum-server`'s internal listener; the server credits only the request's own
+token and advances deposit requests from `created` to `funded` when
+cumulative transfers reach the requested amount, or to `expired` when the
+finalized block timestamp passes the deadline. The indexer has no database
+and no keys ([`architecture.md`](architecture.md)).
 
-The sweep worker submits batches to `BatchSweeper`. For an address without
+`gum-server`'s scheduler groups funded requests into sweep jobs and
+publishes one `SweepBatch` command per job on the Postgres bus;
+`gum-signers` executes it against `BatchSweeper`. For an address without
 code it calls `PaymentFactory.execute`, which deploys `DepositRequest` at the
 counterfactual address; before expiry the constructor pays the beneficiary
 exactly the requested amount and sends any remainder back to the payer's
 wallet, and after expiry it sends the whole balance to that wallet. For an
 address that already has code it calls `Deposit.recover`, which forwards
 anything that arrived later to the payer's wallet. The finalized receipt
-decides the outcome: `Settled` → `fulfilled` (with a `Recovered` remainder
-when overpaid), standalone `Recovered` → `recovered`, `SweepRecovered` → late
-funds collected, and `SweepFailed` → retried or `blocked` after reading
-`paused()`, `isBlacklisted()`, and `balanceOf()` on the token. Every nonzero
-recovery is written to the `recovered_funds` ledger in the transaction that
-resolves the batch, and each ledger row raises a `deposit_request.recovered_funds`
-webhook.
+decides the outcome, which the signers report as evidence in a
+`SweepFinalized` event and the server turns into transitions: `Settled` →
+`fulfilled` (with the overpayment recovered), `Returned` → `recovered`,
+`LateCollected` → late funds collected, and `Failed` → retried or
+`attention_reason` set after the signers read `paused()`,
+`isBlacklisted()`, and `balanceOf()` on the token at the receipt block.
+Every nonzero recovery is written to the `recovered_funds` ledger in the
+transaction that applies the event, and each ledger row raises a
+`deposit_request.recovered_funds` webhook.
 
 The recovery wallet is the payer's attested wallet, never a configured or
 requested value: `gum-server` rejects a create request that carries
 `refund_address`.
 
 ```
-created → funded → deploying → fulfilled
-   │                    │
-   └──► expired ◄───────┘──► recovered        blocked (operator review)
+created → funded → fulfilled
+   │         │
+   └► expired└──► recovered
 ```
+
+Being inside a sweep job (`sweep_job_id`) and needing an operator
+(`attention_reason`, shown publicly as `needs_attention`) are flags beside
+the status, not statuses; see `architecture.md` §1.
 
 A deposit request is denominated in one `currency`, `USDC` (default) or
 `USDT`, and only the exact contract the chain's `PAYDAY_CHAINS` entry lists
@@ -137,7 +147,7 @@ arrives in your mailbox. Each run starts from a clean database,
 attachment store, and Anvil chains so their indexed histories cannot drift.
 After the bootstrap deploys the contracts on both Anvils, the runner reads
 their runtime bytecode from each chain and builds `PAYDAY_CHAINS` from it
-(overriding any `.env` value), because both services verify the deployed
+(overriding any `.env` value), because all three services verify the deployed
 contract generation, and each token's `decimals()`, `name()`, and
 `version()`, on every chain at startup and refuse to start on a mismatch.
 
@@ -229,7 +239,7 @@ the end-to-end suite's payer, whose wallet every request is bound to; account
 both tokens on the first chain and USDC alone on the second, and hands the
 Relay stand-in both addresses as `RELAY_STUB_USDC` and `RELAY_STUB_USDT`.
 
-Pin the deployed generation for both services (the runner does this for
+Pin the deployed generation for the services (the runner does this for
 you, per chain, when it builds `PAYDAY_CHAINS`); these are the two hashes
 each registry entry carries:
 
@@ -274,11 +284,14 @@ set -a; source .env; set +a
 ./target/debug/payday-dev-identity
 ```
 
-Start `gum-server` in another shell so it fetches the local signing key and
-applies the database schema:
+Apply the schema, then start `gum-server` in another shell (services never
+migrate on start; `/health/ready` on the internal listener,
+`http://127.0.0.1:3010/health/ready`, answers 503 `schema behind` until
+the migration has run):
 
 ```bash
 set -a; source .env; set +a
+./target/debug/gum-server migrate
 ./target/debug/gum-server
 ```
 
@@ -286,12 +299,19 @@ Then mint an account and key with `scripts/local-api-key.sh` (it reads
 `DATABASE_URL`), or sign in through the web app against the development Privy
 app. Production merchant sign-in is Privy too; see `docs/authentication.md`.
 
-In another terminal:
+In two more terminals, once `gum-server` is ready:
 
 ```bash
 set -a; source .env; set +a
-PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gum-indexer
+PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gum-indexer   # health on 127.0.0.1:3011
 ```
+
+```bash
+set -a; source .env; set +a
+./target/debug/gum-signers                                         # health on 127.0.0.1:3012
+```
+
+`scripts/local-runner.sh` does all of this in order for `just dev`.
 
 ### 5. Create a deposit request
 
@@ -388,7 +408,8 @@ and confirmation gating; multi-range draining; range replay idempotency; chain
 isolation; expiry by block timestamp; settlement, recovery, third-party
 execution, and late-fund collection through finalized receipts; failure
 classification (paused, blacklisted, underfunded, unknown); same-nonce fee
-replacement, abandoned nonces, and the paused sweep worker; API validation;
+replacement, abandoned nonces, and stalled lanes; bus delivery, retry,
+dead-letter and idempotency; crash-boundary recovery in the signers; API validation;
 CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 
 ## Configuration
@@ -432,7 +453,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   prints to its log (`DEV IDENTITY OTP <email> <code>`). Local convenience
   only; the provider refuses to bind anything but loopback, and Auth0 issues
   the real codes
-- `PAYDAY_CHAINS` — the network registry both services read: a JSON array
+- `PAYDAY_CHAINS` — the network registry all three services read: a JSON array
   of `{chain_id, tokens, factory, batch_sweeper, factory_code_hash,
   batch_sweeper_code_hash, start_block, finality_source,
   finality_confirmations, block_time_ms, log_range_size,
@@ -444,7 +465,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   there is not offered on that chain, and at least one chain must list
   USDC. The code hashes are keccak256 of the runtime bytecode at the two
   addresses
-  (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); both
+  (`cast keccak "$(cast code <ADDRESS> --rpc-url <RPC_URL>)"`); the
   services compare them with each live chain at startup, also checking that
   `BatchSweeper.factory()` is the entry's `factory` and that each token's
   `decimals()`, `name()`, and `version()` match its currency (a missing
@@ -460,8 +481,9 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `finality_source` is `finalized` or `latest` (see
   `docs/indexer-architecture.md`)
 - `PAYDAY_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
-  (QuickNode in production, an Anvil locally); read by both services
-  (`gum-server` uses it for deployment verification)
+  (QuickNode in production, an Anvil locally); read by all three services
+  (`gum-server` uses it for deployment verification and read-only chain
+  queries; it never signs)
 - `PAYDAY_RPC_WS_URL_<chain_id>` — WebSocket endpoint for that chain's
   transfer signal; unset derives it from the HTTP URL (`https` → `wss`,
   `http` → `ws`, same host, path and token), `off` disables the signal
@@ -475,8 +497,8 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` — reconcile cadence while a chain
   has something to watch and its transfer signal is connected, default
   60000; the local runner uses 1000
-- `PAYDAY_INDEXER_POLL_INTERVAL_MS` — sweep loop cadence, and the reconcile
-  cadence while the signal is disconnected or disabled, default 2000
+- `PAYDAY_INDEXER_POLL_INTERVAL_MS` — the indexer's pass cadence while the
+  signal is disconnected or disabled, default 2000
 - `PAYDAY_INDEXER_IDLE_INTERVAL_MS` — pass cadence for a chain with nothing
   to watch, whose passes fast-forward the cursor without scanning, default
   300000; the local runner uses 2000
@@ -489,16 +511,29 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   [quicknode-rpc-limits.md](runbooks/quicknode-rpc-limits.md))
 - `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` — seconds without a receipt before a
   helper transaction is replaced on the same nonce, default 60
-- `PAYDAY_SWEEP_MAX_SUBMISSIONS` — replacements before the sweep worker
-  pauses and alarms, default 5
-- `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified item failures before a deposit request
-  is `blocked`, default 8
+- `PAYDAY_SWEEP_MAX_SUBMISSIONS` — replacements of one transaction before
+  `gum-signers` publishes `ExecutionStalled` and stops raising fees
+  (reconciliation continues), default 5
+- `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified attempts before `gum-signers`
+  fails a job permanently, default 8. The server-side counterpart is
+  `SweepPolicy::max_attempts` (5): unexplained item failures before the
+  deposit request gets `attention_reason = retries_exhausted`
+- `PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS` — how often `gum-server` turns
+  funded requests into sweep jobs when not woken by the indexer, default 5000
+- `PAYDAY_SIGNERS_POLL_INTERVAL_MS` — `gum-signers` pass cadence when not
+  woken by a command, default 2000; the local runner uses 250
+- `PAYDAY_SIGNERS_RPC_MAX_RPS` — as `PAYDAY_INDEXER_RPC_MAX_RPS`, for the
+  signers, default 20
+- `PAYDAY_INTERNAL_BIND_ADDR`, `PAYDAY_SERVER_INTERNAL_URL`,
+  `PAYDAY_INTERNAL_TOKEN` — `gum-server`'s internal listener, where the
+  indexer finds it, and the bearer token both read
+- `PAYDAY_INDEXER_LISTEN_ADDR`, `PAYDAY_SIGNERS_LISTEN_ADDR` — the two
+  workers' `/health` listeners
 - `PAYDAY_CCTP_IRIS_URL` — Circle's attestation service the withdrawal relayer
   polls for a bridge leg's burn, default `https://iris-api.circle.com`; the
   local Anvil chains have no `cctp` block, so nothing polls it there
 - `PAYDAY_RELAY_URL` and `PAYDAY_RELAY_API_KEY` — Relay (relay.link), for
-  paying a deposit request from another network; both `gum-server` (quotes)
-  and `gum-indexer` (following reported quotes) read them. Unset key:
+  paying a deposit request from another network; `gum-server` reads them. Unset key:
   the hosted checkout does not offer it. `just dev` and `just e2e` point
   them at `scripts/relay-stub.mjs`, a stand-in on port 4020 that quotes a
   transfer of the local USDC or USDT (`RELAY_STUB_USDC`, `RELAY_STUB_USDT`)
@@ -511,8 +546,9 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   uses Anvil account #0 plus mnemonic accounts #10 and #11 (Anvil starts
   with twelve accounts). Mutually exclusive with KMS
 - `PAYDAY_KMS_KEY_IDS` — production AWS KMS secp256k1 key ARNs,
-  comma-separated, one per pool signer; the worker uses its ambient ECS task
-  role for `kms:GetPublicKey` and `kms:Sign` on each
+  comma-separated, one per pool signer; `gum-signers` uses its ambient ECS
+  task role for `kms:GetPublicKey` and `kms:Sign` on each. Only
+  `gum-signers` reads either signer variable
 - `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding deposit request PDFs;
   `payday-attachments-local` on the runner's MinIO
 - `PAYDAY_ATTACHMENT_S3_ENDPOINT`, `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE` —
@@ -546,10 +582,12 @@ Terraform source is under `infra/`.
   (`docs/runbooks/wrong-network-deposit.md`).
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.
-- One helper transaction is in flight per pool signer; replacements share
-  its nonce. After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed submissions
-  that signer's lane pauses and alarms while the other signers and block
-  indexing continue.
-- `blocked` deposit requests are released by an operator (`docs/runbooks/stuck-deposit-request.md`);
-  the worker never retries them on its own.
+- One transaction is in flight per pool signer per chain; replacements
+  share its nonce. After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed
+  submissions `gum-signers` stops raising that lane's fees and alarms
+  (`ExecutionStalled`) while still reconciling it every pass; the other
+  signers and block indexing continue.
+- Deposit requests with an `attention_reason` are released by an operator
+  (`docs/runbooks/stuck-deposit-request.md`); the scheduler never picks
+  them up on its own.
 - Deposit listing is cursor-paginated and bounded to 100 records per request.

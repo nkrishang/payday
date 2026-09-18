@@ -30,11 +30,9 @@ exercised on every change.
 
 - The deposit request id, from the payer or the merchant.
 - An API key on the merchant's account, `curl`, `jq`, and `cast`.
-- An RPC URL for the chain the funds landed on, and a key with a little gas
-  there (the KMS sweep signer works: `cast send --aws` with
-  `AWS_KMS_KEY_ID`, as in
-  [stuck-deposit-request.md](stuck-deposit-request.md); any funded key
-  does, since both calls are permissionless).
+- An RPC URL for the chain the funds landed on, and an operator key with a
+  little gas there. Both calls are permissionless; do not export or use the
+  signers service's KMS keys for this manual operation.
 
 ## Step 1: Confirm where the funds are
 

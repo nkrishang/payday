@@ -7,7 +7,7 @@ locals {
   checkout_base_url = var.checkout_base_url
 
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
-  # The chain registry both services read: every network a payer may pay
+  # The chain registry all three services read: every network a payer may pay
   # on, with the contract generation deployed there. The RPC URL for each
   # is a secret (PAYDAY_RPC_URL_<chain_id>), never part of this JSON.
   common_environment = [
@@ -104,6 +104,14 @@ resource "aws_security_group" "api" {
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
+  # The internal listener: the indexer's RPC and the health endpoints. Only
+  # the indexer may reach it; it is never behind the ALB.
+  ingress {
+    from_port       = var.internal_port
+    to_port         = var.internal_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.indexer.id]
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -122,6 +130,16 @@ resource "aws_security_group" "indexer" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+resource "aws_security_group" "signers" {
+  name_prefix = "${var.name}-signers-"
+  vpc_id      = aws_vpc.this.id
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
 
 resource "aws_security_group" "db" {
   name_prefix = "${var.name}-db-"
@@ -130,7 +148,7 @@ resource "aws_security_group" "db" {
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [aws_security_group.api.id, aws_security_group.indexer.id]
+    security_groups = [aws_security_group.api.id, aws_security_group.signers.id]
   }
   egress {
     from_port   = 0
@@ -288,6 +306,18 @@ resource "random_password" "admin_bearer" {
   length  = 48
   special = false
 }
+# The bearer the indexer presents on gum-server's internal listener. Shared
+# by exactly those two services; rotating it is a new random_password.
+resource "random_password" "internal_token" {
+  length  = 48
+  special = false
+}
+resource "aws_secretsmanager_secret" "internal_token" { name = "${var.name}/internal-token" }
+resource "aws_secretsmanager_secret_version" "internal_token" {
+  secret_id     = aws_secretsmanager_secret.internal_token.id
+  secret_string = random_password.internal_token.result
+}
+
 resource "aws_secretsmanager_secret" "admin_bearer" { name = "${var.name}/admin-bearer" }
 resource "aws_secretsmanager_secret_version" "admin_bearer" {
   secret_id     = aws_secretsmanager_secret.admin_bearer.id
@@ -396,6 +426,11 @@ resource "aws_ecr_repository" "indexer" {
   image_tag_mutability = "IMMUTABLE"
   image_scanning_configuration { scan_on_push = true }
 }
+resource "aws_ecr_repository" "signers" {
+  name                 = "${var.name}-signers"
+  image_tag_mutability = "IMMUTABLE"
+  image_scanning_configuration { scan_on_push = true }
+}
 
 resource "aws_cloudwatch_log_group" "api" {
   name              = "/ecs/${var.name}/api"
@@ -403,6 +438,10 @@ resource "aws_cloudwatch_log_group" "api" {
 }
 resource "aws_cloudwatch_log_group" "indexer" {
   name              = "/ecs/${var.name}/indexer"
+  retention_in_days = 30
+}
+resource "aws_cloudwatch_log_group" "signers" {
+  name              = "/ecs/${var.name}/signers"
   retention_in_days = 30
 }
 
@@ -430,14 +469,28 @@ resource "aws_iam_role_policy_attachment" "indexer_execution" {
   role       = aws_iam_role.indexer_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
+resource "aws_iam_role" "signers_execution" {
+  name               = "${var.name}-signers-execution"
+  assume_role_policy = aws_iam_role.api_execution.assume_role_policy
+}
+resource "aws_iam_role_policy_attachment" "signers_execution" {
+  role       = aws_iam_role.signers_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
 
 resource "aws_iam_role_policy" "api_secrets" {
   role   = aws_iam_role.api_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.resend_api_key[*].arn, aws_secretsmanager_secret.privy_app_secret[*].arn, aws_secretsmanager_secret.relay_api_key[*].arn) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn, aws_secretsmanager_secret.internal_token.arn, aws_secretsmanager_secret.webhook_encryption_key.arn, aws_secretsmanager_secret.admin_bearer.arn, aws_secretsmanager_secret.payer_ref_master_key.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.resend_api_key[*].arn, aws_secretsmanager_secret.privy_app_secret[*].arn, aws_secretsmanager_secret.relay_api_key[*].arn) }] })
 }
+# The indexer reads chains and talks to gum-server: no database credential,
+# no signing key.
 resource "aws_iam_role_policy" "indexer_secrets" {
   role   = aws_iam_role.indexer_execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn, aws_secretsmanager_secret.relay_api_key[*].arn) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.internal_token.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn) }] })
+}
+resource "aws_iam_role_policy" "signers_secrets" {
+  role   = aws_iam_role.signers_execution.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.database_url.arn], values(aws_secretsmanager_secret.rpc_url)[*].arn) }] })
 }
 
 resource "aws_iam_role" "api_task" {
@@ -462,12 +515,19 @@ resource "aws_iam_role_policy" "api_onboarding_payer_kms" {
   role   = aws_iam_role.api_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.onboarding_payer.arn }] })
 }
+# The indexer's task role has no permissions at all: it is a read-only
+# observer of chains and a client of gum-server.
 resource "aws_iam_role" "indexer_task" {
   name               = "${var.name}-indexer-task"
   assume_role_policy = aws_iam_role.api_execution.assume_role_policy
 }
-resource "aws_iam_role_policy" "indexer_kms" {
-  role   = aws_iam_role.indexer_task.id
+# gum-signers is the only process that can sign with the sweep pool.
+resource "aws_iam_role" "signers_task" {
+  name               = "${var.name}-signers-task"
+  assume_role_policy = aws_iam_role.api_execution.assume_role_policy
+}
+resource "aws_iam_role_policy" "signers_kms" {
+  role   = aws_iam_role.signers_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.signer[*].arn }] })
 }
 
@@ -722,9 +782,14 @@ resource "aws_ecs_task_definition" "api" {
   container_definitions = jsonencode([{
     name                   = "api", image = "${aws_ecr_repository.api.repository_url}:${var.image_tag}", essential = true,
     readonlyRootFilesystem = true,
-    portMappings           = [{ containerPort = var.api_port, protocol = "tcp" }],
+    portMappings = [
+      { containerPort = var.api_port, protocol = "tcp" },
+      { containerPort = var.internal_port, protocol = "tcp", name = "internal" }
+    ],
+    stopTimeout = 120,
     environment = concat(local.common_environment, [
       { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
+      { name = "PAYDAY_INTERNAL_BIND_ADDR", value = "0.0.0.0:${var.internal_port}" },
       { name = "PAYDAY_PRIVY_APP_ID", value = var.privy_app_id },
       { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
       { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
@@ -737,6 +802,7 @@ resource "aws_ecs_task_definition" "api" {
     # startup, so it reads each chain through the same RPC secrets as the indexer.
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "PAYDAY_INTERNAL_TOKEN", valueFrom = aws_secretsmanager_secret.internal_token.arn },
       { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
       { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
     ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets, local.relay_secrets),
@@ -761,12 +827,13 @@ resource "aws_ecs_task_definition" "indexer" {
     readonlyRootFilesystem = true,
     stopTimeout            = 120,
     environment = concat(local.common_environment, [
-      { name = "PAYDAY_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
+      { name = "PAYDAY_SERVER_INTERNAL_URL", value = "http://${local.api_internal_hostname}:${var.internal_port}" },
+      { name = "PAYDAY_INDEXER_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" },
       { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
       { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
       { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
     ]),
-    secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets, local.relay_secrets),
+    secrets          = concat([{ name = "PAYDAY_INTERNAL_TOKEN", valueFrom = aws_secretsmanager_secret.internal_token.arn }], local.rpc_url_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
   }])
 
@@ -776,6 +843,82 @@ resource "aws_ecs_task_definition" "indexer" {
       error_message = "rpc_urls must carry an endpoint for every chain in chains, keyed by decimal chain id."
     }
   }
+}
+
+resource "aws_ecs_task_definition" "signers" {
+  family                   = "${var.name}-signers"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.signers_cpu
+  memory                   = var.signers_memory
+  execution_role_arn       = aws_iam_role.signers_execution.arn
+  task_role_arn            = aws_iam_role.signers_task.arn
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+  container_definitions = jsonencode([{
+    name                   = "signers", image = "${aws_ecr_repository.signers.repository_url}:${var.image_tag}", essential = true,
+    readonlyRootFilesystem = true,
+    # A helper transaction that is signed but not yet broadcast is durable;
+    # the stop timeout only lets an in-progress RPC call finish.
+    stopTimeout = 120,
+    environment = concat(local.common_environment, [
+      { name = "PAYDAY_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
+      { name = "PAYDAY_SIGNERS_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" }
+    ]),
+    secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets),
+    logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.signers.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "signers" } }
+  }])
+}
+
+# `gum-server migrate` as a one-off task: the deploy runs it with the new
+# image before the services roll (docs/production-runbook.md). Same image,
+# same credentials, no ports.
+resource "aws_ecs_task_definition" "migrate" {
+  family                   = "${var.name}-migrate"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.api_execution.arn
+  task_role_arn            = aws_iam_role.api_task.arn
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+  container_definitions = jsonencode([{
+    name                   = "migrate", image = "${aws_ecr_repository.api.repository_url}:${var.image_tag}", essential = true,
+    readonlyRootFilesystem = true,
+    command                = ["migrate"],
+    environment            = [{ name = "RUST_LOG", value = "info" }],
+    secrets                = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }],
+    logConfiguration       = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "migrate" } }
+  }])
+}
+
+# Private DNS so the indexer finds gum-server's internal listener by name
+# (api.<name>.local). Cloud Map registers each api task's private IP as it
+# starts; the record's short TTL means a rolled task disappears within a
+# minute, and the indexer's HTTP retries cover the gap.
+resource "aws_service_discovery_private_dns_namespace" "this" {
+  name = "${var.name}.local"
+  vpc  = aws_vpc.this.id
+}
+resource "aws_service_discovery_service" "api" {
+  name = "api"
+  dns_config {
+    namespace_id   = aws_service_discovery_private_dns_namespace.this.id
+    routing_policy = "MULTIVALUE"
+    dns_records {
+      type = "A"
+      ttl  = 10
+    }
+  }
+  health_check_custom_config {}
+}
+locals {
+  api_internal_hostname = "${aws_service_discovery_service.api.name}.${aws_service_discovery_private_dns_namespace.this.name}"
 }
 
 resource "aws_lb" "api" {
@@ -866,8 +1009,13 @@ resource "aws_ecs_service" "api" {
     container_name   = "api"
     container_port   = var.api_port
   }
+  service_registries {
+    registry_arn = aws_service_discovery_service.api.arn
+  }
   depends_on = [aws_lb_listener.https]
 }
+# One indexer task: the ledger's compare-and-set cursor makes a second one
+# safe, merely wasteful, so the deployment may briefly overlap.
 resource "aws_ecs_service" "indexer" {
   name                               = "indexer"
   cluster                            = aws_ecs_cluster.this.id
@@ -883,6 +1031,28 @@ resource "aws_ecs_service" "indexer" {
   network_configuration {
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.indexer.id]
+    assign_public_ip = true
+  }
+}
+# One signers task. Two would be safe for correctness (every lane is a row
+# lock and every job an idempotent command) but would race for the same
+# signer nonces and lose to each other; the deployment therefore stops the
+# old task before starting the new one.
+resource "aws_ecs_service" "signers" {
+  name                               = "signers"
+  cluster                            = aws_ecs_cluster.this.id
+  task_definition                    = aws_ecs_task_definition.signers.arn
+  desired_count                      = 1
+  launch_type                        = "FARGATE"
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.signers.id]
     assign_public_ip = true
   }
 }
@@ -971,26 +1141,17 @@ resource "aws_cloudwatch_metric_alarm" "indexer_tasks" {
   dimensions          = { ClusterName = aws_ecs_cluster.this.name, ServiceName = aws_ecs_service.indexer.name }
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
-resource "aws_cloudwatch_log_metric_filter" "indexer_fatal" {
-  name           = "${var.name}-indexer-fatal"
-  log_group_name = aws_cloudwatch_log_group.indexer.name
-  pattern        = "\"indexer fatal\""
-  metric_transformation {
-    name      = "IndexerFatal"
-    namespace = var.name
-    value     = "1"
-  }
-}
-resource "aws_cloudwatch_metric_alarm" "indexer_fatal" {
-  alarm_name          = "${var.name}-indexer-fatal"
-  namespace           = var.name
-  metric_name         = "IndexerFatal"
-  statistic           = "Sum"
+resource "aws_cloudwatch_metric_alarm" "signers_tasks" {
+  alarm_name          = "${var.name}-signers-task-count"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "RunningTaskCount"
+  statistic           = "Minimum"
   period              = 60
-  evaluation_periods  = 1
-  threshold           = 0
-  comparison_operator = "GreaterThanThreshold"
-  treat_missing_data  = "notBreaching"
+  evaluation_periods  = 2
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+  dimensions          = { ClusterName = aws_ecs_cluster.this.name, ServiceName = aws_ecs_service.signers.name }
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
 resource "aws_cloudwatch_log_metric_filter" "notification_failures" {
@@ -1040,65 +1201,107 @@ resource "aws_cloudwatch_metric_alarm" "notification_missing_contact" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }
-# Worker conditions that do not end the process. Each is logged on every
-# pass while it holds, so the alarm stays raised until the condition clears.
+# Conditions the services log but do not exit on. Each is logged on every
+# pass while it holds, so an alarm stays raised until the condition clears.
+# The patterns are the exact `tracing` messages; the log lines carry the
+# chain_id, job id and signer as structured fields.
 locals {
-  indexer_log_alarms = {
-    sweep_paused = {
-      pattern     = "\"sweep worker paused\""
+  log_alarms = {
+    indexer_chain_halted = {
+      log_group   = aws_cloudwatch_log_group.indexer.name
+      pattern     = "\"finality violation; chain halted\""
       period      = 60
-      description = "The sweep worker cannot resolve its in-flight batch; see docs/runbooks/stuck-deposit-request.md"
+      threshold   = 0
+      description = "A finalized block changed hash. The chain is halted: nothing is scanned or swept on it until an operator repairs the cursor and runs `gum-server chain resume <chain-id>` (docs/architecture.md)"
     }
-    signer_low_balance = {
-      pattern     = "\"sweep signer balance low\""
+    indexer_pass_failing = {
+      log_group   = aws_cloudwatch_log_group.indexer.name
+      pattern     = "\"indexer pass failed; retrying\""
       period      = 300
-      description = "A KMS sweep signer is below its chain's low-balance level; the log line names the address, fund it"
+      threshold   = 10
+      description = "Sustained RPC or gum-server failures in the indexer; payments are detected late until it clears"
     }
-    cursor_lagging = {
-      pattern     = "\"indexer cursor lagging\""
-      period      = 60
-      description = "The block indexer trails finality by more than a thousand blocks; follow docs/runbooks/stuck-deposit-request.md"
-    }
-    sweep_backlog_stale = {
-      pattern     = "\"sweep backlog stale\""
-      period      = 300
-      description = "Collectable funds have waited more than fifteen minutes"
-    }
-    retryable_failures = {
-      pattern     = "?\"sweep pass failed\" ?\"indexer pass failed\""
-      period      = 300
-      description = "Sustained retryable RPC or database failures in the worker"
-    }
-    transfer_signal_down = {
+    indexer_signal_down = {
+      log_group   = aws_cloudwatch_log_group.indexer.name
       pattern     = "?\"transfer signal disconnected\" ?\"transfer signal connection failed\""
       period      = 600
-      description = "The indexer's WebSocket transfer signal keeps failing; payments are still detected on the PAYDAY_INDEXER_POLL_INTERVAL_MS cadence at the old request cost. Check the QuickNode endpoint's WebSocket status"
+      threshold   = 0
+      description = "The indexer's WebSocket transfer signal keeps failing; payments are still detected on the poll cadence at the old request cost. Check the RPC endpoint's WebSocket status"
+    }
+    signers_stalled = {
+      log_group   = aws_cloudwatch_log_group.signers.name
+      pattern     = "\"transaction unconfirmed after the replacement limit; fees are no longer raised\""
+      period      = 60
+      threshold   = 0
+      description = "A helper transaction was replaced past the limit without mining; the signers keep re-broadcasting. See docs/runbooks/stuck-deposit-request.md"
+    }
+    signers_low_balance = {
+      log_group   = aws_cloudwatch_log_group.signers.name
+      pattern     = "\"signer balance is low\""
+      period      = 300
+      threshold   = 0
+      description = "A KMS sweep signer is below its chain's low-balance level; the log line names the address, fund it"
+    }
+    signers_failing = {
+      log_group   = aws_cloudwatch_log_group.signers.name
+      pattern     = "?\"job deferred after a transient failure\" ?\"reconciling transaction failed\" ?\"broadcast failed; the signed transaction stays durable for the next pass\""
+      period      = 300
+      threshold   = 10
+      description = "Sustained RPC, KMS or database failures in the signers"
+    }
+    server_dead_letter = {
+      log_group   = aws_cloudwatch_log_group.api.name
+      pattern     = "?\"dead-lettering\" ?\"message handling failed permanently; dead-lettered\""
+      period      = 60
+      threshold   = 0
+      description = "A bus delivery was parked for an operator: `gum-server bus dead`, then `gum-server bus retry <message-id>` once the cause is fixed"
+    }
+    server_sweep_stuck = {
+      log_group   = aws_cloudwatch_log_group.api.name
+      pattern     = "?\"sweep job open past the stuck threshold; check gum-signers\" ?\"execution stalled\""
+      period      = 300
+      threshold   = 0
+      description = "A sweep job has had no terminal event for over an hour, or the signers reported it stalled"
+    }
+    server_attention = {
+      log_group   = aws_cloudwatch_log_group.api.name
+      pattern     = "\"deposit request needs operator attention\""
+      period      = 300
+      threshold   = 0
+      description = "A deposit request was marked for manual attention; follow docs/runbooks/stuck-deposit-request.md"
+    }
+    signers_dead_letter = {
+      log_group   = aws_cloudwatch_log_group.signers.name
+      pattern     = "\"message handling failed permanently; dead-lettered\""
+      period      = 60
+      threshold   = 0
+      description = "A sweep command was dead-lettered by the signers: `gum-server bus dead`"
     }
   }
 }
 
-resource "aws_cloudwatch_log_metric_filter" "indexer" {
-  for_each       = local.indexer_log_alarms
-  name           = "${var.name}-indexer-${replace(each.key, "_", "-")}"
-  log_group_name = aws_cloudwatch_log_group.indexer.name
+resource "aws_cloudwatch_log_metric_filter" "service" {
+  for_each       = local.log_alarms
+  name           = "${var.name}-${replace(each.key, "_", "-")}"
+  log_group_name = each.value.log_group
   pattern        = each.value.pattern
   metric_transformation {
-    name      = "Indexer${title(replace(each.key, "_", ""))}"
+    name      = title(replace(each.key, "_", ""))
     namespace = var.name
     value     = "1"
   }
 }
 
-resource "aws_cloudwatch_metric_alarm" "indexer" {
-  for_each            = local.indexer_log_alarms
-  alarm_name          = "${var.name}-indexer-${replace(each.key, "_", "-")}"
+resource "aws_cloudwatch_metric_alarm" "service" {
+  for_each            = local.log_alarms
+  alarm_name          = "${var.name}-${replace(each.key, "_", "-")}"
   alarm_description   = each.value.description
   namespace           = var.name
-  metric_name         = aws_cloudwatch_log_metric_filter.indexer[each.key].metric_transformation[0].name
+  metric_name         = aws_cloudwatch_log_metric_filter.service[each.key].metric_transformation[0].name
   statistic           = "Sum"
   period              = each.value.period
   evaluation_periods  = 1
-  threshold           = each.key == "retryable_failures" ? 10 : 0
+  threshold           = each.value.threshold
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
