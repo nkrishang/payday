@@ -120,6 +120,7 @@ impl Indexer {
         );
         let mut cache = WatchCache::default();
         let mut failures: u32 = 0;
+        let mut signal_target: Option<u64> = None;
         loop {
             if *shutdown.borrow() {
                 info!(chain_id, "chain worker stopped");
@@ -139,7 +140,24 @@ impl Indexer {
                 }
                 Ok(Pass::Scanned { .. }) => {
                     failures = 0;
-                    self.cadence_for(&cache)
+                    if let Some(target) = signal_target {
+                        match self.ledger.cursor(chain_id).await {
+                            Ok(Some(cursor)) if cursor.block >= target => {
+                                signal_target = None;
+                                self.cadence_for(&cache)
+                            }
+                            Ok(cursor) => {
+                                debug!(target, indexed = ?cursor.map(|cursor| cursor.block), "signal target is not finalized and indexed yet; following up");
+                                Duration::from_millis(self.config.block_time_ms.max(1))
+                            }
+                            Err(error) => {
+                                warn!(%error, target, "could not check signal catch-up progress");
+                                self.cadence.failure_backoff.delay(1)
+                            }
+                        }
+                    } else {
+                        self.cadence_for(&cache)
+                    }
                 }
                 Ok(Pass::Halted) => {
                     failures = 0;
@@ -159,11 +177,25 @@ impl Indexer {
                     wait
                 }
             };
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                _ = self.signal.notified() => { let _ = self.signal.take_target(); }
-                _ = self.signal.health_changed() => {}
-                _ = shutdown.changed() => {}
+            let deadline = tokio::time::sleep(wait);
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => break,
+                    _ = tokio::time::sleep(self.cadence.poll) => {
+                        if let Err(error) = self.refresh_watch_list(&mut cache).await {
+                            warn!(chain_id, %error, "watch list refresh failed; retrying");
+                        }
+                    }
+                    _ = self.signal.notified() => {
+                        if let Some(target) = self.signal.take_target() {
+                            signal_target = Some(signal_target.map_or(target, |pending| pending.max(target)));
+                        }
+                        break;
+                    }
+                    _ = self.signal.health_changed() => break,
+                    _ = shutdown.changed() => break,
+                }
             }
         }
     }
@@ -182,6 +214,16 @@ impl Indexer {
     pub async fn pass(&self, cache: &mut WatchCache) -> Result<Pass, PassError> {
         let chain_id = self.config.chain_id;
         let mut cursor = self.ledger.cursor(chain_id).await?;
+        // Read the boundary before validating continuity. That puts even an
+        // empty-watch fast-forward inside a before/after ancestry window:
+        // adopting a replacement finalized branch cannot erase the evidence
+        // that our stored cursor belonged to the old one.
+        let boundary = gum_chain::finality_boundary(
+            self.chain.as_ref(),
+            self.config.finality_source,
+            self.config.finality_confirmations,
+        )
+        .await?;
 
         if let Some(stored) = cursor {
             let header = self.chain.block_header(stored.block).await?;
@@ -204,12 +246,6 @@ impl Indexer {
             }
         }
 
-        let boundary = gum_chain::finality_boundary(
-            self.chain.as_ref(),
-            self.config.finality_source,
-            self.config.finality_confirmations,
-        )
-        .await?;
         self.ledger
             .report_finalized_head(
                 chain_id,
@@ -221,24 +257,7 @@ impl Indexer {
             )
             .await?;
 
-        let recent_since =
-            Utc::now() - chrono::Duration::from_std(self.late_watch).unwrap_or_default();
-        let list = self
-            .ledger
-            .watch_list(
-                chain_id,
-                WatchListQuery {
-                    recent_since,
-                    known_fingerprint: cache.fingerprint.clone(),
-                },
-            )
-            .await?;
-        cache.fingerprint = Some(list.fingerprint);
-        if let Some(addresses) = list.addresses {
-            debug!(chain_id, watched = addresses.len(), "watch list refreshed");
-            cache.addresses = Arc::new(addresses);
-            let _ = self.watch_tx.send(cache.addresses.clone());
-        }
+        self.refresh_watch_list(cache).await?;
 
         let start = cursor.map_or(self.config.start_block, |c| c.block.saturating_add(1));
         if start > boundary.number {
@@ -280,26 +299,57 @@ impl Indexer {
 
         let tokens = self.config.token_addresses();
         let mut from = start;
+        let mut range_size = self.config.log_range_size.max(1);
         let mut ranges = 0;
         let mut observed = 0;
         while from <= boundary.number && ranges < self.max_ranges {
-            let to = boundary
-                .number
-                .min(from.saturating_add(self.config.log_range_size.max(1) - 1));
+            let to = boundary.number.min(from.saturating_add(range_size - 1));
             debug!(
                 chain_id,
                 from_block = from,
                 to_block = to,
                 "scanning finalized range"
             );
-            let transfers = self
+            // Put the cursor continuity read inside the same before/after
+            // window as the logs. A finalized reorg between a separate
+            // cursor check and this first end-header read must not let both
+            // end reads agree on the new branch and silently advance us.
+            let before = self.chain.block_header(to).await?;
+            if let Some(expected) = cursor {
+                let preceding = self.chain.block_header(expected.block).await?;
+                if preceding.hash != expected.block_hash {
+                    let reason =
+                        format!("finalized block {} changed while scanning", expected.block);
+                    self.ledger
+                        .report_fault(
+                            chain_id,
+                            ChainFaultReport {
+                                reason,
+                                block: Some(expected.block),
+                            },
+                        )
+                        .await?;
+                    return Ok(Pass::Halted);
+                }
+            }
+            let transfers = match self
                 .chain
                 .token_transfers(&tokens, from, to, &cache.addresses)
-                .await?;
-            // The window's end header, read after the logs: if the logs
-            // came from a block the node has since replaced, the ledger's
-            // hash check on the next pass catches it.
+                .await
+            {
+                Ok(transfers) => transfers,
+                Err(ChainError::LogRangeTooLarge(message)) if range_size > 1 => {
+                    range_size = (range_size / 2).max(1);
+                    warn!(from_block = from, to_block = to, smaller = range_size, error = %message, "provider rejected the log range; splitting it");
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let header = self.chain.block_header(to).await?;
+            if before.hash != header.hash {
+                warn!(block = to, before = %before.hash, after = %header.hash, "range end changed while fetching logs; retrying the uncommitted range");
+                continue;
+            }
             let observations: Vec<PaymentObservation> = transfers
                 .into_iter()
                 .map(|transfer| {
@@ -344,6 +394,29 @@ impl Indexer {
             ranges,
             observations: observed,
         })
+    }
+
+    async fn refresh_watch_list(&self, cache: &mut WatchCache) -> Result<(), LedgerError> {
+        let chain_id = self.config.chain_id;
+        let recent_since =
+            Utc::now() - chrono::Duration::from_std(self.late_watch).unwrap_or_default();
+        let list = self
+            .ledger
+            .watch_list(
+                chain_id,
+                WatchListQuery {
+                    recent_since,
+                    known_fingerprint: cache.fingerprint.clone(),
+                },
+            )
+            .await?;
+        cache.fingerprint = Some(list.fingerprint);
+        if let Some(addresses) = list.addresses {
+            debug!(chain_id, watched = addresses.len(), "watch list refreshed");
+            cache.addresses = Arc::new(addresses);
+            let _ = self.watch_tx.send(cache.addresses.clone());
+        }
+        Ok(())
     }
 
     async fn apply(
@@ -715,6 +788,38 @@ mod tests {
         assert_eq!(*ledger.watch_list_calls.lock().unwrap(), 3);
     }
 
+    #[tokio::test]
+    async fn provider_range_limits_are_adapted_without_losing_progress() {
+        let ledger = Arc::new(FakeLedger::default());
+        ledger.watch(PAID);
+        let chain = Arc::new(MockChain::new(250).with(|state| {
+            state.max_log_range = Some(25);
+            state.transfers = vec![transfer(120, PAID, 5), transfer(240, PAID, 7)];
+        }));
+        let worker = indexer(ledger.clone(), chain.clone(), 100, 20);
+
+        worker.pass(&mut WatchCache::default()).await.unwrap();
+
+        assert_eq!(ledger.cursor_block(), Some(250));
+        assert_eq!(
+            ledger
+                .observations()
+                .iter()
+                .map(|observation| observation.block_number)
+                .collect::<Vec<_>>(),
+            [120, 240]
+        );
+        assert!(
+            chain
+                .state
+                .lock()
+                .unwrap()
+                .log_requests
+                .iter()
+                .all(|(from, to, _)| to - from < 25)
+        );
+    }
+
     /// A restarted worker (fresh process memory) continues from the
     /// ledger's cursor: nothing is scanned twice, nothing is skipped.
     #[tokio::test]
@@ -899,6 +1004,56 @@ mod tests {
             }
         );
         assert_eq!(ledger.cursor_block(), Some(300));
+    }
+
+    /// Continuity is checked after the range's first end-header read. If the
+    /// branch changes in between, the stored cursor catches it before logs
+    /// from the replacement branch can be committed.
+    #[tokio::test]
+    async fn a_reorg_between_cursor_validation_and_range_read_halts_the_chain() {
+        let ledger = Arc::new(FakeLedger::default());
+        ledger.watch(PAID);
+        *ledger.cursor.lock().unwrap() = Some(IndexerCursor {
+            block: 200,
+            block_hash: block_hash(200),
+            block_timestamp: Some(0),
+        });
+        let chain = Arc::new(MockChain::new(250).with(|state| {
+            state.transfers = vec![transfer(220, PAID, 1)];
+            // Cursor header, finalized header, and initial range-end header
+            // see the old branch. The following cursor read sees the reorg.
+            state.reorg_on_header_request = Some(4);
+        }));
+        let worker = indexer(ledger.clone(), chain, 100, 10);
+        let mut cache = WatchCache::default();
+
+        assert_eq!(worker.pass(&mut cache).await.unwrap(), Pass::Halted);
+        assert_eq!(ledger.cursor_block(), Some(200));
+        assert!(ledger.ranges().is_empty());
+        assert_eq!(ledger.faults.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_watch_list_cannot_fast_forward_across_a_reorg() {
+        let ledger = Arc::new(FakeLedger::default());
+        *ledger.cursor.lock().unwrap() = Some(IndexerCursor {
+            block: 200,
+            block_hash: block_hash(200),
+            block_timestamp: Some(0),
+        });
+        let chain = Arc::new(MockChain::new(250).with(|state| {
+            // Boundary sees the old branch; continuity sees the replacement.
+            state.reorg_on_header_request = Some(2);
+        }));
+        let worker = indexer(ledger.clone(), chain, 100, 10);
+
+        assert_eq!(
+            worker.pass(&mut WatchCache::default()).await.unwrap(),
+            Pass::Halted
+        );
+        assert_eq!(ledger.cursor_block(), Some(200));
+        assert!(ledger.ranges().is_empty());
+        assert_eq!(ledger.faults.lock().unwrap().len(), 1);
     }
 
     /// A pass that fails halfway leaves the ledger consistent: the windows

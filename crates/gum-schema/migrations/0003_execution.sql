@@ -36,7 +36,7 @@ CREATE TABLE execution.jobs (
     resolution JSONB,
 
     CONSTRAINT execution_jobs_kind
-        CHECK (kind IN ('sweep_batch', 'withdrawal_step')),
+        CHECK (kind IN ('sweep_batch', 'withdrawal_step', 'onboarding_payment')),
     CONSTRAINT execution_jobs_state
         CHECK (state IN ('queued', 'executing', 'finalized', 'abandoned', 'rejected')),
     CONSTRAINT execution_jobs_resolved
@@ -123,14 +123,20 @@ CREATE TABLE execution.transaction_attempts (
         CHECK (max_fee_per_gas ~ '^[0-9]+$' AND max_priority_fee_per_gas ~ '^[0-9]+$')
 );
 
--- Chains the server told us to stop signing for. In-flight transactions
--- keep being reconciled; no new transaction is prepared while a row exists.
+-- Chain-fault controls the server sent us. A resume is retained as a
+-- tombstone so a delayed retry of the matching halt cannot reactivate it.
+-- In-flight transactions keep being reconciled while any fault is open.
 CREATE TABLE execution.chain_halts (
-    chain_id BIGINT PRIMARY KEY,
-    fault_id UUID NOT NULL,
-    reason TEXT NOT NULL,
-    halted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    fault_id UUID PRIMARY KEY,
+    chain_id BIGINT NOT NULL,
+    reason TEXT,
+    halted_at TIMESTAMPTZ,
+    resumed_at TIMESTAMPTZ,
+    CONSTRAINT execution_chain_halts_has_control
+        CHECK (halted_at IS NOT NULL OR resumed_at IS NOT NULL)
 );
+CREATE INDEX execution_chain_halts_open ON execution.chain_halts (chain_id)
+    WHERE halted_at IS NOT NULL AND resumed_at IS NULL;
 
 -- Health the signers publish for operators (read by gum-server's status
 -- endpoint). One row per chain worker and one per pool signer.

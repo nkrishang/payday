@@ -51,6 +51,8 @@ pub enum ExecutionCommand {
     /// One transaction of a withdrawal leg: the EIP-3009 transfer, the CCTP
     /// burn, or the CCTP mint.
     WithdrawalStep(WithdrawalStepCommand),
+    /// The onboarding walkthrough's one USDC payment, from its dedicated payer.
+    OnboardingPayment(OnboardingPaymentCommand),
 }
 
 impl ExecutionCommand {
@@ -58,6 +60,7 @@ impl ExecutionCommand {
         match self {
             Self::SweepBatch(command) => command.job_id,
             Self::WithdrawalStep(command) => command.job_id,
+            Self::OnboardingPayment(command) => command.job_id,
         }
     }
 
@@ -65,6 +68,7 @@ impl ExecutionCommand {
         match self {
             Self::SweepBatch(command) => command.chain_id,
             Self::WithdrawalStep(command) => command.chain_id,
+            Self::OnboardingPayment(command) => command.chain_id,
         }
     }
 }
@@ -77,12 +81,24 @@ impl BusMessage for ExecutionCommand {
         match self {
             Self::SweepBatch(_) => "sweep_batch",
             Self::WithdrawalStep(_) => "withdrawal_step",
+            Self::OnboardingPayment(_) => "onboarding_payment",
         }
     }
 
     fn deduplication_key(&self) -> String {
         self.job_id().to_string()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingPaymentCommand {
+    pub job_id: Uuid,
+    pub chain_id: u64,
+    /// The only signer permitted to execute this command.
+    pub payer: Address,
+    pub token: Address,
+    pub recipient: Address,
+    pub amount: U256,
 }
 
 /// Everything the signers need to build, submit and *classify* one batch.
@@ -184,6 +200,12 @@ pub struct WithdrawalStepCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionEvent {
+    /// The durable onboarding transaction was accepted by a node.
+    OnboardingPaymentSubmitted {
+        job_id: Uuid,
+        chain_id: u64,
+        tx_hash: B256,
+    },
     /// A helper transaction for the job left the node. Informational: the
     /// server records the hash for the dashboard, nothing else depends on it.
     SweepSubmitted {
@@ -242,7 +264,8 @@ pub enum ExecutionEvent {
 impl ExecutionEvent {
     pub fn job_id(&self) -> Uuid {
         match self {
-            Self::SweepSubmitted { job_id, .. }
+            Self::OnboardingPaymentSubmitted { job_id, .. }
+            | Self::SweepSubmitted { job_id, .. }
             | Self::SweepFinalized { job_id, .. }
             | Self::SweepAbandoned { job_id, .. }
             | Self::WithdrawalStepFinalized { job_id, .. }
@@ -253,7 +276,8 @@ impl ExecutionEvent {
 
     pub fn chain_id(&self) -> u64 {
         match self {
-            Self::SweepSubmitted { chain_id, .. }
+            Self::OnboardingPaymentSubmitted { chain_id, .. }
+            | Self::SweepSubmitted { chain_id, .. }
             | Self::SweepFinalized { chain_id, .. }
             | Self::SweepAbandoned { chain_id, .. }
             | Self::WithdrawalStepFinalized { chain_id, .. }
@@ -269,6 +293,7 @@ impl BusMessage for ExecutionEvent {
 
     fn kind(&self) -> &'static str {
         match self {
+            Self::OnboardingPaymentSubmitted { .. } => "onboarding_payment_submitted",
             Self::SweepSubmitted { .. } => "sweep_submitted",
             Self::SweepFinalized { .. } => "sweep_finalized",
             Self::SweepAbandoned { .. } => "sweep_abandoned",
@@ -332,6 +357,7 @@ pub enum SweepItemOutcome {
 pub struct SettlementEvidence {
     pub tx_hash: B256,
     pub block: u64,
+    pub transaction_index: u64,
     pub block_timestamp: u64,
     pub settled: Option<U256>,
     pub recovered: U256,

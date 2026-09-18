@@ -89,6 +89,7 @@ async fn classify_item(
                 Some(SettlementEvidence {
                     tx_hash: event.transaction_hash,
                     block: event.block_number,
+                    transaction_index: event.transaction_index,
                     block_timestamp: event_header.timestamp,
                     settled: event.settled,
                     recovered: event.recovered,

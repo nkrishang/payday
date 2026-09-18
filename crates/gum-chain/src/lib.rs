@@ -530,6 +530,7 @@ pub struct SettlementEvent {
     pub transaction_hash: B256,
     pub block_number: u64,
     pub block_hash: B256,
+    pub transaction_index: u64,
     pub settled: Option<U256>,
     pub recovered: U256,
 }
@@ -1152,6 +1153,9 @@ impl ChainReader for AlloyChainClient {
             let block_hash = log.block_hash.ok_or_else(|| {
                 ChainError::Transient("settlement log is missing its block hash".to_string())
             })?;
+            let transaction_index = log.transaction_index.ok_or_else(|| {
+                ChainError::Transient("settlement log is missing its transaction index".to_string())
+            })?;
             if log.topics()[0] == settled {
                 let event = Settled::decode_log(&log.inner).map_err(|error| {
                     ChainError::Transient(format!(
@@ -1162,6 +1166,7 @@ impl ChainReader for AlloyChainClient {
                     transaction_hash,
                     block_number,
                     block_hash,
+                    transaction_index,
                     Amount::Settled(event.data.amount),
                 ));
             } else {
@@ -1177,6 +1182,7 @@ impl ChainReader for AlloyChainClient {
                     transaction_hash,
                     block_number,
                     block_hash,
+                    transaction_index,
                     Amount::Recovered(event.data.amount),
                 ));
             }
@@ -1184,7 +1190,9 @@ impl ChainReader for AlloyChainClient {
         // The constructor always emits at least one of the two events, so the
         // earliest is the deployment; an overpaid live deployment emits both
         // in that one transaction and the ledger needs both amounts.
-        let Some(&(transaction_hash, block_number, block_hash, _)) = events.first() else {
+        let Some(&(transaction_hash, block_number, block_hash, transaction_index, _)) =
+            events.first()
+        else {
             return Ok(None);
         };
         let malformed = |event: &str| {
@@ -1194,7 +1202,7 @@ impl ChainReader for AlloyChainClient {
         };
         let mut settled_amount = None;
         let mut recovered_amount = None;
-        for (_, _, _, amount) in events
+        for (_, _, _, _, amount) in events
             .iter()
             .take_while(|(hash, ..)| *hash == transaction_hash)
         {
@@ -1221,6 +1229,7 @@ impl ChainReader for AlloyChainClient {
             transaction_hash,
             block_number,
             block_hash,
+            transaction_index,
             settled: settled_amount,
             recovered: recovered_amount.unwrap_or(U256::ZERO),
         }))

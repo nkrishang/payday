@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use gum_bus::{Delivery, Handler, HandlerError};
 use gum_contracts::ExecutionEvent;
 use gum_ledger::{
-    FinalizedSweep, InvoiceRepository, StepApplied, StepError, StepPolicy, SweepError, SweepPolicy,
-    WithdrawalRepository,
+    FinalizedSweep, InvoiceRepository, OnboardingDemoPaymentRepository, StepApplied, StepError,
+    StepPolicy, SweepError, SweepPolicy, WithdrawalRepository,
 };
 use sqlx::{Postgres, Transaction};
 use tracing::{error, info, warn};
@@ -28,6 +28,7 @@ use tracing::{error, info, warn};
 pub struct ExecutionEventHandler {
     invoices: InvoiceRepository,
     withdrawals: WithdrawalRepository,
+    onboarding: OnboardingDemoPaymentRepository,
     sweep_policy: SweepPolicy,
     step_policy: StepPolicy,
 }
@@ -40,6 +41,7 @@ impl ExecutionEventHandler {
         step_policy: StepPolicy,
     ) -> Self {
         Self {
+            onboarding: OnboardingDemoPaymentRepository::new(invoices.pool().clone()),
             invoices,
             withdrawals,
             sweep_policy,
@@ -79,6 +81,13 @@ impl Handler<ExecutionEvent> for ExecutionEventHandler {
         let job_id = delivery.message.job_id();
         let chain_id = delivery.message.chain_id();
         match &delivery.message {
+            ExecutionEvent::OnboardingPaymentSubmitted { tx_hash, .. } => {
+                self.onboarding
+                    .record_submission(tx, job_id, *tx_hash)
+                    .await?;
+                info!(%job_id, %tx_hash, "onboarding payment submitted");
+                Ok(())
+            }
             ExecutionEvent::SweepSubmitted {
                 tx_hash,
                 signer,

@@ -629,10 +629,12 @@ pub async fn apply_chain_control(
         } => {
             sqlx::query(
                 r#"
-                INSERT INTO execution.chain_halts (chain_id, fault_id, reason)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (chain_id) DO UPDATE
-                SET fault_id = EXCLUDED.fault_id, reason = EXCLUDED.reason, halted_at = now()
+                INSERT INTO execution.chain_halts (fault_id, chain_id, reason, halted_at)
+                VALUES ($2, $1, $3, now())
+                ON CONFLICT (fault_id) DO UPDATE
+                SET chain_id = EXCLUDED.chain_id,
+                    reason = EXCLUDED.reason,
+                    halted_at = COALESCE(execution.chain_halts.halted_at, now())
                 "#,
             )
             .bind(*chain_id as i64)
@@ -642,11 +644,18 @@ pub async fn apply_chain_control(
             .await?;
         }
         ChainControl::Resumed { fault_id, chain_id } => {
-            sqlx::query("DELETE FROM execution.chain_halts WHERE chain_id = $1 AND fault_id = $2")
-                .bind(*chain_id as i64)
-                .bind(fault_id)
-                .execute(conn)
-                .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO execution.chain_halts (fault_id, chain_id, resumed_at)
+                VALUES ($2, $1, now())
+                ON CONFLICT (fault_id) DO UPDATE
+                SET resumed_at = COALESCE(execution.chain_halts.resumed_at, now())
+                "#,
+            )
+            .bind(*chain_id as i64)
+            .bind(fault_id)
+            .execute(conn)
+            .await?;
         }
     }
     Ok(())
@@ -654,7 +663,9 @@ pub async fn apply_chain_control(
 
 pub async fn is_halted(pool: &PgPool, chain_id: u64) -> Result<bool, sqlx::Error> {
     let halted: Option<i64> =
-        sqlx::query_scalar("SELECT chain_id FROM execution.chain_halts WHERE chain_id = $1")
+        sqlx::query_scalar(
+            "SELECT chain_id FROM execution.chain_halts WHERE chain_id = $1 AND halted_at IS NOT NULL AND resumed_at IS NULL LIMIT 1",
+        )
             .bind(chain_id as i64)
             .fetch_optional(pool)
             .await?;
@@ -710,4 +721,40 @@ pub async fn upsert_signer_status(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[sqlx::test(migrator = "gum_schema::MIGRATOR")]
+    async fn a_resume_tombstone_defeats_a_delayed_halt(pool: PgPool) {
+        let fault_id = Uuid::now_v7();
+        let resumed = ChainControl::Resumed {
+            fault_id,
+            chain_id: 1,
+        };
+        let halted = ChainControl::Halted {
+            fault_id,
+            chain_id: 1,
+            reason: "old fault".into(),
+        };
+        let mut conn = pool.acquire().await.unwrap();
+        apply_chain_control(&mut conn, &resumed).await.unwrap();
+        apply_chain_control(&mut conn, &halted).await.unwrap();
+        assert!(!is_halted(&pool, 1).await.unwrap());
+
+        let current = Uuid::now_v7();
+        apply_chain_control(
+            &mut conn,
+            &ChainControl::Halted {
+                fault_id: current,
+                chain_id: 1,
+                reason: "current fault".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(is_halted(&pool, 1).await.unwrap());
+    }
 }

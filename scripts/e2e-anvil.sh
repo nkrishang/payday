@@ -871,7 +871,7 @@ paused_id="$(jq -r .id <<<"$paused")"
 paused_address="$(jq -r .address <<<"$paused")"
 send_usdc "$paused_address" 500000
 set_paused true
-wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#dr_}'::uuid AND sweep_attempts >= 1 AND status = 'deploying'" \
+wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#dr_}'::uuid AND sweep_attempts >= 1 AND status = 'funded' AND attention_reason IS NULL" \
   "paused token did not produce a retryable failure"
 assert_eq null "$(get_invoice "$paused_id" | jq -r .attention)" "a paused token must not block the payment"
 set_paused false

@@ -311,6 +311,7 @@ CREATE TABLE invoices (
     paid_at TIMESTAMPTZ,
     expired_at TIMESTAMPTZ,
     settlement_tx_hash BYTEA,
+    settlement_transaction_index BIGINT,
     fee_amount TEXT NOT NULL DEFAULT '0',
     net_amount TEXT NOT NULL,
 
@@ -407,6 +408,8 @@ CREATE TABLE invoices (
         CHECK (payment_metadata_values_fit(metadata)),
     CONSTRAINT invoices_settlement_tx_hash_length
         CHECK (settlement_tx_hash IS NULL OR octet_length(settlement_tx_hash) = 32),
+    CONSTRAINT invoices_settlement_transaction_index_non_negative
+        CHECK (settlement_transaction_index IS NULL OR settlement_transaction_index >= 0),
     CONSTRAINT invoices_fee_amount_zero
         CHECK (fee_amount = '0'),
     CONSTRAINT invoices_net_amount_matches_amount
@@ -1126,6 +1129,7 @@ CREATE INDEX payer_client_secrets_invoice
 CREATE TABLE onboarding_demo_payments (
     account_id UUID PRIMARY KEY REFERENCES accounts(id),
     payment_id UUID NOT NULL REFERENCES invoices(id),
+    job_id UUID NOT NULL UNIQUE,
     tx_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

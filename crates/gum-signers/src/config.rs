@@ -33,6 +33,7 @@ pub struct Config {
     rpc_max_rps: u64,
     default_low_balance_wei: U256,
     signer: SignerConfig,
+    onboarding_payer: Option<SignerConfig>,
 }
 
 impl Config {
@@ -51,6 +52,20 @@ impl Config {
             (false, true) => SignerConfig::Local(local_keys),
             (true, false) => SignerConfig::AwsKms(kms_key_ids),
             _ => panic!("exactly one of PAYDAY_SIGNER_KEYS and PAYDAY_KMS_KEY_IDS must be set"),
+        };
+        let onboarding_local = std::env::var("PAYDAY_ONBOARDING_PAYER_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let onboarding_kms = std::env::var("PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let onboarding_payer = match (onboarding_local, onboarding_kms) {
+            (Some(key), None) => Some(SignerConfig::Local(vec![key])),
+            (None, Some(key)) => Some(SignerConfig::AwsKms(vec![key])),
+            (None, None) => None,
+            _ => panic!(
+                "PAYDAY_ONBOARDING_PAYER_KEY and PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID are mutually exclusive"
+            ),
         };
         let max_submissions = number("PAYDAY_SWEEP_MAX_SUBMISSIONS", 5);
         assert!(
@@ -86,6 +101,7 @@ impl Config {
                 })
                 .unwrap_or(U256::from(50_000_000_000_000_000u64)),
             signer,
+            onboarding_payer,
         }
     }
 
@@ -115,6 +131,10 @@ impl Config {
 
     pub fn signer(&self) -> &SignerConfig {
         &self.signer
+    }
+
+    pub fn onboarding_payer(&self) -> Option<&SignerConfig> {
+        self.onboarding_payer.as_ref()
     }
 
     /// The executor policy for one chain; the low-balance threshold may be

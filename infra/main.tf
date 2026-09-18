@@ -528,7 +528,7 @@ resource "aws_iam_role" "signers_task" {
 }
 resource "aws_iam_role_policy" "signers_kms" {
   role   = aws_iam_role.signers_task.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.signer[*].arn }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = concat(aws_kms_key.signer[*].arn, [aws_kms_key.onboarding_payer.arn]) }] })
 }
 
 # ---------------------------------------------------------------------------
@@ -865,6 +865,7 @@ resource "aws_ecs_task_definition" "signers" {
     stopTimeout = 120,
     environment = concat(local.common_environment, [
       { name = "PAYDAY_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
+      { name = "PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
       { name = "PAYDAY_SIGNERS_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" }
     ]),
     secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets),

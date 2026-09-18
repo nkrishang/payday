@@ -194,6 +194,7 @@ enum ItemDecision {
         execute_tx: bool,
         settlement_tx_hash: B256,
         settlement_block: u64,
+        settlement_transaction_index: u64,
         settlement_timestamp: u64,
         recoveries: Vec<RecoveredFunds>,
         attention: Option<&'static str>,
@@ -242,6 +243,7 @@ fn decide(
             execute_tx: true,
             settlement_tx_hash: receipt.tx_hash,
             settlement_block: receipt.block,
+            settlement_transaction_index: receipt.transaction_index,
             settlement_timestamp: receipt.block_timestamp,
             recoveries: own(*overpayment_recovered, RecoveryReason::Overpayment)
                 .into_iter()
@@ -253,6 +255,7 @@ fn decide(
             execute_tx: true,
             settlement_tx_hash: receipt.tx_hash,
             settlement_block: receipt.block,
+            settlement_transaction_index: receipt.transaction_index,
             settlement_timestamp: receipt.block_timestamp,
             recoveries: own(*amount, RecoveryReason::Expired).into_iter().collect(),
             attention: None,
@@ -268,6 +271,7 @@ fn decide(
                     execute_tx: false,
                     settlement_tx_hash: receipt.tx_hash,
                     settlement_block: receipt.block,
+                    settlement_transaction_index: receipt.transaction_index,
                     settlement_timestamp: receipt.block_timestamp,
                     recoveries: late.into_iter().collect(),
                     attention: None,
@@ -280,6 +284,7 @@ fn decide(
                     execute_tx: false,
                     settlement_tx_hash: receipt.tx_hash,
                     settlement_block: receipt.block,
+                    settlement_transaction_index: receipt.transaction_index,
                     settlement_timestamp: receipt.block_timestamp,
                     recoveries: late.into_iter().collect(),
                     attention: Some(SETTLEMENT_UNKNOWN),
@@ -289,6 +294,7 @@ fn decide(
                 Some(SettlementEvidence {
                     tx_hash,
                     block,
+                    transaction_index,
                     block_timestamp,
                     settled,
                     recovered: settlement_recovered,
@@ -321,6 +327,7 @@ fn decide(
                         execute_tx: false,
                         settlement_tx_hash: *tx_hash,
                         settlement_block: *block,
+                        settlement_transaction_index: *transaction_index,
                         settlement_timestamp: *block_timestamp,
                         recoveries: settlement_recovery.into_iter().chain(late).collect(),
                         attention: None,
@@ -585,10 +592,15 @@ impl InvoiceRepository {
                     execute_tx,
                     settlement_tx_hash,
                     settlement_block,
+                    settlement_transaction_index,
                     settlement_timestamp,
                     recoveries,
                     attention,
                 } => {
+                    let (classification_block, classification_transaction_index) = row
+                        .resolved_at_block
+                        .zip(row.settlement_transaction_index)
+                        .unwrap_or((settlement_block as i64, settlement_transaction_index as i64));
                     sqlx::query(
                         r#"
                         UPDATE payment_observations
@@ -605,12 +617,44 @@ impl InvoiceRepository {
                     .bind(receipt.transaction_index as i64)
                     .execute(&mut *conn)
                     .await?;
+                    // Classification is a function of chain order, not of
+                    // whether observations or execution evidence arrived at
+                    // the server first. Reconcile every existing transfer to
+                    // the initial settlement position before recomputing the
+                    // request aggregates and proof read model.
+                    sqlx::query(
+                        r#"
+                        UPDATE payment_observations
+                        SET disposition = CASE
+                                WHEN block_timestamp <= $4
+                                 AND (block_number, transaction_index) < ($2, $3)
+                                THEN 'credited' ELSE 'late' END,
+                            disposition_reason = CASE
+                                WHEN block_timestamp <= $4
+                                 AND (block_number, transaction_index) < ($2, $3)
+                                THEN NULL
+                                WHEN block_timestamp > $4 THEN 'invoice_expired'
+                                ELSE $5 END
+                        WHERE invoice_id = $1 AND disposition <> 'error'
+                        "#,
+                    )
+                    .bind(invoice_id)
+                    .bind(classification_block)
+                    .bind(classification_transaction_index)
+                    .bind(row.expiration_timestamp)
+                    .bind(status.map_or_else(
+                        || format!("invoice_{}", row.status),
+                        |value| format!("invoice_{}", value.as_str()),
+                    ))
+                    .execute(&mut *conn)
+                    .await?;
                     sqlx::query(
                         r#"
                         UPDATE invoices
                         SET status = COALESCE($4, status),
                             execute_tx_hash = CASE WHEN $5 THEN $6 ELSE execute_tx_hash END,
                             settlement_tx_hash = COALESCE(settlement_tx_hash, $7),
+                            settlement_transaction_index = COALESCE(settlement_transaction_index, $10),
                             resolved_at_block = CASE WHEN $4 IS NULL THEN resolved_at_block
                                                      ELSE COALESCE(resolved_at_block, $8) END,
                             settled_at = CASE WHEN $4 IS NULL THEN settled_at
@@ -623,6 +667,10 @@ impl InvoiceRepository {
                                   AND collected_at_block IS NULL
                                   AND disposition <> 'error'
                             ),
+                            confirmed_received = COALESCE((
+                                SELECT sum(amount::numeric)::text FROM payment_observations
+                                WHERE invoice_id = $1 AND disposition = 'credited'
+                            ), '0'),
                             sweep_job_id = NULL,
                             sweep_attempts = 0,
                             last_attempt_at = NULL,
@@ -639,6 +687,7 @@ impl InvoiceRepository {
                     .bind(settlement_tx_hash.as_slice())
                     .bind(settlement_block as i64)
                     .bind(settlement_timestamp as f64)
+                    .bind(settlement_transaction_index as i64)
                     .execute(&mut *conn)
                     .await?;
                     for recovery in &recoveries {
@@ -1513,6 +1562,39 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn settlement_reclassifies_observations_that_arrived_first(pool: PgPool) {
+        let repo = InvoiceRepository::new(pool.clone());
+        let invoice = insert_invoice(&pool, 100).await;
+        fund(&pool, &invoice).await;
+        observe(&pool, &invoice, 1).await;
+        set_finalized_clock(&pool, EXPIRATION - 60).await;
+        let job = schedule(&repo).await.unwrap();
+        // This transfer is indexed before the server consumes settlement
+        // evidence, but is later on chain than the settlement transaction.
+        observe(&pool, &invoice, BLOCK + 2).await;
+
+        let items = [result(&invoice, settled(0))];
+        apply(&repo, &receipt(job.job_id, &items)).await.unwrap();
+
+        let dispositions: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT block_number, disposition FROM payment_observations WHERE invoice_id = $1 ORDER BY block_number",
+        )
+        .bind(invoice.id.0)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dispositions, [(1, "credited".into()), (9, "late".into())]);
+        let row = repo.find_by_id(invoice.id.0).await.unwrap().unwrap();
+        assert_eq!(row.confirmed_received, "100");
+        assert_eq!(row.settlement_transaction_index, Some(1));
+        let proof = crate::ProofRepository::new(pool)
+            .settlement_transfers(invoice.id.0)
+            .await
+            .unwrap();
+        assert_eq!(proof.len(), 1, "returned late funds are not in the proof");
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn expired_deployment_returns_funds(pool: PgPool) {
         let repo = InvoiceRepository::new(pool.clone());
         let invoice = insert_invoice(&pool, 100).await;
@@ -1554,6 +1636,7 @@ mod tests {
                 settlement: Some(SettlementEvidence {
                     tx_hash: SETTLEMENT_TX_HASH,
                     block: SETTLEMENT_BLOCK,
+                    transaction_index: 0,
                     block_timestamp: SETTLEMENT_TIMESTAMP,
                     settled: Some(U256::from(100)),
                     recovered: U256::from(25),

@@ -86,6 +86,8 @@ pub struct DbInvoice {
     pub paid_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     pub expired_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     pub settlement_tx_hash: Option<Vec<u8>>,
+    /// Position of the transaction that first settled or returned the request.
+    pub settlement_transaction_index: Option<i64>,
     pub fee_amount: String,
     pub net_amount: String,
     /// Optional link to the merchant's customer record; the parties below are
@@ -1152,6 +1154,7 @@ impl InvoiceRepository {
             required: U256,
             received: U256,
             drained_at: Option<(i64, i64)>,
+            settlement_at: Option<(i64, i64)>,
             uncollected: i32,
             touched: bool,
             /// The request's own token: the only contract whose transfers pay it.
@@ -1227,6 +1230,7 @@ impl InvoiceRepository {
                     required,
                     received,
                     drained_at: row.drained_at_block.zip(row.drained_at_transaction_index),
+                    settlement_at: row.resolved_at_block.zip(row.settlement_transaction_index),
                     uncollected: row.uncollected_count,
                     touched: false,
                     token_address,
@@ -1248,7 +1252,15 @@ impl InvoiceRepository {
 
             let zero = observation.amount.is_zero();
             let open = matches!(credit.status.as_str(), "created" | "funded");
-            let accepting = open && observation.block_timestamp <= credit.expiration_timestamp;
+            let before_settlement = credit.settlement_at.is_none_or(|position| {
+                (
+                    observation.block_number as i64,
+                    observation.transaction_index as i64,
+                ) < position
+            });
+            let accepting = before_settlement
+                && observation.block_timestamp <= credit.expiration_timestamp
+                && (open || credit.settlement_at.is_some());
             let (disposition, disposition_reason) = if zero {
                 ("error", Some("zero_amount".to_string()))
             } else if accepting {
@@ -1614,6 +1626,7 @@ pub(crate) mod tests {
             paid_at: None,
             expired_at: None,
             settlement_tx_hash: None,
+            settlement_transaction_index: None,
             fee_amount: "0".into(),
             net_amount: "100".into(),
             customer_id: None,

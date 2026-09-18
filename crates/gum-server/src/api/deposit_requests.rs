@@ -862,18 +862,9 @@ pub async fn onboarding_deposit(
         ensure_onboarding_network(signer, binding, row.id)?;
     }
 
-    let claim = state
-        .onboarding_demo_payments
-        .claim(account, row.id)
-        .await?;
-    if claim == OnboardingClaim::Conflict {
-        return Err(ApiError::onboarding_deposit_already_claimed());
-    }
-
     // Minting and approving a session is cheap and safe to repeat on a retry
     // (it only ever adds harmless extra rows for this one demo invoice); the
-    // on-chain transfer below is the part that must never happen twice, and
-    // that is what `claim` above actually guards.
+    // durable execution job below is the part that must never happen twice.
     let session = state
         .payer_sessions
         .create(row.id, PAYER_SESSION_TTL)
@@ -965,23 +956,45 @@ pub async fn onboarding_deposit(
     // chain is watching.
     ensure_onboarding_network(signer, &binding, row.id)?;
     let payment_address = binding.payment_address;
+    let claim = state
+        .onboarding_demo_payments
+        .claim_and_publish(
+            account,
+            row.id,
+            signer.chain_id(),
+            signer.address(),
+            signer.usdc(),
+            payment_address.0,
+            invoice.amount.0,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, payment_id = %row.id, "failed to schedule onboarding payment");
+            ApiError::internal("failed to schedule the onboarding demo transfer")
+        })?;
+    if claim == OnboardingClaim::Conflict {
+        return Err(ApiError::onboarding_deposit_already_claimed());
+    }
 
     let tx_hash = match claim {
         OnboardingClaim::AlreadySubmitted(tx_hash) => tx_hash,
-        OnboardingClaim::Claimed | OnboardingClaim::PendingRetry => {
-            let tx_hash = signer
-                .send_usdc(payment_address.0, invoice.amount.0)
-                .await
-                .map_err(|error| {
-                    tracing::error!(%error, payment_id = %row.id, "onboarding demo transfer failed");
-                    ApiError::internal("failed to submit the onboarding demo transfer")
-                })?
-                .to_string();
-            state
-                .onboarding_demo_payments
-                .record_tx_hash(account, row.id, &tx_hash)
-                .await?;
-            tx_hash
+        OnboardingClaim::Claimed(job_id) | OnboardingClaim::PendingRetry(job_id) => {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(hash) = state
+                    .onboarding_demo_payments
+                    .submitted_hash(job_id)
+                    .await?
+                {
+                    break hash.to_string();
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(ApiError::internal(
+                        "onboarding demo transfer is still pending",
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
         OnboardingClaim::Conflict => unreachable!("handled above"),
     };

@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
+use alloy_sol_types::{SolCall, sol};
 use chrono::Utc;
 use gum_bus::{BackoffPolicy, Publisher};
 use gum_chain::{
@@ -44,6 +45,8 @@ use gum_contracts::{
     AbandonReason, CorrelationId, ExecutionCommand, ExecutionEvent, StepResult, SweepBatchCommand,
     WithdrawalStepCommand,
 };
+
+sol! { function transfer(address to, uint256 amount) returns (bool); }
 use gum_core::ChainConfig;
 use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
@@ -256,7 +259,13 @@ impl ChainWorker {
                 Ok(Started::Transaction) => report.started += 1,
                 Ok(Started::Resolved) => report.resolved += 1,
                 Ok(Started::Deferred) => {}
-                Ok(Started::NoSigner) => break,
+                Ok(Started::NoSigner) => {
+                    // A dedicated onboarding lane cannot consume an ordinary
+                    // signer. Let unrelated work behind it use the pool.
+                    if !matches!(job.command, ExecutionCommand::OnboardingPayment(_)) {
+                        break;
+                    }
+                }
                 Err(error) => {
                     warn!(job_id = %job.id, error = %error, "starting job failed");
                     report.errors.push(error.to_string());
@@ -348,6 +357,36 @@ impl ChainWorker {
                     return self.on_mined(transaction, attempt.tx_hash, receipt).await;
                 }
             }
+            if let ExecutionCommand::WithdrawalStep(command) = &transaction.job.command {
+                let boundary = self.boundary().await?;
+                if let Some(precondition) = &command.precondition
+                    && let Precondition::Violated { tx_hash } = step::check(
+                        self.chain.as_ref(),
+                        self.config.log_range_size,
+                        precondition,
+                        &boundary,
+                    )
+                    .await?
+                {
+                    let event = ExecutionEvent::WithdrawalStepFinalized {
+                        job_id: transaction.job.id,
+                        leg_id: command.leg_id,
+                        chain_id: self.config.chain_id,
+                        step: command.step,
+                        result: StepResult::ExecutedElsewhere { tx_hash },
+                    };
+                    self.resolve(transaction, JobState::Finalized, TxState::Finalized, &event)
+                        .await?;
+                    return Ok(true);
+                }
+                // The nonce proves this signed attempt cannot be replaced,
+                // but it does not prove the financial operation failed. Keep
+                // the job unresolved until its durable precondition or a
+                // receipt establishes the outcome.
+                self.report_stall(transaction).await?;
+                warn!(tx_hash = %newest.tx_hash, "nonce consumed but withdrawal outcome is unresolved; retaining the lane");
+                return Ok(false);
+            }
             let reason = AbandonReason::NonceConsumed {
                 signer: transaction.signer,
                 nonce: transaction.nonce,
@@ -358,17 +397,7 @@ impl ChainWorker {
         }
 
         if transaction.attempts.len() as u32 >= self.policy.max_submissions {
-            if transaction.stall_reported_at.is_none() {
-                let mut tx = self.pool.begin().await?;
-                let event = ExecutionEvent::ExecutionStalled {
-                    job_id: transaction.job.id,
-                    chain_id: self.config.chain_id,
-                    signer: transaction.signer,
-                    submissions: transaction.attempts.len() as u32,
-                };
-                self.publish(&mut tx, &transaction.job, &event).await?;
-                store::mark_stall_reported(&mut tx, transaction.id).await?;
-                tx.commit().await?;
+            if self.report_stall(transaction).await? {
                 error!(
                     submissions = transaction.attempts.len(),
                     "transaction unconfirmed after the replacement limit; fees are no longer raised"
@@ -384,6 +413,23 @@ impl ChainWorker {
         Ok(false)
     }
 
+    async fn report_stall(&self, transaction: &OpenTransaction) -> Result<bool, ExecutorError> {
+        if transaction.stall_reported_at.is_some() {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await?;
+        let event = ExecutionEvent::ExecutionStalled {
+            job_id: transaction.job.id,
+            chain_id: self.config.chain_id,
+            signer: transaction.signer,
+            submissions: transaction.attempts.len() as u32,
+        };
+        self.publish(&mut tx, &transaction.job, &event).await?;
+        store::mark_stall_reported(&mut tx, transaction.id).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     async fn receipt(
         &self,
         transaction: &OpenTransaction,
@@ -396,6 +442,11 @@ impl ChainWorker {
                 .await?
                 .map(Receipt::Sweep),
             ExecutionCommand::WithdrawalStep(_) => self
+                .chain
+                .transaction_receipt(tx_hash)
+                .await?
+                .map(Receipt::Step),
+            ExecutionCommand::OnboardingPayment(_) => self
                 .chain
                 .transaction_receipt(tx_hash)
                 .await?
@@ -444,6 +495,25 @@ impl ChainWorker {
             (ExecutionCommand::WithdrawalStep(command), Receipt::Step(outcome)) => {
                 self.finalize_step(transaction, command, tx_hash, outcome, &boundary)
                     .await
+            }
+            (ExecutionCommand::OnboardingPayment(_), Receipt::Step(_)) => {
+                let tx_hash = transaction.attempts[0].tx_hash;
+                let event = ExecutionEvent::OnboardingPaymentSubmitted {
+                    job_id: transaction.job.id,
+                    chain_id: self.config.chain_id,
+                    tx_hash,
+                };
+                // A node may have accepted and mined the initial attempt
+                // before mark_broadcast and its event committed. Publishing
+                // the stable initial hash here closes that crash window; an
+                // event already written at broadcast deduplicates exactly.
+                let mut tx = self.pool.begin().await?;
+                self.publish(&mut tx, &transaction.job, &event).await?;
+                store::resolve_transaction(&mut tx, transaction.id, TxState::Finalized).await?;
+                store::resolve_job(&mut tx, transaction.job.id, JobState::Finalized, &event)
+                    .await?;
+                tx.commit().await?;
+                Ok(true)
             }
             _ => unreachable!("receipt kind follows the command kind"),
         }
@@ -566,18 +636,29 @@ impl ChainWorker {
         self.chain.broadcast_sweep_transaction(&prepared).await?;
         let mut tx = self.pool.begin().await?;
         store::mark_broadcast(&mut tx, transaction.id, attempt.replacement_number).await?;
-        if attempt.broadcast_at.is_none()
-            && let ExecutionCommand::SweepBatch(_) = &transaction.job.command
-        {
-            let event = ExecutionEvent::SweepSubmitted {
-                job_id: transaction.job.id,
-                chain_id: self.config.chain_id,
-                signer: transaction.signer,
-                nonce: transaction.nonce,
-                tx_hash: attempt.tx_hash,
-                replacement: attempt.replacement_number,
+        if attempt.broadcast_at.is_none() {
+            let event = match &transaction.job.command {
+                ExecutionCommand::SweepBatch(_) => Some(ExecutionEvent::SweepSubmitted {
+                    job_id: transaction.job.id,
+                    chain_id: self.config.chain_id,
+                    signer: transaction.signer,
+                    nonce: transaction.nonce,
+                    tx_hash: attempt.tx_hash,
+                    replacement: attempt.replacement_number,
+                }),
+                ExecutionCommand::OnboardingPayment(_) if attempt.replacement_number == 0 => {
+                    Some(ExecutionEvent::OnboardingPaymentSubmitted {
+                        job_id: transaction.job.id,
+                        chain_id: self.config.chain_id,
+                        tx_hash: attempt.tx_hash,
+                    })
+                }
+                ExecutionCommand::OnboardingPayment(_) => None,
+                ExecutionCommand::WithdrawalStep(_) => None,
             };
-            self.publish(&mut tx, &transaction.job, &event).await?;
+            if let Some(event) = event {
+                self.publish(&mut tx, &transaction.job, &event).await?;
+            }
         }
         tx.commit().await?;
         info!(tx_hash = %attempt.tx_hash, replacement = attempt.replacement_number, "transaction broadcast");
@@ -623,6 +704,23 @@ impl ChainWorker {
                     )
                     .await?
             }
+            ExecutionCommand::OnboardingPayment(command) => {
+                self.chain
+                    .prepare_call(
+                        command.payer,
+                        command.token,
+                        transferCall {
+                            to: command.recipient,
+                            amount: command.amount,
+                        }
+                        .abi_encode()
+                        .into(),
+                        transaction.nonce,
+                        transaction.gas_limit,
+                        fees,
+                    )
+                    .await?
+            }
         };
         let attempt = Attempt {
             replacement_number: previous.replacement_number + 1,
@@ -646,6 +744,11 @@ impl ChainWorker {
         reason: AbandonReason,
     ) -> Result<(), ExecutorError> {
         let event = match &transaction.job.command {
+            ExecutionCommand::OnboardingPayment(_) => {
+                // Never claim a financial failure from an uncertain nonce outcome.
+                self.report_stall(transaction).await?;
+                return Ok(());
+            }
             ExecutionCommand::SweepBatch(_) => ExecutionEvent::SweepAbandoned {
                 job_id: transaction.job.id,
                 chain_id: self.config.chain_id,
@@ -735,12 +838,6 @@ impl ChainWorker {
     ) -> Result<Started, ExecutorError> {
         // Nonce-free conclusions first: they need no signer at all.
         if let ExecutionCommand::WithdrawalStep(command) = &job.command {
-            let now = Utc::now().timestamp().max(0) as u64;
-            if command.not_after.is_some_and(|deadline| now >= deadline) {
-                self.conclude_step(job, command, StepResult::Expired)
-                    .await?;
-                return Ok(Started::Resolved);
-            }
             if let Some(precondition) = &command.precondition {
                 let boundary = self.boundary().await?;
                 if let Precondition::Violated { tx_hash } = step::check(
@@ -757,11 +854,28 @@ impl ChainWorker {
                     return Ok(Started::Resolved);
                 }
             }
+            let now = Utc::now().timestamp().max(0) as u64;
+            if command.not_after.is_some_and(|deadline| now >= deadline) {
+                self.conclude_step(job, command, StepResult::Expired)
+                    .await?;
+                return Ok(Started::Resolved);
+            }
         }
 
-        let Some(signer) = free.first().copied() else {
+        let dedicated = match &job.command {
+            ExecutionCommand::OnboardingPayment(command) => Some(command.payer),
+            _ => None,
+        };
+        let Some(signer) = dedicated.or_else(|| free.first().copied()) else {
             return Ok(Started::NoSigner);
         };
+        if dedicated.is_some()
+            && store::busy_signers(&self.pool, self.config.chain_id)
+                .await?
+                .contains(&signer)
+        {
+            return Ok(Started::NoSigner);
+        }
 
         let mined = self.chain.signer_nonce(signer, false).await?;
         let pending = self.chain.signer_nonce(signer, true).await?;
@@ -769,6 +883,9 @@ impl ChainWorker {
             // Something outside the pool is using this key. Never sign on
             // top of it; another signer may still take the job.
             warn!(%signer, mined, pending, "signer has transactions in flight that are not ours; skipping it");
+            if dedicated.is_some() {
+                return Ok(Started::NoSigner);
+            }
             free.remove(0);
             return Ok(if free.is_empty() {
                 Started::NoSigner
@@ -822,6 +939,27 @@ impl ChainWorker {
                     command.gas_limit,
                 )
             }
+            ExecutionCommand::OnboardingPayment(command) => {
+                let calldata: alloy_primitives::Bytes = transferCall {
+                    to: command.recipient,
+                    amount: command.amount,
+                }
+                .abi_encode()
+                .into();
+                let gas_limit = 100_000;
+                let prepared = self
+                    .chain
+                    .prepare_call(
+                        command.payer,
+                        command.token,
+                        calldata.clone(),
+                        mined,
+                        gas_limit,
+                        fees,
+                    )
+                    .await?;
+                (prepared, command.token, calldata, gas_limit)
+            }
         };
         let attempt = Attempt {
             replacement_number: 0,
@@ -850,7 +988,9 @@ impl ChainWorker {
             tx.commit().await?;
             id
         };
-        free.remove(0);
+        if dedicated.is_none() {
+            free.remove(0);
+        }
         info!(%signer, nonce = mined, tx_hash = %attempt.tx_hash, "transaction signed and persisted");
 
         // From here on the slot exists; a failure is recovered by the next
@@ -900,6 +1040,11 @@ impl ChainWorker {
     /// A job that will never produce a transaction.
     async fn reject_job(&self, job: &Job, reason: AbandonReason) -> Result<(), ExecutorError> {
         let event = match &job.command {
+            ExecutionCommand::OnboardingPayment(_) => ExecutionEvent::ExecutionRejected {
+                job_id: job.id,
+                chain_id: self.config.chain_id,
+                reason: format!("{reason:?}"),
+            },
             ExecutionCommand::SweepBatch(_) => ExecutionEvent::SweepAbandoned {
                 job_id: job.id,
                 chain_id: self.config.chain_id,

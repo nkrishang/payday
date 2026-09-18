@@ -115,8 +115,12 @@ pub struct MockState {
     pub submissions: Vec<Submission>,
     /// The pool, in rotation order. `MockChain::new` seeds one signer.
     pub signers: Vec<Address>,
+    /// Keys registered for dedicated work but excluded from the ordinary pool.
+    pub dedicated_signers: HashSet<Address>,
     /// Mined transaction count per signer; a missing entry is 0.
     pub mined_nonces: HashMap<Address, u64>,
+    /// Pending transaction count overrides; otherwise it equals the mined count.
+    pub pending_nonces: HashMap<Address, u64>,
     pub submit_error: Option<fn() -> ChainError>,
     pub fees: FeeEstimate,
     /// `estimate_fees` calls, for the once-per-pass assertion.
@@ -419,6 +423,7 @@ impl ChainReader for MockChain {
             transaction_hash: B256::repeat_byte(0xCC),
             block_number: from_block,
             block_hash: block_hash(from_block),
+            transaction_index: 0,
             settled: Some(settled),
             recovered: U256::ZERO,
         }))
@@ -474,8 +479,9 @@ impl ChainExecutor for MockChain {
 
     async fn signer_nonce(&self, signer: Address, pending: bool) -> Result<u64, ChainError> {
         let state = self.state.lock().unwrap();
-        // Monad semantics: `pending` reads the same as `latest`.
-        let _ = pending;
+        if pending && let Some(nonce) = state.pending_nonces.get(&signer) {
+            return Ok(*nonce);
+        }
         Ok(state.mined_nonces.get(&signer).copied().unwrap_or(0))
     }
 
@@ -511,7 +517,7 @@ impl ChainExecutor for MockChain {
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError> {
         let mut state = self.state.lock().unwrap();
-        if !state.signers.contains(&signer) {
+        if !state.signers.contains(&signer) && !state.dedicated_signers.contains(&signer) {
             return Err(ChainError::Transient(format!("no key for signer {signer}")));
         }
         if state.prepare_errors.contains(&signer) {
@@ -548,7 +554,7 @@ impl ChainExecutor for MockChain {
         fees: FeeEstimate,
     ) -> Result<PreparedSweepTransaction, ChainError> {
         let mut state = self.state.lock().unwrap();
-        if !state.signers.contains(&signer) {
+        if !state.signers.contains(&signer) && !state.dedicated_signers.contains(&signer) {
             return Err(ChainError::Transient(format!("no key for signer {signer}")));
         }
         if state.prepare_errors.contains(&signer) {

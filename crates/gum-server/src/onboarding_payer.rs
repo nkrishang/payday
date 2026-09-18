@@ -10,20 +10,12 @@
 
 use std::sync::Arc;
 
-use alloy_network::{EthereumWallet, TransactionBuilder};
-use alloy_primitives::{Address, B256, Signature, U256};
-use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::TransactionRequest;
+use alloy_primitives::{Address, B256, Signature};
 use alloy_signer::Signer;
 use alloy_signer_aws::AwsSigner;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolCall, sol};
 
 use crate::config::OnboardingPayerSignerConfig;
-
-sol! {
-    function transfer(address to, uint256 amount) returns (bool);
-}
 
 /// The same key, kept for raw signatures: the demo payer attests its wallet
 /// (an EIP-712 digest) before it pays.
@@ -34,7 +26,6 @@ enum Backend {
 
 #[derive(Clone)]
 pub struct OnboardingPayerSigner {
-    provider: DynProvider,
     backend: Arc<Backend>,
     address: Address,
     /// The chain the demo pays on and that chain's USDC.
@@ -46,20 +37,16 @@ impl OnboardingPayerSigner {
     pub async fn from_config(
         config: &OnboardingPayerSignerConfig,
         sdk_config: &aws_config::SdkConfig,
-        rpc_url: &str,
+        _rpc_url: &str,
         chain_id: u64,
         usdc: Address,
     ) -> Result<Self, String> {
-        let (address, wallet, backend) = match config {
+        let (address, backend) = match config {
             OnboardingPayerSignerConfig::Local(key) => {
                 let signer: PrivateKeySigner = key
                     .parse()
                     .map_err(|error| format!("invalid PAYDAY_ONBOARDING_PAYER_KEY: {error}"))?;
-                (
-                    signer.address(),
-                    EthereumWallet::from(signer.clone()),
-                    Backend::Local(signer),
-                )
+                (signer.address(), Backend::Local(signer))
             }
             OnboardingPayerSignerConfig::AwsKms(key_id) => {
                 let kms = aws_sdk_kms::Client::new(sdk_config);
@@ -68,21 +55,10 @@ impl OnboardingPayerSigner {
                     .map_err(|error| {
                         format!("failed to initialize PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID: {error}")
                     })?;
-                (
-                    signer.address(),
-                    EthereumWallet::from(signer.clone()),
-                    Backend::Kms(signer),
-                )
+                (signer.address(), Backend::Kms(signer))
             }
         };
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect(rpc_url)
-            .await
-            .map_err(|error| format!("failed to connect onboarding payer provider: {error}"))?
-            .erased();
         Ok(Self {
-            provider,
             backend: Arc::new(backend),
             address,
             chain_id,
@@ -110,23 +86,5 @@ impl OnboardingPayerSigner {
             Backend::Local(signer) => signer.sign_hash(digest).await,
             Backend::Kms(signer) => signer.sign_hash(digest).await,
         }
-    }
-
-    /// Broadcast `USDC.transfer(to, amount)` and return the transaction hash.
-    /// Does not wait for a receipt: the indexer picks the transfer up and
-    /// carries the invoice through funding and settlement on its own, exactly
-    /// as it would for a payer's own browser-submitted transfer.
-    pub async fn send_usdc(&self, to: Address, amount: U256) -> Result<B256, String> {
-        let usdc_address = self.usdc;
-        let calldata = transferCall { to, amount }.abi_encode();
-        let tx = TransactionRequest::default()
-            .with_to(usdc_address)
-            .with_input(calldata);
-        let pending = self
-            .provider
-            .send_transaction(tx)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(*pending.tx_hash())
     }
 }
