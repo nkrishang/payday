@@ -1,4 +1,4 @@
-# Payday: Verified Customer Funds — Consolidated Product Plan
+# Gum: Verified Customer Funds — Consolidated Product Plan
 
 > **Superseded on 2026-09-05.** Identity verification is no longer part of
 > the product. Everything below about `verified_identity`,
@@ -11,7 +11,7 @@
 
 **Status:** Consolidated implementation plan, updated with owner decisions on all open questions.
 
-**Positioning:** **Payday is the complete solution for receiving attributable, verified customer funds over stablecoin rails.**
+**Positioning:** **Gum is the complete solution for receiving attributable, verified customer funds over stablecoin rails.**
 
 **Guiding principle:** The product should be the *leanest comprehensive* version — every necessary capability, nothing superfluous, nothing missing.
 
@@ -19,7 +19,7 @@
 
 ## 1. Product direction
 
-Payday already creates a unique counterfactual payment address for each invoice, detects USDC transfers, and deploys a payment contract to settle funds.
+Gum already creates a unique counterfactual payment address for each invoice, detects USDC transfers, and deploys a payment contract to settle funds.
 
 The product adds four connected capabilities:
 
@@ -42,15 +42,15 @@ Use **invoice** for the issued business document and **payment** for its on-chai
 
 ## 2. Product promise and honest boundaries
 
-For a `verified_identity` invoice, Payday can assert:
+For a `verified_identity` invoice, Gum can assert:
 
-> The merchant specified an expected email and identity. A visitor controlling that mailbox completed a liveness-backed document check matching those assertions before Payday disclosed and swept the payment address.
+> The merchant specified an expected email and identity. A visitor controlling that mailbox completed a liveness-backed document check matching those assertions before Gum disclosed and swept the payment address.
 
-For a `verified_identity_unattributed` invoice, Payday can assert:
+For a `verified_identity_unattributed` invoice, Gum can assert:
 
-> The merchant specified an expected email. A visitor controlling that mailbox completed a liveness-backed document check successfully before Payday disclosed and swept the payment address. The merchant did not assert, and Payday does not disclose, that person's legal identity.
+> The merchant specified an expected email. A visitor controlling that mailbox completed a liveness-backed document check successfully before Gum disclosed and swept the payment address. The merchant did not assert, and Gum does not disclose, that person's legal identity.
 
-Payday cannot assert that the verified person controlled the wallet that ultimately sent funds. Once disclosed, an address can be forwarded, and the payment contract cannot inspect sender identity.
+Gum cannot assert that the verified person controlled the wallet that ultimately sent funds. Once disclosed, an address can be forwarded, and the payment contract cannot inspect sender identity.
 
 The gate therefore controls:
 
@@ -65,13 +65,13 @@ A future wallet-ownership signature could strengthen this binding, but it is not
 
 ## 3. Product principles
 
-### 3.1 Merchant asserts; Payday confirms
+### 3.1 Merchant asserts; Gum confirms
 
-For attributed identity verification, the merchant supplies the expected email and legal identity. Payday returns a match result, not vendor-extracted identity data.
+For attributed identity verification, the merchant supplies the expected email and legal identity. Gum returns a match result, not vendor-extracted identity data.
 
-For unattributed identity verification, the merchant supplies only the expected email. Payday confirms that document and liveness verification passed, without returning the verified person's identity.
+For unattributed identity verification, the merchant supplies only the expected email. Gum confirms that document and liveness verification passed, without returning the verified person's identity.
 
-Payday is a confirmation service, not an identity-data marketplace.
+Gum is a confirmation service, not an identity-data marketplace.
 
 ### 3.2 Four presets externally, independent facts internally
 
@@ -90,7 +90,7 @@ AML screening, wallet ownership, proof of address, and KYB are not additional pa
 
 ### 3.3 Disclosure and settlement control, not on-chain access control
 
-For gated invoices Payday withholds:
+For gated invoices Gum withholds:
 
 - Payment address
 - Payment URI
@@ -104,7 +104,7 @@ This is stronger than disclosure-only gating, but it remains an off-chain policy
 
 The merchant specifies the invoice amount directly.
 
-Payday does **not** model:
+Gum does **not** model:
 
 - Line items
 - Quantity
@@ -114,11 +114,11 @@ Payday does **not** model:
 - Line-item categories
 - `sum(line_items) == amount` reconciliation
 
-If the merchant needs an itemized breakdown, they attach a PDF. Payday stores, presents, and hashes the document but does not parse or reconcile its contents.
+If the merchant needs an itemized breakdown, they attach a PDF. Gum stores, presents, and hashes the document but does not parse or reconcile its contents.
 
 ### 3.5 Jurisdiction-agnostic by construction
 
-Payday will not model:
+Gum will not model:
 
 - Tax rates or calculations
 - Tax identities
@@ -126,13 +126,13 @@ Payday will not model:
 - Jurisdiction-specific invoice schemas
 - Fiat settlement or FX
 
-Merchants own their jurisdiction-specific obligations. Bounded free-text `details` fields and PDF attachments let them provide required information without requiring Payday to interpret it.
+Merchants own their jurisdiction-specific obligations. Bounded free-text `details` fields and PDF attachments let them provide required information without requiring Gum to interpret it.
 
-> **Payday gives you a complete, verifiable record of why money moved. What your jurisdiction requires you to do with it is yours.**
+> **Gum gives you a complete, verifiable record of why money moved. What your jurisdiction requires you to do with it is yours.**
 
 ### 3.6 Minimize identity data
 
-Payday stores merchant-supplied assertions because they are necessary to enforce payer policy.
+Gum stores merchant-supplied assertions because they are necessary to enforce payer policy.
 
 It must not persist vendor-extracted:
 
@@ -147,9 +147,9 @@ Stored KYC output is limited to provider reference, verification type, status, t
 
 ### 3.7 Normal settlement remains direct
 
-The exact invoice amount moves directly from the deterministic payment address to the merchant's receiver address. Payday does not intermediate the intended invoice amount.
+The exact invoice amount moves directly from the deterministic payment address to the merchant's receiver address. Gum does not intermediate the intended invoice amount.
 
-Overpayments, stray funds, expired balances, and later transfers move to Payday's recovery wallet. This introduces custody for recovered funds and means Payday can no longer make an unqualified claim that it never controls customer value.
+Overpayments, stray funds, expired balances, and later transfers move to Gum's recovery wallet. This introduces custody for recovered funds and means Gum can no longer make an unqualified claim that it never controls customer value.
 
 The recovery path must remain a narrow exception. No escrow, discretionary holding of the intended payment amount, batching of customer balances, netting, or fee custody should be added without legal review.
 
@@ -189,7 +189,7 @@ Existing chain mechanics remain part of the payment record:
 - Token
 - Receiver
 - Payment address
-- Payday recovery address
+- Gum recovery address
 - Factory
 - Salt
 - Lifecycle status
@@ -301,7 +301,7 @@ Payer access is session-scoped:
 2. The public response includes invoice information and requirement status but omits payment mechanics for gated invoices.
 3. The visitor verifies the expected email through a dedicated Auth0 payer audience.
 4. Identity modes either reuse an eligible merchant-scoped credential or start a Didit hosted session lazily.
-5. When all requirements pass, Payday:
+5. When all requirements pass, Gum:
    - Marks the invoice's verification requirements complete.
    - Reveals the address, URI, and QR to that payer session.
    - Allows the indexer to sweep a live funded invoice.
@@ -321,7 +321,7 @@ A `verified_identity` credential may be reused only when its stored assertion ha
 
 #### Recovery ownership
 
-The recovery address is Payday's custodial recovery wallet, not an expected receiver or payer-controlled refund address.
+The recovery address is Gum's custodial recovery wallet, not an expected receiver or payer-controlled refund address.
 
 Consequences:
 
@@ -329,7 +329,7 @@ Consequences:
 - Configure recovery centrally per chain/environment.
 - Continue storing the selected recovery address on each invoice because it is committed into the counterfactual address.
 - The recovery wallet key is held in AWS KMS (infrastructure already in use), not in a hot wallet or manual key file.
-- Recovered funds are reviewed manually and returned to the appropriate party by the operator. Payday has no real users at this point, so this is a manual process — no automated disbursement logic is needed yet.
+- Recovered funds are reviewed manually and returned to the appropriate party by the operator. Gum has no real users at this point, so this is a manual process — no automated disbursement logic is needed yet.
 - Maintain an invoice-level ledger for every amount recovered so manual review has a clear record.
 
 #### Payment contract behavior
@@ -344,16 +344,16 @@ balance < amount:
 
 balance >= amount:
     transfer amount to receiver
-    transfer balance - amount to Payday recovery
+    transfer balance - amount to Gum recovery
 ```
 
 For an expired deployment:
 
 ```text
-transfer the entire balance to Payday recovery
+transfer the entire balance to Gum recovery
 ```
 
-`recover()` remains unchanged and forwards the contract's complete current token balance to Payday recovery.
+`recover()` remains unchanged and forwards the contract's complete current token balance to Gum recovery.
 
 Event behavior:
 
@@ -378,7 +378,7 @@ Its external interface and address-prediction formula do not need to change.
 
 However, `PaymentFactory` embeds `Payment.creationCode`. The modified contract therefore requires deploying a new factory build. `BatchSweeper` has an immutable factory reference and must be redeployed or otherwise repointed as part of the same pre-production rollout.
 
-Because Payday is not in production, all environments should move together rather than support mixed contract generations.
+Because Gum is not in production, all environments should move together rather than support mixed contract generations.
 
 ### 4.8 Indexer verification gate
 
@@ -398,7 +398,7 @@ Therefore:
 - Payment before verification is recorded and may mark the invoice funded.
 - It does not trigger live settlement.
 - Completing verification before expiry permits the same address to settle normally.
-- If verification never completes, expiry permits the complete balance to move to Payday recovery.
+- If verification never completes, expiry permits the complete balance to move to Gum recovery.
 - Verification after expiry cannot revive the invoice.
 - Partial or stray funds on expiry also move to recovery.
 - No address is quarantined or discarded.
@@ -409,14 +409,14 @@ The decisive guard belongs in the database claim path used by `claim_sweep_batch
 
 Unsolicited transfers are accepted as operational noise, not a settlement-safety problem.
 
-Payday should:
+Gum should:
 
 - Record every transfer.
 - Mark whether verification had completed when the first funding was observed.
 - Surface likely unsolicited payments to the merchant.
 - Avoid representing them as proof that the verified person controlled the sending wallet.
 - Continue using the same address.
-- Route any excess over the invoice amount to Payday recovery.
+- Route any excess over the invoice amount to Gum recovery.
 
 For verified invoices, unsolicited pre-verification funding waits until verification or expiry.
 
@@ -432,7 +432,7 @@ For permissionless invoices, funding can trigger settlement immediately. An atta
 
 A Merkle root is not justified for the current product.
 
-Its primary benefit would be selective disclosure: proving one field belongs to an invoice without revealing the rest. Payday has no demonstrated workflow requiring field-level proofs. Merchants, payers, and auditors normally need the complete invoice record, and expected-identity assertions already require access control regardless of proof format.
+Its primary benefit would be selective disclosure: proving one field belongs to an invoice without revealing the rest. Gum has no demonstrated workflow requiring field-level proofs. Merchants, payers, and auditors normally need the complete invoice record, and expected-identity assertions already require access control regardless of proof format.
 
 A Merkle implementation would introduce:
 
@@ -444,7 +444,7 @@ A Merkle implementation would introduce:
 
 It would not materially improve the initial invoice, audit, or receipt workflow.
 
-Payday will instead hash the complete canonical issuance snapshot. If customers later demonstrate a real selective-disclosure requirement, a versioned Merkle commitment can be introduced without changing the Solidity interface because the contract treats the salt as opaque.
+Gum will instead hash the complete canonical issuance snapshot. If customers later demonstrate a real selective-disclosure requirement, a versioned Merkle commitment can be introduced without changing the Solidity interface because the contract treats the salt as opaque.
 
 ### 5.2 Commitment construction
 
@@ -452,8 +452,8 @@ At issuance:
 
 ```text
 canonical_bytes = JCS(canonical_issuance_snapshot)
-attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V1" || canonical_bytes)
-salt = keccak256("PAYDAY_SALT_V1" || random_nonce || attribution_hash)
+attribution_hash = keccak256("GUM_ATTRIBUTION_V1" || canonical_bytes)
+salt = keccak256("GUM_SALT_V1" || random_nonce || attribution_hash)
 ```
 
 Where:
@@ -498,7 +498,7 @@ A conventional PDF receipt is only a document. It does not independently prove:
 - That the invoice content was not substituted after payment
 - That an attached PDF is the same file presented at issuance
 
-Payday's Proof of Payment lets a merchant, payer, or auditor independently:
+Gum's Proof of Payment lets a merchant, payer, or auditor independently:
 
 1. Hash the canonical invoice and attached PDFs.
 2. Recompute the salt.
@@ -506,7 +506,7 @@ Payday's Proof of Payment lets a merchant, payer, or auditor independently:
 4. Verify that address received the referenced USDC transfer.
 5. Confirm that the invoice record and payment belong together.
 
-This is useful for reconciliation, audit evidence, disputes, and counterparty records. The verifier does not need access to Payday's database or need to trust that a later PDF export was left unchanged.
+This is useful for reconciliation, audit evidence, disputes, and counterparty records. The verifier does not need access to Gum's database or need to trust that a later PDF export was left unchanged.
 
 The proof establishes **invoice-to-address-to-transfer integrity**. It does not prove that the KYC-verified person owned the sending wallet.
 
@@ -523,11 +523,11 @@ A settled Proof of Payment package contains:
 - Payment address
 - Transaction hash and transfer details
 - Attachment hash, with the attachment file optionally included
-- Payday-attested verification mode, result, and timestamp
+- Gum-attested verification mode, result, and timestamp
 
 The issuance commitment is independently verifiable from the address.
 
-Verification outcomes happen after issuance and therefore cannot be included in the address commitment. They are explicitly labelled **Payday-attested**, not address-committed. A simple signed attestation is sufficient; an append-only hash-chain product is deferred.
+Verification outcomes happen after issuance and therefore cannot be included in the address commitment. They are explicitly labelled **Gum-attested**, not address-committed. A simple signed attestation is sufficient; an append-only hash-chain product is deferred.
 
 Proof of Payment is accessible to the merchant. The merchant may share it at their discretion with payers, auditors, or counterparties. It is not a public bearer-link download.
 
@@ -539,7 +539,7 @@ Proof of Payment is accessible to the merchant. The merchant may share it at the
 
 Use Auth0 only for email verification, with a dedicated payer audience separate from the merchant API-key bootstrap path.
 
-Do not route document verification through Auth0 marketplace login integrations. Payday's payers are anonymous link visitors, and doing so would turn every payer into an additional billable Auth0 user.
+Do not route document verification through Auth0 marketplace login integrations. Gum's payers are anonymous link visitors, and doing so would turn every payer into an additional billable Auth0 user.
 
 ### 6.2 Didit for document and liveness checks
 
@@ -563,13 +563,13 @@ For `verified_identity_unattributed`:
 - Treat approval as successful KYC for a real person, regardless of identity.
 - Do not return extracted identity to the merchant.
 
-Name representation follows Didit's capabilities and best practices. Payday does not impose its own transliteration, ordering, or normalization rules — it passes the merchant's assertion to Didit and relies on Didit's documented matching behaviour for non-Latin scripts, diacritics, middle names, and name ordering. Whatever threshold Didit applies, Payday must be able to explain it plainly (GDPR Art. 22).
+Name representation follows Didit's capabilities and best practices. Gum does not impose its own transliteration, ordering, or normalization rules — it passes the merchant's assertion to Didit and relies on Didit's documented matching behaviour for non-Latin scripts, diacritics, middle names, and name ordering. Whatever threshold Didit applies, Gum must be able to explain it plainly (GDPR Art. 22).
 
 For both:
 
 - Create sessions lazily; vendor sessions are much shorter-lived than invoices.
 - Never put merchant assertions in payer-editable query parameters.
-- Never proxy document or selfie capture through Payday.
+- Never proxy document or selfie capture through Gum.
 - Verify webhook signatures before processing.
 - Bind only status, provider reference, and allowed risk categories.
 - Do not log webhook bodies.
@@ -583,7 +583,7 @@ An automated decline that prevents payment may create a GDPR Art. 22 review obli
 
 The manual process must still be defined:
 
-- The payer appeal route (how a declined payer contacts Payday).
+- The payer appeal route (how a declined payer contacts Gum).
 - What evidence the reviewer inspects (vendor dashboard status, risk codes — never extracted identity stored locally).
 - What is recorded (decision, timestamp, reviewer).
 - How quickly a review is completed (target: within 1 business day).
@@ -595,7 +595,7 @@ As volume grows, this transitions to a dedicated operator or team, and the proce
 
 Wallet ownership proof remains optional and separable.
 
-A payer signs a challenge with the connected wallet, and Payday verifies address recovery. This is the only proposed feature that directly links a verified browser session to a wallet.
+A payer signs a challenge with the connected wallet, and Gum verifies address recovery. This is the only proposed feature that directly links a verified browser session to a wallet.
 
 It is not required for the four-mode launch and must not delay it.
 
@@ -633,7 +633,7 @@ Payer write routes:
 - `GET .../verify`
 - `POST /v1/webhooks/identity`
 
-Do not extend the payer router's unrestricted CORS policy to write routes. In v1, verification is completed on Payday's hosted checkout.
+Do not extend the payer router's unrestricted CORS policy to write routes. In v1, verification is completed on Gum's hosted checkout.
 
 ### 7.2 Dashboard
 
@@ -667,7 +667,7 @@ The checkout:
 
 ### 7.4 CLI
 
-Removed. Payday is API-first with the dashboard for management; automation
+Removed. Gum is API-first with the dashboard for management; automation
 uses the API or the TypeScript SDK directly. Offline proof verification lives
 in `gateway_core::verify_proof`.
 
@@ -677,7 +677,7 @@ The existing test forbidding the word "invoice" should be deliberately updated. 
 
 ## 8. Consolidated schema plan
 
-Payday is not in production. Do not create one migration per roadmap slice.
+Gum is not in production. Do not create one migration per roadmap slice.
 
 Implement the entire product schema as one consolidated migration for reviewability. Before the first production release, squash it into the baseline migrations if that leaves a cleaner fresh-install schema.
 
@@ -790,7 +790,7 @@ Attribution, contract, and non-KYC invoice work can proceed in parallel.
 
 **Effort:** L
 
-- Change `Payment.sol` to send exactly `amount` to the receiver and any remainder to Payday recovery.
+- Change `Payment.sol` to send exactly `amount` to the receiver and any remainder to Gum recovery.
 - Keep expired deployment and `recover()` full-balance recovery behavior.
 - Update contract events and documentation.
 - Deploy a new `PaymentFactory` build.
@@ -818,7 +818,7 @@ Attribution, contract, and non-KYC invoice work can proceed in parallel.
 - Do not add line items.
 - Add presigned PDF upload (1 file, max 5 MiB), validation, scanning, finalization, and signed download.
 - Render invoices and attachments on `/pay/{id}` — with progressive content visibility per §4.3 for gated invoices.
-- Generate a deterministic Payday invoice-summary PDF.
+- Generate a deterministic Gum invoice-summary PDF.
 - Add dashboard create/list/detail flows.
 - Implement canonicalization, simple attribution hash, and derived salt.
 - Add Proof of Payment export (merchant-accessible, shareable at merchant's discretion) and offline verifier.
@@ -851,7 +851,7 @@ Attribution, contract, and non-KYC invoice work can proceed in parallel.
 - Preserve unconditional expiry recovery eligibility.
 - Record and surface likely unsolicited transfers.
 - Add checkout verification state and resume behavior.
-- Restrict payer POST CORS to Payday's hosted origin.
+- Restrict payer POST CORS to Gum's hosted origin.
 
 **Acceptance:**
 
@@ -989,7 +989,7 @@ Verify:
 
 *Engineering-grade framing, not legal advice. Counsel must review identity verification and custodial recovery before launch.*
 
-The current design assumption is that Payday has no general AML/BSA KYC obligation. It therefore cannot rely on GDPR Art. 6(1)(c) "legal obligation" to justify expansive collection.
+The current design assumption is that Gum has no general AML/BSA KYC obligation. It therefore cannot rely on GDPR Art. 6(1)(c) "legal obligation" to justify expansive collection.
 
 Potential bases include:
 
@@ -1000,12 +1000,12 @@ Potential bases include:
 Consequences:
 
 - Identity requirements are opt-in per invoice.
-- Payday does not proxy document or selfie capture.
+- Gum does not proxy document or selfie capture.
 - Vendor-extracted identity is not stored.
 - A retention/destruction policy exists before collection.
 - Declined payers have a defined human-review route.
 
-Unregulated does not mean "retain for five years." BSA/CIP and EU AMLD retention floors bind obliged entities. Retaining unnecessary KYC records would worsen Payday's data-minimization position.
+Unregulated does not mean "retain for five years." BSA/CIP and EU AMLD retention floors bind obliged entities. Retaining unnecessary KYC records would worsen Gum's data-minimization position.
 
 Biometrics remain the largest liability tail. Vendor-held data reduces but does not eliminate that risk.
 
@@ -1015,23 +1015,23 @@ OFAC obligations may apply even where AML/KYC obligations do not. Sanctions scre
 
 ### Custodial recovery
 
-Moving overpayments, expired balances, and stray funds to Payday's wallet creates actual custody over those amounts.
+Moving overpayments, expired balances, and stray funds to Gum's wallet creates actual custody over those amounts.
 
 For the initial product:
 
 - The recovery wallet key is held in AWS KMS (infrastructure already in use).
 - Recovered funds are reviewed manually by the operator and returned to the appropriate party. No automated disbursement.
-- Payday has no real users yet, so this is a manual, non-scaling process — appropriate for the current stage.
+- Gum has no real users yet, so this is a manual, non-scaling process — appropriate for the current stage.
 - Maintain an invoice-level ledger for every recovered amount so manual review has a clear record.
 
-Before production launch with real users, Payday needs:
+Before production launch with real users, Gum needs:
 
 - Counsel's classification of this recovery role.
 - Terms defining ownership of recovered funds.
 - A return/disbursement procedure (manual for now, formalized later).
 - Segregation and key-control policy for the KMS-held recovery key.
 
-The intended invoice amount still moves directly to the merchant, but the prior blanket "Payday never takes custody" statement is no longer accurate — Payday takes custody of *recovered* amounts only.
+The intended invoice amount still moves directly to the merchant, but the prior blanket "Gum never takes custody" statement is no longer accurate — Gum takes custody of *recovered* amounts only.
 
 ---
 
@@ -1060,11 +1060,11 @@ The intended invoice amount still moves directly to the merchant, but the prior 
 |---|---|
 | Payer modes | Four presets: permissionless, verified email, matched identity, and unattributed identity |
 | Invoice amount | Merchant specifies it directly |
-| Line items | Not a Payday primitive |
+| Line items | Not a Gum primitive |
 | Itemization | Merchant may attach a PDF |
 | Attachments | PDF only, 1 file, max 5 MiB, immutable at issuance |
 | Invoice content visibility | Full content gated behind verification for gated invoices; issuer name and heading visible before verification |
-| Recovery destination | Payday-controlled custodial wallet, AWS KMS key |
+| Recovery destination | Gum-controlled custodial wallet, AWS KMS key |
 | Live contract settlement | Exact invoice amount to receiver; remainder to recovery |
 | Expired and later funds | Complete balance to recovery |
 | Recovered funds handling | Manual review by operator; no automated disbursement (no real users yet) |
@@ -1080,13 +1080,13 @@ The intended invoice amount still moves directly to the merchant, but the prior 
 | Credential lifetime | Minimum reasonable, up to vendor capability |
 | Identity storage | Status-only; no vendor-extracted identity |
 | Expected identity fields | Minimal data to satisfy merchant demand — legal name only to start |
-| Name representation | Follows Didit's capabilities and best practices; Payday imposes no custom normalization |
+| Name representation | Follows Didit's capabilities and best practices; Gum imposes no custom normalization |
 | Human review | Founder-operated manually; formalized as volume grows |
 | Decline retries | One automated resubmission, then human review or cancellation |
 | Sanctions screening | Deferred; will use Didit AML/PEP capability or separate screening in the future |
 | Schema rollout | One consolidated pre-production migration, optionally squashed into baseline |
 | Vocabulary | Invoice for the document; payment for fulfillment |
-| Currency model | One `currency` per request (USDC default, USDT; more later), the currency's canonical contract per chain; Payday never gives the merchant a rate worse than 1:1, so USDC (CCTP) is payable and withdrawable on any network while USDT pins a network at creation and withdraws per network |
+| Currency model | One `currency` per request (USDC default, USDT; more later), the currency's canonical contract per chain; Gum never gives the merchant a rate worse than 1:1, so USDC (CCTP) is payable and withdrawable on any network while USDT pins a network at creation and withdraws per network |
 | Dashboard MVP | Create/list/detail invoices and customers, payer-policy state, verification review, recovered-funds visibility, and proof downloads |
 
 ---

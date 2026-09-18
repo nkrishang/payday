@@ -575,13 +575,13 @@ impl ApiError {
         }
     }
 
-    /// The account's Payday wallet has not been seen yet: it is created at
+    /// The account's Gum wallet has not been seen yet: it is created at
     /// the first dashboard sign-in and recorded from that session.
     pub fn wallet_not_ready() -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code: "wallet_not_ready",
-            message: "The account's Payday wallet is not known yet; sign in to the dashboard once"
+            message: "The account's Gum wallet is not known yet; sign in to the dashboard once"
                 .into(),
         }
     }
@@ -601,10 +601,10 @@ impl ApiError {
     /// do hold the currency but cannot bridge it to the destination.
     pub fn nothing_to_withdraw(currency: gum_core::Currency, elsewhere: &[&str]) -> Self {
         let message = if elsewhere.is_empty() {
-            format!("The Payday wallet holds no {currency} on any network serving it")
+            format!("The Gum wallet holds no {currency} on any network serving it")
         } else {
             format!(
-                "The Payday wallet holds no {currency} on the destination network. {currency} does not bridge; its balance on {} is withdrawn to an address on that network",
+                "The Gum wallet holds no {currency} on the destination network. {currency} does not bridge; its balance on {} is withdrawn to an address on that network",
                 elsewhere.join(", ")
             )
         };

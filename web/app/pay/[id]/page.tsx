@@ -2,7 +2,7 @@ import { GumError, type PayerDepositRequest } from "@gum/sdk";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Checkout } from "@/components/checkout/checkout";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 /**
  * The deposit request is fetched on the server so the page arrives complete — amount,

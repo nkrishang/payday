@@ -1,6 +1,6 @@
 # Webhooks
 
-Set `PAYDAY_WEBHOOK_ENCRYPTION_KEY` to exactly 32 random bytes encoded with
+Set `GUM_WEBHOOK_ENCRYPTION_KEY` to exactly 32 random bytes encoded with
 standard base64. Startup without it is an explicit safe boundary: endpoint
 creation and delivery are disabled. Signing secrets are returned only by
 `POST /v1/webhooks`; the database stores SHA-256 for identification and an
@@ -14,7 +14,7 @@ version/key ID, so retain old key material until it has been re-encrypted; merel
 creating a new Secrets Manager version is not a complete application-level
 rotation.
 
-Endpoint URLs must be credential-free HTTPS URLs with a DNS hostname. Payday
+Endpoint URLs must be credential-free HTTPS URLs with a DNS hostname. Gum
 resolves and rejects every loopback, private, link-local, and reserved
 destination both when an endpoint is created and immediately before every
 request. Redirects are never followed. `DELETE /v1/webhooks/{id}` disables an
@@ -23,8 +23,8 @@ endpoint (`204`) without deleting delivery history, which
 subsequently be registered with a new secret. The routes are listed in the
 [HTTP API reference](api-reference.md#webhooks).
 
-Deliveries contain `Payday-Event-Id`, `Payday-Event-Type`, and
-`Payday-Signature: v1,t=<unix-seconds>,sha256=<hex>`. Verify HMAC-SHA256 with
+Deliveries contain `Gum-Event-Id`, `Gum-Event-Type`, and
+`Gum-Signature: v1,t=<unix-seconds>,sha256=<hex>`. Verify HMAC-SHA256 with
 the signing secret over the exact bytes `v1.<timestamp>.<raw HTTP body>`, and
 reject stale timestamps. Event IDs are idempotency keys. Non-2xx responses are
 retried exponentially (up to 12 attempts, capped at one hour); redirects are
@@ -60,7 +60,7 @@ when the request failed or was not the payer's after all.
 ## Payload
 
 Payloads use the public, versioned `2026-08-01` envelope: `id` (the `evt_`
-event id, also sent as `Payday-Event-Id`), `type`, `occurred_at`, and
+event id, also sent as `Gum-Event-Id`), `type`, `occurred_at`, and
 `data`. Every deposit request event carries
 `data.deposit_request`, a strict subset of the API's own deposit request
 object under the same names, units, and formats — so a handler can hand
@@ -128,7 +128,7 @@ request is indistinguishable from one for an exact deposit, and
 
 `reason` is one of `overpayment`, `expired`, or `late_transfer`. Returned
 funds went to the payer's attested wallet on-chain in the named transaction;
-nothing is held by Payday. Use these events to explain to a payer where the
+nothing is held by Gum. Use these events to explain to a payer where the
 difference went.
 
 Test events are sent only to the requested endpoint, require no deposit request, and

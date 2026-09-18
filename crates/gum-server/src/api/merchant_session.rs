@@ -10,7 +10,7 @@
 //! The secret is returned once and stored hashed. Exchanging it is the whole
 //! verification: it mints the payer session with the merchant-session fact,
 //! records an approved attempt, completes the invoice's verification while it
-//! is live, and so raises `verification.approved`. Payday's only added claim
+//! is live, and so raises `verification.approved`. Gum's only added claim
 //! is that the merchant's server released this secret before the session was
 //! opened; who the payer is remains the merchant's assertion, carried as
 //! `payer_reference` in the policy and every webhook.

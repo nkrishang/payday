@@ -1,7 +1,7 @@
 import { GumError } from "@gum/sdk";
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { ClientSecretExchange, MerchantSessionGate } from "./merchant-session";
 
 const SECRET = "cs_" + "b".repeat(43);

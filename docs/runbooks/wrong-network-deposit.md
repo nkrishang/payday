@@ -40,16 +40,16 @@ Read the request. `chain.id` is the network the payer chose; `address` is
 the deposit address; `self_settlement` carries the terms the factory needs.
 
 ```bash
-export PAYDAY_API_URL="https://api.payday.sh"
-export PAYDAY_API_KEY="<merchant account api key>"
-req=$(curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<dr_id>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY")
+export GUM_API_URL="https://api.gum.money"
+export GUM_API_KEY="<merchant account api key>"
+req=$(curl -fsS "$GUM_API_URL/v1/deposit-requests/<dr_id>" \
+  -H "Authorization: Bearer $GUM_API_KEY")
 echo "$req" | jq '{status, chain, token, address, payer_wallet, payout_address, amount_base_units, expires_at, self_settlement}'
 ```
 
 Then check the address's balance on the chain the payer says they used,
 with that chain's contract for the request's `currency` (the matching
-`tokens` entry of its `PAYDAY_CHAINS` entry; the table in the production
+`tokens` entry of its `GUM_CHAINS` entry; the table in the production
 runbook lists them). USDT0 is served on Monad and Arbitrum only, so a USDT
 request's funds on Base sit in whatever contract the payer's wallet used
 there; `recover` takes that contract's address either way:
@@ -159,6 +159,6 @@ token's whole balance to the payer's wallet. Nothing about it appears in
 Watching every deposit address on every chain would multiply the
 indexer's RPC spend by the number of supported networks for an event that
 should be rare (the checkout switches the wallet to the chosen network
-before signing, and the wallet signs a domain naming that chain). Payday's
+before signing, and the wallet signs a domain naming that chain). Gum's
 decision (2026-09-10) is to handle these case by case. If they become
 common, the two calls above are the whole automation.

@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
  * reload or a hosted verification flow, and ends with the tab.
  */
 
-const PREFIX = "payday:payer-session:";
+const PREFIX = "gum:payer-session:";
 
 export function payerSessionKey(paymentId: string): string {
   return `${PREFIX}${paymentId}`;

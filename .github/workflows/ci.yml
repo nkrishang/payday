@@ -59,7 +59,7 @@ jobs:
     env:
       # Build-time values only. Everything here is public by definition: it is
       # inlined into the browser bundle. Production values live in Vercel.
-      NEXT_PUBLIC_PAYDAY_API_URL: https://api.payday.sh
+      NEXT_PUBLIC_GUM_API_URL: https://api.gum.money
       # The networks the checkout offers, with public RPCs for wallet reads.
       NEXT_PUBLIC_CHAINS: '[{"id":143,"name":"Monad","rpcUrl":"https://rpc.monad.xyz","tokens":[{"currency":"USDC","address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},{"currency":"USDT","address":"0xe7cd86e13AC4309349F30B3435a9d337750fC82D"}],"explorerUrl":"https://monadvision.com","confirmation":"Credited within seconds"},{"id":8453,"name":"Base","rpcUrl":"https://mainnet.base.org","tokens":[{"currency":"USDC","address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}],"explorerUrl":"https://basescan.org","confirmation":"Credited within a minute"},{"id":42161,"name":"Arbitrum One","rpcUrl":"https://arb1.arbitrum.io/rpc","tokens":[{"currency":"USDC","address":"0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},{"currency":"USDT","address":"0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"}],"explorerUrl":"https://arbiscan.io","confirmation":"Credited within a minute"}]'
       # The landing page prerenders the sign-in dialog, which needs an app id
@@ -74,16 +74,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test --workspace @gum/sdk
-      - run: npm run typecheck --workspace @payday/web
-      - run: npm run lint --workspace @payday/web
-      - run: npm test --workspace @payday/web
-      - run: npm run build --workspace @payday/web
+      - run: npm run typecheck --workspace @gum/web
+      - run: npm run lint --workspace @gum/web
+      - run: npm test --workspace @gum/web
+      - run: npm run build --workspace @gum/web
       - run: npx playwright install --with-deps chromium
         working-directory: web
-      - run: npm run test:e2e --workspace @payday/web
+      - run: npm run test:e2e --workspace @gum/web
       # Development and production differ enough to break one and not the
       # other, so the same specs run against both servers.
-      - run: npm run test:e2e:dev --workspace @payday/web
+      - run: npm run test:e2e:dev --workspace @gum/web
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -131,7 +131,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gateway
-      PAYDAY_BATCH_SWEEPER_ADDRESS: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+      GUM_BATCH_SWEEPER_ADDRESS: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -152,7 +152,7 @@ jobs:
           context: .
           target: gum-server
           push: false
-          tags: payday-api:test
+          tags: gum-api:test
           cache-from: type=gha,scope=containers
           cache-to: type=gha,mode=max,scope=containers
       - uses: docker/build-push-action@v6
@@ -160,7 +160,7 @@ jobs:
           context: .
           target: gum-indexer
           push: false
-          tags: payday-indexer:test
+          tags: gum-indexer:test
           cache-from: type=gha,scope=containers
           cache-to: type=gha,mode=max,scope=containers
       - uses: docker/build-push-action@v6
@@ -168,7 +168,7 @@ jobs:
           context: .
           target: gum-signers
           push: false
-          tags: payday-signers:test
+          tags: gum-signers:test
           cache-from: type=gha,scope=containers
           cache-to: type=gha,mode=max,scope=containers
 

@@ -50,7 +50,7 @@ Being inside a sweep job (`sweep_job_id`) and needing an operator
 the status, not statuses; see `architecture.md` §1.
 
 A deposit request is denominated in one `currency`, `USDC` (default) or
-`USDT`, and only the exact contract the chain's `PAYDAY_CHAINS` entry lists
+`USDT`, and only the exact contract the chain's `GUM_CHAINS` entry lists
 for that currency is credited, on that chain; a transfer of another
 configured stablecoin to the address stays there for `recover(address)` to
 return. Every served stablecoin uses six decimal places. Production
@@ -72,13 +72,13 @@ serving USDC and USDT) and Anvil on 8546 (chain 31338, the L2-shaped
 
 The acquisition path has two halves over standard EVM JSON-RPC:
 
-The indexer runs one worker per `PAYDAY_CHAINS` entry, each with its own
-RPC (`PAYDAY_RPC_URL_<chain_id>`), cursor, advisory lock, and signal,
+The indexer runs one worker per `GUM_CHAINS` entry, each with its own
+RPC (`GUM_RPC_URL_<chain_id>`), cursor, advisory lock, and signal,
 watching every token contract the entry lists; `indexer_cursor` and
 `indexer_status` are keyed by chain alone.
 
 - **The reconciler** (the only writer) runs a pass every
-  `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` and immediately on a wake. A pass is
+  `GUM_INDEXER_RECONCILE_INTERVAL_MS` and immediately on a wake. A pass is
   one boundary header read (the entry's `finality_source`, `finalized` or
   `latest`, minus `finality_confirmations` blocks), one header read to
   verify the stored cursor hash, then, if the chain has anything to watch,
@@ -88,12 +88,12 @@ watching every token contract the entry lists; `indexer_cursor` and
   (500 per call), and a second range-end read that proves nothing
   moved while the logs were fetched. A chain with nothing to watch
   fast-forwards its cursor instead and sleeps
-  `PAYDAY_INDEXER_IDLE_INTERVAL_MS`. Deposits are classified by the
+  `GUM_INDEXER_IDLE_INTERVAL_MS`. Deposits are classified by the
   `blockTimestamp` the log itself carries, so a block with transfers costs
-  no extra request. Up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges drain
+  no extra request. Up to `GUM_INDEXER_MAX_RANGES_PER_TICK` ranges drain
   per pass, so a backlog clears independently of the cadence.
 - **The transfer signal** is a WebSocket `eth_subscribe` on the same node
-  (`PAYDAY_RPC_WS_URL_<chain_id>`, derived from the HTTP URL when unset)
+  (`GUM_RPC_WS_URL_<chain_id>`, derived from the HTTP URL when unset)
   for transfers of the chain's configured tokens whose recipient is one of
   our payment addresses, one subscription per chain, held
   only while the chain has something to watch. On Monad it uses `monadLogs`
@@ -103,7 +103,7 @@ watching every token contract the entry lists; `indexer_cursor` and
   a block time at a time until the block is behind the boundary. The signal
   never writes: a missed or duplicated notification costs latency, not
   correctness, and while the socket is down the reconciler simply runs on
-  `PAYDAY_INDEXER_POLL_INTERVAL_MS`.
+  `GUM_INDEXER_POLL_INTERVAL_MS`.
 
 Observations, deposit request projections, and the hash-bearing cursor commit
 atomically. Every transfer to a known deposit request address is retained: `credited`
@@ -122,7 +122,7 @@ skipped.
 
 - Rust, Foundry (`anvil`, `cast`, `forge`), Docker (it runs PostgreSQL and
   the MinIO attachment store), `just`, the PostgreSQL client, and `jq`.
-- Node.js 20 or newer, for the TypeScript SDK and the `payday.sh` web app.
+- Node.js 20 or newer, for the TypeScript SDK and the `gum.money` web app.
 
 Copy `.env.example` to `.env` if you want to override the checked-in local
 defaults. Start PostgreSQL, MinIO, Anvil, the development identity provider,
@@ -141,12 +141,12 @@ just seed                      # or: just seed you@example.test
 Merchant sign-in is Privy's, which has no local stand-in, so the seed writes
 an account and a key straight into the runner's database
 (`scripts/local-api-key.sh`) and prints the key; export it as
-`PAYDAY_API_KEY`. To sign in through the browser instead, run the web app
+`GUM_API_KEY`. To sign in through the browser instead, run the web app
 below: it signs in against the real development Privy app and the code
 arrives in your mailbox. Each run starts from a clean database,
 attachment store, and Anvil chains so their indexed histories cannot drift.
 After the bootstrap deploys the contracts on both Anvils, the runner reads
-their runtime bytecode from each chain and builds `PAYDAY_CHAINS` from it
+their runtime bytecode from each chain and builds `GUM_CHAINS` from it
 (overriding any `.env` value), because all three services verify the deployed
 contract generation, and each token's `decimals()`, `name()`, and
 `version()`, on every chain at startup and refuse to start on a mismatch.
@@ -159,7 +159,7 @@ cp web/.env.example web/.env.local
 just web
 ```
 
-It serves `http://127.0.0.1:3002`, which is what `PAYDAY_PUBLIC_BASE_URL`
+It serves `http://127.0.0.1:3002`, which is what `GUM_PUBLIC_BASE_URL`
 points at, so the `deposit_url` the API returns opens the real checkout and the
 gateway accepts the dashboard's cross-origin requests (the merchant routes
 answer only that origin). Port 3002 rather than 3001, which belongs to the
@@ -167,7 +167,7 @@ development identity provider. See [web/README.md](../web/README.md).
 
 For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_PRIVY_APP_ID`
 (the development Privy app, the same id the runner gives `gum-server` as
-`PAYDAY_PRIVY_APP_ID`; `http://127.0.0.1:3002` must be among that app's
+`GUM_PRIVY_APP_ID`; `http://127.0.0.1:3002` must be among that app's
 allowed domains) and `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
 `http://127.0.0.1:9000`, so the page may PUT PDFs there). The example file
 carries working local values. Payer and issuer-mailbox codes still come from
@@ -228,7 +228,7 @@ It deploys:
 - `MockStablecoin` as USDC: `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`
 - `BatchSweeper`: `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`
 - `MockStablecoin` as USDT: `0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9`
-  (account #0's nonce-3 CREATE address; `PAYDAY_USDT_ADDRESS` to the
+  (account #0's nonce-3 CREATE address; `GUM_USDT_ADDRESS` to the
   runner)
 
 `MockStablecoin` (`foundry/src/MockStablecoin.sol`, formerly `MockUSDC`)
@@ -240,7 +240,7 @@ both tokens on the first chain and USDC alone on the second, and hands the
 Relay stand-in both addresses as `RELAY_STUB_USDC` and `RELAY_STUB_USDT`.
 
 Pin the deployed generation for the services (the runner does this for
-you, per chain, when it builds `PAYDAY_CHAINS`); these are the two hashes
+you, per chain, when it builds `GUM_CHAINS`); these are the two hashes
 each registry entry carries:
 
 ```bash
@@ -257,23 +257,23 @@ finalize is waiting on, as described under
 [Attachments and the scan tag](#attachments-and-the-scan-tag).
 
 ```bash
-docker run -d --rm --name payday-minio \
-  -e MINIO_ROOT_USER=payday-local -e MINIO_ROOT_PASSWORD=payday-local -e MINIO_BROWSER=off \
+docker run -d --rm --name gum-minio \
+  -e MINIO_ROOT_USER=gum-local -e MINIO_ROOT_PASSWORD=gum-local -e MINIO_BROWSER=off \
   -p 127.0.0.1:9000:9000 quay.io/minio/minio server /data
 curl -fsS http://127.0.0.1:9000/minio/health/live
 docker run --rm --network host \
-  -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
-  quay.io/minio/mc mb --ignore-existing local/payday-attachments-local
+  -e MC_HOST_local=http://gum-local:gum-local@127.0.0.1:9000 \
+  quay.io/minio/mc mb --ignore-existing local/gum-attachments-local
 ```
 
-`.env.example` carries the matching `PAYDAY_ATTACHMENT_*` and `AWS_*` values.
+`.env.example` carries the matching `GUM_ATTACHMENT_*` and `AWS_*` values.
 
 ### 4. Build and start the services manually
 
-Ensure `.env` contains the database URL, `PAYDAY_CHAINS` (one entry per
+Ensure `.env` contains the database URL, `GUM_CHAINS` (one entry per
 Anvil, with the fixture addresses, its `tokens`, the two code hashes above,
 finality settings, and start block; `scripts/local-runner.sh`'s
-`chain_entry` builds one), `PAYDAY_RPC_URL_31337` and `PAYDAY_RPC_URL_31338`, signer and
+`chain_entry` builds one), `GUM_RPC_URL_31337` and `GUM_RPC_URL_31338`, signer and
 attestation keys, attachment store, and identity settings (the
 `.env.example` hash placeholders are zero and will be refused).
 Start the identity provider:
@@ -281,7 +281,7 @@ Start the identity provider:
 ```bash
 cargo build --workspace
 set -a; source .env; set +a
-./target/debug/payday-dev-identity
+./target/debug/gum-dev-identity
 ```
 
 Apply the schema, then start `gum-server` in another shell (services never
@@ -303,7 +303,7 @@ In two more terminals, once `gum-server` is ready:
 
 ```bash
 set -a; source .env; set +a
-PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gum-indexer   # health on 127.0.0.1:3011
+GUM_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gum-indexer   # health on 127.0.0.1:3011
 ```
 
 ```bash
@@ -319,7 +319,7 @@ Expirations must be at least ten minutes and at most a year ahead.
 
 ```bash
 curl -fsS http://127.0.0.1:3000/v1/deposit-requests \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+  -H "Authorization: Bearer $GUM_API_KEY" \
   -H "Content-Type: application/json" -H "Idempotency-Key: local-1" \
   -d '{"amount": "1.5", "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
        "issuer": {"name": "Local"}, "payer": {"name": "Payer"},
@@ -339,7 +339,7 @@ Copy `id` and, after the binding, `address` from `GET /v1/deposit-requests/{id}`
 then transfer 1.5 USDC (`1500000` atomic units) from the bound wallet:
 
 The `self_settlement` object contains the factory and salt needed for anyone
-to settle the deposit request on-chain if Payday is unavailable.
+to settle the deposit request on-chain if Gum is unavailable.
 
 ```bash
 cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
@@ -348,7 +348,7 @@ cast send 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
   --rpc-url http://127.0.0.1:8545
 
 curl -fsS "http://127.0.0.1:3000/v1/deposit-requests/<id>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+  -H "Authorization: Bearer $GUM_API_KEY" | jq
 ```
 
 The status should reach `settled` with `settlement_tx_hash` set. Verify the
@@ -378,8 +378,8 @@ path — set any other value on the object key,
 
 ```bash
 docker run --rm --network host \
-  -e MC_HOST_local=http://payday-local:payday-local@127.0.0.1:9000 \
-  quay.io/minio/mc tag set local/payday-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
+  -e MC_HOST_local=http://gum-local:gum-local@127.0.0.1:9000 \
+  quay.io/minio/mc tag set local/gum-attachments-local/uploads/<account_id>/<attachment_id>.pdf \
   'GuardDutyMalwareScanStatus=THREATS_FOUND'
 ```
 
@@ -415,12 +415,12 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 ## Configuration
 
 - `DATABASE_URL`
-- `PAYDAY_API_KEY` — CLI-only per-account bearer key for deposit requests
-- `PAYDAY_PRIVY_APP_ID` — the Privy app merchants sign in to; `gum-server`
+- `GUM_API_KEY` — CLI-only per-account bearer key for deposit requests
+- `GUM_PRIVY_APP_ID` — the Privy app merchants sign in to; `gum-server`
   verifies dashboard sessions against its published keys, fetched at startup
   (see `docs/authentication.md`). `just dev` sets the development app; unset,
   only API keys authenticate, which is how `just e2e` runs
-- `PAYDAY_PRIVY_APP_SECRET` — optional; unrelated to session verification.
+- `GUM_PRIVY_APP_SECRET` — optional; unrelated to session verification.
   Enables `POST /v1/wallets/pregenerate`, which the sign-up dialog calls the
   moment a merchant submits their email so Privy can create the embedded
   wallet in parallel with sending the code, instead of only starting once the
@@ -428,32 +428,32 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   anywhere, sign-in still creates the wallet itself; the dialog just waits
   slightly longer for it. Rate-limited to one request per email per 30
   seconds, in memory, bounded the same way the proof cache is
-- `PAYDAY_PAYER_AUTH0_ISSUER`, `PAYDAY_PAYER_AUTH0_AUDIENCE`,
-  `PAYDAY_PAYER_AUTH0_CLIENT_ID`, `PAYDAY_PAYER_REF_MASTER_KEY` — the payer
+- `GUM_PAYER_AUTH0_ISSUER`, `GUM_PAYER_AUTH0_AUDIENCE`,
+  `GUM_PAYER_AUTH0_CLIENT_ID`, `GUM_PAYER_REF_MASTER_KEY` — the payer
   email-verification audience and the payer-reference key, set together or not
   at all; `just dev` and `just e2e` point them at the development provider's
-  `payday-payer-local` client and audience
-- `PAYDAY_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
-  verification writes answer to; defaults to `PAYDAY_PUBLIC_BASE_URL`
-- `PAYDAY_RESEND_API_KEY` — optional; the Resend key that emails a payer
+  `gum-payer-local` client and audience
+- `GUM_HOSTED_CHECKOUT_ORIGIN` — the one browser origin the payer
+  verification writes answer to; defaults to `GUM_PUBLIC_BASE_URL`
+- `GUM_RESEND_API_KEY` — optional; the Resend key that emails a payer
   named with an `email` on a deposit request their link to it, from
-  `PAYDAY_PAYER_EMAIL_FROM` (default `Payday <contact@payday.sh>`). Unset,
+  `GUM_PAYER_EMAIL_FROM` (default `Gum <contact@gum.money>`). Unset,
   as `just dev` leaves it, the emails are queued in `notification_outbox`
   and never sent; set it against a Resend domain you control to see the
   real message
-- `PAYDAY_ADMIN_REVIEWER_ID` — recorded as the operator on
+- `GUM_ADMIN_REVIEWER_ID` — recorded as the operator on
   `POST /v1/admin/deposit-requests/{id}/release`; defaults to `operator`
-- `PAYDAY_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
+- `GUM_DEV_IDENTITY` — set to `1` only locally to permit a loopback HTTP
   issuer; non-loopback HTTP issuers remain rejected
-- `PAYDAY_DEV_IDENTITY_BIND` — loopback socket for the development provider
-- `PAYDAY_DEV_IDENTITY_ISSUER` — token issuer; must exactly match
-  `PAYDAY_PAYER_AUTH0_ISSUER`
-- `PAYDAY_DEV_IDENTITY_OTP` — the code the development provider emails for
+- `GUM_DEV_IDENTITY_BIND` — loopback socket for the development provider
+- `GUM_DEV_IDENTITY_ISSUER` — token issuer; must exactly match
+  `GUM_PAYER_AUTH0_ISSUER`
+- `GUM_DEV_IDENTITY_OTP` — the code the development provider emails for
   every payer or issuer-mailbox verification, instead of a random one it only
   prints to its log (`DEV IDENTITY OTP <email> <code>`). Local convenience
   only; the provider refuses to bind anything but loopback, and Auth0 issues
   the real codes
-- `PAYDAY_CHAINS` — the network registry all three services read: a JSON array
+- `GUM_CHAINS` — the network registry all three services read: a JSON array
   of `{chain_id, tokens, factory, batch_sweeper, factory_code_hash,
   batch_sweeper_code_hash, start_block, finality_source,
   finality_confirmations, block_time_ms, log_range_size,
@@ -473,100 +473,100 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   against `DOMAIN_SEPARATOR`), and refuse to start on
   a mismatch. `just dev` and `just e2e` build the two local entries from
   the running Anvils (`build_chain_registry` in `scripts/local-runner.sh`).
-  `signer_low_balance_wei` overrides `PAYDAY_SIGNER_LOW_BALANCE_WEI` for
+  `signer_low_balance_wei` overrides `GUM_SIGNER_LOW_BALANCE_WEI` for
   that chain. `cctp` is `{domain, token_messenger, message_transmitter,
   forwarder, forwarder_code_hash}`, Circle's CCTP V2 and the deployed
   `WithdrawalForwarder`; it requires USDC among the chain's `tokens`, and
   a chain without it (the local Anvils) serves same-chain withdrawals only.
   `finality_source` is `finalized` or `latest` (see
   `docs/indexer-architecture.md`)
-- `PAYDAY_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
+- `GUM_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
   (QuickNode in production, an Anvil locally); read by all three services
   (`gum-server` uses it for deployment verification and read-only chain
   queries; it never signs)
-- `PAYDAY_RPC_WS_URL_<chain_id>` — WebSocket endpoint for that chain's
+- `GUM_RPC_WS_URL_<chain_id>` — WebSocket endpoint for that chain's
   transfer signal; unset derives it from the HTTP URL (`https` → `wss`,
   `http` → `ws`, same host, path and token), `off` disables the signal
-- `PAYDAY_ONBOARDING_CHAIN_ID` — the chain the dashboard onboarding demo
+- `GUM_ONBOARDING_CHAIN_ID` — the chain the dashboard onboarding demo
   deposit binds and pays on; defaults to the first registry entry
-- `PAYDAY_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
+- `GUM_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
   deposit links point; `http://127.0.0.1:3002`
-  locally, `https://payday.sh` in production. Must be a bare origin, and HTTPS
+  locally, `https://gum.money` in production. Must be a bare origin, and HTTPS
   unless it is loopback
-- `PAYDAY_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
-- `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` — reconcile cadence while a chain
+- `GUM_INDEXER_MAX_RANGES_PER_TICK` — ranges drained per pass, default 20
+- `GUM_INDEXER_RECONCILE_INTERVAL_MS` — reconcile cadence while a chain
   has something to watch and its transfer signal is connected, default
   60000; the local runner uses 1000
-- `PAYDAY_INDEXER_POLL_INTERVAL_MS` — the indexer's pass cadence while the
+- `GUM_INDEXER_POLL_INTERVAL_MS` — the indexer's pass cadence while the
   signal is disconnected or disabled, default 2000
-- `PAYDAY_INDEXER_IDLE_INTERVAL_MS` — pass cadence for a chain with nothing
+- `GUM_INDEXER_IDLE_INTERVAL_MS` — pass cadence for a chain with nothing
   to watch, whose passes fast-forward the cursor without scanning, default
   300000; the local runner uses 2000
-- `PAYDAY_INDEXER_LATE_WATCH_DAYS` — how long a settled address stays in the
+- `GUM_INDEXER_LATE_WATCH_DAYS` — how long a settled address stays in the
   watch list, which the signal subscribes to and every range scan is
   filtered by, default 365; a late transfer outside the window is not seen
   and is returned by hand (`docs/runbooks/wrong-network-deposit.md`)
-- `PAYDAY_INDEXER_RPC_MAX_RPS` — paces outgoing RPC calls under the provider's
+- `GUM_INDEXER_RPC_MAX_RPS` — paces outgoing RPC calls under the provider's
   requests-per-second budget, default 40; 0 disables pacing (see
   [quicknode-rpc-limits.md](runbooks/quicknode-rpc-limits.md))
-- `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` — seconds without a receipt before a
+- `GUM_SWEEP_PENDING_TIMEOUT_SECS` — seconds without a receipt before a
   helper transaction is replaced on the same nonce, default 60
-- `PAYDAY_SWEEP_MAX_SUBMISSIONS` — replacements of one transaction before
+- `GUM_SWEEP_MAX_SUBMISSIONS` — replacements of one transaction before
   `gum-signers` publishes `ExecutionStalled` and stops raising fees
   (reconciliation continues), default 5
-- `PAYDAY_SWEEP_MAX_ATTEMPTS` — unclassified attempts before `gum-signers`
+- `GUM_SWEEP_MAX_ATTEMPTS` — unclassified attempts before `gum-signers`
   fails a job permanently, default 8. The server-side counterpart is
   `SweepPolicy::max_attempts` (5): unexplained item failures before the
   deposit request gets `attention_reason = retries_exhausted`
-- `PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS` — how often `gum-server` turns
+- `GUM_SWEEP_SCHEDULER_INTERVAL_MS` — how often `gum-server` turns
   funded requests into sweep jobs when not woken by the indexer, default 5000
-- `PAYDAY_SIGNERS_POLL_INTERVAL_MS` — `gum-signers` pass cadence when not
+- `GUM_SIGNERS_POLL_INTERVAL_MS` — `gum-signers` pass cadence when not
   woken by a command, default 2000; the local runner uses 250
-- `PAYDAY_SIGNERS_RPC_MAX_RPS` — as `PAYDAY_INDEXER_RPC_MAX_RPS`, for the
+- `GUM_SIGNERS_RPC_MAX_RPS` — as `GUM_INDEXER_RPC_MAX_RPS`, for the
   signers, default 20
-- `PAYDAY_INTERNAL_BIND_ADDR`, `PAYDAY_SERVER_INTERNAL_URL`,
-  `PAYDAY_INTERNAL_TOKEN` — `gum-server`'s internal listener, where the
+- `GUM_INTERNAL_BIND_ADDR`, `GUM_SERVER_INTERNAL_URL`,
+  `GUM_INTERNAL_TOKEN` — `gum-server`'s internal listener, where the
   indexer finds it, and the bearer token both read
-- `PAYDAY_INDEXER_LISTEN_ADDR`, `PAYDAY_SIGNERS_LISTEN_ADDR` — the two
+- `GUM_INDEXER_LISTEN_ADDR`, `GUM_SIGNERS_LISTEN_ADDR` — the two
   workers' `/health` listeners
-- `PAYDAY_CCTP_IRIS_URL` — Circle's attestation service the withdrawal relayer
+- `GUM_CCTP_IRIS_URL` — Circle's attestation service the withdrawal relayer
   polls for a bridge leg's burn, default `https://iris-api.circle.com`; the
   local Anvil chains have no `cctp` block, so nothing polls it there
-- `PAYDAY_RELAY_URL` and `PAYDAY_RELAY_API_KEY` — Relay (relay.link), for
+- `GUM_RELAY_URL` and `GUM_RELAY_API_KEY` — Relay (relay.link), for
   paying a deposit request from another network; `gum-server` reads them. Unset key:
   the hosted checkout does not offer it. `just dev` and `just e2e` point
   them at `scripts/relay-stub.mjs`, a stand-in on port 4020 that quotes a
   transfer of the local USDC or USDT (`RELAY_STUB_USDC`, `RELAY_STUB_USDT`)
   to its solver on the second Anvil and fills it on the first
-- `PAYDAY_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
+- `GUM_SIGNER_LOW_BALANCE_WEI` — threshold for the low-balance warning,
   default 0.05 native tokens; a chain's `signer_low_balance_wei` overrides it
-- `PAYDAY_SIGNER_KEYS` — the local/Anvil sweep signer pool, comma-separated
+- `GUM_SIGNER_KEYS` — the local/Anvil sweep signer pool, comma-separated
   private keys; every key keeps one helper transaction in flight, so N keys
   let N sweep batches or withdrawal steps run at once per chain. The runner
   uses Anvil account #0 plus mnemonic accounts #10 and #11 (Anvil starts
   with twelve accounts). Mutually exclusive with KMS
-- `PAYDAY_KMS_KEY_IDS` — production AWS KMS secp256k1 key ARNs,
+- `GUM_KMS_KEY_IDS` — production AWS KMS secp256k1 key ARNs,
   comma-separated, one per pool signer; `gum-signers` uses its ambient ECS
   task role for `kms:GetPublicKey` and `kms:Sign` on each. Only
   `gum-signers` reads either signer variable
-- `PAYDAY_ATTACHMENT_BUCKET` — S3 bucket holding deposit request PDFs;
-  `payday-attachments-local` on the runner's MinIO
-- `PAYDAY_ATTACHMENT_S3_ENDPOINT`, `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE` —
+- `GUM_ATTACHMENT_BUCKET` — S3 bucket holding deposit request PDFs;
+  `gum-attachments-local` on the runner's MinIO
+- `GUM_ATTACHMENT_S3_ENDPOINT`, `GUM_ATTACHMENT_S3_FORCE_PATH_STYLE` —
   optional endpoint override and path-style addressing, set locally to reach
   MinIO at `http://127.0.0.1:9000`; unset in production
-- `PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS` — lifetime of signed download URLs,
+- `GUM_ATTACHMENT_DOWNLOAD_TTL_SECS` — lifetime of signed download URLs,
   default 300
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` — MinIO's root
-  credentials locally (`payday-local`, region `us-east-1`); the ambient ECS
+  credentials locally (`gum-local`, region `us-east-1`); the ambient ECS
   task role in production
-- `PAYDAY_ATTESTATION_SIGNER_KEY` — local key signing Proof of Payment
+- `GUM_ATTESTATION_SIGNER_KEY` — local key signing Proof of Payment
   verification attestations (Anvil account #6, whose address
   `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
-  mutually exclusive with `PAYDAY_ATTESTATION_KMS_KEY_ID`, the production KMS
+  mutually exclusive with `GUM_ATTESTATION_KMS_KEY_ID`, the production KMS
   secp256k1 key ARN. Exactly one is required
-- `PAYDAY_ONBOARDING_PAYER_KEY` — local key that pays the dashboard onboarding
+- `GUM_ONBOARDING_PAYER_KEY` — local key that pays the dashboard onboarding
   walkthrough's one self-issued deposit request (Anvil account #1); mutually
-  exclusive with `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
+  exclusive with `GUM_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
   key. Unlike attestation, both may be unset in any environment, including
   production — that simply disables `POST /v1/deposit-requests/{id}/onboarding-deposit`
 
@@ -583,7 +583,7 @@ Terraform source is under `infra/`.
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.
 - One transaction is in flight per pool signer per chain; replacements
-  share its nonce. After `PAYDAY_SWEEP_MAX_SUBMISSIONS` unconfirmed
+  share its nonce. After `GUM_SWEEP_MAX_SUBMISSIONS` unconfirmed
   submissions `gum-signers` stops raising that lane's fees and alarms
   (`ExecutionStalled`) while still reconciling it every pass; the other
   signers and block indexing continue.

@@ -73,7 +73,7 @@ pub struct DeliveryAttemptResponse {
 #[derive(Serialize)]
 pub struct DeliveryResponse {
     id: WebhookDeliveryId,
-    /// The envelope `id` and `Payday-Event-Id` the delivery carried.
+    /// The envelope `id` and `Gum-Event-Id` the delivery carried.
     event_id: WebhookEventId,
     endpoint_id: WebhookId,
     /// `pending`, `delivered`, or `failed`.

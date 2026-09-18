@@ -1,4 +1,4 @@
-//! The stablecoins Payday accepts. A currency is the product-level asset a
+//! The stablecoins Gum accepts. A currency is the product-level asset a
 //! merchant prices in ("USDT"); on each chain it is one exact contract, named
 //! by the chain registry, whose own symbol may differ ("USDT0" on Monad).
 //!
@@ -6,7 +6,7 @@
 //! chains. USDC has CCTP, which burns on one chain and mints on another at
 //! exactly 1:1, so a USDC request may be paid on any supported chain and the
 //! merchant withdraws to whichever chain they like. Nothing else has such a
-//! path, and Payday never gives a merchant a rate worse than 1:1, so every
+//! path, and Gum never gives a merchant a rate worse than 1:1, so every
 //! other currency's request pins the chain it settles on and withdraws on
 //! that chain alone. A payer may still pay from another chain through Relay:
 //! the spread there is the payer's.

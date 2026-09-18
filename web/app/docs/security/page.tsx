@@ -14,33 +14,33 @@ import {
 } from "@/components/docs/prose";
 
 export const metadata: Metadata = {
-  title: "How Payday works",
+  title: "How Gum works",
   description:
-    "The architecture and security properties of Payday, written for a customer doing due diligence: no custody, terms fixed in the address, finality-gated crediting, and how credentials are handled.",
+    "The architecture and security properties of Gum, written for a customer doing due diligence: no custody, terms fixed in the address, finality-gated crediting, and how credentials are handled.",
 };
 
 export default function SecurityPage() {
   return (
     <DocsPage
       eyebrow="Trust"
-      title="How Payday works"
-      lead="What happens between a deposit request and a settled deposit, and the properties that hold along the way. Written for the person deciding whether to build on Payday, with as much detail as that decision needs."
+      title="How Gum works"
+      lead="What happens between a deposit request and a settled deposit, and the properties that hold along the way. Written for the person deciding whether to build on Gum, with as much detail as that decision needs."
     >
       <H2 id="in-one-paragraph">In one paragraph</H2>
       <p>
-        Payday never holds funds. Each request gets a one-time smart-contract address whose
+        Gum never holds funds. Each request gets a one-time smart-contract address whose
         settlement terms are fixed before it exists, derived from the issued document and the
         payer&apos;s own signature. A finality-gated indexer reads stablecoin transfer events from the
         chain into a durable ledger and updates each request from that ledger. When a request is
         funded or expires, a settlement transaction executes the contract, which can only move the
         funds under its own fixed terms: the amount to your wallet, and anything else to the
         payer&apos;s wallet. Every step is recorded, and a settled request yields a proof that can
-        be checked without Payday.
+        be checked without Gum.
       </p>
 
       <H2 id="no-custody">No custody</H2>
       <Compare>
-        <CompareItem title="What Payday holds" badge={<Pill tone="green">nothing of yours</Pill>}>
+        <CompareItem title="What Gum holds" badge={<Pill tone="green">nothing of yours</Pill>}>
           <ul>
             <li>Your deposit requests, customers, and identities</li>
             <li>A ledger of every observed transfer</li>
@@ -49,7 +49,7 @@ export default function SecurityPage() {
           </ul>
         </CompareItem>
         <CompareItem
-          title="What Payday never holds"
+          title="What Gum never holds"
           badge={<Pill tone="yellow">by construction</Pill>}
         >
           <ul>
@@ -70,7 +70,7 @@ export default function SecurityPage() {
       <H2 id="terms-fixed-in-the-address">Terms fixed in the address</H2>
       <p>
         The one-time address is a CREATE3 address: it depends on a factory contract and a salt, and
-        the contract that will live there is deployed only when it is time to settle. Payday derives
+        the contract that will live there is deployed only when it is time to settle. Gum derives
         the salt from two things: the hash of the issued document, canonicalized with RFC 8785 so
         that the same document always hashes the same way, and the EIP-712 digest of the
         payer&apos;s wallet attestation over that hash.
@@ -101,7 +101,7 @@ export default function SecurityPage() {
 
       <H2 id="detection">Detection and crediting</H2>
       <p>
-        Payday runs its own indexer against the chain. It does not download blocks or trust a
+        Gum runs its own indexer against the chain. It does not download blocks or trust a
         third-party notification; it queries each served stablecoin contract&apos;s{" "}
         <code>Transfer</code> event
         logs for the addresses it is expecting, in bounded block ranges, up to the chain&apos;s
@@ -159,7 +159,7 @@ export default function SecurityPage() {
           <tr>
             <td>Chain time</td>
             <td>
-              Deadlines are judged by block timestamp, not by any clock Payday or the payer holds.
+              Deadlines are judged by block timestamp, not by any clock Gum or the payer holds.
             </td>
           </tr>
           <tr>
@@ -184,13 +184,13 @@ export default function SecurityPage() {
       </p>
       <p>
         Because the contract enforces this, a settlement transaction submitted by anyone, including
-        a payer or an auditor holding the salt, has the same effect. Payday&apos;s worker exists so
+        a payer or an auditor holding the salt, has the same effect. Gum&apos;s worker exists so
         that no one has to.
       </p>
 
       <H2 id="verification">Verification</H2>
       <p>
-        Payday separates who a payer is from which wallet paid, and is precise about which of the
+        Gum separates who a payer is from which wallet paid, and is precise about which of the
         two it vouches for.
       </p>
       <Table>
@@ -205,15 +205,15 @@ export default function SecurityPage() {
           <tr>
             <td>The mailbox was opened</td>
             <td>
-              A one-time code from an established identity provider, exchanged by Payday. The payer
+              A one-time code from an established identity provider, exchanged by Gum. The payer
               never names an address; it goes to the one you asserted.
             </td>
-            <td>Payday attests it, signed into the proof.</td>
+            <td>Gum attests it, signed into the proof.</td>
           </tr>
           <tr>
             <td>Your application released the secret</td>
             <td>A single-use client secret, stored hashed, spent on first exchange.</td>
-            <td>Payday attests it; the reference is your assertion.</td>
+            <td>Gum attests it; the reference is your assertion.</td>
           </tr>
           <tr>
             <td>This wallet committed to this request</td>
@@ -233,7 +233,7 @@ export default function SecurityPage() {
       <p>
         The result is the <Link href="/docs/proof-of-payment">Proof of Payment</Link>: the
         recomputable parts are recomputable, the attested parts are signed and bound to that request
-        and that payer, and Payday declines to issue a proof it cannot stand behind.
+        and that payer, and Gum declines to issue a proof it cannot stand behind.
       </p>
 
       <H2 id="credentials">Credentials and secrets</H2>
@@ -250,15 +250,15 @@ export default function SecurityPage() {
       <H3 id="merchant-sign-in">Merchant sign-in</H3>
       <p>
         Merchants sign in through an established wallet-and-identity provider with an emailed code.
-        The provider creates the account&apos;s embedded wallet and holds its key material; Payday
+        The provider creates the account&apos;s embedded wallet and holds its key material; Gum
         verifies the provider&apos;s signed identity token on every request with the provider&apos;s
-        published keys, and refuses to start if it cannot fetch them. Payday never sees a password
+        published keys, and refuses to start if it cannot fetch them. Gum never sees a password
         and never holds a merchant&apos;s wallet key.
       </p>
       <H3 id="payer-sessions">Payer sessions and codes</H3>
       <ul>
         <li>
-          Verification codes are created and checked by the identity provider; Payday sees the code
+          Verification codes are created and checked by the identity provider; Gum sees the code
           only to pass it on, and stores neither it nor the mailbox beyond the proof it needs.
         </li>
         <li>Session tokens are opaque, 24-hour, stored hashed, and bound to one request.</li>
@@ -277,7 +277,7 @@ export default function SecurityPage() {
       <H3 id="attachments">Attachments</H3>
       <p>
         PDFs go straight to object storage through a presigned, write-once upload. They are scanned
-        for malware before they can be attached, hashed by Payday from the stored bytes, and pinned
+        for malware before they can be attached, hashed by Gum from the stored bytes, and pinned
         to the exact object version admitted. A rejected file is deleted.
       </p>
 
@@ -320,7 +320,7 @@ export default function SecurityPage() {
       </ul>
 
       <Callout title="Questions for a security review">
-        Write to <a href="mailto:support@payday.sh">support@payday.sh</a>. We are glad to walk
+        Write to <a href="mailto:support@gum.money">support@gum.money</a>. We are glad to walk
         through any of the above in more depth, share the contract sources, or run a live settlement
         with you on the sandbox.
       </Callout>

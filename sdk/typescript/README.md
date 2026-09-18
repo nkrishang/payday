@@ -9,7 +9,7 @@ npm install @gum/sdk
 ```ts
 import { GumClient } from "@gum/sdk";
 
-const gum = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const gum = new GumClient({ apiKey: process.env.GUM_API_KEY! });
 const depositRequest = await gum.depositRequests.create({
   amount: "10.00",
   payout_address: "0x1111111111111111111111111111111111111111",
@@ -201,8 +201,8 @@ document against its leg so a wrong document is refused rather than signed.
 import { GumClient } from "@gum/sdk";
 import { privateKeySigner, signWithdrawal } from "@gum/sdk/signing";
 
-const gum = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
-const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
+const gum = new GumClient({ apiKey: process.env.GUM_API_KEY! });
+const signer = await privateKeySigner(process.env.GUM_WALLET_KEY!);
 
 let withdrawal = await gum.withdrawals.create(
   { currency: "USDC", destination: { chain_id: "8453", address: "0x1111111111111111111111111111111111111111" } },
@@ -231,7 +231,7 @@ anything but USDC — a USDT withdrawal has a single transfer leg on the
 destination network. These checks are the security boundary.
 `withdrawals.list`, `withdrawals.get`, and `withdrawals.cancel` round out the
 namespace. The full guide, with Rust and Go samples, is at
-https://payday.sh/docs/withdrawals.
+https://gum.money/docs/withdrawals.
 
 ## Building your own checkout
 
@@ -278,7 +278,7 @@ creation, in which case `networks` holds that one entry and `chain` and
 `token` name it from the start while `address` still waits for the wallet;
 pass the
 session token from verification as `payerSession` and it travels in the
-`Payday-Payer-Session` header. The response deliberately carries no merchant
+`Gum-Payer-Session` header. The response deliberately carries no merchant
 data — no payout or recovery address, metadata, customer, or policy
 assertions; only a masked `expected_email_hint`. Once the address exists,
 `payer.relay.chains(id)` lists the networks the attested wallet may pay

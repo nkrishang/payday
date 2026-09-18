@@ -79,7 +79,7 @@ export interface PublicCctp {
  * explorerUrl?, nativeSymbol?, confirmation?, cctp?}`, in the order the
  * checkout offers the networks, where `tokens` is `[{currency, address,
  * symbol?, decimals?}]`. Must list the same chains and contracts as
- * gatewayd's PAYDAY_CHAINS.
+ * gatewayd's GUM_CHAINS.
  */
 function parseChains(raw: string): PublicChain[] {
   let parsed: unknown;
@@ -199,9 +199,9 @@ const attachmentUploadOrigin = process.env.NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN;
 const payerAppealEmail = process.env.NEXT_PUBLIC_PAYER_APPEAL_EMAIL;
 
 export const config = {
-  /** Origin of the Payday API, e.g. https://api.payday.sh. */
+  /** Origin of the Gum API, e.g. https://api.gum.money. */
   apiUrl: trimTrailingSlash(
-    required(process.env.NEXT_PUBLIC_PAYDAY_API_URL, "NEXT_PUBLIC_PAYDAY_API_URL"),
+    required(process.env.NEXT_PUBLIC_GUM_API_URL, "NEXT_PUBLIC_GUM_API_URL"),
   ),
   /** The networks this deployment offers, in the order the checkout lists them. */
   chains,

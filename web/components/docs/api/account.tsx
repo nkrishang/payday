@@ -51,8 +51,8 @@ export const ACCOUNT_GROUP: EndpointGroup = {
         ],
       },
       examples: {
-        curl: `curl -fsS "$API/v1/account" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const account = await payday.account.get();`,
+        curl: `curl -fsS "$API/v1/account" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const account = await gum.account.get();`,
         response: ACCOUNT,
       },
     },
@@ -91,10 +91,10 @@ export const ACCOUNT_GROUP: EndpointGroup = {
   -H "Authorization: Bearer $DASHBOARD_SESSION_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{ "expected_generation": 3 }'`,
-        ts: `const payday = new GumClient({ accessToken: identityToken });
-const issued = await payday.account.issueApiKey(account.generation);`,
+        ts: `const gum = new GumClient({ accessToken: identityToken });
+const issued = await gum.account.issueApiKey(account.generation);`,
         response: `{
-  "api_key": "payday_live_…",
+  "api_key": "gum_live_…",
   "generation": 4,
   "replaced_previous_key": true
 }`,
@@ -120,7 +120,7 @@ const issued = await payday.account.issueApiKey(account.generation);`,
   -H "Authorization: Bearer $DASHBOARD_SESSION_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{ "expected_generation": 4 }'`,
-        ts: `await payday.account.revokeApiKey(account.generation);`,
+        ts: `await gum.account.revokeApiKey(account.generation);`,
         response: `HTTP/1.1 204 No Content`,
         responseLang: "http",
       },
@@ -151,8 +151,8 @@ export const STATUS_GROUP: EndpointGroup = {
       },
       answers: [{ status: 503, when: "State unreadable." }],
       examples: {
-        curl: `curl -fsS "$API/v1/status" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const status = await payday.status();`,
+        curl: `curl -fsS "$API/v1/status" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const status = await gum.status();`,
         response: `{
   "chains": [
     {

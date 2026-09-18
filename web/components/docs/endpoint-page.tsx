@@ -19,7 +19,7 @@ const AUTH: Record<Auth, { icon: typeof KeyRound; label: string; detail: string 
   payer_session: {
     icon: Lock,
     label: "Unauthenticated",
-    detail: "Payday-Payer-Session unlocks gated content.",
+    detail: "Gum-Payer-Session unlocks gated content.",
   },
 };
 

@@ -606,7 +606,7 @@ export interface AttachmentCommitment { id: string; byte_length: string; sha256:
  * attestation rather than through this document.
  */
 export interface CanonicalIssuanceSnapshot {
-  schema: "payday.invoice.v4";
+  schema: "gum.invoice.v4";
   canonicalization: "RFC8785";
   issuer: Party;
   bill_to: Party;
@@ -630,7 +630,7 @@ export interface CanonicalIssuanceSnapshot {
  * The payer's wallet attestation as the proof carries it: the exact typed
  * data the wallet signed (under the chosen chain's domain), its EIP-712
  * digest, and the signature. The proof's salt is
- * `keccak256("PAYDAY_SALT_V3" || attribution_hash || digest)` and the wallet
+ * `keccak256("GUM_SALT_V3" || attribution_hash || digest)` and the wallet
  * is the address's recovery term.
  */
 export interface PayerWalletAttestation {
@@ -644,7 +644,7 @@ export interface PayerWalletAttestation {
 /** One fact Gum observed: the proven mailbox or the accepted wallet signature. */
 export interface VerificationFact {
   kind: "mailbox" | "merchant_session" | "wallet";
-  provider: "auth0" | "merchant" | "payday";
+  provider: "auth0" | "merchant" | "gum";
   at: string;
 }
 
@@ -716,7 +716,7 @@ export interface VerificationAttestationPayload {
   facts: VerificationFact[];
 }
 
-/** Payday-attested, not address-committed: verification happens after issuance. */
+/** Gum-attested, not address-committed: verification happens after issuance. */
 export interface SignedVerificationAttestation {
   payload: VerificationAttestationPayload;
   signer: string;
@@ -877,11 +877,11 @@ export class GumError extends Error {
   }
 }
 
-const DEFAULT_BASE_URL = "https://api.payday.sh";
+const DEFAULT_BASE_URL = "https://api.gum.money";
 const DEFAULT_SCAN_TIMEOUT_MS = 120_000;
 const SCAN_POLL_INITIAL_MS = 1_000;
 const SCAN_POLL_MAX_MS = 8_000;
-const PAYER_SESSION_HEADER = "Payday-Payer-Session";
+const PAYER_SESSION_HEADER = "Gum-Payer-Session";
 
 interface RequestOptions {
   method?: string;
@@ -1363,7 +1363,7 @@ export class GumClient {
  * A deposit link is intentionally open: anyone holding it may view the deposit
  * request and fulfil it. These routes accept no API key, so never pass a secret here.
  * A payer session token, obtained by completing verification on a gated
- * deposit request, travels in `Payday-Payer-Session` and unlocks the withheld content.
+ * deposit request, travels in `Gum-Payer-Session` and unlocks the withheld content.
  */
 export class GumPayerClient {
   private readonly baseUrl: string;

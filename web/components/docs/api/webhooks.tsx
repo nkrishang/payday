@@ -2,7 +2,7 @@ import type { EndpointGroup } from "./types";
 
 const WEBHOOK = `{
   "id": "wh_0198f80c-3333-7dc1-a369-90556a64f700",
-  "url": "https://example.com/payday/webhook",
+  "url": "https://example.com/gum/webhook",
   "created_at": "2026-09-06T12:00:00Z",
   "disabled_at": null
 }`;
@@ -40,10 +40,10 @@ export const WEBHOOKS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS "$API/v1/webhooks" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{ "url": "https://example.com/payday/webhook" }'`,
-        ts: `const endpoint = await payday.webhooks.add("https://example.com/payday/webhook");`,
+  -d '{ "url": "https://example.com/gum/webhook" }'`,
+        ts: `const endpoint = await gum.webhooks.add("https://example.com/gum/webhook");`,
         response: WEBHOOK.replace('"created_at"', '"secret": "whsec_…",\n  "created_at"'),
         responseTitle: "201 Created",
       },
@@ -57,8 +57,8 @@ export const WEBHOOKS: EndpointGroup = {
       summary: "Lists active endpoints. Secrets omitted.",
       response: { description: "{ webhooks: Webhook[] }." },
       examples: {
-        curl: `curl -fsS "$API/v1/webhooks" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { webhooks } = await payday.webhooks.list();`,
+        curl: `curl -fsS "$API/v1/webhooks" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { webhooks } = await gum.webhooks.list();`,
         response: `{
   "webhooks": [ ${WEBHOOK.replace(/\n/g, "\n    ")} ]
 }`,
@@ -75,8 +75,8 @@ export const WEBHOOKS: EndpointGroup = {
       response: { description: "Webhook." },
       answers: [{ status: 404, code: "webhook_not_found", when: "" }],
       examples: {
-        curl: `curl -fsS "$API/v1/webhooks/wh_0198f80c-…" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const endpoint = await payday.webhooks.get(id);`,
+        curl: `curl -fsS "$API/v1/webhooks/wh_0198f80c-…" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const endpoint = await gum.webhooks.get(id);`,
         response: WEBHOOK,
       },
     },
@@ -91,8 +91,8 @@ export const WEBHOOKS: EndpointGroup = {
       response: { description: "204 No Content." },
       examples: {
         curl: `curl -fsS -X DELETE "$API/v1/webhooks/wh_0198f80c-…" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `await payday.webhooks.remove(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `await gum.webhooks.remove(id);`,
         response: `HTTP/1.1 204 No Content`,
         responseLang: "http",
       },
@@ -112,8 +112,8 @@ export const WEBHOOKS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/webhooks/wh_0198f80c-…/test" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { delivery_id } = await payday.webhooks.test(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { delivery_id } = await gum.webhooks.test(id);`,
         response: `{
   "delivery_id": "whd_0198f80c-5555-7dc1-a369-90556a64f700"
 }`,
@@ -135,7 +135,7 @@ export const WEBHOOKS: EndpointGroup = {
       response: {
         fields: [
           { name: "id", type: "whd_ id", description: "" },
-          { name: "event_id", type: "evt_ id", description: "Also sent as Payday-Event-Id." },
+          { name: "event_id", type: "evt_ id", description: "Also sent as Gum-Event-Id." },
           { name: "endpoint_id", type: "wh_ id", description: "" },
           {
             name: "state",
@@ -161,8 +161,8 @@ export const WEBHOOKS: EndpointGroup = {
       },
       examples: {
         curl: `curl -fsS "$API/v1/webhook-deliveries?endpoint_id=wh_0198f80c-…&limit=20" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const page = await payday.webhooks.deliveries({ endpoint_id: id, limit: 20 });`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const page = await gum.webhooks.deliveries({ endpoint_id: id, limit: 20 });`,
         response: `{
   "deliveries": [
     {

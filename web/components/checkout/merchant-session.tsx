@@ -4,7 +4,7 @@ import { GumError } from "@gum/sdk";
 import { Loader2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { takeClientSecret } from "@/lib/client-secret";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 /**
  * Where a merchant-session checkout stands with its client secret. The

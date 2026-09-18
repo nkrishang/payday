@@ -1,4 +1,4 @@
-//! The onboarding walkthrough's one real on-chain transfer: Payday paying
+//! The onboarding walkthrough's one real on-chain transfer: Gum paying
 //! its own first, self-issued deposit request so a brand new merchant sees
 //! the whole product — a real invoice, a real transfer, real settlement —
 //! before they have a real customer of their own.
@@ -45,7 +45,7 @@ impl OnboardingPayerSigner {
             OnboardingPayerSignerConfig::Local(key) => {
                 let signer: PrivateKeySigner = key
                     .parse()
-                    .map_err(|error| format!("invalid PAYDAY_ONBOARDING_PAYER_KEY: {error}"))?;
+                    .map_err(|error| format!("invalid GUM_ONBOARDING_PAYER_KEY: {error}"))?;
                 (signer.address(), Backend::Local(signer))
             }
             OnboardingPayerSignerConfig::AwsKms(key_id) => {
@@ -53,7 +53,7 @@ impl OnboardingPayerSigner {
                 let signer = AwsSigner::new(kms, key_id.clone(), Some(chain_id))
                     .await
                     .map_err(|error| {
-                        format!("failed to initialize PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID: {error}")
+                        format!("failed to initialize GUM_ONBOARDING_PAYER_KMS_KEY_ID: {error}")
                     })?;
                 (signer.address(), Backend::Kms(signer))
             }

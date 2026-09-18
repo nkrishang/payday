@@ -138,7 +138,7 @@ prefixed_id!(
     WebhookDeliveryId, "whd_", "webhook delivery"
 );
 prefixed_id!(
-    /// One event, as the webhook envelope's `id` and the `Payday-Event-Id`
+    /// One event, as the webhook envelope's `id` and the `Gum-Event-Id`
     /// header carry it; the idempotency key for a handler.
     WebhookEventId, "evt_", "webhook event"
 );

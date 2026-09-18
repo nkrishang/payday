@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
-# A real deposit, end to end, against a live Payday API: issue a deposit
+# A real deposit, end to end, against a live Gum API: issue a deposit
 # request, bind the payer's wallet exactly as the hosted checkout does, pay
 # it on-chain, wait for finalized settlement, and check the Proof of Payment.
-# Staging by default (docs/staging.md); production with PAYDAY_API_URL and a
+# Staging by default (docs/staging.md); production with GUM_API_URL and a
 # live key, as the launch check in docs/production-runbook.md.
 #
 # The payout address defaults to the paying wallet, so the stablecoin comes straight
 # back and the run costs only gas. Required:
-#   PAYDAY_API_KEY   a merchant API key minted in the dashboard
-#   PAYDAY_RPC_URL   an HTTPS Monad RPC the payer wallet sends through
+#   GUM_API_KEY   a merchant API key minted in the dashboard
+#   GUM_RPC_URL   an HTTPS Monad RPC the payer wallet sends through
 #   PAYER_KEY        the private key of a wallet holding the currency and MON
-#   PAYDAY_CURRENCY  USDC (default) or USDT; USDT pins the request to CHAIN_ID
+#   GUM_CURRENCY  USDC (default) or USDT; USDT pins the request to CHAIN_ID
 set -euo pipefail
 
-API_URL="${PAYDAY_API_URL:-https://api.staging.payday.sh}"
-RPC_URL="${PAYDAY_RPC_URL:?set PAYDAY_RPC_URL to an HTTPS Monad RPC endpoint}"
-: "${PAYDAY_API_KEY:?set PAYDAY_API_KEY to a merchant key minted in the dashboard}"
+API_URL="${GUM_API_URL:-https://api.staging.gum.money}"
+RPC_URL="${GUM_RPC_URL:?set GUM_RPC_URL to an HTTPS Monad RPC endpoint}"
+: "${GUM_API_KEY:?set GUM_API_KEY to a merchant key minted in the dashboard}"
 PAYER_KEY="${PAYER_KEY:?set PAYER_KEY to the private key of a wallet holding the currency and MON}"
-CURRENCY="${PAYDAY_CURRENCY:-USDC}"
+CURRENCY="${GUM_CURRENCY:-USDC}"
 case "$CURRENCY" in
-  USDC) TOKEN="${PAYDAY_TOKEN_ADDRESS:-0x754704Bc059F8C67012fEd69BC8A327a5aafb603}" ;;  # Monad USDC
-  USDT) TOKEN="${PAYDAY_TOKEN_ADDRESS:-0xe7cd86e13AC4309349F30B3435a9d337750fC82D}" ;;  # Monad USDT0
-  *) echo "PAYDAY_CURRENCY must be USDC or USDT" >&2; exit 1 ;;
+  USDC) TOKEN="${GUM_TOKEN_ADDRESS:-0x754704Bc059F8C67012fEd69BC8A327a5aafb603}" ;;  # Monad USDC
+  USDT) TOKEN="${GUM_TOKEN_ADDRESS:-0xe7cd86e13AC4309349F30B3435a9d337750fC82D}" ;;  # Monad USDT0
+  *) echo "GUM_CURRENCY must be USDC or USDT" >&2; exit 1 ;;
 esac
 USDC="$TOKEN"
-CHAIN_ID="${PAYDAY_CHAIN_ID:-143}"
+CHAIN_ID="${GUM_CHAIN_ID:-143}"
 # The origin the hosted checkout runs on; the wallet routes answer only it.
-CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-http://127.0.0.1:3002}"
+CHECKOUT_ORIGIN="${GUM_HOSTED_CHECKOUT_ORIGIN:-http://127.0.0.1:3002}"
 AMOUNT="${AMOUNT:-0.01}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-900}"
 # The attestor address published for this environment; checked when set.
-ATTESTOR="${PAYDAY_ATTESTOR:-}"
+ATTESTOR="${GUM_ATTESTOR:-}"
 # With LATE_TRANSFER=1, a second transfer after settlement must come back.
 LATE_TRANSFER="${LATE_TRANSFER:-0}"
 
@@ -40,7 +40,7 @@ done
 
 PAYER="$(cast wallet address --private-key "$PAYER_KEY")"
 PAYOUT_ADDRESS="${PAYOUT_ADDRESS:-$PAYER}"
-logs="$(mktemp -d "${TMPDIR:-/tmp}/payday-live-smoke.XXXXXX")"
+logs="$(mktemp -d "${TMPDIR:-/tmp}/gum-live-smoke.XXXXXX")"
 trap 'rm -rf "$logs"' EXIT
 
 merchant() {
@@ -48,11 +48,11 @@ merchant() {
   shift $(($# < 3 ? $# : 3))
   if [[ -n "$body" ]]; then
     curl --fail --silent --show-error --request "$method" \
-      --header "Authorization: Bearer $PAYDAY_API_KEY" \
+      --header "Authorization: Bearer $GUM_API_KEY" \
       --header "Content-Type: application/json" --data "$body" "$@" "$API_URL$path"
   else
     curl --fail --silent --show-error --request "$method" \
-      --header "Authorization: Bearer $PAYDAY_API_KEY" "$@" "$API_URL$path"
+      --header "Authorization: Bearer $GUM_API_KEY" "$@" "$API_URL$path"
   fi
 }
 
@@ -60,7 +60,7 @@ payer_post() {
   local path=$1 body=$2 session=${3:-}
   local -a session_header=()
   if [[ -n "$session" ]]; then
-    session_header=(--header "Payday-Payer-Session: $session")
+    session_header=(--header "Gum-Payer-Session: $session")
   fi
   curl --fail --silent --show-error --request POST \
     --header "Origin: $CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
@@ -106,7 +106,7 @@ wait_for() {
   fail "$id never reached '$description' within ${TIMEOUT_SECS}s; last: $(jq -c . <<<"$view")"
 }
 
-echo "Payday live smoke test"
+echo "Gum live smoke test"
 echo "  API:     $API_URL"
 echo "  chain:   $CHAIN_ID, $CURRENCY $TOKEN"
 echo "  payer:   $PAYER"
@@ -132,11 +132,11 @@ run_id="live-smoke-$(date +%s)-$RANDOM"
 body="$(jq -cn --arg payout "$PAYOUT_ADDRESS" --arg amount "$AMOUNT" --arg ref "$run_id" \
   --arg currency "$CURRENCY" --arg chain "$CHAIN_ID" \
   '{amount: $amount, currency: $currency, payout_address: $payout, expires_in: 3600, reference: $ref,
-    issuer: {name: "Payday"}, payer: {name: "Live smoke test"},
+    issuer: {name: "Gum"}, payer: {name: "Live smoke test"},
     payer_policy: {mode: "permissionless"}}
    + (if $currency == "USDT" then {chain_id: $chain} else {} end)')"
 created="$(curl --fail --silent --show-error --request POST \
-  --header "Authorization: Bearer $PAYDAY_API_KEY" \
+  --header "Authorization: Bearer $GUM_API_KEY" \
   --header "Content-Type: application/json" \
   --header "Idempotency-Key: $run_id" \
   --data "$body" "$API_URL/v1/deposit-requests")"
@@ -189,7 +189,7 @@ echo "settled in $(jq -r .settlement_tx_hash <<<"$settled")"
 # 5. The Proof of Payment names this wallet, this address, and the settlement.
 proof="$(merchant GET "/v1/deposit-requests/$id/proof")"
 jq -e --arg payer "$(lower "$PAYER")" --arg address "$(lower "$address")" \
-  '.version == "payday.proof.v4"
+  '.version == "gum.proof.v4"
    and (.payment_address | ascii_downcase) == $address
    and (.payer_wallet.address | ascii_downcase) == $payer
    and .payer_wallet.typed_data.primaryType == "PayerAttestation"

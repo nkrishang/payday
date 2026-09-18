@@ -9,11 +9,11 @@ export const metadata: Metadata = {
   description: "Mint an API key, issue a deposit request, share the link, and watch it settle.",
 };
 
-const CREATE_CURL = `export API=https://api.payday.sh
-export PAYDAY_API_KEY=payday_live_...
+const CREATE_CURL = `export API=https://api.gum.money
+export GUM_API_KEY=gum_live_...
 
 curl -fsS "$API/v1/deposit-requests" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: order-1042" \\
   -d '{
@@ -29,9 +29,9 @@ curl -fsS "$API/v1/deposit-requests" \\
 
 const CREATE_TS = `import { GumClient } from "@gum/sdk";
 
-const payday = new GumClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const gum = new GumClient({ apiKey: process.env.GUM_API_KEY! });
 
-const request = await payday.depositRequests.create(
+const request = await gum.depositRequests.create(
   {
     amount: "25.00",
     payout_address: "0x1111111111111111111111111111111111111111",
@@ -49,7 +49,7 @@ console.log(request.id, request.deposit_url);`;
 
 const CREATE_RESPONSE = `{
   "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "deposit_url": "https://payday.sh/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "deposit_url": "https://gum.money/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "status": "awaiting_deposit",
   "amount": "25.000000",
   "amount_base_units": "25000000",
@@ -72,17 +72,17 @@ const CREATE_RESPONSE = `{
 }`;
 
 const POLL_CURL = `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…?wait_for=change&timeout=30" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   | jq '{status, address, received, settlement_tx_hash}'`;
 
 const POLL_TS = `// Returns when the request changes, or after 30 seconds.
-const latest = await payday.depositRequests.get(request.id, { waitForChange: true });
+const latest = await gum.depositRequests.get(request.id, { waitForChange: true });
 console.log(latest.status, latest.address, latest.received);`;
 
 const PROOF_CURL = `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/proof" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" > proof.json`;
+  -H "Authorization: Bearer $GUM_API_KEY" > proof.json`;
 
-const PROOF_TS = `const proof = await payday.depositRequests.proof(request.id);
+const PROOF_TS = `const proof = await gum.depositRequests.proof(request.id);
 await fs.writeFile("proof.json", JSON.stringify(proof, null, 2));`;
 
 export default function QuickstartPage() {
@@ -101,20 +101,20 @@ export default function QuickstartPage() {
       <Steps>
         <Step title="Sign in and mint an API key">
           <p>
-            Open <a href="https://payday.sh">payday.sh</a>, choose <strong>Start Building</strong>,
+            Open <a href="https://gum.money">gum.money</a>, choose <strong>Start Building</strong>,
             and enter the code emailed to you. The account is created the first time a code is
             accepted, with its own wallet where deposits settle by default.
           </p>
           <p>
             In the dashboard&apos;s <strong>API key</strong> section, generate a key. It is shown
-            exactly once. Store it as <code>PAYDAY_API_KEY</code> in your server&apos;s secret
+            exactly once. Store it as <code>GUM_API_KEY</code> in your server&apos;s secret
             store, never in a browser or a repository. A key has full authority over the account;
             see <Link href="/docs/api#authentication">Authentication</Link> for rotation and
             revocation.
           </p>
           <p>
             To try against test USDC first, use the sandbox at{" "}
-            <code>https://api.sandbox.payday.sh</code> with a <code>payday_test_</code> key. See{" "}
+            <code>https://api.sandbox.gum.money</code> with a <code>gum_test_</code> key. See{" "}
             <Link href="/docs/environments">Environments</Link>.
           </p>
         </Step>
@@ -152,7 +152,7 @@ export default function QuickstartPage() {
         <Step title="Share the link">
           <p>
             Send <code>deposit_url</code> to the payer. If the request carried a{" "}
-            <code>payer.email</code>, Payday has already emailed it to them. The hosted checkout
+            <code>payer.email</code>, Gum has already emailed it to them. The hosted checkout
             shows the request, the networks it may be paid on, the amount still due, the exact
             token and one-time address and QR once the payer has chosen a network (or you pinned
             one with <code>chain_id</code>) and signed, a
@@ -169,7 +169,7 @@ export default function QuickstartPage() {
           <p>
             Read the request whenever you like, or long-poll so a screen updates the moment
             something changes. For automation, register a <Link href="/docs/webhooks">webhook</Link>{" "}
-            instead and let Payday tell you.
+            instead and let Gum tell you.
           </p>
           <CodeTabs
             tabs={[
@@ -180,7 +180,7 @@ export default function QuickstartPage() {
           <p>
             A normal deposit moves <code>awaiting_deposit</code> → <code>deposited</code> →{" "}
             <code>settled</code>, with <code>partially_deposited</code> in between when transfers
-            arrive in pieces. Payday credits only finalized transfers, so a payer&apos;s wallet may
+            arrive in pieces. Gum credits only finalized transfers, so a payer&apos;s wallet may
             show a confirmed transaction a little before <code>received</code> changes.
           </p>
         </Step>
@@ -189,7 +189,7 @@ export default function QuickstartPage() {
           <p>
             Once settled, every request yields a JSON proof tying the exact document to the
             payer&apos;s wallet, the one-time address, the transfers that paid it, and the
-            settlement transaction. It verifies offline without trusting Payday. Keep it with your
+            settlement transaction. It verifies offline without trusting Gum. Keep it with your
             records.
           </p>
           <CodeTabs

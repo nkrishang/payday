@@ -15,7 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import { describeLoadError, type LoadFailure } from "@/lib/load-error";
-import { createMerchantClient } from "@/lib/merchant-payday";
+import { createMerchantClient } from "@/lib/merchant-gum";
 import { SigningOutScreen } from "./session-screens";
 
 export const HOME_PATH = "/dashboard";

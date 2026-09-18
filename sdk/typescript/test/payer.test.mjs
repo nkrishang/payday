@@ -83,7 +83,7 @@ test("payer reads use the public route and send no authorization", async () => {
   assert.equal(mock.calls[0].url, `https://example.test/v1/payer/deposit-requests/${payerPayment.id}`);
   assert.equal(mock.calls[0].init.method, "GET");
   assert.equal(mock.calls[0].init.headers.Authorization, undefined);
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], undefined);
   assert.equal(mock.calls[0].init.cache, "no-store");
 });
 
@@ -114,7 +114,7 @@ test("payer reads forward a session token and an abort signal, and encode the id
 
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb");
   assert.equal(mock.calls[0].init.signal, controller.signal);
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_token");
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], "pps_token");
   assert.equal(mock.calls[0].init.headers.Authorization, undefined);
 });
 
@@ -128,8 +128,8 @@ test("payer attachment reads use the public sub-route with an optional session",
   assert.equal(open.filename, "request.pdf");
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/attachment");
   assert.equal(mock.calls[0].init.method, "GET");
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
-  assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_token");
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], undefined);
+  assert.equal(mock.calls[1].init.headers["Gum-Payer-Session"], "pps_token");
 });
 
 test("a locked attachment surfaces verification_required", async () => {
@@ -154,7 +154,7 @@ test("the QR is fetched as a blob with the session in a header, never the URL", 
 
   assert.equal(await svg.text(), "<svg/>");
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/qr");
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_token");
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], "pps_token");
   assert.equal(mock.calls[0].init.headers.Accept, "image/svg+xml");
   assert.ok(!mock.calls[0].url.includes("pps_token"));
 });
@@ -163,7 +163,7 @@ test("payer client defaults to the production API origin", async () => {
   const mock = mockFetch(() => new Response(JSON.stringify(payerPayment)));
   const client = new GumPayerClient({ fetch: mock.fetch });
   await client.depositRequests.get("dr_1");
-  assert.equal(mock.calls[0].url, "https://api.payday.sh/v1/payer/deposit-requests/dr_1");
+  assert.equal(mock.calls[0].url, "https://api.gum.money/v1/payer/deposit-requests/dr_1");
 });
 
 test("email verification starts without naming a mailbox and confirms with the session", async () => {
@@ -185,11 +185,11 @@ test("email verification starts without naming a mailbox and confirms with the s
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/verify/email/start");
   assert.equal(mock.calls[0].init.method, "POST");
   assert.equal(mock.calls[0].init.body, undefined);
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
-  assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_new");
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], undefined);
+  assert.equal(mock.calls[1].init.headers["Gum-Payer-Session"], "pps_new");
   assert.equal(mock.calls[2].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/verify/email/confirm");
   assert.deepEqual(JSON.parse(mock.calls[2].init.body), { otp: "123456" });
-  assert.equal(mock.calls[2].init.headers["Payday-Payer-Session"], "pps_new");
+  assert.equal(mock.calls[2].init.headers["Gum-Payer-Session"], "pps_new");
   assert.equal(mock.calls[3].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/verify");
   assert.equal(mock.calls[3].init.method, "GET");
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
@@ -264,7 +264,7 @@ test("a client secret is exchanged once for a session, and the failures are told
   assert.equal(mock.calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), { client_secret: "cs_secret" });
   assert.equal(mock.calls[0].init.headers.Authorization, undefined);
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], undefined);
 
   await assert.rejects(client.verification.exchangeClientSecret("dr_a/b", "cs_secret"), (error) => {
     assert.ok(error instanceof GumError);
@@ -318,13 +318,13 @@ test("the wallet step mints a challenge for the wallet and submits its signature
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/wallet/challenge");
   assert.equal(mock.calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), { wallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" });
-  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], undefined);
+  assert.equal(mock.calls[0].init.headers["Gum-Payer-Session"], undefined);
   assert.equal(mock.calls[1].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/wallet/attest");
   assert.deepEqual(JSON.parse(mock.calls[1].init.body), {
     wallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     signature: `0x${"ab".repeat(65)}`,
   });
-  assert.equal(mock.calls[1].init.headers["Payday-Payer-Session"], "pps_wallet");
+  assert.equal(mock.calls[1].init.headers["Gum-Payer-Session"], "pps_wallet");
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, undefined);
 });
 
@@ -360,7 +360,7 @@ test("paying from another network lists chains, quotes, and reports the deposit 
   assert.equal(mock.calls[2].url, `https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes/${quote.id}/sent`);
   assert.deepEqual(JSON.parse(mock.calls[2].init.body), { transaction_hash: `0x${"22".repeat(32)}` });
   for (const call of mock.calls) {
-    assert.equal(call.init.headers["Payday-Payer-Session"], "pps_relay");
+    assert.equal(call.init.headers["Gum-Payer-Session"], "pps_relay");
     assert.equal(call.init.headers.Authorization, undefined);
   }
 });

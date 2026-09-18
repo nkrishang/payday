@@ -276,7 +276,7 @@ test("webhook and status methods use canonical routes and enveloped lists", asyn
     return json({});
   });
   const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
-  await client.webhooks.add("https://hooks.example.test/payday");
+  await client.webhooks.add("https://hooks.example.test/gum");
   const listed = await client.webhooks.list();
   await client.webhooks.get("endpoint/id");
   const removed = await client.webhooks.remove("endpoint/id");
@@ -408,7 +408,7 @@ test("verification detail uses the payment sub-route", async () => {
 test("a merchant-session deposit request returns its client secret once and mints more on request", async () => {
   const issued = {
     id: "dr_1",
-    deposit_url: "https://payday.sh/pay/dr_1",
+    deposit_url: "https://gum.money/pay/dr_1",
     payer_policy: { mode: "merchant_session", payer_reference: "user_123" },
     client_secret: "cs_first",
     client_secret_expires_at: "2026-09-01T00:15:00Z",
@@ -425,7 +425,7 @@ test("a merchant-session deposit request returns its client secret once and mint
     "first",
   );
   assert.equal(created.client_secret, "cs_first");
-  assert.equal(checkoutUrl(created, created.client_secret), "https://payday.sh/pay/dr_1#cs=cs_first");
+  assert.equal(checkoutUrl(created, created.client_secret), "https://gum.money/pay/dr_1#cs=cs_first");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body).payer_policy, { mode: "merchant_session", payer_reference: "user_123" });
 
   const replayed = await client.depositRequests.create(
@@ -442,7 +442,7 @@ test("a merchant-session deposit request returns its client secret once and mint
   assert.equal(mock.calls[2].init.body, undefined);
   assert.equal(mock.calls[2].init.headers.Authorization, "Bearer k");
   // The secret rides in the fragment, encoded, and never without a secret.
-  assert.equal(checkoutUrl({ deposit_url: "https://payday.sh/pay/dr_1" }, "cs_a+b"), "https://payday.sh/pay/dr_1#cs=cs_a%2Bb");
+  assert.equal(checkoutUrl({ deposit_url: "https://gum.money/pay/dr_1" }, "cs_a+b"), "https://gum.money/pay/dr_1#cs=cs_a%2Bb");
   assert.throws(() => checkoutUrl(created, ""), TypeError);
 });
 
@@ -475,7 +475,7 @@ test("account.get reads with the client's own credential", async () => {
 });
 
 test("account.issueApiKey issues against the account's generation with the session", async () => {
-  const issued = { api_key: "payday_live_abc", generation: 3, replaced_previous_key: true };
+  const issued = { api_key: "gum_live_abc", generation: 3, replaced_previous_key: true };
   const mock = mockFetch(() => json(issued, 200));
   // The session is the credential: the same token the client reads with is
   // what mints the key. (The API refuses an API key here on its own.)

@@ -3,9 +3,9 @@
 //!
 //! ```text
 //! canonical_bytes    = JCS(canonical_issuance_snapshot)          (RFC 8785)
-//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V4" || canonical_bytes)
+//! attribution_hash   = keccak256("GUM_ATTRIBUTION_V4" || canonical_bytes)
 //! attestation_digest = EIP-712 signing hash of the payer's PayerAttestation
-//! salt               = keccak256("PAYDAY_SALT_V3" || attribution_hash || attestation_digest)
+//! salt               = keccak256("GUM_SALT_V3" || attribution_hash || attestation_digest)
 //! ```
 //!
 //! The salt exists only once a payer has attested a wallet for the request
@@ -28,14 +28,14 @@ use uuid::Uuid;
 use crate::{Amount, BeneficiaryAddress, Currency, NetworkTerms, Salt};
 
 pub const ATTRIBUTION_VERSION: u16 = 4;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V4";
-pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V3";
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"GUM_ATTRIBUTION_V4";
+pub const SALT_DOMAIN: &[u8] = b"GUM_SALT_V3";
 /// `CanonicalIssuanceSnapshot::schema`; a new schema means a new version.
 /// v3 commits to the list of networks the request may be paid on instead of
 /// one chain: the payer's attestation selects one of them. v4 names the
 /// currency and its decimals, so a document states what it asks for in its
 /// own words rather than only through each network's contract address.
-pub const SNAPSHOT_SCHEMA: &str = "payday.invoice.v4";
+pub const SNAPSHOT_SCHEMA: &str = "gum.invoice.v4";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
@@ -57,7 +57,7 @@ pub struct Party {
 /// `merchant_session` is the API-first mode: the merchant's own application
 /// has already authenticated the payer, names them by `payer_reference` (its
 /// own user id), and opens the hosted checkout for them with a single-use
-/// client secret. Payday performs no check of its own; it records that the
+/// client secret. Gum performs no check of its own; it records that the
 /// merchant's server released the secret and binds the session to it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -521,7 +521,7 @@ mod tests {
         // whitespace, then reversed keys, an escaped character, and the
         // absent party fields spelled out as null.
         let natural = r#"{
-            "schema": "payday.invoice.v4", "canonicalization": "RFC8785",
+            "schema": "gum.invoice.v4", "canonicalization": "RFC8785",
             "issuer": {"name": "Acme Corp", "email": "billing@acme.example"},
             "bill_to": {"name": "Globex", "details": "1 Main St"},
             "currency": "USDC", "decimals": "6",
@@ -552,7 +552,7 @@ mod tests {
             "bill_to":{"details":"1 Main St","email":null,"name":"Globex"},
             "issuer":{"details":null,"email":"billing@acme.example","name":"Acme Corp"},
             "currency":"USDC",
-            "canonicalization":"RFC8785","schema":"payday.invoice.v4"}"#;
+            "canonicalization":"RFC8785","schema":"gum.invoice.v4"}"#;
         let a: CanonicalIssuanceSnapshot = serde_json::from_str(natural).unwrap();
         let b: CanonicalIssuanceSnapshot = serde_json::from_str(reversed).unwrap();
         assert_eq!(a, snapshot());
@@ -581,20 +581,20 @@ mod tests {
             r#""token_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}],"notes":"Thanks","#,
             r#""payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},"#,
             r#""receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","#,
-            r#""reference":"INV-1","schema":"payday.invoice.v4"}"#,
+            r#""reference":"INV-1","schema":"gum.invoice.v4"}"#,
         );
         let bytes = canonical_bytes(&snapshot()).unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
         assert_eq!(
             attribution_hash(&bytes).to_string(),
-            "0x9508e57f3fafab805408b7301cb5c84988758aea6fa50d5c5d47aa0627376e62"
+            "0x535c232a845fa5027d9b6537bfbb49c1118deeb418b6e23b715576de1eb657b4"
         );
         let attestation_digest = B256::repeat_byte(0x11);
         assert_eq!(
             recompute_salt(attribution_hash(&bytes), attestation_digest)
                 .0
                 .to_string(),
-            "0x1394b6b0c2eaf02fdadd147547667e4af5b477d4ac9c4cc324549862cd4ea009"
+            "0x17c9b0e36c56d12e1c1680af49bea8cbe7fb4e202b68fe78d30ad04ab518498d"
         );
     }
 

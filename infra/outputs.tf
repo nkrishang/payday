@@ -27,7 +27,7 @@ output "public_subnet_ids" { value = aws_subnet.public[*].id }
 output "api_security_group_id" { value = aws_security_group.api.id }
 output "rds_endpoint" { value = aws_db_instance.this.endpoint }
 output "notification_dkim_records" {
-  description = "CNAME records to add in the DNS provider hosting notification_domain_name (Vercel for payday.sh); SES verifies the sending identity once they resolve."
+  description = "CNAME records to add in the DNS provider hosting notification_domain_name (Vercel for gum.money); SES verifies the sending identity once they resolve."
   value = {
     for token in aws_sesv2_email_identity.notifications.dkim_signing_attributes[0].tokens :
     "${token}._domainkey.${var.notification_domain_name}" => "${token}.dkim.amazonses.com"

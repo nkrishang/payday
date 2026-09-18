@@ -15,7 +15,7 @@ vi.mock("wagmi", () => ({
 const { relay } = vi.hoisted(() => ({
   relay: { chains: vi.fn(), quote: vi.fn(), sent: vi.fn() },
 }));
-vi.mock("@/lib/payday", () => ({ payerClient: { relay } }));
+vi.mock("@/lib/gum", () => ({ payerClient: { relay } }));
 
 /** Base, the origin chain the fixture quotes route from. */
 const BASE: RelayOriginChain = {

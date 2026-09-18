@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
 import { describeError } from "@/lib/attachment-upload";
 import { formatDisplayAmount } from "@/lib/format";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { storePayerSession } from "@/lib/payer-session";
 import { useMerchant } from "./session";
 

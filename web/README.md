@@ -1,4 +1,4 @@
-# payday.sh
+# gum.money
 
 The landing page, the hosted checkout at `/pay/{id}` (where every
 `deposit_url` points), the merchant dashboard at `/dashboard`, and the
@@ -16,7 +16,7 @@ record in `components/docs/api/`, the sidebar entries derive from those
 records, and `app/docs/api/[group]/[slug]` renders every one of them with
 the same template.
 
-The checkout is built on Payday's own public payer API through
+The checkout is built on Gum's own public payer API through
 [`@gum/sdk`](../sdk/typescript). Those routes take no API key and expose no
 merchant data, because a deposit link is open by design: anyone holding it is
 allowed to fund the deposit request. For a gated request the API withholds the
@@ -40,7 +40,7 @@ request as empty shells and fetch everything client-side. See
 
 The gateway must be running (`just dev` from the repository root, which also
 starts Anvil, the indexer, and the local identity provider for payer codes),
-and `PAYDAY_PUBLIC_BASE_URL` must point here so created deposit requests link somewhere
+and `GUM_PUBLIC_BASE_URL` must point here so created deposit requests link somewhere
 that can render them.
 
 ```bash
@@ -55,24 +55,24 @@ Merchant sign-in is the real Privy app even locally (there is no stand-in), so
 dashboard, and the code arrives in a real mailbox.
 
 ```bash
-npm run typecheck --workspace @payday/web
-npm run lint      --workspace @payday/web
-npm test          --workspace @payday/web
+npm run typecheck --workspace @gum/web
+npm run lint      --workspace @gum/web
+npm test          --workspace @gum/web
 
 npx playwright install chromium          # once
-npm run test:e2e  --workspace @payday/web
+npm run test:e2e  --workspace @gum/web
 # beside a running `just dev`, whose Anvils hold 8545 and 8546:
-PW_RPC_PORTS=18545,18546 npm run test:e2e --workspace @payday/web
+PW_RPC_PORTS=18545,18546 npm run test:e2e --workspace @gum/web
 ```
 
-The browser suite runs against `e2e/stub-api.mjs`, a stand-in for the Payday
+The browser suite runs against `e2e/stub-api.mjs`, a stand-in for the Gum
 API. For the checkout the scenario is chosen by the deposit request id —
 `/pay/dr_settled`, `/pay/dr_gated-email`, and so on. Because the checkout
 renders on the server, intercepting in the browser would miss the first paint
 entirely, so the app itself is pointed at the stub. For the dashboard the same
 stub plays the merchant API behind a fake bearer check and the presigned upload
 target, and Privy itself is replaced at bundle time by `test/privy-stub.tsx`
-(`PAYDAY_PRIVY_STUB=1`): the same hooks, a session kept in the tab, one
+(`GUM_PRIVY_STUB=1`): the same hooks, a session kept in the tab, one
 accepted code (`123456`, which the stub's payer and issuer-mailbox
 verifications accept too). It covers what unit tests cannot: that the page
 hydrates, that polling moves the DOM on its own, that states which must not
@@ -87,13 +87,13 @@ resend cooldown is driven by Playwright's clock rather than waited out.
 Every variable is `NEXT_PUBLIC_` and therefore inlined into the browser bundle.
 Nothing secret belongs here — in particular every `rpcUrl` in
 `NEXT_PUBLIC_CHAINS` (the networks the checkout offers, mirroring gatewayd's
-`PAYDAY_CHAINS`) must be a public endpoint, never the operator RPC the
+`GUM_CHAINS`) must be a public endpoint, never the operator RPC the
 gateway reads from Secrets Manager.
 See [`.env.example`](.env.example). Missing values fail loudly at startup rather
 than degrading silently, matching the gateway's own configuration convention.
 
 The dashboard adds the Privy app it signs in to (`NEXT_PUBLIC_PRIVY_APP_ID`,
-the same id `gatewayd` verifies sessions against as `PAYDAY_PRIVY_APP_ID`)
+the same id `gatewayd` verifies sessions against as `GUM_PRIVY_APP_ID`)
 and, because the browser PUTs attachment bytes straight to object storage, the
 origin of the presigned upload URL (`NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN`) so
 the page's Content-Security-Policy admits it — the local MinIO in development,
@@ -110,7 +110,7 @@ correctly with JavaScript disabled. `useDepositRequest` then keeps it live by re
 the API directly from the browser; the payer routes are public and CORS-enabled,
 so proxying through this app would add a hop and a second copy of the contract
 without buying anything. The dashboard calls the merchant routes the same way,
-which the gateway allows from one origin only — `PAYDAY_PUBLIC_BASE_URL`, so
+which the gateway allows from one origin only — `GUM_PUBLIC_BASE_URL`, so
 this app must be served from exactly that origin.
 
 **Polling is adaptive, and deliberately not long polling.** The person who just
@@ -160,6 +160,6 @@ the payer actually has installed. WalletConnect is added when
 
 ## Deployment
 
-A Vercel project rooted at `web/`, serving `payday.sh`. Point the gateway at it
+A Vercel project rooted at `web/`, serving `gum.money`. Point the gateway at it
 with the `checkout_base_url` Terraform variable, which is where every
 `deposit_url` it mints points. See `docs/production-runbook.md` §9.

@@ -143,12 +143,12 @@ async fn deliver(key: [u8; 32], job: &gum_ledger::DeliveryClaim) -> Result<u16, 
     let response = http
         .post(url)
         .header(
-            "Payday-Event-Id",
+            "Gum-Event-Id",
             gum_core::WebhookEventId(job.event_id).to_string(),
         )
-        .header("Payday-Event-Type", &job.event_type)
+        .header("Gum-Event-Type", &job.event_type)
         .header(
-            "Payday-Signature",
+            "Gum-Signature",
             format!("v1,t={timestamp},sha256={signature}"),
         )
         .header("Content-Type", "application/json")

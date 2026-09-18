@@ -1,6 +1,6 @@
 # Auth0 configuration
 
-Terraform owns Payday's passwordless email connection, branded OTP template,
+Terraform owns Gum's passwordless email connection, branded OTP template,
 the payer verification application, and tenant attack protection. It
 deliberately does not own the Resend credential: keep that key only in Auth0's
 email-provider settings as described in
@@ -16,7 +16,7 @@ times more often than a merchant signs up and never needs a user of its own.
 Create a dedicated Auth0 Machine-to-Machine deployment client authorized only
 for the Auth0 Management API scopes `read:connections`, `update:connections`,
 `read:clients`, `create:clients`, `update:clients`, `read:attack_protection`,
-and `update:attack_protection`. Do not authorize it for the Payday API. Expose its credentials through the provider's
+and `update:attack_protection`. Do not authorize it for the Gum API. Expose its credentials through the provider's
 `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET` environment
 variables; never put them in a checked-in file or Terraform command line.
 
@@ -56,25 +56,25 @@ requires an explicit reviewed code change.
 ## Dashboard application
 
 There is none: the merchant dashboard signs in through Privy, not Auth0 (see
-`docs/authentication.md`). A tenant that still carries a `Payday Dashboard`
-single-page application, the `Payday API` resource server, or the `Payday
+`docs/authentication.md`). A tenant that still carries a `Gum Dashboard`
+single-page application, the `Gum API` resource server, or the `Gum
 email OTP claims` Action from the dashboard's earlier Auth0 login can delete
 them; the API no longer accepts those tokens and nothing reads that client
-ID. The tracked `payday-email-otp.js` Action source is kept only until that
+ID. The tracked `gum-email-otp.js` Action source is kept only until that
 cleanup lands.
 
 ## Payer verification application
 
-`payer.tf` declares the `Payday Payer Verification` application and enables
+`payer.tf` declares the `Gum Payer Verification` application and enables
 the passwordless email connection for it. It is the client `gatewayd` uses to
 prove a payer owns the mailbox a deposit request was issued to: the API asks Auth0 to
 email the code and exchanges it server-side, so the application is public
 (native, no secret) and needs only the passwordless OTP grant. Its tokens are
-requested for a separate payer API audience (`https://api.payday.sh/payer`),
+requested for a separate payer API audience (`https://api.gum.money/payer`),
 which the merchant Action ignores and the payer Action
-(`actions/payday-payer-email-otp.js`) guards. See
+(`actions/gum-payer-email-otp.js`) guards. See
 [`docs/authentication.md`](../docs/authentication.md) for the audience, the
-Action, its secrets, and the matching `PAYDAY_PAYER_*` settings.
+Action, its secrets, and the matching `GUM_PAYER_*` settings.
 
 If the application was created in the dashboard beforehand, import it:
 
@@ -95,13 +95,13 @@ weaken the launch posture:
   no allowlisted IPs. Each IP receives 100 failed login attempts per day
   (replenished every 864,000 ms) and 50 signup attempts per day (replenished
   every 1,728,000 ms).
-* **Breached-password detection:** disabled because Payday's only connection is
+* **Breached-password detection:** disabled because Gum's only connection is
   email OTP and has no password to inspect. Independently, Auth0 accepts only
   three failed submissions for one OTP before requiring a new code.
 
 The provider has no recipient-address field for `admin_notification`; Auth0
 sends suspicious-IP notices to tenant administrators. Before applying, verify
-in **Dashboard → Settings → Tenant Members** that at least two current Payday
+in **Dashboard → Settings → Tenant Members** that at least two current Gum
 operators are administrators who receive Auth0 mail. Remove departed members
 immediately and audit recipients quarterly.
 
@@ -140,9 +140,9 @@ with a custom email-provider Action.
 
 ## Verification
 
-Auth0 pastes the Action source into a CommonJS runtime, so `payday-email-otp.js`
+Auth0 pastes the Action source into a CommonJS runtime, so `gum-email-otp.js`
 uses `require` and `exports`. The Action admits exactly the client ID in its
-`PAYDAY_CLIENT_ID` secret; an unset secret admits nothing. The repository root is an ES module workspace, so
+`GUM_CLIENT_ID` secret; an unset secret admits nothing. The repository root is an ES module workspace, so
 `auth0/package.json` pins this directory back to CommonJS; without it Node reads
 these files as ES modules and the tests fail to load.
 

@@ -1,7 +1,7 @@
 # Sandbox environment
 
 The sandbox is a second, isolated instance of the production Terraform
-architecture at `api.sandbox.payday.sh`. It offers the testnets of the
+architecture at `api.sandbox.gum.money`. It offers the testnets of the
 production networks with Circle's test USDC: Monad testnet (chain ID `10143`,
 `0xf817257fed379853cDe0fa4F97AB987181B1E5Ea`), Base Sepolia (`84532`,
 `0x036CbD53842c5426634e7929541eC2318f3dCF7e`), and Arbitrum Sepolia
@@ -38,16 +38,16 @@ terraform -chdir=infra plan -var-file=terraform.sandbox.tfvars -out=sandbox.tfpl
 The distinct backend state key and `name = "payday-sandbox"` cause Terraform
 to instantiate a separate VPC, database, ECS cluster/services, repositories,
 secrets, signer, load balancer, alarms, and DNS record. `api_key_prefix =
-"payday_test_"` makes this service issue sandbox keys; production explicitly
-uses `payday_live_`.
+"gum_test_"` makes this service issue sandbox keys; production explicitly
+uses `gum_live_`.
 
 ## Calling it
 
-Point the SDK or `curl` at the sandbox origin with a `payday_test_` key:
+Point the SDK or `curl` at the sandbox origin with a `gum_test_` key:
 
 ```bash
-curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
-  -H "Authorization: Bearer payday_test_..."
+curl -fsS "https://api.sandbox.gum.money/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
+  -H "Authorization: Bearer gum_test_..."
 ```
 
-In the SDK, pass `baseUrl: "https://api.sandbox.payday.sh"` to `GumClient`.
+In the SDK, pass `baseUrl: "https://api.sandbox.gum.money"` to `GumClient`.

@@ -28,13 +28,13 @@ use uuid::Uuid;
 /// merchant Post-Login Action admits. It exchanges an email OTP for a token
 /// bound to the API audience; that token is a session for the merchant API
 /// and, while fresh, the credential that issues an API key.
-const DASHBOARD_CLIENT_ID: &str = "payday-dashboard-local";
-const AUDIENCE: &str = "payday-api-local";
+const DASHBOARD_CLIENT_ID: &str = "gum-dashboard-local";
+const AUDIENCE: &str = "gum-api-local";
 /// The payer application and its own audience, mirroring the production
 /// payer Action: gum-server exchanges a payer's code here, and the token it
 /// gets back is good for nothing but unlocking a deposit request.
-const PAYER_CLIENT_ID: &str = "payday-payer-local";
-const PAYER_AUDIENCE: &str = "payday-payer-local";
+const PAYER_CLIENT_ID: &str = "gum-payer-local";
+const PAYER_AUDIENCE: &str = "gum-payer-local";
 
 /// How long an emailed code stays usable, matching the window Auth0's
 /// passwordless connection is configured for in `auth0/passwordless.tf`. The
@@ -111,15 +111,15 @@ struct Claims {
     aud: String,
     exp: u64,
     azp: String,
-    #[serde(rename = "https://api.payday.sh/auth/method")]
+    #[serde(rename = "https://api.gum.money/auth/method")]
     method: &'static str,
-    #[serde(rename = "https://api.payday.sh/auth/client_id")]
+    #[serde(rename = "https://api.gum.money/auth/client_id")]
     client_id: String,
-    #[serde(rename = "https://api.payday.sh/auth/authenticated_at")]
+    #[serde(rename = "https://api.gum.money/auth/authenticated_at")]
     authenticated_at: u64,
-    #[serde(rename = "https://api.payday.sh/auth/event_id")]
+    #[serde(rename = "https://api.gum.money/auth/event_id")]
     event_id: String,
-    #[serde(rename = "https://api.payday.sh/auth/email")]
+    #[serde(rename = "https://api.gum.money/auth/email")]
     email: String,
 }
 
@@ -199,7 +199,7 @@ async fn start(
     if request.connection != "email" || request.send != "code" || !request.email.contains('@') {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let otp = std::env::var("PAYDAY_DEV_IDENTITY_OTP")
+    let otp = std::env::var("GUM_DEV_IDENTITY_OTP")
         .unwrap_or_else(|_| format!("{:06}", rand::rng().random_range(0..1_000_000)));
     state.otps.lock().await.insert(
         (
@@ -286,21 +286,20 @@ async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 #[tokio::main]
 async fn main() {
-    let bind =
-        std::env::var("PAYDAY_DEV_IDENTITY_BIND").unwrap_or_else(|_| "127.0.0.1:3001".into());
+    let bind = std::env::var("GUM_DEV_IDENTITY_BIND").unwrap_or_else(|_| "127.0.0.1:3001".into());
     let bind: SocketAddr = bind
         .parse()
-        .expect("PAYDAY_DEV_IDENTITY_BIND must be a socket address");
+        .expect("GUM_DEV_IDENTITY_BIND must be a socket address");
     assert!(
         bind.ip().is_loopback(),
         "development identity provider must bind to a loopback address"
     );
     let issuer =
-        std::env::var("PAYDAY_DEV_IDENTITY_ISSUER").unwrap_or_else(|_| format!("http://{bind}"));
+        std::env::var("GUM_DEV_IDENTITY_ISSUER").unwrap_or_else(|_| format!("http://{bind}"));
     let listener = TcpListener::bind(&bind)
         .await
         .expect("bind dev identity provider");
-    eprintln!("payday development identity provider listening on {bind} (never use in production)");
+    eprintln!("gum development identity provider listening on {bind} (never use in production)");
     axum::serve(listener, router(issuer))
         .await
         .expect("serve dev identity provider");
@@ -403,7 +402,7 @@ mod tests {
         let claims = verified_claims(&state, response["access_token"].as_str().unwrap());
         assert_eq!(claims["azp"], DASHBOARD_CLIENT_ID);
         assert_eq!(
-            claims["https://api.payday.sh/auth/client_id"],
+            claims["https://api.gum.money/auth/client_id"],
             DASHBOARD_CLIENT_ID
         );
     }
@@ -470,12 +469,12 @@ mod tests {
         assert_eq!(claims["aud"], AUDIENCE);
         assert_eq!(claims["azp"], DASHBOARD_CLIENT_ID);
         assert_eq!(
-            claims["https://api.payday.sh/auth/client_id"],
+            claims["https://api.gum.money/auth/client_id"],
             DASHBOARD_CLIENT_ID
         );
-        assert_eq!(claims["https://api.payday.sh/auth/method"], "email_otp");
+        assert_eq!(claims["https://api.gum.money/auth/method"], "email_otp");
         assert_eq!(
-            claims["https://api.payday.sh/auth/email"],
+            claims["https://api.gum.money/auth/email"],
             "merchant@example.com"
         );
     }
@@ -486,7 +485,7 @@ mod tests {
         let denied = start(
             State(state.clone()),
             Json(StartRequest {
-                client_id: "payday-other-local".into(),
+                client_id: "gum-other-local".into(),
                 connection: "email".into(),
                 email: "dev@example.com".into(),
                 send: "code".into(),
@@ -501,7 +500,7 @@ mod tests {
         let otp = issue_otp(&state, DASHBOARD_CLIENT_ID, "dev@example.com").await;
         let denied = token(
             State(state.clone()),
-            Json(token_request("payday-other-local", "dev@example.com", &otp)),
+            Json(token_request("gum-other-local", "dev@example.com", &otp)),
         )
         .await
         .unwrap_err();
@@ -549,12 +548,12 @@ mod tests {
         assert_eq!(claims["aud"], PAYER_AUDIENCE);
         assert_eq!(claims["azp"], PAYER_CLIENT_ID);
         assert_eq!(
-            claims["https://api.payday.sh/auth/client_id"],
+            claims["https://api.gum.money/auth/client_id"],
             PAYER_CLIENT_ID
         );
-        assert_eq!(claims["https://api.payday.sh/auth/method"], "email_otp");
+        assert_eq!(claims["https://api.gum.money/auth/method"], "email_otp");
         assert_eq!(
-            claims["https://api.payday.sh/auth/email"],
+            claims["https://api.gum.money/auth/email"],
             "payer@example.com"
         );
 

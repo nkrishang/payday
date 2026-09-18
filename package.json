@@ -1,5 +1,5 @@
 {
-  "name": "payday-workspace",
+  "name": "gum-workspace",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -9,10 +9,10 @@
   "scripts": {
     "build:sdk": "npm run build --workspace @gum/sdk",
     "test:sdk": "npm test --workspace @gum/sdk",
-    "dev": "npm run dev --workspace @payday/web",
-    "build": "npm run build --workspace @payday/web",
-    "lint": "npm run lint --workspace @payday/web",
-    "test": "npm test --workspace @payday/web"
+    "dev": "npm run dev --workspace @gum/web",
+    "build": "npm run build --workspace @gum/web",
+    "lint": "npm run lint --workspace @gum/web",
+    "test": "npm test --workspace @gum/web"
   },
   "engines": {
     "node": ">=20"

@@ -4,7 +4,7 @@ import type { PayerDepositRequest } from "@gum/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PendingPayment } from "@/lib/checkout-state";
 import { backoffMs, jitter, pollDelayMs } from "@/lib/poll";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { pendingRelayReport, RelaySendRetrier } from "@/lib/relay-send";
 
 interface PendingSend {

@@ -38,34 +38,31 @@ impl Config {
                 value.map(|v| (c.chain_id, v))
             })
             .collect();
-        let max_ranges = number("PAYDAY_INDEXER_MAX_RANGES_PER_TICK", 20);
+        let max_ranges = number("GUM_INDEXER_MAX_RANGES_PER_TICK", 20);
         assert!(
             max_ranges > 0,
-            "PAYDAY_INDEXER_MAX_RANGES_PER_TICK must be positive"
+            "GUM_INDEXER_MAX_RANGES_PER_TICK must be positive"
         );
         Self {
             chains,
             rpc_urls,
             ws_urls,
-            server_url: required("PAYDAY_SERVER_INTERNAL_URL")
+            server_url: required("GUM_SERVER_INTERNAL_URL")
                 .trim_end_matches('/')
                 .to_owned(),
-            token: required("PAYDAY_INTERNAL_TOKEN"),
-            listen: std::env::var("PAYDAY_INDEXER_LISTEN_ADDR")
+            token: required("GUM_INTERNAL_TOKEN"),
+            listen: std::env::var("GUM_INDEXER_LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".into())
                 .parse()
-                .expect("invalid PAYDAY_INDEXER_LISTEN_ADDR"),
-            poll: Duration::from_millis(number("PAYDAY_INDEXER_POLL_INTERVAL_MS", 2_000)),
-            reconcile: Duration::from_millis(number(
-                "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS",
-                60_000,
-            )),
-            idle: Duration::from_millis(number("PAYDAY_INDEXER_IDLE_INTERVAL_MS", 300_000)),
+                .expect("invalid GUM_INDEXER_LISTEN_ADDR"),
+            poll: Duration::from_millis(number("GUM_INDEXER_POLL_INTERVAL_MS", 2_000)),
+            reconcile: Duration::from_millis(number("GUM_INDEXER_RECONCILE_INTERVAL_MS", 60_000)),
+            idle: Duration::from_millis(number("GUM_INDEXER_IDLE_INTERVAL_MS", 300_000)),
             late_watch: Duration::from_secs(
-                number("PAYDAY_INDEXER_LATE_WATCH_DAYS", 365).saturating_mul(86_400),
+                number("GUM_INDEXER_LATE_WATCH_DAYS", 365).saturating_mul(86_400),
             ),
             max_ranges,
-            rpc_max_rps: number("PAYDAY_INDEXER_RPC_MAX_RPS", 40),
+            rpc_max_rps: number("GUM_INDEXER_RPC_MAX_RPS", 40),
         }
     }
     pub fn chains(&self) -> &[ChainConfig] {

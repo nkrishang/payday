@@ -67,8 +67,8 @@ export function WithdrawPanel({
 }) {
   const { client, signOut } = useMerchant();
   const { signTypedData } = useSignTypedData();
-  const recent = useResource("withdrawals:recent", (payday) =>
-    payday.withdrawals.list({ limit: 5 }),
+  const recent = useResource("withdrawals:recent", (gum) =>
+    gum.withdrawals.list({ limit: 5 }),
   );
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [busy, setBusy] = useState(false);

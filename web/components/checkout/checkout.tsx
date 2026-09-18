@@ -66,7 +66,7 @@ function readChosenNetwork(key: string): string | null {
  * ever binds the chain the challenge was minted for.
  */
 function useChosenNetwork(id: string): [string | null, (chainId: string) => void] {
-  const key = `payday:network:${id}`;
+  const key = `gum:network:${id}`;
   const chosen = useSyncExternalStore(
     subscribeNetwork,
     () => readChosenNetwork(key),

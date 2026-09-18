@@ -1,5 +1,5 @@
 import { type AttachmentDescriptor, GumError } from "@gum/sdk";
-import { createMerchantClient } from "./merchant-payday";
+import { createMerchantClient } from "./merchant-gum";
 
 /** The API's limit; checked here only so the form can answer before a wasted upload. */
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;

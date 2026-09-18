@@ -1,7 +1,7 @@
 import { GumError } from "@gum/sdk";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { EmailVerification } from "./email-verification";
 
 const APPROVED = {

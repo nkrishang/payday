@@ -1,11 +1,11 @@
 //! The merchant's withdrawal authorization: an EIP-3009 signature over their
-//! own stablecoin that Payday relays but cannot redirect.
+//! own stablecoin that Gum relays but cannot redirect.
 //!
-//! A withdrawal moves the merchant's Payday wallet balance in one currency
+//! A withdrawal moves the merchant's Gum wallet balance in one currency
 //! to one destination. Each chain's balance is one *leg*, and each leg is
 //! authorized by one EIP-712 signature under that chain's token contract,
 //! using the token's own `TransferWithAuthorization` /
-//! `ReceiveWithAuthorization` types (EIP-3009). Every contract Payday serves
+//! `ReceiveWithAuthorization` types (EIP-3009). Every contract Gum serves
 //! implements them: Circle's FiatToken and Tether's USDT0 alike.
 //!
 //! ```text
@@ -23,7 +23,7 @@
 //! recomputes the nonce from the destination it is asked to burn towards,
 //! and USDC rejects the signature unless they agree. The relayer therefore
 //! pays gas and nothing else. Only ECDSA (externally owned) wallets are
-//! accepted; the Payday wallet is one.
+//! accepted; the Gum wallet is one.
 //!
 //! The domain's `name` and `version` differ between deployments ("USDC" on
 //! Monad, "USD Coin" on Base and Arbitrum, both version "2"; "USDT0" on
@@ -292,7 +292,7 @@ impl<'de> Deserialize<'de> for AuthorizationTypes {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthorizationMessage {
-    /// EIP-55 checksummed: the merchant's Payday wallet.
+    /// EIP-55 checksummed: the merchant's Gum wallet.
     pub from: String,
     /// EIP-55 checksummed: the destination (transfer) or the forwarder (receive).
     pub to: String,

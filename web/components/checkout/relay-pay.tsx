@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { cn } from "@/lib/cn";
 import { formatBaseUnits, formatDisplayAmount, truncateAddress } from "@/lib/format";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { clearRelayReport, recordRelayBroadcast } from "@/lib/relay-send";
 import { ConnectSheet } from "./connect-sheet";
 import { walletErrorMessage } from "./wallet-errors";

@@ -14,12 +14,12 @@ const RPC_PORTS = (process.env.PW_RPC_PORTS ?? "8545,8546").split(",");
  * would miss the first paint entirely. Instead both the app and the browser
  * talk to a stub payer API, and the deposit request id selects the scenario. The same
  * stub plays the merchant API for the dashboard specs, and Privy itself is
- * replaced at bundle time by `test/privy-stub.tsx` (`PAYDAY_PRIVY_STUB`).
+ * replaced at bundle time by `test/privy-stub.tsx` (`GUM_PRIVY_STUB`).
  */
 const publicEnv = {
-  NEXT_PUBLIC_PAYDAY_API_URL: `http://127.0.0.1:${STUB_PORT}`,
+  NEXT_PUBLIC_GUM_API_URL: `http://127.0.0.1:${STUB_PORT}`,
   NEXT_PUBLIC_PRIVY_APP_ID: "privy-stub-app",
-  PAYDAY_PRIVY_STUB: "1",
+  GUM_PRIVY_STUB: "1",
   NEXT_PUBLIC_CHAINS: JSON.stringify([
     {
       id: 143,

@@ -55,7 +55,7 @@ pub struct AppState {
     /// The networks a deposit request may be paid on.
     pub networks: Arc<ChainRegistry>,
     /// Cross-chain payments through Relay; `None` without
-    /// `PAYDAY_RELAY_API_KEY`, and the relay routes answer `relay_unavailable`.
+    /// `GUM_RELAY_API_KEY`, and the relay routes answer `relay_unavailable`.
     pub relay: Option<Arc<RelayService>>,
     pub relay_intents: RelayIntentRepository,
     pub payer: PayerAccess,
@@ -65,7 +65,7 @@ pub struct AppState {
     pub api_key_prefix: String,
     pub rate_limits: Arc<Mutex<HashMap<Uuid, (f64, Instant)>>>,
     /// Bucket capacity, and tokens refilled per second, of the per-account
-    /// rate limiter: `PAYDAY_RATE_LIMIT_PER_MINUTE`, 60 by default.
+    /// rate limiter: `GUM_RATE_LIMIT_PER_MINUTE`, 60 by default.
     pub rate_limit_per_minute: f64,
     proof_cache: Arc<StdMutex<HashMap<ProofCacheKey, ProofOfPayment>>>,
     /// The attachment bucket and the attestation key; the service configures
@@ -75,7 +75,7 @@ pub struct AppState {
     /// `None` unless a deployment has deliberately funded and configured a
     /// wallet for the onboarding walkthrough's one demo transfer.
     onboarding_payer: Option<OnboardingPayerSigner>,
-    /// `None` unless `PAYDAY_PRIVY_APP_SECRET` is configured; wallet
+    /// `None` unless `GUM_PRIVY_APP_SECRET` is configured; wallet
     /// pregeneration (pregenerated_wallet.rs) is a latency optimization, not
     /// a dependency, so its absence never blocks sign-in.
     pregenerated_wallets: Option<Arc<dyn WalletPregenerator>>,
@@ -128,7 +128,7 @@ impl AppState {
             webhook_encryption_key,
             api_key_prefix,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
-            rate_limit_per_minute: std::env::var("PAYDAY_RATE_LIMIT_PER_MINUTE")
+            rate_limit_per_minute: std::env::var("GUM_RATE_LIMIT_PER_MINUTE")
                 .ok()
                 .and_then(|value| value.parse::<f64>().ok())
                 .filter(|limit| *limit > 0.0)

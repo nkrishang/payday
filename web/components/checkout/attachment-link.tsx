@@ -4,7 +4,7 @@ import { type AttachmentDescriptor, GumError } from "@gum/sdk";
 import { FileText, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { formatBytes } from "@/lib/format";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 type LinkState =
   | { status: "idle" }

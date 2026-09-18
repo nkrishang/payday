@@ -9,15 +9,15 @@
 # deploys.
 
 name           = "payday-staging"
-api_key_prefix = "payday_test_"
+api_key_prefix = "gum_test_"
 aws_region     = "eu-north-1"
-domain_name    = "api.staging.payday.sh"
-# The Route53 hosted zone for api.staging.payday.sh, delegated from Vercel
+domain_name    = "api.staging.gum.money"
+# The Route53 hosted zone for api.staging.gum.money, delegated from Vercel
 # DNS with four NS records named api.staging (docs/staging.md, bootstrap).
 route53_zone_id   = "Z_REPLACE_WITH_STAGING_ZONE_ID"
 checkout_base_url = "http://127.0.0.1:3002"
-alarm_email       = "krishang@payday.sh"
-admin_reviewer_id = "krishang@payday.sh"
+alarm_email       = "krishang@gum.money"
+admin_reviewer_id = "krishang@gum.money"
 
 # Merchant sign-in uses the development Privy app, which already allows the
 # local dashboard origin; a staging account is still its own row in the
@@ -25,10 +25,10 @@ admin_reviewer_id = "krishang@payday.sh"
 privy_app_id = "cmt9wxn7h011h0cjsma7fzytr"
 # Payer and issuer-mailbox codes go through the production Auth0 tenant.
 auth0_issuer = "https://dev-5ojfw164vnkjnk6m.us.auth0.com/"
-# Set both once the Payday Payer API and the Payday Payer Verification
+# Set both once the Gum Payer API and the Gum Payer Verification
 # application exist in that tenant (docs/authentication.md §3); until then
 # gated deposit requests answer verification_unavailable on staging.
-# payer_auth0_audience  = "https://api.payday.sh/payer"
+# payer_auth0_audience  = "https://api.gum.money/payer"
 # payer_auth0_client_id = "REPLACE_WITH_PAYER_VERIFICATION_CLIENT_ID"
 
 # Monad mainnet and Circle native USDC: staging settles real cents so RPC,
@@ -115,8 +115,8 @@ chains = [
 
 # Merchant email from staging's own subdomain; its DKIM records are the
 # notification_dkim_records output, added in Vercel DNS.
-notification_domain_name  = "staging.payday.sh"
-notification_from_address = "alerts@staging.payday.sh"
+notification_domain_name  = "staging.gum.money"
+notification_from_address = "alerts@staging.gum.money"
 
 # Overwritten by the deploy workflow with git-<sha> of the commit it ships.
 image_tag = "git-0000000000000000000000000000000000000000"

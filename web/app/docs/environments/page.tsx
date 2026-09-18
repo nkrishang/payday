@@ -9,18 +9,18 @@ export const metadata: Metadata = {
     "Production and sandbox: the base URLs, the currencies and networks each one settles on with their contracts, and how the two differ.",
 };
 
-const SANDBOX = `curl -fsS "https://api.sandbox.payday.sh/v1/deposit-requests/dr_…" \\
-  -H "Authorization: Bearer payday_test_..."`;
+const SANDBOX = `curl -fsS "https://api.sandbox.gum.money/v1/deposit-requests/dr_…" \\
+  -H "Authorization: Bearer gum_test_..."`;
 
-const SANDBOX_TS = `const payday = new GumClient({
-  apiKey: process.env.PAYDAY_TEST_API_KEY!,
-  baseUrl: "https://api.sandbox.payday.sh",
+const SANDBOX_TS = `const gum = new GumClient({
+  apiKey: process.env.GUM_TEST_API_KEY!,
+  baseUrl: "https://api.sandbox.gum.money",
 });`;
 
 export default function EnvironmentsPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Environments"
       lead="Two isolated services with the same API. Production settles USDC on Monad, Base, and Arbitrum One and USDT on Monad and Arbitrum One; the sandbox settles Circle's test USDC on their testnets, with its own accounts, keys, and database."
     >
@@ -36,19 +36,19 @@ export default function EnvironmentsPage() {
           <tr>
             <td>API</td>
             <td>
-              <code>https://api.payday.sh</code>
+              <code>https://api.gum.money</code>
             </td>
             <td>
-              <code>https://api.sandbox.payday.sh</code>
+              <code>https://api.sandbox.gum.money</code>
             </td>
           </tr>
           <tr>
             <td>Keys</td>
             <td>
-              <code>payday_live_…</code>
+              <code>gum_live_…</code>
             </td>
             <td>
-              <code>payday_test_…</code>
+              <code>gum_test_…</code>
             </td>
           </tr>
           <tr>
@@ -132,7 +132,7 @@ export default function EnvironmentsPage() {
         served as a deposit currency. The sandbox serves Circle&apos;s test USDC only.
       </p>
       <p>
-        The rule behind the matrix: Payday never gives you a rate worse than 1:1. USDC bridges
+        The rule behind the matrix: Gum never gives you a rate worse than 1:1. USDC bridges
         through Circle&apos;s CCTP at exactly 1:1, so a USDC request may be paid on any network
         and withdrawn to whichever you choose. USDT has no such path, so a USDT request must pin{" "}
         <code>chain_id</code> to a network serving it (<code>400 invalid_request</code> naming{" "}

@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { onExecutePostLogin } = require("./payday-email-otp");
+const { onExecutePostLogin } = require("./gum-email-otp");
 
 function actionApi() {
   const claims = new Map();
@@ -18,12 +18,12 @@ function actionApi() {
 
 function event(overrides = {}) {
   return {
-    resource_server: { identifier: "https://api.payday.sh" },
+    resource_server: { identifier: "https://api.gum.money" },
     secrets: {
-      PAYDAY_API_AUDIENCE: "https://api.payday.sh",
-      PAYDAY_CLIENT_ID: "payday-dashboard",
+      GUM_API_AUDIENCE: "https://api.gum.money",
+      GUM_CLIENT_ID: "gum-dashboard",
     },
-    client: { client_id: "payday-dashboard" },
+    client: { client_id: "gum-dashboard" },
     connection: { strategy: "email" },
     authentication: {
       methods: [{ name: "email", timestamp: new Date().toISOString() }],
@@ -39,40 +39,40 @@ test("adds fresh email OTP claims for the dashboard client", async () => {
 
   assert.equal(result.denial(), undefined);
   assert.equal(
-    result.claims.get("https://api.payday.sh/auth/method"),
+    result.claims.get("https://api.gum.money/auth/method"),
     "email_otp",
   );
-  assert.equal(result.claims.get("https://api.payday.sh/auth/email"), "merchant@example.com");
+  assert.equal(result.claims.get("https://api.gum.money/auth/email"), "merchant@example.com");
   assert.match(
-    result.claims.get("https://api.payday.sh/auth/event_id"),
+    result.claims.get("https://api.gum.money/auth/event_id"),
     /^[0-9a-f-]{36}$/,
   );
   assert.deepEqual(
     [...result.claims.keys()].sort(),
     [
-      "https://api.payday.sh/auth/authenticated_at",
-      "https://api.payday.sh/auth/client_id",
-      "https://api.payday.sh/auth/email",
-      "https://api.payday.sh/auth/event_id",
-      "https://api.payday.sh/auth/method",
+      "https://api.gum.money/auth/authenticated_at",
+      "https://api.gum.money/auth/client_id",
+      "https://api.gum.money/auth/email",
+      "https://api.gum.money/auth/event_id",
+      "https://api.gum.money/auth/method",
     ],
   );
   assert.equal(
-    result.claims.get("https://api.payday.sh/auth/client_id"),
-    "payday-dashboard",
+    result.claims.get("https://api.gum.money/auth/client_id"),
+    "gum-dashboard",
   );
 });
 
 test("denies an unknown client, another authentication method, or a missing client", async () => {
   const secretsWithoutClient = {
-    PAYDAY_API_AUDIENCE: "https://api.payday.sh",
+    GUM_API_AUDIENCE: "https://api.gum.money",
   };
   for (const invalid of [
     event({ client: { client_id: "other-client" } }),
     event({ connection: { strategy: "google-oauth2" } }),
     event({ authentication: { methods: [{ name: "federated" }] } }),
     // The client secret is not configured yet: the dashboard must stay out.
-    event({ secrets: secretsWithoutClient, client: { client_id: "payday-dashboard" } }),
+    event({ secrets: secretsWithoutClient, client: { client_id: "gum-dashboard" } }),
     // No client at all must not match an unset secret.
     event({ secrets: secretsWithoutClient, client: {} }),
   ]) {

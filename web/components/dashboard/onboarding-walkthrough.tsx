@@ -30,7 +30,7 @@ import { useMerchant } from "./session";
 const STEPS = ["Amount", "Billing", "Verification", "Review"] as const;
 const AMOUNT = "0.000001";
 const BILL_NAME = "Gum";
-const BILL_EMAIL = "onboarding@payday.sh";
+const BILL_EMAIL = "onboarding@gum.money";
 const HEADING = "Onboarding";
 
 const GUIDANCE = [

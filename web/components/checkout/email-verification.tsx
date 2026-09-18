@@ -5,7 +5,7 @@ import { Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Problem } from "@/components/ui/field";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 /**
  * Proves the payer owns the mailbox the deposit request was issued to. The payer

@@ -78,8 +78,8 @@ aws logs tail /ecs/payday/signers --since 30m --region "$AWS_REGION" \
 ## 5. Verify the API endpoint is reachable
 
 ```bash
-curl -sf "$PAYDAY_API_URL/health/live" && echo " live OK" || echo " live FAIL"
-curl -sf "$PAYDAY_API_URL/health/ready" && echo " ready OK" || echo " ready FAIL"
+curl -sf "$GUM_API_URL/health/live" && echo " live OK" || echo " live FAIL"
+curl -sf "$GUM_API_URL/health/ready" && echo " ready OK" || echo " ready FAIL"
 ```
 
 ## 6. Check indexer cursor lag
@@ -99,11 +99,11 @@ cast block finalized --rpc-url "$MONAD_RPC_URL" --field number
 ```
 
 A small lag (a few blocks) is normal. A chain with nothing to watch
-fast-forwards its cursor once per `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five
+fast-forwards its cursor once per `GUM_INDEXER_IDLE_INTERVAL_MS` (five
 minutes) without scanning, so an idle chain's cursor legitimately trails by
 up to that long; the `lag_blocks` in `/v1/status` is measured at the last
 pass. The worker drains up to
-`PAYDAY_INDEXER_MAX_RANGES_PER_TICK` ranges per pass, so a backlog after an
+`GUM_INDEXER_MAX_RANGES_PER_TICK` ranges per pass, so a backlog after an
 outage clears on its own; a lag that keeps growing means the provider is
 rejecting requests — see [quicknode-rpc-limits.md](quicknode-rpc-limits.md).
 

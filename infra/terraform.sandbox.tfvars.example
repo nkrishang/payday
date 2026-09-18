@@ -1,15 +1,15 @@
 # A second, isolated deployment of the existing stack. Use a separate backend
 # state key (sandbox/payday.tfstate) and never apply this file to production state.
 name             = "payday-sandbox"
-api_key_prefix   = "payday_test_"
+api_key_prefix   = "gum_test_"
 aws_region       = "us-east-1"
-domain_name      = "api.sandbox.payday.sh"
+domain_name      = "api.sandbox.gum.money"
 # A separate Vercel deployment of the web app serves the sandbox checkout.
-checkout_base_url = "https://sandbox.payday.sh"
+checkout_base_url = "https://sandbox.gum.money"
 # The sandbox sends merchant email from its own subdomain, so its SES identity
 # and DKIM records never collide with production's.
-notification_domain_name  = "sandbox.payday.sh"
-notification_from_address = "alerts@sandbox.payday.sh"
+notification_domain_name  = "sandbox.gum.money"
+notification_from_address = "alerts@sandbox.gum.money"
 # A separate Privy app for the sandbox, so sandbox accounts and wallets never
 # mix with production ones.
 privy_app_id     = "your-sandbox-privy-app-id"

@@ -10,7 +10,7 @@ import { Problem } from "@/components/ui/field";
 import { wagmiChain } from "@/lib/chain";
 import { truncateAddress } from "@/lib/format";
 import { payerAttestationDefinition } from "@/lib/payer-attestation";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { ConnectSheet } from "./connect-sheet";
 import { walletErrorMessage } from "./wallet-errors";
 
