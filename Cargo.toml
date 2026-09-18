@@ -1,11 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gateway-core",
-    "crates/gateway-db",
-    "crates/gatewayd",
-    "crates/gateway-indexer",
-    "crates/gateway-relay",
+    "crates/gum-core",
+    "crates/gum-contracts",
+    "crates/gum-schema",
+    "crates/gum-bus",
+    "crates/gum-telemetry",
+    "crates/gum-chain",
+    "crates/gum-signers",
+    "crates/gum-ledger",
+    "crates/gum-server",
+    "crates/gum-indexer",
+    "crates/gum-relay",
     "crates/dev-identity",
 ]
 

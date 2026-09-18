@@ -39,7 +39,7 @@ Once a deposit request settles, `GET /v1/deposit-requests/{id}/proof` exports th
 deposit request, the nonce and salt, the deposit address, the settling transfer, and a
 Payday-signed verification attestation. Anyone holding it can recompute the
 hash, salt, and address and check the transfer offline, with no Payday access;
-the checks are published as `gateway_core::verify_proof`, and the attached
+the checks are published as `gum_core::verify_proof`, and the attached
 PDF's hash can be compared with the one the proof commits to. Share the proof
 with payers or auditors at your discretion; it is not a public link.
 

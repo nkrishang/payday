@@ -1,0 +1,17 @@
+[package]
+name = "gum-contracts"
+version = "0.1.0"
+edition = "2024"
+description = "Typed wire contracts shared by Gum services: bus messages, internal RPC types, correlation headers."
+
+[dependencies]
+gum-core = { path = "../gum-core" }
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

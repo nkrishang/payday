@@ -40,7 +40,7 @@ variable "checkout_base_url" {
 variable "privy_app_id" {
   description = <<-EOT
     Public id of the Privy app merchants sign in to (see
-    docs/authentication.md). gatewayd verifies dashboard sessions — Privy
+    docs/authentication.md). gum-server verifies dashboard sessions — Privy
     identity tokens — against this app's published keys; the web app is built
     with the same id as NEXT_PUBLIC_PRIVY_APP_ID. Public, like every value in
     this file; there is no Privy secret anywhere in Payday.
@@ -73,7 +73,7 @@ variable "payer_auth0_audience" {
 }
 
 variable "payer_auth0_client_id" {
-  description = "Public client ID of the Auth0 Native application gatewayd exchanges payer codes with (auth0/payer.tf)."
+  description = "Public client ID of the Auth0 Native application gum-server exchanges payer codes with (auth0/payer.tf)."
   type        = string
   default     = ""
   validation {
@@ -285,6 +285,24 @@ variable "indexer_memory" {
   type    = number
   default = 512
 }
+variable "internal_port" {
+  description = "gum-server's internal listener: the indexer's RPC and the health endpoints. Reachable only from the indexer's security group."
+  type        = number
+  default     = 8081
+}
+variable "health_port" {
+  description = "Health listener of the indexer and the signers. Neither has an inbound rule; the port exists for a future ECS health check."
+  type        = number
+  default     = 8080
+}
+variable "signers_cpu" {
+  type    = number
+  default = 512
+}
+variable "signers_memory" {
+  type    = number
+  default = 1024
+}
 variable "api_port" {
   type    = number
   default = 8080
@@ -381,7 +399,7 @@ variable "relay_api_key" {
 variable "privy_app_secret" {
   description = <<-EOT
     Privy app secret the API pregenerates merchant wallets with during email
-    sign-up. Leave empty to skip pregeneration: gatewayd answers pregenerate
+    sign-up. Leave empty to skip pregeneration: gum-server answers pregenerate
     with 503 and sign-in still creates the wallet itself. Supply as
     TF_VAR_privy_app_secret. Note that Terraform state will contain it.
   EOT

@@ -19,7 +19,7 @@ case "$email" in
   *) echo "usage: $0 [EMAIL]" >&2; exit 2 ;;
 esac
 
-# The same shape gatewayd mints: the configured prefix and 32 random bytes,
+# The same shape gum-server mints: the configured prefix and 32 random bytes,
 # base64url without padding.
 prefix="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
 case "$prefix" in

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# != 4)); then
-  echo "usage: $0 <aws-region> <api-ecr-url> <indexer-ecr-url> <immutable-tag>" >&2
+if (($# != 5)); then
+  echo "usage: $0 <aws-region> <server-ecr-url> <indexer-ecr-url> <signers-ecr-url> <immutable-tag>" >&2
   exit 2
 fi
 
 region=$1
-api_repository=$2
+server_repository=$2
 indexer_repository=$3
-tag=$4
-registry=${api_repository%%/*}
+signers_repository=$4
+tag=$5
+registry=${server_repository%%/*}
 repo_root=$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)
 cd "$repo_root"
 
@@ -25,20 +26,27 @@ if [[ -n $(git status --porcelain --untracked-files=normal) ]]; then
   exit 2
 fi
 
-if [[ ${indexer_repository%%/*} != "$registry" ]]; then
-  echo "API and indexer repositories must use the same ECR registry" >&2
-  exit 2
-fi
+for repository in "$indexer_repository" "$signers_repository"; do
+  if [[ ${repository%%/*} != "$registry" ]]; then
+    echo "all three repositories must use the same ECR registry" >&2
+    exit 2
+  fi
+done
 
 aws ecr get-login-password --region "$region" \
   | docker login --username AWS --password-stdin "$registry"
 
-docker build --platform linux/amd64 --target gatewayd \
-  --tag "$api_repository:$tag" .
-docker build --platform linux/amd64 --target gateway-indexer \
+# One build context, three targets: the builder stage is shared, so the
+# three images carry binaries from the same compilation.
+docker build --platform linux/amd64 --target gum-server \
+  --tag "$server_repository:$tag" .
+docker build --platform linux/amd64 --target gum-indexer \
   --tag "$indexer_repository:$tag" .
+docker build --platform linux/amd64 --target gum-signers \
+  --tag "$signers_repository:$tag" .
 
-docker push "$api_repository:$tag"
+docker push "$server_repository:$tag"
 docker push "$indexer_repository:$tag"
+docker push "$signers_repository:$tag"
 
-echo "pushed API and indexer images with tag $tag"
+echo "pushed server, indexer and signers images with tag $tag"

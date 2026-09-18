@@ -1,7 +1,7 @@
 # Indexer cursor reset
 
-The indexer maintains a cursor in the database tracking the last-processed
-block. If the cursor is far behind the chain head (e.g. after a long downtime
+The server maintains the indexer's cursor in `indexer_cursor`, tracking the
+last-processed block. If the cursor is far behind the chain head (e.g. after a long downtime
 or a fresh deploy with an old start block), you can skip ahead to a recent
 block to avoid replaying unnecessary history.
 
@@ -72,8 +72,16 @@ Replace `<TARGET_BLOCK>` with the numeric block number and
 aws logs tail /ecs/payday/indexer --since 2m --region "$AWS_REGION"
 ```
 
-If the indexer was already running, it will use the new cursor on its next
-tick (every 2 seconds by default). No restart is needed.
+If the chain was halted, resume it after repairing the cursor. Run this as a
+one-off task using the `api` image (as described in
+[indexer-fatal-halt.md](indexer-fatal-halt.md)):
+
+```bash
+gum-server chain resume 143
+```
+
+The indexer re-checks the halted chain every pass and uses the repaired cursor.
+No indexer restart is needed.
 
 If the indexer was stopped, restart it — see [service-restart.md](service-restart.md).
 

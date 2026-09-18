@@ -16,7 +16,8 @@ to `CHAIN_ID` (Monad or Arbitrum, where USDT0 is served) and
   request body and pay with Monad's USDT0
   (`0xe7cd86e13AC4309349F30B3435a9d337750fC82D`) wherever the USDC contract
   appears below.
-- The indexer running and caught up (see [daily-monitoring.md](daily-monitoring.md))
+- All three services running, with the indexer caught up and signers healthy
+  (see [daily-monitoring.md](daily-monitoring.md))
 
 ## Step 1: Create a deposit request
 
@@ -69,6 +70,15 @@ watch -n 5 "curl -fsS $PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID> \
 The status should progress: `awaiting_deposit → deposited → settled`.
 
 With the indexer caught up, this typically takes under 30 seconds.
+
+For an operator trace, read the request's `sweep_jobs.correlation_id`, then:
+
+```sql
+SELECT * FROM bus.messages
+WHERE correlation_id = '<CORRELATION_ID>' ORDER BY published_at;
+```
+
+The API, indexer, and signers logs carry the same `correlation_id`.
 
 ## Step 4: Verify on-chain state
 

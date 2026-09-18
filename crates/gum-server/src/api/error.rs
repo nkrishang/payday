@@ -1,0 +1,730 @@
+use axum::Json;
+use axum::http::header::WWW_AUTHENTICATE;
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+
+/// Stable, machine-readable error codes for the API.
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl ApiError {
+    pub fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "A valid bearer API key or dashboard session token is required".into(),
+        }
+    }
+
+    pub fn identity_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "identity_unauthorized",
+            message: "A valid dashboard session (Privy identity token) is required".into(),
+        }
+    }
+    pub fn admin_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "admin_unauthorized",
+            message: "A valid operator bearer credential is required".into(),
+        }
+    }
+    pub fn deposit_request_not_blocked() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "deposit_request_not_blocked",
+            message: "Deposit request is not blocked".into(),
+        }
+    }
+
+    pub fn payer_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_deposit_link",
+            message: "This deposit link is invalid or expired".into(),
+        }
+    }
+
+    pub fn identity_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "identity_unavailable",
+            message: "Account authentication is temporarily unavailable".into(),
+        }
+    }
+
+    pub fn authentication_event_already_used() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "authentication_event_already_used",
+            message: "This authentication event was already used; authenticate again".into(),
+        }
+    }
+
+    pub fn account_contact_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "account_contact_required",
+            message: "A verified merchant email is required before creating a deposit request; sign in to the dashboard again".into(),
+        }
+    }
+
+    pub fn api_key_generation_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "api_key_generation_conflict",
+            message: "The API key changed after confirmation; authenticate and try again".into(),
+        }
+    }
+
+    pub fn account_disabled() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "account_disabled",
+            message: "This account is disabled".into(),
+        }
+    }
+
+    pub fn missing_idempotency_key() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "missing_idempotency_key",
+            message: "Idempotency-Key header is required".into(),
+        }
+    }
+
+    pub fn invalid_request(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+            message: msg.into(),
+        }
+    }
+
+    pub fn invalid_amount(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_amount",
+            message: msg.into(),
+        }
+    }
+
+    /// The currency is one this build knows but no registered chain serves.
+    pub fn unsupported_currency(currency: gum_core::Currency) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unsupported_currency",
+            message: format!("{currency} is not served on any of this deployment's networks"),
+        }
+    }
+
+    /// The chain a payer named is not one the request can be paid on.
+    pub fn unsupported_chain() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unsupported_chain",
+            message:
+                "This deposit request cannot be paid on that chain; choose one of its networks"
+                    .into(),
+        }
+    }
+
+    pub fn idempotency_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "idempotency_conflict",
+            message: "Idempotency-Key already used with different request parameters".into(),
+        }
+    }
+
+    pub fn deposit_request_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "deposit_request_not_found",
+            message: "Deposit request not found".into(),
+        }
+    }
+
+    pub fn invalid_deposit_reference() -> Self {
+        Self::invalid_request(
+            "reference must be a complete deposit request ID (dr_…) or deposit address (0x…)",
+        )
+    }
+
+    pub fn deposit_request_not_payable() -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code: "deposit_request_not_payable",
+            message: "This deposit request is no longer accepting funds".into(),
+        }
+    }
+
+    pub fn database_unavailable(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "database_unavailable",
+            message: msg.into(),
+        }
+    }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal_error",
+            message: msg.into(),
+        }
+    }
+
+    pub fn customer_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "customer_not_found",
+            message: "Customer not found".into(),
+        }
+    }
+
+    pub fn issuer_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "issuer_not_found",
+            message: "Issuer identity not found".into(),
+        }
+    }
+
+    pub fn payout_address_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "payout_address_not_found",
+            message: "Payout address not found".into(),
+        }
+    }
+
+    pub fn issuer_name_taken() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_name_taken",
+            message: "Another of your issuer identities already uses this name".into(),
+        }
+    }
+
+    pub fn issuer_in_use() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_in_use",
+            message: "Requests were issued under this identity; it cannot be deleted".into(),
+        }
+    }
+
+    pub fn issuer_email_already_verified() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "issuer_email_already_verified",
+            message: "This contact address is already verified".into(),
+        }
+    }
+
+    pub fn attachment_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "attachment_not_found",
+            message: "Attachment not found".into(),
+        }
+    }
+
+    pub fn attachment_scan_pending() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_scan_pending",
+            message: "The malware scan has not reported yet; retry finalize with backoff".into(),
+        }
+    }
+
+    /// `reason` is a short token or the scanner's verdict, never derived
+    /// from the uploaded bytes.
+    pub fn attachment_rejected(reason: &str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "attachment_rejected",
+            message: format!("The upload was rejected ({reason}); upload a new file"),
+        }
+    }
+
+    pub fn attachment_not_ready() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "Finalize the upload before attaching it to a deposit request".into(),
+        }
+    }
+
+    /// The bucket expired a finalized upload before an invoice was issued
+    /// with it; the merchant starts over with a new upload.
+    pub fn attachment_expired() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "The upload expired before it was attached; upload the PDF again".into(),
+        }
+    }
+
+    /// Finalize was called before anything reached the presigned URL.
+    pub fn attachment_not_uploaded() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_not_ready",
+            message: "Upload the PDF to upload_url before finalizing".into(),
+        }
+    }
+
+    pub fn attachment_already_attached() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "attachment_already_attached",
+            message: "This attachment already belongs to an issued deposit request".into(),
+        }
+    }
+
+    pub fn deposit_request_not_settled() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "deposit_request_not_settled",
+            message: "Proof of Payment is available once the deposit has settled".into(),
+        }
+    }
+
+    /// Funds credited to the payment came from a wallet other than the one
+    /// the payer attested, so no proof can claim the attested wallet paid.
+    pub fn deposit_sender_mismatch() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "deposit_sender_mismatch",
+            message: "Credited transfers came from a wallet other than the payer's attested wallet; no Proof of Payment can be issued".into(),
+        }
+    }
+
+    /// The request has no payment address yet: the payer has not attested
+    /// the wallet they will pay from.
+    pub fn wallet_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_required",
+            message: "The deposit address exists once the payer has attested their wallet".into(),
+        }
+    }
+
+    pub fn wallet_already_bound(wallet: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_already_bound",
+            message: format!("This deposit request is already bound to wallet {wallet}"),
+        }
+    }
+
+    /// No unexpired challenge is outstanding for the session.
+    pub fn wallet_challenge_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_challenge_required",
+            message: "Request a wallet challenge first; the previous one was used or expired"
+                .into(),
+        }
+    }
+
+    pub fn wallet_signature_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "wallet_signature_invalid",
+            message: "The signature does not recover to the stated wallet. Sign the challenge with that wallet; smart-contract wallets are not supported yet".into(),
+        }
+    }
+
+    /// A gated invoice's content and payment mechanics stay hidden until the
+    /// payer has satisfied the policy (product plan §4.3).
+    pub fn verification_required() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "verification_required",
+            message: "Complete verification to view this deposit request's details".into(),
+        }
+    }
+
+    /// The deployment has no payer Auth0 audience configured.
+    pub fn verification_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "verification_unavailable",
+            message: "Email verification is not available on this deployment".into(),
+        }
+    }
+
+    /// The passwordless provider did not answer the code exchange.
+    pub fn identity_provider_unavailable() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "identity_provider_unavailable",
+            message: "The verification provider did not respond; try again shortly".into(),
+        }
+    }
+
+    pub fn verification_not_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_not_required",
+            message: "This deposit request does not require verification".into(),
+        }
+    }
+
+    /// The route exists for another policy mode: email codes on a
+    /// merchant-session invoice, or client secrets on any other mode.
+    pub fn verification_method_not_applicable(message: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_method_not_applicable",
+            message: message.into(),
+        }
+    }
+
+    /// Unknown, expired, or minted for another payment: one answer for all
+    /// three, so a guess learns nothing about which.
+    pub fn client_secret_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "client_secret_invalid",
+            message:
+                "The client secret is not valid for this deposit request; return to the app that opened it"
+                    .into(),
+        }
+    }
+
+    /// The link was opened once already. Told apart from an invalid secret so
+    /// the checkout can say so: the payer most likely has the first tab open.
+    pub fn client_secret_used() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "client_secret_used",
+            message:
+                "This link was already opened; return to the app and open the deposit request again"
+                    .into(),
+        }
+    }
+
+    pub fn payer_session_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "payer_session_invalid",
+            message: "The payer session is missing, invalid, or expired; start verification again"
+                .into(),
+        }
+    }
+
+    pub fn otp_resend_cooldown(retry_after_secs: u64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "otp_resend_cooldown",
+            message: format!(
+                "A code was sent recently; request another in {retry_after_secs} seconds"
+            ),
+        }
+    }
+
+    pub fn otp_invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "otp_invalid",
+            message: "The code was not accepted; check it or request a new one".into(),
+        }
+    }
+
+    pub fn verification_not_started() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "verification_not_started",
+            message: "Request a code before confirming one".into(),
+        }
+    }
+
+    /// The deployment has no Privy app secret configured for wallet
+    /// pregeneration; sign-in still creates a merchant's wallet itself.
+    pub fn wallet_pregeneration_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "wallet_pregeneration_unavailable",
+            message: "Wallet pregeneration is not available on this deployment".into(),
+        }
+    }
+
+    /// The deployment has no onboarding payer wallet configured.
+    pub fn onboarding_deposit_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "onboarding_deposit_unavailable",
+            message: "The onboarding demo deposit is not available on this deployment".into(),
+        }
+    }
+
+    /// Bounds the endpoint to the one reserved, self-issued deposit request
+    /// shape — never a general "settle any invoice" affordance.
+    pub fn onboarding_deposit_not_eligible() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "onboarding_deposit_not_eligible",
+            message: "This deposit request is not the onboarding walkthrough's demo request".into(),
+        }
+    }
+
+    /// At most one onboarding demo payment per account, ever.
+    pub fn onboarding_deposit_already_claimed() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "onboarding_deposit_already_claimed",
+            message: "This account has already completed its onboarding demo deposit".into(),
+        }
+    }
+
+    pub fn webhook_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "webhook_not_found",
+            message: "Webhook endpoint not found".into(),
+        }
+    }
+
+    /// The deployment has no webhook encryption key, so no endpoint can be
+    /// registered: the secret it would be issued could not be stored.
+    pub fn webhooks_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "webhooks_unavailable",
+            message: "Webhooks are not available on this deployment".into(),
+        }
+    }
+
+    pub fn rate_limited() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: "Per-account request limit exceeded".into(),
+        }
+    }
+
+    pub fn withdrawal_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "withdrawal_not_found",
+            message: "Withdrawal not found".into(),
+        }
+    }
+
+    /// The deployment has no Relay key, so no cross-chain payment is offered.
+    pub fn relay_unavailable() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "relay_unavailable",
+            message: "Paying from another network is not available here".into(),
+        }
+    }
+
+    /// Relay would not or could not quote the route.
+    pub fn relay_quote_failed(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "relay_quote_failed",
+            message: message.into(),
+        }
+    }
+
+    /// The origin chain is not one a payer may pay from.
+    pub fn relay_unsupported_origin() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "relay_unsupported_origin",
+            message: "This request cannot be paid from that network with that token; choose one of the offered ones".into(),
+        }
+    }
+
+    pub fn relay_intent_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "relay_intent_not_found",
+            message: "That quote does not belong to this deposit request".into(),
+        }
+    }
+
+    /// The report names a different transaction than the one already
+    /// recorded for that quote. Asking for a new quote cannot help: the
+    /// recorded one stands.
+    pub fn relay_report_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "relay_report_conflict",
+            message: "This quote already recorded a different origin transaction".into(),
+        }
+    }
+
+    pub fn withdrawal_leg_not_found(leg: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "withdrawal_leg_not_found",
+            message: format!("{leg} is not a leg of this withdrawal"),
+        }
+    }
+
+    /// The account's Payday wallet has not been seen yet: it is created at
+    /// the first dashboard sign-in and recorded from that session.
+    pub fn wallet_not_ready() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_not_ready",
+            message: "The account's Payday wallet is not known yet; sign in to the dashboard once"
+                .into(),
+        }
+    }
+
+    /// Legs snapshot balances, so two open withdrawals would authorize the
+    /// same funds twice.
+    pub fn withdrawal_in_progress() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "withdrawal_in_progress",
+            message: "This account already has a withdrawal in progress; let it finish or cancel it first"
+                .into(),
+        }
+    }
+
+    /// Nothing the withdrawal could move. `elsewhere` names the chains that
+    /// do hold the currency but cannot bridge it to the destination.
+    pub fn nothing_to_withdraw(currency: gum_core::Currency, elsewhere: &[&str]) -> Self {
+        let message = if elsewhere.is_empty() {
+            format!("The Payday wallet holds no {currency} on any network serving it")
+        } else {
+            format!(
+                "The Payday wallet holds no {currency} on the destination network. {currency} does not bridge; its balance on {} is withdrawn to an address on that network",
+                elsewhere.join(", ")
+            )
+        };
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "nothing_to_withdraw",
+            message,
+        }
+    }
+
+    /// A bridge leg would move more than Circle's per-message burn limit, so
+    /// the withdrawal could never execute. The merchant can still withdraw
+    /// that network's balance to an address on the same network.
+    pub fn withdrawal_exceeds_bridge_limit(chain: &str, amount: &str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "withdrawal_exceeds_bridge_limit",
+            message: format!(
+                "Bridging {amount} USDC from {chain} is above Circle's 10,000,000 USDC limit for one bridge transaction. Withdraw that network's balance to an address on {chain} instead."
+            ),
+        }
+    }
+
+    /// The deployment cannot read balances, or cannot bridge from a chain the
+    /// wallet holds funds on.
+    pub fn withdrawals_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "withdrawals_unavailable",
+            message: message.into(),
+        }
+    }
+
+    pub fn withdrawal_signature_invalid(leg: &str, reason: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "signature_invalid",
+            message: format!("{leg}: {reason}"),
+        }
+    }
+
+    /// The leg already carries a different signature, or has moved past
+    /// signing.
+    pub fn withdrawal_leg_not_signable(leg: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "leg_not_awaiting_signature",
+            message: format!("{leg} is not awaiting a signature"),
+        }
+    }
+
+    pub fn withdrawal_authorization_expired(leg: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "authorization_expired",
+            message: format!("{leg}: the authorization window has passed; create a new withdrawal"),
+        }
+    }
+
+    /// A leg has been relayed: its funds are moving and cannot be recalled.
+    pub fn withdrawal_not_cancellable() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "withdrawal_not_cancellable",
+            message: "A leg of this withdrawal has already been relayed; it will run to completion"
+                .into(),
+        }
+    }
+
+    pub fn withdrawal_finished() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "withdrawal_finished",
+            message: "This withdrawal has already completed or failed".into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    error: ErrorDetail,
+}
+
+#[derive(Serialize)]
+struct ErrorDetail {
+    code: String,
+    message: String,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = self.status;
+        let body = ErrorBody {
+            error: ErrorDetail {
+                code: self.code.into(),
+                message: self.message,
+            },
+        };
+        let mut response = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        response
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(e: sqlx::Error) -> Self {
+        tracing::error!(error = ?e, "database error");
+        Self::database_unavailable("database error")
+    }
+}
+
+impl From<gum_ledger::DbInvoiceError> for ApiError {
+    fn from(e: gum_ledger::DbInvoiceError) -> Self {
+        // A stored row outside the schema contract is a server-side data fault,
+        // not a client error.
+        tracing::error!(error = ?e, "failed to decode invoice row");
+        Self::internal("failed to decode stored invoice")
+    }
+}

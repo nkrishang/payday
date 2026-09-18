@@ -28,13 +28,13 @@ for r in d.get('values',{}).get('root_module',{}).get('resources',[]):
     vals = r.get('values',{})
     if 'subnet.public' in addr:
         print(f'{addr}: {vals[\"id\"]}')
-    if 'security_group.indexer' in addr:
+    if 'security_group.api' in addr:
         print(f'{addr}: {vals[\"id\"]}')
 "
 ```
 
-Use the **public subnets** (for Fargate image pull) and the **indexer security
-group** (which has DB access).
+Use the **public subnets** (for Fargate image pull) and the **API security
+group** (which has DB access). The indexer has no database connection.
 
 ## Method: One-off Fargate task with Postgres image
 
@@ -94,7 +94,7 @@ aws ecs run-task \
   --task-definition payday-db-access:1 \
   --count 1 \
   --region "$AWS_REGION" \
-  --network-configuration "awsvpcConfiguration={subnets=[SUBNET_A,SUBNET_B],securityGroups=[INDEXER_SG],assignPublicIp=ENABLED}" \
+  --network-configuration "awsvpcConfiguration={subnets=[SUBNET_A,SUBNET_B],securityGroups=[API_SG],assignPublicIp=ENABLED}" \
   --overrides file:///tmp/db-access-overrides.json \
   --query 'tasks[0].{taskArn:taskArn,status:lastStatus}' --output json
 ```
@@ -124,29 +124,29 @@ aws logs tail /ecs/payday/db-access --since 5m --region "$AWS_REGION"
 
 ## Alternative: Enable ECS Exec
 
-If you need an interactive shell, enable ECS Exec on the indexer service:
+If you need an interactive shell, enable ECS Exec on the API service:
 
 ```bash
-aws ecs update-service --cluster payday --service indexer \
+aws ecs update-service --cluster payday --service api \
   --enable-execute-command --region "$AWS_REGION"
-aws ecs update-service --cluster payday --service indexer \
+aws ecs update-service --cluster payday --service api \
   --force-new-deployment --region "$AWS_REGION"
 ```
 
-Then exec into the running indexer container:
+Then exec into the running API container:
 
 ```bash
 # Requires the Session Manager plugin installed locally:
 # brew install --cask session-manager-plugin
 
-TASK_ARN=$(aws ecs list-tasks --cluster payday --service-name indexer \
+TASK_ARN=$(aws ecs list-tasks --cluster payday --service-name api \
   --desired-status RUNNING --region "$AWS_REGION" --output text --query 'taskArns[0]')
 
 aws ecs execute-command --cluster payday --task "$TASK_ARN" \
-  --container indexer --command "sh" --interactive --region "$AWS_REGION"
+  --container api --command "sh" --interactive --region "$AWS_REGION"
 ```
 
-The indexer image is minimal (no psql), but you can install it:
+The API image may not include psql, but if its base image supports `apk` you can install it:
 
 ```sh
 apk add --no-cache postgresql-client

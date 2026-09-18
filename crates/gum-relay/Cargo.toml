@@ -1,0 +1,12 @@
+[package]
+name = "gum-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

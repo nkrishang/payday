@@ -18,7 +18,7 @@ and those checks run many times more often than a merchant signs up. Creating
 a Privy user for each would be paying for accounts that exist for one code.
 So they stay on Auth0's embedded passwordless OTP: Auth0 creates the code,
 verifies it, and mints a token for a dedicated payer audience; Resend delivers
-the email; `gatewayd` drives the exchange and only ever sees the code. Payday
+the email; `gum-server` drives the exchange and only ever sees the code. Payday
 stores neither the code nor the mailbox beyond the proof it needs.
 
 Each Privy identity owns exactly one active Payday API key. Requesting another
@@ -37,7 +37,7 @@ PostgreSQL stores only a SHA-256 digest and a final-six-character hint.
 | Resend API key | Resend **API Keys → Create API Key** | Auth0 **Branding → Email Provider** only |
 
 There is no Privy app secret anywhere in Payday: verifying an identity token
-needs only the app's published keys, which `gatewayd` fetches from
+needs only the app's published keys, which `gum-server` fetches from
 `https://auth.privy.io/api/v1/apps/<app id>/jwks.json`. The Auth0 payer
 application has no client secret either. The separate Terraform deployment
 identity is a confidential Management API application; keep that application's
@@ -131,8 +131,8 @@ them; nothing reads their tokens.
 The payer Action is inert for every other audience and denies every other
 client on its own. It sets exactly five claims: method, client ID,
 authentication time, a random event ID, and the proven email, trimmed and
-lowercased so `gatewayd` can compare it with the merchant's assertion.
-`gatewayd` drives the exchange itself: the payer never names an email, and the
+lowercased so `gum-server` can compare it with the merchant's assertion.
+`gum-server` drives the exchange itself: the payer never names an email, and the
 code goes to the address the merchant asserted. The same exchange proves an
 issuer identity's contact address from the dashboard.
 
@@ -145,7 +145,7 @@ the OTP email wording non-enumerating and free of deposit data.
 
 ## 4. Configure Payday
 
-Configure `gatewayd` (or its untracked local `.env`) with:
+Configure `gum-server` (or its untracked local `.env`) with:
 
 ```bash
 # Merchant sign-in: the Privy app's public id. Unset, only API keys authenticate.
@@ -161,7 +161,7 @@ export PAYDAY_PAYER_REF_MASTER_KEY="$(openssl rand -base64 32)"
 export PAYDAY_HOSTED_CHECKOUT_ORIGIN="https://payday.sh"
 ```
 
-`gatewayd` fetches the Privy app's key set at startup and refuses to start if
+`gum-server` fetches the Privy app's key set at startup and refuses to start if
 it cannot; afterwards it refreshes the set every five minutes or on an unknown
 key id, and fails closed once it has gone an hour without a successful
 refresh. Without `PAYDAY_PRIVY_APP_ID` every dashboard session is refused and
@@ -210,7 +210,7 @@ signed in. The dashboard reads the current identity token from the SDK and
 sends it as `Authorization: Bearer <token>` on every call; nothing of Payday's
 stores a credential of its own.
 
-`gatewayd` verifies the token's ES256 signature against the app's JWKS, its
+`gum-server` verifies the token's ES256 signature against the app's JWKS, its
 issuer (`privy.io`), its audience (the app id), and its expiry, and reads the
 `linked_accounts` claim — a JSON string, as Privy's own server SDK reads it —
 for the mailbox (`type: email`) and the embedded wallet (`type: wallet`,
@@ -229,7 +229,7 @@ dashboard signs out the same way.
 
 Locally the dashboard signs in against the real development Privy app (there
 is no local stand-in), with `http://127.0.0.1:3002` among its allowed domains
-and `gatewayd` configured with the same app id. Scripts that need an account
+and `gum-server` configured with the same app id. Scripts that need an account
 without a browser — `just seed`, `scripts/e2e-anvil.sh` — write one straight
 into the local database with `scripts/local-api-key.sh` instead.
 

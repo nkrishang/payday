@@ -16,7 +16,7 @@ minio_port="${PAYDAY_MINIO_PORT:-9000}"
 # MinIO removed its Docker Hub images; quay.io is the official registry now.
 minio_image="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
 mc_image="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
-# MinIO's root credentials double as the AWS credentials gatewayd signs with.
+# MinIO's root credentials double as the AWS credentials gum-server signs with.
 minio_credential="payday-local"
 attachment_bucket="payday-attachments-local"
 pids=()
@@ -159,8 +159,17 @@ load_local_env() {
   export "PAYDAY_RPC_URL_${PAYDAY_CHAIN_ID}=$PAYDAY_RPC_URL"
   export "PAYDAY_RPC_URL_${PAYDAY_SECOND_CHAIN_ID}=$PAYDAY_SECOND_RPC_URL"
   export PAYDAY_API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
+  # The three services. gum-server's internal listener serves the indexer's
+  # RPC and its own health; the indexer and the signers each serve health
+  # only. The shared bearer token is what makes the indexer's reports
+  # trusted; any value works locally.
+  export PAYDAY_INTERNAL_BIND_ADDR="${PAYDAY_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
+  export PAYDAY_SERVER_INTERNAL_URL="${PAYDAY_SERVER_INTERNAL_URL:-http://$PAYDAY_INTERNAL_BIND_ADDR}"
+  export PAYDAY_INTERNAL_TOKEN="${PAYDAY_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
+  export PAYDAY_INDEXER_LISTEN_ADDR="${PAYDAY_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
+  export PAYDAY_SIGNERS_LISTEN_ADDR="${PAYDAY_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
   # Merchants sign in through Privy, for real, even locally: the dashboard
-  # (`just web`) uses the same app id, and gatewayd verifies its identity
+  # (`just web`) uses the same app id, and gum-server verifies its identity
   # tokens against Privy's published keys. Payer and issuer-mailbox codes
   # come from the loopback development identity provider instead.
   export PAYDAY_PRIVY_APP_ID="${PAYDAY_PRIVY_APP_ID:-cmt9wxn7h011h0cjsma7fzytr}"
@@ -188,7 +197,7 @@ USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   # several helper transactions can be in flight at once, as in production.
   BOOTSTRAP_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
   export PAYDAY_SIGNER_KEYS="${PAYDAY_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82}"
-  # The web dev server hosts both dashboard and checkout; gatewayd remains on
+  # The web dev server hosts both dashboard and checkout; gum-server remains on
   # PAYDAY_API_URL and is called cross-origin by the browser.
   export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
   export PAYDAY_API_KEY_PREFIX="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
@@ -334,13 +343,18 @@ curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null || {
   echo "development identity provider did not become ready" >&2
   exit 1
 }
-prefix gatewayd ./target/debug/gatewayd
+# Migrations are an explicit step, never a side effect of a service
+# starting: every service's readiness refuses until the schema is current.
+echo "[migrate] applying schema migrations"
+./target/debug/gum-server migrate
+prefix gum-server ./target/debug/gum-server
 for _ in {1..100}; do
-  curl -fsS "$PAYDAY_API_URL/health" >/dev/null 2>&1 && break
+  curl -fsS "$PAYDAY_SERVER_INTERNAL_URL/health/ready" >/dev/null 2>&1 && break
   sleep .1
 done
-curl -fsS "$PAYDAY_API_URL/health" >/dev/null || { echo "gatewayd did not become ready" >&2; exit 1; }
-prefix indexer ./target/debug/gateway-indexer
+curl -fsS "$PAYDAY_SERVER_INTERNAL_URL/health/ready" >/dev/null || { echo "gum-server did not become ready" >&2; exit 1; }
+prefix indexer ./target/debug/gum-indexer
+prefix signers ./target/debug/gum-signers
 echo "[runner] ready: API $PAYDAY_API_URL; 'just web' serves the dashboard, 'just seed' mints an API key"
 echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do

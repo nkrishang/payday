@@ -15,11 +15,11 @@ Every same-chain leg, USDC or USDT0, is an EIP-3009
 | Leg state | Funds are | Who acts next |
 |---|---|---|
 | `awaiting_signature` | In the Payday wallet, untouched | The merchant (sign, or cancel). Expires 24 h after creation. |
-| `authorized` | In the Payday wallet, untouched | gateway-indexer on the source chain (`relay_step`). |
-| `relaying` | Moving: a `transferWithAuthorization` or (USDC only) `WithdrawalForwarder.bridge` is in flight | gateway-indexer: receipt, fee bump, or reconciliation of a consumed nonce. |
+| `authorized` | In the Payday wallet, untouched | gum-server orchestrates the next `withdrawal_step`. |
+| `relaying` | Moving: a `transferWithAuthorization` or (USDC only) `WithdrawalForwarder.bridge` is in flight | gum-signers: receipt, fee replacement, or reconciliation. |
 | `burned` | Burned on the source chain; Circle owes the mint | Circle's attestation service (Iris). Monad: seconds. Base/Arbitrum: ~15–19 minutes. |
-| `attested` | Burned; attestation stored on the leg | gateway-indexer on the **destination** chain (`receiveMessage`). |
-| `minting` | The mint is in flight on the destination chain | gateway-indexer: receipt or fee bump. |
+| `attested` | Burned; attestation stored on the leg | gum-server orchestrates `receiveMessage` on the destination chain. |
+| `minting` | The mint is in flight on the destination chain | gum-signers: receipt or fee replacement. |
 | `completed` | At the destination address | Nobody. |
 | `failed` | Wherever the last successful step left them; `failure_reason` says which | An operator, if the reason is not the merchant's to fix. |
 | `expired` | In the Payday wallet, untouched | The merchant: create a new withdrawal. |
@@ -42,14 +42,19 @@ psql "$DATABASE_URL" -c "
   WHERE w.id = '<withdrawal uuid>' ORDER BY l.position"
 ```
 
-The indexer's sweep-worker health line (every five minutes) carries
-`withdrawal_legs_authorized`, `withdrawal_legs_awaiting_attestation`,
-`withdrawal_legs_attested`, and `withdrawal_step_in_flight` per chain; a
-`sweep worker paused` error naming a withdrawal leg means a step exceeded
-`PAYDAY_SWEEP_MAX_SUBMISSIONS` on the signer it names and needs the same
-treatment as a stalled sweep batch (`stuck-deposit-request.md`, "Sweep
-worker paused": that signer's balance and the fee market first; the other
-pool signers keep relaying and sweeping meanwhile).
+Each executable step has an `execution.jobs` row whose `command` kind is
+`withdrawal_step`. Obtain the step job id from the leg, then inspect it and its
+lane:
+
+```sql
+SELECT * FROM execution.jobs WHERE id = '<STEP_JOB_ID>';
+SELECT * FROM execution.transactions WHERE job_id = '<STEP_JOB_ID>';
+```
+
+Use `execution.executor_status`, `execution.signer_status`, and
+`GET /v1/status` for health. A stalled step follows the same replacement and
+continuing-reconciliation behavior as a sweep lane; see
+[stuck-deposit-request.md](stuck-deposit-request.md#stalled-execution-lane).
 
 ## `burned` for longer than expected
 
@@ -62,18 +67,16 @@ curl -fsS "https://iris-api.circle.com/v2/messages/15?transactionHash=0x<burn tx
 
 `404` means Iris has not indexed the burn yet; `pending_confirmations`
 means the source chain is not final in Circle's eyes yet (an L2 waits for
-~65 Ethereum blocks); `complete` means the indexer will pick it up on its
+~65 Ethereum blocks); `complete` means gum-server will pick it up on its
 next poll (`attestation_next_check_at`). A burn that Iris never completes
 after an hour is a Circle incident; the leg stays `burned` and no funds are
 at risk, since only the attested message can mint them.
 
 ## `attested` or `minting` for longer than expected
 
-The destination chain's worker is responsible. Check that worker's health
-line and signer balance. If the mint must be done by hand — say the
-destination chain's worker is down for long — anyone may submit it from any
-funded key, and the leg will complete on its own once the worker sees the
-nonce used:
+The destination chain's execution job is responsible. Check its transaction
+lane and signer balance. If the mint must be done by hand, anyone may submit
+it from any funded key, and reconciliation will observe the result:
 
 ```bash
 psql "$DATABASE_URL" -Atc "SELECT encode(attestation_message,'hex'), encode(attestation,'hex') FROM withdrawal_legs WHERE id = '<leg uuid>'"
@@ -93,13 +96,10 @@ and only the fifth revert in a row is terminal. The count resets when a step
 finally succeeds. So a `failed` leg has reverted five times or hit a
 condition no retry fixes.
 
-A `relaying` step whose signer nonce was spent without any visible receipt
-(the RPC lost it, or somebody consumed the authorization) is never cleared:
-its transaction history stays on the leg while the relayer reconciles every
-tick, and it completes by itself once the consuming transaction surfaces in
-the finalized event search. If nothing has surfaced after 24 hours, the
-worker reports itself `paused` with the leg id, signer, and nonce until an
-operator resolves it.
+A `relaying` step whose signer nonce was spent without a visible receipt keeps
+its durable transaction and attempt history while gum-signers reconciles every
+pass. Past the replacement limit fees are no longer raised, an
+`ExecutionStalled` event is published, and reconciliation continues.
 
 A reverted transfer or burn left
 the funds in the Payday wallet; the merchant creates a new withdrawal. A

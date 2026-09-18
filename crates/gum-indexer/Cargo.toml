@@ -1,0 +1,32 @@
+[package]
+name = "gum-indexer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gum-core = { path = "../gum-core" }
+gum-chain = { path = "../gum-chain" }
+gum-contracts = { path = "../gum-contracts" }
+gum-telemetry = { path = "../gum-telemetry" }
+gum-bus = { path = "../gum-bus" }
+alloy-primitives = { workspace = true }
+alloy-pubsub = { workspace = true }
+alloy-rpc-client = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-transport = { workspace = true }
+alloy-transport-ws = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+axum = { workspace = true }
+
+[dev-dependencies]
+gum-chain = { path = "../gum-chain", features = ["mock"] }

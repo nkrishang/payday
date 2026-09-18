@@ -37,7 +37,7 @@ contract PaymentFactoryScript is Script {
 
         vm.stopBroadcast();
 
-        // gatewayd and gateway-indexer refuse to start unless the live code
+        // gum-server and gum-indexer refuse to start unless the live code
         // hashes match these values, so print them ready to paste into the
         // environment alongside the addresses.
         console.log("PAYDAY_FACTORY_ADDRESS=%s", vm.toString(address(factory)));

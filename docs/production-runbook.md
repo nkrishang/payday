@@ -25,9 +25,11 @@ address's recovery term. Payday custodies no stablecoin.
 | Component | Runs on | Public name | Source |
 |---|---|---|---|
 | Landing page, hosted checkout (`/pay/{id}`), merchant dashboard (`/dashboard`) | Vercel project rooted at `web/` | `payday.sh`, `www.payday.sh` | `web/` |
-| Merchant and payer API (`gatewayd`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gatewayd` |
-| Stablecoin indexer and sweep worker | ECS Fargate service `indexer`, one task running one worker per network watching every configured token contract, no inbound access | none | `crates/gateway-indexer` |
-| Database | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA | none | `crates/gateway-db/migrations` |
+| Merchant and payer API (`gum-server`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gum-server` |
+| Stablecoin indexer (`gum-indexer`) | ECS Fargate service `indexer`, one task running one read-only chain observer per network; no database, no keys; reports to the API's internal listener over Cloud Map DNS | none | `crates/gum-indexer` |
+| Transaction executor (`gum-signers`) | ECS Fargate service `signers`, one task; the only principal that can `kms:Sign` with the sweep pool; consumes execution commands from the Postgres bus and publishes execution events; no inbound access | none | `crates/gum-signers` |
+| Database (domain tables, `bus.*`, `execution.*`) | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA; reachable from `api` and `signers` only | none | `crates/gum-schema/migrations` |
+| Schema migrations | ECS task definition `migrate` (the `api` image running `gum-server migrate`), run once per deploy by `scripts/run-migrate-task.sh` before the services roll | none | `crates/gum-schema` |
 | Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
 | Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
 | Merchant notification email | SES identity for `payday.sh` | `alerts@payday.sh` | `infra/` |
@@ -38,9 +40,11 @@ address's recovery term. Payday custodies no stablecoin.
 | RPC | One QuickNode paid endpoint per network, each its own Secrets Manager secret | | |
 | DNS | `payday.sh` at Vercel DNS; a Route53 public hosted zone for `api.payday.sh` delegated from it | | `infra/` |
 
-The `api` service runs the `gatewayd` image and the `indexer` service runs
-the `gateway-indexer` image. Both are built from the root `Dockerfile` and
-tagged `git-<full SHA>`.
+The `api` service (and the `migrate` task) runs the `gum-server` image, the
+`indexer` service the `gum-indexer` image, and the `signers` service the
+`gum-signers` image. All three are targets of the root `Dockerfile` and are
+tagged `git-<full SHA>`. How the three divide the work, and what each one
+does when killed and restarted, is [`architecture.md`](architecture.md).
 
 ## Accounts and assets the operator must provide
 
@@ -157,7 +161,7 @@ in that order. Every served stablecoin has six decimals on all of them.
 - [Monad RPC differences](https://docs.monad.xyz/reference/rpc-differences):
   QuickNode allows 100 blocks per `eth_getLogs` (`log_range_size`),
   `eth_getTransactionByHash` returns nothing for a transaction still in
-  flight, and the `pending` tag reads like `latest`. The sweep worker
+  flight, and the `pending` tag reads like `latest`. `gum-signers`
   therefore treats a helper transaction without a receipt after
   `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
   detects a consumed nonce from the signer's mined transaction count.
@@ -461,42 +465,54 @@ start until those images exist:
 terraform -chdir=infra init -backend-config=backend.hcl
 terraform -chdir=infra apply \
   -target=aws_ecr_repository.api \
-  -target=aws_ecr_repository.indexer
+  -target=aws_ecr_repository.indexer \
+  -target=aws_ecr_repository.signers
 
 api_repo=$(terraform -chdir=infra output -raw api_ecr_repository_url)
 indexer_repo=$(terraform -chdir=infra output -raw indexer_ecr_repository_url)
+signers_repo=$(terraform -chdir=infra output -raw signers_ecr_repository_url)
 tag="git-$(git rev-parse HEAD)"
 
-scripts/push-images.sh <AWS_REGION> "$api_repo" "$indexer_repo" "$tag"
+scripts/push-images.sh <AWS_REGION> "$api_repo" "$indexer_repo" "$signers_repo" "$tag"
 ```
 
 The push script requires exactly `git-<full HEAD SHA>` and refuses a dirty
 worktree. Commit and review every source change before building. This makes
 the image-to-source relationship and rollback deterministic.
 
-### The database starts empty
+### The database starts empty, and nothing migrates on start
 
-The schema is a single baseline, `crates/gateway-db/migrations/0001_initial_schema.sql`,
-embedded in both service images and applied by whichever service connects
-first. There is no migration from any earlier pre-release schema: a database
-that ran the old 21-file chain refuses the baseline outright, because its
-`_sqlx_migrations` table disagrees with the embedded set.
+The schema is `crates/gum-schema/migrations/` (`0001_application.sql`,
+`0002_bus.sql`, `0003_execution.sql`), embedded in the `gum-server` image
+and applied only by `gum-server migrate`. No service applies migrations
+when it starts; instead every service's `/health/ready` refuses (`schema
+behind`) until the schema is at the version its binary expects, so a
+service that rolls before the migration ran fails its health check and the
+deployment circuit breaker stops it. There is no migration from any earlier
+pre-release schema.
 
-- **New environment:** nothing to do. Terraform creates the RDS instance
-  with an empty `gateway` database and the first task to start applies the
-  baseline (its log says `database migrations applied`).
-- **Existing pre-release environment:** scale the `api` and `indexer`
-  services to zero, then empty the database through the
+- **New environment:** Terraform creates the RDS instance with an empty
+  `gateway` database. Register the `migrate` task definition and run it
+  before the services can become healthy:
+
+  ```bash
+  terraform -chdir=infra apply -target=aws_ecs_task_definition.migrate
+  scripts/run-migrate-task.sh <NAME>    # runs `gum-server migrate`, waits, prints its log
+  ```
+
+- **Existing pre-release environment:** scale the `api`, `indexer` and
+  `signers` services to zero, then empty the database through the
   procedure in [`db-access.md`](runbooks/db-access.md):
 
   ```sql
-  DROP SCHEMA public CASCADE;
-  CREATE SCHEMA public;
+  DROP SCHEMA public CASCADE; CREATE SCHEMA public;
+  DROP SCHEMA bus CASCADE;
+  DROP SCHEMA execution CASCADE;
   ```
 
   This discards every pre-release account, key, deposit request, and
-  observation, which is the intent. Restore the desired counts with the
-  full apply below; the services recreate the schema on start. Pre-release
+  observation, which is the intent. Run the migrate task as above, then
+  restore the desired counts with the full apply below. Pre-release
   attachments left in the S3 bucket are orphaned by this: empty the
   `uploads/` prefix as well.
 
@@ -512,16 +528,20 @@ terraform -chdir=infra apply deploy.tfplan
 Review the plan before applying it. In particular, reject unexplained database
 replacement or destruction, IAM permissions broader than the named secrets,
 the attachment bucket's `uploads/` prefix, and the named KMS keys (only the
-API task role may sign with the attestation key, only the indexer task role
-with the sweep key, and nothing with the legacy recovery key), an indexer
-count other than one, or plaintext or non-HTTPS endpoints.
+API task role may sign with the attestation key, only the **signers** task
+role with the sweep pool, and nothing with the legacy recovery key), a
+database secret attached to the indexer task, an indexer or signers count
+other than one, or plaintext or non-HTTPS endpoints.
 
-AWS creates the TLS certificate and DNS records, ALB and WAF, the two ECS
-services, the RDS database, Secrets Manager values, alarms, KMS keys, the SES
-identity, the attachment bucket, and its GuardDuty Malware Protection plan.
-Both services verify the contract generation against the chain as they
-start: if a task loops on a code-hash or bound-factory refusal, the tfvars
-and the deployment disagree. Fix the values, never the check. WAF request
+AWS creates the TLS certificate and DNS records, ALB and WAF, the three ECS
+services and the `migrate` task definition, the Cloud Map namespace the
+indexer resolves `api.<name>.local` through, the RDS database, Secrets
+Manager values (including the generated `internal_token` the indexer
+presents to the API), alarms, KMS keys, the SES identity, the attachment
+bucket, and its GuardDuty Malware Protection plan. All three services
+verify the contract generation against the chain as they start: if a task
+loops on a code-hash or bound-factory refusal, the tfvars and the
+deployment disagree. Fix the values, never the check. WAF request
 sampling is disabled so the bearer header is not retained in samples. RDS
 connections verify the server certificate against the checksum-pinned AWS
 RDS CA bundle in the container. Confirm the SNS subscription link sent to
@@ -538,15 +558,15 @@ resource.
 
 ### Sweep signer pool
 
-The indexer sweeps with `sweep_signer_count` KMS keys (five in production),
-each an address that keeps one helper transaction in flight, so several
-sweep batches and withdrawal steps run at once on every chain. At boot it
-logs one line per key and chain with the Ethereum address derived from the
-KMS public key:
+`gum-signers` executes with `sweep_signer_count` KMS keys (five in
+production), each an address that keeps one transaction in flight per
+chain, so several sweep batches and withdrawal steps run at once on every
+chain. At boot it logs one `configured signer` line per key and chain with
+the Ethereum address derived from the KMS public key:
 
 ```bash
-aws logs tail /ecs/payday/indexer --since 15m \
-  --filter-pattern 'configured sweep signer'
+aws logs tail /ecs/payday/signers --since 15m \
+  --filter-pattern 'configured signer'
 ```
 
 Independently derive every address with Foundry's AWS KMS support:
@@ -560,38 +580,20 @@ done
 The addresses must match the log, in order. Each is one address on every
 chain, and each sweeps on every chain, so fund **every** address on each
 chain: only enough MON on Monad and ETH on Base and Arbitrum One for expected
-sweeps, spread over the pool (the worker rotates through the signers, so
-they drain evenly). The worker alarms per signer and chain below the chain's
-`signer_low_balance_wei` (`PAYDAY_SIGNER_LOW_BALANCE_WEI` as the fallback),
-and the `sweep signer balance low` line names the address. The signers do
-not custody stablecoins; they pay gas to invoke the permissionless factory.
+sweeps, spread over the pool (free signers are offered richest first, so
+they drain evenly). `gum-signers` warns per signer and chain below the
+chain's `signer_low_balance_wei` (`PAYDAY_SIGNER_LOW_BALANCE_WEI` as the
+fallback); the `signer balance is low` line names the address and drives
+the `signers-low-balance` alarm. The signers do not custody stablecoins;
+they pay gas to invoke the permissionless factory. Current balances are
+also in `execution.signer_status` and in `GET /v1/status`.
 
 Raising `sweep_signer_count` adds keys at the end of the pool; lowering it
-is refused by Terraform's `prevent_destroy`, and a key removed from the
-pool while it owns an open batch or withdrawal step halts the sweep worker
-until that row is resolved by hand (`docs/runbooks/stuck-deposit-request.md`,
-`docs/runbooks/stuck-withdrawal.md`). Deploy a release that changes the pool
-with no sweep batch or withdrawal relay step open, or set the open batch's
-`signer` / open step's `step_signer` column to the address that signed it.
-
-### Deploying the signer pool (0002) to a database with real data
-
-Migration `0002_signer_pool.sql` is the one post-freeze migration that is
-*not* compatible with the previous image: batch submissions from the old
-indexer omit `signer` (whose default the migration drops) and step
-submissions omit `step_signer`, so an old task running against the migrated
-schema fails on every submission. Deploy it in a coordinated window, in this
-order:
-
-1. Stop the indexer task (`ecs update-service --desired-count 0`) and wait
-   for any open sweep batch or withdrawal step to resolve — a row open when
-   the migration applies gets the zero address and halts the new worker
-   until an operator sets its `signer`/`step_signer` column by hand.
-2. Deploy the new API image; its startup runs the migration. The old indexer
-   must already be stopped so it cannot write the columns the migration is
-   about to require.
-3. Fund the new signer addresses on every chain (above), then set the
-   indexer service's desired count back.
+is refused by Terraform's `prevent_destroy`. A key removed from the pool
+while it has an open row in `execution.transactions` can still have its
+receipts looked up but cannot be fee-bumped, so change the pool only when
+`SELECT count(*) FROM execution.transactions WHERE resolved_at IS NULL AND
+signer = <address>` is zero, or wait for that lane to resolve.
 
 ### Attestation signer
 
@@ -607,7 +609,7 @@ cast wallet address --aws
 
 Publish that address as Payday's trusted attestor, in the API documentation
 and wherever proofs are downloaded, so merchants and auditors can hand it to
-whatever runs `gateway_core::verify_proof`; an attestation signed by anything
+whatever runs `gum_core::verify_proof`; an attestation signed by anything
 else must fail verification. The address changes only if the key is
 replaced, which changes the trust anchor of every earlier proof, so treat
 replacement as an announced cut-over, never as routine rotation.
@@ -616,7 +618,7 @@ replacement as an announced cut-over, never as routine rotation.
 
 The dashboard's onboarding walkthrough can pay one self-issued deposit
 request per account from a Payday-funded wallet. Terraform does not
-provision that key; the endpoint is disabled unless `gatewayd` is given
+provision that key; the endpoint is disabled unless `gum-server` is given
 `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
 with, funded with a little gas and USDC on the onboarding chain:
 `PAYDAY_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
@@ -663,7 +665,7 @@ Vercel and a changed value needs a redeploy.
    domains. Preview deployments get their own `*.vercel.app` origins: the
    checkout works there because the payer API is public and CORS-open, but
    the dashboard does not, since Privy allows only the listed domains and
-   `gatewayd` accepts merchant-route requests from `checkout_base_url` only.
+   `gum-server` accepts merchant-route requests from `checkout_base_url` only.
    Test dashboard changes locally or on production.
 
 Vercel redeploys on every push to `main`. Because the web app and the API
@@ -757,10 +759,11 @@ before accepting real deposits. Confirm that:
    wallet within a minute while the status stays `settled`, and
    `recovered_funds` records it with reason `late_transfer` (see the
    [smoke test](runbooks/end-to-end-smoke-test.md)).
-6. API and indexer logs contain no repeated errors.
+6. API, indexer, and signers logs contain no repeated errors, and
+   `/health/ready` on each answers 200.
 7. CloudWatch alarms and RDS backups are configured.
 8. `GET /v1/deposit-requests/{id}/proof` returns a proof whose attestation
-   `signer` is the address from §8, and `gateway_core::verify_proof` accepts
+   `signer` is the address from §8, and `gum_core::verify_proof` accepts
    it with that address as the trusted attestor.
 
 Do not advertise or depend on the service until this succeeds.
@@ -769,69 +772,69 @@ Do not advertise or depend on the service until this succeeds.
 
 ### Backend
 
-For each application update, build and push a new `git-<SHA>` tag, change
-`image_tag`, review `terraform plan`, and apply it. ECS's deployment circuit
-breaker rolls back failed task startups. The indexer deployment stops the old
-task before starting the new one so two owners of a sweep signer's nonce
-stream never overlap. A
-manual rollback sets `image_tag` to a previous known-good image and applies
-again. Secrets Manager rotation is not observed by running tasks; force a new
-deployment after rotating a secret.
+The `Deploy staging` workflow is the reference procedure; production
+follows the same order by hand. For each application update:
+
+1. Build and push the three `git-<SHA>` images (§7).
+2. Register the new `migrate` task definition and run it:
+   `terraform -chdir=infra apply -target=aws_ecs_task_definition.migrate`
+   then `scripts/run-migrate-task.sh <NAME>`. The task exits non-zero and
+   the deploy stops here if a migration fails; no service has rolled yet.
+3. Change `image_tag`, review `terraform plan`, and apply it. ECS's
+   deployment circuit breaker rolls back failed task startups. The
+   `indexer` and `signers` services deploy with minimum healthy 0%, so the
+   old task stops before the new one starts: two signers never share a
+   nonce stream, and two indexers never race the cursor (the cursor is
+   compare-and-set, so a race would be harmless, only wasteful).
+4. `aws ecs wait services-stable --services api indexer signers`.
+
+A manual rollback sets `image_tag` to a previous known-good image and
+applies again (see below for the schema constraint). Secrets Manager
+rotation is not observed by running tasks; force a new deployment after
+rotating a secret ([secrets-rotation.md](runbooks/secrets-rotation.md)
+says which services read which secret).
 
 ### Schema changes
 
-Migrations are embedded and run at service startup. Until the first real
-deposit is accepted, the schema stays one baseline file,
-`0001_initial_schema.sql`, edited in place; a schema change recreates every
-database, which the staging deploy does on its own
+Migrations live in `crates/gum-schema/migrations/` and are applied only by
+the `migrate` task (`gum-server migrate`), never by a starting service.
+Every service's readiness check compares the applied versions with the set
+its binary embeds and refuses to become ready while any is missing, so the
+ordering above is enforced, not just documented. Until the first real
+deposit is accepted, the three files are edited in place; a schema change
+recreates every database, which the staging deploy does on its own
 ([staging.md](staging.md)) and production does as in §7. Once real data
-exists, the baseline is frozen and a change is a new numbered file,
-reviewed for compatibility with the image still running while the new one
-starts. The exception so far is `0002_signer_pool.sql`, which the previous
-image cannot write against; §8 documents its coordinated deploy window.
+exists, the files are frozen and a change is a new numbered file, reviewed
+for compatibility with the image still running while the new one starts.
 
 #### Rolling back after a new migration has applied
 
-A migration is additive, but the *previous image* does not know the new
-version number: sqlx fails startup with `VersionMissing(<n>)` when the
-database holds a version the image's embedded set does not contain. Once a
-new migration has applied, a manual rollback to the pre-migration image
-will fail at startup on every task restart, including ECS's own circuit
-breaker. Roll back to an image built from the post-migration commit instead
-(same schema, previous behavior), or build a rollback image from the old
-application commit with the new `crates/gateway-db/migrations/` files added
-to it. Do not delete the row from `_sqlx_migrations` to force the old image
-to start: its notion of the schema is then missing an index it never reads,
-and the next migration to assume the table shape will not be the last thing
-to disagree.
-
-For `0002_signer_pool.sql` the second option is only half a rollback: an
-image built from the pre-pool commit runs against the migrated schema, but
-its submissions omit the `signer`/`step_signer` columns, so it can serve
-reads yet cannot submit a sweep batch or relay step. If a rollback is
-required while that migration is the newest one, roll the application back
-and accept a paused sweeper, or repair the open rows by hand; the durable
-rollback is rolling forward to the post-migration commit.
+The readiness check only requires that every version the image embeds is
+applied; it does not object to versions it has never heard of. So an
+older image runs against a newer schema as long as the migration was
+additive, and a rollback is setting `image_tag` to the previous image and
+applying. Do not delete rows from `_sqlx_migrations`. If a migration was
+not additive (a dropped or renamed column the old image reads), the
+rollback is rolling forward to a fixed image built from the post-migration
+commit.
 
 #### Concurrent index builds
 
 A post-freeze migration that builds an index on a large table runs with
 `-- no-transaction` and `CREATE INDEX CONCURRENTLY` so the build never takes
-a write lock on the table (the baseline currently holds none; both index
-builds that once lived in their own numbered migrations were folded back
-into it while Payday was still pre-release). The cost of that is atomicity:
-a failed build leaves an invalid index and
-does not record the version, so every later startup retries the migration
-and fails again — loudly, on purpose: such a migration deliberately omits
-`IF NOT EXISTS` so a retry cannot skip a leftover invalid index and record
-itself as applied. Recover in this order:
+a write lock on the table (the current files hold none). The cost of that
+is atomicity: a failed build leaves an invalid index and does not record
+the version, so every later `migrate` run retries the migration and fails
+again — loudly, on purpose: such a migration deliberately omits `IF NOT
+EXISTS` so a retry cannot skip a leftover invalid index and record itself as
+applied. Recover in this order:
 
 1. Confirm no build is still running:
    `SELECT pid, query FROM pg_stat_activity WHERE query ILIKE '%CREATE INDEX%';`
 2. Find the invalid index:
    `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;`
 3. Drop it: `DROP INDEX CONCURRENTLY <name>;`
-4. Restart a service; migrations run at startup and rebuild the index.
+4. Run the migrate task again.
 
 If a version was ever recorded while its index is invalid (should be
 impossible with these migrations, but check
@@ -885,12 +888,14 @@ against production state.
 
 - Keep RDS deletion protection enabled and periodically test point-in-time
   restoration into a non-production database.
-- The worker raises its own alarms for a paused sweep, a low signer balance,
-  cursor lag, a stale sweep backlog, and sustained retryable failures; see
-  [daily-monitoring.md](runbooks/daily-monitoring.md). Permanent safety
-  errors in the block indexer and loss of the retained database
-  advisory-lock connection terminate the worker instead of appearing healthy;
-  a stuck helper transaction only pauses the sweep worker.
+- Each service raises its own log-derived alarms (a halted chain, a
+  stalled transaction lane, a low signer balance, dead-lettered bus
+  deliveries, a sweep job open past an hour, a deposit request needing
+  attention, sustained retryable failures); see
+  [daily-monitoring.md](runbooks/daily-monitoring.md). Nothing exits on a
+  stuck transaction: `gum-signers` keeps reconciling it every pass and
+  `gum-server` keeps the deposit request in its job until a terminal event
+  arrives.
 - Rotate account API keys from the dashboard's API key section as described
   in [secrets-rotation.md](runbooks/secrets-rotation.md). The previous key
   has a 24-hour grace period; revoking invalidates current and grace-period
@@ -903,10 +908,14 @@ against production state.
   long as their deposit request; the lifecycle rule removes only uploads that
   were never attached (still tagged `payday-upload=pending`) after seven
   days. Include the bucket in the backup discipline applied to the database.
-- The retained PostgreSQL advisory lock rejects a second indexer even if
-  someone bypasses ECS and starts another task. Keep the ECS service at one
-  task as an additional control.
-- A finalized cursor hash mismatch requires operator investigation; the
-  worker intentionally exits and alerts rather than silently skipping or
-  rewriting observations. `indexer_cursor` and `indexer_status` hold one
-  row per chain, whatever the chain's currencies.
+- Keep the `indexer` and `signers` services at one task each. A second
+  indexer is harmless (every range it reports is a compare-and-set on the
+  server-owned cursor) but wasteful; a second signers task would contend
+  for the same signer lanes, which the `execution_transactions_open_lane`
+  unique index makes fail loudly rather than double-spend a nonce.
+- A finalized cursor hash mismatch halts the chain and requires operator
+  investigation ([indexer-fatal-halt.md](runbooks/indexer-fatal-halt.md));
+  the indexer reports the fault rather than silently skipping or rewriting
+  observations, and nothing is scheduled or signed on that chain until
+  `gum-server chain resume <chain-id>`. `indexer_cursor` holds one row per
+  chain, whatever the chain's currencies.

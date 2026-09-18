@@ -47,16 +47,28 @@ MINIO_PORT="${PAYDAY_MINIO_PORT:-9000}"
 # MinIO removed its Docker Hub images; quay.io is the official registry now.
 MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
 MC_IMAGE="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
-# MinIO's root credentials double as the AWS credentials gatewayd signs with.
+# MinIO's root credentials double as the AWS credentials gum-server signs with.
 MINIO_CREDENTIAL="payday-local"
 ATTACHMENT_BUCKET="payday-attachments-local"
 
 export PAYDAY_RPC_URL="$RPC_URL"
 export PAYDAY_API_URL="$API_URL"
-# gatewayd listens where its clients (this suite, on PAYDAY_API_URL) expect it:
+# gum-server listens where its clients (this suite, on PAYDAY_API_URL) expect it:
 # derive the bind from the API URL so a suite run on shifted ports needs no
 # separate bind setting.
 export PAYDAY_BIND_ADDR="${PAYDAY_API_URL#http://}"
+# gum-server's internal listener (the indexer's RPC, health) and the health
+# listeners of the other two services, on ports the suite does not otherwise
+# use. Port 3001 is the development identity provider.
+export PAYDAY_INTERNAL_BIND_ADDR="${PAYDAY_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
+export PAYDAY_SERVER_INTERNAL_URL="${PAYDAY_SERVER_INTERNAL_URL:-http://$PAYDAY_INTERNAL_BIND_ADDR}"
+export PAYDAY_INTERNAL_TOKEN="${PAYDAY_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
+export PAYDAY_INDEXER_LISTEN_ADDR="${PAYDAY_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
+export PAYDAY_SIGNERS_LISTEN_ADDR="${PAYDAY_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
+# The signers act on a sweep the moment the command lands, but their timer
+# is also what re-checks pending transactions; keep it quick.
+export PAYDAY_SIGNERS_POLL_INTERVAL_MS="${PAYDAY_SIGNERS_POLL_INTERVAL_MS:-500}"
+export PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS="${PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS:-500}"
 # The binary's EnvFilter defaults to silent when RUST_LOG is unset (production
 # sets it in infra/main.tf). The assertions below read the indexer's log
 # trail, so give every service the same level production runs at.
@@ -82,7 +94,7 @@ export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
 export PAYDAY_DEV_IDENTITY_BIND="${PAYDAY_DEV_IDENTITY_BIND:-127.0.0.1:3001}"
 export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://${PAYDAY_DEV_IDENTITY_BIND}}"
 # No PAYDAY_PRIVY_APP_ID: this suite runs offline on API keys minted straight
-# into its database, and gatewayd simply refuses dashboard sessions.
+# into its database, and gum-server simply refuses dashboard sessions.
 export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
 export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
 export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
@@ -156,12 +168,12 @@ wait_for_rpc() {
 
 wait_for_api() {
   for _ in {1..100}; do
-    if curl --fail --silent --output /dev/null "$API_URL/health"; then
+    if curl --fail --silent --output /dev/null "$PAYDAY_SERVER_INTERNAL_URL/health/ready"; then
       return
     fi
     sleep 0.1
   done
-  echo "gatewayd did not become ready" >&2
+  echo "gum-server did not become ready" >&2
   return 1
 }
 
@@ -233,7 +245,7 @@ chain_entry() {
       block_time_ms: 1000, log_range_size: 100}'
 }
 
-# gatewayd and the indexer read PAYDAY_CHAINS and refuse to start unless the
+# gum-server and the indexer read PAYDAY_CHAINS and refuse to start unless the
 # deployed runtime bytecode on each chain hashes to the registry's values, so
 # the registry is built from the freshly bootstrapped chains.
 build_chain_registry() {
@@ -319,12 +331,13 @@ get_invoice() {
     "$API_URL/v1/deposit-requests/$1"
 }
 
-# Poll at the documented per-account rate until a jq expression is true. A
-# 100ms loop used to be harmless, but now tests the rate limiter instead of the
-# payment transition and can starve the rest of this end-to-end suite.
+# Poll at the documented per-account rate until a jq expression is true. The
+# 90-second bound covers the sweep policy's 60-second first retry after a
+# transient item failure. A 100ms loop used to be harmless, but now tests the
+# rate limiter instead of the payment transition and can starve the suite.
 wait_for_invoice() {
   local id=$1 expression=$2 description=$3 invoice
-  for _ in {1..60}; do
+  for _ in {1..90}; do
     invoice="$(get_invoice "$id")"
     if jq -e "$expression" <<<"$invoice" >/dev/null; then
       return
@@ -582,17 +595,22 @@ curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known
 # The suite makes hundreds of API calls in a few minutes, well past a
 # production account's allowance; the scenario asserts on 429s only where the
 # limiter is the subject, so open the bucket up rather than pace every read.
-PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
-gatewayd_pid=$!
-pids+=("$gatewayd_pid")
+echo "Applying schema migrations"
+./target/debug/gum-server migrate
+PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gum-server >"$logs/gum-server.log" 2>&1 &
+server_pid=$!
+pids+=("$server_pid")
 wait_for_api
 echo "Creating two accounts with keys minted straight into the database"
 PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test)"
 export PAYDAY_API_KEY
 SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test)"
-./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
+./target/debug/gum-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")
+./target/debug/gum-signers >"$logs/signers.log" 2>&1 &
+signers_pid=$!
+pids+=("$signers_pid")
 
 run_id="${GITHUB_RUN_ID:-local}-$(date +%s)-$$"
 
@@ -854,7 +872,7 @@ paused_id="$(jq -r .id <<<"$paused")"
 paused_address="$(jq -r .address <<<"$paused")"
 send_usdc "$paused_address" 500000
 set_paused true
-wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#dr_}'::uuid AND sweep_attempts >= 1 AND status = 'deploying'" \
+wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${paused_id#dr_}'::uuid AND sweep_attempts >= 1 AND status = 'funded' AND attention_reason IS NULL" \
   "paused token did not produce a retryable failure"
 assert_eq null "$(get_invoice "$paused_id" | jq -r .attention)" "a paused token must not block the payment"
 set_paused false
@@ -1107,22 +1125,36 @@ assert_eq 0 "$(token_balance "$BENEFICIARY_PARTIAL" "$SECOND_RPC_URL")" "the rec
 send_usdc "$wrong_address" 500000
 wait_for_status "$wrong_id" settled
 
-echo "Checking that every helper transaction batch resolved"
+echo "Checking that every sweep job and helper transaction resolved"
+# The server's view: every job it scheduled has heard its one terminal
+# event from the signers.
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(*) FROM sweep_batches WHERE resolved_at IS NULL
-")" "a sweep batch is still open"
-# The pool rotates: consecutive batches leave from different signers even
-# when they never overlap, so a suite this long must have used several.
+  SELECT count(*) FROM sweep_jobs WHERE resolved_at IS NULL
+")" "a sweep job is still open"
+# The signers' view: no (signer, nonce) lane is still open, and no job it
+# accepted is still in progress.
+assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM execution.transactions WHERE resolved_at IS NULL
+")" "a helper transaction is still in flight"
+assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM execution.jobs WHERE resolved_at IS NULL
+")" "an execution job is still open"
+# The pool rotates: consecutive jobs leave from different signers even when
+# they never overlap, so a suite this long must have used several.
 distinct_signers="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(DISTINCT signer) FROM sweep_batches
+  SELECT count(DISTINCT signer) FROM execution.transactions
 ")"
 [[ "$distinct_signers" -ge 2 ]] || {
-  echo "expected sweep batches from at least two pool signers, found $distinct_signers" >&2
+  echo "expected helper transactions from at least two pool signers, found $distinct_signers" >&2
   exit 1
 }
 assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
-  SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND blocked_reason IS NULL
+  SELECT count(*) FROM invoices WHERE uncollected_count > 0 AND attention_reason IS NULL
 ")" "collectable funds remain queued"
+# Nothing the bus carried between the services was dead-lettered.
+assert_eq 0 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
+  SELECT count(*) FROM bus.deliveries WHERE state = 'dead'
+")" "a bus delivery was dead-lettered"
 
 echo "Checking that every recovery ledger row raised a deposit_request.recovered_funds event"
 ledger_rows="$(psql "$DATABASE_URL" --tuples-only --no-align --command "
@@ -1517,7 +1549,8 @@ assert_eq 0 "$(usdt_balance "$MERCHANT_WALLET")" "the merchant wallet still hold
 
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive "second Anvil" "$second_anvil_pid"
-assert_process_alive gatewayd "$gatewayd_pid"
-assert_process_alive gateway-indexer "$indexer_pid"
+assert_process_alive gum-server "$server_pid"
+assert_process_alive gum-indexer "$indexer_pid"
+assert_process_alive gum-signers "$signers_pid"
 
 echo "All Anvil end-to-end flows passed"

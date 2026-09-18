@@ -1,6 +1,6 @@
 # Service restart
 
-Restart the API or indexer ECS service. This forces a new task deployment with
+Restart the API, indexer, or signers ECS service. This forces a new task deployment with
 the current task definition. Use this when a container is unhealthy, crashed,
 or needs to pick up new environment configuration.
 
@@ -11,8 +11,8 @@ aws ecs update-service --cluster payday --service indexer \
   --force-new-deployment --region "$AWS_REGION"
 ```
 
-The old task receives a SIGTERM and drains. The new task starts after the old
-one stops, ensuring only one indexer holds the database advisory lock at a time.
+The old task receives a SIGTERM and drains. The indexer has no database
+connection or signing keys; its cursor remains in the server's database.
 
 Verify the new task is running:
 
@@ -31,11 +31,8 @@ aws logs tail /ecs/payday/indexer --since 2m --region "$AWS_REGION"
 ```
 
 You should see:
-- `database migrations applied`
-- `exclusive indexer database lock acquired`
-- `configured sweep signer address=0x... signer="aws-kms"`
-- `block indexer started`
-- `sweep worker started`
+- `chain worker started`
+- `transfer signal connected`
 
 ## Restart the API
 
@@ -48,8 +45,24 @@ Verify:
 
 ```bash
 # Wait ~30 seconds:
-curl -sf "$PAYDAY_API_URL/health" && echo " OK" || echo " FAIL"
+curl -sf "$PAYDAY_API_URL/health/live" && echo " live OK" || echo " live FAIL"
+curl -sf "$PAYDAY_API_URL/health/ready" && echo " ready OK" || echo " ready FAIL"
 ```
+
+Readiness reports `schema behind` after a deployment containing migrations.
+Service startup never applies them: run `scripts/run-migrate-task.sh <env>`
+(`gum-server migrate` in a one-off `api` task), then check readiness again.
+
+## Restart the signers
+
+```bash
+aws ecs update-service --cluster payday --service signers \
+  --force-new-deployment --region "$AWS_REGION"
+```
+
+Verify running and desired counts match with `describe-services`, as above,
+and inspect `/ecs/payday/signers`. In-flight signed attempts are durable in
+`execution.transaction_attempts` and reconciliation resumes on startup.
 
 ## Restart with a new task definition
 

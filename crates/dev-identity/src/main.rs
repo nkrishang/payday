@@ -31,7 +31,7 @@ use uuid::Uuid;
 const DASHBOARD_CLIENT_ID: &str = "payday-dashboard-local";
 const AUDIENCE: &str = "payday-api-local";
 /// The payer application and its own audience, mirroring the production
-/// payer Action: gatewayd exchanges a payer's code here, and the token it
+/// payer Action: gum-server exchanges a payer's code here, and the token it
 /// gets back is good for nothing but unlocking a deposit request.
 const PAYER_CLIENT_ID: &str = "payday-payer-local";
 const PAYER_AUDIENCE: &str = "payday-payer-local";
@@ -48,7 +48,7 @@ const EMAIL_OTP_TTL: Duration = Duration::from_secs(300);
 /// the API accepts the token until it expires and there is nothing to refresh
 /// it with — so a short one here does not make development safer, it just signs
 /// a merchant out mid-request. The freshness the account routes insist on is a
-/// separate window (`AUTHENTICATION_MAX_AGE` in gatewayd) measured from the
+/// separate window (`AUTHENTICATION_MAX_AGE` in gum-server) measured from the
 /// token's own `authenticated_at`, and is unaffected by this.
 const ACCESS_TOKEN_TTL: u64 = 24 * 60 * 60;
 
@@ -73,9 +73,12 @@ struct AppState {
     // Auth0 passwordless transactions belong to the application that started
     // them. Keep the audience in the key as well so this remains safe if a
     // local client is ever allowed to address more than one API.
-    otps: Arc<Mutex<HashMap<(String, String, String), PendingOtp>>>,
+    otps: Arc<Mutex<HashMap<OtpKey, PendingOtp>>>,
     otp_ttl: Duration,
 }
+
+/// `(client_id, audience, email)`.
+type OtpKey = (String, String, String);
 
 /// One emailed code, and the moment it stops being one.
 struct PendingOtp {
