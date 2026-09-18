@@ -11,47 +11,63 @@ additionally require `Idempotency-Key`. A replay returns
 `Idempotency-Replayed: true`.
 
 Create requests contain `amount`, `payout_address`, an `issuer` and a `payer`
-party (`name`, optional `email` and `details`), and a `payer_policy`
-(`permissionless`, `verified_email`, or `merchant_session`; the verified mode
-names the expected email, and the merchant-session mode names the user your
+party (`name`, optional `email` and `details`), and an optional `verification`
+object of up to three independent add-ons: `email` (names the expected email,
+verified by the same OTP flow as before), `merchant_auth` (names the user your
 own application has signed in, by your `payer_reference`, and returns a
 single-use `client_secret` your server hands that user — see
-[Merchant sessions](api-reference.md#merchant-sessions)). Optional
+[Merchant sessions](api-reference.md#merchant-sessions)), and
+`wallet_attestation` (`true`, which requires the payer to sign the EIP-712
+attestation from the wallet they will pay from). Omitted or `{}` means no
+add-ons: the request is fully permissionless. `payer_policy` is rejected as an
+unknown field. Optional
 fields are `currency`, `chain_id`, `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
 `customer_id`, an `issuer_id`, and one finalized `attachment_id` for a scanned
 PDF. A request that names a saved customer may leave `payer` out, and one
 that names a saved issuer identity may leave `issuer` and `payout_address`
 out: the saved record is snapshotted in their place, and the smallest valid
-request is `amount`, `issuer_id`, `customer_id`, and `payer_policy`. Ids are
+request is `amount`, `issuer_id`, and `customer_id`. Ids are
 prefixed (`dr_`, `cus_`, `iss_`, `att_`; see the reference's Conventions) and
 are passed back exactly as received. The amount
 is used directly; there are no line items. Exactly `amount` settles to
-`payout_address`. The response's `address` is null at creation: the deposit request
-address exists only once the payer has attested, from the hosted page, the
-wallet they will pay from (`payer_wallet`), which is the address's recovery
-term (`recovery_address`), where overpayment remainders, expired balances,
-and late transfers return on-chain. The binding raises a `deposit_request.ready`
-webhook. Recovery is never a request field, so a request carrying
-`refund_address` is rejected. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
+`payout_address`. The deposit address exists as soon as the request's network
+is fixed: pin `chain_id` (or issue where the deployment offers one network)
+and the create response already carries `address`, with no payer signature
+involved at all and no restriction on which wallet the payer pays from — an
+exchange withdrawal, for example, is fine. Without a pinned `chain_id`, the
+payer picks a network on the hosted checkout (`POST
+/v1/payer/deposit-requests/{id}/network`, no wallet signature needed) and the
+address follows. With the `wallet_attestation` add-on, the old wallet step
+happens instead: the payer signs the attestation from the chosen network and
+the address exists only after it (`payer_wallet`), raising a
+`deposit_request.ready` webhook. Recovery is never a request field, so a
+request carrying
+`refund_address` is rejected: every deposit address's recovery term is
+Payday's own dedicated KMS recovery wallet (`recovery_address`), where
+overpayment remainders, expired balances, and late transfers land on-chain
+before Payday returns them to the payer manually, after review. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
 both for a 24-hour lifetime. `currency` is `USDC` (the default) or `USDT`,
 and every response carries it. There is no token field: a USDC request
 offers every supported network (`networks`) and the payer chooses one on
-the hosted checkout when they sign, unless `chain_id` pins it; `chain` and
+the hosted checkout when the network is not pinned; `chain` and
 `token` are `null` until the network is fixed. USDC bridges 1:1, so a USDC
 request may be paid on any network and the merchant withdraws to any. USDT
 has no such path, so a USDT request must pin `chain_id` to a network
 serving USDT (Monad or Arbitrum One; `400 invalid_request` naming
 `chain_id` otherwise, `422 unsupported_chain` for a chain that does not
 serve it), and its USDT is withdrawn on that network. The payer may still
-pay either from another network through Relay, carrying the spread.
+pay either from another network through Relay, carrying the spread — never
+on a wallet-attested request, where a relay solver would pay from a
+different wallet.
 
 Every immutable field, including the attachment's hash, takes part in
 idempotency: reusing a key with a different document returns
-`409 idempotency_conflict`. The issued deposit request is canonicalized and, together
-with the payer's wallet attestation, committed into the deposit address
-through the salt, which is what makes the Proof of Payment
+`409 idempotency_conflict`. The issued deposit request is canonicalized and,
+together with the issuance nonce and any wallet attestation, committed into
+the deposit address through the salt, which is what makes the Proof of Payment
 (`GET /v1/deposit-requests/{id}/proof`, after settlement) verifiable offline: the
-document, the wallet, the address, and the transfers from that wallet.
+document, the address, the transfers, and — when the wallet-attestation
+add-on is attached — the wallet that paid.
 
 Deposit requests expose the public states `awaiting_deposit`, `partially_deposited`, `deposited`,
 `settled`, `expired`, `returned`, and `needs_attention`; amounts are trimmed decimal strings in the
@@ -77,21 +93,23 @@ The email is queued in the issuing transaction and sent by a background
 worker, so it never delays the create response and is never lost to a
 provider outage; an idempotent replay sends nothing again, and a request that
 is cancelled, funded, or expired before the worker reaches it is not sent.
-Merchant-session requests are never emailed, since their link opens only
+Merchant-auth requests are never emailed, since their link opens only
 from your own application. The email is a courtesy, not a verification step:
-the `verified_email` policy still checks `expected_email`, which may differ.
+the email add-on still checks `expected_email`, which may differ.
 
 The link is unauthenticated by design — anyone holding it may read the deposit request
 and pay it. `GET /v1/payer/deposit-requests/{id}`, its `/qr`, and its `/attachment`
 accept no API key, return no merchant data, and send
 `Access-Control-Allow-Origin: *`, so a merchant can build a checkout of their
-own against them. For the gated payer modes the page shows only the issuer
-name and heading until the payer's session satisfies the policy; the amount,
+own against them. For requests with an email or merchant-auth add-on the page
+shows only the issuer name and heading until the payer's session satisfies it; the amount,
 payer, notes, reference, PDF, address, and QR are withheld
-(`content_unlocked: false`). A `merchant_session` page unlocks the moment your
+(`content_unlocked: false`). A merchant-auth page unlocks the moment your
 application opens it with the client secret in the URL fragment
 (`deposit_url#cs=…`); the bare link tells the payer to open it from your app.
-Every request then takes the wallet step (`/wallet/challenge` and
+Without the wallet-attestation add-on, no signature is asked for: the payer
+picks a network if none is pinned and the address appears. With it, the
+request takes the wallet step (`/wallet/challenge` and
 `/wallet/attest`, see the API reference) before the address, QR, and wallet
 button appear. Reproduce the guidance in [Deposit safety](deposit-safety.md)
 if you build your own.
@@ -151,13 +169,16 @@ REQUEST=$(curl -fsS "$API/v1/deposit-requests" \
   -H "Idempotency-Key: quickstart-$(date +%s)" \
   -d '{"amount":"1.00","payout_address":"0x1111111111111111111111111111111111111111",
        "issuer":{"name":"Acme LLC"},"payer":{"name":"Customer Inc"},
-       "payer_policy":{"mode":"permissionless"},"expires_in":3600}')
+       "verification":{"wallet_attestation":true},"expires_in":3600}')
 DEPOSIT_REQUEST_ID=$(printf '%s' "$REQUEST" | jq -r .id)
 DEPOSIT_URL=$(printf '%s' "$REQUEST" | jq -r .deposit_url)
-# Open $DEPOSIT_URL as the payer and sign the wallet attestation: the one-time
-# address exists only once the payer's wallet is bound (deposit_request.ready),
-# so `.address` is null on the create response. Then send test USDC to it from
-# that wallet; there is intentionally no privileged "mark deposited" endpoint
+# Open $DEPOSIT_URL as the payer and sign the wallet attestation: with the
+# wallet-attestation add-on the one-time address exists only once the payer's
+# wallet is bound (deposit_request.ready), so `.address` is null on the create
+# response. Without the add-on (and with chain_id pinned, or after the payer
+# picks a network) `.address` is set immediately. Then send test USDC to it —
+# from the attested wallet when the add-on is attached, from any wallet when
+# it is not; there is intentionally no privileged "mark deposited" endpoint
 # because indexer finality is tested.
 curl -fsS "$API/v1/deposit-requests/$DEPOSIT_REQUEST_ID?wait_for=change&timeout=30" \
   -H "Authorization: Bearer $PAYDAY_API_KEY" | jq '{status, address, received}'

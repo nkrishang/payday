@@ -88,7 +88,7 @@ the same `correlation_id`. Common causes:
 | Reason | Meaning / action |
 |--------|------------------|
 | `beneficiary_blacklisted` | Agree a valid destination with the merchant. |
-| `recovery_blacklisted` | The payer must resolve the issuer restriction. |
+| `recovery_blacklisted` | The recovery custody address is restricted on the token; route the return through compliance before releasing. |
 | `payment_address_blacklisted` | Compliance escalation; funds cannot move. |
 | `balance_below_amount` | Investigate disagreement between chain balance and finalized history. |
 | `retries_exhausted` | Inspect the execution job, transactions, attempts, and receipts. |
@@ -105,10 +105,13 @@ curl -fsS -X POST "$PAYDAY_API_URL/v1/admin/deposit-requests/<DEPOSIT_REQUEST_ID
 unset PAYDAY_ADMIN_SECRET
 ```
 
-## Reconciling returned funds
+## Reconciling recovered funds
 
-Overpayment remainders, expired balances, and late transfers return on-chain
-to the payer's attested wallet. The ledger records them:
+Overpayment remainders, expired balances, and late transfers are recovered
+on-chain into Payday's recovery custody (`recovery_address` on the request,
+the dedicated KMS recovery wallet). Returning each amount to the payer is a
+manual step, signed with that key after review ("Recovery custody and manual
+returns" in the production runbook). The ledger records what was recovered:
 
 ```sql
 SELECT r.invoice_id, i.account_id, r.reason, r.amount,
@@ -117,6 +120,9 @@ FROM recovered_funds r
 JOIN invoices i ON i.id = r.invoice_id
 ORDER BY r.recovered_at DESC;
 ```
+
+For every row not yet matched by a manual return, complete the review and
+the return; until then, Payday is holding those funds in custody.
 
 ## Stalled execution lane
 

@@ -142,9 +142,8 @@ test("a new merchant is put straight to work: identity, contact, first request",
   expect(body.customer_id).toBeTruthy();
   expect(body.payout_address).toBe(wallet);
   expect(body.payer).toMatchObject({ name: "Gum", email: "onboarding@payday.sh" });
-  expect(body.payer_policy).toEqual({
-    mode: "verified_email",
-    expected_email: "onboarding@payday.sh",
+  expect(body.verification).toEqual({
+    email: { expected_email: "onboarding@payday.sh" },
   });
 
   // The success screen is not the usual three-CTA one — it shows the real
@@ -382,7 +381,7 @@ test("the payer's view link opens unlocked for the issuing merchant, without ver
   await page.getByLabel("Payer").fill("Globex LLC");
   await page.getByLabel("Reason").fill("Consulting");
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("radio", { name: "Verified email" }).check();
+  await page.getByRole("checkbox", { name: "Verify payer email" }).check();
   await page.getByLabel("Expected payer email").fill("payer@example.com");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Issue deposit request" }).click();

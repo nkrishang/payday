@@ -71,25 +71,36 @@ struct Party {
     /// At most 4000 bytes.
     details: Option<String>,
 }
+/// The verification add-ons attached to a deposit request. Omitted or empty
+/// means none: the permissionless default, which accepts any deposit. Any
+/// combination may be attached.
 #[derive(Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum PayerPolicyMode {
-    Permissionless,
-    VerifiedEmail,
-    MerchantSession,
+#[schema(example = json!({"email":{"expected_email":"alice@example.com"},"wallet_attestation":true}))]
+struct PayerVerification {
+    /// Prove ownership of exactly this mailbox with a one-time code. The
+    /// payer sees only a masked hint.
+    email: Option<EmailVerification>,
+    /// The merchant's own authentication: its application signed the payer
+    /// in and released the single-use client secret that opens the checkout.
+    merchant_auth: Option<MerchantAuth>,
+    /// Require the payer to sign an EIP-712 attestation from the wallet
+    /// they will pay from; only transfers from it count toward the request.
+    #[serde(default)]
+    wallet_attestation: bool,
 }
-/// `expected_email` is required for `verified_email`; `payer_reference` is
-/// required for `merchant_session`; each is forbidden elsewhere.
+/// Prove ownership of exactly this mailbox with a one-time code.
 #[derive(Serialize, Deserialize, ToSchema)]
-#[schema(example = json!({"mode":"merchant_session","payer_reference":"user_123"}))]
-struct PayerPolicy {
-    mode: PayerPolicyMode,
+struct EmailVerification {
     /// Trimmed and lowercased; the payer sees only a masked hint.
-    expected_email: Option<String>,
+    expected_email: String,
+}
+/// The merchant's own authentication for the payer it let in.
+#[derive(Serialize, Deserialize, ToSchema)]
+struct MerchantAuth {
     /// The merchant application's own identifier for the payer it
     /// authenticated: 1–128 bytes, one printable token, case preserved.
     /// Returned on every webhook for the deposit; never shown to the payer.
-    payer_reference: Option<String>,
+    payer_reference: String,
 }
 /// A single-use secret that opens the hosted checkout for the payer the
 /// merchant authenticated. Returned once; the API stores only its hash.
@@ -120,7 +131,7 @@ struct Attribution {
     hash: String,
 }
 #[derive(Deserialize, ToSchema)]
-#[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"payer":{"name":"Globex"},"payer_policy":{"mode":"permissionless"},"expires_in":3600,"reference":"INV-42","customer_id":"cus_0198f80c-1111-7dc1-a369-90556a64f700","metadata":{"po":"PO-77"}}))]
+#[schema(example = json!({"amount":"10.50","payout_address":"0x1111111111111111111111111111111111111111","issuer":{"name":"Acme Corp"},"payer":{"name":"Globex"},"expires_in":3600,"reference":"INV-42","customer_id":"cus_0198f80c-1111-7dc1-a369-90556a64f700","metadata":{"po":"PO-77"}}))]
 struct CreateDepositRequest {
     amount: String,
     /// `USDC` (the default) or `USDT`: the one currency the request is
@@ -142,7 +153,9 @@ struct CreateDepositRequest {
     /// The paying party. May be left out when `customer_id` is given: the
     /// customer is snapshotted in its place. An inline party always wins.
     payer: Option<Party>,
-    payer_policy: PayerPolicy,
+    /// The verification add-ons attached; omitted means none, the
+    /// permissionless default.
+    verification: Option<PayerVerification>,
     /// A `cus_` id of one of your customers.
     customer_id: Option<String>,
     /// The `iss_` id of the saved issuer identity this is issued under.
@@ -205,8 +218,10 @@ struct DepositRequest {
     reference: Option<String>,
     customer_id: Option<String>,
     issuer_id: Option<String>,
-    /// The full policy including merchant assertions; never shown to payers.
-    payer_policy: PayerPolicy,
+    /// The verification add-ons attached, including the merchant's
+    /// assertions; omitted when none are attached. Never shown to payers
+    /// beyond what the verification views disclose.
+    verification: Option<PayerVerification>,
     attachment: Option<AttachmentDescriptor>,
     verification_completed_at: Option<String>,
     likely_unsolicited_at: Option<String>,
@@ -267,7 +282,8 @@ struct DepositRequestSummary {
     status: DepositRequestStatus,
     amount: String,
     received: String,
-    payer_policy_mode: PayerPolicyMode,
+    /// The verification add-ons attached; omitted when none are attached.
+    verification: Option<PayerVerification>,
     customer_id: Option<String>,
     issuer_id: Option<String>,
     has_attachment: bool,
@@ -283,9 +299,10 @@ enum VerificationFactStatus {
     Approved,
     Declined,
 }
-/// Each fact the policy needs, on its own. `wallet` is never `not_required`:
-/// every request needs the payer's wallet attestation before it has an
-/// address. `complete` is the identity policy alone.
+/// Each fact the request's add-ons need, on its own. `wallet` is
+/// `not_required` unless the wallet-attestation add-on is attached: only
+/// then does the payer sign before an address exists. `complete` covers
+/// the identity add-ons alone.
 #[derive(Serialize, ToSchema)]
 struct VerificationRequirements {
     email: VerificationFactStatus,
@@ -309,7 +326,8 @@ struct VerificationAttempt {
 }
 #[derive(Serialize, ToSchema)]
 struct VerificationDetail {
-    payer_policy_mode: PayerPolicyMode,
+    /// The add-ons the request attached; omitted when none are attached.
+    verification: Option<PayerVerification>,
     verification_completed_at: Option<String>,
     likely_unsolicited_at: Option<String>,
     facts: VerificationRequirements,
@@ -669,7 +687,10 @@ struct CanonicalIssuanceSnapshot {
     heading: Option<String>,
     reference: Option<String>,
     expiration_timestamp: String,
-    payer_policy: PayerPolicy,
+    payer_verification: Option<PayerVerification>,
+    /// EIP-55 checksummed: Payday's own recovery wallet, the payment
+    /// contract's recovery term.
+    recovery_address: String,
     attachment: Option<AttachmentCommitment>,
     /// Every network the request may be paid on, ordered by chain id.
     networks: Vec<SnapshotNetwork>,
@@ -759,20 +780,31 @@ struct AttestedRelayFill {
 struct VerificationAttestationPayload {
     version: String,
     payment_id: String,
+    /// `settlement` for a request without the wallet-attestation add-on,
+    /// `wallet_attributed` for one with it: the verifier refuses an
+    /// attestation carried by a proof of the other scope.
+    scope: String,
     /// The issuance commitment the attestation is bound to, so a genuine
     /// attestation cannot be transplanted onto another deposit request's package.
     attribution_hash: String,
+    /// `0x` hex, 32 bytes: the issuance nonce the address's salt was derived
+    /// from, disclosed so third parties can rederive the address.
+    issuance_nonce: String,
     chain_id: String,
     payment_address: String,
-    payer_wallet: String,
+    /// EIP-55 checksummed wallet the payer attested; `wallet_attributed`
+    /// scope only.
+    payer_wallet: Option<String>,
     /// The nonce inside the payer's signed attestation; Payday's word is
-    /// that it was issued only after the policy passed.
-    wallet_nonce: String,
-    payer_policy_mode: PayerPolicyMode,
+    /// that it was issued only after the identity add-ons passed.
+    /// `wallet_attributed` scope only.
+    wallet_nonce: Option<String>,
     /// `not_required`, `approved`, or `pending`.
     result: String,
     verified_at: Option<String>,
-    wallet_bound_at: String,
+    /// When the payer's attestation was accepted; `wallet_attributed` scope
+    /// only.
+    wallet_bound_at: Option<String>,
     facts: Vec<VerificationFact>,
     /// The transfers Relay's solver made for cross-chain payments the
     /// attested wallet sent, each with the origin Payday verified; absent
@@ -1019,7 +1051,7 @@ fn cancel_withdrawal() {}
 
 #[derive(OpenApi)]
 #[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,StatusWithdrawals,StatusSigner,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerVerification,EmailVerification,MerchantAuth,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,StatusWithdrawals,StatusSigner,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
  modifiers(&Security), tags((name="withdrawals",description="Moving the Payday wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
@@ -1143,7 +1175,7 @@ mod tests {
         for documented in [
             "issuer",
             "payer",
-            "payer_policy",
+            "verification",
             "attachment",
             "attribution",
         ] {
@@ -1158,9 +1190,13 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        for field in ["amount", "payer_policy"] {
-            assert!(required.contains(&field), "{field} must be required");
-        }
+        // `amount` is the only required field: `verification` defaults to
+        // none attached, the permissionless model.
+        assert!(required.contains(&"amount"), "amount must be required");
+        assert!(
+            !required.contains(&"verification"),
+            "verification is optional"
+        );
         // The parties and the payout address may come from saved records.
         for field in ["payout_address", "issuer", "payer"] {
             assert!(!required.contains(&field), "{field} must be optional");
@@ -1224,16 +1260,14 @@ mod tests {
                 .is_none_or(|fields| fields.is_empty()),
             "every update field is optional"
         );
-        assert_eq!(
-            d["components"]["schemas"]["PayerPolicyMode"]["enum"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
+        assert!(
+            d["components"]["schemas"]["PayerVerification"]["properties"]["wallet_attestation"]
+                .is_object()
         );
         assert!(deposit["client_secret"].is_object());
         assert!(
-            d["components"]["schemas"]["PayerPolicy"]["properties"]["payer_reference"].is_object()
+            d["components"]["schemas"]["PayerVerification"]["properties"]["merchant_auth"]
+                .is_object()
         );
         assert!(
             d["components"]["schemas"]["VerificationRequirements"]["properties"]

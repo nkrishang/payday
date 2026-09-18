@@ -1,5 +1,4 @@
-import type { PayerPolicyMode, DepositRequestStatus } from "@payday/sdk";
-import type { ComposerMode } from "./create-deposit-request";
+import type { PayerVerification, DepositRequestStatus } from "@payday/sdk";
 import type { CheckoutTone } from "@/lib/checkout-state";
 
 /** Merchant-facing words for the API's status values, in lifecycle order. */
@@ -23,36 +22,18 @@ export function statusTone(status: DepositRequestStatus): CheckoutTone {
 }
 
 /**
- * The two presets the composer offers, in order. The third mode,
- * `merchant_session`, is deliberately absent: it exists for an application
- * that has signed its user in and can hand them the client secret, which a
- * request composed by hand in the dashboard has no way to do. It is created
- * through the API only, and the dashboard shows it once it exists.
+ * Merchant-facing words for a request's verification add-ons, read from the
+ * `verification` object every response carries. `merchant_auth` appears only
+ * when a request was composed through the API: it needs the merchant's
+ * application to sign the payer in and hand over the client secret, which a
+ * request composed by hand in the dashboard has no way to do.
  */
-export const MODES: ReadonlyArray<{ value: ComposerMode; label: string; description: string }> = [
-  {
-    value: "permissionless",
-    label: "Permissionless",
-    description:
-      "Anyone holding a link to the deposit request can view the deposit details and fund it.",
-  },
-  {
-    value: "verified_email",
-    label: "Verified email",
-    description:
-      "The payer must prove ownership of the expected email before the amount, details, and address are shown.",
-  },
-];
-
-/** Every mode's merchant-facing name, including the API-only one. */
-const MODE_LABELS: Record<PayerPolicyMode, string> = {
-  permissionless: "Permissionless",
-  verified_email: "Verified email",
-  merchant_session: "Your app's sign-in",
-};
-
-export function modeLabel(mode: PayerPolicyMode): string {
-  return MODE_LABELS[mode] ?? mode;
+export function verificationLabel(verification: PayerVerification): string {
+  const parts: string[] = [];
+  if (verification.email) parts.push("Verified email");
+  if (verification.merchant_auth) parts.push("Your app's sign-in");
+  if (verification.wallet_attestation) parts.push("Wallet attestation");
+  return parts.length > 0 ? parts.join(" + ") : "None";
 }
 
 export function formatDate(iso: string): string {

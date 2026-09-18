@@ -6,10 +6,11 @@ import { MerchantSessionGate, type ClientSecretStatus } from "./merchant-session
 
 /**
  * What a gated deposit request shows before the payer has verified: the issuer, the
- * heading, and the one way in that the policy allows. For a verified-email
- * request that is a masked hint of the mailbox and the controls for the code;
- * for a merchant-session request it is the name of the app that opens it,
- * because nothing on this page can. Nothing else is in the tree — the API
+ * heading, and the way in that each pending identity add-on allows. For an
+ * email-gated request that is a masked hint of the mailbox and the controls
+ * for the code; for a merchant-auth request it is the name of the app that
+ * opens it, because nothing on this page can. Both can be pending at once,
+ * and then both ways in are shown. Nothing else is in the tree — the API
  * does not send the amount, parties, attachment, or address, and this
  * component never asks for them.
  */
@@ -30,8 +31,9 @@ export function VerificationGate({
   onCodeSent: () => void;
   onVerified: () => void;
 }) {
-  const { mode, expected_email_hint } = payment.payer_policy;
-  const merchantSession = mode === "merchant_session";
+  const { expected_email_hint, requirements } = payment;
+  const merchantSession = requirements.merchant_session === "pending";
+  const emailPending = requirements.email === "pending";
 
   return (
     <div className="px-5 py-6 sm:px-6">
@@ -59,7 +61,9 @@ export function VerificationGate({
           <div className="mt-2">
             <MerchantSessionGate issuerName={payment.issuer_name} status={clientSecretStatus} />
           </div>
-        ) : (
+        ) : null}
+
+        {emailPending ? (
           <>
             <p className="mt-2 text-[13px] leading-relaxed text-muted">
               Payment details are disclosed on this page once you verify ownership of the expected
@@ -84,7 +88,7 @@ export function VerificationGate({
               />
             </div>
           </>
-        )}
+        ) : null}
       </section>
     </div>
   );

@@ -382,11 +382,11 @@ fn sweep_item(row: &DbInvoice, first_observed_block: Option<u64>) -> Result<Swee
 }
 
 /// The eligibility predicate shared by the scheduler and the queue stats.
-/// A live funded request is eligible only when its policy is permissionless
-/// or its verification has completed, and only while the finalized chain
-/// clock has not passed its deadline (product plan §4.8). Closed requests
-/// (`expired`, `fulfilled`, `recovered`) are always eligible so their
-/// balance reaches recovery whatever the verification state.
+/// A live funded request is eligible only when it attaches no identity
+/// add-ons or its verification has completed, and only while the finalized
+/// chain clock has not passed its deadline (product plan §4.8). Closed
+/// requests (`expired`, `fulfilled`, `recovered`) are always eligible so
+/// their balance reaches recovery whatever the verification state.
 const ELIGIBLE: &str = r#"
     invoice.uncollected_count > 0
     AND invoice.sweep_job_id IS NULL
@@ -396,7 +396,7 @@ const ELIGIBLE: &str = r#"
         OR (
             invoice.status = 'funded'
             AND (
-                invoice.payer_policy_mode = 'permissionless'
+                (invoice.expected_email IS NULL AND invoice.payer_reference IS NULL)
                 OR invoice.verification_completed_at IS NOT NULL
             )
             AND invoice.expiration_timestamp >= COALESCE(
@@ -973,10 +973,11 @@ mod tests {
     use alloy_primitives::{Address, U256, address};
     use gum_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, Currency, Invoice, Party,
-        PayerPolicy,
+        PayerVerification, RecoveryAddress,
     };
     use sqlx::PgPool;
 
+    use crate::invoices::tests::TEST_RECOVERY;
     use crate::{AccountId, CreateInvoiceInput};
 
     const CHAIN_ID: u64 = 31337;
@@ -1003,10 +1004,14 @@ mod tests {
     }
 
     async fn insert_invoice(pool: &PgPool, amount: u64) -> Invoice {
-        insert_invoice_with(pool, amount, PayerPolicy::Permissionless).await
+        insert_invoice_with(pool, amount, PayerVerification::default()).await
     }
 
-    async fn insert_invoice_with(pool: &PgPool, amount: u64, policy: PayerPolicy) -> Invoice {
+    async fn insert_invoice_with(
+        pool: &PgPool,
+        amount: u64,
+        verification: PayerVerification,
+    ) -> Invoice {
         let account_id = Uuid::from_u128(1);
         sqlx::query(
             r#"INSERT INTO accounts (id, api_key_hash, api_key_hint)
@@ -1029,10 +1034,11 @@ mod tests {
         let snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
-            policy,
+            verification,
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(TEST_RECOVERY),
             amount,
             EXPIRATION,
         );
@@ -1040,6 +1046,7 @@ mod tests {
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(TEST_RECOVERY),
             amount,
             EXPIRATION,
             snapshot,
@@ -1066,9 +1073,13 @@ mod tests {
         Invoice::try_from(&bound).unwrap()
     }
 
-    fn gated() -> PayerPolicy {
-        PayerPolicy::VerifiedEmail {
-            expected_email: "alice@example.com".into(),
+    fn gated() -> PayerVerification {
+        PayerVerification {
+            email: Some(gum_core::EmailVerification {
+                expected_email: "alice@example.com".into(),
+            }),
+            merchant_auth: None,
+            wallet_attestation: false,
         }
     }
 

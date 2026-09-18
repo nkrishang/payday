@@ -43,6 +43,11 @@ STRANGER="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 # Proof of Payment attestations are signed with Anvil account #6; its address,
 # 0x976EA74026E726554dB657fA54763abd0C3a0aa9, is the trusted attestor here.
 ATTESTATION_SIGNER_KEY="0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e"
+# Gum's own recovery wallet: every payment contract is deployed with it as
+# the recovery address, whatever the payer verified. Recovery is manual, so
+# no suite flow needs its key — only its balance. A fixed stand-in address
+# outside Anvil's twelve accounts.
+RECOVERY="0xf78b72F68d560c06C36c3BeF86F1f055b83221e5"
 MINIO_PORT="${PAYDAY_MINIO_PORT:-9000}"
 # MinIO removed its Docker Hub images; quay.io is the official registry now.
 MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
@@ -101,6 +106,8 @@ export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
 export PAYDAY_PAYER_REF_MASTER_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 export PAYDAY_HOSTED_CHECKOUT_ORIGIN="$API_URL"
 export PAYDAY_ATTESTATION_SIGNER_KEY="$ATTESTATION_SIGNER_KEY"
+# The recovery address every payment contract is deployed with (see RECOVERY).
+export PAYDAY_RECOVERY_ADDRESS="$RECOVERY"
 # MinIO stands in for the S3 attachment bucket; see start_minio below.
 export PAYDAY_ATTACHMENT_BUCKET="$ATTACHMENT_BUCKET"
 export PAYDAY_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${MINIO_PORT}"
@@ -260,30 +267,35 @@ build_chain_registry() {
   export PAYDAY_CHAINS
 }
 
-# Issue a permissionless request and bind the payer's wallet to it, so the
-# response carries the address the flows below pay. The merchant response is
-# re-read after the binding, as an integration polling for `address` would.
+# Issue a permissionless request and choose its network, so the response
+# carries the address the flows below pay. The merchant response is re-read
+# after the choice, as an integration polling for `address` would.
 create_invoice() {
   local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 issued id
   issued="$(issue_invoice "$amount" "$beneficiary" "$expires_in" "$idempotency_key" "${5:-}" "${6:-}")"
   id="$(jq -er .id <<<"$issued")"
   if [[ "$(jq -r .address <<<"$issued")" == null ]]; then
-    bind_payer_wallet "$id" >/dev/null
+    choose_network "$id" >/dev/null
   fi
   get_invoice "$id"
 }
 
-# Issue only: no address until a payer binds a wallet. A fifth argument pins
-# the network the merchant wants the deposit on; a sixth names the currency
-# (USDC unless given).
+# Issue only: no address until a payer chooses a network or attests a wallet.
+# A fifth argument pins the network the merchant wants the deposit on; a
+# sixth names the currency (USDC unless given); an optional seventh is a JSON
+# `verification` object with the add-ons to attach (email, merchant_auth,
+# wallet_attestation). Absent, the request is permissionless.
 issue_invoice() {
-  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 chain_id=${5:-} currency=${6:-} body
+  local amount=$1 beneficiary=$2 expires_in=$3 idempotency_key=$4 chain_id=${5:-} currency=${6:-} verification=${7:-} body
   body="$(invoice_body "$amount" "$beneficiary" "$expires_in")"
   if [[ -n "$chain_id" ]]; then
     body="$(jq -c --arg chain "$chain_id" '. + {chain_id: $chain}' <<<"$body")"
   fi
   if [[ -n "$currency" ]]; then
     body="$(jq -c --arg currency "$currency" '. + {currency: $currency}' <<<"$body")"
+  fi
+  if [[ -n "$verification" ]]; then
+    body="$(jq -c --argjson verification "$verification" '. + {verification: $verification}' <<<"$body")"
   fi
   curl --fail --silent \
     --header "Authorization: Bearer $PAYDAY_API_KEY" \
@@ -293,8 +305,27 @@ issue_invoice() {
     "$API_URL/v1/deposit-requests"
 }
 
-# The payer's wallet step, as the hosted checkout performs it: the payer
-# names the chain they will pay on, asks for a challenge for their wallet,
+# The payer's network choice, as the hosted checkout performs it for a
+# request without the wallet-attestation add-on: name the chain, and the
+# payment address is minted for it. Idempotent for the chain already chosen;
+# a session may be passed for a gated request (one that has verified its
+# mailbox). Prints the payer view.
+choose_network() {
+  local id=$1 chain_id=${2:-$CHAIN_ID} session=${3:-}
+  local -a session_header=()
+  if [[ -n "$session" ]]; then
+    session_header=(--header "Payday-Payer-Session: $session")
+  fi
+  curl --fail --silent --request POST \
+    --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+    ${session_header[@]+"${session_header[@]}"} \
+    --data "$(jq -cn --arg chain "$chain_id" '{chain_id: $chain}')" \
+    "$API_URL/v1/payer/deposit-requests/$id/network"
+}
+
+# The payer's wallet step, as the hosted checkout performs it for a request
+# that attached the wallet-attestation add-on: the payer names the chain they
+# will pay on, asks for a challenge for their wallet,
 # signs it with cast exactly as a wallet signs EIP-712 typed data (under that
 # chain's domain), then attests. A session may be passed for a gated request
 # (one that has verified its mailbox); a permissionless request gets one
@@ -398,18 +429,17 @@ set_blacklisted() {
 
 # Raw request body for POST /v1/deposit-requests; built with jq so no shell quoting
 # is involved (bash 3.2 brace-expands nested quotes inside "$(...)"). Neither
-# recovery nor the chain is a request field: recovery is the payer's attested
-# wallet, and the payer chooses the network when they sign. The document
-# fields are the minimum a deposit request carries: two parties and an open
-# payer policy.
+# recovery nor the chain is a request field: recovery is Gum's own wallet, and
+# the payer chooses the network when they pay. The document fields are the
+# minimum a deposit request carries: two parties and no verification add-ons
+# (permissionless by default; `verification` attaches them).
 invoice_body() {
   local amount=$1 beneficiary=$2 expires_in=$3
   jq -cn --arg beneficiary "$beneficiary" \
     --arg amount "$amount" --argjson expires_in "$expires_in" \
     '{payout_address: $beneficiary,
       amount: $amount, expires_in: $expires_in,
-      issuer: {name: "Payday E2E Issuer"}, payer: {name: "Payday E2E Customer"},
-      payer_policy: {mode: "permissionless"}}'
+      issuer: {name: "Payday E2E Issuer"}, payer: {name: "Payday E2E Customer"}}'
 }
 
 # A merchant API request with the primary account's key. The body, when
@@ -633,6 +663,10 @@ with_unknown_chain="$(jq -c '. + {chain_id: "999"}' <<<"$valid")"
 assert_eq 422 "$(api_status_code "$with_unknown_chain")" "a chain the deployment does not serve was accepted"
 with_token="$(jq -c --arg token "$USDC" '. + {token_address: $token}' <<<"$valid")"
 assert_eq 400 "$(api_status_code "$with_token")" "a request naming a token was accepted"
+# The retired payer-policy field is unknown like any other: the add-ons live
+# in `verification`.
+with_policy="$(jq -c '. + {payer_policy: {mode: "permissionless"}}' <<<"$valid")"
+assert_eq 400 "$(api_status_code "$with_policy")" "the retired payer_policy field was accepted"
 # Merchants do not choose where recovered funds go; the field is unknown to
 # the API and must fail like any other unknown field. The exact code is the
 # API's decision, so only the class is asserted.
@@ -643,33 +677,43 @@ refund_status="$(api_status_code "$with_refund_address")"
   exit 1
 }
 
-echo "Testing an exact deposit, the payer's wallet binding, and API idempotency"
-exact_issued="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
+echo "Testing an exact deposit, the payer's wallet attestation, and API idempotency"
+# The wallet-attestation add-on: the request has no address until a wallet
+# signs, and only that wallet may pay it.
+exact_issued="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id" "" "" '{"wallet_attestation": true}')"
 exact_id="$(jq -er .id <<<"$exact_issued")"
 assert_eq null "$(jq -r .address <<<"$exact_issued")" "a freshly issued request already has an address"
 assert_eq null "$(jq -r .payer_wallet <<<"$exact_issued")" "a freshly issued request already names a payer wallet"
-assert_eq 4 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
-# No network until the payer chooses; the offer lists both local chains.
+assert_eq 5 "$(jq -r .attribution.version <<<"$exact_issued")" "issued invoice has the wrong attribution version"
+# No network until the payer chooses (with their signature, here); the offer
+# lists both local chains.
 assert_eq null "$(jq -r .chain <<<"$exact_issued")" "a freshly issued request already names a chain"
 assert_eq "$CHAIN_ID $SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$exact_issued")" \
   "the issued request does not offer both networks"
+# The network-choice route is not on an attested request's path: the network
+# follows the attestation.
+assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg chain "$CHAIN_ID" '{chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$exact_id/network")" \
+  "an attested request offered the network choice"
 # A chain the request does not offer is refused before any signature.
 assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet, chain_id: "999"}')" \
   "$API_URL/v1/payer/deposit-requests/$exact_id/wallet/challenge")" \
   "a challenge was minted for a chain the request does not offer"
-# The payer's wallet, not the merchant, is what turns the request into an address.
+# The payer's signature, not the merchant, is what turns the request into an address.
 bind_payer_wallet "$exact_id" >/dev/null
 exact="$(get_invoice "$exact_id")"
-exact_replay="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
+exact_replay="$(issue_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id" "" "" '{"wallet_attestation": true}')"
 assert_eq "$exact_id" "$(jq -r .id <<<"$exact_replay")" "idempotent replay created another invoice"
 assert_eq "$(jq -r .address <<<"$exact")" "$(jq -r .address <<<"$exact_replay")" \
   "idempotent replay does not report the bound address"
 assert_eq "$(lowercase "$PAYER")" "$(jq -r '.payer_wallet | ascii_downcase' <<<"$exact")" \
   "invoice does not name the attested payer wallet"
-assert_eq "$(lowercase "$PAYER")" "$(jq -r '.recovery_address | ascii_downcase' <<<"$exact")" \
-  "the recovery term is not the payer's wallet"
+assert_eq "$(lowercase "$RECOVERY")" "$(jq -r '.recovery_address | ascii_downcase' <<<"$exact")" \
+  "the recovery term is not Gum's recovery wallet"
 assert_eq "$CHAIN_ID" "$(jq -r .chain.id <<<"$exact")" "the bound request does not name the chosen chain"
 assert_eq "$CHAIN_ID" "$(jq -r .self_settlement.chain_id <<<"$exact")" "self-settlement does not name the chain"
 [[ "$(jq -r .wallet_bound_at <<<"$exact")" != null ]] || {
@@ -773,20 +817,23 @@ assert_eq "$((partial_before + 1000000))" "$(token_balance "$BENEFICIARY_PARTIAL
   "partial payment beneficiary balance mismatch"
 assert_payment_deployed_and_empty "$partial_address"
 
-echo "Testing exact settlement with the remainder returned to the payer"
+echo "Testing exact settlement with the remainder forwarded to Gum's recovery wallet"
 overpayment="$(create_invoice 1 "$BENEFICIARY_OVERPAYMENT" 3600 "overpayment-$run_id")"
 overpayment_id="$(jq -r .id <<<"$overpayment")"
 overpayment_address="$(jq -r .address <<<"$overpayment")"
 overpayment_before="$(token_balance "$BENEFICIARY_OVERPAYMENT")"
-# The payer is both the sender and, being the attested wallet, where the
-# remainder comes back to.
+# The payer is the sender; the remainder comes back to Gum's recovery wallet
+# (the contract's recovery address), which handles it by hand.
+recovery_before="$(token_balance "$RECOVERY")"
 payer_before="$(token_balance "$PAYER")"
 send_usdc "$overpayment_address" 1250000
 wait_for_status "$overpayment_id" settled
 assert_eq "$((overpayment_before + 1000000))" "$(token_balance "$BENEFICIARY_OVERPAYMENT")" \
   "beneficiary must receive exactly the invoice amount"
-assert_eq "$((payer_before - 1000000))" "$(token_balance "$PAYER")" \
-  "overpayment remainder did not return to the payer's wallet"
+assert_eq "$((payer_before - 1250000))" "$(token_balance "$PAYER")" \
+  "the payer's whole transfer did not leave the payer's wallet"
+assert_eq "$((recovery_before + 250000))" "$(token_balance "$RECOVERY")" \
+  "overpayment remainder did not reach Gum's recovery wallet"
 assert_payment_deployed_and_empty "$overpayment_address"
 wait_for_sql 1 "$(recovery_ledger_query "$overpayment_id" overpayment 250000)" \
   "overpayment remainder was not recorded in the recovery ledger"
@@ -831,14 +878,15 @@ assert_payment_deployed_and_empty "$batch_one_address"
 assert_payment_deployed_and_empty "$batch_two_address"
 assert_payment_deployed_and_empty "$batch_three_address"
 
-echo "Testing that a transfer after settlement is forwarded back to the payer"
-payer_before="$(token_balance "$PAYER")"
+echo "Testing that a transfer after settlement is forwarded to Gum's recovery wallet"
+recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$batch_one_address" 7
 send_usdc "$batch_one_address" 0
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${batch_one_id#dr_}'::uuid AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late transfer was not collected"
-assert_eq "$payer_before" "$(token_balance "$PAYER")" "late transfer did not come back to the payer's wallet"
+assert_eq "$((recovery_before + 7))" "$(token_balance "$RECOVERY")" \
+  "late transfer did not reach Gum's recovery wallet"
 wait_for_sql 1 "$(recovery_ledger_query "$batch_one_id" late_transfer 7)" \
   "late transfer was not recorded in the recovery ledger"
 assert_eq 1 "$(psql "$DATABASE_URL" --tuples-only --no-align --command "
@@ -859,7 +907,7 @@ third_expiration="$(jq -r '.expires_at | fromdateiso8601' <<<"$third")"
 send_usdc "$third_address" 2000000
 third_party_tx="$(cast send "$FACTORY" \
   'execute(address,uint256,address,uint64,address,bytes32,uint256)' \
-  "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$third_expiration" "$PAYER" "$third_salt" "$CHAIN_ID" \
+  "$USDC" 2000000 "$BENEFICIARY_THIRD_PARTY" "$third_expiration" "$RECOVERY" "$third_salt" "$CHAIN_ID" \
   --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" --json | jq -r .transactionHash)"
 wait_for_status "$third_id" settled
 assert_eq "$third_party_tx" "$(get_invoice "$third_id" | jq -r .settlement_tx_hash)" \
@@ -896,18 +944,18 @@ curl --fail --silent --output /dev/null --request POST \
 wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
 
-echo "Testing automatic return of an expired partial deposit and its late completion"
+echo "Testing automatic recovery of an expired partial deposit and its late completion"
 expired="$(create_invoice 1 "$BENEFICIARY_EXPIRED" 660 "expired-recovery-$run_id")"
 expired_id="$(jq -r .id <<<"$expired")"
 expired_address="$(jq -r .address <<<"$expired")"
-payer_before="$(token_balance "$PAYER")"
+recovery_before="$(token_balance "$RECOVERY")"
 send_usdc "$expired_address" 400000
 wait_for_invoice "$expired_id" '.received_base_units == "400000" and .status == "partially_deposited"' "partial payment credited"
 # Chain time passes the deadline; wall-clock stays where it is.
 cast rpc --rpc-url "$RPC_URL" evm_increaseTime 700 >/dev/null
 wait_for_status "$expired_id" returned
-assert_eq "$payer_before" "$(token_balance "$PAYER")" \
-  "expired partial payment was not returned to the payer's wallet"
+assert_eq "$((recovery_before + 400000))" "$(token_balance "$RECOVERY")" \
+  "expired partial payment was not recovered to Gum's recovery wallet"
 assert_payment_deployed_and_empty "$expired_address"
 assert_eq false "$(cast call "$expired_address" 'settled()(bool)' --rpc-url "$RPC_URL")" \
   "deployed Payment must record recovery"
@@ -917,17 +965,25 @@ send_usdc "$expired_address" 600000
 wait_for_sql 1 "SELECT count(*) FROM payment_observations
   WHERE invoice_id = '${expired_id#dr_}'::uuid AND amount = '600000' AND disposition = 'late' AND collected_at_block IS NOT NULL" \
   "late completion was not collected"
-assert_eq "$payer_before" "$(token_balance "$PAYER")" \
-  "late completion was not returned to the payer's wallet"
+assert_eq "$((recovery_before + 1000000))" "$(token_balance "$RECOVERY")" \
+  "late completion was not recovered to Gum's recovery wallet"
 assert_eq returned "$(get_invoice "$expired_id" | jq -r .status)" "late completion changed the payment status"
 assert_eq 0 "$(token_balance "$expired_address")" "late completion stranded at the payment address"
 wait_for_sql 1 "$(recovery_ledger_query "$expired_id" late_transfer 600000)" \
   "late completion was not recorded in the recovery ledger"
 
 echo "Testing a request paid on the second network"
+# Permissionless, unpinned: the payer's network choice mints the address.
 second_issued="$(issue_invoice 0.75 "$BENEFICIARY_EXACT" 3600 "second-network-$run_id")"
 second_id="$(jq -er .id <<<"$second_issued")"
-bind_payer_wallet "$second_id" "" "$SECOND_CHAIN_ID" >/dev/null
+choose_network "$second_id" "$SECOND_CHAIN_ID" >/dev/null
+# A pinned choice among offered networks cannot be reopened: same chain is
+# idempotent, a different offered chain is a conflict.
+assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg chain "$CHAIN_ID" '{chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$second_id/network")" \
+  "the network choice was reopened on a chosen request"
 second="$(get_invoice "$second_id")"
 second_address="$(jq -er .address <<<"$second")"
 assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$second")" "the request does not name the second chain"
@@ -936,7 +992,7 @@ assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$second")" "the request does
   exit 1
 }
 # The same document bound on the first chain lands elsewhere: the chain is
-# committed into the address like the wallet.
+# committed into the address like the network.
 [[ "$second_address" != "$exact_address" ]] || {
   echo "the same address was derived for two chains" >&2
   exit 1
@@ -959,24 +1015,31 @@ grep -q 'nothing watched; cursor fast-forwarded without scanning' "$logs/indexer
 echo "Testing a request the merchant pinned to the second network"
 pinned_issued="$(issue_invoice 0.5 "$BENEFICIARY_EXACT" 3600 "pinned-$run_id" "$SECOND_CHAIN_ID")"
 pinned_id="$(jq -er .id <<<"$pinned_issued")"
-# The network is known from issuance and it is the only one offered; the
-# address still waits for the payer's wallet.
+# The network is known from issuance and it is the only one offered; with no
+# add-ons attached, the address exists from the moment of issuance.
 assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$pinned_issued")" "a pinned request does not name its chain at issuance"
 assert_eq "$SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join(" ")' <<<"$pinned_issued")" \
   "a pinned request offers more than its chain"
-assert_eq null "$(jq -r .address <<<"$pinned_issued")" "a pinned request has an address before any wallet"
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .self_settlement.chain_id <<<"$pinned_issued")" \
+  "self-settlement does not name the pinned chain"
+[[ "$(jq -r .address <<<"$pinned_issued")" != null ]] || {
+  echo "a pinned permissionless request has no address at issuance" >&2
+  exit 1
+}
 assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$pinned_id")")" \
   "the payer page does not name the pinned chain"
-# The payer cannot take it elsewhere.
+# The payer cannot take it elsewhere: a chain the request does not offer is
+# refused outright, before any already-chosen check.
 assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-  --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
-  "$API_URL/v1/payer/deposit-requests/$pinned_id/wallet/challenge")" \
-  "a challenge was minted on a chain the merchant excluded"
-bind_payer_wallet "$pinned_id" "" "$SECOND_CHAIN_ID" >/dev/null
+  --data "$(jq -cn --arg chain "$CHAIN_ID" '{chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$pinned_id/network")" \
+  "a network choice was taken from a chain the request does not offer"
+# Choosing the pinned network again is idempotent.
+assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$(choose_network "$pinned_id" "$SECOND_CHAIN_ID")")" \
+  "the same network choice was not idempotent"
 pinned="$(get_invoice "$pinned_id")"
 pinned_address="$(jq -er .address <<<"$pinned")"
-assert_eq "$SECOND_CHAIN_ID" "$(jq -r .self_settlement.chain_id <<<"$pinned")" "the pinned binding is not on the pinned chain"
 # The webhook payload names the chain the way the API does.
 wait_for_sql 1 "SELECT count(*) FROM webhook_events
   WHERE invoice_id = '${pinned_id#dr_}'::uuid AND event_type = 'deposit_request.ready'
@@ -991,13 +1054,13 @@ assert_eq "$((pinned_before + 500000))" "$(token_balance "$BENEFICIARY_EXACT" "$
 echo "Testing a payment from the second network through Relay"
 # Pinned to the first chain; the payer's USDC is on the second. The page's
 # steps, made by hand: list the origins, quote, send the quote's transaction
-# from the attested wallet, report it, and watch the delivery settle the
+# from the payer's wallet, report it, and watch the delivery settle the
 # request without a flag and with a proof that names the origin.
 relay_issued="$(issue_invoice 2 "$BENEFICIARY_EXACT" 3600 "relay-$run_id" "$CHAIN_ID")"
 relay_id="$(jq -er .id <<<"$relay_issued")"
-bind_payer_wallet "$relay_id" "" "$CHAIN_ID" >/dev/null
+assert_eq null "$(jq -r .payer_wallet <<<"$relay_issued")" "a permissionless request names a payer wallet"
 relay_view="$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id")"
-assert_eq true "$(jq -r .relay_available <<<"$relay_view")" "a bound, payable request does not offer Relay"
+assert_eq true "$(jq -r .relay_available <<<"$relay_view")" "a payable request does not offer Relay"
 assert_eq null "$(jq -r .relay <<<"$relay_view")" "a request with no quote follows one"
 assert_eq "$SECOND_CHAIN_ID" "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id/relay/chains" \
   | jq -r '[.chains[].chain_id] | join(" ")')" "the origins are not the other chain alone"
@@ -1009,10 +1072,10 @@ relay_post() {
 }
 assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-  --data "$(jq -cn --arg chain "$CHAIN_ID" '{origin_chain_id: $chain}')" \
+  --data "$(jq -cn --arg chain "$CHAIN_ID" --arg wallet "$PAYER" '{origin_chain_id: $chain, payer_wallet: $wallet}')" \
   "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes")" \
   "a quote from the request's own chain was accepted"
-relay_quote="$(relay_post /relay/quotes "$(jq -cn --arg chain "$SECOND_CHAIN_ID" '{origin_chain_id: $chain}')")"
+relay_quote="$(relay_post /relay/quotes "$(jq -cn --arg chain "$SECOND_CHAIN_ID" --arg wallet "$PAYER" '{origin_chain_id: $chain, payer_wallet: $wallet}')")"
 rli="$(jq -er .id <<<"$relay_quote")"
 assert_eq 2000000 "$(jq -r .amount_out_base_units <<<"$relay_quote")" "the quote does not land the amount due"
 assert_eq 2020000 "$(jq -r .amount_in_base_units <<<"$relay_quote")" "the quote's input is not amount plus fee"
@@ -1048,28 +1111,28 @@ assert_eq "$relay_tx" "$(jq -r .transfers[0].relay.origin_transaction_hash <<<"$
 assert_eq filled "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id" | jq -r .relay.status)" \
   "the payer view does not report the fill"
 relay_proof="$(api_json GET "/v1/deposit-requests/$relay_id/proof")"
-jq -e '.version == "payday.proof.v4"
+jq -e '.version == "payday.proof.v5"
+  and .verification.payload.scope == "settlement"
   and (.transfers | length) == 1
   and (.transfers[0].sender | ascii_downcase) != ($payer | ascii_downcase)
   and .transfers[0].relay.origin_sender == $payer
   and .transfers[0].relay.origin_chain_id == $origin
   and .transfers[0].relay.origin_transaction_hash == $tx
   and .transfers[0].relay.attribution_source == "receipt"
-  and (.verification.payload.relay_fills | length) == 1
-  and .verification.payload.relay_fills[0].transaction_hash == .transfers[0].transaction_hash' \
+  and (.verification.payload.relay_fills | length) == 0' \
   --arg payer "$PAYER" --arg origin "$SECOND_CHAIN_ID" --arg tx "$relay_tx" <<<"$relay_proof" >/dev/null || {
   echo "the relayed Proof of Payment is incomplete: $(jq -c . <<<"$relay_proof")" >&2
   exit 1
 }
 
-echo "Testing that a stranger's transfer parked on a failed Relay quote is flagged after all"
+echo "Testing that a failed Relay quote does not taint a permissionless request"
 parked_issued="$(issue_invoice 3 "$BENEFICIARY_EXACT" 3600 "relay-parked-$run_id" "$CHAIN_ID")"
 parked_id="$(jq -er .id <<<"$parked_issued")"
-bind_payer_wallet "$parked_id" "" "$CHAIN_ID" >/dev/null
+choose_network "$parked_id" "$CHAIN_ID" >/dev/null
 parked_address="$(get_invoice "$parked_id" | jq -er .address)"
 parked_quote="$(curl --fail --silent --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-  --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" '{origin_chain_id: $chain}')" \
+  --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" --arg wallet "$PAYER" '{origin_chain_id: $chain, payer_wallet: $wallet}')" \
   "$API_URL/v1/payer/deposit-requests/$parked_id/relay/quotes")"
 parked_rli="$(jq -er .id <<<"$parked_quote")"
 parked_request="$(jq -er .request_id <<<"$parked_quote")"
@@ -1084,15 +1147,23 @@ send_usdc "$STRANGER" 3000000
 cast send "$USDC" 'transfer(address,uint256)' "$parked_address" 3000000 \
   --private-key "$STRANGER_KEY" --rpc-url "$RPC_URL" >/dev/null
 wait_for_status "$parked_id" settled
-wait_for_sql 1 "SELECT count(*) FROM invoices WHERE id = '${parked_id#dr_}'::uuid AND likely_unsolicited_at IS NOT NULL" \
-  "the stranger's transfer stayed parked after the quote failed"
-wait_for_sql 1 "SELECT count(*) FROM webhook_events
-  WHERE invoice_id = '${parked_id#dr_}'::uuid AND event_type = 'deposit_request.likely_unsolicited'" \
-  "the unparked transfer did not raise deposit_request.likely_unsolicited"
+# The request attached no wallet attestation, so no wallet was ever vouched
+# for: any incoming deposit is the payer's by construction, and the failed
+# Relay intent does not change that. The transfer settles unflagged.
+assert_eq null "$(get_invoice "$parked_id" | jq -r .likely_unsolicited_at)" \
+  "a permissionless request flagged a transfer nobody vouched for"
 assert_eq failed "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$parked_id" | jq -r .relay.status)" \
   "the failed quote is not reported as failed"
-assert_eq deposit_sender_mismatch "$(api_error_code GET "/v1/deposit-requests/$parked_id/proof")" \
-  "a proof was served for a request paid by a stranger after a failed quote"
+# The request attached no wallet attestation, so its proof claims nothing
+# about who paid (settlement scope) and is served even though the transfer's
+# sender was never vouched for.
+parked_proof="$(api_json GET "/v1/deposit-requests/$parked_id/proof")"
+jq -e '.version == "payday.proof.v5"
+  and .verification.payload.scope == "settlement"
+  and .payer_wallet == null' <<<"$parked_proof" >/dev/null || {
+  echo "the parked request's proof is not settlement-scope: $(jq -c . <<<"$parked_proof")" >&2
+  exit 1
+}
 
 echo "Testing that a payment on the wrong chain never settles and can be returned by hand"
 wrong="$(create_invoice 0.5 "$BENEFICIARY_PARTIAL" 3600 "wrong-chain-$run_id")"
@@ -1101,7 +1172,6 @@ wrong_address="$(jq -er .address <<<"$wrong")"
 wrong_salt="$(jq -er .self_settlement.salt <<<"$wrong")"
 wrong_expiration="$(jq -r '.expires_at | fromdateiso8601' <<<"$wrong")"
 assert_eq "$CHAIN_ID" "$(jq -r .chain.id <<<"$wrong")" "the request is not bound to the first chain"
-payer_second_before="$(token_balance "$PAYER" "$SECOND_RPC_URL")"
 # The payer sends the second chain's USDC to an address bound to the first.
 send_usdc "$wrong_address" 500000 "$SECOND_RPC_URL"
 sleep 4
@@ -1110,16 +1180,16 @@ assert_eq 0 "$(get_invoice "$wrong_id" | jq -r .received_base_units)" "a wrong-c
 # docs/runbooks/wrong-network-deposit.md: the factory sits at the same
 # address on every chain, so the operator deploys the Payment there (the
 # constructor refuses to route anything) and forwards that chain's USDC to
-# the payer's own wallet through the permissionless recover(token).
+# Gum's recovery wallet through the permissionless recover(token).
 cast send "$FACTORY" 'execute(address,uint256,address,uint64,address,bytes32,uint256)' \
-  "$USDC" 500000 "$BENEFICIARY_PARTIAL" "$wrong_expiration" "$PAYER" "$wrong_salt" "$CHAIN_ID" \
+  "$USDC" 500000 "$BENEFICIARY_PARTIAL" "$wrong_expiration" "$RECOVERY" "$wrong_salt" "$CHAIN_ID" \
   --private-key "$SIGNER_KEY" --rpc-url "$SECOND_RPC_URL" >/dev/null
 assert_eq false "$(cast call "$wrong_address" 'settled()(bool)' --rpc-url "$SECOND_RPC_URL")" \
   "a wrong-chain deployment recorded a settlement"
 assert_eq 500000 "$(token_balance "$wrong_address" "$SECOND_RPC_URL")" "the wrong-chain constructor moved funds"
 cast send "$wrong_address" 'recover(address)' "$USDC" --private-key "$SIGNER_KEY" --rpc-url "$SECOND_RPC_URL" >/dev/null
-assert_eq "$payer_second_before" "$(token_balance "$PAYER" "$SECOND_RPC_URL")" \
-  "the wrong-chain balance did not return to the payer's wallet"
+assert_eq 500000 "$(token_balance "$RECOVERY" "$SECOND_RPC_URL")" \
+  "the wrong-chain balance did not reach Gum's recovery wallet"
 assert_eq 0 "$(token_balance "$BENEFICIARY_PARTIAL" "$SECOND_RPC_URL")" "the receiver was paid on the wrong chain"
 # The request itself is untouched and still payable on the chain it chose.
 send_usdc "$wrong_address" 500000
@@ -1205,7 +1275,7 @@ documented_id="$(jq -er .id <<<"$documented")"
 assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
   "issued invoice does not carry the attachment commitment"
 assert_eq "$customer_id" "$(jq -r .customer_id <<<"$documented")" "issued invoice lost its customer"
-assert_eq 4 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
+assert_eq 5 "$(jq -r .attribution.version <<<"$documented")" "issued invoice lacks an attribution version"
 descriptor="$(api_json GET "/v1/deposit-requests/$documented_id/attachment")"
 downloaded="$logs/downloaded.pdf"
 curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"
@@ -1216,7 +1286,7 @@ reuse_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
 assert_eq 409 "$reuse_status" "an attached PDF was attached to a second invoice"
 
 gated_body="$(jq -c '. + {heading: "Gated retainer",
-  payer_policy: {mode: "verified_email", expected_email: "alice@example.test"}}' \
+  verification: {email: {expected_email: "alice@example.test"}}}' \
   <<<"$(invoice_body 2 "$BENEFICIARY_EXACT" 3600)")"
 gated="$(curl --fail --silent \
   --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
@@ -1250,27 +1320,33 @@ verify_payer_email() {
   echo "$session"
 }
 
-echo "Testing that a gated request takes the wallet step only from a verified session"
+echo "Testing that a gated request takes the network step only from a verified session"
 gated_before="$(token_balance "$BENEFICIARY_EXACT")"
-# No session, no wallet step: the identity policy comes first.
+# No session, no network step: the identity add-on comes first.
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
+  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --data "$(jq -cn --arg chain "$CHAIN_ID" '{chain_id: $chain}')" \
+  "$API_URL/v1/payer/deposit-requests/$gated_id/network")" \
+  "a gated request offered the network choice without a verified session"
+# The wallet-attestation route is not on a gated, unattested request's path.
+assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$gated_id/wallet/challenge")" \
-  "a gated request offered a wallet challenge without a verified session"
+  "a request without the wallet-attestation add-on offered a wallet challenge"
 gated_session="$(verify_payer_email "$gated_id")"
 gated_unlocked="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
   "$API_URL/v1/payer/deposit-requests/$gated_id")"
 assert_eq true "$(jq -r .content_unlocked <<<"$gated_unlocked")" "verified session did not unlock the invoice"
 assert_eq "Payday E2E Customer" "$(jq -r .details.payer.name <<<"$gated_unlocked")" "verified session did not see the document"
-assert_eq null "$(jq -r .address <<<"$gated_unlocked")" "an unlocked request had an address before the wallet step"
-assert_eq pending "$(jq -r .requirements.wallet <<<"$gated_unlocked")" "the wallet fact is not pending before the wallet step"
+assert_eq null "$(jq -r .address <<<"$gated_unlocked")" "an unlocked request had an address before the network step"
+assert_eq not_required "$(jq -r .requirements.wallet <<<"$gated_unlocked")" "the wallet fact is not exempt on an unattested request"
 [[ "$(get_invoice "$gated_id" | jq -r .verification_completed_at)" != null ]] || {
   echo "the verified request does not record its verification completion" >&2
   exit 1
 }
-# The verified session signs; the request now has its address.
-bind_payer_wallet "$gated_id" "$gated_session" >/dev/null
+# The verified session chooses the network; the request now has its address.
+choose_network "$gated_id" "$CHAIN_ID" "$gated_session" >/dev/null
 gated_bound="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
   "$API_URL/v1/payer/deposit-requests/$gated_id")"
 gated_address="$(jq -er .address <<<"$gated_bound")"
@@ -1296,9 +1372,12 @@ assert_eq null "$(get_invoice "$gated_id" | jq -r .likely_unsolicited_at)" \
   "the payer's own transfer was flagged as unsolicited"
 
 echo "Testing that funds from a wallet other than the attested one are flagged and earn no proof"
-stranger_paid="$(create_invoice 1 "$BENEFICIARY_EXPIRED" 3600 "stranger-$run_id")"
+# The wallet-attestation add-on is what binds a request to one payer wallet:
+# its deposits from anywhere else are unsolicited and earn no proof.
+stranger_paid="$(issue_invoice 1 "$BENEFICIARY_EXPIRED" 3600 "stranger-$run_id" "" "" '{"wallet_attestation": true}')"
 stranger_id="$(jq -er .id <<<"$stranger_paid")"
-stranger_address="$(jq -er .address <<<"$stranger_paid")"
+bind_payer_wallet "$stranger_id" >/dev/null
+stranger_address="$(jq -er .address <<<"$(get_invoice "$stranger_id")")"
 # Fund the stranger, then let it pay the request bound to the payer.
 send_usdc "$STRANGER" 1000000
 cast send "$USDC" 'transfer(address,uint256)' "$stranger_address" 1000000 \
@@ -1324,18 +1403,19 @@ api_json GET "/v1/deposit-requests/$documented_id/request.pdf" "" --output "$inv
 assert_eq "%PDF-" "$(head -c 5 "$invoice_pdf")" "invoice document is not a PDF"
 
 proof="$(api_json GET "/v1/deposit-requests/$exact_id/proof")"
-jq -e '.version == "payday.proof.v4" and .payment_address != null and .salt != null
+jq -e '.version == "payday.proof.v5" and .payment_address != null and .salt != null
   and .chain_id == $chain and (.canonical_issuance_snapshot.networks | length) == 2
   and .attribution_hash != null and .payer_wallet.signature != null
   and .payer_wallet.typed_data.primaryType == "PayerAttestation"
-  and .recovery_address == .payer_wallet.address
+  and (.recovery_address | ascii_downcase) == ($recovery | ascii_downcase)
   and .settlement_transaction_hash != null
   and (.transfers | length) > 0 and (.transfers | all(.sender == $payer))
   and .verification.signature != null
+  and .verification.payload.scope == "wallet_attributed"
   and .verification.payload.payer_wallet == $payer
   and (.verification.payload.facts | map(.kind) | index("wallet") != null)
   and .verification.signer == "0x976EA74026E726554dB657fA54763abd0C3a0aa9"' \
-  --arg payer "$PAYER" --arg chain "$CHAIN_ID" <<<"$proof" >/dev/null || {
+  --arg payer "$PAYER" --arg chain "$CHAIN_ID" --arg recovery "$RECOVERY" <<<"$proof" >/dev/null || {
   echo "Proof of Payment is incomplete: $(jq -c . <<<"$proof")" >&2
   exit 1
 }
@@ -1350,6 +1430,11 @@ assert_eq "$(jq -r .attribution_hash <<<"$proof")" \
 assert_eq "$(jq -r .payment_address <<<"$proof")" \
   "$(jq -r .verification.payload.payment_address <<<"$proof")" \
   "attestation is not bound to the proof's payment address"
+# The recovery address is Gum's own wallet, never the attested payer's.
+[[ "$(jq -r '.recovery_address == .payer_wallet.address' <<<"$proof")" == false ]] || {
+  echo "the proof's recovery address is the payer's wallet" >&2
+  exit 1
+}
 assert_eq 409 "$(api_status GET "/v1/deposit-requests/$documented_id/proof")" \
   "a proof was served for an unsettled invoice"
 
@@ -1478,11 +1563,11 @@ assert_eq 1000000 "$(token_balance "$usdt_address")" \
 assert_eq 1 "$(jq '.transfers | length' <<<"$(get_invoice "$usdt_id")")" \
   "the stray USDC was recorded as a transfer"
 # The runbook's recovery: anyone may return a foreign token from a deployed
-# Payment to the payer's wallet.
-payer_usdc_before="$(token_balance "$PAYER")"
+# Payment to its recovery wallet — Gum's own, wherever the request was paid.
+recovery_before_stray="$(token_balance "$RECOVERY")"
 cast send "$usdt_address" 'recover(address)' "$USDC" --private-key "$STRANGER_KEY" --rpc-url "$RPC_URL" >/dev/null
-assert_eq "$((payer_usdc_before + 1000000))" "$(token_balance "$PAYER")" \
-  "recover(address) did not return the stray USDC to the payer"
+assert_eq "$((recovery_before_stray + 1000000))" "$(token_balance "$RECOVERY")" \
+  "recover(address) did not return the stray USDC to Gum's recovery wallet"
 
 echo "Testing a USDT request paid with USDC from another chain through Relay"
 usdt_relay="$(create_invoice 2 "$BENEFICIARY_PARTIAL" 3600 "usdt-relay-$run_id" "$CHAIN_ID" USDT)"
@@ -1495,7 +1580,8 @@ assert_eq USDC "$(jq -r '.chains[0].tokens[0].currency' <<<"$usdt_relay_chains")
 usdt_origin_token="$(jq -r '.chains[0].tokens[0].address' <<<"$usdt_relay_chains")"
 usdt_quote="$(curl --fail --silent --request POST \
   --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-  --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" --arg token "$usdt_origin_token" '{origin_chain_id: $chain, origin_token: $token}')" \
+  --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" --arg token "$usdt_origin_token" --arg wallet "$PAYER" \
+    '{origin_chain_id: $chain, origin_token: $token, payer_wallet: $wallet}')" \
   "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/quotes")"
 usdt_rli="$(jq -er .id <<<"$usdt_quote")"
 assert_eq USDC "$(jq -r .origin_token.currency <<<"$usdt_quote")" "the quote does not name the origin currency"

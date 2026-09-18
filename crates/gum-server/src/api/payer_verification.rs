@@ -17,7 +17,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use gum_core::{
-    Invoice, InvoiceStatus, PayerPolicyMode, VerificationFacts, VerificationRequirementsResponse,
+    Invoice, InvoiceStatus, PayerVerification, VerificationFacts, VerificationRequirementsResponse,
     rfc3339,
 };
 use gum_ledger::{DbInvoice, DbPayerSession, PAYER_SESSION_TTL, StartEmailVerificationError};
@@ -70,13 +70,13 @@ pub fn session_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn status_response(
-    mode: PayerPolicyMode,
+    verification: &PayerVerification,
     session: &DbPayerSession,
     wallet_bound: bool,
 ) -> VerificationStatusResponse {
     VerificationStatusResponse {
         requirements: VerificationRequirementsResponse::from_facts(
-            mode,
+            verification,
             VerificationFacts {
                 wallet: wallet_bound,
                 ..session.facts()
@@ -90,7 +90,7 @@ fn unix_now() -> u64 {
 }
 
 /// The email-gated invoice behind `id`, still open to verification:
-/// permissionless invoices have nothing to verify, merchant-session invoices
+/// permissionless invoices have nothing to verify, merchant-auth invoices
 /// are opened by a client secret rather than a code, and verification after
 /// the deadline or after settlement cannot change anything, so all are
 /// refused up front.
@@ -102,14 +102,14 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
         .await?
         .ok_or_else(ApiError::payer_unauthorized)?;
     let invoice = Invoice::try_from(&row)?;
-    match invoice.issuance_snapshot.payer_policy.mode() {
-        PayerPolicyMode::VerifiedEmail => {}
-        PayerPolicyMode::Permissionless => return Err(ApiError::verification_not_required()),
-        PayerPolicyMode::MerchantSession => {
-            return Err(ApiError::verification_method_not_applicable(
-                "This deposit request is opened by the issuer's application; it does not send email codes",
-            ));
-        }
+    let verification = &invoice.issuance_snapshot.payer_verification;
+    if verification.merchant_auth.is_some() {
+        return Err(ApiError::verification_method_not_applicable(
+            "This deposit request is opened by the issuer's application; it does not send email codes",
+        ));
+    }
+    if verification.email.is_none() {
+        return Err(ApiError::verification_not_required());
     }
     let open = matches!(
         invoice.status,
@@ -131,9 +131,9 @@ fn expected_email(invoice: &Invoice) -> String {
     normalize_email(
         invoice
             .issuance_snapshot
-            .payer_policy
+            .payer_verification
             .expected_email()
-            .expect("gated_invoice admits only verified_email policies"),
+            .expect("gated_invoice admits only email-gated requests"),
     )
 }
 
@@ -307,11 +307,11 @@ pub async fn confirm_email(
     if completion.invoice_completed_at.is_some() {
         tracing::info!(invoice_id = %row.id, "payer verification completed");
     }
-    let mode = invoice.issuance_snapshot.payer_policy.mode();
+    let verification = &invoice.issuance_snapshot.payer_verification;
     Ok((
         no_store(),
         Json(status_response(
-            mode,
+            verification,
             &completion.session,
             invoice.binding.is_some(),
         )),
@@ -332,10 +332,8 @@ pub async fn status(
         .find_by_id(uuid)
         .await?
         .ok_or_else(ApiError::payer_unauthorized)?;
-    let mode: PayerPolicyMode = row
-        .payer_policy_mode
-        .parse()
-        .map_err(|_| ApiError::internal("invalid payer policy mode in stored invoice"))?;
+    let invoice = Invoice::try_from(&row)?;
+    let verification = invoice.issuance_snapshot.payer_verification.clone();
     let response = match session_token(&headers) {
         Some(token) => {
             let session = state
@@ -343,11 +341,11 @@ pub async fn status(
                 .find_active(token, row.id)
                 .await?
                 .ok_or_else(ApiError::payer_session_invalid)?;
-            status_response(mode, &session, row.payment_address.is_some())
+            status_response(&verification, &session, row.payment_address.is_some())
         }
         None => VerificationStatusResponse {
-            requirements: VerificationRequirementsResponse::for_mode(
-                mode,
+            requirements: VerificationRequirementsResponse::for_verification(
+                &verification,
                 row.verification_completed_at.is_some(),
                 row.payment_address.is_some(),
             ),

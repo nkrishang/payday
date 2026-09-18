@@ -11,13 +11,13 @@ function mockFetch(handler) {
   return { fetch, calls };
 }
 
-const requirementsNone = { email: "not_required", merchant_session: "not_required", complete: true };
+const requirementsNone = { email: "not_required", wallet: "not_required", merchant_session: "not_required", complete: true };
 
 const payerPayment = {
   id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   issuer_name: "Acme LLC",
   heading: "March retainer",
-  payer_policy: { mode: "permissionless", expected_email_hint: null },
+  expected_email_hint: null,
   requirements: requirementsNone,
   status: "awaiting_deposit",
   payable: true,
@@ -49,7 +49,7 @@ const lockedPayment = {
   id: payerPayment.id,
   issuer_name: "Acme LLC",
   heading: "March retainer",
-  payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
+  expected_email_hint: "a****@e***.com",
   requirements: { ...requirementsNone, email: "pending", complete: false },
   status: "awaiting_deposit",
   payable: true,
@@ -95,7 +95,7 @@ test("a locked gated deposit request carries null mechanics and no invoice conte
 
   assert.equal(payment.content_unlocked, false);
   assert.equal(payment.issuer_name, "Acme LLC");
-  assert.equal(payment.payer_policy.expected_email_hint, "a****@e***.com");
+  assert.equal(payment.expected_email_hint, "a****@e***.com");
   assert.equal(payment.requirements.complete, false);
   for (const field of [
     "currency", "networks", "chain", "token", "amount", "amount_base_units", "received", "received_base_units",
@@ -348,7 +348,7 @@ test("paying from another network lists chains, quotes, and reports the deposit 
   const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
 
   const chains = await client.relay.chains("dr_1", { payerSession: "pps_relay" });
-  const quoted = await client.relay.quote("dr_1", "8453", { originToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payerSession: "pps_relay" });
+  const quoted = await client.relay.quote("dr_1", "8453", { payerWallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", originToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payerSession: "pps_relay" });
   const sent = await client.relay.sent("dr_1", quoted.id, `0x${"22".repeat(32)}`, { payerSession: "pps_relay" });
 
   assert.equal(chains.chains[0].name, "Base");
@@ -356,7 +356,7 @@ test("paying from another network lists chains, quotes, and reports the deposit 
   assert.equal(sent.relay.status, "sent");
   assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_1/relay/chains");
   assert.equal(mock.calls[1].url, "https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes");
-  assert.deepEqual(JSON.parse(mock.calls[1].init.body), { origin_chain_id: "8453", origin_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" });
+  assert.deepEqual(JSON.parse(mock.calls[1].init.body), { origin_chain_id: "8453", payer_wallet: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", origin_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" });
   assert.equal(mock.calls[2].url, `https://example.test/v1/payer/deposit-requests/dr_1/relay/quotes/${quote.id}/sent`);
   assert.deepEqual(JSON.parse(mock.calls[2].init.body), { transaction_hash: `0x${"22".repeat(32)}` });
   for (const call of mock.calls) {
@@ -377,4 +377,19 @@ test("a wallet that is already bound surfaces wallet_already_bound", async () =>
     assert.equal(error.status, 409);
     return true;
   });
+});
+
+test("selectNetwork posts the chain to the network route and answers the payer view", async () => {
+  const bound = { ...payerPayment, address: "0x2222222222222222222222222222222222222222" };
+  const mock = mockFetch(() => new Response(JSON.stringify(bound)));
+  const client = new PaydayPayerClient({ baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const payment = await client.depositRequests.selectNetwork("dr_a/b", "8453", { payerSession: "pps_net" });
+
+  assert.equal(payment.address, "0x2222222222222222222222222222222222222222");
+  assert.equal(mock.calls[0].url, "https://example.test/v1/payer/deposit-requests/dr_a%2Fb/network");
+  assert.equal(mock.calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body), { chain_id: "8453" });
+  assert.equal(mock.calls[0].init.headers["Payday-Payer-Session"], "pps_net");
+  assert.equal(mock.calls[0].init.headers.Authorization, undefined);
 });

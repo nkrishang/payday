@@ -1,19 +1,23 @@
-import type { CreateDepositRequest, Party, PayerPolicy, PayerPolicyMode } from "@payday/sdk";
+import type { CreateDepositRequest, Party } from "@payday/sdk";
 
 /**
- * The modes the composer can produce. `merchant_session` is not one of them:
- * it needs the merchant's application to sign the payer in and hand over the
+ * The add-ons the composer can attach. Merchant auth is not one of them: it
+ * needs the merchant's application to sign the payer in and hand over the
  * client secret, which a request composed by hand has no way to do. It is
- * created through the API only.
+ * attached through the API only.
  */
-export type ComposerMode = Exclude<PayerPolicyMode, "merchant_session">;
+export interface ComposerVerification {
+  verifyEmail: boolean;
+  expectedEmail: string;
+  walletAttestation: boolean;
+}
 
 /**
  * The `POST /v1/deposit-requests` body, built from what the composer collected.
  *
  * The composer asks its questions over four steps and keeps a draft of
  * strings; this turns that draft into the request the SDK sends. Only the
- * shape is decided here — limits, policy rules, and the expiry window are the
+ * shape is decided here — limits, add-on rules, and the expiry window are the
  * API's to enforce, and its message is shown verbatim when it refuses.
  */
 
@@ -40,8 +44,7 @@ export interface DepositRequestValues {
   heading: string;
   reference: string;
   notes: string;
-  mode: ComposerMode;
-  expectedEmail: string;
+  verification: ComposerVerification;
 }
 
 export const EMPTY_VALUES: DepositRequestValues = {
@@ -62,8 +65,7 @@ export const EMPTY_VALUES: DepositRequestValues = {
   heading: "",
   reference: "",
   notes: "",
-  mode: "permissionless",
-  expectedEmail: "",
+  verification: { verifyEmail: false, expectedEmail: "", walletAttestation: false },
 };
 
 function party(name: string, email: string, details: string): Party {
@@ -74,14 +76,18 @@ function party(name: string, email: string, details: string): Party {
   };
 }
 
-function policy(values: DepositRequestValues): PayerPolicy {
+/**
+ * The `verification` add-ons, in the API's own shape. An empty set is left
+ * out entirely: omitted or `{}`, the request is fully permissionless. The
+ * expected email is only sent when the email add-on is on, and wallet
+ * attestation only when it is asked for.
+ */
+function verification(values: ComposerVerification): CreateDepositRequest["verification"] {
   const expected_email = values.expectedEmail.trim();
-  switch (values.mode) {
-    case "permissionless":
-      return { mode: "permissionless" };
-    case "verified_email":
-      return { mode: "verified_email", expected_email };
-  }
+  const email = values.verifyEmail ? { expected_email } : undefined;
+  const wallet_attestation = values.walletAttestation || undefined;
+  if (!email && !wallet_attestation) return undefined;
+  return { ...(email ? { email } : {}), ...(wallet_attestation ? { wallet_attestation } : {}) };
 }
 
 export function buildCreateDepositRequest(
@@ -101,6 +107,7 @@ export function buildCreateDepositRequest(
   // re-anchor it to whenever the request happened to arrive, which is not what
   // "expires at 5pm on Friday" means.
   const expiresAt = optional(values.expiresAt);
+  const addOns = verification(values.verification);
 
   return {
     amount: values.amount.trim(),
@@ -108,7 +115,7 @@ export function buildCreateDepositRequest(
     payout_address: values.payoutAddress.trim(),
     issuer: party(values.issuerName, values.issuerEmail, values.issuerDetails),
     payer: party(values.billName, values.billEmail, values.billDetails),
-    payer_policy: policy(values),
+    ...(addOns ? { verification: addOns } : {}),
     ...(values.chainId.trim() ? { chain_id: values.chainId.trim() } : {}),
     ...(values.customerId ? { customer_id: values.customerId } : {}),
     ...(values.issuerId ? { issuer_id: values.issuerId } : {}),

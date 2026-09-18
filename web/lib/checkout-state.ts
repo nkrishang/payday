@@ -12,23 +12,26 @@ import { formatDisplayAmount } from "./format";
  *    deadline was reached and waits for the server to confirm, rather than
  *    claiming the request is over.
  * 2. Deposit instructions disappear the moment the request stops being payable.
- *    Funds sent after the deadline route back to the payer's attested wallet
+ *    Funds sent after the deadline route back to Payday's recovery wallet
  *    rather than to the merchant, so continuing to show an address would only
  *    invite a transfer that has to come back.
  * 3. A gated deposit request discloses nothing but the issuer and heading until the
  *    gateway says the content is unlocked. The API withholds the fields; this
  *    module turns their absence into a phase so no component ever reaches for
  *    a null amount or address.
- * 4. An unlocked request has no address until its payer chooses a network and
- *    attests the wallet they will pay from. That is a phase of its own
- *    (`wallet_required`), and the chain, address, QR, and wallet button exist
- *    only past it.
+ * 4. What stands between an unlocked request and an address is a requirement,
+ *    not a mode: with the wallet attestation add-on the payer signs
+ *    (`wallet_required`); without it, a request offering several networks
+ *    only needs one chosen (`network_required`), and a pinned one already
+ *    has its address.
  */
 export type CheckoutPhase =
   | "verification_required"
   | "email_pending"
+  /** No wallet attestation: the payer fixes the network, no signature involved. */
+  | "network_required"
   | "wallet_required"
-  /** A merchant-session deposit request: only the merchant's app can open it. */
+  /** A merchant-auth deposit request: only the merchant's app can open it. */
   | "app_required"
   /** The client secret from the fragment is being exchanged. */
   | "app_opening"
@@ -79,8 +82,8 @@ export interface CheckoutView {
  * A payer-facing deposit request whose content is present. The API nulls every one of
  * these together while a gated request is locked, so components that render
  * an amount take this type and never see a null. The chain and address are
- * separate: they exist only once the payer has chosen a network and bound a
- * wallet (see `ReadyPayerDepositRequest`); until then `networks` lists the choice.
+ * separate: they exist only once the request has a network (see
+ * `ReadyPayerDepositRequest`); until then `networks` lists the choice.
  */
 export type UnlockedPayerDepositRequest = PayerDepositRequest & {
   currency: string;
@@ -94,15 +97,17 @@ export type UnlockedPayerDepositRequest = PayerDepositRequest & {
 };
 
 /**
- * An unlocked deposit request whose payer wallet is bound on a chosen network,
- * so the one-time address exists. Everything that shows or uses the address,
- * the chain, or the token takes this type.
+ * An unlocked deposit request whose payment address exists: a network has
+ * been chosen (and, with the wallet attestation add-on, a wallet bound).
+ * Everything that shows or uses the address, the chain, or the token takes
+ * this type. `payer_wallet` is the attested wallet when the add-on is
+ * attached and completed — the only case where the payer must pay from a
+ * particular wallet — and null when anyone may pay from any wallet.
  */
 export type ReadyPayerDepositRequest = UnlockedPayerDepositRequest & {
   chain: Chain;
   token: Token;
   address: string;
-  payer_wallet: string;
 };
 
 /**
@@ -150,14 +155,16 @@ export function unlockedDepositRequest(payment: PayerDepositRequest): UnlockedPa
 
 /**
  * Narrows further to a deposit request with an address. The API sets `chain`,
- * `token`, `address`, and `payer_wallet` together when the binding exists;
- * any one without the others is treated as unbound rather than rendered with
- * a hole.
+ * `token`, and `address` together once the request has a network — the wallet
+ * attestation add-on is one way for that to happen, and not the only one;
+ * any one without the others is treated as unregistered rather than rendered
+ * with a hole. `payer_wallet` is not required: without the add-on the payer
+ * may pay from any wallet.
  */
 export function readyDepositRequest(payment: UnlockedPayerDepositRequest): ReadyPayerDepositRequest | null {
-  const { chain, token, address, payer_wallet } = payment;
-  if (chain === null || token === null || address === null || payer_wallet === null) return null;
-  return { ...payment, chain, token, address, payer_wallet };
+  const { chain, token, address } = payment;
+  if (chain === null || token === null || address === null) return null;
+  return { ...payment, chain, token, address };
 }
 
 /**
@@ -181,7 +188,7 @@ export function isTerminalStatus(status: DepositRequestStatus): boolean {
 }
 
 const RECOVERY_NOTE =
-  "The full balance goes back to the wallet you signed with, not to the merchant. Nothing else is needed from you.";
+  "Whatever arrived goes back to Payday's recovery wallet, not to the merchant. Nothing else is needed from you.";
 
 export function checkoutView(payment: PayerDepositRequest, local: CheckoutLocalState): CheckoutView {
   const unlocked = unlockedDepositRequest(payment);
@@ -196,16 +203,19 @@ export function checkoutView(payment: PayerDepositRequest, local: CheckoutLocalS
 }
 
 /**
- * The two locked phases, in the order a payer moves through them. The
- * facts come from the API for this tab's session; only "a code is on its
- * way" is local, because the API cannot know which tab asked.
+ * The locked phases, in the order a payer moves through them. Which gate
+ * applies comes from the requirements themselves, not a policy mode: a
+ * pending merchant session is opened by the merchant's app, a pending email
+ * is proved with a code, and both together ask for both. The facts come from
+ * the API for this tab's session; only "a code is on its way" is local,
+ * because the API cannot know which tab asked.
  */
 function lockedView(payment: PayerDepositRequest, local: CheckoutLocalState): CheckoutView {
-  const { requirements, payer_policy } = payment;
+  const { requirements, expected_email_hint } = payment;
 
-  // A merchant-session deposit request has no step for the payer to take here: the
+  // A merchant-auth deposit request has no step for the payer to take here: the
   // merchant's app opened it, or nothing will.
-  if (payer_policy.mode === "merchant_session") {
+  if (requirements.merchant_session === "pending") {
     return local.exchangingClientSecret
       ? {
           phase: "app_opening",
@@ -251,7 +261,7 @@ function lockedView(payment: PayerDepositRequest, local: CheckoutLocalState): Ch
       tone: "progress",
       label: "Check your email",
       title: "Enter the code we sent",
-      detail: `A one-time code was sent to ${payer_policy.expected_email_hint ?? "the expected mailbox"}. Enter it here to continue.`,
+      detail: `A one-time code was sent to ${expected_email_hint ?? "the expected mailbox"}. Enter it here to continue.`,
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,
@@ -291,7 +301,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
 
   if (payment.status === "settled") {
     // Settlement is exact: the merchant receives the requested amount and any
-    // remainder goes back to the payer's attested wallet, so an overpaid payer
+    // remainder goes back to Payday's recovery wallet, so an overpaid payer
     // is told where the rest went rather than left to assume the merchant is
     // holding it.
     const overpaid = received > BigInt(payment.amount_base_units);
@@ -303,7 +313,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       detail:
         "Exactly the requested amount reached the merchant. You can close this page." +
         (overpaid
-          ? " Anything above the requested amount went back to the wallet you signed with."
+          ? " Anything above the requested amount went back to Payday's recovery wallet."
           : ""),
       showInstructions: false,
       showWalletStep: false,
@@ -380,27 +390,43 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
     };
   }
 
-  // No address yet: the payer chooses the network they will pay on and signs
-  // from the wallet they will pay from, and the address is derived from both.
-  // This comes before anything this browser may have sent, because nothing
-  // can have been sent.
+  // No address yet: what is missing is a requirement, and the two ways there
+  // are differ. With the wallet attestation add-on the payer picks the network
+  // and signs from the wallet they will pay from, and the address is derived
+  // from both. Without it no signature is involved: the payer fixes the
+  // network on its own and the address is registered. Either way this comes
+  // before anything this browser may have sent, because nothing can have been
+  // sent.
   const ready = readyDepositRequest(payment);
   if (ready === null) {
-    // A request offering one network has no choice to make: the merchant
-    // pinned it, and only the wallet is still the payer's to give.
-    const pinned = payment.networks.length === 1 ? payment.networks[0] : null;
+    if (payment.requirements.wallet === "pending") {
+      // A request offering one network has no choice to make: the merchant
+      // pinned it, and only the wallet is still the payer's to give.
+      const pinned = payment.networks.length === 1 ? payment.networks[0] : null;
+      return {
+        phase: "wallet_required",
+        tone: "neutral",
+        label: "Wallet required",
+        title: pinned
+          ? "Sign from the wallet you will pay from"
+          : "Choose a network and sign from the wallet you will pay from",
+        detail: pinned
+          ? `This deposit is paid on ${pinned.chain.name}. Gum creates a unique, one-time payment destination for the wallet you intend to pay with; it is fixed once you sign.`
+          : "Gum creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
+        showInstructions: false,
+        showWalletStep: true,
+        isTerminal: false,
+      };
+    }
     return {
-      phase: "wallet_required",
+      phase: "network_required",
       tone: "neutral",
-      label: "Wallet required",
-      title: pinned
-        ? "Sign from the wallet you will pay from"
-        : "Choose a network and sign from the wallet you will pay from",
-      detail: pinned
-        ? `This deposit is paid on ${pinned.chain.name}. Gum creates a unique, one-time payment destination for the wallet you intend to pay with; it is fixed once you sign.`
-        : "Gum creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
+      label: "Choose a network",
+      title: "Choose the network to pay on",
+      detail:
+        "This deposit can be paid on any of the networks below. Pick one and Gum creates a unique, one-time payment address on it; you can pay from any wallet.",
       showInstructions: false,
-      showWalletStep: true,
+      showWalletStep: false,
       isTerminal: false,
     };
   }
@@ -444,19 +470,25 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       label: "Partially deposited",
       title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${ready.token.symbol}`,
       detail:
-        "Transfers accumulate. If the total is still short at the deadline, the balance goes back to the wallet you signed with.",
+        "Transfers accumulate. If the total is still short at the deadline, the balance goes back to Payday's recovery wallet.",
       showInstructions: true,
       showWalletStep: false,
       isTerminal: false,
     };
   }
 
+  // With the wallet attestation add-on, only transfers from the attested
+  // wallet count; without it, any wallet may pay.
+  const senderNote = ready.payer_wallet
+    ? `Send exactly this amount of ${ready.token.symbol} on ${ready.chain.name}, from the wallet you signed with.`
+    : `Send exactly this amount of ${ready.token.symbol} on ${ready.chain.name}, from any wallet.`;
+
   return {
     phase: "awaiting",
     tone: "neutral",
     label: "Awaiting deposit",
     title: "Amount due",
-    detail: `Send exactly this amount of ${ready.token.symbol} on ${ready.chain.name}, from the wallet you signed with.`,
+    detail: senderNote,
     showInstructions: true,
     showWalletStep: false,
     isTerminal: false,

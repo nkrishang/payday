@@ -7,7 +7,7 @@
 //! already formats it (decimal amount strings, RFC 3339 timestamps). Only
 //! issuance-time fields appear; nothing that changes as the payment progresses.
 
-use gum_core::{DepositRequestResponse, PayerPolicyMode};
+use gum_core::{DepositRequestResponse, PayerVerification};
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
 use thiserror::Error;
 
@@ -132,7 +132,10 @@ fn layout(invoice: &DepositRequestResponse) -> Vec<Line> {
         "Amount",
         &format!("{} {}", invoice.amount, invoice.currency),
     );
-    lines.field("Payer policy", policy_words(invoice.payer_policy.mode()));
+    lines.field(
+        "Payer verification",
+        &verification_words(&invoice.verification),
+    );
 
     lines.section("From");
     lines.party(&invoice.issuer);
@@ -199,16 +202,24 @@ fn layout(invoice: &DepositRequestResponse) -> Vec<Line> {
     lines.finish()
 }
 
-/// The mode in words; the assertions behind it stay out of the document.
-fn policy_words(mode: PayerPolicyMode) -> &'static str {
-    match mode {
-        PayerPolicyMode::Permissionless => "Anyone holding the deposit link may pay",
-        PayerPolicyMode::VerifiedEmail => {
-            "The payer must verify their email address before depositing"
-        }
-        PayerPolicyMode::MerchantSession => {
-            "The issuer's application opens this deposit request for its signed-in customer"
-        }
+/// The attached add-ons in words; the assertions behind them stay out of the
+/// document. An empty list is the permissionless default.
+fn verification_words(verification: &PayerVerification) -> String {
+    let mut clauses: Vec<&'static str> = Vec::new();
+    if verification.email.is_some() {
+        clauses.push("the payer must verify their email address before depositing");
+    }
+    if verification.merchant_auth.is_some() {
+        clauses
+            .push("the issuer's application opens this deposit request for its signed-in customer");
+    }
+    if verification.wallet_attestation {
+        clauses.push("the payer must attest the wallet they will pay from");
+    }
+    if clauses.is_empty() {
+        "Anyone holding the deposit link may pay".to_owned()
+    } else {
+        clauses.join("; ")
     }
 }
 
@@ -409,8 +420,8 @@ mod tests {
     use alloy_primitives::{B256, U256, address};
     use gum_core::{
         Amount, AttachmentDescriptor, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId,
-        Currency, FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy,
-        TokenAddress, sign_payer_attestation, wallet_of,
+        Currency, FactoryAddress, Invoice, NetworkTerms, Party, PayerAttestation,
+        PayerVerification, RecoveryAddress, TokenAddress, sign_payer_attestation, wallet_of,
     };
     use uuid::Uuid;
 
@@ -444,12 +455,14 @@ mod tests {
                 email: None,
                 details: None,
             },
-            PayerPolicy::VerifiedEmail {
-                expected_email: "alice@example.com".into(),
+            PayerVerification {
+                wallet_attestation: true,
+                ..Default::default()
             },
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(address!("0x9999999999999999999999999999999999999999")),
             amount,
             1_900_000_000,
         );
@@ -460,6 +473,7 @@ mod tests {
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(address!("0x9999999999999999999999999999999999999999")),
             amount,
             1_900_000_000,
             snapshot,

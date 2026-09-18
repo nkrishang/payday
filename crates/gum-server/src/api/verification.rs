@@ -10,8 +10,8 @@
 use axum::Extension;
 use axum::extract::{Path, State};
 use gum_core::{
-    PayerPolicyMode, VerificationAttemptId, VerificationAttemptResponse,
-    VerificationDetailResponse, VerificationFacts, VerificationRequirementsResponse, rfc3339,
+    Invoice, VerificationAttemptId, VerificationAttemptResponse, VerificationDetailResponse,
+    VerificationFacts, VerificationRequirementsResponse, rfc3339,
 };
 use gum_ledger::{AccountId, DbInvoice};
 
@@ -25,17 +25,15 @@ async fn detail(
     account: AccountId,
     row: &DbInvoice,
 ) -> Result<VerificationDetailResponse, ApiError> {
-    let mode: PayerPolicyMode = row
-        .payer_policy_mode
-        .parse()
-        .map_err(|_| ApiError::internal("invalid payer policy mode in stored invoice"))?;
+    let invoice = Invoice::try_from(row)?;
+    let verification = invoice.issuance_snapshot.payer_verification.clone();
     let attempts = state
         .payer_sessions
         .attempts_for_invoice(account.0, row.id)
         .await?;
     let wallet = row.payment_address.is_some();
     let facts = if row.verification_completed_at.is_some() {
-        VerificationRequirementsResponse::for_mode(mode, true, wallet)
+        VerificationRequirementsResponse::for_verification(&verification, true, wallet)
     } else {
         let approved = |kind: &str| {
             attempts
@@ -43,7 +41,7 @@ async fn detail(
                 .any(|attempt| attempt.kind == kind && attempt.status == "approved")
         };
         VerificationRequirementsResponse::from_facts(
-            mode,
+            &verification,
             VerificationFacts {
                 email: approved("email"),
                 wallet,
@@ -52,7 +50,7 @@ async fn detail(
         )
     };
     Ok(VerificationDetailResponse {
-        payer_policy_mode: mode,
+        verification,
         verification_completed_at: row.verification_completed_at.map(rfc3339),
         likely_unsolicited_at: row.likely_unsolicited_at.map(rfc3339),
         facts,

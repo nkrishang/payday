@@ -8,17 +8,36 @@ describe("buildCreateDepositRequest", () => {
     billName: "Globex",
     amount: "25.5",
     payoutAddress: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    expectedEmail: "Alice@Example.com",
   };
 
-  it("builds each policy shape without stray fields", () => {
-    expect(buildCreateDepositRequest({ ...filled, mode: "permissionless" }, null).payer_policy).toEqual({
-      mode: "permissionless",
-    });
-    expect(buildCreateDepositRequest({ ...filled, mode: "verified_email" }, null).payer_policy).toEqual({
-      mode: "verified_email",
-      expected_email: "Alice@Example.com",
-    });
+  it("builds each add-on shape without stray fields", () => {
+    expect(buildCreateDepositRequest(filled, null).verification).toBeUndefined();
+    expect(
+      buildCreateDepositRequest(
+        { ...filled, verification: { verifyEmail: true, expectedEmail: " Alice@Example.com ", walletAttestation: false } },
+        null,
+      ).verification,
+    ).toEqual({ email: { expected_email: "Alice@Example.com" } });
+    expect(
+      buildCreateDepositRequest(
+        { ...filled, verification: { verifyEmail: true, expectedEmail: "Alice@Example.com", walletAttestation: true } },
+        null,
+      ).verification,
+    ).toEqual({ email: { expected_email: "Alice@Example.com" }, wallet_attestation: true });
+    expect(
+      buildCreateDepositRequest(
+        { ...filled, verification: { verifyEmail: false, expectedEmail: "", walletAttestation: true } },
+        null,
+      ).verification,
+    ).toEqual({ wallet_attestation: true });
+  });
+
+  it("never composes a merchant_auth add-on: only the merchant's app can open one", () => {
+    const body = buildCreateDepositRequest(
+      { ...filled, verification: { verifyEmail: true, expectedEmail: "alice@example.com", walletAttestation: true } },
+      null,
+    );
+    expect(body.verification).not.toHaveProperty("merchant_auth");
   });
 
   it("omits blank optionals, trims parties, and converts hours to seconds", () => {

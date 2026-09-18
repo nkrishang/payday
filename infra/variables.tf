@@ -93,6 +93,15 @@ variable "route53_zone_id" {
   type        = string
 }
 
+variable "recovery_address" {
+  description = "The Ethereum address of the dedicated recovery KMS key (aws_kms_key.recovery), derived out of band — KMS exposes no Ethereum address; see infra/README.md. Passed to the API as PAYDAY_RECOVERY_ADDRESS: the recovery term committed into every deposit address."
+  type        = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address)) && lower(var.recovery_address) != "0x0000000000000000000000000000000000000000"
+    error_message = "recovery_address must be a nonzero 20-byte EVM address, derived from the recovery KMS key's public key (see infra/README.md)."
+  }
+}
+
 variable "image_tag" {
   description = "Immutable image tag in git-<full lowercase commit SHA> form."
   type        = string

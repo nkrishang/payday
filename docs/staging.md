@@ -77,12 +77,14 @@ or Arbitrum One) and `PAYDAY_TOKEN_ADDRESS` names that chain's USDT0
 contract (the Monad address is the default), so run it once more on each
 chain that serves USDT.
 
-It issues a permissionless request paid out to the paying wallet itself,
-binds that wallet with an EIP-712 attestation signed by `cast` exactly as
+It issues a request with the wallet-attestation add-on, paid out to the paying
+wallet itself, and binds that wallet with an EIP-712 attestation signed by
+`cast` exactly as
 the checkout does, transfers the stablecoin, waits for finalized settlement,
 checks that the payout arrived and the deposit address is empty, and
 validates the Proof of Payment. `LATE_TRANSFER=1` also sends one base unit
-after settlement and waits for it to come back. `PAYDAY_ATTESTOR=0x…` makes
+after settlement and waits for it to be recovered into Payday's recovery
+custody. `PAYDAY_ATTESTOR=0x…` makes
 it check the proof's signer against the address you published. The same
 script runs against production with `PAYDAY_API_URL=https://api.payday.sh`
 and a live key; that is the launch check in the production runbook. Before

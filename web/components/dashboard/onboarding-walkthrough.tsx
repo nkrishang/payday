@@ -18,7 +18,7 @@ import { useMerchant } from "./session";
  * request" flow, not the flow itself. Every field is fixed and inert — the
  * merchant clicks through, they do not fill anything in — and it ends by
  * issuing a real deposit request: Gum billing itself 0.000001 USDC under
- * the identity just created, with a verified-email policy on Gum's own
+ * the identity just created, with email verification on Gum's own
  * onboarding mailbox. `OnboardingSuccess` takes it from there.
  *
  * There is deliberately no Cancel here. This is the one moment in the
@@ -36,8 +36,8 @@ const HEADING = "Onboarding";
 const GUIDANCE = [
   "This is how much you're requesting — Gum will pay this one for real, so you can see the whole flow.",
   "Every deposit request names a payer.",
-  "Verification policies control what a payer must prove before they can see and fund a deposit request.",
-  "Once you submit this request, you'll create a real on-chain deposit request that's gated by your verification policy.",
+  "Verification add-ons control what a payer must prove before they can see and fund a deposit request.",
+  "Once you submit this request, you'll create a real on-chain deposit request that's gated by the email verification you chose.",
 ] as const;
 
 export function OnboardingWalkthrough({
@@ -94,8 +94,7 @@ export function OnboardingWalkthrough({
             billEmail: BILL_EMAIL,
             heading: HEADING,
             reference,
-            mode: "verified_email",
-            expectedEmail: BILL_EMAIL,
+            verification: { verifyEmail: true, expectedEmail: BILL_EMAIL, walletAttestation: false },
           },
           null,
         ),
@@ -119,7 +118,7 @@ export function OnboardingWalkthrough({
       </h1>
       <p className="mt-2 text-[14px] leading-relaxed text-muted">
         Gum lets you create deposit requests for your customers. You specify the deposit details and
-        a verification policy, and Gum handles the rest. Here&apos;s a quick walkthrough.
+        a verification add-on, and Gum handles the rest. Here&apos;s a quick walkthrough.
       </p>
 
       <ol className="mt-7 flex gap-2.5">

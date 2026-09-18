@@ -43,15 +43,16 @@ that updates the lifecycle row.
 | Event | When |
 |---|---|
 | `deposit_request.deposited`, `deposit_request.settled`, `deposit_request.expired`, `deposit_request.returned`, `deposit_request.needs_attention` | The lifecycle transitions above |
-| `deposit_request.recovered_funds` | Funds went back to the payer's attested wallet on the deposit request's behalf: an overpayment remainder at settlement, an expired balance, or a late transfer. One event per returned amount, written in the transaction that records it, so **a deposit request can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
-| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the deposit request's payer policy was satisfied — a proven mailbox, or a merchant-session client secret exchanged by the hosted checkout |
-| `deposit_request.ready` | Raised by the database when `wallet_bound_at` is first set: the payer attested their wallet and the deposit address now exists. This is the moment an integration may quote the address |
-| `deposit_request.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: finalized funds arrived from a wallet other than the attested one. They count toward the amount and settle, but they are not the payer's, and no Proof of Payment is issued |
+| `deposit_request.recovered_funds` | Funds were recovered on the deposit request's behalf into Payday's recovery custody: an overpayment remainder at settlement, an expired balance, or a late transfer. Payday returns them to the payer manually, after review. One event per recovered amount, written in the transaction that records it, so **a deposit request can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
+| `verification.approved` | Raised by the database when `verification_completed_at` is first set: the deposit request's identity add-ons were satisfied — a proven mailbox, or a merchant-auth client secret exchanged by the hosted checkout. Requests with neither identity add-on never raise it |
+| `deposit_request.ready` | Raised by the database when the deposit address first exists: the network was fixed — at issuance for a pinned `chain_id`, on network selection otherwise — or, on a wallet-attested request, the payer attested their wallet. This is the moment an integration may quote the address |
+| `deposit_request.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: on a wallet-attested request, finalized funds arrived from a wallet other than the attested one. They count toward the amount and settle, but they are not the payer's, and no Proof of Payment is issued. Requests without wallet attestation never raise it |
 
 `verification.approved`, `deposit_request.ready`, and `deposit_request.likely_unsolicited`
 are inserted by the same `invoices` table trigger as the lifecycle events, in the
-transaction that first sets `verification_completed_at`, `wallet_bound_at`,
-or `likely_unsolicited_at`. A transfer from Relay's solver for a cross-chain
+transaction that first sets `verification_completed_at`, the deposit address
+(`wallet_bound_at` on a wallet-attested request), or `likely_unsolicited_at`. A
+transfer from Relay's solver for a cross-chain
 payment the payer reported is held back from that flag until Relay resolves
 the request, so `deposit_request.likely_unsolicited` can arrive after
 `deposit_request.deposited` or `deposit_request.settled` for the same request
@@ -81,14 +82,14 @@ API's `amount`, and parse every timestamp the same way:
   "metadata": {"po": "PO-77"},
   "customer_id": null,
   "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
-  "payer_policy_mode": "merchant_session",
+  "verification": {"merchant_auth": {"payer_reference": "user_123"}},
   "payer_reference": "user_123",
   "verification_completed_at": "2026-09-01T11:58:00Z",
   "likely_unsolicited_at": null,
-  "payer_wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+  "payer_wallet": null,
   "address": "0x2222222222222222222222222222222222222222",
   "chain_id": "143",
-  "wallet_bound_at": "2026-09-01T11:58:30Z",
+  "wallet_bound_at": null,
   "expires_at": "2026-09-02T11:57:00Z",
   "created_at": "2026-09-01T11:57:00Z"
 }
@@ -97,12 +98,15 @@ API's `amount`, and parse every timestamp the same way:
 The `dr_` id, the decimal `amount` and `received` beside their
 `_base_units`, `currency` (`USDC` or `USDT`, the stablecoin those amounts
 are in), EIP-55 addresses, and RFC 3339 UTC timestamps to the second
-are exactly what the API returns. `payer_wallet`, `address`, and
-`wallet_bound_at` are null before `deposit_request.ready`. `chain_id` is the
+are exactly what the API returns. `verification` echoes the add-ons the
+request was issued with, except the expected email, which is never included
+(the email add-on appears as `{"email": {}}`). `address` and `wallet_bound_at`
+are null before `deposit_request.ready`; `payer_wallet` is set only on a
+wallet-attested request, once the attestation is accepted. `chain_id` is the
 network the payment is on, as the API's decimal string: known from issuance
 when the merchant pinned it, otherwise from `deposit_request.ready`, null
 before. `payer_reference`
-is your own identifier for the payer on a `merchant_session` deposit (`null`
+is your own identifier for the payer on a merchant-auth deposit (`null`
 otherwise), so a `deposit_request.deposited` or `deposit_request.settled`
 handler can credit that user's ledger directly. The payload never includes
 the expected email or the payer's own data. `deposit_request.needs_attention`
@@ -126,9 +130,10 @@ request is indistinguishable from one for an exact deposit, and
 }
 ```
 
-`reason` is one of `overpayment`, `expired`, or `late_transfer`. Returned
-funds went to the payer's attested wallet on-chain in the named transaction;
-nothing is held by Payday. Use these events to explain to a payer where the
+`reason` is one of `overpayment`, `expired`, or `late_transfer`. The
+recovered funds moved on-chain to Payday's recovery custody in the named
+transaction; returning them to the payer is a separate, manual step after
+review. Use these events to explain to a payer where the
 difference went.
 
 Test events are sent only to the requested endpoint, require no deposit request, and

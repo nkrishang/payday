@@ -13,7 +13,7 @@ import { payerAttestationDefinition } from "./payer-attestation";
 const TYPED: PayerAttestationTypedData = {
   domain: {
     name: "Payday",
-    version: "1",
+    version: "2",
     chainId: 143,
     verifyingContract: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
   },
@@ -35,7 +35,7 @@ const TYPED: PayerAttestationTypedData = {
   },
   message: {
     statement:
-      "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request, and any funds Payday returns go back to it.",
+      "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request.",
     attributionHash: "0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a",
     // The wallet of the secp256k1 key 0x0707…07, as gateway-core's test signs.
     wallet: "0x4a62316623ad457F02cDC5D997deD67a383EC569",
@@ -47,7 +47,7 @@ const TYPED: PayerAttestationTypedData = {
 describe("payerAttestationDefinition", () => {
   it("hashes to the digest gateway-core pins for the same document", () => {
     expect(hashTypedData(payerAttestationDefinition(TYPED))).toBe(
-      "0x23f81e489d7192b8735c0d0c7866fbd8cd502c345b7dca546fc0bd29c0585392",
+      "0x85dd838bc661cc9ad621f423fd551d95b2f69817787092ed4cc51f0e94b16498",
     );
   });
 

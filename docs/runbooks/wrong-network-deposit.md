@@ -1,12 +1,14 @@
 # Wrong-network deposit
 
-A payer chose one network at the wallet step (say Monad) and then sent the
+A payer chose one network at the checkout (say Monad) and then sent the
 request's stablecoin to the deposit address on another supported network
 (say Base). Nothing
 happens on its own: the request stays `awaiting_deposit`, the indexer on
 the other chain does not watch that address (it is bound to Monad), and the
-funds sit at an address with no code on Base. This runbook returns them to
-the payer's own wallet. It is manual by design; see "Why this is safe".
+funds sit at an address with no code on Base. This runbook recovers them
+into Payday's recovery custody; returning them to the payer is then the
+manual review process described in the production runbook ("Recovery custody
+and manual returns"). It is manual by design; see "Why this is safe".
 
 ## What makes it recoverable
 
@@ -19,8 +21,9 @@ the payer's own wallet. It is manual by design; see "Why this is safe".
   receiver and never settles.
 - `recover(address token)` is permissionless: anyone can forward the whole
   balance of any token at the address to the committed recovery wallet,
-  which is the payer's attested wallet. The receiver cannot be paid from
-  the wrong chain and the funds cannot go anywhere but back to the payer.
+  which is Payday's dedicated KMS recovery custody. The receiver cannot be paid from
+  the wrong chain and the funds cannot go anywhere but into that custody;
+  the return to the payer happens after review, by hand.
 
 The two-Anvil end-to-end suite (`just e2e`) performs exactly the steps
 below against chain 31338 for an address bound on 31337, so they are
@@ -44,7 +47,7 @@ export PAYDAY_API_URL="https://api.payday.sh"
 export PAYDAY_API_KEY="<merchant account api key>"
 req=$(curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<dr_id>" \
   -H "Authorization: Bearer $PAYDAY_API_KEY")
-echo "$req" | jq '{status, chain, token, address, payer_wallet, payout_address, amount_base_units, expires_at, self_settlement}'
+echo "$req" | jq '{status, chain, token, address, payer_wallet, recovery_address, payout_address, amount_base_units, expires_at, self_settlement}'
 ```
 
 Then check the address's balance on the chain the payer says they used,
@@ -82,12 +85,12 @@ BOUND_CHAIN=$(echo "$req" | jq -r .chain.id)
 BOUND_TOKEN=$(echo "$req" | jq -r .token.address)
 AMOUNT=$(echo "$req" | jq -r .amount_base_units)
 RECEIVER=$(echo "$req" | jq -r .payout_address)
-PAYER=$(echo "$req" | jq -r .payer_wallet)
+RECOVERY=$(echo "$req" | jq -r .recovery_address)
 EXPIRATION=$(echo "$req" | jq -r '.expires_at | fromdateiso8601')
 
 cast send "$FACTORY" \
   'execute(address,uint256,address,uint64,address,bytes32,uint256)' \
-  "$BOUND_TOKEN" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$PAYER" "$SALT" "$BOUND_CHAIN" \
+  "$BOUND_TOKEN" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$RECOVERY" "$SALT" "$BOUND_CHAIN" \
   --private-key <FUNDED_KEY_ON_THAT_CHAIN> --rpc-url "$WRONG_RPC_URL"
 ```
 
@@ -97,7 +100,7 @@ and did not settle:
 ```bash
 cast call "$FACTORY" \
   'paymentAddress(address,uint256,address,uint64,address,bytes32,uint256)(address)' \
-  "$BOUND_TOKEN" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$PAYER" "$SALT" "$BOUND_CHAIN" \
+  "$BOUND_TOKEN" "$AMOUNT" "$RECEIVER" "$EXPIRATION" "$RECOVERY" "$SALT" "$BOUND_CHAIN" \
   --rpc-url "$WRONG_RPC_URL"                                           # must equal $ADDRESS
 cast call "$ADDRESS" 'settled()(bool)' --rpc-url "$WRONG_RPC_URL"     # false
 cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"   # unchanged
@@ -107,7 +110,7 @@ The receipt carries a `WrongChain(expected, actual)` event. If
 `paymentAddress` does not equal the deposit address, stop: the factory on
 that chain is not this generation, and nothing below can move the funds.
 
-## Step 3: Return the balance to the payer
+## Step 3: Recover the balance into custody
 
 `recover` takes the token to move: the contract the funds sit in on the
 wrong chain, not the request's `token.address`.
@@ -117,13 +120,16 @@ cast send "$ADDRESS" 'recover(address)' "$WRONG_TOKEN" \
   --private-key <FUNDED_KEY_ON_THAT_CHAIN> --rpc-url "$WRONG_RPC_URL"
 
 cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$ADDRESS" --rpc-url "$WRONG_RPC_URL"   # 0
-cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$PAYER" --rpc-url "$WRONG_RPC_URL"     # increased
+cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$RECOVERY" --rpc-url "$WRONG_RPC_URL"  # increased
 ```
 
 The receipt carries `Recovered(recovery, token, amount)` with `recovery`
-equal to the payer's wallet. Tell the payer the funds are back in their
-wallet on that network and that the request is still payable on the
-network they chose (`deposit_url`, which shows it). The request itself is
+equal to Payday's recovery custody address (`recovery_address` on the
+request). Tell the payer that the funds are safe in custody and that Payday
+returns them to a wallet or address they name, after review, and open or
+update the support case that records that review — the manual return itself
+is the production runbook's "Recovery custody and manual returns" procedure.
+The request itself is
 untouched: it stays `awaiting_deposit` until paid or expired, and nothing
 about this appears in `transfers` or `recovered_funds`, because the
 indexer on the bound chain never saw a transfer.
@@ -139,19 +145,19 @@ request does not advance. Once the sweep has deployed the `Payment` on
 `chain.id` (at settlement or expiry; do not deploy it by hand there, the
 constructor would route the committed token), call `recover(address)` with
 the stray contract on that chain: it is permissionless and forwards that
-token's whole balance to the payer's wallet. Nothing about it appears in
+token's whole balance to Payday's recovery custody, from which the manual
+review process returns it to the payer. Nothing about it appears in
 `transfers` or `recovered_funds`.
 
 ## Why this is safe
 
 - Nothing in these steps can pay the receiver: the constructor returns
   before any token call whenever `block.chainid` is not the committed
-  chain, and `recover` forwards only to the committed recovery wallet.
+  chain, and `recover` forwards only to the committed recovery custody.
 - Both calls are permissionless, so the key you use has no authority
-  beyond paying gas. The payer could do this themselves with the same
-  commands.
+  beyond paying gas.
 - A later transfer to the same address on the wrong chain (the payer tries
-  again on the wrong network) is returned by calling `recover` again; the
+  again on the wrong network) is recovered by calling `recover` again; the
   `Payment` is already deployed, so Step 2 is not repeated.
 
 ## Why it is not automated

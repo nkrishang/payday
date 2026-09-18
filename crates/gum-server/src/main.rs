@@ -264,6 +264,7 @@ async fn main() {
         accounts,
         merchant_verifier,
         Arc::new(config.networks().clone()),
+        config.recovery_address(),
         payer,
         config.api_key_prefix().to_owned(),
         config.webhook_encryption_key(),

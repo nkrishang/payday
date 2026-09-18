@@ -32,7 +32,6 @@ pub struct DbInvoiceSettlement {
     pub settlement_tx_hash: Option<Vec<u8>>,
     pub resolved_at_block: Option<i64>,
     pub settled_at: Option<DateTime<Utc>>,
-    pub payer_policy_mode: String,
     pub verification_completed_at: Option<DateTime<Utc>>,
     pub transfers: Vec<DbSettlementTransfer>,
 }

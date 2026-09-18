@@ -11,7 +11,7 @@ import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { StatusDot } from "@/components/ui/status-dot";
 import { cn } from "@/lib/cn";
 import { DepositRowDetail } from "./deposit-row-detail";
-import { formatShortDate, modeLabel, STATUSES } from "./labels";
+import { formatShortDate, verificationLabel, STATUSES } from "./labels";
 import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";
 import { StatusBadge } from "./status-badge";
@@ -373,11 +373,11 @@ export function DepositTable({
                         <StatusBadge status={request.status} />
                       </td>
                       <td className={cn("truncate px-4 py-3 text-left", wide)}>
-                        {modeLabel(request.payer_policy_mode)}
+                        {verificationLabel(request.verification)}
                       </td>
                       <td className={cn("px-4 py-3 text-left", wide)}>
                         <VerificationBadge
-                          mode={request.payer_policy_mode}
+                          verification={request.verification}
                           completedAt={request.verification_completed_at}
                           unsolicitedAt={request.likely_unsolicited_at}
                         />

@@ -13,14 +13,15 @@ export const NETWORKS = [
 export const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
 /**
- * A permissionless deposit request whose payer has attested a wallet: everything the
- * payer route can disclose is present, the address included.
+ * A deposit request with the wallet attestation add-on, completed: everything the
+ * payer route can disclose is present, the address included, and only transfers
+ * from the attested wallet count.
  */
 const READY: ReadyPayerDepositRequest = {
   id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   issuer_name: "Acme Corp",
   heading: null,
-  payer_policy: { mode: "permissionless", expected_email_hint: null },
+  expected_email_hint: null,
   requirements: { email: "not_required", wallet: "approved", merchant_session: "not_required", complete: true },
   status: "awaiting_deposit",
   payable: true,
@@ -52,12 +53,27 @@ const READY: ReadyPayerDepositRequest = {
     reference: null,
     attachment: null,
   },
-  relay_available: true,
+  // Cross-chain Relay cannot honour a sender attestation, so it is gone.
+  relay_available: false,
   relay: null,
 };
 
 export function payment(overrides: Partial<ReadyPayerDepositRequest> = {}): ReadyPayerDepositRequest {
   return { ...READY, ...overrides };
+}
+
+/**
+ * A request with no add-ons at all: the address already exists, and the payer
+ * may pay from any wallet — or from the QR or copy-address flow without
+ * connecting one.
+ */
+export function unattestedPayment(overrides: Partial<ReadyPayerDepositRequest> = {}): ReadyPayerDepositRequest {
+  return payment({
+    requirements: { email: "not_required", wallet: "not_required", merchant_session: "not_required", complete: true },
+    payer_wallet: null,
+    relay_available: true,
+    ...overrides,
+  });
 }
 
 /** USDT is served on Monad alone, as Tether's USDT0. */
@@ -79,8 +95,9 @@ export function usdtPayment(overrides: Partial<ReadyPayerDepositRequest> = {}): 
 }
 
 /**
- * An unlocked request whose payer has not attested a wallet yet: the content
- * is present, the address and payer wallet are null.
+ * A request with the wallet attestation add-on still pending: the content is
+ * present, but the network, address, and attested wallet are all null — the
+ * address is derived from both the chosen network and the signed wallet.
  */
 export function unboundDepositRequest(
   overrides: Partial<UnlockedPayerDepositRequest> = {},
@@ -99,18 +116,38 @@ export function unboundDepositRequest(
     address: null,
     address_explorer_url: null,
     deposit_uri: null,
+    relay_available: false,
     ...overrides,
   };
 }
 
 /**
- * A gated deposit request before verification: exactly what the payer route sends,
+ * A request with no add-ons and several networks on offer, whose address does
+ * not exist yet: choosing one is the payer's step, with no signature involved.
+ */
+export function networkChoiceDepositRequest(
+  overrides: Partial<UnlockedPayerDepositRequest> = {},
+): UnlockedPayerDepositRequest {
+  return unboundDepositRequest({
+    requirements: {
+      email: "not_required",
+      wallet: "not_required",
+      merchant_session: "not_required",
+      complete: true,
+    },
+    payer_wallet: null,
+    ...overrides,
+  });
+}
+
+/**
+ * An email-gated deposit request before verification: exactly what the payer route sends,
  * with every mechanic and document field null.
  */
 export function lockedDepositRequest(overrides: Partial<PayerDepositRequest> = {}): PayerDepositRequest {
   return {
     ...READY,
-    payer_policy: { mode: "verified_email", expected_email_hint: "a****@e***.com" },
+    expected_email_hint: "a****@e***.com",
     requirements: { email: "pending", wallet: "pending", merchant_session: "not_required", complete: false },
     content_unlocked: false,
     currency: null,
@@ -133,12 +170,12 @@ export function lockedDepositRequest(overrides: Partial<PayerDepositRequest> = {
 }
 
 /**
- * A merchant-session deposit request before its app has opened it: locked like an
+ * A merchant-auth deposit request before its app has opened it: locked like an
  * email-gated one, with no mailbox hint and no step the payer can take here.
  */
 export function merchantSessionDepositRequest(overrides: Partial<PayerDepositRequest> = {}): PayerDepositRequest {
   return lockedDepositRequest({
-    payer_policy: { mode: "merchant_session", expected_email_hint: null },
+    expected_email_hint: null,
     requirements: {
       email: "not_required",
       wallet: "pending",

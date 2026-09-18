@@ -425,7 +425,7 @@ Cache-Control: no-store`,
             name: "typed_data",
             type: "object",
             description:
-              'Domain { name: "Payday", version: "1", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
+              'Domain { name: "Payday", version: "2", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
           },
         ],
       },
@@ -451,7 +451,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
   "expires_at": "2026-09-06T12:15:00Z",
   "chain": { "id": "143", "name": "Monad" },
   "typed_data": {
-    "domain": { "name": "Payday", "version": "1", "chainId": 143, "verifyingContract": "0x…" },
+    "domain": { "name": "Payday", "version": "2", "chainId": 143, "verifyingContract": "0x…" },
     "primaryType": "PayerAttestation",
     "types": { "EIP712Domain": [ "…" ], "PayerAttestation": [ "…" ] },
     "message": {
@@ -564,7 +564,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       summary: "Asks Relay for a route and records it as a quote.",
       body: (
         <p>
-          Payday makes the quote, never the page: it pins the attested wallet as the sender, the
+          Payday makes the quote, never the page: it pins the sending wallet the request names, the
           payment address as the recipient, the request&apos;s currency on its network as what
           lands, and exactly the amount still due as the output. The payer sends any of the
           origin&apos;s listed tokens; Relay swaps it, and the payer bears the spread. The answer is
@@ -581,6 +581,13 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
           type: "string",
           required: true,
           description: "Decimal chain id, one of the networks to pay from.",
+        },
+        {
+          name: "payer_wallet",
+          type: "string",
+          required: true,
+          description:
+            "The wallet that will send the origin transactions. Relay builds its steps for it, and only its report of the send is accepted.",
         },
         {
           name: "origin_token",
@@ -626,9 +633,10 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/relay/quotes" \\
   -H "Content-Type: application/json" \\
-  -d '{ "origin_chain_id": "8453", "origin_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }'`,
+  -d '{ "origin_chain_id": "8453", "payer_wallet": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "origin_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }'`,
         ts: `// originToken: an address from the origin's tokens; omitted, its USDC.
-const quote = await payer.relay.quote(id, "8453", { originToken, payerSession });
+// payerWallet: the connected wallet that will send the origin transactions.
+const quote = await payer.relay.quote(id, "8453", { payerWallet: account.address, originToken, payerSession });
 for (const step of quote.steps) {
   await wallet.sendTransaction({ account, to: step.transaction.to, data: step.transaction.data, value: BigInt(step.transaction.value) });
 }`,

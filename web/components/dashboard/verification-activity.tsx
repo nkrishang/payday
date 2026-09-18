@@ -43,7 +43,8 @@ export function VerificationActivity({ paymentId }: { paymentId: string }) {
     );
   }
   const data = detail.data;
-  if (data.payer_policy_mode === "permissionless" || data.attempts.length === 0) return null;
+  if (!data.verification.email && !data.verification.merchant_auth) return null;
+  if (data.attempts.length === 0) return null;
 
   return (
     <div className={`${RULE} grid gap-4`} aria-label="Verification activity">

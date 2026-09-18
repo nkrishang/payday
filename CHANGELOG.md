@@ -26,6 +26,65 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- Payer verification is rebuilt around three independent, optional add-ons,
+  and recovery now always runs through Payday's own custody. The create
+  API's `payer_policy` field is gone: `POST /v1/deposit-requests` takes an
+  optional `verification` object whose keys are `email`
+  (`{"expected_email": …}`, the same OTP flow as before), `merchant_auth`
+  (`{"payer_reference": …}`, the merchant-session client-secret flow,
+  unchanged), and `wallet_attestation` (`true`, the EIP-712 signature from
+  the wallet the payer will pay from). Any combination may be attached;
+  omitted or `{}` means none, which is fully permissionless. A request
+  carrying `payer_policy` is rejected as an unknown field.
+- The deposit address exists as soon as the request's network is fixed.
+  With `chain_id` pinned (or on a single-network deployment) the create
+  response already carries `address` and no payer signature is involved at
+  all: the payer may pay from any wallet, an exchange withdrawal included.
+  Without a pin, the payer picks a network on the hosted checkout's new
+  network-selection step (`POST /v1/payer/deposit-requests/{id}/network`,
+  no wallet signature needed). With the wallet-attestation add-on, the old
+  wallet step happens — challenge and attest from the chosen network — and
+  the address exists only after it. Content gating (`content_unlocked`) is
+  driven by the identity add-ons (email, merchant auth) only.
+- Recovery is always Payday's own dedicated KMS recovery wallet
+  (`PAYDAY_RECOVERY_ADDRESS`), in every case including wallet-attested
+  requests. Overpayment remainders, expired balances, late transfers, and
+  wrong-network or wrong-token recoveries land in that custody on-chain,
+  and Payday returns the funds to the payer manually, after review — never
+  automatically on-chain to the payer's wallet, which is never the recovery
+  term. The earlier promise that returns always reach the payer's wallet
+  automatically and that Payday never holds funds no longer holds and is
+  removed from the documentation; `recovery_address` on the API objects
+  names the custody address, and `deposit_request.recovered_funds`
+  webhooks report each recovery.
+- On a wallet-attested request, deposits observed from any wallet other
+  than the attested one are flagged `likely_unsolicited_at` as before:
+  they still count toward the amount and settle, but no Proof of Payment is
+  issued. Without wallet attestation, incoming deposits are never flagged.
+- Proof of Payment is now `payday.proof.v5` with a `scope`:
+  `wallet_attributed` (the request carried wallet attestation — the old
+  claim that the attested wallet signed and every credited transfer came
+  from it) or `settlement` (no wallet attestation — the proof ties the
+  request document to the address, the credited transfers, and the
+  settlement, and makes no claim about who paid). The canonical issuance
+  snapshot is `payday.invoice.v5`, which includes the recovery address and
+  the verification add-on configuration in place of `payer_policy`. Salt
+  derivation now also commits to a server-generated issuance nonce, which
+  the proof carries.
+- Relay (paying from another chain) is unavailable for wallet-attested
+  requests, because a relay solver pays from a different wallet; it remains
+  available for requests without wallet attestation.
+- The wallet attestation statement the payer signs no longer says that
+  funds return to the payer's wallet: it states that the signer controls
+  the wallet and intends it to pay the deposit request.
+- The operator-facing consequence: recovered funds sit in Payday's custody
+  until reviewed and returned by hand, a manual procedure signed with the
+  dedicated recovery KMS key (`docs/production-runbook.md` §"Recovery
+  custody and manual returns", `docs/runbooks/wrong-network-deposit.md`,
+  `docs/runbooks/stuck-deposit-request.md`).
+
 ### Added
 
 - USDT, alongside USDC. A deposit request is denominated in one `currency`

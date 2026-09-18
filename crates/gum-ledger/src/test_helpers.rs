@@ -6,8 +6,8 @@
 use alloy_primitives::{Address, B256, U256, address};
 use gum_core::{
     Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, Currency, FactoryAddress,
-    Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy, PayerWalletAttestation,
-    TokenAddress, sign_payer_attestation, wallet_of,
+    Invoice, NetworkTerms, Party, PayerAttestation, PayerVerification, PayerWalletAttestation,
+    RecoveryAddress, TokenAddress, sign_payer_attestation, wallet_of,
 };
 use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
@@ -22,6 +22,10 @@ pub const TEST_PAYER_KEY: [u8; 32] = [7u8; 32];
 
 /// The token every test request on the fixture chain is denominated in.
 pub const TEST_TOKEN: Address = address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512");
+
+/// The recovery term every test request commits to: Payday's own recovery
+/// wallet, fixed at issuance and never a payer's.
+pub const TEST_RECOVERY: Address = address!("0x14dC79964da2C08b23698B3D3cc7Ca32193d9955");
 
 /// The networks a test request offers: the local fixture chain first
 /// (where `bind_for_test` binds) and a second chain nobody pays on.
@@ -60,30 +64,41 @@ pub fn test_attestation(invoice: &Invoice, key: &[u8; 32], nonce: B256) -> Payer
 }
 
 /// Bind `key`'s wallet to the invoice behind `id` through the real write
-/// path: a payer session, a challenge, and the attestation. Returns the
-/// bound row.
+/// path. For a request that attached the wallet-attestation add-on: a payer
+/// session, a challenge, and the attestation. Otherwise the address-only
+/// network binding — no payer signature exists. Returns the bound row.
 pub async fn bind_for_test(pool: &PgPool, id: Uuid, key: &[u8; 32]) -> DbInvoice {
     let repo = InvoiceRepository::new(pool.clone());
-    let sessions = crate::PayerSessionRepository::new(pool.clone());
     let row = repo.find_by_id(id).await.unwrap().unwrap();
     let invoice = Invoice::try_from(&row).unwrap();
-    let session = sessions.create(id, crate::PAYER_SESSION_TTL).await.unwrap();
     let chain = invoice.networks[0].chain_id;
-    let challenge = sessions
-        .issue_wallet_challenge(session.id, chain.0, std::time::Duration::from_secs(600))
-        .await
-        .unwrap();
-    let attestation = test_attestation(&invoice, key, challenge.nonce);
-    let binding = invoice
-        .bind_payer_wallet(chain, attestation, Utc::now().to_rfc3339())
-        .unwrap();
-    match repo
-        .bind_payer_wallet(id, session.id, &binding, Utc::now())
-        .await
-        .unwrap()
-    {
-        BindPayerWallet::Bound(row) => row,
-        other => panic!("test invoice could not be bound: {other:?}"),
+    if row.wallet_attestation_required {
+        let sessions = crate::PayerSessionRepository::new(pool.clone());
+        let session = sessions.create(id, crate::PAYER_SESSION_TTL).await.unwrap();
+        let challenge = sessions
+            .issue_wallet_challenge(session.id, chain.0, std::time::Duration::from_secs(600))
+            .await
+            .unwrap();
+        let attestation = test_attestation(&invoice, key, challenge.nonce);
+        let binding = invoice
+            .bind_payer_wallet(chain, attestation, Utc::now().to_rfc3339())
+            .unwrap();
+        match repo
+            .bind_payer_wallet(id, session.id, &binding, Utc::now())
+            .await
+            .unwrap()
+        {
+            BindPayerWallet::Bound(row) => row,
+            other => panic!("test invoice could not be bound: {other:?}"),
+        }
+    } else {
+        let binding = invoice
+            .bind_network(chain, Utc::now().to_rfc3339())
+            .unwrap();
+        match repo.bind_network(id, &binding, Utc::now()).await.unwrap() {
+            BindPayerWallet::Bound(row) => row,
+            other => panic!("test invoice could not be bound: {other:?}"),
+        }
     }
 }
 
@@ -124,6 +139,9 @@ pub async fn account(pool: &PgPool, id: u128) -> AccountId {
 
 /// Issue a fresh domain invoice (new id every call, as a retried request
 /// would produce) and project it for the DB. Unbound: see `insert_bound`.
+/// The default request attaches no add-ons; tests that need the
+/// wallet-attestation add-on set `payer_verification` on both the input and
+/// its snapshot before issuing.
 pub fn issuance_input(
     owner: AccountId,
     key: &str,
@@ -135,10 +153,11 @@ pub fn issuance_input(
     let mut snapshot = CanonicalIssuanceSnapshot::new(
         party("Acme"),
         party("Globex"),
-        PayerPolicy::Permissionless,
+        PayerVerification::default(),
         Currency::Usdc,
         &networks,
         beneficiary,
+        RecoveryAddress(TEST_RECOVERY),
         amount,
         4_000_000_000,
     );
@@ -147,6 +166,7 @@ pub fn issuance_input(
         Currency::Usdc,
         &networks,
         beneficiary,
+        RecoveryAddress(TEST_RECOVERY),
         amount,
         4_000_000_000,
         snapshot,

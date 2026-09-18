@@ -5,9 +5,15 @@
 > `verified_identity_unattributed`, `expected_identity`, KYC, Didit, the
 > `PayerIdentityProvider` boundary, credential reuse, the reconciler, manual
 > review, and the identity step of the checkout describes a design that was
-> built and then removed. The payer policy has two modes, `permissionless`
-> and `verified_email`. Those sections are kept for the record; treat them
+> built and then removed. Those sections are kept for the record; treat them
 > as history, not as the current specification.
+>
+> **Superseded again on 2026-09-18.** The payer `payer_policy` modes —
+> including the two-mode state this note described — are gone. The current
+> model is an optional `verification` object of three independent add-ons
+> (`email`, `merchant_auth`, `wallet_attestation`), with recovery always in
+> Payday's own custody. The authoritative description is `docs/concepts.md`
+> and `docs/api-reference.md`; this document is a planning record only.
 
 **Status:** Consolidated implementation plan, updated with owner decisions on all open questions.
 

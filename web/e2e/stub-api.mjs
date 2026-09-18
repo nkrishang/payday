@@ -54,6 +54,8 @@ function chosen(chainId = "143") {
 }
 /** The wallet the stub's payers attest; the address commits to it, and excess funds return to it. */
 const PAYER_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+/** Payday's own KMS recovery wallet: the recovery term of every deposit request. */
+const RECOVERY_ADDRESS = "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955";
 const PAYOUT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const SETTLEMENT_TX = "0x00210b337281f97a1d0747a1535795822998906f5f7e89917a8cd4ee83aa0190";
 const ATTESTOR = "0x976EA74026E726554dB657fA54763abd0C3a0aa9";
@@ -72,16 +74,22 @@ const QR_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="224" height="224" viewBox="0 0 2 2">' +
   '<rect width="2" height="2" fill="#fff"/><rect width="1" height="1" fill="#090811"/></svg>';
 
-const GATED = new Set(["verified_email", "merchant_session"]);
-
-/** `VerificationRequirementsResponse::for_mode` */
-function requirements(mode, completed = false, walletBound = true) {
-  const required = completed ? "approved" : "pending";
+/**
+ * `VerificationRequirements`: one state per add-on, plus `complete`, which
+ * covers the identity add-ons (email and merchant session) only; the wallet
+ * attestation reports separately, since it is a payment constraint rather
+ * than an identity gate.
+ */
+function requirements({
+  email = "not_required",
+  merchantSession = "not_required",
+  wallet = "not_required",
+} = {}) {
   return {
-    email: mode === "verified_email" ? required : "not_required",
-    wallet: walletBound ? "approved" : "pending",
-    merchant_session: mode === "merchant_session" ? required : "not_required",
-    complete: !GATED.has(mode) || completed,
+    email,
+    wallet,
+    merchant_session: merchantSession,
+    complete: email !== "pending" && merchantSession !== "pending",
   };
 }
 
@@ -125,8 +133,10 @@ function base(overrides = {}) {
     id: "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
     issuer_name: "Acme Corp",
     heading: null,
-    payer_policy: { mode: "permissionless", expected_email_hint: null },
-    requirements: requirements("permissionless"),
+    expected_email_hint: null,
+    // No add-ons: the default request. The network is pinned, so the address
+    // exists at once, and the payer may pay from any wallet.
+    requirements: requirements(),
     status: "awaiting_deposit",
     payable: true,
     expires_at: new Date((now + 3600) * 1000).toISOString(),
@@ -136,7 +146,7 @@ function base(overrides = {}) {
     payer_message: null,
     content_unlocked: true,
     currency: "USDC",
-    networks: NETWORKS,
+    networks: [NETWORKS[0]],
     ...chosen(),
     amount: "25.000000",
     amount_base_units: "25000000",
@@ -144,7 +154,7 @@ function base(overrides = {}) {
     received_base_units: "0",
     remaining: "25.000000",
     remaining_base_units: "25000000",
-    payer_wallet: PAYER_WALLET,
+    payer_wallet: null,
     address: ADDRESS,
     address_explorer_url: null,
     details: {
@@ -155,17 +165,23 @@ function base(overrides = {}) {
       reference: null,
       attachment: null,
     },
-    // The stub deployment offers Relay; a bound, payable request may be
-    // paid from another network, and follows the newest quote reported.
+    // The stub deployment offers Relay, and without the wallet attestation
+    // add-on a cross-chain payment can honour the request.
     relay_available: true,
     relay: null,
     ...overrides,
   };
 }
 
-/** An unlocked request whose payer has not signed yet: content, no chain, no address. */
+/**
+ * An unlocked request with the wallet attestation add-on still pending: the
+ * content is present, but the network, address, and attested wallet are all
+ * null — the address is derived from the network the payer signs for.
+ */
 const UNBOUND = {
-  requirements: requirements("permissionless", false, false),
+  requirements: requirements({ wallet: "pending" }),
+  // Nothing pinned: the wallet step asks for the network and the signature.
+  networks: NETWORKS,
   chain: null,
   token: null,
   payer_wallet: null,
@@ -182,6 +198,9 @@ const UNBOUND = {
  */
 const sessions = new Map();
 
+/** The network a payer fixed for a request without the wallet attestation add-on. */
+const networkChoices = new Map();
+
 /** The session a request presents, if it is valid for `id`. */
 function sessionFor(req, id) {
   const token = req.headers["payday-payer-session"];
@@ -189,17 +208,21 @@ function sessionFor(req, id) {
   return session && session.id === id ? session : null;
 }
 
+/** The add-ons the gated scenarios attach: exactly one identity add-on, no wallet attestation. */
+const EMAIL_ADDONS = { email: { expected_email: "alice@globex.example" } };
+const MERCHANT_ADDONS = { merchant_auth: { payer_reference: "user_123" } };
+
 /** A gated deposit request as its verifying session sees it. */
-function gatedFor(mode, session) {
-  const opened = mode === "merchant_session" ? session?.merchantSession : session?.emailVerified;
-  if (!opened) return locked(mode);
+function gatedFor(addons, session) {
+  const opened = addons.merchant_auth ? session?.merchantSession : session?.emailVerified;
+  if (!opened) return locked(addons);
   return base({
-    heading: mode === "merchant_session" ? "Deposit 25 USDC" : "Consulting — August",
-    payer_policy: {
-      mode,
-      expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
-    },
-    requirements: requirements(mode, true),
+    heading: addons.merchant_auth ? "Deposit 25 USDC" : "Consulting — August",
+    expected_email_hint: addons.email ? "a****@e***.com" : null,
+    requirements: requirements({
+      email: addons.email ? "approved" : "not_required",
+      merchantSession: addons.merchant_auth ? "approved" : "not_required",
+    }),
     details: {
       ...base().details,
       payer: { name: "Globex Corporation" },
@@ -215,32 +238,33 @@ function verifyStatus(payment) {
   return { requirements: payment.requirements };
 }
 
-/** A gated deposit request before verification: only the issuer, heading, and policy leave the API. */
 /**
  * A merchant-issued deposit request as its payer sees it: everything withheld while
- * the policy is gated, since this projection carries no payer session.
+ * the identity add-ons are unsatisfied, since this projection carries no payer session.
  */
 function projectForPayer(payment, session) {
-  const mode = payment.payer_policy.mode;
-  const gated = GATED.has(mode);
-  // A session can satisfy the policy on its own — a preview session
+  const addons = payment.verification ?? {};
+  const emailGated = Boolean(addons.email);
+  const merchantGated = Boolean(addons.merchant_auth);
+  const gated = emailGated || merchantGated;
+  // A session can satisfy the identity add-ons on its own — a preview session
   // (depositRequests.previewSession) unlocks this way deliberately, without
   // ever touching the record's own verification_completed_at — exactly like
-  // the real API's session-based unlock, which this generic (non-scenario)
-  // projection previously ignored in favor of only the record's permanent
-  // flag.
-  const sessionSatisfies =
-    mode === "merchant_session" ? Boolean(session?.merchantSession) : Boolean(session?.emailVerified);
+  // the real API's session-based unlock.
+  const sessionSatisfies = merchantGated ? Boolean(session?.merchantSession) : Boolean(session?.emailVerified);
   const unlocked = Boolean(payment.verification_completed_at) || sessionSatisfies;
   const shared = {
     id: payment.id,
     issuer_name: payment.issuer.name,
     heading: payment.heading,
-    payer_policy: {
-      mode,
-      expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
-    },
-    requirements: requirements(mode, unlocked),
+    expected_email_hint: emailGated ? "a****@e***.com" : null,
+    requirements: requirements({
+      email: emailGated ? (unlocked ? "approved" : "pending") : "not_required",
+      merchantSession: merchantGated ? (unlocked ? "approved" : "pending") : "not_required",
+      // The wallet attestation add-on reports separately, and stays pending
+      // until this session has signed.
+      wallet: addons.wallet_attestation ? "pending" : "not_required",
+    }),
     status: payment.status,
     payable: payment.status === "awaiting_deposit" || payment.status === "partially_deposited",
     expires_at: payment.expires_at,
@@ -274,7 +298,8 @@ function projectForPayer(payment, session) {
   return {
     ...shared,
     content_unlocked: true,
-    relay_available: Boolean(payment.address) && shared.payable,
+    // Cross-chain Relay cannot honour a sender attestation.
+    relay_available: Boolean(payment.address) && shared.payable && !addons.wallet_attestation,
     relay: relayFollowing.get(payment.id) ?? null,
     payer_wallet: payment.payer_wallet,
     networks: payment.networks,
@@ -302,14 +327,15 @@ function projectForPayer(payment, session) {
   };
 }
 
-function locked(mode, facts = requirements(mode)) {
+function locked(addons) {
   return base({
-    heading: mode === "merchant_session" ? "Deposit 25 USDC" : "Consulting — August",
-    payer_policy: {
-      mode,
-      expected_email_hint: mode === "verified_email" ? "a****@e***.com" : null,
-    },
-    requirements: facts,
+    heading: addons.merchant_auth ? "Deposit 25 USDC" : "Consulting — August",
+    expected_email_hint: addons.email ? "a****@e***.com" : null,
+    requirements: requirements({
+      email: addons.email ? "pending" : "not_required",
+      merchantSession: addons.merchant_auth ? "pending" : "not_required",
+      wallet: addons.wallet_attestation ? "pending" : "not_required",
+    }),
     content_unlocked: false,
     currency: null,
     networks: null,
@@ -388,20 +414,44 @@ const scenarios = {
         attachment: ATTACHMENT,
       },
     }),
-  "gated-email": (id, session) => gatedFor("verified_email", session),
-  // No wallet signed yet: the page must ask for a network and the signature
-  // before it shows any address, and show the address on the chosen network
-  // once this session has signed.
-  unbound: (id, session) => (session?.walletBound ? base(chosen(session.chainId)) : base(UNBOUND)),
-  // The merchant pinned Base: the request offers that network alone and
-  // names it before any wallet signs; only the wallet is still the payer's.
+  // The email add-on on its own: locked until this tab's session proves the
+  // mailbox, then open with the address it already has (the network is
+  // pinned, and no wallet signature is involved).
+  "gated-email": (id, session) => gatedFor(EMAIL_ADDONS, session),
+  // The wallet attestation add-on, still pending: the page must ask for a
+  // network and the payer's signature before it shows any address, and show
+  // the address on the chosen network once this session has signed.
+  unbound: (id, session) =>
+    session?.walletBound
+      ? base({ ...chosen(session.chainId), payer_wallet: PAYER_WALLET, relay_available: false })
+      : base(UNBOUND),
+  // The wallet attestation add-on with the merchant pinned Base: the request
+  // offers that network alone and names it before any wallet signs; only the
+  // signature is still the payer's.
   pinned: (id, session) =>
     session?.walletBound
-      ? base({ networks: [NETWORKS[1]], ...chosen("8453") })
+      ? base({
+          networks: [NETWORKS[1]],
+          ...chosen("8453"),
+          payer_wallet: PAYER_WALLET,
+          relay_available: false,
+        })
       : base({ ...UNBOUND, networks: [NETWORKS[1]], chain: BASE, token: NETWORKS[1].token }),
+  // No add-ons and no pinned network: the address waits only for the payer's
+  // network choice — no wallet, no signature. The choice is remembered per
+  // request so the same view comes back on every read.
+  "network-selection": (id) => {
+    const chainId = networkChoices.get(id);
+    if (chainId) return base({ networks: [NETWORKS[1]], ...chosen(chainId) });
+    return base({
+      ...UNBOUND,
+      requirements: requirements(),
+      networks: NETWORKS,
+    });
+  },
   // A USDT request: pinned to Monad at issuance (USDT does not bridge for the
-  // merchant), bound already, and paid in the contract the wallet shows as
-  // USDT0.
+  // merchant), with the address it has from the start, paid in the contract
+  // the wallet shows as USDT0.
   usdt: () =>
     base({
       currency: "USDT",
@@ -412,8 +462,8 @@ const scenarios = {
     }),
   // Opened by the merchant's app with a client secret in the fragment; the
   // bare link stays locked with nothing for the payer to do here.
-  "gated-merchant": (id, session) => gatedFor("merchant_session", session),
-  "gated-merchant-other": (id, session) => gatedFor("merchant_session", session),
+  "gated-merchant": (id, session) => gatedFor(MERCHANT_ADDONS, session),
+  "gated-merchant-other": (id, session) => gatedFor(MERCHANT_ADDONS, session),
   partial: () => base(PARTIAL),
   deposited: () => base({ ...FULL, ...CLOSED, status: "deposited" }),
   settled: () => base({ ...FULL, ...CLOSED, ...SETTLED }),
@@ -524,25 +574,28 @@ function merchantDepositRequest(input, extra = {}) {
   ).toString();
   const address = `0x${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
   // A pinned network narrows the offer to that one entry and names it from
-  // issuance, as the API does; the default offer is every network with the
-  // stub payer bound on the first.
+  // issuance. Without a pinned network the payer chooses, so no address
+  // exists until they do.
   const currency = input.currency ?? "USDC";
   const offered = currency === "USDT" ? [USDT_NETWORK] : NETWORKS;
   const pinned = input.chain_id
     ? offered.find((network) => network.chain.id === input.chain_id)
     : undefined;
   const network = pinned ?? offered[0];
+  // The wallet attestation add-on is the only thing that can bind a payer
+  // wallet, and this stub's merchant-side records never take that step; the
+  // recovery address is Payday's own wallet from issuance either way.
+  const attested = Boolean(input.verification?.wallet_attestation);
   return {
     id,
     deposit_url: `http://127.0.0.1:3003/pay/${id}`,
-    address,
+    address: pinned ? address : null,
     address_explorer_url: null,
+    ready_at: pinned ? created : null,
     payout_address: input.payout_address,
-    // Issued payments in this stub are already bound to the stub payer's
-    // wallet, as a request whose payer has signed would be.
-    payer_wallet: PAYER_WALLET,
-    recovery_address: PAYER_WALLET,
-    wallet_bound_at: created,
+    payer_wallet: null,
+    recovery_address: RECOVERY_ADDRESS,
+    wallet_bound_at: null,
     expires_at: new Date(Date.parse(created) + expiresIn * 1000).toISOString(),
     expires_in: expiresIn,
     amount: fromBaseUnits(amountUnits),
@@ -573,7 +626,11 @@ function merchantDepositRequest(input, extra = {}) {
     issuer_id: input.issuer_id ?? null,
     reference: input.reference ?? null,
     customer_id: input.customer_id ?? null,
-    payer_policy: input.payer_policy,
+    verification: {
+      ...(input.verification?.email ? { email: input.verification.email } : {}),
+      ...(input.verification?.merchant_auth ? { merchant_auth: input.verification.merchant_auth } : {}),
+      wallet_attestation: attested,
+    },
     attachment: extra.attachment ?? null,
     verification_completed_at: null,
     likely_unsolicited_at: null,
@@ -599,23 +656,28 @@ function merchantDepositRequest(input, extra = {}) {
 
 /** The merchant's verification view; seeded deposit requests carry their attempts. */
 function verificationDetail(payment) {
-  const mode = payment.payer_policy.mode;
+  const addons = payment.verification;
   const completed = payment.verification_completed_at !== null;
   const attempts = payment.verification_attempts ?? [];
+  const emailApproved =
+    attempts.some((attempt) => attempt.kind === "email" && attempt.status === "approved") ||
+    completed;
+  const sessionApproved =
+    attempts.some((attempt) => attempt.kind === "merchant_session" && attempt.status === "approved") ||
+    completed;
   return {
-    payer_policy_mode: mode,
+    verification: addons,
     verification_completed_at: payment.verification_completed_at,
     likely_unsolicited_at: payment.likely_unsolicited_at,
-    facts: completed
-      ? requirements(mode, true, Boolean(payment.payer_wallet))
-      : {
-          ...requirements(mode, false, Boolean(payment.payer_wallet)),
-          email: attempts.some(
-            (attempt) => attempt.kind === "email" && attempt.status === "approved",
-          )
-            ? "approved"
-            : requirements(mode).email,
-        },
+    facts: requirements({
+      email: addons.email ? (emailApproved ? "approved" : "pending") : "not_required",
+      merchantSession: addons.merchant_auth
+        ? sessionApproved
+          ? "approved"
+          : "pending"
+        : "not_required",
+      wallet: addons.wallet_attestation ? (payment.wallet_bound_at ? "approved" : "pending") : "not_required",
+    }),
     attempts,
   };
 }
@@ -631,7 +693,7 @@ function summary(payment) {
     issuer_id: payment.issuer_id ?? null,
     reference: payment.reference,
     metadata: payment.metadata,
-    payer_policy_mode: payment.payer_policy.mode,
+    verification: payment.verification,
     customer_id: payment.customer_id,
     has_attachment: payment.attachment !== null,
     verification_completed_at: payment.verification_completed_at,
@@ -654,12 +716,16 @@ function proofFor(payment) {
       amount_base_units: transfer.amount_base_units,
       block_number: transfer.block,
     }));
-  const gated = GATED.has(payment.payer_policy.mode);
+  // With the wallet attestation add-on the proof attributes the transfers to
+  // the payer's attested wallet; without it, it proves only what settled.
+  const attested = Boolean(payment.verification?.wallet_attestation);
+  const issuanceNonce = hex32(`issuance:${payment.id}`);
   return {
-    version: "payday.proof.v4",
+    version: "payday.proof.v5",
+    scope: attested ? "wallet_attributed" : "settlement",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
-      schema: "payday.invoice.v4",
+      schema: "payday.invoice.v5",
       canonicalization: "RFC8785",
       issuer: payment.issuer,
       payer: payment.payer,
@@ -670,7 +736,7 @@ function proofFor(payment) {
       heading: payment.heading,
       reference: payment.reference,
       expiration_timestamp: String(Math.floor(Date.parse(payment.expires_at) / 1000)),
-      payer_policy: payment.payer_policy,
+      verification: payment.verification,
       attachment: payment.attachment
         ? {
             id: payment.attachment.id,
@@ -687,35 +753,45 @@ function proofFor(payment) {
     },
     canonicalization: "RFC8785",
     attribution_hash: payment.attribution.hash,
-    payer_wallet: {
-      address: PAYER_WALLET,
-      typed_data: typedData(payment.attribution.hash, PAYER_WALLET, hex32(`nonce:${payment.id}`)),
-      digest: hex32(`digest:${payment.id}`),
-      signature: `0x${"cd".repeat(65)}`,
-      method: "ecdsa",
-    },
-    salt: payment.self_settlement.salt,
+    issuance_nonce: issuanceNonce,
+    payer_wallet: attested
+      ? {
+          address: PAYER_WALLET,
+          typed_data: typedData(payment.attribution.hash, PAYER_WALLET, hex32(`nonce:${payment.id}`)),
+          digest: hex32(`digest:${payment.id}`),
+          signature: `0x${"cd".repeat(65)}`,
+          method: "ecdsa",
+        }
+      : null,
+    // Derived with the issuance nonce; with an attestation, its digest joins in.
+    salt: hex32(`salt:${payment.id}:${issuanceNonce}`),
     chain_id: "143",
     factory_address: FACTORY,
     payment_address: payment.address,
     token_address: TOKEN,
-    recovery_address: PAYER_WALLET,
+    recovery_address: RECOVERY_ADDRESS,
     settlement_transaction_hash: payment.settlement_tx_hash,
     transfers,
     verification: {
       payload: {
-        version: "payday.attestation.v4",
+        version: "payday.attestation.v5",
         payment_id: payment.id,
         attribution_hash: payment.attribution.hash,
         chain_id: "143",
         payment_address: payment.address,
-        payer_wallet: PAYER_WALLET,
-        wallet_nonce: hex32(`nonce:${payment.id}`),
-        payer_policy_mode: payment.payer_policy.mode,
-        result: gated ? "approved" : "not_required",
+        scope: attested ? "wallet_attributed" : "settlement",
+        ...(attested
+          ? {
+              payer_wallet: PAYER_WALLET,
+              wallet_nonce: hex32(`nonce:${payment.id}`),
+            }
+          : {}),
+        result: attested ? "approved" : "not_required",
         verified_at: payment.verification_completed_at,
         wallet_bound_at: payment.wallet_bound_at,
-        facts: [{ kind: "wallet", provider: "payday", at: payment.wallet_bound_at }],
+        facts: attested
+          ? [{ kind: "wallet", provider: "payday", at: payment.wallet_bound_at }]
+          : [],
       },
       signer: ATTESTOR,
       signature: `0x${"ab".repeat(65)}`,
@@ -726,7 +802,7 @@ function proofFor(payment) {
 /** `PayerAttestation::typed_data`: the EIP-712 document a payer's wallet signs, under the chosen chain's domain. */
 function typedData(attributionHash, wallet, nonce, chainId = 143) {
   return {
-    domain: { name: "Payday", version: "1", chainId, verifyingContract: FACTORY },
+    domain: { name: "Payday", version: "2", chainId, verifyingContract: FACTORY },
     primaryType: "PayerAttestation",
     types: {
       EIP712Domain: [
@@ -745,7 +821,7 @@ function typedData(attributionHash, wallet, nonce, chainId = 143) {
     },
     message: {
       statement:
-        "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request, and any funds Payday returns go back to it.",
+        "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request.",
       attributionHash,
       wallet,
       nonce,
@@ -776,7 +852,11 @@ function seed() {
       reference: "INV-1042",
       notes: "Net 30. Thank you for your business.",
       customer_id: customer.id,
-      payer_policy: { mode: "verified_email", expected_email: "alice@globex.example" },
+      chain_id: "143",
+      verification: {
+        email: { expected_email: "alice@globex.example" },
+        wallet_attestation: true,
+      },
     },
     {
       id: "dr_seed-settled",
@@ -785,6 +865,10 @@ function seed() {
       received_base_units: "30000000",
       attachment: ATTACHMENT,
       verification_completed_at: "2026-08-19T08:30:00.000Z",
+      // The payer completed the wallet attestation add-on before paying, so
+      // the proof carries the attestation block.
+      payer_wallet: PAYER_WALLET,
+      wallet_bound_at: "2026-08-18T10:05:00.000Z",
       deposited_at: settledAt,
       deposited_at_block: "1200",
       settled_at: settledAt,
@@ -829,7 +913,8 @@ function seed() {
       payer: { name: "Initech" },
       heading: "Retainer — September",
       reference: "INV-1043",
-      payer_policy: { mode: "verified_email", expected_email: "bob@initech.example" },
+      chain_id: "143",
+      verification: { email: { expected_email: "bob@initech.example" } },
     },
     {
       id: "dr_seed-unsolicited",
@@ -1115,7 +1200,7 @@ function customerFrom(body, existing) {
 
 async function payer(req, res, url) {
   const match = url.pathname.match(
-    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/session|\/relay\/chains|\/relay\/quotes|\/relay\/quotes\/[^/]+\/sent)?$/,
+    /^\/v1\/payer\/deposit-requests\/([^/]+)(\/qr|\/attachment|\/verify|\/verify\/email\/start|\/verify\/email\/confirm|\/wallet\/challenge|\/wallet\/attest|\/network|\/session|\/relay\/chains|\/relay\/quotes|\/relay\/quotes\/[^/]+\/sent)?$/,
   );
   if (!match) return false;
   const relaySent = /^\/relay\/quotes\/([^/]+)\/sent$/.exec(match[2] ?? "");
@@ -1124,6 +1209,7 @@ async function payer(req, res, url) {
     match[2] === "/verify/email/confirm" ||
     match[2] === "/wallet/challenge" ||
     match[2] === "/wallet/attest" ||
+    match[2] === "/network" ||
     match[2] === "/session" ||
     match[2] === "/relay/quotes" ||
     relaySent !== null;
@@ -1143,7 +1229,7 @@ async function payer(req, res, url) {
 
   const session = sessionFor(req, id);
   const payment = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued, session), id };
-  const mode = payment.payer_policy.mode;
+  const addons = payment.requirements;
   // A cross-chain payment reported for this request is followed on every
   // read, as the real API's `relay` block is.
   if (payment.content_unlocked && relayFollowing.has(id)) payment.relay = relayFollowing.get(id);
@@ -1166,6 +1252,12 @@ async function payer(req, res, url) {
   }
   if (match[2] === "/relay/quotes") {
     const body = await readJson(req);
+    // The wallet that will send the origin transactions: required, as the API
+    // requires it, so the intent can pin whose report of the send counts.
+    const payerWallet = typeof body.payer_wallet === "string" ? body.payer_wallet.trim() : "";
+    if (!/^0x[0-9a-fA-F]{40}$/.test(payerWallet) || /^0x0{40}$/.test(payerWallet)) {
+      return fail(res, 400, "invalid_request", "payer_wallet must be a 20-byte EVM address");
+    }
     const origin = RELAY_CHAINS.find((chain) => chain.chain_id === String(body.origin_chain_id));
     if (!origin || origin.chain_id === payment.chain.id) {
       return fail(res, 422, "relay_unsupported_origin", "This request cannot be paid from that network");
@@ -1234,8 +1326,8 @@ async function payer(req, res, url) {
   }
 
   if (match[2] === "/session") {
-    if (mode !== "merchant_session") {
-      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session deposit request");
+    if (!addons.merchant_session || addons.merchant_session === "not_required") {
+      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-auth deposit request");
     }
     const body = await readJson(req);
     const secret = typeof body.client_secret === "string" ? body.client_secret.trim() : "";
@@ -1252,12 +1344,12 @@ async function payer(req, res, url) {
     return send(res, 200, {
       payer_session: token,
       expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-      requirements: requirements("merchant_session", true),
+      requirements: requirements({ merchantSession: "approved" }),
     });
   }
 
   if (match[2] === "/verify/email/start") {
-    if (mode === "merchant_session") {
+    if (!addons.email || addons.email === "not_required") {
       return fail(
         res,
         409,
@@ -1265,7 +1357,6 @@ async function payer(req, res, url) {
         "Opened by the app, not by email",
       );
     }
-    if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
     // The code goes to the merchant's asserted mailbox; the request names none.
     const reused = session ?? null;
     const token = reused ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
@@ -1277,7 +1368,7 @@ async function payer(req, res, url) {
   }
 
   if (match[2] === "/verify/email/confirm") {
-    if (mode === "merchant_session") {
+    if (!addons.email || addons.email === "not_required") {
       return fail(
         res,
         409,
@@ -1285,7 +1376,6 @@ async function payer(req, res, url) {
         "Opened by the app, not by email",
       );
     }
-    if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
     if (!session) return fail(res, 401, "payer_session_invalid", "Start verification again");
     const body = await readJson(req);
     if (body.otp !== OTP) return fail(res, 401, "otp_invalid", "The code was not accepted");
@@ -1305,6 +1395,9 @@ async function payer(req, res, url) {
   // signature. The stub verifies nothing; it records that this session
   // signed, which is what the scenarios key the address on.
   if (match[2] === "/wallet/challenge") {
+    if (!addons.wallet || addons.wallet === "not_required") {
+      return fail(res, 409, "wallet_attestation_not_required", "This request has no wallet attestation add-on");
+    }
     const body = await readJson(req);
     if (!/^0x[0-9a-fA-F]{40}$/.test(String(body.wallet ?? ""))) {
       return fail(res, 400, "invalid_request", "wallet must be a 20-byte EVM address");
@@ -1319,7 +1412,7 @@ async function payer(req, res, url) {
     if (payment.address) {
       return fail(res, 409, "wallet_already_bound", `Already bound to ${payment.payer_wallet}`);
     }
-    if (GATED.has(mode) && !session?.emailVerified) {
+    if (addons.email === "pending" && !session?.emailVerified) {
       return fail(res, 401, session ? "verification_required" : "payer_session_invalid", "Verify first");
     }
     let token = session ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
@@ -1339,6 +1432,9 @@ async function payer(req, res, url) {
   }
 
   if (match[2] === "/wallet/attest") {
+    if (!addons.wallet || addons.wallet === "not_required") {
+      return fail(res, 409, "wallet_attestation_not_required", "This request has no wallet attestation add-on");
+    }
     if (!session) return fail(res, 401, "payer_session_invalid", "Request a challenge first");
     const body = await readJson(req);
     if (!/^0x[0-9a-fA-F]{130}$/.test(String(body.signature ?? ""))) {
@@ -1347,6 +1443,44 @@ async function payer(req, res, url) {
     session.walletBound = true;
     const current = scenario ? { ...scenario(id, session), id } : { ...projectForPayer(issued, session), id };
     return send(res, 200, current);
+  }
+
+  // Fixing the network without the wallet attestation add-on: no signature is
+  // involved, and the answer is the newest payer view. Idempotent for the same
+  // chain; a different chain is a conflict.
+  if (match[2] === "/network") {
+    if (addons.wallet && addons.wallet !== "not_required") {
+      return fail(
+        res,
+        409,
+        "wallet_attestation_required",
+        "This request chooses its network when the payer signs",
+      );
+    }
+    const body = await readJson(req);
+    const chainId = String(body.chain_id ?? "");
+    const chosenChain = networkChoices.get(id);
+    // Idempotent for the chain already registered; a different one conflicts.
+    if (chosenChain) {
+      if (chosenChain !== chainId) {
+        return fail(res, 409, "network_conflict", "A different network was already chosen");
+      }
+      return send(res, 200, { ...scenario(id, session), id });
+    }
+    if (payment.address) {
+      return fail(res, 409, "network_already_chosen", "This deposit request already has a network");
+    }
+    if ((payment.networks ?? []).length < 2) {
+      return fail(res, 409, "network_already_chosen", "This deposit request offers one network");
+    }
+    if (addons.email === "pending" || addons.merchant_session === "pending") {
+      if (!session) return fail(res, 401, "payer_session_invalid", "Verify first");
+    }
+    if (!(payment.networks ?? []).some((network) => network.chain.id === chainId)) {
+      return fail(res, 422, "unsupported_chain", "This deposit request cannot be paid on that chain");
+    }
+    networkChoices.set(id, chainId);
+    return send(res, 200, { ...scenario(id, session), id });
   }
 
   if (match[2] === "/qr") {
@@ -1715,7 +1849,39 @@ async function attachments(req, res, url) {
   return send(res, 200, draft.descriptor);
 }
 
-const MODES = new Set(["permissionless", ...GATED]);
+/**
+ * The create input's `verification` add-ons: each optional and independent;
+ * the response echoes them normalized with `wallet_attestation` always a
+ * boolean. `payer_policy` is gone — refused below as the unknown field it is.
+ */
+function normalizeVerification(input) {
+  if (input === undefined || input === null) {
+    return { email: undefined, merchant_auth: undefined, wallet_attestation: false };
+  }
+  if (typeof input !== "object" || Array.isArray(input)) return null;
+  const email = input.email;
+  const merchantAuth = input.merchant_auth;
+  if (email !== undefined && (typeof email !== "object" || email === null || !String(email.expected_email ?? "").trim())) {
+    return null;
+  }
+  if (
+    merchantAuth !== undefined &&
+    (typeof merchantAuth !== "object" || merchantAuth === null || !String(merchantAuth.payer_reference ?? "").trim())
+  ) {
+    return null;
+  }
+  const attestation = input.wallet_attestation ?? false;
+  if (typeof attestation !== "boolean") return null;
+  for (const key of Object.keys(input)) {
+    if (!["email", "merchant_auth", "wallet_attestation"].includes(key)) return null;
+  }
+  return {
+    email: email === undefined ? undefined : { expected_email: String(email.expected_email).trim() },
+    merchant_auth:
+      merchantAuth === undefined ? undefined : { payer_reference: String(merchantAuth.payer_reference).trim() },
+    wallet_attestation: attestation,
+  };
+}
 
 function validateCreate(body) {
   if (!toBaseUnits(body.amount)) return "amount must be a positive USDC amount";
@@ -1723,21 +1889,9 @@ function validateCreate(body) {
     return "payout_address must be an address";
   if (!body.issuer?.name?.trim()) return "issuer.name is required";
   if (!body.payer?.name?.trim()) return "payer.name is required";
-  const policy = body.payer_policy;
-  if (!policy || !MODES.has(policy.mode)) return "payer_policy.mode is invalid";
-  if (policy.mode === "verified_email" && !policy.expected_email)
-    return "expected_email is required for verified_email";
-  if (policy.mode === "merchant_session" && !policy.payer_reference)
-    return "payer_reference is required for merchant_session";
-  if (policy.expected_identity !== undefined) {
-    return `expected_identity is not allowed for ${policy.mode}`;
-  }
-  if (policy.mode !== "verified_email" && policy.expected_email !== undefined) {
-    return `expected_email is not allowed for ${policy.mode}`;
-  }
-  if (policy.mode !== "merchant_session" && policy.payer_reference !== undefined) {
-    return `payer_reference is not allowed for ${policy.mode}`;
-  }
+  if (body.payer_policy !== undefined) return "payer_policy is not a known field";
+  const addons = normalizeVerification(body.verification);
+  if (addons === null) return "verification is not a valid set of add-ons";
   if (body.customer_id !== undefined && !store.customers.has(body.customer_id))
     return "customer_id is not yours";
   if (body.expires_at !== undefined) {
@@ -1759,6 +1913,7 @@ async function payments(req, res, url) {
       const body = await readJson(req);
       const problem = validateCreate(body);
       if (problem) return fail(res, 400, "invalid_request", problem);
+      const addons = normalizeVerification(body.verification);
       let attachment = null;
       if (body.attachment_id !== undefined) {
         const draft = store.attachments.get(body.attachment_id);
@@ -1768,9 +1923,12 @@ async function payments(req, res, url) {
         draft.status = "attached";
         attachment = draft.descriptor;
       }
-      const payment = merchantDepositRequest(body, { attachment });
+      const payment = merchantDepositRequest(
+        { ...body, verification: addons },
+        { attachment },
+      );
       store.depositRequests.set(payment.id, payment);
-      if (payment.payer_policy.mode !== "merchant_session") return send(res, 201, payment);
+      if (!addons.merchant_auth) return send(res, 201, payment);
       // The secret is in the response that minted it and nowhere else.
       const minted = mintClientSecret(payment.id);
       return send(res, 201, {
@@ -1788,13 +1946,13 @@ async function payments(req, res, url) {
         return fail(res, 400, "invalid_request", "unknown verification filter");
       }
       const verified = (payment) => {
+        const addons = payment.verification;
+        const identityGated = Boolean(addons.email || addons.merchant_auth);
         switch (verification) {
           case "not_required":
-            return payment.payer_policy.mode === "permissionless";
+            return !identityGated;
           case "pending":
-            return (
-              payment.payer_policy.mode !== "permissionless" && !payment.verification_completed_at
-            );
+            return identityGated && !payment.verification_completed_at;
           case "verified":
             return Boolean(payment.verification_completed_at);
           case "likely_unsolicited":
@@ -1823,11 +1981,8 @@ async function payments(req, res, url) {
   if (!payment) return fail(res, 404, "deposit_request_not_found", "No such deposit request");
   if (match[2] === "/client-secret") {
     if (req.method !== "POST") return fail(res, 405, "method_not_allowed", "method not allowed");
-    const mode = payment.payer_policy.mode;
-    if (mode === "permissionless")
-      return fail(res, 409, "verification_not_required", "Nothing to verify");
-    if (mode !== "merchant_session")
-      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-session deposit request");
+    if (!payment.verification.merchant_auth)
+      return fail(res, 409, "verification_method_not_applicable", "Not a merchant-auth deposit request");
     return send(res, 201, mintClientSecret(payment.id));
   }
   if (match[2] === "/preview-session") {

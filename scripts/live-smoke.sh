@@ -127,13 +127,14 @@ mon_before="$(cast balance "$PAYER" --rpc-url "$RPC_URL")"
 ((usdc_before >= needed)) || fail "payer holds $usdc_before base units of $CURRENCY, needs $needed"
 [[ "$mon_before" != 0 ]] || fail "payer holds no MON for gas"
 
-# 1. Issue: no address until the payer binds a wallet.
+# 1. Issue with the wallet-attestation add-on: no address until the payer
+#    attests a wallet.
 run_id="live-smoke-$(date +%s)-$RANDOM"
 body="$(jq -cn --arg payout "$PAYOUT_ADDRESS" --arg amount "$AMOUNT" --arg ref "$run_id" \
   --arg currency "$CURRENCY" --arg chain "$CHAIN_ID" \
   '{amount: $amount, currency: $currency, payout_address: $payout, expires_in: 3600, reference: $ref,
     issuer: {name: "Payday"}, payer: {name: "Live smoke test"},
-    payer_policy: {mode: "permissionless"}}
+    verification: {wallet_attestation: true}}
    + (if $currency == "USDT" then {chain_id: $chain} else {} end)')"
 created="$(curl --fail --silent --show-error --request POST \
   --header "Authorization: Bearer $PAYDAY_API_KEY" \
@@ -143,6 +144,9 @@ created="$(curl --fail --silent --show-error --request POST \
 id="$(jq -er .id <<<"$created")"
 echo "issued $id -> $(jq -r .deposit_url <<<"$created")"
 [[ "$(jq -r .address <<<"$created")" == null ]] || fail "a fresh request already had an address"
+# Recovery goes to Gum's own wallet, whatever the payer attests; read it off
+# the request so the proof check below matches the deployment's setting.
+recovery="$(jq -er .recovery_address <<<"$created")"
 
 # 2. Bind the payer wallet: challenge, sign the EIP-712 typed data with cast
 #    as a wallet would, attest.
@@ -162,7 +166,7 @@ echo "bound $PAYER -> deposit address $address"
 view="$(merchant GET "/v1/deposit-requests/$id")"
 same_address "$(jq -r .address <<<"$view")" "$address" || fail "merchant view does not carry the bound address"
 same_address "$(jq -r .payer_wallet <<<"$view")" "$PAYER" || fail "merchant view does not name the payer wallet"
-same_address "$(jq -r .recovery_address <<<"$view")" "$PAYER" || fail "the recovery address is not the payer wallet"
+same_address "$(jq -r .recovery_address <<<"$view")" "$recovery" || fail "the recovery address is not the deployment's"
 
 # 3. Pay from the attested wallet.
 payout_before="$(token_balance "$PAYOUT_ADDRESS")"
@@ -188,15 +192,16 @@ echo "settled in $(jq -r .settlement_tx_hash <<<"$settled")"
 
 # 5. The Proof of Payment names this wallet, this address, and the settlement.
 proof="$(merchant GET "/v1/deposit-requests/$id/proof")"
-jq -e --arg payer "$(lower "$PAYER")" --arg address "$(lower "$address")" \
-  '.version == "payday.proof.v4"
+jq -e --arg payer "$(lower "$PAYER")" --arg address "$(lower "$address")" --arg recovery "$(lower "$recovery")" \
+  '.version == "payday.proof.v5"
    and (.payment_address | ascii_downcase) == $address
    and (.payer_wallet.address | ascii_downcase) == $payer
    and .payer_wallet.typed_data.primaryType == "PayerAttestation"
-   and (.recovery_address | ascii_downcase) == $payer
+   and (.recovery_address | ascii_downcase) == $recovery
    and .settlement_transaction_hash != null
    and (.transfers | length) > 0 and (.transfers | all((.sender | ascii_downcase) == $payer))
    and .verification.signature != null
+   and .verification.payload.scope == "wallet_attributed"
    and (.verification.payload.payer_wallet | ascii_downcase) == $payer
    and (.verification.payload.payment_address | ascii_downcase) == $address
    and .verification.payload.attribution_hash == .attribution_hash' <<<"$proof" >/dev/null \
@@ -210,23 +215,24 @@ if [[ -n "$ATTESTOR" ]]; then
 fi
 echo "proof attested by $signer"
 
-# 6. Optionally, money sent after settlement goes back to the payer.
+# 6. Optionally, money sent after settlement is forwarded to Gum's recovery
+# wallet (the contract's recovery address).
 if [[ "$LATE_TRANSFER" == 1 ]]; then
-  late_before="$(token_balance "$PAYER")"
+  late_before="$(token_balance "$recovery")"
   cast send "$USDC" 'transfer(address,uint256)' "$address" 1 \
     --private-key "$PAYER_KEY" --rpc-url "$RPC_URL" >/dev/null
-  echo "sent a late transfer of 1 base unit; waiting for it to come back"
+  echo "sent a late transfer of 1 base unit; waiting for it to reach the recovery wallet"
   deadline=$((SECONDS + TIMEOUT_SECS))
   while ((SECONDS < deadline)); do
-    if [[ "$(token_balance "$PAYER")" == "$late_before" && "$(token_balance "$address")" == 0 ]]; then
+    if [[ "$(token_balance "$recovery")" == "$((late_before + 1))" && "$(token_balance "$address")" == 0 ]]; then
       break
     fi
     sleep 5
   done
-  [[ "$(token_balance "$PAYER")" == "$late_before" ]] || fail "the late transfer was not returned"
+  [[ "$(token_balance "$recovery")" == "$((late_before + 1))" ]] || fail "the late transfer was not recovered"
   [[ "$(merchant GET "/v1/deposit-requests/$id" | jq -r .status)" == settled ]] \
     || fail "a late transfer changed the request's status"
-  echo "late transfer returned to $PAYER"
+  echo "late transfer recovered to $recovery"
 fi
 
 mon_after="$(cast balance "$PAYER" --rpc-url "$RPC_URL")"

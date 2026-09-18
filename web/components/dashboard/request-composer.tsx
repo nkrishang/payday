@@ -18,10 +18,10 @@ import { bridges, chainById, chainsFor, currencies, tokenOn } from "@/lib/config
 import { clampWords, formatDisplayAmount, truncateAddress } from "@/lib/format";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { AttachmentUpload } from "./attachment-upload";
-import { buildCreateDepositRequest, EMPTY_VALUES, type ComposerMode } from "./create-deposit-request";
+import { buildCreateDepositRequest, EMPTY_VALUES, type ComposerVerification } from "./create-deposit-request";
 import { AMOUNT, EMAIL } from "./field-rules";
 import { Labeled } from "./labeled";
-import { formatDate, MODES, modeLabel } from "./labels";
+import { formatDate, verificationLabel } from "./labels";
 import { useMerchant } from "./session";
 
 /**
@@ -88,12 +88,11 @@ interface Draft {
   heading: string;
   reference: string;
   notes: string;
-  mode: ComposerMode;
-  expectedEmail: string;
+  verification: ComposerVerification;
 }
 
 type Field = keyof Draft;
-type Errors = Partial<Record<Field, string>>;
+type Errors = Partial<Record<Field | "verification.expectedEmail", string>>;
 
 const STEPS = ["Amount", "Billing", "Verification", "Review"] as const;
 
@@ -165,8 +164,7 @@ function emptyDraft(
     heading: "",
     reference: "",
     notes: "",
-    mode: "permissionless",
-    expectedEmail: customer?.email ?? "",
+    verification: { verifyEmail: false, expectedEmail: customer?.email ?? "", walletAttestation: false },
   };
 }
 
@@ -207,10 +205,10 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
       errors.billEmail = "Not a valid email address.";
     if (!draft.heading.trim()) errors.heading = "Required.";
   }
-  if (step === 2 && draft.mode !== "permissionless") {
-    const expected = draft.expectedEmail.trim();
-    if (!expected) errors.expectedEmail = "Required for a verified policy.";
-    else if (!EMAIL.test(expected)) errors.expectedEmail = "Not a valid email address.";
+  if (step === 2 && draft.verification.verifyEmail) {
+    const expected = draft.verification.expectedEmail.trim();
+    if (!expected) errors["verification.expectedEmail"] = "Required when verifying the payer's email.";
+    else if (!EMAIL.test(expected)) errors["verification.expectedEmail"] = "Not a valid email address.";
   }
   return errors;
 }
@@ -261,11 +259,19 @@ export function RequestComposer({
 
   const set = <K extends Field>(key: K, value: Draft[K]) => {
     idempotencyKey.current = null;
-    if (key === "expectedEmail") setExpectedEdited(true);
+    if (key === "verification") setExpectedEdited(true);
     setDraft((current) => ({
       ...current,
       [key]: value,
-      ...(key === "billEmail" && !expectedEdited ? { expectedEmail: String(value) } : {}),
+      // The expected mailbox follows the payer's until someone edits it.
+      ...(key === "billEmail" && !expectedEdited
+        ? {
+            verification: {
+              ...current.verification,
+              expectedEmail: String(value),
+            },
+          }
+        : {}),
     }));
     setFailure(null);
   };
@@ -282,8 +288,11 @@ export function RequestComposer({
     String(draft[key]).length > 0 ? errors[key] : undefined;
 
   // The one field that arrives filled in, so silence while empty would read as
-  // "nothing needed here" rather than "you cleared something the policy wants".
-  const expectedProblem = expectedEdited || draft.expectedEmail ? errors.expectedEmail : undefined;
+  // "nothing needed here" rather than "you cleared something the email
+  // verification wants".
+  const expectedProblem = expectedEdited || draft.verification.expectedEmail
+    ? errors["verification.expectedEmail"]
+    : undefined;
 
   const issuer = issuers.find((entry) => entry.id === draft.issuerId) ?? issuers[0];
   // Where this request settles: the account's own wallet, or one the identity
@@ -315,7 +324,7 @@ export function RequestComposer({
       customerId: id,
       billName: found?.name ?? "",
       billEmail: found?.email ?? "",
-      ...(expectedEdited ? {} : { expectedEmail: found?.email ?? "" }),
+      ...(expectedEdited ? {} : { verification: { ...current.verification, expectedEmail: found?.email ?? "" } }),
     }));
   };
 
@@ -401,8 +410,7 @@ export function RequestComposer({
             heading: draft.heading,
             reference: draft.reference,
             notes: draft.notes,
-            mode: draft.mode,
-            expectedEmail: draft.expectedEmail,
+            verification: draft.verification,
           },
           attachment?.id ?? null,
         ),
@@ -419,7 +427,7 @@ export function RequestComposer({
     }
   };
 
-  const gated = draft.mode !== "permissionless";
+  const gated = draft.verification.verifyEmail;
   const last = step === STEPS.length - 1;
 
   return (
@@ -704,21 +712,52 @@ export function RequestComposer({
 
             {step === 2 ? (
               <div className="dash-stagger grid gap-5">
-                <div role="radiogroup" aria-label="Payer policy" className="grid gap-2.5">
-                  {MODES.map((entry) => (
+                <div className="grid gap-2.5">
+                  {[
+                    {
+                      label: "Verify payer email",
+                      description:
+                        "The payer must prove ownership of the expected email before the amount, details, and address are shown.",
+                      control: (
+                        <input
+                          type="checkbox"
+                          checked={draft.verification.verifyEmail}
+                          onChange={(event) =>
+                            set("verification", {
+                              ...draft.verification,
+                              verifyEmail: event.target.checked,
+                            })
+                          }
+                          aria-label="Verify payer email"
+                          className="mt-1 accent-gum-pink"
+                        />
+                      ),
+                    },
+                    {
+                      label: "Require wallet attestation",
+                      description:
+                        "The payer signs an attestation from the wallet they will pay from, and only transfers from that wallet count. Without it the address exists at once and the payer may pay from any wallet.",
+                      control: (
+                        <input
+                          type="checkbox"
+                          checked={draft.verification.walletAttestation}
+                          onChange={(event) =>
+                            set("verification", {
+                              ...draft.verification,
+                              walletAttestation: event.target.checked,
+                            })
+                          }
+                          aria-label="Require wallet attestation"
+                          className="mt-1 accent-gum-pink"
+                        />
+                      ),
+                    },
+                  ].map((entry) => (
                     <label
-                      key={entry.value}
+                      key={entry.label}
                       className="flex cursor-pointer gap-3 rounded-[10px] border border-line bg-surface px-4 py-3.5 transition-colors hover:border-line-strong has-checked:border-gum-pink/60 has-checked:bg-gum-pink/[0.07]"
                     >
-                      <input
-                        type="radio"
-                        name="mode"
-                        value={entry.value}
-                        checked={draft.mode === entry.value}
-                        onChange={() => set("mode", entry.value)}
-                        aria-label={entry.label}
-                        className="mt-1 accent-gum-pink"
-                      />
+                      {entry.control}
                       <span>
                         <span className="block text-[14px] font-medium">{entry.label}</span>
                         <span className="mt-0.5 block text-[13px] leading-relaxed text-muted">
@@ -739,14 +778,25 @@ export function RequestComposer({
                     >
                       <input
                         type="email"
-                        value={draft.expectedEmail}
-                        onChange={(event) => set("expectedEmail", event.target.value)}
+                        value={draft.verification.expectedEmail}
+                        onChange={(event) =>
+                          set("verification", {
+                            ...draft.verification,
+                            expectedEmail: event.target.value,
+                          })
+                        }
                         aria-invalid={expectedProblem ? true : undefined}
                         className={cn(controlStyles, "h-11")}
                       />
                     </Labeled>
                   </div>
                 ) : null}
+
+                <p className="text-[13px] leading-relaxed text-muted">
+                  Signing the payer in through your own application is composed through the API
+                  only: your app attaches merchant auth to the request and hands the payer its
+                  client secret, so there is nothing to choose here.
+                </p>
               </div>
             ) : null}
 
@@ -782,12 +832,23 @@ export function RequestComposer({
                     ) : null}
                   </Row>
                   <Row label="Verification">
-                    {/* The expected mailbox follows the payer even
-                        while the policy is open, so it is only part of this
-                        request when a policy actually checks it. */}
-                    {gated ? modeLabel(draft.mode) : "—"}
-                    {gated && draft.expectedEmail.trim() ? (
-                      <span className="text-muted"> · {draft.expectedEmail.trim()}</span>
+                    {verificationLabel(
+                      // The same normalization the API response carries: the
+                      // expected mailbox follows the payer even while the
+                      // step is open, so it is only part of this request when
+                      // the email add-on is actually on.
+                      {
+                        ...(draft.verification.verifyEmail
+                          ? { email: { expected_email: draft.verification.expectedEmail.trim() } }
+                          : {}),
+                        wallet_attestation: draft.verification.walletAttestation,
+                      },
+                    )}
+                    {gated && draft.verification.expectedEmail.trim() ? (
+                      <span className="text-muted">
+                        {" "}
+                        · {draft.verification.expectedEmail.trim()}
+                      </span>
                     ) : null}
                   </Row>
                   <Row label="Network">{networkLabel(draft)}</Row>
@@ -885,11 +946,20 @@ function Preview({
       <dl className="mt-5 grid gap-3 border-t border-line pt-4 text-[13px]">
         <Line label="From" value={issuerName} at={0} step={step} onEdit={onEdit} />
         <Line label="To" value={draft.billName.trim()} at={1} step={step} onEdit={onEdit} />
-        {/* Unset until a policy is chosen, and "—" says that better than a
+        {/* Unset until an add-on is chosen, and "—" says that better than a
             sentence claiming the open link is itself a kind of verification. */}
         <Line
           label="Verification"
-          value={draft.mode === "permissionless" ? "" : modeLabel(draft.mode)}
+          value={
+            draft.verification.verifyEmail || draft.verification.walletAttestation
+              ? verificationLabel({
+                  ...(draft.verification.verifyEmail
+                    ? { email: { expected_email: draft.verification.expectedEmail.trim() } }
+                    : {}),
+                  wallet_attestation: draft.verification.walletAttestation,
+                })
+              : ""
+          }
           at={2}
           step={step}
           onEdit={onEdit}

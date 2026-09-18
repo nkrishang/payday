@@ -39,7 +39,6 @@ curl -fsS "$API/v1/deposit-requests" \
     "payer": { "name": "Customer Inc" },
     "heading": "March retainer",
     "reference": "INV-1042",
-    "payer_policy": { "mode": "permissionless" },
     "expires_in": 3600
   }' | jq
 ```
@@ -52,20 +51,30 @@ curl -fsS "$API/v1/deposit-requests" \
   runs the whole exchange).
 - `payout_address` is the wallet that receives exactly the requested amount from
   an on-time successful deposit.
-- `payer_policy` here is `permissionless`. To require the payer to verify an
-  email address first, to have your own application open the checkout for a
-  user it has signed in (`merchant_session`), or to add party details, notes,
-  a customer, or metadata, see the [API reference](api-reference.md).
-- The response's `address` is null until the payer, on the hosted page, signs
-  the request's attestation from the wallet they will pay from; a
-  `deposit_request.ready` webhook reports it. Overpayments, late transfers, and
-  expired balances go back to that wallet on-chain, automatically; you cannot
-  choose it, and Payday never holds them.
+- The request above carries no `verification` add-ons, so it is fully
+  permissionless: anyone with the link can pay from any wallet. To require the
+  payer to verify an email address first, to have your own application open
+  the checkout for a user it has signed in, or to require the payer to sign a
+  wallet attestation, add the corresponding add-ons —
+  `"verification": {"email": {"expected_email": "…"}}`,
+  `"verification": {"merchant_auth": {"payer_reference": "…"}}`,
+  `"verification": {"wallet_attestation": true}`, or any combination; see the
+  [API reference](api-reference.md).
+- With `chain_id` pinned (or on a single-network deployment) the response
+  already carries the one-time `address`: no payer signature is involved
+  unless you attached the wallet-attestation add-on, in which case the
+  address appears only after the payer signs the attestation on the hosted
+  page (`deposit_request.ready` reports it). Unpinned and unattested, the
+  payer picks a network on the checkout and the address follows. Overpayments,
+  late transfers, and expired balances are recovered on-chain into Payday's
+  own recovery custody, and Payday returns them to the payer manually, after
+  review; you cannot choose the recovery address, and `refund_address` is
+  rejected.
 - Expiry defaults to 24 hours. Use `expires_in` in seconds or an RFC 3339
   `expires_at`. The allowed window is 10 minutes to 366 days.
 - For a USDC request you do not choose a network. The request offers every
   supported one (`networks`, each with the currency's exact contract there)
-  and the payer picks where to pay when they sign; `chain` and `token` are
+  and the payer picks where to pay on the checkout; `chain` and `token` are
   set from then on. A USDT request must instead pin `chain_id` to Monad
   (`143`) or Arbitrum One (`42161`), because USDT has no 1:1 bridge between
   networks; see [Deposit concepts](concepts.md#currency).
@@ -81,13 +90,15 @@ different body under the same key is `409 idempotency_conflict`.
 
 Send the returned `deposit_url` to the payer. The hosted checkout displays the
 deposit request (issuer, payer, heading, reference, attached PDF), the remaining
-amount, the network step, then the exact token, one-time address, QR code,
+amount, the network step when the network is not pinned, then the exact token,
+one-time address, QR code,
 deadline, and live finalized status, and lets the payer pay from a connected wallet in the page.
-For a verified payer mode it shows only the issuer name and heading until the
-payer completes verification. The link is deliberately open: anyone holding it
+For a request with an email or merchant-auth add-on it shows only the issuer
+name and heading until the payer completes verification. The link is
+deliberately open: anyone holding it
 can read the deposit request and fulfil it, which is what makes it shareable. It
 carries no merchant data — no payout address, recovery address, metadata, or
-policy assertions.
+verification assertions.
 
 Track settlement by polling, or register a webhook
 ([Webhooks](webhooks.md)) and let Payday tell you:
@@ -112,8 +123,11 @@ curl -fsS "$API/v1/deposit-requests?limit=20&starting_after=<NEXT-CURSOR>" \
 ```
 
 Once settled, download the Proof of Payment. It ties the exact deposit request to its
-deposit address and the transfers that paid it, and verifies offline without
-trusting Payday's database; the checks are the ones in
+deposit address, the transfers that paid it, and the settlement, and verifies
+offline without
+trusting Payday's database; on a request that carried the wallet-attestation
+add-on it additionally attributes every transfer to the attested wallet, and
+otherwise it makes no claim about who paid. The checks are the ones in
 `gum_core::verify_proof`, and the [API reference](api-reference.md)
 describes what each field commits to:
 

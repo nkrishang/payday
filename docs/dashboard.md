@@ -213,7 +213,7 @@ that customer.
    customer and links the request to it (the request still stores its own
    snapshot), the payer typed fresh otherwise — saved as a customer on
    issue — what the request is for, a reference, notes, and the attachment.
-3. *Verification*: the payer policy.
+3. *Verification*: the verification add-ons.
 4. *Review*: every value as it will be sent.
 
 The whole document, exactly as `POST /v1/deposit-requests` takes it:
@@ -227,18 +227,19 @@ The whole document, exactly as `POST /v1/deposit-requests` takes it:
   shows the attachment's own stages: *uploading*, *scanning* (the malware scan
   has not reported), then *ready* with its size and SHA-256 — or *rejected*
   with the API's reason;
-- the payer policy: `permissionless` or `verified_email`, with the expected
-  email for `verified_email`. The expected email is required for that mode,
-  says so on its label, and arrives pre-filled from the payer's address
-  — following it until the merchant types their own, after which it is theirs.
-  The third mode, `merchant_session`, is not offered here: it needs an
-  application that has signed the payer in and can hand them the client
-  secret, so it is created through the API. Requests issued that way still
-  appear in the dashboard, with the app's payer reference and an "Opened by
-  your app" entry in the verification activity.
+- the verification add-ons. The dashboard composes only the email check:
+  the expected email is required when the add-on is on, says so on its
+  label, and arrives pre-filled from the payer's address — following it
+  until the merchant types their own, after which it is theirs. Merchant
+  auth is not offered here: it needs an application that has signed the
+  payer in and can hand them the client secret, so it is created through
+  the API; wallet attestation is likewise API-only. Requests issued that
+  way still appear in the dashboard, with the app's payer reference, the
+  add-ons they carry, and an "Opened by your app" entry in the
+  verification activity.
 
-Issued deposit requests are immutable; a different amount, party, policy, or
-attachment means a new deposit request.
+Issued deposit requests are immutable; a different amount, party,
+verification, or attachment means a new deposit request.
 
 **Detail** (in the row itself). A row opens in place rather than navigating:
 the list is where a merchant works, and leaving it to read one request meant
@@ -256,7 +257,7 @@ merchant came for:
 
 - *Document*: only what the row omits — the payer's address and details,
   the notes, and a link to the saved customer;
-- *Verification* (gated requests only): the policy mode with the merchant's own
+- *Verification* (gated requests only): the add-ons with the merchant's own
   assertion (the expected email), and the verification verdict — separate from
   the deposit request status, because a gated request can be funded before its payer
   has verified. The activity behind it follows once there is any: every
@@ -289,26 +290,31 @@ merchant came for:
 
 Two indicators sit beside the deposit request status and mean different things.
 
-**Verification** — *Not required* for permissionless deposit requests; *Pending* until
-the gateway records that the expected payer completed the policy's checks;
+**Verification** — *Not required* for requests with no email or merchant-auth
+add-on; *Pending* until
+the gateway records that the expected payer completed the checks;
 *Verified*, with the completion time, afterwards.
 
-**Payer wallet** — the wallet the payer signed the request's attestation
+**Payer wallet** — on a wallet-attested request, the wallet the payer signed
+the attestation
 with, shown on the detail page with the address once it exists (the address
 is created from that signature; before it, the row says so). Only that
-wallet's transfers are the payer's.
+wallet's transfers are the payer's, and no wallet is shown on a request
+without the add-on, where the payer may pay from any.
 
 **Likely unsolicited** — shown, with the time, when finalized funds arrived
-from a wallet other than the attested one. The funds still count and settle;
+from a wallet other than the attested one; only a wallet-attested request can
+show it. The funds still count and settle;
 the flag says the attested wallet did not pay them, and no Proof of Payment
 will claim it did.
 
-**Returned to the payer** — a section on the detail page, present only when
-something went back to the payer's attested wallet rather than the payout
-address: the overpayment remainder on a settled deposit request, the full balance of
+**Recovered funds** — a section on the detail page, present only when
+something was recovered into Payday's recovery custody rather than paid out:
+the overpayment remainder on a settled deposit request, the full balance of
 a returned one, and every transfer the indexer classified as late, each with
-its transaction hash and whether it has been collected. Returns are on-chain
-and automatic.
+its transaction hash and whether it has been collected. Recovery is on-chain
+and automatic; the return to the payer is a manual review process and is not
+shown here.
 
 ## Customers
 

@@ -1,7 +1,7 @@
-import type { PayerPolicy, PayerPolicyMode } from "@payday/sdk";
+import type { PayerVerification } from "@payday/sdk";
 import { AlertTriangle } from "lucide-react";
 import { StatusDot } from "@/components/ui/status-dot";
-import { formatDate, modeLabel } from "./labels";
+import { formatDate, verificationLabel } from "./labels";
 
 /**
  * Verification is a separate fact from the deposit. A request can receive funds
@@ -11,16 +11,21 @@ import { formatDate, modeLabel } from "./labels";
  */
 
 type Facts = {
-  mode: PayerPolicyMode;
+  verification: PayerVerification;
   completedAt: string | null;
   unsolicitedAt: string | null;
 };
 
-function verdict({ mode, completedAt }: Facts): {
+/** Whether any identity add-on was attached: email or merchant auth. */
+export function identityGated(verification: PayerVerification): boolean {
+  return Boolean(verification.email || verification.merchant_auth);
+}
+
+function verdict({ verification, completedAt }: Facts): {
   label: string;
   tone: "neutral" | "success" | "warning";
 } {
-  if (mode === "permissionless") return { label: "Not required", tone: "neutral" };
+  if (!identityGated(verification)) return { label: "Not required", tone: "neutral" };
   if (completedAt) return { label: "Verified", tone: "success" };
   return { label: "Pending", tone: "warning" };
 }
@@ -49,35 +54,42 @@ export function VerificationBadge(facts: Facts) {
 
 /** The full picture for the detail page, including the merchant's assertion. */
 export function VerificationStatus({
-  policy,
+  verification,
   completedAt,
   unsolicitedAt,
 }: {
-  policy: PayerPolicy;
+  verification: PayerVerification;
   completedAt: string | null;
   unsolicitedAt: string | null;
 }) {
-  const { label, tone } = verdict({ mode: policy.mode, completedAt, unsolicitedAt });
+  const { label, tone } = verdict({ verification, completedAt, unsolicitedAt });
 
   return (
     <div>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-[13px]">
-        <dt className="text-faint">Policy</dt>
-        <dd className="font-medium">{modeLabel(policy.mode)}</dd>
+        <dt className="text-faint">Add-ons</dt>
+        <dd className="font-medium">{verificationLabel(verification)}</dd>
 
-        {policy.mode === "verified_email" ? (
+        {verification.email ? (
           <>
             <dt className="text-faint">Expected email</dt>
-            <dd className="font-mono break-all">{policy.expected_email}</dd>
+            <dd className="font-mono break-all">{verification.email.expected_email}</dd>
           </>
         ) : null}
 
-        {policy.mode === "merchant_session" ? (
+        {verification.merchant_auth ? (
           <>
             {/* The merchant's own user id, as their app sent it: the payer
                 this request was opened for. */}
             <dt className="text-faint">Payer reference</dt>
-            <dd className="font-mono break-all">{policy.payer_reference}</dd>
+            <dd className="font-mono break-all">{verification.merchant_auth.payer_reference}</dd>
+          </>
+        ) : null}
+
+        {verification.wallet_attestation ? (
+          <>
+            <dt className="text-faint">Wallet attestation</dt>
+            <dd className="font-medium">Required</dd>
           </>
         ) : null}
 

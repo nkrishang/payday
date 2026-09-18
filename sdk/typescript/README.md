@@ -17,7 +17,6 @@ const depositRequest = await payday.depositRequests.create({
   payer: { name: "Customer Inc", details: "12 Main St, Springfield" },
   heading: "March retainer",
   reference: "INV-1042",
-  payer_policy: { mode: "permissionless" },
   expires_in: 3600,
 }, crypto.randomUUID()); // caller-supplied idempotency key is mandatory
 
@@ -32,7 +31,7 @@ address, details, and first saved payout address are snapshotted), and with
 
 ```ts
 await payday.depositRequests.create(
-  { amount: "10.00", issuer_id: acme.id, customer_id: globex.id, payer_policy: { mode: "permissionless" } },
+  { amount: "10.00", issuer_id: acme.id, customer_id: globex.id },
   crypto.randomUUID(),
 );
 ```
@@ -44,19 +43,24 @@ address, `att_` attachment, `wh_` webhook, `whd_` delivery, `evt_` event,
 prefix is refused.
 
 A deposit request is the document: issuer, payer, one directly specified amount,
-optional `notes`, `heading`, `reference`, and `metadata`, a payer policy, and at
-most one PDF attachment. The deposit request is its on-chain fulfilment, which is why
-the routes stay under `/v1/deposit-requests`. There are no line items; attach a PDF for
-an itemized breakdown. An issued deposit request is immutable — change anything and you
-cancel and reissue.
+optional `notes`, `heading`, `reference`, and `metadata`, optional verification
+add-ons, and at most one PDF attachment. The deposit request is its on-chain
+fulfilment, which is why the routes stay under `/v1/deposit-requests`. There are
+no line items; attach a PDF for an itemized breakdown. An issued deposit request
+is immutable — change anything and you cancel and reissue.
 
-Exactly `amount` settles to `payout_address`. The response's `address` is null
-at creation: the deposit address exists only once the payer has attested, from
-the hosted page, the wallet they will pay from (`payer_wallet`). That wallet is
-the address's recovery term (`recovery_address` always equals it), so overpayment
-remainders, expired balances, and late transfers return to the payer. Wait for
-the `deposit_request.ready` webhook, or poll until `address` is set, before quoting an
-address anywhere. A create request carrying `refund_address` is rejected.
+Exactly `amount` settles to `payout_address`. Overpayment remainders, expired
+balances, and late transfers always return to Payday's own recovery wallet
+(`recovery_address`, present from creation, never the payer's). `ready_at` is
+when the payment address was registered: with no wallet attestation add-on the
+address exists as soon as the request has a network — at creation when the
+merchant pinned `chain_id` or the currency offers a single network, and
+otherwise once the payer picks one — so `address` may be set on the create
+response itself. With the add-on, `address` stays null until the payer signs,
+and `payer_wallet`/`wallet_bound_at` name the wallet they attested; without it
+they are null and the payer may pay from any wallet. Wait for the
+`deposit_request.ready` webhook, or poll until `address` is set, before quoting
+an address anywhere. A create request carrying `refund_address` is rejected.
 
 `currency` is `USDC` unless given. USDC bridges 1:1, so a USDC request may
 leave the network to the payer or pin one with `chain_id`; a `USDT` request
@@ -66,26 +70,28 @@ bridge for the merchant. Every deposit request and summary carries
 `token.symbol` is what a wallet shows there (`USDT0` for USDT on Monad and
 Arbitrum).
 
-## Payer policy
+## Payer verification
 
-`payer_policy` is one of three presets. The verified mode names the expected
-mailbox; the merchant-session mode names the user your own application has
-already signed in, by your own identifier:
+Verification is three independent, optional add-ons on `verification`,
+combinable in any way; left out, the request is fully open:
 
 ```ts
-{ mode: "permissionless" }
-{ mode: "verified_email", expected_email: "alice@example.com" }
-{ mode: "merchant_session", payer_reference: "user_123" }
+{ email: { expected_email: "alice@example.com" } }   // prove the mailbox
+{ merchant_auth: { payer_reference: "user_123" } }   // your app opens the checkout
+{ wallet_attestation: true }                         // sign from the paying wallet
 ```
 
-Gated deposit requests withhold their content from the payer page until verification
-completes; every request, gated or not, withholds its deposit address until the
-payer's wallet attestation (`PaydayPayerClient.wallet.challenge` then `attest`).
-The full policy is returned only to the merchant.
+The email add-on gates the payer page's content behind a code to the expected
+mailbox; the merchant-auth add-on gates it behind a client secret your
+application hands out; the wallet attestation add-on asks the payer to sign an
+EIP-712 attestation from the wallet they will pay from, and only transfers from
+that wallet then count. Every response echoes the add-ons back as `verification`
+(`email` and `merchant_auth` present only when attached, `wallet_attestation`
+always a boolean).
 
 ### Merchant sessions: your app opens the checkout
 
-For `merchant_session` the create response carries a single-use
+With `merchant_auth` the create response carries a single-use
 `client_secret`, valid for fifteen minutes and returned exactly once (never on
 a replay or a later read; the API stores only its hash). Your server, having
 authenticated the user, sends them to the deposit page with the secret in the
@@ -94,7 +100,7 @@ No code, no vendor, nothing for the payer to type:
 
 ```ts
 const deposit = await payday.depositRequests.create(
-  { ...request, payer_policy: { mode: "merchant_session", payer_reference: user.id } },
+  { ...request, verification: { merchant_auth: { payer_reference: user.id } } },
   `deposit-${deposit.id}`,
 );
 // redirect the signed-in user; the fragment never reaches a server log
@@ -131,9 +137,9 @@ also exposed separately as `attachments.create({ filename })` and
 
 - `depositRequests.attachment(id)` — the attached PDF's descriptor with a short-lived `download_url`.
 - `depositRequests.requestPdf(id)` — Payday's deterministic deposit request summary as a `Blob`; the same deposit request always renders byte-identical.
-- `depositRequests.verification(id)` — the deposit request's verification facts (`email`, `merchant_session`, and `complete`) and every attempt made against it, with its status and times. Never the code, the client secret, or the payer's session.
-- `depositRequests.createClientSecret(id)` — a fresh single-use client secret for a `merchant_session` deposit, for a user your app signs in again; see [Merchant sessions](#merchant-sessions-your-app-opens-the-checkout).
-- `depositRequests.proof(id)` — the `ProofOfPayment` for a settled deposit request (`409 deposit_request_not_settled` before). It ties the canonical issuance snapshot, nonce, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the deposit request's `settlement_tx_hash`), carries a Payday attestation bound to that deposit request, and can be verified offline without contacting Payday (the checks live in `gateway_core::verify_proof`).
+- `depositRequests.verification(id)` — the deposit request's verification facts (`email`, `wallet`, `merchant_session`, and `complete`) and every attempt made against it, with its status and times. Never the code, the client secret, or the payer's session.
+- `depositRequests.createClientSecret(id)` — a fresh single-use client secret for a `merchant_auth` deposit, for a user your app signs in again; see [Merchant sessions](#merchant-sessions-your-app-opens-the-checkout).
+- `depositRequests.proof(id)` — the `ProofOfPayment` (v5) for a settled deposit request (`409 deposit_request_not_settled` before). It ties the canonical issuance snapshot, `issuance_nonce`, salt, and CREATE3 address to the credited transfers and the fulfilment transaction (`settlement_transaction_hash`, the same hash as the deposit request's `settlement_tx_hash`), carries a `scope` of `wallet_attributed` (with the payer's attestation) or `settlement` (no sender claims), and can be verified offline without contacting Payday (the checks live in `gateway_core::verify_proof`). Old `payday.proof.v4` records stay valid historical artifacts (`ProofOfPaymentV4`).
 
 ## Customers
 
@@ -244,8 +250,8 @@ const payer = new PaydayPayerClient();
 
 const deposit = await payer.depositRequests.get("dr_0198f80c-8d2f-7dc1-a369-90556a64f700");
 deposit.issuer_name;          // always shown, with `heading`
-deposit.content_unlocked;     // false while a gated deposit request awaits verification
-deposit.requirements;         // email status and whether the policy is complete
+deposit.content_unlocked;     // false while an identity add-on awaits verification
+deposit.requirements;         // email, merchant_session, and wallet states, and whether identity add-ons are complete
 deposit.currency;             // "USDC" or "USDT" — what every amount is in; null while locked
 deposit.remaining_base_units; // exact integer string — the only value to do arithmetic on
 deposit.deposit_uri;          // EIP-681 request for the amount still due, or null
@@ -256,37 +262,46 @@ deposit.server_timestamp;     // render the deadline without trusting the payer'
 payer.depositRequests.qr(deposit.id, payerSession); // SVG blob for an <img>; 401 while locked, 410 once not payable
 payer.depositRequests.attachment(deposit.id, payerSession); // PDF descriptor; 401 verification_required while locked
 
-// Email verification for a gated deposit request: the code goes to the mailbox the
+// Email verification for an email-gated deposit request: the code goes to the mailbox the
 // merchant asserted, and the payer only types it. These writes are answered
 // cross-origin for the hosted checkout only.
 const { payer_session } = await payer.verification.startEmail(deposit.id);
 await payer.verification.confirmEmail(deposit.id, "123456", payer_session);
 const { requirements } = await payer.verification.status(deposit.id, { payerSession: payer_session });
 
-// A merchant-session deposit request instead arrives with a client secret in the URL
+// A merchant-auth deposit request instead arrives with a client secret in the URL
 // fragment (`#cs=…`); exchange it once for the session, then read as above.
 const opened = await payer.verification.exchangeClientSecret(deposit.id, clientSecret);
+
+// Without the wallet attestation add-on, a request that offers several networks has no
+// address until the payer picks one — no wallet signature involved:
+const chosen = await payer.depositRequests.selectNetwork(deposit.id, "8453", { payerSession });
 ```
 
-For `permissionless` deposit requests everything is unlocked immediately. For
-`verified_email`, `currency`, `networks`, the amounts, `address`, `deposit_uri`, and
-`details` are `null` until the payer's session satisfies the policy; `chain`
-and `token` are `null` until the payer has chosen a network and bound their
-wallet (`payer.wallet.challenge(id, wallet, chainId, options)`, then
-`attest`), unless the merchant pinned the network with `chain_id` at
-creation, in which case `networks` holds that one entry and `chain` and
-`token` name it from the start while `address` still waits for the wallet;
-pass the
-session token from verification as `payerSession` and it travels in the
-`Payday-Payer-Session` header. The response deliberately carries no merchant
-data — no payout or recovery address, metadata, customer, or policy
-assertions; only a masked `expected_email_hint`. Once the address exists,
-`payer.relay.chains(id)` lists the networks the attested wallet may pay
-from through Relay, each with `tokens` (the stablecoins it may send there),
-and `payer.relay.quote(id, originChainId, { originToken? })` quotes one of
-them (the network's USDC by default) swapped into the request's currency;
-`payer.relay.sent` reports the origin transaction. Pass an `AbortSignal` to
-cancel a poll. If you build your own checkout, reproduce the guidance in
-[Deposit safety](../../docs/deposit-safety.md): payers must send the exact
-amount of the exact token on the network they chose, and must not pay at
+For a request with no add-ons everything is unlocked immediately, and `address`
+exists as soon as the request has a network — at creation when the merchant
+pinned `chain_id`, else after `selectNetwork`; the payer may pay from any
+wallet. For an email-gated request, `currency`, `networks`, the amounts,
+`address`, `deposit_uri`, and `details` are `null` until the payer's session
+satisfies the identity add-ons. With the wallet attestation add-on attached,
+`address` waits for the payer to choose a network and sign
+(`payer.wallet.challenge(id, wallet, chainId, options)`, then `attest`), unless
+the merchant pinned the network with `chain_id` at creation, in which case
+`networks` holds that one entry and `chain` and `token` name it from the start
+while `address` still waits for the wallet; pass the session token from
+verification as `payerSession` and it travels in the `Payday-Payer-Session`
+header. The response deliberately carries no merchant data — no payout or
+recovery address, metadata, customer, or verification assertions; only a masked
+`expected_email_hint` when the email add-on is attached. Once the address
+exists, `relay_available` says whether the payer may pay from another network
+(never with the wallet attestation add-on attached); `payer.relay.chains(id)`
+lists the networks they may pay from through Relay, each with `tokens` (the
+stablecoins they may send there), and `payer.relay.quote(id, originChainId, {
+payerWallet, originToken? })` quotes one of them (the network's USDC by
+default) swapped into
+the request's currency, pinned to `payerWallet` — the wallet that will send
+the origin transactions; `payer.relay.sent` reports the origin transaction. Pass
+an `AbortSignal` to cancel a poll. If you build your own checkout, reproduce the
+guidance in [Deposit safety](../../docs/deposit-safety.md): payers must send the
+exact amount of the exact token on the network they chose, and must not pay at
 the deadline boundary.

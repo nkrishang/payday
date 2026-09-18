@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use alloy_primitives::Address;
 use gum_core::ChainRegistry;
 
 /// Signed download links live this long unless configured otherwise.
@@ -55,6 +56,10 @@ pub struct Config {
     /// Circle's Iris API (`PAYDAY_CCTP_IRIS_URL`), polled for the
     /// attestation of every bridge leg's burn. Mainnet by default.
     iris_url: String,
+    /// Gum's own recovery wallet (`PAYDAY_RECOVERY_ADDRESS`), the recovery
+    /// term every payment contract commits to. Never a payer's wallet, and
+    /// never optional: a deployment without it cannot issue.
+    recovery_address: Address,
     /// How often the sweep scheduler looks at the queue when nothing woke it
     /// (`PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS`, 5000 by default).
     sweep_scheduler_interval: Duration,
@@ -174,6 +179,9 @@ impl Config {
                     .unwrap_or_else(|message| panic!("{message}")),
             });
 
+        let recovery_address = recovery_address(required("PAYDAY_RECOVERY_ADDRESS").trim())
+            .unwrap_or_else(|message| panic!("{message}"));
+
         Config {
             bind_addr: std::env::var("PAYDAY_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3000".into()),
@@ -213,6 +221,7 @@ impl Config {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| crate::iris::DEFAULT_IRIS_URL.to_owned()),
+            recovery_address,
             sweep_scheduler_interval: Duration::from_millis(
                 std::env::var("PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS")
                     .ok()
@@ -237,6 +246,12 @@ impl Config {
 
     pub fn iris_url(&self) -> &str {
         &self.iris_url
+    }
+
+    /// Gum's own recovery wallet, the recovery term every payment contract
+    /// commits to.
+    pub fn recovery_address(&self) -> Address {
+        self.recovery_address
     }
 
     pub fn sweep_scheduler_interval(&self) -> Duration {
@@ -353,6 +368,13 @@ fn payer_email_from(value: Option<String>) -> Result<String, String> {
         Some((local, domain)) if !local.is_empty() && domain.contains('.') => Ok(value),
         _ => Err(format!("invalid PAYDAY_PAYER_EMAIL_FROM '{value}'")),
     }
+}
+
+/// The recovery wallet: a 20-byte address, checksummed or not.
+fn recovery_address(value: &str) -> Result<Address, String> {
+    value
+        .parse::<Address>()
+        .map_err(|_| format!("invalid PAYDAY_RECOVERY_ADDRESS '{value}': expected an EVM address"))
 }
 
 /// The chain the onboarding demo pays on: the first registered chain unless

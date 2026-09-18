@@ -84,3 +84,10 @@ chains = [
 # can be in flight at once. Every key needs gas on every chain
 # (docs/production-runbook.md §8); the default is 1.
 sweep_signer_count = 5
+
+# Gum's custody wallet: the Ethereum address of the dedicated recovery KMS key
+# (output recovery_kms_key_arn), derived with
+#   AWS_KMS_KEY_ID="$(terraform output -raw recovery_kms_key_arn)" cast wallet address --aws
+# and verified independently (docs/production-runbook.md §"Recovery custody and
+# manual returns"). Recovered funds land there on every chain.
+recovery_address = "0x0000000000000000000000000000000000000001"

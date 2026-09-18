@@ -1,8 +1,9 @@
 //! The payer's wallet attestation (product plan §4.6, §5.4).
 //!
 //! ```text
-//! POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…", "chain_id": "8453"}
-//! POST /v1/payer/deposit-requests/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
+//! POST /v1/payer/deposit-requests/{id}/network           {"chain_id": "8453"}
+//! POST /v1/payer/deposit-requests/{id}/wallet/challenge  {"wallet": "0x…", "chain_id": "8453"}
+//! POST /v1/payer/deposit-requests/{id}/wallet/attest     {"wallet": "0x…", "signature": "0x…"}
 //! ```
 //!
 //! Once a session satisfies the request's policy (immediately, for a
@@ -113,12 +114,81 @@ async fn open_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Invoice)
     Ok((row, invoice))
 }
 
-/// The session may take the wallet step once the request's identity policy
-/// is satisfied. A permissionless request has no identity step, so any
-/// session (or none) will do.
+/// The session may take the wallet step once the request's identity add-ons
+/// are satisfied. A request with neither identity add-on has no identity
+/// step, so any session (or none) will do.
 fn policy_satisfied(invoice: &Invoice, session: &DbPayerSession) -> bool {
-    let mode = invoice.issuance_snapshot.payer_policy.mode();
-    !mode.is_gated() || session.satisfies(mode)
+    let verification = &invoice.issuance_snapshot.payer_verification;
+    !verification.is_gated() || session.satisfies(verification)
+}
+
+/// The network choice for a request that may still pick one: an address
+/// exists only once a network is known, so this is the step that mints it
+/// for a request issued across several networks without wallet attestation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectNetworkRequest {
+    /// The network the payer will pay on: one of the request's `networks`.
+    pub chain_id: String,
+}
+
+/// POST /v1/payer/deposit-requests/{id}/network {"chain_id": "8453"}.
+///
+/// Binds the request to the chosen network and mints its payment address.
+/// Idempotent for the network already chosen; any other network is a
+/// conflict, because the address commits to the first one. A request with
+/// the wallet-attestation add-on never comes here: its address waits for
+/// the signature instead.
+pub async fn select_network(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SelectNetworkRequest>,
+) -> Result<Response, ApiError> {
+    let (row, invoice) = open_invoice(&state, &id).await?;
+    if invoice.wallet_attestation_required() {
+        return Err(ApiError::wallet_attestation_required());
+    }
+    let chain = parse_chain(&invoice, &request.chain_id)?;
+    // A gated request answers only a session that satisfies its identity
+    // add-ons, exactly like the wallet step; an open one needs no session.
+    let verification = &invoice.issuance_snapshot.payer_verification;
+    if verification.is_gated() {
+        let token = session_token(&headers).ok_or_else(ApiError::payer_session_invalid)?;
+        let session = state
+            .payer_sessions
+            .find_active(token, row.id)
+            .await?
+            .ok_or_else(ApiError::payer_session_invalid)?;
+        if !session.satisfies(verification) {
+            return Err(ApiError::verification_required());
+        }
+    }
+    if let Some(binding) = &invoice.binding {
+        if binding.network.chain_id == chain {
+            let access = authorized_invoice(&state, &id, session_token(&headers)).await?;
+            return Ok((no_store(), Json(payer_response(&state, access))).into_response());
+        }
+        return Err(ApiError::network_already_chosen());
+    }
+    let now = Utc::now();
+    let binding = invoice.bind_network(chain, rfc3339(now)).map_err(|error| {
+        match error {
+            // Unreachable in practice: parse_chain already checked
+            // membership, but the salt derivation is the last word.
+            BindError::UnsupportedChain(_) => ApiError::network_conflict(),
+            error => ApiError::internal(error.to_string()),
+        }
+    })?;
+    match state.repo.bind_network(row.id, &binding, now).await? {
+        BindPayerWallet::Bound(_) => {}
+        // Another caller chose first while this call was in flight; the
+        // same answer as if the row had carried it all along.
+        BindPayerWallet::AlreadyBound(_) => return Err(ApiError::network_already_chosen()),
+        BindPayerWallet::NotBindable(_) => return Err(ApiError::deposit_request_not_payable()),
+    }
+    let access = authorized_invoice(&state, &id, session_token(&headers)).await?;
+    Ok((no_store(), Json(payer_response(&state, access))).into_response())
 }
 
 pub async fn challenge(
@@ -129,14 +199,24 @@ pub async fn challenge(
 ) -> Result<Response, ApiError> {
     let wallet = parse_wallet(&request.wallet)?;
     let (row, invoice) = open_invoice(&state, &id).await?;
+    // The attestation step exists only for a request that attached the
+    // wallet-attestation add-on: without it there is no wallet to bind, and
+    // the address exists (or waits on a network choice) without a signature.
+    if !invoice.wallet_attestation_required() {
+        return Err(ApiError::wallet_attestation_not_required());
+    }
     if let Some(binding) = &invoice.binding {
         return Err(ApiError::wallet_already_bound(
-            &binding.payer_wallet.to_checksum(None),
+            &binding
+                .wallet
+                .as_ref()
+                .map(|wallet| wallet.payer_wallet.to_checksum(None))
+                .unwrap_or_default(),
         ));
     }
     let chain = parse_chain(&invoice, &request.chain_id)?;
     let network = *invoice.network_for(chain).expect("parse_chain checked");
-    let gated = invoice.issuance_snapshot.payer_policy.mode().is_gated();
+    let gated = invoice.issuance_snapshot.payer_verification.is_gated();
     let (session, token) = match session_token(&headers) {
         Some(token) => {
             let session = state

@@ -194,7 +194,7 @@ test("an overpaid settled deposit request says where the remainder went", async 
   await expect(page.getByText("Deposit complete")).toBeVisible();
   await expect(page.getByText(/Exactly the requested amount reached the merchant/)).toBeVisible();
   await expect(
-    page.getByText(/above the requested amount went back to the wallet you signed with/),
+    page.getByText(/above the requested amount went back to Payday's recovery wallet/),
   ).toBeVisible();
   // The receipt shows both what was asked for and what actually arrived.
   await expect(page.getByText("25.00 USDC")).toBeVisible();
@@ -222,7 +222,7 @@ test("an expired deposit request holding funds says where they went", async ({ p
   await page.goto("/pay/dr_expired-funded");
 
   await expect(page.getByText("The deadline passed before this deposit completed")).toBeVisible();
-  await expect(page.getByText(/goes back to the wallet you signed with/)).toBeVisible();
+  await expect(page.getByText(/goes back to Payday's recovery wallet/)).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -230,8 +230,36 @@ test("a returned deposit request does the same", async ({ page }) => {
   await page.goto("/pay/dr_returned");
 
   await expect(page.getByText("This deposit was not completed in time")).toBeVisible();
-  await expect(page.getByText(/back to the wallet you signed with/)).toBeVisible();
+  await expect(page.getByText(/back to Payday's recovery wallet/)).toBeVisible();
   await expectNoInstructions(page);
+});
+
+test("a request with no add-ons and several networks fixes one with no wallet at all", async ({
+  page,
+}) => {
+  await page.goto("/pay/dr_network-selection");
+
+  // No address yet, and no wallet step: choosing the network is the only
+  // thing between the payer and an address, and it needs no signature.
+  await expect(page.getByText("Choose a network")).toBeVisible();
+  await expect(page.getByText(/you can pay from any wallet/)).toBeVisible();
+  await expectNoInstructions(page);
+
+  // Choose Base and register it; no wallet is connected anywhere in this test.
+  const networks = page.getByRole("radiogroup", { name: /network to pay on/i });
+  await expect(networks.getByRole("radio", { name: /Monad/ })).toBeVisible();
+  await expect(networks.getByRole("radio", { name: /Base/ })).toBeVisible();
+  await networks.getByRole("radio", { name: /Base/ }).click();
+  await page.getByRole("button", { name: /get your deposit address/i }).click();
+
+  // The address arrives from the choice alone, and the page offers it to any
+  // wallet — or to the QR and the copied address without one.
+  await expect(page.getByText(ADDRESS)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Base · 8453")).toBeVisible();
+  await expect(page.getByText("Choose a network")).toHaveCount(0);
+  await expect(page.getByText(/you can pay from any wallet/i).first()).toBeVisible();
+  await expect(page.getByRole("img", { name: /QR code/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /pay with wallet/i })).toBeVisible();
 });
 
 test("an unbound request takes a network and the payer's signature before it shows any address", async ({
@@ -317,19 +345,23 @@ test("a payer can pay from another network through Relay", async ({ page }) => {
   await expect(page.getByRole("option", { name: /Monad/ })).toHaveCount(0);
   await page.getByRole("option", { name: /Polygon/ }).click();
 
-  // A quote arrives for exactly the amount due, with what it costs to send.
-  await expect(page.getByTestId("relay-quote")).toContainText("25.02 USDC");
-  await expect(page.getByTestId("relay-quote")).toContainText("exactly 25.00 USDC lands on Monad");
-
-  // Connect, then pay: the wallet lacks Polygon, so it is added from the
-  // chain record and switched to; the approve and the deposit are sent in
-  // order, and the deposit is reported before the page waits on delivery.
+  // The quote is made for the wallet that will send the origin transactions,
+  // so no quote until the wallet is connected.
+  await expect(page.getByText(/Connect the wallet you will pay from to get a quote/)).toBeVisible();
   await page.getByRole("button", { name: /connect wallet/i }).click();
   await page
     .getByRole("dialog")
     .getByRole("button")
     .filter({ hasText: /injected/i })
     .click();
+
+  // A quote arrives for exactly the amount due, with what it costs to send.
+  await expect(page.getByTestId("relay-quote")).toContainText("25.02 USDC");
+  await expect(page.getByTestId("relay-quote")).toContainText("exactly 25.00 USDC lands on Monad");
+
+  // Pay: the wallet lacks Polygon, so it is added from the
+  // chain record and switched to; the approve and the deposit are sent in
+  // order, and the deposit is reported before the page waits on delivery.
   const reported = page.waitForRequest(
     (request) =>
       request.method() === "POST" && /\/relay\/quotes\/rli_[^/]+\/sent$/.test(request.url()),

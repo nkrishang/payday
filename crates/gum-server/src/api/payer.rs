@@ -7,9 +7,8 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use gum_core::{
     AttachmentDescriptor, DepositRequestResponse, Invoice, InvoiceId, InvoiceStatus, NetworkDto,
-    PayerDepositRequestDetails, PayerDepositRequestResponse, PayerPolicyResponse,
-    PayerRelayIntentDto, PaymentBinding, VerificationFacts, VerificationRequirementsResponse,
-    deposit_request_id, masked_email, rfc3339,
+    PayerDepositRequestDetails, PayerDepositRequestResponse, PayerRelayIntentDto, PaymentBinding,
+    VerificationFacts, VerificationRequirementsResponse, deposit_request_id, masked_email, rfc3339,
 };
 use gum_ledger::DbAttachment;
 use qrcode::{QrCode, render::svg};
@@ -190,7 +189,14 @@ pub(crate) fn payer_response(
     } = access;
     let now = unix_now();
     let (remaining, payable) = payment_state(&invoice, now);
-    let relay_available = state.relay.is_some() && unlocked && payable && invoice.binding.is_some();
+    // Relay replaces the payer's own transfer with the solver's, so a
+    // request that attested the wallet it is paid from never offers it: the
+    // attestation is a commitment about whose transfer counts.
+    let relay_available = state.relay.is_some()
+        && unlocked
+        && payable
+        && invoice.binding.is_some()
+        && !invoice.wallet_attestation_required();
     let relay = relay_intent
         .filter(|_| unlocked)
         .map(|intent| PayerRelayIntentDto {
@@ -216,12 +222,8 @@ pub(crate) fn payer_response(
     let payer_message = invoice.attention_reason.as_ref().map(|_| {
         "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.".into()
     });
-    let policy = &invoice.issuance_snapshot.payer_policy;
-    let mode = policy.mode();
-    let payer_policy = PayerPolicyResponse {
-        mode,
-        expected_email_hint: policy.expected_email().map(masked_email),
-    };
+    let policy = &invoice.issuance_snapshot.payer_verification;
+    let expected_email_hint = policy.expected_email().map(masked_email);
     let response = DepositRequestResponse::from_invoice(invoice, None);
     let settlement_tx_hash = settlement_tx_hash.filter(|_| unlocked);
     let settlement_explorer_url = settlement_tx_hash
@@ -233,7 +235,7 @@ pub(crate) fn payer_response(
         id: response.id,
         issuer_name: response.issuer.name,
         heading: response.heading,
-        payer_policy,
+        expected_email_hint,
         requirements,
         status: response.status,
         payable,
@@ -302,9 +304,11 @@ pub async fn authorized_invoice(
         .map_err(|_| ApiError::internal("invalid settlement transaction hash"))?
         .map(|hash| hash.to_string());
     let invoice = Invoice::try_from(&row)?;
-    let mode = invoice.issuance_snapshot.payer_policy.mode();
+    let verification = invoice.issuance_snapshot.payer_verification.clone();
     let session = match session_token {
-        Some(token) if mode.is_gated() => state.payer_sessions.find_active(token, row.id).await?,
+        Some(token) if verification.is_gated() => {
+            state.payer_sessions.find_active(token, row.id).await?
+        }
         _ => None,
     };
     // The wallet fact belongs to the invoice: one wallet is bound to it,
@@ -312,18 +316,22 @@ pub async fn authorized_invoice(
     let wallet_bound = row.payment_address.is_some();
     let requirements = match &session {
         Some(session) => VerificationRequirementsResponse::from_facts(
-            mode,
+            &verification,
             VerificationFacts {
                 wallet: wallet_bound,
                 ..session.facts()
             },
         ),
-        None => VerificationRequirementsResponse::for_mode(mode, false, wallet_bound),
+        None => VerificationRequirementsResponse::for_verification(
+            &verification,
+            row.verification_completed_at.is_some(),
+            wallet_bound,
+        ),
     };
-    let content_unlocked = !mode.is_gated()
+    let content_unlocked = !verification.is_gated()
         || session
             .as_ref()
-            .is_some_and(|session| session.satisfies(mode));
+            .is_some_and(|session| session.satisfies(&verification));
     let attachment = if content_unlocked && invoice.issuance_snapshot.attachment.is_some() {
         state.attachments.find_by_invoice(row.id).await?
     } else {
@@ -423,16 +431,17 @@ pub async fn attachment(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{B256, U256, address};
+    use alloy_primitives::{Address, B256, U256, address};
     use gum_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, Currency, FactoryAddress,
-        Invoice, NetworkTerms, Party, PayerAttestation, PayerPolicy, TokenAddress,
-        sign_payer_attestation, wallet_of,
+        Invoice, NetworkTerms, Party, PayerAttestation, PayerVerification, RecoveryAddress,
+        TokenAddress, sign_payer_attestation, wallet_of,
     };
 
     use super::*;
 
     const PAYER_KEY: [u8; 32] = [7u8; 32];
+    const RECOVERY: Address = address!("0x14dC79964da2C08b23698B3D3cc7Ca32193d9955");
 
     fn invoice() -> Invoice {
         let factory = FactoryAddress(address!("0x0000000000000000000000000000000000000001"));
@@ -452,10 +461,14 @@ mod tests {
         let snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
-            PayerPolicy::Permissionless,
+            PayerVerification {
+                wallet_attestation: true,
+                ..Default::default()
+            },
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(RECOVERY),
             amount,
             u64::MAX / 2,
         );
@@ -463,6 +476,7 @@ mod tests {
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(RECOVERY),
             amount,
             u64::MAX / 2,
             snapshot,

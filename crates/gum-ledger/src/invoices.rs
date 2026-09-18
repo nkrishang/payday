@@ -17,8 +17,9 @@ use crate::{AccountId, attachments};
 pub use gum_contracts::{IndexerCursor, PaymentObservation, RangeApplied};
 use gum_core::{
     Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, FactoryAddress, Invoice,
-    InvoiceId, InvoiceStatusParseError, NetworkTerms, Party, PayerPolicy, PayerWalletAttestation,
-    PaymentAddress, PaymentBinding, RecoveryAddress, Salt, TokenAddress,
+    InvoiceId, InvoiceStatusParseError, NetworkTerms, Party, PayerVerification,
+    PayerWalletAttestation, PaymentAddress, PaymentBinding, RecoveryAddress, Salt, TokenAddress,
+    WalletEvidence,
 };
 
 /// Database row representing one invoice.
@@ -40,15 +41,19 @@ pub struct DbInvoice {
     pub expires_in_secs: i64,
     pub expiration_intent: String,
     pub amount: String,
-    /// The payer wallet binding: all six set together once a payer attests
-    /// a wallet, `NULL` before (`invoices_binding_complete`). The recovery
-    /// address is always the payer wallet.
+    /// The payer wallet binding: all three set together once a payer attests
+    /// a wallet, `NULL` before (`invoices_wallet_evidence_complete`). Written
+    /// only for a request that attached the wallet-attestation add-on.
     pub payer_wallet: Option<Vec<u8>>,
     pub payer_attestation: Option<sqlx::types::Json<PayerWalletAttestation>>,
     pub wallet_bound_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
-    pub recovery_address: Option<Vec<u8>>,
+    /// The snapshot's recovery term: always Payday's own recovery wallet,
+    /// fixed at issuance — never the payer's wallet.
+    pub recovery_address: Vec<u8>,
     pub salt: Option<Vec<u8>>,
     pub payment_address: Option<Vec<u8>>,
+    /// When the address was registered and deposits may arrive.
+    pub ready_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     pub status: String,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
@@ -100,16 +105,22 @@ pub struct DbInvoice {
     pub bill_to: Option<sqlx::types::Json<Party>>,
     pub notes: Option<String>,
     pub heading: Option<String>,
-    pub payer_policy_mode: String,
+    /// The verification add-ons' columns, independent of one another.
     pub expected_email: Option<String>,
     /// The merchant's own identifier for the authenticated payer
-    /// (`merchant_session` mode), opaque to Payday.
+    /// (merchant-auth add-on), opaque to Payday.
     pub payer_reference: Option<String>,
+    /// The wallet-attestation add-on: deposits from any other wallet are
+    /// likely unsolicited.
+    pub wallet_attestation_required: bool,
     pub verification_completed_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     /// Proof material.
     pub issuance_snapshot: sqlx::types::Json<CanonicalIssuanceSnapshot>,
     pub attribution_version: i16,
     pub attribution_hash: Vec<u8>,
+    /// The fresh secret drawn at issuance that the salt is derived from;
+    /// undisclosed until the payment address is registered.
+    pub issuance_nonce: Vec<u8>,
     /// First chain time at which finalized funds arrived from a wallet
     /// other than the payer's attested one.
     pub likely_unsolicited_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
@@ -198,11 +209,6 @@ impl TryFrom<&DbInvoice> for Invoice {
             None => None,
             Some(payment_address) => {
                 let missing = |field| DbInvoiceError::IncompleteBinding { id: row.id, field };
-                let payer_wallet = address_from_col(
-                    row.id,
-                    "payer_wallet",
-                    row.payer_wallet.as_deref().ok_or(missing("payer_wallet"))?,
-                )?;
                 let network = NetworkTerms {
                     chain_id: ChainId(row.chain_id.ok_or(missing("chain_id"))? as u64),
                     token: TokenAddress(address_from_col(
@@ -220,21 +226,27 @@ impl TryFrom<&DbInvoice> for Invoice {
                             .ok_or(missing("factory_address"))?,
                     )?),
                 };
+                // The wallet evidence is present exactly when the request
+                // attached the wallet-attestation add-on (the schema's CHECK
+                // constraints keep the two in step).
+                let wallet = match (&row.payer_wallet, &row.payer_attestation) {
+                    (Some(payer_wallet), Some(attestation)) => Some(WalletEvidence {
+                        payer_wallet: address_from_col(row.id, "payer_wallet", payer_wallet)?,
+                        attestation: attestation.0.clone(),
+                        bound_at: row
+                            .wallet_bound_at
+                            .ok_or(missing("wallet_bound_at"))?
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    }),
+                    (None, None) => None,
+                    _ => return Err(missing("payer_attestation")),
+                };
                 Some(PaymentBinding {
-                    payer_wallet,
                     network,
-                    attestation: row
-                        .payer_attestation
-                        .as_ref()
-                        .ok_or(missing("payer_attestation"))?
-                        .0
-                        .clone(),
                     recovery: RecoveryAddress(address_from_col(
                         row.id,
                         "recovery_address",
-                        row.recovery_address
-                            .as_deref()
-                            .ok_or(missing("recovery_address"))?,
+                        &row.recovery_address,
                     )?),
                     salt: Salt(word_from_col(
                         row.id,
@@ -246,10 +258,11 @@ impl TryFrom<&DbInvoice> for Invoice {
                         "payment_address",
                         payment_address,
                     )?),
-                    bound_at: row
-                        .wallet_bound_at
-                        .ok_or(missing("wallet_bound_at"))?
+                    ready_at: row
+                        .ready_at
+                        .ok_or(missing("ready_at"))?
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    wallet,
                 })
             }
         };
@@ -274,6 +287,9 @@ impl TryFrom<&DbInvoice> for Invoice {
             expiration_timestamp: row.expiration_timestamp as u64,
             amount: Amount(units_from_col(row.id, &row.amount)?),
             binding,
+            // The row's nonce is the one the salt was derived from; a
+            // mismatch means the row is corrupt.
+            issuance_nonce: word_from_col(row.id, "issuance_nonce", &row.issuance_nonce)?,
             status,
             received: Amount(units_from_col(row.id, &row.confirmed_received)?),
             execute_tx_hash: row
@@ -372,7 +388,7 @@ pub struct CreateInvoiceInput {
     pub heading: Option<String>,
     pub reference: Option<String>,
     pub metadata: serde_json::Value,
-    pub payer_policy: PayerPolicy,
+    pub payer_verification: PayerVerification,
     pub currency: String,
     pub token_decimals: u8,
     pub beneficiary_address: [u8; 20],
@@ -384,6 +400,17 @@ pub struct CreateInvoiceInput {
     pub issuance_snapshot: CanonicalIssuanceSnapshot,
     pub attribution_version: u16,
     pub attribution_hash: [u8; 32],
+    /// The salt input drawn at issuance; undisclosed until the address is
+    /// registered.
+    pub issuance_nonce: [u8; 32],
+    /// The snapshot's recovery term: Payday's own recovery wallet.
+    pub recovery_address: [u8; 20],
+    /// The address binding written at issuance, when the request attaches no
+    /// wallet attestation and its network is pinned: a single-network request
+    /// has its address the moment it exists. A request that attached wallet
+    /// attestation binds only through the attestation, and a multi-network
+    /// permissionless one when the payer selects a network.
+    pub initial_binding: Option<PaymentBinding>,
     /// Where to send the payer their copy of the request, if anywhere. Set
     /// by the API from `payer.email` when the request is one a payer can
     /// open from a link; the row is queued in the issuance transaction so a
@@ -411,7 +438,7 @@ pub struct IssuanceRequest<'a> {
     pub metadata: &'a serde_json::Value,
     pub customer_id: Option<Uuid>,
     pub issuer_id: Option<Uuid>,
-    pub payer_policy: &'a PayerPolicy,
+    pub payer_verification: &'a PayerVerification,
     pub attachment_id: Option<Uuid>,
     pub attachment: Option<&'a gum_core::AttachmentCommitment>,
 }
@@ -432,9 +459,9 @@ pub fn same_issuance(existing: &DbInvoice, request: &IssuanceRequest<'_>) -> boo
         && existing.bill_to.as_ref().map(|party| &party.0) == Some(request.bill_to)
         && existing.notes.as_deref() == request.notes
         && existing.heading.as_deref() == request.heading
-        && existing.payer_policy_mode == request.payer_policy.mode().as_str()
-        && existing.expected_email.as_deref() == request.payer_policy.expected_email()
-        && existing.payer_reference.as_deref() == request.payer_policy.payer_reference()
+        && existing.wallet_attestation_required == request.payer_verification.wallet_attestation
+        && existing.expected_email.as_deref() == request.payer_verification.expected_email()
+        && existing.payer_reference.as_deref() == request.payer_verification.payer_reference()
         && committed.map(|attachment| attachment.id) == request.attachment_id
         && committed == request.attachment
 }
@@ -494,7 +521,7 @@ impl CreateInvoiceInput {
             heading: snapshot.heading.clone(),
             reference: snapshot.reference.clone(),
             metadata: serde_json::json!({}),
-            payer_policy: snapshot.payer_policy.clone(),
+            payer_verification: snapshot.payer_verification.clone(),
             currency: snapshot.currency.clone(),
             token_decimals,
             beneficiary_address: invoice.beneficiary.0.into(),
@@ -505,6 +532,9 @@ impl CreateInvoiceInput {
             issuance_snapshot: snapshot.clone(),
             attribution_version: invoice.attribution_version,
             attribution_hash: invoice.attribution_hash.into(),
+            issuance_nonce: invoice.issuance_nonce.into(),
+            recovery_address: invoice.recovery().0.into(),
+            initial_binding: invoice.binding.clone(),
             payer_notification_email: None,
         }
     }
@@ -536,7 +566,7 @@ impl CreateInvoiceInput {
                 metadata: &self.metadata,
                 customer_id: self.customer_id,
                 issuer_id: self.issuer_id,
-                payer_policy: &self.payer_policy,
+                payer_verification: &self.payer_verification,
                 attachment_id,
                 attachment: existing_attachment
                     .and_then(DbAttachment::commitment)
@@ -611,13 +641,15 @@ impl InvoiceRepository {
             r#"
             INSERT INTO invoices
                 (id, account_id, idempotency_key, customer_id, issuer_id, issuer, bill_to, notes, heading,
-                 reference, metadata, payer_policy_mode, expected_email, payer_reference,
-                 currency, token_decimals, beneficiary_address,
+                 reference, metadata, expected_email, payer_reference, wallet_attestation_required,
+                 currency, token_decimals, beneficiary_address, recovery_address,
                  expiration_timestamp, expires_in_secs, expiration_intent,
                  amount, net_amount, issuance_snapshot,
-                 attribution_version, attribution_hash, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $23, $24, $14, $15,
-                    $16, $17, $18, $19, $19, $20, $21, $22, 'created')
+                 attribution_version, attribution_hash, issuance_nonce,
+                 salt, payment_address, ready_at, chain_id, factory_address, token_address, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                    $15, $16, $17, $18, $19, $20, $21, $22, $22, $23, $24, $25, $26,
+                    $27, $28, $29, $30, $31, $32, 'created')
             ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING *
             "#,
@@ -633,10 +665,13 @@ impl InvoiceRepository {
         .bind(&input.heading)
         .bind(&input.reference)
         .bind(&input.metadata)
-        .bind(input.payer_policy.mode().as_str())
-        .bind(input.payer_policy.expected_email())
+        .bind(input.payer_verification.expected_email())
+        .bind(input.payer_verification.payer_reference())
+        .bind(input.payer_verification.wallet_attestation)
+        .bind(&input.currency)
         .bind(input.token_decimals as i16)
         .bind(input.beneficiary_address)
+        .bind(input.recovery_address)
         .bind(input.expiration_timestamp as i64)
         .bind(input.expires_in_secs as i64)
         .bind(&input.expiration_intent)
@@ -644,8 +679,35 @@ impl InvoiceRepository {
         .bind(sqlx::types::Json(&input.issuance_snapshot))
         .bind(input.attribution_version as i16)
         .bind(input.attribution_hash)
-        .bind(input.payer_policy.payer_reference())
-        .bind(&input.currency)
+        .bind(input.issuance_nonce)
+        // The initial binding is all-or-nothing: its block is written as one
+        // unit or not at all, matching `invoices_binding_complete`.
+        .bind(input.initial_binding.as_ref().map(|b| b.salt.0.to_vec()))
+        .bind(
+            input
+                .initial_binding
+                .as_ref()
+                .map(|b| b.payment_address.0.to_vec()),
+        )
+        .bind(input.initial_binding.as_ref().map(|_| Utc::now()))
+        .bind(
+            input
+                .initial_binding
+                .as_ref()
+                .map(|b| b.network.chain_id.0 as i64),
+        )
+        .bind(
+            input
+                .initial_binding
+                .as_ref()
+                .map(|b| b.network.factory.0.to_vec()),
+        )
+        .bind(
+            input
+                .initial_binding
+                .as_ref()
+                .map(|b| b.network.token.0.to_vec()),
+        )
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -705,7 +767,10 @@ impl InvoiceRepository {
         if row.payment_address.is_some() {
             return Ok(BindPayerWallet::AlreadyBound(row));
         }
-        if row.status != "created" || row.expiration_timestamp < now.timestamp() {
+        if row.status != "created"
+            || row.expiration_timestamp < now.timestamp()
+            || !row.wallet_attestation_required
+        {
             return Ok(BindPayerWallet::NotBindable(row));
         }
         let row = sqlx::query_as::<_, DbInvoice>(
@@ -714,9 +779,9 @@ impl InvoiceRepository {
             SET payer_wallet = $2,
                 payer_attestation = $3,
                 wallet_bound_at = $4,
-                recovery_address = $2,
                 salt = $5,
                 payment_address = $6,
+                ready_at = $4,
                 chain_id = $7,
                 factory_address = $8,
                 token_address = $9,
@@ -726,8 +791,21 @@ impl InvoiceRepository {
             "#,
         )
         .bind(invoice_id)
-        .bind(binding.payer_wallet.as_slice())
-        .bind(sqlx::types::Json(&binding.attestation))
+        .bind(
+            binding
+                .wallet
+                .as_ref()
+                .expect("attested binding")
+                .payer_wallet
+                .as_slice(),
+        )
+        .bind(sqlx::types::Json(
+            &binding
+                .wallet
+                .as_ref()
+                .expect("attested binding")
+                .attestation,
+        ))
         .bind(now)
         .bind(binding.salt.0.as_slice())
         .bind(binding.payment_address.0.as_slice())
@@ -758,6 +836,58 @@ impl InvoiceRepository {
         .await?;
         tx.commit().await?;
         Ok(BindPayerWallet::Bound(row))
+    }
+
+    /// Register the address a request without the wallet-attestation add-on
+    /// derives: the payer's network selection, or the pinned single network
+    /// at issuance (written by `insert_issued`). No payer signature exists —
+    /// the salt commits to the issuance nonce and the document alone, and
+    /// any wallet may pay the address.
+    pub async fn bind_network(
+        &self,
+        invoice_id: Uuid,
+        binding: &PaymentBinding,
+        now: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    ) -> Result<BindPayerWallet, sqlx::Error> {
+        let row = sqlx::query_as::<_, DbInvoice>(
+            r#"
+            UPDATE invoices
+            SET salt = $2,
+                payment_address = $3,
+                ready_at = $4,
+                chain_id = $5,
+                factory_address = $6,
+                token_address = $7,
+                updated_at = now()
+            WHERE id = $1 AND payment_address IS NULL AND status = 'created'
+              AND NOT wallet_attestation_required
+            RETURNING *
+            "#,
+        )
+        .bind(invoice_id)
+        .bind(binding.salt.0.as_slice())
+        .bind(binding.payment_address.0.as_slice())
+        .bind(now)
+        .bind(binding.network.chain_id.0 as i64)
+        .bind(binding.network.factory.0.as_slice())
+        .bind(binding.network.token.0.as_slice())
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(row) => Ok(BindPayerWallet::Bound(row)),
+            None => {
+                let row = sqlx::query_as::<_, DbInvoice>("SELECT * FROM invoices WHERE id = $1")
+                    .bind(invoice_id)
+                    .fetch_optional(&self.pool)
+                    .await?
+                    .ok_or(sqlx::Error::RowNotFound)?;
+                if row.payment_address.is_some() {
+                    Ok(BindPayerWallet::AlreadyBound(row))
+                } else {
+                    Ok(BindPayerWallet::NotBindable(row))
+                }
+            }
+        }
     }
 
     /// Expire every unbound `created` request whose deadline precedes
@@ -843,8 +973,10 @@ impl InvoiceRepository {
                  AND ($6::uuid IS NULL OR candidate.customer_id = $6)
                  AND ($7::uuid IS NULL OR candidate.issuer_id = $7)
                  AND ($8::text IS NULL OR
-                    ($8 = 'not_required' AND candidate.payer_policy_mode = 'permissionless') OR
-                    ($8 = 'pending' AND candidate.payer_policy_mode <> 'permissionless'
+                    ($8 = 'not_required' AND candidate.expected_email IS NULL
+                        AND candidate.payer_reference IS NULL) OR
+                    ($8 = 'pending' AND (candidate.expected_email IS NOT NULL
+                        OR candidate.payer_reference IS NOT NULL)
                         AND candidate.verification_completed_at IS NULL) OR
                     ($8 = 'verified' AND candidate.verification_completed_at IS NOT NULL) OR
                     ($8 = 'likely_unsolicited' AND candidate.likely_unsolicited_at IS NOT NULL))
@@ -1159,9 +1291,11 @@ impl InvoiceRepository {
             touched: bool,
             /// The request's own token: the only contract whose transfers pay it.
             token_address: Vec<u8>,
-            /// The wallet the payer attested; funds from anywhere else are
-            /// likely unsolicited (product plan §4.9).
-            payer_wallet: Vec<u8>,
+            /// The wallet the payer attested, when the request attached the
+            /// wallet-attestation add-on; funds from anywhere else are
+            /// likely unsolicited (product plan §4.9). Without the add-on
+            /// any incoming deposit counts, so there is no foreign wallet.
+            payer_wallet: Option<Vec<u8>>,
             /// Chain time of the earliest new nonzero transfer in this range
             /// from a wallet other than `payer_wallet`.
             first_foreign_timestamp: Option<u64>,
@@ -1215,12 +1349,15 @@ impl InvoiceRepository {
             let received = U256::from_str_radix(&row.confirmed_received, 10).map_err(|_| {
                 sqlx::Error::Decode(format!("invalid confirmed_received for {}", row.id).into())
             })?;
-            // The address filter above only matches bound invoices.
-            let (Some(payment_address), Some(payer_wallet), Some(token_address)) =
-                (row.payment_address, row.payer_wallet, row.token_address)
+            // The address filter above only matches bound invoices; the
+            // payer wallet is optional — a request without the
+            // wallet-attestation add-on takes deposits from any wallet.
+            let (Some(payment_address), Some(token_address)) =
+                (row.payment_address.clone(), row.token_address.clone())
             else {
                 continue;
             };
+            let payer_wallet = row.payer_wallet.clone();
             credits.insert(
                 payment_address,
                 InvoiceCredit {
@@ -1279,38 +1416,61 @@ impl InvoiceRepository {
                 },
             );
 
-            // Who sent it. A transfer from the attested wallet is the
-            // payer's. One from anywhere else is the payer's too when Relay
-            // made it for an intent of theirs: outright when the intent is
-            // already filled and this exact log is the quoted output it
-            // paid for, provisionally (parked, not flagged) when an intent
-            // the payer reported as sent is still pending and the amount is
-            // the quoted one. A transaction hash names a transaction, not a
-            // transfer: a fill only explains the log for its exact quoted
-            // amount, never the dust or an unrelated transfer in the same
-            // transaction. A quote nobody sent explains nothing.
-            let attribution = if observation.sender.as_slice() == credit.payer_wallet {
-                Attribution::Payer
-            } else if zero {
-                Attribution::Foreign
-            } else if let Some(filled) = credit.relay.iter().find(|intent| {
-                intent.status == "filled"
-                    && U256::from_str_radix(&intent.quoted_out_amount, 10)
-                        .is_ok_and(|quoted| quoted == observation.amount)
-                    && intent
-                        .fill_tx_hashes
-                        .iter()
-                        .any(|hash| hash.as_slice() == observation.transaction_hash.as_slice())
-            }) {
-                Attribution::Relay(filled.id)
-            } else if credit.relay.iter().any(|intent| {
-                intent.status == "sent"
-                    && U256::from_str_radix(&intent.quoted_out_amount, 10)
-                        .is_ok_and(|quoted| quoted == observation.amount)
-            }) {
-                Attribution::Parked
-            } else {
-                Attribution::Foreign
+            // Who sent it. For a request that attached wallet attestation, a
+            // transfer from the attested wallet is the payer's. One from
+            // anywhere else is the payer's too when Relay made it for an
+            // intent of theirs: outright when the intent is already filled
+            // and this exact log is the quoted output it paid for,
+            // provisionally (parked, not flagged) when an intent the payer
+            // reported as sent is still pending and the amount is the quoted
+            // one. A transaction hash names a transaction, not a transfer: a
+            // fill only explains the log for its exact quoted amount, never
+            // the dust or an unrelated transfer in the same transaction. A
+            // quote nobody sent explains nothing. Without the attestation
+            // add-on, though, no wallet was ever vouched for: any incoming
+            // deposit is the payer's by construction, and a relayed fill is
+            // recorded as provenance, not as a foreign-sender exception.
+            let attribution = match &credit.payer_wallet {
+                None => {
+                    if zero {
+                        Attribution::Foreign
+                    } else if let Some(filled) = credit.relay.iter().find(|intent| {
+                        intent.status == "filled"
+                            && U256::from_str_radix(&intent.quoted_out_amount, 10)
+                                .is_ok_and(|quoted| quoted == observation.amount)
+                            && intent.fill_tx_hashes.iter().any(|hash| {
+                                hash.as_slice() == observation.transaction_hash.as_slice()
+                            })
+                    }) {
+                        Attribution::Relay(filled.id)
+                    } else {
+                        Attribution::Payer
+                    }
+                }
+                Some(payer_wallet) if observation.sender.as_slice() == payer_wallet.as_slice() => {
+                    Attribution::Payer
+                }
+                Some(_) if zero => Attribution::Foreign,
+                Some(_) => {
+                    if let Some(filled) = credit.relay.iter().find(|intent| {
+                        intent.status == "filled"
+                            && U256::from_str_radix(&intent.quoted_out_amount, 10)
+                                .is_ok_and(|quoted| quoted == observation.amount)
+                            && intent.fill_tx_hashes.iter().any(|hash| {
+                                hash.as_slice() == observation.transaction_hash.as_slice()
+                            })
+                    }) {
+                        Attribution::Relay(filled.id)
+                    } else if credit.relay.iter().any(|intent| {
+                        intent.status == "sent"
+                            && U256::from_str_radix(&intent.quoted_out_amount, 10)
+                                .is_ok_and(|quoted| quoted == observation.amount)
+                    }) {
+                        Attribution::Parked
+                    } else {
+                        Attribution::Foreign
+                    }
+                }
             };
             let relay_intent_id = match attribution {
                 Attribution::Relay(id) => Some(id),
@@ -1542,12 +1702,12 @@ async fn replay(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gum_core::{AttachmentCommitment, Currency, PayerPolicyMode};
+    use gum_core::{AttachmentCommitment, Currency, EmailVerification};
     use sqlx::types::chrono::{DateTime, Utc};
 
     pub(crate) use crate::test_helpers::{
-        TEST_PAYER_KEY, TEST_TOKEN, account, bind_for_test, insert_bound, issuance_input, party,
-        test_attestation, test_networks, test_payer_wallet,
+        TEST_PAYER_KEY, TEST_RECOVERY, TEST_TOKEN, account, bind_for_test, insert_bound,
+        issuance_input, party, test_attestation, test_networks, test_payer_wallet,
     };
 
     fn epoch() -> DateTime<Utc> {
@@ -1567,10 +1727,11 @@ pub(crate) mod tests {
         CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
-            PayerPolicy::Permissionless,
+            PayerVerification::default(),
             Currency::Usdc,
             &row_networks(),
             BeneficiaryAddress(Address::repeat_byte(3)),
+            RecoveryAddress(TEST_RECOVERY),
             Amount(U256::from(100)),
             1_900_000_000,
         )
@@ -1600,9 +1761,10 @@ pub(crate) mod tests {
                 B256::repeat_byte(1),
             ))),
             wallet_bound_at: Some(epoch()),
-            recovery_address: Some(vec![6u8; 20]),
+            recovery_address: vec![9u8; 20],
             salt: Some(vec![4u8; 32]),
             payment_address: Some(vec![5u8; 20]),
+            ready_at: Some(epoch()),
             status: "created".to_string(),
             created_at: epoch(),
             updated_at: epoch(),
@@ -1634,13 +1796,14 @@ pub(crate) mod tests {
             bill_to: Some(sqlx::types::Json(party("Globex"))),
             notes: None,
             heading: None,
-            payer_policy_mode: "permissionless".into(),
             expected_email: None,
             payer_reference: None,
+            wallet_attestation_required: true,
             verification_completed_at: None,
             issuance_snapshot: sqlx::types::Json(snapshot()),
-            attribution_version: 4,
+            attribution_version: 5,
             attribution_hash: vec![8u8; 32],
+            issuance_nonce: vec![7u8; 32],
             likely_unsolicited_at: None,
         }
     }
@@ -1652,6 +1815,7 @@ pub(crate) mod tests {
             Currency::Usdc,
             &row_networks(),
             BeneficiaryAddress(Address::repeat_byte(3)),
+            RecoveryAddress(TEST_RECOVERY),
             Amount(U256::from(100)),
             1_900_000_000,
             snapshot,
@@ -1668,25 +1832,31 @@ pub(crate) mod tests {
         assert_eq!(invoice.amount.0.to_string(), "100");
         assert_eq!(invoice.expiration_timestamp, 1_900_000_000);
         let binding = invoice.binding.as_ref().unwrap();
-        assert_eq!(binding.recovery.0, Address::repeat_byte(6));
-        assert_eq!(binding.payer_wallet, Address::repeat_byte(6));
+        // Recovery is the snapshot's term — Payday's wallet — whatever the
+        // payer attested.
+        assert_eq!(binding.recovery.0, Address::repeat_byte(9));
+        assert_eq!(
+            binding.wallet.as_ref().unwrap().payer_wallet,
+            Address::repeat_byte(6)
+        );
         assert_eq!(binding.salt.0, B256::repeat_byte(4));
         assert_eq!(binding.payment_address.0, Address::repeat_byte(5));
-        assert_eq!(binding.bound_at, "1970-01-01T00:00:00Z");
+        assert_eq!(binding.ready_at, "1970-01-01T00:00:00Z");
         assert_eq!(invoice.received.0, U256::ZERO);
         assert_eq!(invoice.execute_tx_hash, None);
-        assert_eq!(invoice.attribution_version, 4);
+        assert_eq!(invoice.attribution_version, 5);
         assert_eq!(invoice.attribution_hash, B256::repeat_byte(8));
         assert_eq!(invoice.issuance_snapshot.issuer.name, "Acme");
+        assert_eq!(invoice.issuance_nonce, B256::repeat_byte(7));
 
-        // An unbound row decodes with no address at all.
+        // An unbound row decodes with no address at all, recovery fixed.
         let mut row = valid_row();
         row.payer_wallet = None;
         row.payer_attestation = None;
         row.wallet_bound_at = None;
-        row.recovery_address = None;
         row.salt = None;
         row.payment_address = None;
+        row.ready_at = None;
         row.chain_id = None;
         row.factory_address = None;
         row.token_address = None;
@@ -1799,12 +1969,15 @@ pub(crate) mod tests {
     #[test]
     fn a_payment_address_without_the_rest_of_its_binding_is_rejected() {
         // The schema forbids this; a reader still refuses to invent a binding.
+        // A permissionless request has no wallet evidence at all, and that is
+        // not incomplete — so the impossible row is a wallet without its
+        // attestation.
         let mut row = valid_row();
-        row.payer_wallet = None;
+        row.payer_attestation = None;
         assert!(matches!(
             Invoice::try_from(&row),
             Err(DbInvoiceError::IncompleteBinding {
-                field: "payer_wallet",
+                field: "payer_attestation",
                 ..
             })
         ));
@@ -1928,21 +2101,26 @@ pub(crate) mod tests {
         original.heading = Some("March retainer".into());
         original.reference = Some("INV-1".into());
         original.metadata = serde_json::json!({"po": "42"});
-        original.payer_policy = PayerPolicy::VerifiedEmail {
-            expected_email: "alice@example.com".into(),
+        original.payer_verification = PayerVerification {
+            email: Some(EmailVerification {
+                expected_email: "alice@example.com".into(),
+            }),
+            merchant_auth: None,
+            wallet_attestation: false,
         };
+        original.issuance_snapshot.payer_verification = original.payer_verification.clone();
         let issued = repo
             .insert_issued(&original, Some(document.id))
             .await
             .unwrap();
         assert!(!issued.replayed);
         assert_eq!(issued.row.customer_id, Some(customer));
-        assert_eq!(issued.row.payer_policy_mode, "verified_email");
+        assert!(!issued.row.wallet_attestation_required);
         assert_eq!(
             issued.row.expected_email.as_deref(),
             Some("alice@example.com")
         );
-        assert_eq!(issued.row.attribution_version, 4);
+        assert_eq!(issued.row.attribution_version, 5);
         assert_eq!(
             issued.row.attribution_hash.as_slice(),
             original.attribution_hash.as_slice()
@@ -1957,7 +2135,7 @@ pub(crate) mod tests {
         retry.heading = original.heading.clone();
         retry.reference = original.reference.clone();
         retry.metadata = original.metadata.clone();
-        retry.payer_policy = original.payer_policy.clone();
+        retry.payer_verification = original.payer_verification.clone();
         assert_ne!(retry.id, original.id);
         assert_eq!(retry.attribution_hash, original.attribution_hash);
         let replayed = repo.insert_issued(&retry, Some(document.id)).await.unwrap();
@@ -2003,16 +2181,16 @@ pub(crate) mod tests {
                 Some(document.id),
             ),
             (
-                "policy mode",
-                Box::new(|i| i.payer_policy = PayerPolicy::Permissionless),
+                "wallet attestation add-on",
+                Box::new(|i| i.payer_verification.wallet_attestation = true),
                 Some(document.id),
             ),
             (
                 "expected email",
                 Box::new(|i| {
-                    i.payer_policy = PayerPolicy::VerifiedEmail {
+                    i.payer_verification.email = Some(EmailVerification {
                         expected_email: "alicia@example.com".into(),
-                    }
+                    })
                 }),
                 Some(document.id),
             ),
@@ -2035,7 +2213,7 @@ pub(crate) mod tests {
             conflicting.heading = original.heading.clone();
             conflicting.reference = original.reference.clone();
             conflicting.metadata = original.metadata.clone();
-            conflicting.payer_policy = original.payer_policy.clone();
+            conflicting.payer_verification = original.payer_verification.clone();
             mutate(&mut conflicting);
             let error = repo
                 .insert_issued(&conflicting, attachment)
@@ -2052,12 +2230,9 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(count, 1, "conflicts issue nothing");
         assert_eq!(
-            issued
-                .row
-                .payer_policy_mode
-                .parse::<PayerPolicyMode>()
-                .unwrap(),
-            PayerPolicyMode::VerifiedEmail
+            issued.row.expected_email.as_deref(),
+            Some("alice@example.com"),
+            "the email add-on is what the row records"
         );
         assert_eq!(
             issued
@@ -2167,7 +2342,7 @@ pub(crate) mod tests {
             format!("customer_id = '{customer}'"),
             "amount = '2000000'".to_string(),
             r"beneficiary_address = '\x0909090909090909090909090909090909090909'".to_string(),
-            "payer_policy_mode = 'verified_email', expected_email = 'a@b.co'".to_string(),
+            "expected_email = 'a@b.co', wallet_attestation_required = true".to_string(),
             r"attribution_hash = '\x0909090909090909090909090909090909090909090909090909090909090909'".to_string(),
         ];
         // Once bound, the binding is as fixed as the issuance.
@@ -2242,7 +2417,7 @@ pub(crate) mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // Inserted directly: the policy columns are issuance fields, so no
+        // Inserted directly: the add-on columns are issuance fields, so no
         // repository write path can set them once the row exists. The
         // binding is written by hand too, as one transition.
         let id = Uuid::now_v7();
@@ -2251,23 +2426,24 @@ pub(crate) mod tests {
                  (id, account_id, idempotency_key,
                   currency, token_decimals, beneficiary_address, expiration_timestamp, expires_in_secs,
                   expiration_intent, amount, net_amount, status, reference, metadata,
-                  payer_policy_mode, expected_email, issuance_snapshot, attribution_version,
-                  attribution_hash)
-               VALUES ($1, $2, 'allowlist', 'USDC', 6, $3, 4000000000, 3600, 'at:4000000000',
+                  wallet_attestation_required, issuance_nonce, recovery_address,
+                  issuance_snapshot, attribution_version, attribution_hash)
+                  VALUES ($1, $2, 'allowlist', 'USDC', 6, $3, 4000000000, 3600, 'at:4000000000',
                   '1000000', '1000000', 'created', 'order-7', '{"source":"checkout"}',
-                  'verified_email', 'alice@example.com', '{}', 3, $4)"#,
-        )
-        .bind(id)
-        .bind(account)
-        .bind([1u8; 20].as_slice())
-        .bind([2u8; 32].as_slice())
-        .execute(&pool)
+                  true, $4, $3, '{}', 5, $5)"#,
+                  )
+                  .bind(id)
+                  .bind(account)
+                  .bind([1u8; 20].as_slice())
+                  .bind([2u8; 32].as_slice())
+                  .bind([3u8; 32].as_slice())
+                  .execute(&pool)
         .await
         .unwrap();
 
         // Every transition that enqueues an invoice event, in lifecycle order.
         for statement in [
-            r"UPDATE invoices SET payer_wallet = '\x0505050505050505050505050505050505050505', payer_attestation = '{}', wallet_bound_at = now(), recovery_address = '\x0505050505050505050505050505050505050505', salt = '\x0202020202020202020202020202020202020202020202020202020202020202', payment_address = '\x0606060606060606060606060606060606060606', chain_id = 1, factory_address = '\x0101010101010101010101010101010101010101', token_address = '\x0101010101010101010101010101010101010101' WHERE id = $1",
+            r"UPDATE invoices SET payer_wallet = '\x0505050505050505050505050505050505050505', payer_attestation = '{}', wallet_bound_at = now(), ready_at = now(), salt = '\x0202020202020202020202020202020202020202020202020202020202020202', payment_address = '\x0606060606060606060606060606060606060606', chain_id = 1, factory_address = '\x0101010101010101010101010101010101010101', token_address = '\x0101010101010101010101010101010101010101' WHERE id = $1",
             "UPDATE invoices SET status = 'funded', paid_at = now() WHERE id = $1",
             "UPDATE invoices SET verification_completed_at = now() WHERE id = $1",
             "UPDATE invoices SET likely_unsolicited_at = now() WHERE id = $1",
@@ -2328,8 +2504,7 @@ pub(crate) mod tests {
             "metadata",
             "customer_id",
             "issuer_id",
-            "payer_policy_mode",
-            "payer_reference",
+            "verification",
             "verification_completed_at",
             "likely_unsolicited_at",
             "payer_wallet",
@@ -2337,6 +2512,7 @@ pub(crate) mod tests {
             "chain_id",
             "currency",
             "wallet_bound_at",
+            "ready_at",
             "expires_at",
             "created_at",
         ]
@@ -2611,15 +2787,19 @@ pub(crate) mod tests {
     async fn funds_from_another_wallet_are_flagged_once_and_never_quarantined(pool: PgPool) {
         let owner = account(&pool, 1).await;
         let repo = InvoiceRepository::new(pool.clone());
-        let gated = PayerPolicy::VerifiedEmail {
-            expected_email: "alice@example.com".into(),
+        let gated = PayerVerification {
+            email: Some(EmailVerification {
+                expected_email: "alice@example.com".into(),
+            }),
+            merchant_auth: None,
+            wallet_attestation: true,
         };
         let mut foreign = issuance_input(owner, "foreign", None);
-        foreign.issuance_snapshot.payer_policy = gated.clone();
-        foreign.payer_policy = gated.clone();
+        foreign.issuance_snapshot.payer_verification = gated.clone();
+        foreign.payer_verification = gated.clone();
         let mut own = issuance_input(owner, "own", None);
-        own.issuance_snapshot.payer_policy = gated.clone();
-        own.payer_policy = gated;
+        own.issuance_snapshot.payer_verification = gated.clone();
+        own.payer_verification = gated;
         let open = issuance_input(owner, "open", None);
         let foreign = insert_bound(&pool, &foreign, None).await;
         let own = insert_bound(&pool, &own, None).await;
@@ -2725,19 +2905,29 @@ pub(crate) mod tests {
         let owner = account(&pool, 1).await;
         let repo = InvoiceRepository::new(pool.clone());
         let sessions = crate::PayerSessionRepository::new(pool.clone());
-        let issued = repo
-            .insert_issued(&issuance_input(owner, "bind", None), None)
-            .await
-            .unwrap()
-            .row;
+        // A wallet-attested request: the binding comes only through the
+        // payer's signature.
+        let mut input = issuance_input(owner, "bind", None);
+        let verification = PayerVerification {
+            wallet_attestation: true,
+            ..Default::default()
+        };
+        input.issuance_snapshot.payer_verification = verification.clone();
+        input.payer_verification = verification;
+        let issued = repo.insert_issued(&input, None).await.unwrap().row;
         assert!(issued.payment_address.is_none());
         assert!(issued.payer_wallet.is_none());
 
         let bound = bind_for_test(&pool, issued.id, &TEST_PAYER_KEY).await;
         let invoice = Invoice::try_from(&bound).unwrap();
         let binding = invoice.binding.as_ref().unwrap();
-        assert_eq!(binding.payer_wallet, test_payer_wallet());
-        assert_eq!(bound.recovery_address, bound.payer_wallet);
+        assert_eq!(
+            binding.wallet.as_ref().unwrap().payer_wallet,
+            test_payer_wallet()
+        );
+        // Recovery is Gum's recovery wallet, never the payer's.
+        let payer_wallet = bound.payer_wallet.as_deref().expect("bound wallet");
+        assert_ne!(bound.recovery_address.as_slice(), payer_wallet);
         assert!(bound.wallet_bound_at.is_some());
         assert!(invoice.address_matches_parameters());
         // The wallet attempt is on the merchant's list, and the challenge is
@@ -2778,11 +2968,14 @@ pub(crate) mod tests {
         ));
 
         // An expired request cannot be bound at all.
-        let expired = repo
-            .insert_issued(&issuance_input(owner, "expired", None), None)
-            .await
-            .unwrap()
-            .row;
+        let mut expired_input = issuance_input(owner, "expired", None);
+        let expired_verification = PayerVerification {
+            wallet_attestation: true,
+            ..Default::default()
+        };
+        expired_input.issuance_snapshot.payer_verification = expired_verification.clone();
+        expired_input.payer_verification = expired_verification;
+        let expired = repo.insert_issued(&expired_input, None).await.unwrap().row;
         let expired_invoice = Invoice::try_from(&expired).unwrap();
         let late = expired_invoice
             .bind_payer_wallet(

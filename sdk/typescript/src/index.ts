@@ -15,20 +15,38 @@ export interface Party {
   details?: string;
 }
 
-export type PayerPolicyMode = "permissionless" | "verified_email" | "merchant_session";
-
 /**
- * Who may pay, and what they must prove first. The verified mode names the
- * expected mailbox. The merchant-session mode names the payer your own
- * application has already signed in, by your own identifier; your server then
- * hands that payer the single-use `client_secret` the create response
- * carries, and no code or vendor is involved. Every assertion is
+ * The optional add-ons a create request may attach, independently, in any
+ * combination; left out or `{}`, none attach and anyone holding the link may
+ * pay from any wallet. `email` asks the payer to prove the mailbox named
+ * here. `merchant_auth` names the payer your own application has already
+ * signed in, by your own identifier; your server then hands that payer the
+ * single-use `client_secret` the create response carries. Every assertion is
  * merchant-supplied and immutable once the deposit request is issued.
  */
-export type PayerPolicy =
-  | { mode: "permissionless" }
-  | { mode: "verified_email"; expected_email: string }
-  | { mode: "merchant_session"; payer_reference: string };
+export interface CreateDepositRequestVerification {
+  /** Prove ownership of this mailbox before the content is shown. */
+  email?: { expected_email: string };
+  /** The payer, as your application identified them; opened by client secret. */
+  merchant_auth?: { payer_reference: string };
+  /**
+   * Ask the payer to sign an EIP-712 attestation from the wallet they will
+   * pay from. Without it the address exists at once and the payer may pay
+   * from any wallet; with it, only transfers from the attested wallet count.
+   */
+  wallet_attestation?: boolean;
+}
+
+/**
+ * The add-ons attached to a deposit request, as every response carries them:
+ * `email` and `merchant_auth` are present only when attached, and
+ * `wallet_attestation` is always a boolean, `false` when not attached.
+ */
+export interface PayerVerification {
+  email?: { expected_email: string };
+  merchant_auth?: { payer_reference: string };
+  wallet_attestation: boolean;
+}
 
 export interface AttachmentDescriptor {
   id: string;
@@ -73,7 +91,12 @@ export interface CreateDepositRequest {
    * customer is snapshotted in its place. An inline party always wins.
    */
   payer?: Party;
-  payer_policy: PayerPolicy;
+  /**
+   * The optional add-ons, independent and combinable; left out, none attach
+   * and the request is fully open: anyone holding the link may pay from any
+   * wallet. See `CreateDepositRequestVerification`.
+   */
+  verification?: CreateDepositRequestVerification;
   customer_id?: string;
   /**
    * The saved issuer identity this is issued under. `issuer` above is still
@@ -101,34 +124,43 @@ export interface DepositRequest {
   status: DepositRequestStatus;
   /**
    * Every network the payer may pay on; the request commits to all of them
-   * and the payer picks one when they sign their wallet attestation. One
-   * entry when the merchant pinned the network with `chain_id`.
+   * and the payer picks one — when signing an attestation, or through the
+   * network endpoint when it is not attached. One entry when the merchant
+   * pinned the network with `chain_id`.
    */
   networks: Network[];
   /**
    * The payment's network: the pinned one from issuance, else the one the
-   * payer chose once a wallet is bound; null before either.
+   * payer chose once it is known; null before either.
    */
   chain: Chain | null;
   currency: string;
   token: Token | null;
   /**
-   * The one-time payment address. Null until the payer attests the wallet
-   * they will pay from: the address commits to that attestation, so it
-   * cannot exist before it.
+   * The one-time payment address. Present as soon as the request has a
+   * network: at creation when no wallet attestation is attached and the
+   * network is pinned or the only one offered, and otherwise once the payer
+   * picks a network (or attests a wallet, when the add-on is attached).
    */
   address: string | null;
   address_explorer_url: string | null;
   payout_address: string;
   /**
-   * The wallet the payer attested, once they have. Only transfers from it
-   * are the payer's; overpayment remainders, expired balances, and late
-   * transfers return to it.
+   * The wallet the payer attested, when the wallet attestation add-on is
+   * attached and they completed it; null otherwise. Only transfers from it
+   * are the payer's. Without the add-on the payer may pay from any wallet,
+   * and this stays null.
    */
   payer_wallet: string | null;
-  /** Always equal to `payer_wallet`: the address's recovery term. */
-  recovery_address: string | null;
-  /** When the attestation was accepted and the address derived. */
+  /**
+   * Always present: Payday's own recovery wallet, the term every deposit
+   * address returns overpayment remainders, expired balances, and late
+   * transfers to. Never the payer's wallet, attested or not.
+   */
+  recovery_address: string;
+  /** When the payment address was registered. */
+  ready_at: string | null;
+  /** When the attestation was accepted, with the wallet attestation add-on attached. */
   wallet_bound_at: string | null;
   amount: string;
   amount_base_units: string;
@@ -149,14 +181,15 @@ export interface DepositRequest {
   /** The issuer identity it was issued under; immutable once issued. */
   issuer_id: string | null;
   metadata: Record<string, JsonValue>;
-  /** Full policy including assertions; merchant-only, never on the payer route. */
-  payer_policy: PayerPolicy;
+  /** The add-ons attached at issuance, as the create input normalized them. */
+  verification: PayerVerification;
   attachment: AttachmentDescriptor | null;
   /**
-   * `merchant_session` only, and only on the `201` that issued the deposit request:
-   * the first single-use client secret, valid for fifteen minutes. Absent on
-   * every later read and on idempotent replays; the API stores only its hash.
-   * Send the payer to `checkoutUrl(depositRequest, client_secret)`; mint another with
+   * With the `merchant_auth` add-on attached, and only on the `201` that
+   * issued the deposit request: the first single-use client secret, valid
+   * for fifteen minutes. Absent on every later read and on idempotent
+   * replays; the API stores only its hash. Send the payer to
+   * `checkoutUrl(depositRequest, client_secret)`; mint another with
    * `depositRequests.createClientSecret` when they come back.
    */
   client_secret?: string;
@@ -188,21 +221,22 @@ export interface DepositRequest {
 export type VerificationFactStatus = "not_required" | "pending" | "approved" | "declined";
 
 /**
- * Each fact the policy needs, on its own. `email` is the identity policy and
- * `complete` is whether the session satisfies it (which unlocks the content).
- * `wallet` is never `not_required`: every request needs the payer's wallet
- * attestation before it has an address, and it belongs to the request, not
- * the session.
+ * Each add-on's state, on its own. `email` and `merchant_session` are the
+ * identity add-ons, and `complete` is whether the session satisfies them all
+ * (which unlocks the content); a request with neither is complete at once.
+ * `wallet` is the wallet attestation add-on: `not_required` when it is not
+ * attached, and otherwise the request's own step, never the session's.
  */
 export interface VerificationRequirements {
   email: VerificationFactStatus;
   wallet: VerificationFactStatus;
   /** Your application opened the checkout by exchanging a client secret. */
   merchant_session: VerificationFactStatus;
+  /** Every attached identity add-on is satisfied; content may unlock. */
   complete: boolean;
 }
 
-/** A fresh single-use client secret for a `merchant_session` deposit request. Returned once; stored hashed. */
+/** A fresh single-use client secret for a `merchant_auth` deposit request. Returned once; stored hashed. */
 export interface ClientSecret { client_secret: string; expires_at: string }
 
 /** A payer session minted by exchanging a client secret on the hosted checkout. */
@@ -241,9 +275,6 @@ export function previewUrl(depositRequest: Pick<DepositRequest, "deposit_url">, 
   return `${depositRequest.deposit_url}#${PREVIEW_SESSION_FRAGMENT_KEY}=${encodeURIComponent(previewSession)}`;
 }
 
-/** The policy as the payer may see it: the mode and a masked mailbox hint such as `a****@e***.com`. */
-export interface PayerPolicySummary { mode: PayerPolicyMode; expected_email_hint: string | null }
-
 /** A payer session minted by `verification.startEmail`; the token is opaque and stored hashed by the API. */
 export interface StartEmailVerification { payer_session: string; expires_at: string }
 
@@ -267,7 +298,8 @@ export interface VerificationAttempt {
 
 /** The merchant's verification view of one deposit request: each fact on its own and every attempt. */
 export interface VerificationDetail {
-  payer_policy_mode: PayerPolicyMode;
+  /** The add-ons attached at issuance, as the create input normalized them. */
+  verification: PayerVerification;
   verification_completed_at: string | null;
   likely_unsolicited_at: string | null;
   facts: VerificationRequirements;
@@ -287,9 +319,10 @@ export interface PayerDepositRequestDetails {
 /**
  * The narrowed projection served to anyone holding a deposit link.
  *
- * Deliberately carries no merchant data: no payout or recovery address, no
- * metadata, customer, or policy assertions. The deposit page is world-readable,
- * so this is the only deposit request shape safe to render on it.
+ * Deliberately carries no merchant data: no payout or recovery address,
+ * metadata, customer, or verification assertions. The deposit page is
+ * world-readable, so this is the only deposit request shape safe to render
+ * on it.
  *
  * Gated deposit requests disclose progressively. Until `content_unlocked` is true the
  * mechanics (`chain`, `token`, amounts, `address`, `deposit_uri`) and `details`
@@ -299,7 +332,8 @@ export interface PayerDepositRequest {
   id: string;
   issuer_name: string;
   heading: string | null;
-  payer_policy: PayerPolicySummary;
+  /** Masked mailbox hint such as `a****@e***.com`, when the email add-on is attached; null otherwise. */
+  expected_email_hint: string | null;
   requirements: VerificationRequirements;
   status: DepositRequestStatus;
   /** Whether the gateway still considers this address payable. */
@@ -328,17 +362,26 @@ export interface PayerDepositRequest {
   received_base_units: string | null;
   remaining: string | null;
   remaining_base_units: string | null;
-  /** The wallet bound to this request, once a payer has attested one. */
+  /**
+   * The wallet bound to this request by the wallet attestation add-on, once
+   * the payer completed it; null when the add-on is not attached, so the
+   * payer may pay from any wallet.
+   */
   payer_wallet: string | null;
-  /** Present once unlocked and a wallet is bound; null before either. */
+  /**
+   * Present once unlocked and the request has a network: the address exists
+   * before any wallet is attested when the add-on is not attached.
+   */
   address: string | null;
   address_explorer_url: string | null;
-  /** EIP-681 request for the amount still due; null while locked, unbound, or once not payable. */
+  /** EIP-681 request for the amount still due; null while locked, before a network is chosen, or once not payable. */
   deposit_uri: string | null;
   details: PayerDepositRequestDetails | null;
   /**
    * Whether the payer may pay from another network through Relay: the
    * deployment offers it, the address exists, and the request is payable.
+   * Always false with the wallet attestation add-on attached, which a
+   * cross-chain payment cannot honour.
    */
   relay_available: boolean;
   /** The newest cross-chain payment quoted for this request, if any; null while locked. */
@@ -463,7 +506,8 @@ export interface DepositRequestSummary {
   payer_name: string;
   reference: string | null;
   metadata: Record<string, JsonValue>;
-  payer_policy_mode: PayerPolicyMode;
+  /** The add-ons attached at issuance, as the create input normalized them. */
+  verification: PayerVerification;
   customer_id: string | null;
   issuer_id: string | null;
   has_attachment: boolean;
@@ -601,9 +645,9 @@ export interface AttachmentCommitment { id: string; byte_length: string; sha256:
 
 /**
  * The exact document hashed at issuance; every string is canonical (decimal
- * amounts, EIP-55 addresses). It carries no recovery address: that is the
- * payer's attested wallet, which enters the payment address through the
- * attestation rather than through this document.
+ * amounts, EIP-55 addresses). It carries no recovery address: that is always
+ * Payday's own recovery wallet, which the deposit address carries as its
+ * recovery term rather than through this document.
  */
 export interface CanonicalIssuanceSnapshot {
   schema: "payday.invoice.v4";
@@ -619,7 +663,8 @@ export interface CanonicalIssuanceSnapshot {
   heading: string | null;
   reference: string | null;
   expiration_timestamp: string;
-  payer_policy: PayerPolicy;
+  /** The add-ons attached at issuance, as the create input normalized them. */
+  verification: PayerVerification;
   attachment: AttachmentCommitment | null;
   /** Every network the request may be paid on, ordered by chain id. */
   networks: Array<{ chain_id: string; token_address: string; factory_address: string }>;
@@ -629,9 +674,9 @@ export interface CanonicalIssuanceSnapshot {
 /**
  * The payer's wallet attestation as the proof carries it: the exact typed
  * data the wallet signed (under the chosen chain's domain), its EIP-712
- * digest, and the signature. The proof's salt is
- * `keccak256("PAYDAY_SALT_V3" || attribution_hash || digest)` and the wallet
- * is the address's recovery term.
+ * digest, and the signature. Present only on a `wallet_attributed`-scope
+ * proof, where the salt is
+ * `keccak256("PAYDAY_SALT_V5" || issuance_nonce || attribution_hash || digest)`.
  */
 export interface PayerWalletAttestation {
   address: string;
@@ -687,10 +732,20 @@ export interface AttestedRelayFill extends RelayAttribution {
 }
 
 /**
+ * How the proof attributes its transfers. `wallet_attributed`: the wallet
+ * attestation add-on was attached, the payer signed, and the attestation
+ * below vouches for the sending wallet. `settlement`: no wallet attestation,
+ * so the payer may have paid from any wallet and the proof claims nothing
+ * about the sender — its salt is derived without an attestation digest.
+ */
+export type ProofScope = "wallet_attributed" | "settlement";
+
+/**
  * What Payday signs about a verification outcome. The commitment (attribution
- * hash, chain, CREATE3 address, payer wallet, and the nonce inside the wallet's
- * attestation) is in the signed payload so the attestation vouches for this
- * request and this payer only, not for any proof reusing its id.
+ * hash, chain, CREATE3 address, and, with the wallet attestation add-on, the
+ * payer wallet and the nonce inside its attestation) is in the signed payload
+ * so it vouches for this request and this payer only, not for any proof
+ * reusing its id.
  */
 export interface VerificationAttestationPayload {
   version: string;
@@ -701,18 +756,22 @@ export interface VerificationAttestationPayload {
   chain_id: string;
   /** EIP-55 checksummed CREATE3 payment address. */
   payment_address: string;
-  payer_wallet: string;
-  wallet_nonce: string;
+  /** The scope the proof carries: `wallet_attributed` or `settlement`. */
+  scope: ProofScope;
+  /** The attested wallet; absent for a `settlement` scope, which claims no sender. */
+  payer_wallet?: string;
+  /** The nonce inside the wallet's attestation; absent for a `settlement` scope. */
+  wallet_nonce?: string;
   /**
    * The transfers Relay's solver made for cross-chain payments the attested
    * wallet sent, each with the origin Payday verified; absent when every
    * transfer came from the wallet itself.
    */
   relay_fills?: AttestedRelayFill[];
-  payer_policy_mode: PayerPolicyMode;
   result: string;
   verified_at: string | null;
-  wallet_bound_at: string;
+  /** When the payer attested; absent for a `settlement` scope. */
+  wallet_bound_at?: string;
   facts: VerificationFact[];
 }
 
@@ -724,25 +783,39 @@ export interface SignedVerificationAttestation {
 }
 
 /**
- * Offline-verifiable record tying the issued deposit request to the wallet its payer
- * attested, to the payment address both commit to, to the transfers from that
- * wallet that paid it, and to the transaction that settled it. It is checked
- * without Payday: `gateway_core::verify_proof` holds the offline checks.
+ * Offline-verifiable record tying the issued deposit request to its payment
+ * address, to the transfers that paid it, and to the transaction that settled
+ * it. It is checked without Payday: `gateway_core::verify_proof` holds the
+ * offline checks. With the wallet attestation add-on attached
+ * (`scope: "wallet_attributed"`) it also ties the payer's attested wallet in;
+ * without it (`scope: "settlement"`) it claims nothing about the sender.
  */
 export interface ProofOfPayment {
+  /** `payday.proof.v5`. Old v4 proofs remain valid historical artifacts (`ProofOfPaymentV4`). */
   version: string;
+  /** Whether the payer's wallet is attested into the proof or the sender is unclaimed. */
+  scope: ProofScope;
+  /** `0x` hex, 32 bytes: minted at issuance and mixed into the salt. */
+  issuance_nonce: string;
   payment_id: string;
   canonical_issuance_snapshot: CanonicalIssuanceSnapshot;
   canonicalization: string;
   attribution_hash: string;
-  payer_wallet: PayerWalletAttestation;
+  /**
+   * The payer's wallet attestation, present exactly when `scope` is
+   * `wallet_attributed`. The proof's salt is
+   * `keccak256("PAYDAY_SALT_V5" || issuance_nonce || attribution_hash ||
+   * digest)`, the digest being the attestation's; a settlement-scope salt is
+   * derived without it.
+   */
+  payer_wallet: PayerWalletAttestation | null;
   salt: string;
   /** The network the payer chose among the snapshot's `networks`; the factory and token are that network's. */
   chain_id: string;
   factory_address: string;
   payment_address: string;
   token_address: string;
-  /** The payer's attested wallet. */
+  /** Always Payday's own recovery wallet: the address's recovery term. */
   recovery_address: string;
   /**
    * The fulfilment transaction (the deposit request's `settlement_tx_hash`) that
@@ -752,6 +825,46 @@ export interface ProofOfPayment {
   settlement_transaction_hash: string;
   transfers: ProofTransfer[];
   verification: SignedVerificationAttestation;
+}
+
+/**
+ * A historical `payday.proof.v4`, kept for verifying settled deposits issued
+ * under the retired payer-policy model, where every request carried its
+ * payer's attested wallet as the recovery term. New proofs are
+ * `ProofOfPayment` (v5).
+ */
+export interface ProofOfPaymentV4 {
+  version: string;
+  payment_id: string;
+  canonical_issuance_snapshot: CanonicalIssuanceSnapshotV4;
+  canonicalization: string;
+  attribution_hash: string;
+  payer_wallet: PayerWalletAttestation;
+  salt: string;
+  chain_id: string;
+  factory_address: string;
+  payment_address: string;
+  token_address: string;
+  /** The payer's attested wallet — v4's recovery term. */
+  recovery_address: string;
+  settlement_transaction_hash: string;
+  transfers: ProofTransfer[];
+  verification: SignedVerificationAttestationV4;
+}
+
+/** The issuance snapshot a v4 proof carries, with the retired `payer_policy`. */
+export interface CanonicalIssuanceSnapshotV4 extends Omit<CanonicalIssuanceSnapshot, "verification"> {
+  payer_policy: { mode: "permissionless" | "verified_email" | "merchant_session" } & Record<string, unknown>;
+}
+
+/** The Payday attestation a v4 proof carries, with the retired `payer_policy_mode`. */
+export interface SignedVerificationAttestationV4 extends Omit<SignedVerificationAttestation, "payload"> {
+  payload: Omit<VerificationAttestationPayload, "scope" | "payer_wallet" | "wallet_nonce" | "wallet_bound_at"> & {
+    payer_policy_mode: string;
+    payer_wallet: string;
+    wallet_nonce: string;
+    wallet_bound_at: string;
+  };
 }
 
 /** One entry per supported network: where its indexer, sweeper, and signers stand. */
@@ -1124,21 +1237,21 @@ export class PaydayClient {
     verification: (id: string): Promise<VerificationDetail> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/verification`),
     /**
-     * A fresh single-use client secret for a `merchant_session` deposit request, for a
-     * payer your application signs in again after the first secret was spent
-     * or expired. Earlier unspent secrets stay valid until they expire.
-     * `409 verification_not_required` for a permissionless deposit request,
-     * `409 verification_method_not_applicable` for a `verified_email` one, and
-     * `410 deposit_request_not_payable` once the request is closed without having verified.
+     * A fresh single-use client secret for a deposit request with the
+     * `merchant_auth` add-on, for a payer your application signs in again
+     * after the first secret was spent or expired. Earlier unspent secrets
+     * stay valid until they expire. `409 verification_not_required` for a
+     * request without the add-on, `410 deposit_request_not_payable` once the
+     * request is closed without having verified.
      */
     createClientSecret: (id: string): Promise<ClientSecret> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/client-secret`, { method: "POST" }),
     /**
      * A session that opens the deposit request's own payer view exactly as a
      * verified payer would see it, for the issuing merchant to preview their
-     * own request — works for every payer policy, not only
-     * `merchant_session`. This is not verification: it records no attempt
-     * and never marks the deposit request's own verification complete.
+     * own request — works for every combination of add-ons. This is not
+     * verification: it records no attempt and never marks the deposit
+     * request's own verification complete.
      * `410 deposit_request_not_payable` once the request is closed without
      * having verified.
      */
@@ -1380,6 +1493,22 @@ export class PaydayPayerClient {
       request<PayerDepositRequest>(this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}`, payerOptions(options)),
 
     /**
+     * Pick the network to pay on, for a request without the wallet
+     * attestation add-on that does not yet have an address and offers more
+     * than one. Fixes the network and registers the payment address:
+     * idempotent for the same chain, a conflict for a different one. Answers
+     * the payer view with the address set. Requires the payer session header
+     * when identity add-ons are attached and unsatisfied. A request with the
+     * wallet attestation add-on keeps choosing its network through
+     * `wallet.challenge` + `wallet.attest`.
+     */
+    selectNetwork: (id: string, chainId: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<PayerDepositRequest> =>
+      request<PayerDepositRequest>(
+        this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/network`,
+        { method: "POST", body: { chain_id: chainId }, ...payerOptions(options) },
+      ),
+
+    /**
      * The deposit request's PDF with a short-lived `download_url`. Answers
      * `401 verification_required` while the content is still gated.
      */
@@ -1436,10 +1565,11 @@ export class PaydayPayerClient {
         payerOptions(options),
       ),
     /**
-     * Exchange a `merchant_session` client secret for the payer session it
+     * Exchange a `merchant_auth` client secret for the payer session it
      * opens. Exactly once: a second exchange answers `409 client_secret_used`;
      * an unknown, expired, or foreign secret `401 client_secret_invalid`. The
-     * session satisfies the policy on its own, so the next read is unlocked.
+     * session satisfies the identity add-ons on its own, so the next read is
+     * unlocked.
      */
     exchangeClientSecret: (id: string, clientSecret: string, options: { signal?: AbortSignal } = {}): Promise<ExchangeClientSecret> =>
       request<ExchangeClientSecret>(
@@ -1449,22 +1579,25 @@ export class PaydayPayerClient {
   };
 
   /**
-   * The payer's wallet attestation. Once the session satisfies the request's
-   * policy (at once, for a permissionless request), `challenge` returns the
+   * The payer's wallet attestation, for a deposit request created with the
+   * wallet attestation add-on. Once the session satisfies the request's
+   * identity add-ons (at once, when there are none), `challenge` returns the
    * EIP-712 document the wallet must sign under the chosen network's domain,
    * and `attest` hands the signature back. The signature binds that wallet
    * and that network to the request and derives its payment address; only
-   * transfers from that wallet on that chain count, and anything Payday
-   * returns goes back to it. These writes answer cross-origin requests from
-   * the hosted checkout only.
+   * transfers from that wallet on that chain count. A request without the
+   * add-on has no wallet step at all — it has an address as soon as it has a
+   * network, and the payer may pay from any wallet — and both routes answer
+   * an error for one. These writes answer cross-origin requests from the
+   * hosted checkout only.
    */
   readonly wallet = {
     /**
      * Mint the challenge for `wallet` on `chainId`, one of the request's
-     * `networks`. For a permissionless request with no session yet, the
-     * response carries a fresh `payer_session` to keep. Answers
-     * `422 unsupported_chain` for a chain the request does not offer and
-     * `409 wallet_already_bound` once a wallet is bound.
+     * `networks`. For a request whose identity add-ons are unsatisfied with
+     * no session yet, the response carries a fresh `payer_session` to keep.
+     * Answers `422 unsupported_chain` for a chain the request does not offer
+     * and `409 wallet_already_bound` once a wallet is bound.
      */
     challenge: (id: string, wallet: string, chainId: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<WalletChallenge> =>
       request<WalletChallenge>(
@@ -1488,13 +1621,15 @@ export class PaydayPayerClient {
   /**
    * Paying from another network through Relay, once the address exists and
    * while the request is payable (`relay_available`). Payday makes the quote:
-   * it pins the attested wallet as the sender, the payment address as the
-   * recipient, and exactly the amount still due as what lands. The page
-   * sends the quote's transactions from that wallet on the origin network,
-   * reports the deposit's hash, and follows `relay` on the payer view. All
-   * three answer `404 relay_unavailable` on a deployment without Relay,
-   * `409 wallet_required` before the address exists, and
-   * `410 deposit_request_not_payable` afterwards.
+   * it pins the sender — the wallet the quote named, which with the wallet
+   * attestation add-on must be the attested one — the payment address as the
+   * recipient, and exactly
+   * the amount still due as what lands. The page sends the quote's
+   * transactions on the origin network, reports the deposit's hash, and
+   * follows `relay` on the payer view. All three answer `404
+   * relay_unavailable` on a deployment without Relay, `409 wallet_required`
+   * before the address exists, and `410 deposit_request_not_payable`
+   * afterwards.
    */
   readonly relay = {
     /** The networks a payer may pay from, and the stablecoins they may send on each: every one Relay takes deposits on that Payday serves, except the request's own. */
@@ -1506,16 +1641,27 @@ export class PaydayPayerClient {
     /**
      * A quote from `originToken` on `originChainId` (the network's USDC when no
      * token is given): one of the addresses `chains` offers there, swapped by
-     * Relay into the request's currency. Answers `422 relay_unsupported_origin`
-     * for a network or token not offered and `502 relay_quote_failed` when
-     * Relay has no route; ask again after `expires_at`.
+     * Relay into the request's currency. `payerWallet` is the wallet that will
+     * send the origin transactions — Relay builds its steps for it, and only
+     * its report of the send is accepted. Answers `422
+     * relay_unsupported_origin` for a network or token not offered and
+     * `502 relay_quote_failed` when Relay has no route; ask again after
+     * `expires_at`.
      */
-    quote: (id: string, originChainId: string, options: { originToken?: string; signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayQuote> =>
+    quote: (
+      id: string,
+      originChainId: string,
+      options: { payerWallet: string; originToken?: string; signal?: AbortSignal; payerSession?: string },
+    ): Promise<RelayQuote> =>
       request<RelayQuote>(
         this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/quotes`,
         {
           method: "POST",
-          body: { origin_chain_id: originChainId, ...(options.originToken ? { origin_token: options.originToken } : {}) },
+          body: {
+            origin_chain_id: originChainId,
+            payer_wallet: options.payerWallet,
+            ...(options.originToken ? { origin_token: options.originToken } : {}),
+          },
           ...payerOptions(options),
         },
       ),
