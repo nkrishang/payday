@@ -297,6 +297,45 @@ test("webhook and status methods use canonical routes and enveloped lists", asyn
   ]);
 });
 
+test("status returns one picture per network, including signers and the withdrawal queues", async () => {
+  const mock = mockFetch(() =>
+    json({
+      chains: [
+        {
+          id: "143",
+          name: "Monad",
+          finalized_block: "101",
+          finalized_at: "2026-09-18T10:00:00Z",
+          halted: null,
+          indexer: { cursor_block: "100", cursor_at: "2026-09-18T09:59:00Z", lag_blocks: 1 },
+          sweeper: { state: "running", detail: null, queued: 2, in_flight: 1, oldest_uncollected_secs: 12.5 },
+          withdrawals: { authorized: 1, awaiting_attestation: 0, attested: 0, in_flight: 1 },
+          signers: [
+            {
+              address: "0x2222222222222222222222222222222222222222",
+              balance_wei: "1000000000000000000",
+              low_balance: false,
+              error: null,
+              observed_at: "2026-09-18T10:00:01Z",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+
+  const status = await client.status();
+
+  assert.equal(mock.calls[0].url, "https://example.test/v1/status");
+  const chain = status.chains[0];
+  assert.equal(chain.halted, null);
+  assert.equal(chain.sweeper.state, "running");
+  assert.equal(chain.sweeper.in_flight, 1);
+  assert.equal(chain.withdrawals.authorized, 1);
+  assert.equal(chain.signers[0].low_balance, false);
+});
+
 test("cancel and transfers return the deposit request and an enveloped list", async () => {
   const mock = mockFetch((url) =>
     url.endsWith("/cancel")

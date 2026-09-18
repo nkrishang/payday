@@ -754,15 +754,34 @@ export interface ProofOfPayment {
   verification: SignedVerificationAttestation;
 }
 
-/** One entry per supported network. */
+/** One entry per supported network: where its indexer, sweeper, and signers stand. */
 export interface ServiceStatus {
   chains: Array<{
     id: string;
     name: string;
     finalized_block: string | null;
     finalized_at: string | null;
+    /** The open finality fault, when the chain is halted. */
+    halted: string | null;
     indexer: { cursor_block: string | null; cursor_at: string | null; lag_blocks: number | null };
-    sweeper: { state: string; queued: number };
+    /** `state` is `running`, `halted`, `failing`, `stale` (no recent signer heartbeat), or `unknown`. */
+    sweeper: {
+      state: string;
+      detail: string | null;
+      queued: number;
+      in_flight: number;
+      oldest_uncollected_secs: number | null;
+    };
+    /** The withdrawal pipeline's queue depths on this network. */
+    withdrawals: { authorized: number; awaiting_attestation: number; attested: number; in_flight: number };
+    /** The signing keys serving this network, as the signers service reports them. */
+    signers: Array<{
+      address: string;
+      balance_wei: string | null;
+      low_balance: boolean;
+      error: string | null;
+      observed_at: string;
+    }>;
   }>;
 }
 export interface Webhook {
