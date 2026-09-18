@@ -26,6 +26,60 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard is the account's control panel for an API-first Gum, and
+  nothing more. It is three sections on one page: the **API key** the
+  merchant's own server calls the API with (generate, roll with a 24-hour
+  grace window, revoke); the **account**, which joins the sign-in email —
+  changeable in place through a code sent to the new mailbox, via Privy's
+  `useUpdateEmail` — to the wallet in full with its balance of every
+  stablecoin on every network, read from the public chain, and the withdraw
+  flow that moves the settled balance to one address on a chain of the
+  merchant's choice (offering only the networks that serve the currency:
+  USDC from every network at once, USDT from the destination alone); and a
+  **read-only table of every deposit**, five at a time, newest first,
+  filtered by status, verification, and customer, with an "Issuer ID"
+  column and a self-paginating customer picker. The deposit detail — the
+  progress bar, the lifecycle rail, and the document, verification,
+  deposit, recovered-funds, payer's-view, and files groups — is unchanged,
+  and now also renders as its own page at `/dashboard/deposits/{id}`, where
+  links to a single request land. The session's resource cache is keyed by
+  the Privy subject rather than the email, so page data survives an email
+  change.
+- Creating deposit requests, managing customers, and issuing under an
+  identity are the API's job. The dashboard's four-step composer, customers
+  section, issuer-identity section, and the onboarding walkthrough that
+  gated them are gone, and the quickstart, recipes, concepts, API
+  reference, and dashboard documentation describe the new division of
+  labour.
+
+### Removed
+
+- Saved issuer identities and payout addresses. The issuer side of a
+  deposit request is the required inline `issuer` party and the required
+  `payout_address`, plus an optional `issuer_id`: an opaque identifier of
+  the merchant's own choosing, 1–255 bytes, stored verbatim and returned
+  verbatim — nothing is looked up, and the list route filters it by exact
+  string equality. The `/v1/issuers` routes, the `/v1/payout-addresses`
+  routes, the issuer email-verification flow, `404 issuer_not_found`,
+  `404 payout_address_not_found`, and the `409 issuer_name_taken`,
+  `issuer_in_use`, and `issuer_email_already_verified` errors are gone,
+  as are the SDK's `issuers` and `payoutAddresses` resources; the SDK's
+  `create` now requires `payout_address` and `issuer` and takes `issuer_id`
+  as the opaque string. Migration `0004` converts `invoices.issuer_id` to
+  text — existing UUID values are prefixed with `iss_` to stay
+  distinguishable — and drops the `issuers`, `issuer_payout_addresses`,
+  `payout_addresses`, and `onboarding_demo_payments` tables.
+- The onboarding walkthrough, front to back: the dashboard's setup flow and
+  its live payer preview, `POST /v1/deposit-requests/{id}/onboarding-deposit`
+  with its `409 onboarding_deposit_*` and `503 onboarding_deposit_unavailable`
+  errors, the onboarding payer signer lane in gum-signers and its bus
+  command and event, the `PAYDAY_ONBOARDING_*` settings, and the demo
+  payer's KMS key and its Terraform wiring. Wallet pregeneration
+  (`POST /v1/wallets/pregenerate`) stays: it is part of sign-up, not the
+  walkthrough.
+
 ### Added
 
 - USDT, alongside USDC. A deposit request is denominated in one `currency`

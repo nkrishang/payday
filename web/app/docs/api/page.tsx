@@ -114,8 +114,6 @@ export default function ApiIntroductionPage() {
           {[
             ["dr_", "deposit request"],
             ["cus_", "customer"],
-            ["iss_", "issuer identity"],
-            ["pa_", "payout address"],
             ["att_", "attachment"],
             ["wh_", "webhook endpoint"],
             ["whd_", "webhook delivery"],
@@ -165,8 +163,8 @@ export default function ApiIntroductionPage() {
         </li>
         <li>
           Lists are enveloped under the plural (<code>deposit_requests</code>,{" "}
-          <code>customers</code>, <code>issuers</code>, <code>payout_addresses</code>,{" "}
-          <code>webhooks</code>, <code>deliveries</code>, <code>transfers</code>).
+          <code>customers</code>, <code>webhooks</code>, <code>deliveries</code>,{" "}
+          <code>transfers</code>).
         </li>
         <li>Clients must tolerate unknown fields and branch only on documented values.</li>
       </ul>
@@ -247,7 +245,7 @@ export default function ApiIntroductionPage() {
         </thead>
         <tbody>
           <tr>
-            <td>Deposit requests, customers, issuers, attachments, webhooks</td>
+            <td>Deposit requests, customers, attachments, webhooks</td>
             <td>64 KiB</td>
           </tr>
           <tr>

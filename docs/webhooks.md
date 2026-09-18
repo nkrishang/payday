@@ -80,7 +80,7 @@ API's `amount`, and parse every timestamp the same way:
   "reference": "INV-1042",
   "metadata": {"po": "PO-77"},
   "customer_id": null,
-  "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
+  "issuer_id": "issuer-acme-eu",
   "payer_policy_mode": "merchant_session",
   "payer_reference": "user_123",
   "verification_completed_at": "2026-09-01T11:58:00Z",

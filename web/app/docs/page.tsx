@@ -31,7 +31,7 @@ export default function IntroductionPage() {
       lead="Payday turns USDC and USDT transfers into verified customer deposits. You state what you are owed and by whom; Payday gives that one payer a one-time address, watches the chain, and moves exactly the requested amount to your wallet."
     >
       <p>
-        You create a <strong>deposit request</strong> through a small API or the dashboard. Payday
+        You create a <strong>deposit request</strong> through a small API. Payday
         gives you a link. The payer opens it, proves whatever your policy asks of them, and signs
         once from the wallet they will pay from. That signature creates the one-time address they
         pay into. When finalized funds reach it, Payday settles exactly the amount you asked for to
@@ -48,7 +48,7 @@ export default function IntroductionPage() {
         <Step title="You issue a deposit request">
           <p>
             An amount in USDC or USDT, who is asking, who should pay, a deadline, and a payer
-            policy. From the dashboard, or with one API call. You get back an id and a{" "}
+            policy, with one API call. You get back an id and a{" "}
             <code>deposit_url</code>.
           </p>
         </Step>
@@ -88,9 +88,9 @@ export default function IntroductionPage() {
       <Compare>
         <CompareItem title="The dashboard" badge={<Pill tone="green">no code</Pill>}>
           <p>
-            Sign in with an emailed code. Set up the identity you issue under, create requests in
-            four steps, share the link, and watch each one settle. Every account gets its own
-            wallet, where deposits settle by default.
+            Sign in with an emailed code. Copy your API key, watch every deposit settle, and
+            withdraw the settled balance to a chain of your choice. Every account gets its own
+            wallet, where deposits settle.
           </p>
         </CompareItem>
         <CompareItem title="The API and SDK" badge={<Pill>server-side</Pill>}>
@@ -149,7 +149,7 @@ export default function IntroductionPage() {
           Choose between open links, emailed codes, and your own sign-in.
         </Card>
         <Card href="/docs/dashboard" title="Dashboard">
-          Everything a merchant does day to day, without writing code.
+          Your API key, your settled balance and its withdrawal, and every deposit, read-only.
         </Card>
         <Card href="/docs/api" title="API reference">
           Every route, field, and error code, with examples.

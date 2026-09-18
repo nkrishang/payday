@@ -44,8 +44,8 @@ const NEW_ACCOUNT_WINDOW_MS = 5 * 60_000;
  * so once account.get() reports one, Privy's side is genuinely done.
  *
  * Gives up after WALLET_POLL_TIMEOUT_MS rather than hang forever; from there
- * the dashboard's own "Check again" affordance (account-section.tsx,
- * onboarding-walkthrough.tsx) covers whatever is left.
+ * the dashboard's own "Check again" affordance (account-section.tsx) covers
+ * whatever is left.
  */
 async function waitForWallet(): Promise<void> {
   const deadline = Date.now() + WALLET_POLL_TIMEOUT_MS;

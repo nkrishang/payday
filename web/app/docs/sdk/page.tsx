@@ -122,20 +122,6 @@ export default function SdkPage() {
             </td>
           </tr>
           <tr>
-            <td>issuers</td>
-            <td>
-              <code>create</code>, <code>get</code>, <code>list</code>, <code>update</code>,{" "}
-              <code>remove</code>, <code>startEmailVerification</code>,{" "}
-              <code>confirmEmailVerification</code>, <code>setPayoutAddresses</code>
-            </td>
-          </tr>
-          <tr>
-            <td>payoutAddresses</td>
-            <td>
-              <code>create</code>, <code>list</code>, <code>remove</code>
-            </td>
-          </tr>
-          <tr>
             <td>attachments</td>
             <td>
               <code>upload</code> (the whole exchange), <code>create</code>, <code>finalize</code>

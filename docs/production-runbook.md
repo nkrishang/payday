@@ -425,8 +425,7 @@ Replace every placeholder in `terraform.tfvars`, including:
   and `batch_sweeper`, their `factory_code_hash` and
   `batch_sweeper_code_hash` from §2, that chain's `start_block`, its
   `tokens` (`[{currency = "USDC", address = …}, {currency = "USDT",
-  address = …}]`; at least one chain must list USDC, which the onboarding
-  demo pays), and the fixed values from the table above. Both tasks receive
+  address = …}]`), and the fixed values from the table above. Both tasks receive
   the list as `PAYDAY_CHAINS`, whose entries carry
   `tokens: [{"currency":"USDC","address":"0x…"},{"currency":"USDT","address":"0x…"}]`
   and `start_block`. Each `tokens` address must be the issuer's **canonical
@@ -613,16 +612,6 @@ whatever runs `gum_core::verify_proof`; an attestation signed by anything
 else must fail verification. The address changes only if the key is
 replaced, which changes the trust anchor of every earlier proof, so treat
 replacement as an announced cut-over, never as routine rotation.
-
-### Onboarding demo payer (optional)
-
-The dashboard's onboarding walkthrough can pay one self-issued deposit
-request per account from a Payday-funded wallet. Terraform does not
-provision that key; the endpoint is disabled unless `gum-server` is given
-`PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
-with, funded with a little gas and USDC on the onboarding chain:
-`PAYDAY_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
-it off for launch unless the walkthrough is wanted.
 
 ## 9. Deploy the web app to Vercel
 

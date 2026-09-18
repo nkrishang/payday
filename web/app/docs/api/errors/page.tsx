@@ -87,17 +87,12 @@ const GROUPS: Array<{ title: string; id: string; rows: Row[] }> = [
         meaning: "Missing, malformed, or foreign id.",
       },
       { code: "customer_not_found", status: "404", meaning: "" },
-      { code: "issuer_not_found", status: "404", meaning: "" },
-      { code: "payout_address_not_found", status: "404", meaning: "" },
       {
         code: "webhook_not_found",
         status: "404",
         meaning: "Also: test event requested on a disabled endpoint.",
       },
       { code: "attachment_not_found", status: "404", meaning: "Also: request has no attachment." },
-      { code: "issuer_name_taken", status: "409", meaning: "" },
-      { code: "issuer_in_use", status: "409", meaning: "Requests issued under the identity." },
-      { code: "issuer_email_already_verified", status: "409", meaning: "" },
       {
         code: "unsupported_chain",
         status: "422",

@@ -81,7 +81,12 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
   },
   { name: "heading, reference, notes", type: "string | null", description: "As submitted." },
   { name: "metadata", type: "object", description: "As submitted. Merchant-only." },
-  { name: "customer_id, issuer_id", type: "id | null", description: "Linked records." },
+  { name: "customer_id", type: "cus_ id | null", description: "Linked customer record." },
+  {
+    name: "issuer_id",
+    type: "string | null",
+    description: "The opaque issuer id submitted at creation, verbatim.",
+  },
   {
     name: "payer_policy",
     type: "object",
@@ -191,7 +196,7 @@ const OBJECT = `{
   "notes": "Net 30. Thank you.",
   "metadata": { "po": "PO-77" },
   "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-  "issuer_id": "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+  "issuer_id": "issuer-acme-eu",
   "payer_policy": { "mode": "verified_email", "expected_email": "ap@customer.example" },
   "attachment": null,
   "verification_completed_at": null,
@@ -272,12 +277,7 @@ const CREATE_BODY: FieldDoc[] = [
   {
     name: "payout_address",
     type: "string",
-    description: (
-      <>
-        Nonzero EVM address. Required unless <code>issuer_id</code> names an identity with a saved
-        payout address, whose first address is used.
-      </>
-    ),
+    description: <>Nonzero EVM address. Required. Receives exactly amount at settlement.</>,
   },
   {
     name: "chain_id",
@@ -298,7 +298,7 @@ const CREATE_BODY: FieldDoc[] = [
     description: (
       <>
         <code>name</code> 1–255 bytes; <code>email</code> 3–254 bytes; <code>details</code> ≤4,000
-        bytes. Required unless <code>issuer_id</code> is given. Inline wins.
+        bytes. Required. Stored as a snapshot on the request.
       </>
     ),
   },
@@ -315,9 +315,9 @@ const CREATE_BODY: FieldDoc[] = [
   },
   {
     name: "issuer_id",
-    type: "iss_ id",
+    type: "string",
     description:
-      "Stored immutably on the request. Supplies issuer and payout_address when omitted.",
+      "Optional opaque issuer identifier, 1–255 bytes, stored verbatim and returned on reads. Not an internal id: no lookup happens, and list filters match it by exact string equality.",
   },
   {
     name: "customer_id",
@@ -374,10 +374,10 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       body: (
         <>
           <p>
-            Minimal body: <code>amount</code>, <code>issuer_id</code>, <code>customer_id</code>,{" "}
-            <code>payer_policy</code>. Unknown fields are rejected. Text fields reject control
-            characters. Every immutable field participates in idempotency, including the
-            attachment&apos;s hash.
+            Minimal body: <code>amount</code>, <code>payout_address</code>, <code>issuer</code>,{" "}
+            <code>payer</code>, <code>payer_policy</code>. Unknown fields are rejected. Text fields
+            reject control characters. Every immutable field participates in idempotency, including
+            the attachment&apos;s hash.
           </p>
           <p>
             <code>address</code>, <code>payer_wallet</code>, <code>recovery_address</code>,{" "}
@@ -419,7 +419,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         { status: 400, code: "missing_idempotency_key", when: "Header absent." },
         {
           status: 404,
-          code: "customer_not_found / issuer_not_found",
+          code: "customer_not_found",
           when: "Not owned by the account.",
         },
         {
@@ -468,7 +468,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
     "notes": "Net 30. Thank you.",
     "payer_policy": { "mode": "verified_email", "expected_email": "ap@customer.example" },
     "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-    "issuer_id": "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+    "issuer_id": "issuer-acme-eu",
     "expires_in": 3600,
     "metadata": { "po": "PO-77" }
   }'`,
@@ -483,7 +483,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
     notes: "Net 30. Thank you.",
     payer_policy: { mode: "verified_email", expected_email: "ap@customer.example" },
     customer_id: "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-    issuer_id: "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+    issuer_id: "issuer-acme-eu",
     expires_in: 3600,
     metadata: { po: "PO-77" },
   },
@@ -504,7 +504,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         { name: "status", type: "enum", description: "One public status." },
         { name: "reference", type: "string", description: "Exact match." },
         { name: "customer_id", type: "cus_ id", description: "" },
-        { name: "issuer_id", type: "iss_ id", description: "" },
+        { name: "issuer_id", type: "string", description: "Exact match." },
         {
           name: "verification",
           type: "enum",
@@ -547,7 +547,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       "metadata": { "po": "PO-77" },
       "payer_policy_mode": "verified_email",
       "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-      "issuer_id": "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+      "issuer_id": "issuer-acme-eu",
       "has_attachment": false,
       "verification_completed_at": null,
       "likely_unsolicited_at": null,

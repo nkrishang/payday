@@ -17,7 +17,7 @@ signing, real S3 scanning, and real email.
 | Contracts | bootstrapped on Anvil each run | staging's own `PaymentFactory` generation | production's generation |
 | Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `payday.sh` |
 | Merchant sign-in | development Privy app | development Privy app | production Privy app |
-| Payer and issuer codes | the local identity provider, fixed code | production Auth0 tenant, real mail | production Auth0 tenant |
+| Payer codes | the local identity provider, fixed code | production Auth0 tenant, real mail | production Auth0 tenant |
 | Attachments | MinIO, verdict tagged by hand | S3 and GuardDuty | S3 and GuardDuty |
 | Merchant email | not sent | SES from `alerts@staging.payday.sh` | SES from `alerts@payday.sh` |
 | Keys | Anvil accounts | staging's own KMS keys | production's KMS keys |
