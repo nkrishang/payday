@@ -838,6 +838,40 @@ impl WithdrawalRepository {
         }
     }
 
+    /// The signers refused the step `job_id` runs outright
+    /// (`ExecutionRejected`): the command was malformed or named a chain
+    /// they do not serve, which no retry of the same command fixes. The leg
+    /// fails inside `conn`'s transaction, with the reason. Returns false
+    /// when no leg runs the job (a duplicate delivery).
+    pub async fn reject_step(
+        &self,
+        conn: &mut PgConnection,
+        job_id: Uuid,
+        reason: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let leg = sqlx::query_as::<_, LegRow>(
+            r#"SELECT l.* FROM withdrawal_legs l
+               JOIN withdrawals w ON w.id = l.withdrawal_id
+               WHERE l.step_job_id = $1 FOR UPDATE OF w, l"#,
+        )
+        .bind(job_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .map(DbWithdrawalLeg::try_from)
+        .transpose()?;
+        let Some(leg) = leg else {
+            return Ok(false);
+        };
+        let reason = format!("the signers rejected the step: {reason}");
+        match fail(conn, &leg, &reason).await {
+            Ok(_) => Ok(true),
+            Err(StepError::Database(error)) => Err(error),
+            Err(StepError::NotOpen(_) | StepError::Mismatch { .. }) => {
+                unreachable!("fail() reports database errors only")
+            }
+        }
+    }
+
     /// The leg cannot proceed: a burn Circle will not attest, or anything
     /// else no retry fixes. Its funds are wherever the last successful step
     /// left them, which `failure_reason` explains.

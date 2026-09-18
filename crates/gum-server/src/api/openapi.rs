@@ -371,8 +371,12 @@ struct StatusChain {
     name: String,
     finalized_block: Option<String>,
     finalized_at: Option<String>,
+    /// The open finality fault while the chain is halted.
+    halted: Option<String>,
     indexer: StatusIndexer,
     sweeper: StatusSweeper,
+    withdrawals: StatusWithdrawals,
+    signers: Vec<StatusSigner>,
 }
 #[derive(Serialize, ToSchema)]
 struct StatusIndexer {
@@ -382,8 +386,27 @@ struct StatusIndexer {
 }
 #[derive(Serialize, ToSchema)]
 struct StatusSweeper {
+    /// `running`, `halted`, `failing`, `stale` or `unknown`.
     state: String,
+    detail: Option<String>,
     queued: i64,
+    in_flight: i64,
+    oldest_uncollected_secs: Option<f64>,
+}
+#[derive(Serialize, ToSchema)]
+struct StatusWithdrawals {
+    authorized: i64,
+    awaiting_attestation: i64,
+    attested: i64,
+    in_flight: i64,
+}
+#[derive(Serialize, ToSchema)]
+struct StatusSigner {
+    address: String,
+    balance_wei: Option<String>,
+    low_balance: bool,
+    error: Option<String>,
+    observed_at: String,
 }
 /// One entry per supported network.
 #[derive(Serialize, ToSchema)]
@@ -996,7 +1019,7 @@ fn cancel_withdrawal() {}
 
 #[derive(OpenApi)]
 #[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,StatusWithdrawals,StatusSigner,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
  modifiers(&Security), tags((name="withdrawals",description="Moving the Payday wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 

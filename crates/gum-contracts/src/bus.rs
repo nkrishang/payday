@@ -16,8 +16,8 @@
 
 use alloy_primitives::{Address, B256, Bytes, U256};
 use gum_core::Currency;
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Commands the server publishes for `gum-signers`.
@@ -415,7 +415,10 @@ pub enum ChainControl {
         chain_id: u64,
         reason: String,
     },
-    Resumed { fault_id: Uuid, chain_id: u64 },
+    Resumed {
+        fault_id: Uuid,
+        chain_id: u64,
+    },
 }
 
 impl BusMessage for ChainControl {

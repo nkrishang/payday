@@ -46,6 +46,18 @@ pub struct Config {
     /// address; `PAYDAY_RELAY_API_KEY` unset leaves them unoffered.
     relay_url: String,
     relay_api_key: Option<String>,
+    /// The listener `gum-indexer` calls (`PAYDAY_INTERNAL_BIND_ADDR`) and
+    /// the bearer token it presents (`PAYDAY_INTERNAL_TOKEN`). Never the
+    /// public listener: these routes mutate the ledger unauthenticated by
+    /// anything but the token.
+    internal_bind_addr: String,
+    internal_token: String,
+    /// Circle's Iris API (`PAYDAY_CCTP_IRIS_URL`), polled for the
+    /// attestation of every bridge leg's burn. Mainnet by default.
+    iris_url: String,
+    /// How often the sweep scheduler looks at the queue when nothing woke it
+    /// (`PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS`, 5000 by default).
+    sweep_scheduler_interval: Duration,
 }
 
 /// Payer email goes out through Resend, the account Auth0 already sends
@@ -193,7 +205,42 @@ impl Config {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            internal_bind_addr: std::env::var("PAYDAY_INTERNAL_BIND_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:3001".into()),
+            internal_token: required("PAYDAY_INTERNAL_TOKEN"),
+            iris_url: std::env::var("PAYDAY_CCTP_IRIS_URL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| crate::iris::DEFAULT_IRIS_URL.to_owned()),
+            sweep_scheduler_interval: Duration::from_millis(
+                std::env::var("PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS")
+                    .ok()
+                    .map(|value| {
+                        value.parse::<u64>().unwrap_or_else(|_| {
+                            panic!("PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS must be a positive integer")
+                        })
+                    })
+                    .unwrap_or(5_000)
+                    .max(100),
+            ),
         }
+    }
+
+    pub fn internal_bind_addr(&self) -> &str {
+        &self.internal_bind_addr
+    }
+
+    pub fn internal_token(&self) -> &str {
+        &self.internal_token
+    }
+
+    pub fn iris_url(&self) -> &str {
+        &self.iris_url
+    }
+
+    pub fn sweep_scheduler_interval(&self) -> Duration {
+        self.sweep_scheduler_interval
     }
 
     pub fn relay_url(&self) -> &str {

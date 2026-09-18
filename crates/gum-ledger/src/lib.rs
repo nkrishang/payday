@@ -3,6 +3,7 @@ mod attachments;
 mod chain_faults;
 mod cursor;
 mod customers;
+mod execution_status;
 mod invoices;
 mod issuers;
 mod notifications;
@@ -25,6 +26,7 @@ pub use attachments::{
 pub use chain_faults::{ChainFaultError, ChainFaultRepository, DbChainFault, RaiseOutcome};
 pub use cursor::{CursorRepository, FinalizedHead, IndexerCursor};
 pub use customers::{CreateCustomerInput, CustomerRepository, DbCustomer};
+pub use execution_status::{ExecutionStatusView, ExecutorStatus, SignerStatus};
 pub use invoices::{
     BindPayerWallet, CreateInvoiceInput, CustomerCurrencyStats, DbIndexerFreshness, DbInvoice,
     DbInvoiceError, DbInvoiceTransfer, InsertIssuedInvoice, InsertIssuedInvoiceError,
@@ -63,6 +65,9 @@ pub use withdrawals::{
     LegState, NewWithdrawal, NewWithdrawalLeg, OpenStep, RelayStats, StepApplied, StepError,
     StepPolicy, WithdrawalRepository,
 };
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers;
 
 /// The database schema lives in `gum-schema`; re-exported so
 /// `#[sqlx::test(migrator = "gum_ledger::MIGRATOR")]` keeps working and every

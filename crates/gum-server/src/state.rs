@@ -29,6 +29,9 @@ use crate::onboarding_payer::OnboardingPayerSigner;
 use crate::payer_identity::PayerVerification;
 use crate::pregenerated_wallet::WalletPregenerator;
 
+/// `(account, deposit request, payment address)`.
+type ProofCacheKey = (Uuid, Uuid, Address);
+
 /// Shared application state passed to all Axum handlers via `.with_state()`.
 #[derive(Clone)]
 pub struct AppState {
@@ -64,7 +67,7 @@ pub struct AppState {
     /// Bucket capacity, and tokens refilled per second, of the per-account
     /// rate limiter: `PAYDAY_RATE_LIMIT_PER_MINUTE`, 60 by default.
     pub rate_limit_per_minute: f64,
-    proof_cache: Arc<StdMutex<HashMap<(Uuid, Uuid, Address), ProofOfPayment>>>,
+    proof_cache: Arc<StdMutex<HashMap<ProofCacheKey, ProofOfPayment>>>,
     /// The attachment bucket and the attestation key; the service configures
     /// both at startup, and a route that needs one answers 500 without it.
     attachment_store: Option<AttachmentStore>,
@@ -240,6 +243,11 @@ impl RelayService {
 
     pub fn api(&self) -> &dyn RelayApi {
         self.api.as_ref()
+    }
+
+    /// A handle for the background pollers that outlive any one request.
+    pub fn shared_api(&self) -> Arc<dyn RelayApi> {
+        self.api.clone()
     }
 
     /// The chains Relay serves, refreshed hourly. A failed refresh keeps the

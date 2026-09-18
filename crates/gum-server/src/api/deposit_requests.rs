@@ -859,7 +859,7 @@ pub async fn onboarding_deposit(
     // before the claim below consumes the account's one-shot demo payment, so
     // an operator fixing the binding can still re-run the walkthrough.
     if let Some(binding) = &invoice.binding {
-        ensure_onboarding_network(&signer, binding, row.id)?;
+        ensure_onboarding_network(signer, binding, row.id)?;
     }
 
     let claim = state
@@ -963,7 +963,7 @@ pub async fn onboarding_deposit(
     // network than the one this signer pays on. Paying either from here on
     // any other chain would send real funds to an address no indexer of that
     // chain is watching.
-    ensure_onboarding_network(&signer, &binding, row.id)?;
+    ensure_onboarding_network(signer, &binding, row.id)?;
     let payment_address = binding.payment_address;
 
     let tx_hash = match claim {

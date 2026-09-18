@@ -1,33 +1,77 @@
+//! `gum-server`: the API and the only process that touches the ledger.
+//!
+//! Besides serving the public API it runs every ledger-side loop of the
+//! deposit-request and withdrawal lifecycles: the internal RPC the indexer
+//! reports into, the sweep scheduler, the withdrawal orchestrator, the
+//! consumer of the signers' evidence, and the notification and webhook
+//! workers. All of them are restartable at any instant: their state is the
+//! database and the bus, never process memory.
+//!
+//! Subcommands (`gum-server <command>`): `migrate`, `bus dead [limit]`,
+//! `bus retry <message-id>`, `chain resume <chain-id>`.
+
 mod api;
 mod attachments;
 mod attestation;
 mod chain_reader;
+mod cli;
 mod config;
-mod deployment;
+#[cfg(test)]
+mod deposit_lifecycle_tests;
 mod dispatcher;
+mod execution_events;
+mod internal_rpc;
+mod iris;
 mod onboarding_payer;
 mod payer_email;
 mod payer_identity;
 mod pregenerated_wallet;
+mod relay_intents;
 mod request_pdf;
 mod state;
+mod sweep_scheduler;
 mod webhook_worker;
+mod withdrawal_orchestrator;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::serve;
+use gum_bus::{Consumer, ConsumerOptions, Publisher};
+use gum_chain::{AlloyChainClient, ChainReader};
+use gum_contracts::ExecutionEvent;
+use gum_telemetry::health::{DatabaseReady, ReadinessCheck};
 use tokio::net::TcpListener;
-use tracing_subscriber::EnvFilter;
+use tokio::sync::Notify;
+
+/// The bus consumer name of this service; deliveries are tracked per name.
+const CONSUMER_NAME: &str = "gum-server";
+/// RPC calls per second the server allows itself per chain; it only reads
+/// headers, receipts and balances.
+const RPC_MAX_RPS: u64 = 10;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    gum_telemetry::init("gum-server");
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = gum_ledger::connect(&database_url, 4)
+            .await
+            .expect("failed to connect to database");
+        match cli::run(&pool, &args).await {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let config = config::Config::from_env();
 
-    let pool = gum_ledger::connect(config.database_url())
+    let pool = gum_ledger::connect(config.database_url(), 16)
         .await
         .expect("failed to connect to database");
 
@@ -168,10 +212,12 @@ async fn main() {
     // contract generation on every chain it offers, so refuse to serve
     // against any other deployment anywhere. The chains are independent
     // endpoints, so they are checked together.
-    futures::future::try_join_all(config.networks().chains().iter().map(|chain| {
-        deployment::verify_deployment(
-            config.rpc_url(chain.chain_id),
-            deployment::ExpectedDeployment {
+    let chain_clients: HashMap<u64, Arc<dyn ChainReader>> =
+        futures::future::try_join_all(config.networks().chains().iter().map(|chain| async {
+            let client = AlloyChainClient::connect(config.rpc_url(chain.chain_id), RPC_MAX_RPS)
+                .await
+                .map_err(|error| format!("chain {}: {error}", chain.chain_id))?;
+            let expected = gum_core::ExpectedDeployment {
                 chain_id: chain.chain_id,
                 factory: chain.factory,
                 factory_code_hash: chain.factory_code_hash,
@@ -181,11 +227,16 @@ async fn main() {
                     .cctp
                     .as_ref()
                     .map(|cctp| (cctp.forwarder, cctp.forwarder_code_hash)),
-            },
-        )
-    }))
-    .await
-    .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"));
+            };
+            gum_chain::verify_deployment(&client, &expected)
+                .await
+                .map_err(|error| format!("chain {}: {error}", chain.chain_id))?;
+            Ok::<_, String>((chain.chain_id, Arc::new(client) as Arc<dyn ChainReader>))
+        }))
+        .await
+        .unwrap_or_else(|error| panic!("contract deployment verification failed: {error}"))
+        .into_iter()
+        .collect();
     // Withdrawals read balances and each token's EIP-712 domain over the
     // same RPC endpoints; a domain the token disowns is a startup failure,
     // never a signature the relayer discovers is worthless.
@@ -235,9 +286,95 @@ async fn main() {
     // The dispatcher renders the payer's link and reads the request it is
     // about through the same repositories the routes use.
     let (invoices, payer_access) = (state.repo.clone(), state.payer.clone());
+    let withdrawals = state.withdrawals.clone();
+    let relay_intents = state.relay_intents.clone();
+    let relay_api = state.relay.as_ref().map(|service| service.shared_api());
+    let networks = state.networks.clone();
     let app = api::router(state);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // --- The ledger-side lifecycle loops. Each is a pure function of the
+    // database and the bus; killing and restarting the process at any point
+    // resumes every one of them where the last commit left it.
+    let publisher = Publisher::new(CONSUMER_NAME);
+    let sweep_wake = Arc::new(Notify::new());
+    let sweep_policy = gum_ledger::SweepPolicy::default();
+    let step_policy = gum_ledger::StepPolicy::default();
+
+    let internal = internal_rpc::router(internal_rpc::InternalState::new(
+        invoices.clone(),
+        gum_ledger::ChainFaultRepository::new(pool.clone(), publisher),
+        networks.clone(),
+        config.internal_token(),
+        sweep_wake.clone(),
+    ));
+    let checks: Vec<Arc<dyn ReadinessCheck>> = vec![Arc::new(DatabaseReady {
+        pool: pool.clone(),
+        migrator: Some(&gum_schema::MIGRATOR),
+    })];
+    let internal_app = axum::Router::new()
+        .nest("/internal/v1/indexer", internal)
+        .merge(gum_telemetry::health::router(checks));
+    let internal_listener = TcpListener::bind(config.internal_bind_addr())
+        .await
+        .expect("failed to bind the internal listener");
+    tracing::info!(
+        addr = config.internal_bind_addr(),
+        "internal RPC and health listening"
+    );
+    let mut internal_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        if let Err(error) = serve(internal_listener, internal_app)
+            .with_graceful_shutdown(async move {
+                let _ = internal_shutdown.wait_for(|stop| *stop).await;
+            })
+            .await
+        {
+            tracing::error!(error = %error, "internal listener failed");
+        }
+    });
+
+    tokio::spawn(gum_bus::run_consumer::<ExecutionEvent, _>(
+        Consumer::new(CONSUMER_NAME, pool.clone(), ConsumerOptions::default()),
+        execution_events::ExecutionEventHandler::new(
+            invoices.clone(),
+            withdrawals.clone(),
+            sweep_policy,
+            step_policy,
+        ),
+        shutdown_rx.clone(),
+    ));
+    tokio::spawn(
+        sweep_scheduler::SweepScheduler::new(
+            invoices.clone(),
+            publisher,
+            networks.clone(),
+            sweep_policy,
+            config.sweep_scheduler_interval(),
+            sweep_wake,
+        )
+        .run(shutdown_rx.clone()),
+    );
+    let attestations: Arc<dyn iris::AttestationSource> = Arc::new(
+        iris::IrisClient::new(config.iris_url()).unwrap_or_else(|error| panic!("{error}")),
+    );
+    tokio::spawn(
+        withdrawal_orchestrator::WithdrawalOrchestrator::new(
+            withdrawals,
+            pool.clone(),
+            networks.clone(),
+            publisher,
+            attestations,
+            step_policy,
+            chain_clients.clone(),
+        )
+        .run(shutdown_rx.clone()),
+    );
+    tokio::spawn(
+        relay_intents::RelayIntentPoller::new(relay_intents, relay_api, chain_clients, networks)
+            .run(shutdown_rx.clone()),
+    );
     let senders = dispatcher::Senders {
         merchant: config
             .notification_from_address()

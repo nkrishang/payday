@@ -89,7 +89,9 @@ impl From<BusError> for HandlerError {
             BusError::ConflictingPayload { .. } | BusError::Encode(_) => {
                 Self::Permanent(error.to_string())
             }
-            BusError::Database(_) | BusError::LeaseLost { .. } => Self::Retryable(error.to_string()),
+            BusError::Database(_) | BusError::LeaseLost { .. } => {
+                Self::Retryable(error.to_string())
+            }
         }
     }
 }
@@ -179,7 +181,7 @@ impl Consumer {
         .bind(self.name)
         .bind(M::TOPIC)
         .bind(self.options.batch_size)
-        .bind(self.options.lease)
+        .bind(interval(self.options.lease))
         .fetch_all(&self.pool)
         .await?;
         if claimed.is_empty() {
@@ -297,7 +299,7 @@ impl Consumer {
         .bind(delivery.message_id)
         .bind(self.name)
         .bind(delivery.lease_token)
-        .bind(delay)
+        .bind(interval(delay))
         .bind(&message)
         .fetch_optional(&self.pool)
         .await?;
@@ -306,7 +308,12 @@ impl Consumer {
         })
     }
 
-    async fn park_dead(&self, message_id: Uuid, lease_token: Uuid, error: &str) -> Result<(), BusError> {
+    async fn park_dead(
+        &self,
+        message_id: Uuid,
+        lease_token: Uuid,
+        error: &str,
+    ) -> Result<(), BusError> {
         sqlx::query(
             r#"
             UPDATE bus.deliveries
@@ -371,10 +378,16 @@ impl Consumer {
             "#,
         )
         .bind(self.name)
-        .bind(age)
+        .bind(interval(age))
         .fetch_one(&self.pool)
         .await?)
     }
+}
+
+/// A `Duration` as Postgres can store it: `INTERVAL` has microsecond
+/// precision and sqlx refuses to encode anything finer.
+fn interval(duration: Duration) -> Duration {
+    Duration::from_micros(duration.as_micros() as u64)
 }
 
 /// A message handler. It receives the transaction the acknowledgement will
@@ -398,32 +411,22 @@ where
     M: BusMessage,
     H: Handler<M>,
 {
-    info!(consumer = consumer.name(), topic = M::TOPIC, "bus consumer started");
+    info!(
+        consumer = consumer.name(),
+        topic = M::TOPIC,
+        "bus consumer started"
+    );
     loop {
         if *shutdown.borrow() {
             break;
         }
-        let batch = match consumer.claim::<M>().await {
-            Ok(batch) => batch,
+        let claimed = match handle_batch(&consumer, &handler).await {
+            Ok(outcomes) => outcomes.len(),
             Err(error) => {
                 warn!(consumer = consumer.name(), error = %error, "claiming deliveries failed");
-                Vec::new()
+                0
             }
         };
-        let claimed = batch.len();
-        for delivery in batch {
-            let span = info_span!(
-                "bus.handle",
-                consumer = consumer.name(),
-                message_type = %delivery.kind,
-                message_id = %delivery.message_id,
-                correlation_id = %delivery.correlation_id,
-                attempt = delivery.attempt,
-            );
-            handle_one(&consumer, &handler, &delivery)
-                .instrument(span)
-                .await;
-        }
         if claimed as i64 >= consumer.options().batch_size {
             continue;
         }
@@ -432,14 +435,60 @@ where
             _ = shutdown.changed() => {}
         }
     }
-    info!(consumer = consumer.name(), topic = M::TOPIC, "bus consumer stopped");
+    info!(
+        consumer = consumer.name(),
+        topic = M::TOPIC,
+        "bus consumer stopped"
+    );
+}
+
+/// What one delivery became after a handler ran over it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandledDelivery {
+    /// Handler writes and acknowledgement committed together.
+    Done { message_id: Uuid },
+    /// The handler failed; the delivery was rescheduled or dead-lettered.
+    Failed {
+        message_id: Uuid,
+        error: String,
+        disposition: Disposition,
+    },
+}
+
+/// Claim one batch of `M` and run `handler` over each delivery, one
+/// transaction per delivery. The loop [`run_consumer`] runs is this,
+/// repeated; tests and one-shot tools call it directly to observe every
+/// disposition. Only a failure to *claim* is an error: handler failures
+/// are recorded on the delivery and reported in the result.
+pub async fn handle_batch<M: BusMessage, H: Handler<M>>(
+    consumer: &Consumer,
+    handler: &H,
+) -> Result<Vec<HandledDelivery>, BusError> {
+    let batch = consumer.claim::<M>().await?;
+    let mut outcomes = Vec::with_capacity(batch.len());
+    for delivery in batch {
+        let span = info_span!(
+            "bus.handle",
+            consumer = consumer.name(),
+            message_type = %delivery.kind,
+            message_id = %delivery.message_id,
+            correlation_id = %delivery.correlation_id,
+            attempt = delivery.attempt,
+        );
+        outcomes.push(
+            handle_one(consumer, handler, &delivery)
+                .instrument(span)
+                .await,
+        );
+    }
+    Ok(outcomes)
 }
 
 async fn handle_one<M: BusMessage, H: Handler<M>>(
     consumer: &Consumer,
     handler: &H,
     delivery: &Delivery<M>,
-) {
+) -> HandledDelivery {
     let started = std::time::Instant::now();
     let outcome: Result<(), HandlerError> = async {
         let mut tx = consumer.pool().begin().await?;
@@ -451,17 +500,35 @@ async fn handle_one<M: BusMessage, H: Handler<M>>(
     .await;
     let latency_ms = started.elapsed().as_millis() as u64;
     match outcome {
-        Ok(()) => info!(latency_ms, "message handled"),
-        Err(error) => match consumer.fail(delivery, &error).await {
-            Ok(Disposition::Retry { available_at }) => {
-                warn!(error = %error, latency_ms, retry_at = %available_at, "message handling failed; will retry")
+        Ok(()) => {
+            info!(latency_ms, "message handled");
+            HandledDelivery::Done {
+                message_id: delivery.message_id,
             }
-            Ok(Disposition::Dead) => {
-                error!(error = %error, latency_ms, "message handling failed permanently; dead-lettered")
+        }
+        Err(error) => {
+            let disposition = match consumer.fail(delivery, &error).await {
+                Ok(disposition @ Disposition::Retry { available_at }) => {
+                    warn!(error = %error, latency_ms, retry_at = %available_at, "message handling failed; will retry");
+                    disposition
+                }
+                Ok(Disposition::Dead) => {
+                    error!(error = %error, latency_ms, "message handling failed permanently; dead-lettered");
+                    Disposition::Dead
+                }
+                Err(bus_error) => {
+                    // The lease still expires; the next claimer retries.
+                    error!(error = %error, bus_error = %bus_error, "message handling failed and the failure could not be recorded");
+                    Disposition::Retry {
+                        available_at: Utc::now(),
+                    }
+                }
+            };
+            HandledDelivery::Failed {
+                message_id: delivery.message_id,
+                error: error.to_string(),
+                disposition,
             }
-            Err(bus_error) => {
-                error!(error = %error, bus_error = %bus_error, "message handling failed and the failure could not be recorded")
-            }
-        },
+        }
     }
 }

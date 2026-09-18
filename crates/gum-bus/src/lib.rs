@@ -42,8 +42,8 @@ mod publisher;
 
 pub use backoff::{BackoffPolicy, backoff_delay};
 pub use consumer::{
-    Consumer, ConsumerOptions, DeadDelivery, Delivery, Disposition, Handler, HandlerError,
-    run_consumer,
+    Consumer, ConsumerOptions, DeadDelivery, Delivery, Disposition, HandledDelivery, Handler,
+    HandlerError, handle_batch, run_consumer,
 };
 pub use publisher::{PublishOutcome, Publisher};
 
@@ -53,7 +53,9 @@ use thiserror::Error;
 pub enum BusError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
-    #[error("message {message_id} encodes as {actual} but was published under the same key as {expected}")]
+    #[error(
+        "message {message_id} encodes as {actual} but was published under the same key as {expected}"
+    )]
     ConflictingPayload {
         message_id: uuid::Uuid,
         expected: String,

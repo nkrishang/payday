@@ -8,6 +8,11 @@ futures = { workspace = true }
 gum-core = { path = "../gum-core" }
 gum-ledger = { path = "../gum-ledger" }
 gum-relay = { path = "../gum-relay" }
+gum-chain = { path = "../gum-chain" }
+gum-contracts = { path = "../gum-contracts" }
+gum-bus = { path = "../gum-bus" }
+gum-schema = { path = "../gum-schema" }
+gum-telemetry = { path = "../gum-telemetry" }
 alloy-primitives = { workspace = true }
 alloy-network = { workspace = true }
 alloy-provider = { workspace = true }
@@ -21,7 +26,6 @@ thiserror = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -46,7 +50,9 @@ pdf-writer = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
+gum-chain = { path = "../gum-chain", features = ["mock"] }
 gum-core = { path = "../gum-core", features = ["test-helpers"] }
+gum-ledger = { path = "../gum-ledger", features = ["test-helpers"] }
 rsa = { version = "0.9", features = ["pem"] }
 # Privy signs with ES256; tests mint their own P-256 key to stand in for it.
 p256 = { version = "0.13", features = ["pem", "pkcs8"] }

@@ -29,15 +29,15 @@ impl BackoffPolicy {
 }
 
 /// The pure computation behind [`BackoffPolicy::delay`]; `unit` is a sample
-/// in `[0, 1)` so tests can pin it.
+/// in `[0, 1)` so tests can pin it. The result has whole-millisecond
+/// precision: it is stored as a Postgres `INTERVAL`, which refuses
+/// sub-microsecond values, and nothing here needs finer than that.
 pub fn backoff_delay(base: Duration, cap: Duration, attempt: u32, unit: f64) -> Duration {
     let exponent = attempt.saturating_sub(1).min(31);
-    let scaled = base
-        .checked_mul(1u32 << exponent)
-        .unwrap_or(cap)
-        .min(cap);
+    let scaled = base.checked_mul(1u32 << exponent).unwrap_or(cap).min(cap);
     let half = scaled / 2;
-    half + Duration::from_secs_f64(half.as_secs_f64() * unit.clamp(0.0, 1.0))
+    let jitter_ms = (half.as_millis() as f64 * unit.clamp(0.0, 1.0)) as u64;
+    Duration::from_millis(half.as_millis() as u64 + jitter_ms)
 }
 
 #[cfg(test)]
@@ -53,6 +53,19 @@ mod tests {
         assert_eq!(backoff_delay(base, cap, 3, 1.0), Duration::from_secs(8));
         assert_eq!(backoff_delay(base, cap, 10, 1.0), cap);
         assert_eq!(backoff_delay(base, cap, 40, 0.0), cap / 2);
+    }
+
+    #[test]
+    fn delays_have_whole_millisecond_precision() {
+        // A jitter sample that would otherwise produce nanoseconds.
+        let delay = backoff_delay(
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+            1,
+            0.123_456_789,
+        );
+        assert_eq!(delay.subsec_nanos() % 1_000_000, 0, "{delay:?}");
+        assert_eq!(delay, Duration::from_millis(1_123));
     }
 
     #[test]

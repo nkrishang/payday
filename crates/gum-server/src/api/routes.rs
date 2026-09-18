@@ -463,11 +463,7 @@ mod tests {
 
     /// One chain of the test deployment.
     fn test_chain(chain_id: u64, usdc: Address, factory: Address) -> gum_core::ChainConfig {
-        test_chain_with(
-            chain_id,
-            vec![(gum_core::Currency::Usdc, usdc)],
-            factory,
-        )
+        test_chain_with(chain_id, vec![(gum_core::Currency::Usdc, usdc)], factory)
     }
 
     /// The USDT contract the test deployment serves on chain 1 alone.
@@ -536,9 +532,7 @@ mod tests {
         ])
     }
 
-    fn test_networks_on(
-        chains: Vec<gum_core::ChainConfig>,
-    ) -> Arc<gum_core::ChainRegistry> {
+    fn test_networks_on(chains: Vec<gum_core::ChainConfig>) -> Arc<gum_core::ChainRegistry> {
         Arc::new(gum_core::ChainRegistry::new(chains).unwrap())
     }
 

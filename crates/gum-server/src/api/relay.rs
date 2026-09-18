@@ -107,7 +107,7 @@ async fn payable(
     headers: &HeaderMap,
 ) -> Result<(UnlockedBound, U256), ApiError> {
     let request = unlocked_bound(state, id, headers).await?;
-    let (remaining, is_payable) = payment_state(&request.invoice(), unix_now());
+    let (remaining, is_payable) = payment_state(request.invoice(), unix_now());
     if !is_payable || remaining.is_zero() {
         return Err(ApiError::deposit_request_not_payable());
     }

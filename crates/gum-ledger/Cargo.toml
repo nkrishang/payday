@@ -3,6 +3,10 @@ name = "gum-ledger"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Fixtures for the services' own tests (`gum_ledger::test_helpers`).
+test-helpers = ["gum-core/test-helpers"]
+
 [dependencies]
 gum-core = { path = "../gum-core" }
 gum-schema = { path = "../gum-schema" }

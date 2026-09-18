@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use gum_core::{ChainRegistry, Currency, TokenDomain};
 use thiserror::Error;
 
-use crate::deployment::redact_urls;
+use gum_chain::redact_urls;
 
 sol! {
     function name() view returns (string);

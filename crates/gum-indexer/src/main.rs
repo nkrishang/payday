@@ -6,6 +6,7 @@ mod signal;
 use gum_chain::{AlloyChainClient, ChainReader};
 use gum_core::ExpectedDeployment;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 
 #[tokio::main]
@@ -69,9 +70,15 @@ async fn main() {
             configured.clone(),
             config.late_watch(),
             config.max_ranges(),
-            config.poll(),
-            config.reconcile(),
-            config.idle(),
+            indexer::Cadence {
+                poll: config.poll(),
+                reconcile: config.reconcile(),
+                idle: config.idle(),
+                failure_backoff: gum_bus::BackoffPolicy::new(
+                    Duration::from_secs(1),
+                    config.idle().max(Duration::from_secs(30)),
+                ),
+            },
             signal_state,
             watch_tx,
         );

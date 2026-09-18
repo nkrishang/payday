@@ -691,7 +691,6 @@ pub async fn finality_boundary(
 /// transaction in flight; the pool is what lets several run at once.
 #[async_trait]
 pub trait ChainExecutor: ChainReader {
-
     /// The signer pool: every address this client can sign for, in the
     /// order they were configured. Never empty. Each signer keeps one helper
     /// transaction in flight; the pool is what lets several run at once.
@@ -1530,7 +1529,6 @@ impl ChainReader for AlloyChainClient {
 
 #[async_trait]
 impl ChainExecutor for AlloyChainClient {
-
     fn signers(&self) -> Vec<Address> {
         self.signers.clone()
     }

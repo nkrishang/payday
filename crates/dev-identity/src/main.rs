@@ -73,9 +73,12 @@ struct AppState {
     // Auth0 passwordless transactions belong to the application that started
     // them. Keep the audience in the key as well so this remains safe if a
     // local client is ever allowed to address more than one API.
-    otps: Arc<Mutex<HashMap<(String, String, String), PendingOtp>>>,
+    otps: Arc<Mutex<HashMap<OtpKey, PendingOtp>>>,
     otp_ttl: Duration,
 }
+
+/// `(client_id, audience, email)`.
+type OtpKey = (String, String, String);
 
 /// One emailed code, and the moment it stops being one.
 struct PendingOtp {

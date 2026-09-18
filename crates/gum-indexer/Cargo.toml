@@ -8,6 +8,7 @@ gum-core = { path = "../gum-core" }
 gum-chain = { path = "../gum-chain" }
 gum-contracts = { path = "../gum-contracts" }
 gum-telemetry = { path = "../gum-telemetry" }
+gum-bus = { path = "../gum-bus" }
 alloy-primitives = { workspace = true }
 alloy-pubsub = { workspace = true }
 alloy-rpc-client = { workspace = true }
@@ -29,8 +30,3 @@ axum = { workspace = true }
 
 [dev-dependencies]
 gum-chain = { path = "../gum-chain", features = ["mock"] }
-gum-ledger = { path = "../gum-ledger" }
-gum-bus = { path = "../gum-bus" }
-gum-schema = { path = "../gum-schema" }
-sqlx = { workspace = true }
-tower = { workspace = true }

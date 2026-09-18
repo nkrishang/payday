@@ -10,7 +10,9 @@ use std::sync::Mutex;
 
 use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use async_trait::async_trait;
-use gum_core::{Amount, BeneficiaryAddress, ChainId, FactoryAddress, RecoveryAddress, TokenAddress};
+use gum_core::{
+    Amount, BeneficiaryAddress, ChainId, FactoryAddress, RecoveryAddress, TokenAddress,
+};
 
 use crate::{
     BlockHeader, ChainError, ChainExecutor, ChainReader, FailureProbe, FeeEstimate,
@@ -142,8 +144,7 @@ pub struct MockState {
     /// Factory each BatchSweeper reports; defaults to the test factory.
     pub sweeper_factories: HashMap<Address, Address>,
     /// `eth_call` answers by (contract, calldata); anything else is 32 zero bytes.
-    pub view_results:
-        HashMap<(Address, Bytes), Bytes>,
+    pub view_results: HashMap<(Address, Bytes), Bytes>,
     /// EIP-3009 authorizations the token has consumed, by (authorizer, nonce).
     pub consumed_authorizations: HashSet<(Address, B256)>,
     /// The block each consumed authorization's `AuthorizationUsed` event
@@ -319,11 +320,7 @@ impl ChainReader for MockChain {
 
     /// The mock's world has one final history, so reading through
     /// finality changes nothing.
-    async fn finalized_view_call(
-        &self,
-        to: Address,
-        calldata: Bytes,
-    ) -> Result<Bytes, ChainError> {
+    async fn finalized_view_call(&self, to: Address, calldata: Bytes) -> Result<Bytes, ChainError> {
         Ok(self
             .state
             .lock()
@@ -457,10 +454,7 @@ impl ChainReader for MockChain {
             .unwrap_or_else(|| mock_code_hash(address)))
     }
 
-    async fn batch_sweeper_factory(
-        &self,
-        batch_sweeper: Address,
-    ) -> Result<Address, ChainError> {
+    async fn batch_sweeper_factory(&self, batch_sweeper: Address) -> Result<Address, ChainError> {
         Ok(self
             .state
             .lock()
@@ -474,7 +468,6 @@ impl ChainReader for MockChain {
 
 #[async_trait]
 impl ChainExecutor for MockChain {
-
     fn signers(&self) -> Vec<Address> {
         self.state.lock().unwrap().signers.clone()
     }
@@ -604,20 +597,21 @@ impl ChainExecutor for MockChain {
         let sweeps = submission.sweeps.clone();
         state.submissions.push(submission);
         if let Some(block) = state.mine_at {
-            let outcomes =
-                sweeps
-                    .iter()
-                    .map(|sweep| {
-                        let payment = payment_address_of(sweep);
-                        let outcome = state.next_outcomes.remove(&payment).unwrap_or(
-                            SweepOutcome::Settled {
+            let outcomes = sweeps
+                .iter()
+                .map(|sweep| {
+                    let payment = payment_address_of(sweep);
+                    let outcome =
+                        state
+                            .next_outcomes
+                            .remove(&payment)
+                            .unwrap_or(SweepOutcome::Settled {
                                 amount: sweep.amount,
                                 recovered_amount: U256::ZERO,
-                            },
-                        );
-                        (payment, outcome)
-                    })
-                    .collect();
+                            });
+                    (payment, outcome)
+                })
+                .collect();
             let succeeded = state.next_receipt_succeeds;
             state.mined_nonces.insert(signer, nonce + 1);
             state.receipts.insert(
