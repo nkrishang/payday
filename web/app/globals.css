@@ -78,19 +78,20 @@
 }
 
 /*
- * The hero's code panels are dark in both themes — they are pictures of a
- * program, and their colours only make sense on a terminal ground. Tokens are
- * fixed rather than theme-swapped for that reason.
+ * Code samples are dark in both themes — they are pictures of a program,
+ * and sit on the docs' black ground. The scheme is the landing page's
+ * editor: white text, strings and verbs in pink, the rest in a lighter or
+ * dimmer white; nothing else competes with the pink.
  */
 :root {
-  --term-bg: #0b0b0b;
-  --term-chrome: #151515;
-  --term-line: #232323;
-  --term-text: #f2f2f2;
-  --term-dim: #6e6e6e;
-  --term-accent: #a3d277;
-  --term-id: #7dd3fc;
-  --term-warn: #fcd34d;
+  --term-bg: color-mix(in srgb, #f7f7f5 4%, #121212);
+  --term-chrome: color-mix(in srgb, #f7f7f5 7%, #121212);
+  --term-line: rgb(247 247 245 / 0.1);
+  --term-text: #f7f7f5;
+  --term-dim: color-mix(in srgb, #f7f7f5 42%, #121212);
+  --term-accent: #ff5ca8;
+  --term-id: #f7f7f5;
+  --term-warn: color-mix(in srgb, #f7f7f5 75%, #121212);
 }
 
 @theme inline {
@@ -497,33 +498,121 @@
 }
 
 /*
- * The rest of the app, in the landing page's clothes.
+ * The rest of the app, in Gum's clothes.
  *
- * Payday is a dark product on either colour scheme — the marketing page says
- * so, and a merchant arriving from "Get Started" (or a payer arriving from
- * a deposit link) should not watch the ground flip to white. Rather than
- * restyle every page by hand, `.dash`/`.brand-dark` redefine the theme tokens
- * the pages already read, so a table, a form control, and a status badge all
- * follow. Both halves of each token are restated: Tailwind's `--color-*`
- * resolve `var(--*)` where they are declared, so overriding the raw value
- * alone would never reach `bg-surface`.
+ * The dashboard and the hosted checkout are the landing page continued: the
+ * same four colours (white, pink, black, grey), the same type, the same rules
+ * between things. Rather than restyle every page by hand, `.gum` redefines
+ * the theme tokens the pages already read, so a table, a form control and a
+ * status badge all follow. Both halves of each token are restated: Tailwind's
+ * `--color-*` resolve `var(--*)` where they are declared, so overriding the
+ * raw value alone would never reach `bg-surface`.
  *
- * `.dash` is the dashboard's own name for this and carries one thing only it
- * needs (the hero wave's overflow clipping); `.brand-dark` is the same theme
- * for anything else that wants it — currently the hosted checkout — without
- * borrowing a name that means "dashboard".
+ * Light on either colour scheme, like the landing page. There is no fifth
+ * colour: elevation is the black at a few percent, a line is the grey at
+ * thirty, and the pink is for the one thing on a page that is Gum's — a
+ * progress bar, the chosen option, a link.
  *
- * `body:has(.dash, .brand-dark)` restates the same tokens a second time, on
- * body itself. Radix's `Dialog.Portal` (the wallet picker, the identity
- * check's confirmation) mounts to `document.body` by default, which is a
- * *sibling* of `.dash`/`.brand-dark`, not a descendant — without this, a
- * portalled dialog over a branded page would silently fall back to the
- * generic light/dark tokens instead of inheriting the brand ones, since CSS
- * custom properties only inherit down the tree they are declared on.
+ * `body:has(.gum)` restates the same tokens a second time, on body itself.
+ * Radix's `Dialog.Portal` (the wallet picker, the identity check's
+ * confirmation) mounts to `document.body` by default, which is a *sibling*
+ * of `.gum`, not a descendant — without this, a portalled dialog over a
+ * branded page would silently fall back to the generic light/dark tokens
+ * instead of inheriting the brand ones, since CSS custom properties only
+ * inherit down the tree they are declared on.
  */
-.dash,
+.gum,
+body:has(.gum) {
+  color-scheme: light;
+  /* `body` resolves `color: var(--ink)` outside this block, so on a dark
+     system it would keep the dark theme's off-white for everything that
+     inherits over a ground this page forces light regardless. The colour is
+     restated here, where `--ink` is the black. */
+  color: var(--ink);
+  --canvas: #f7f7f5;
+  --surface: #f7f7f5;
+  --raised: color-mix(in srgb, #121212 5%, #f7f7f5);
+  --ink: #121212;
+  --muted: #6f6e6e;
+  --faint: color-mix(in srgb, #6f6e6e 68%, #f7f7f5);
+  --line: rgb(111 110 110 / 0.3);
+  --line-strong: rgb(111 110 110 / 0.5);
+  /* Primary actions are the landing page's black button. */
+  --inverse: #121212;
+  --inverse-ink: #f7f7f5;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-inverse: var(--inverse);
+  --color-inverse-ink: var(--inverse-ink);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+.gum {
+  position: relative;
+  isolation: isolate;
+}
+
+/* The page's own ground, so an overscroll bounce is not a dark flash. */
+body:has(.gum) {
+  background-color: #f7f7f5;
+}
+
+.gum ::selection {
+  background-color: #ff5ca8;
+  color: #f7f7f5;
+}
+
+.gum :focus-visible,
+body:has(.gum) :focus-visible {
+  outline-color: #121212;
+}
+
+/* Pink where the platform would paint its own accent: checkboxes, radios,
+   progress, the native date picker. */
+.gum,
+body:has(.gum) {
+  accent-color: #ff5ca8;
+}
+
+/* A text field marks focus by its own border turning black (components/ui/
+   field.tsx), so the page's focus ring would only draw a second one. */
+.gum
+  :is(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select):focus-visible,
+body:has(.gum)
+  :is(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select):focus-visible {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.dash {
+  /* The composer's sticky preview must still stick, so `clip` and not
+     `hidden`: nothing decorative may put a horizontal scrollbar under the
+     whole dashboard. */
+  overflow-x: clip;
+}
+
+/*
+ * The documentation reads dark: `.docs` opts into `.brand-dark`
+ * (components/docs/shell.tsx). It is the same mechanism as `.gum` with the
+ * palette turned over — Gum's black for the ground, its white for the ink,
+ * the white at alpha for lines and dim text, and the same one pink.
+ */
 .brand-dark,
-body:has(.dash, .brand-dark) {
+body:has(.brand-dark) {
   color-scheme: dark;
   /* `body` resolves `color: var(--ink)` outside this block, so on a light
      system it would keep the light theme's near-black for everything that
@@ -531,17 +620,17 @@ body:has(.dash, .brand-dark) {
      forces dark regardless. The colour is restated here, where `--ink` is the
      dark one. */
   color: var(--ink);
-  --canvas: #070707;
-  --surface: #121311;
-  --raised: #1b1c19;
-  --ink: #f6f2ea;
-  --muted: #b0afa9;
-  --faint: #8b8a84;
-  --line: #232420;
-  --line-strong: #35362f;
-  /* Primary actions are the hero's green button, not an inverted slab. */
-  --inverse: #a3d277;
-  --inverse-ink: #0f0f0e;
+  --canvas: #121212;
+  --surface: color-mix(in srgb, #f7f7f5 4%, #121212);
+  --raised: color-mix(in srgb, #f7f7f5 8%, #121212);
+  --ink: #f7f7f5;
+  --muted: color-mix(in srgb, #f7f7f5 62%, #121212);
+  --faint: color-mix(in srgb, #f7f7f5 42%, #121212);
+  --line: rgb(247 247 245 / 0.1);
+  --line-strong: rgb(247 247 245 / 0.18);
+  /* Primary actions are the white button of the landing page's pink close. */
+  --inverse: #f7f7f5;
+  --inverse-ink: #121212;
   --success: #8fd6a3;
   --warning: #f5c451;
   --danger: #f87171;
@@ -560,38 +649,32 @@ body:has(.dash, .brand-dark) {
   --color-warning: var(--warning);
   --color-danger: var(--danger);
 
-  font-family: var(--font-albert), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
-.dash,
 .brand-dark {
   position: relative;
   isolation: isolate;
 }
 
-.dash {
-  /* The hero's wave is drawn 160px wider than the page on each side and drifts
-     sideways, which is a decoration, not content: clipped rather than allowed
-     to put a horizontal scrollbar under the whole dashboard. `clip` and not
-     `hidden`, so the composer's sticky preview still sticks. */
-  overflow-x: clip;
-}
-
 /* The page's own ground, so an overscroll bounce is not a white flash. */
-body:has(.dash, .brand-dark) {
-  background-color: #070707;
+body:has(.brand-dark) {
+  background-color: #121212;
 }
 
-.dash .font-heading,
+.brand-dark ::selection {
+  background-color: #ff5ca8;
+  color: #f7f7f5;
+}
+
 .brand-dark .font-heading,
-body:has(.dash, .brand-dark) .font-heading {
+body:has(.brand-dark) .font-heading {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
-.dash :focus-visible,
 .brand-dark :focus-visible,
-body:has(.dash, .brand-dark) :focus-visible {
-  outline-color: #a3d277;
+body:has(.brand-dark) :focus-visible {
+  outline-color: #f7f7f5;
 }
 
 /*
@@ -750,7 +833,7 @@ body:has(.dash, .brand-dark) :focus-visible {
   /* Near-opaque: fields sliding under it must not read through the bar. */
   background: color-mix(in oklab, var(--canvas) 97%, transparent);
   backdrop-filter: blur(8px);
-  box-shadow: 0 -12px 16px -12px rgb(0 0 0 / 55%);
+  box-shadow: 0 -12px 16px -12px rgb(18 18 18 / 12%);
   /* Bleeds past the form's own width so nothing shows at its edges. */
   margin-inline: -12px;
   padding-inline: 12px;
@@ -871,15 +954,15 @@ body:has(.dash, .brand-dark) :focus-visible {
 
 .docs-prose :is(p, li, td, dd, dt, figcaption, aside, summary) > a,
 .docs-prose :is(p, li, td, dd, figcaption) > strong > a {
-  color: var(--color-brand-green);
+  color: #ff5ca8;
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--color-brand-green) 35%, transparent);
+  text-decoration-color: color-mix(in oklab, #ff5ca8 35%, transparent);
   text-underline-offset: 3px;
   transition: text-decoration-color 120ms;
 }
 
 .docs-prose :is(p, li, td, dd, dt, figcaption, aside, summary) > a:hover {
-  text-decoration-color: var(--color-brand-green);
+  text-decoration-color: #ff5ca8;
 }
 
 /* Inline code, everywhere but inside a sample. */
@@ -982,7 +1065,7 @@ body:has(.dash, .brand-dark) :focus-visible {
 }
 
 .docs-step-body a {
-  color: var(--color-brand-green);
+  color: #ff5ca8;
 }
 
 .docs-step-body ul {
@@ -1078,9 +1161,9 @@ body:has(.dash, .brand-dark) :focus-visible {
 }
 
 .docs-endpoint-body a {
-  color: var(--color-brand-green);
+  color: #ff5ca8;
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--color-brand-green) 35%, transparent);
+  text-decoration-color: color-mix(in oklab, #ff5ca8 35%, transparent);
   text-underline-offset: 3px;
 }
 

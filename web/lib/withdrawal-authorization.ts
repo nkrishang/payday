@@ -3,7 +3,7 @@ import { encodeAbiParameters, keccak256, type TypedDataDefinition } from "viem";
 import { bridges, chainById, tokenOn } from "./config";
 
 /**
- * The EIP-712 document the Payday wallet signs for one withdrawal leg, in
+ * The EIP-712 document the Gum wallet signs for one withdrawal leg, in
  * the shape viem's `signTypedData` / `hashTypedData` and Privy's
  * `useSignTypedData` take.
  *
@@ -111,7 +111,7 @@ export function checkLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLeg
     return "The document is not the authorization type this leg needs.";
   }
   if (!same(typed.message.from, withdrawal.wallet_address)) {
-    return "The document is not signed from your Payday wallet.";
+    return "The document is not signed from your Gum wallet.";
   }
   if (typed.domain.chainId !== Number(leg.source_chain.id)) {
     return "The document is under another network's token.";

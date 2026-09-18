@@ -77,7 +77,7 @@ function Attempt({ attempt }: { attempt: VerificationAttempt }) {
   const status =
     attempt.kind === "merchant_session" ? "Session opened" : STATUS_LABEL[attempt.status];
   return (
-    <div className="rounded-[10px] border border-line px-3.5 py-3 text-[13px]">
+    <div className="rounded-[8px] border border-line px-3.5 py-3 text-[13px]">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="font-medium">{KIND_LABEL[attempt.kind] ?? attempt.kind}</span>
         <span className="text-muted">{status}</span>

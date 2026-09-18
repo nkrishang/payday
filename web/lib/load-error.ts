@@ -27,10 +27,10 @@ export function describeLoadError(error: unknown): LoadFailure {
   if (error instanceof PaydayError) {
     const detail = `${error.message}${requestSuffix(error)}`;
     if (error.status === 429) {
-      return { message: "Payday is busy right now.", detail, transient: true };
+      return { message: "Gum is busy right now.", detail, transient: true };
     }
     if (error.status >= 500) {
-      return { message: "Payday is temporarily unavailable.", detail, transient: true };
+      return { message: "Gum is temporarily unavailable.", detail, transient: true };
     }
     if (error.status === 404) {
       return { message: "That record is no longer here.", detail, transient: false };
@@ -46,7 +46,7 @@ export function describeLoadError(error: unknown): LoadFailure {
   // `fetch` rejects with a TypeError when the network, not the server, failed.
   if (error instanceof TypeError) {
     return {
-      message: "Payday can't be reached. Check your connection.",
+      message: "Gum can't be reached. Check your connection.",
       detail: error.message || null,
       transient: true,
     };

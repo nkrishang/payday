@@ -76,7 +76,7 @@ export function CustomerForm({
   };
 
   return (
-    <form onSubmit={submit} className="grid gap-4 rounded-[16px] border border-line bg-surface p-5">
+    <form onSubmit={submit} className="grid gap-4 rounded-[12px] border border-line bg-surface p-5">
       <Field label="Name">
         <Input
           required

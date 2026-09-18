@@ -282,7 +282,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       title: "Settlement is paused",
       detail:
         payment.payer_message ??
-        "Payday has paused this deposit and an operator is resolving it. Do not send another transfer.",
+        "Gum has paused this deposit and an operator is resolving it. Do not send another transfer.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: true,
@@ -356,7 +356,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       label: "Deposited",
       title: "Deposit received",
       detail:
-        "Payday is settling the requested amount to the merchant. Nothing more is needed from you.",
+        "Gum is settling the requested amount to the merchant. Nothing more is needed from you.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,
@@ -373,7 +373,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       label: "Closing",
       title: "The deadline has been reached",
       detail:
-        "Do not send funds now. Payday is confirming the final on-chain state; the chain's clock, not this page, decides the outcome.",
+        "Do not send funds now. Gum is confirming the final on-chain state; the chain's clock, not this page, decides the outcome.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,
@@ -397,8 +397,8 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
         ? "Sign from the wallet you will pay from"
         : "Choose a network and sign from the wallet you will pay from",
       detail: pinned
-        ? `This deposit is paid on ${pinned.chain.name}. Payday creates a unique, one-time payment destination for the wallet you intend to pay with; it is fixed once you sign.`
-        : "Payday creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
+        ? `This deposit is paid on ${pinned.chain.name}. Gum creates a unique, one-time payment destination for the wallet you intend to pay with; it is fixed once you sign.`
+        : "Gum creates a unique, one-time payment destination for the network and the wallet you intend to pay with. Both are fixed once you sign.",
       showInstructions: false,
       showWalletStep: true,
       isTerminal: false,
@@ -429,8 +429,8 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       label: relayed ? "Delivering" : "Confirming",
       title: relayed ? "Relay is delivering your payment" : "Transaction confirmed on-chain",
       detail: relayed
-        ? `Your deposit was sent; Relay delivers it to ${ready.chain.name} in seconds, and Payday credits it once that network finalizes it. Keep this page open.`
-        : "Payday credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
+        ? `Your deposit was sent; Relay delivers it to ${ready.chain.name} in seconds, and Gum credits it once that network finalizes it. Keep this page open.`
+        : "Gum credits transfers once the network finalizes them, so this can lag your wallet by a moment. Keep this page open.",
       showInstructions: false,
       showWalletStep: false,
       isTerminal: false,

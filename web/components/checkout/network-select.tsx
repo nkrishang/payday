@@ -38,7 +38,7 @@ export function NetworkSelect({
         <p className="text-[11px] font-medium tracking-[0.14em] text-faint uppercase">Pay on</p>
         <p
           data-testid="pinned-network"
-          className="mt-2 flex items-center justify-between gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3"
+          className="mt-2 flex items-center justify-between gap-3 rounded-[8px] border border-line bg-raised px-3.5 py-3"
         >
           <span className="min-w-0">
             <span className="block text-[14px] font-medium">{pinned.chain.name}</span>
@@ -75,7 +75,7 @@ export function NetworkSelect({
               disabled={disabled || configured === null}
               onClick={() => onSelect(network.chain.id)}
               className={cn(
-                "flex w-full items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3 text-left transition-colors",
+                "flex w-full items-center justify-between gap-3 rounded-[8px] border px-3.5 py-3 text-left transition-colors",
                 checked
                   ? "border-ink bg-raised"
                   : "border-line hover:border-muted disabled:cursor-not-allowed disabled:opacity-60",

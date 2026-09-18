@@ -192,7 +192,7 @@ function validate(draft: Draft, step: number, openedAt: number): Errors {
     }
     if (!draft.payoutAddressId)
       errors.payoutAddressId =
-        "Your Payday wallet is still being created. Try again in a moment, or add a saved wallet to this identity.";
+        "Your Gum wallet is still being created. Try again in a moment, or add a saved wallet to this identity.";
     if (draft.expiry === CUSTOM) {
       const at = draft.expiresAt ? new Date(draft.expiresAt).getTime() : Number.NaN;
       if (!Number.isFinite(at)) errors.expiresAt = "Pick a date and time.";
@@ -290,7 +290,7 @@ export function RequestComposer({
   // saved. Offered as a choice only when there is actually more than one.
   const settleOptions = [
     ...(accountWallet
-      ? [{ id: ACCOUNT_WALLET, title: "Payday wallet", detail: truncateAddress(accountWallet) }]
+      ? [{ id: ACCOUNT_WALLET, title: "Gum wallet", detail: truncateAddress(accountWallet) }]
       : []),
     ...(issuer?.payout_addresses ?? []).map((entry) => ({
       id: entry.id,
@@ -426,7 +426,7 @@ export function RequestComposer({
     <div>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <h1 className="font-heading text-[26px] leading-tight font-medium tracking-[-0.04em] sm:text-[30px]">
-          New deposit request<span className="text-brand-yellow">.</span>
+          New deposit request.
         </h1>
         <button
           type="button"
@@ -444,7 +444,7 @@ export function RequestComposer({
             <span className="block h-[3px] overflow-hidden rounded-full bg-line">
               <span
                 className={cn(
-                  "block h-full origin-left rounded-full bg-brand-green transition-transform duration-500 ease-out",
+                  "block h-full origin-left rounded-full bg-gum-pink transition-transform duration-500 ease-out",
                   index <= step ? "scale-x-100" : "scale-x-0",
                 )}
               />
@@ -577,7 +577,7 @@ export function RequestComposer({
                     role="radiogroup"
                     aria-label="Expires in"
                     aria-required="true"
-                    className="mt-1.5 inline-flex rounded-[10px] border border-line bg-surface p-1"
+                    className="mt-1.5 inline-flex rounded-[8px] border border-line bg-surface p-1"
                   >
                     {EXPIRIES.map((option) => (
                       <button
@@ -589,7 +589,7 @@ export function RequestComposer({
                         className={cn(
                           "h-9 rounded-[7px] px-3.5 text-[13px] transition-colors",
                           draft.expiry === option.value
-                            ? "bg-brand-green font-medium text-brand-black"
+                            ? "bg-gum-pink font-medium text-gum-white"
                             : "text-muted hover:text-ink",
                         )}
                       >
@@ -649,7 +649,7 @@ export function RequestComposer({
                   </Labeled>
                   <Labeled
                     label="Email"
-                    hint="Payday emails them a link to the request once it's issued."
+                    hint="Gum emails them a link to the request once it's issued."
                     error={shown("billEmail")}
                   >
                     <input
@@ -708,7 +708,7 @@ export function RequestComposer({
                   {MODES.map((entry) => (
                     <label
                       key={entry.value}
-                      className="flex cursor-pointer gap-3 rounded-[12px] border border-line bg-surface px-4 py-3.5 transition-colors hover:border-line-strong has-checked:border-brand-green/60 has-checked:bg-brand-green/[0.07]"
+                      className="flex cursor-pointer gap-3 rounded-[10px] border border-line bg-surface px-4 py-3.5 transition-colors hover:border-line-strong has-checked:border-gum-pink/60 has-checked:bg-gum-pink/[0.07]"
                     >
                       <input
                         type="radio"
@@ -717,7 +717,7 @@ export function RequestComposer({
                         checked={draft.mode === entry.value}
                         onChange={() => set("mode", entry.value)}
                         aria-label={entry.label}
-                        className="mt-1 accent-[#a3d277]"
+                        className="mt-1 accent-gum-pink"
                       />
                       <span>
                         <span className="block text-[14px] font-medium">{entry.label}</span>
@@ -754,7 +754,7 @@ export function RequestComposer({
               <div className="grid gap-4">
                 <dl
                   aria-label="Request summary"
-                  className="grid gap-3 rounded-[12px] border border-line bg-surface px-4 py-4 text-[13.5px]"
+                  className="grid gap-3 rounded-[10px] border border-line bg-surface px-4 py-4 text-[13.5px]"
                 >
                   <Row label="Amount">
                     <span className="tabular inline-flex items-center justify-end gap-1">
@@ -769,7 +769,7 @@ export function RequestComposer({
                       {payoutAddress ? truncateAddress(payoutAddress) : ""}
                     </span>
                     {draft.payoutAddressId === ACCOUNT_WALLET ? (
-                      <span className="text-muted"> · Payday wallet</span>
+                      <span className="text-muted"> · Gum wallet</span>
                     ) : null}
                   </Row>
                   <Row label="Payer">
@@ -864,7 +864,7 @@ function Preview({
   const title = draft.heading.trim() || draft.reference.trim();
 
   return (
-    <aside className="min-w-0 rounded-[16px] border border-line bg-surface p-5 lg:sticky lg:top-6">
+    <aside className="min-w-0 rounded-[12px] border border-line bg-surface p-5 lg:sticky lg:top-6">
       <p className="text-[11px] tracking-[0.12em] text-faint uppercase">Deposit request</p>
       <p className="mt-3 flex items-center gap-1.5">
         <span
@@ -966,7 +966,7 @@ function Choice({
         {options.map((option) => (
           <label
             key={option.id}
-            className="flex cursor-pointer items-center gap-2.5 rounded-[10px] border border-line bg-surface px-3.5 py-2.5 transition-colors hover:border-line-strong has-checked:border-brand-green/60 has-checked:bg-brand-green/[0.07]"
+            className="flex cursor-pointer items-center gap-2.5 rounded-[8px] border border-line bg-surface px-3.5 py-2.5 transition-colors hover:border-line-strong has-checked:border-gum-pink/60 has-checked:bg-gum-pink/[0.07]"
           >
             <input
               type="radio"
@@ -975,7 +975,7 @@ function Choice({
               checked={selected === option.id}
               onChange={() => onSelect(option.id)}
               aria-label={option.title}
-              className="accent-[#a3d277]"
+              className="accent-gum-pink"
             />
             <span className="min-w-0">
               <span

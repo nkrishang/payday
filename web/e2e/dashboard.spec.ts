@@ -284,7 +284,7 @@ test("a likely unsolicited deposit shows its flag and every verification attempt
   expect(text).not.toMatch(/SENTINEL|1900-01-01|identity check|identity document|risk/i);
 });
 
-test("the account section shows the signed-in mailbox and the Payday wallet", async ({ page }) => {
+test("the account section shows the signed-in mailbox and the Gum wallet", async ({ page }) => {
   await signIn(page, "account-view@example.com");
 
   const section = page.getByRole("region", { name: "Account" });
@@ -392,7 +392,7 @@ test("a merchant withdraws everything to one network from the account section", 
   await expect(legs).toHaveCount(2);
   await expect(legs.nth(0)).toContainText("5.00 USDC");
   await expect(legs.nth(0)).toContainText("Monad → Base via CCTP");
-  await expect(legs.nth(0)).toContainText("Pays Payday's forwarder");
+  await expect(legs.nth(0)).toContainText("Pays Gum's forwarder");
   await expect(legs.nth(1)).toContainText("1.25 USDC");
   await expect(legs.nth(1)).toContainText("on Base");
 

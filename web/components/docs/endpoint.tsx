@@ -8,25 +8,25 @@ import type { Method } from "./api/types";
  */
 
 const METHOD_TEXT: Record<Method, string> = {
-  GET: "text-brand-green",
-  POST: "text-term-id",
-  PUT: "text-brand-yellow",
+  GET: "text-success",
+  POST: "text-ink",
+  PUT: "text-warning",
   PATCH: "text-[#f0a35e]",
   DELETE: "text-danger",
 };
 
 const METHOD_TINT: Record<Method, string> = {
-  GET: "bg-brand-green/12",
-  POST: "bg-term-id/12",
-  PUT: "bg-brand-yellow/12",
+  GET: "bg-success/12",
+  POST: "bg-ink/12",
+  PUT: "bg-warning/12",
   PATCH: "bg-[#f0a35e]/12",
   DELETE: "bg-danger/12",
 };
 
 const METHOD_BORDER: Record<Method, string> = {
-  GET: "border-brand-green/40",
-  POST: "border-term-id/40",
-  PUT: "border-brand-yellow/40",
+  GET: "border-success/40",
+  POST: "border-ink/40",
+  PUT: "border-warning/40",
   PATCH: "border-[#f0a35e]/40",
   DELETE: "border-danger/40",
 };
@@ -86,7 +86,7 @@ export function Params({ title, rows }: { title?: string; rows: ParamRow[] }) {
               <code className="docs-param">{row.name}</code>
               <span className="font-mono text-[11px] text-faint">{row.type}</span>
               {row.required ? (
-                <span className="font-mono text-[10.5px] tracking-[0.04em] text-brand-yellow uppercase">
+                <span className="font-mono text-[10.5px] tracking-[0.04em] text-warning uppercase">
                   required
                 </span>
               ) : null}
@@ -125,9 +125,9 @@ export function Answers({
               className={cn(
                 "font-mono text-[13px] tabular",
                 row.status < 300
-                  ? "text-brand-green"
+                  ? "text-success"
                   : row.status < 500
-                    ? "text-brand-yellow"
+                    ? "text-warning"
                     : "text-danger",
               )}
             >

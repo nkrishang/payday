@@ -605,7 +605,7 @@ test("an unknown link is a clean dead end", async ({ page }) => {
 
   expect(response?.status()).toBe(404);
   await expect(page.getByText("This deposit link is not valid")).toBeVisible();
-  await expect(page.getByRole("link", { name: /What is Payday/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /What is Gum/ })).toBeVisible();
 });
 
 test("deposit pages are not indexable and cannot be framed", async ({ page }) => {

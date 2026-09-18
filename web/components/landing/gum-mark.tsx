@@ -18,11 +18,11 @@ export function GumMark({
   className?: string;
 }) {
   const mask: CSSProperties = {
-    WebkitMaskImage: "url(/gum/mark.png)",
+    WebkitMaskImage: "url(/gum/mark.svg)",
     WebkitMaskSize: "contain",
     WebkitMaskRepeat: "no-repeat",
     WebkitMaskPosition: "center",
-    maskImage: "url(/gum/mark.png)",
+    maskImage: "url(/gum/mark.svg)",
     maskSize: "contain",
     maskRepeat: "no-repeat",
     maskPosition: "center",

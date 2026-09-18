@@ -71,7 +71,7 @@ export function AttachmentLink({
         type="button"
         onClick={open}
         disabled={fetching}
-        className="flex w-full items-center gap-3 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-left transition-colors hover:border-line-strong disabled:opacity-60"
+        className="flex w-full items-center gap-3 rounded-[8px] border border-line bg-raised px-3.5 py-3 text-left transition-colors hover:border-line-strong disabled:opacity-60"
       >
         {fetching ? (
           <Loader2 className="size-4 shrink-0 animate-spin text-muted" />

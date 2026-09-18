@@ -27,7 +27,7 @@ const RECEIPT_POLL_MS = 2_000;
  * The payer's stablecoin may sit on a chain the request is not on, and may
  * not even be the request's currency: USDC on Base can pay a USDT request on
  * Monad, with Relay swapping on the way and the payer carrying the spread.
- * Payday quotes
+ * Gum quotes
  * the route (the quote is pinned to the attested wallet, the payment
  * address, and exactly the amount still due), and this component sends the
  * quote's transactions from the connected wallet on the origin chain, then
@@ -35,7 +35,7 @@ const RECEIPT_POLL_MS = 2_000;
  *
  * The origin chain is whichever of Relay's the payer picks, so it is not in
  * this app's wagmi configuration; the wallet is driven through its EIP-1193
- * provider directly: switch (or add, from the chain record Payday relays)
+ * provider directly: switch (or add, from the chain record Gum relays)
  * to the origin chain, send each step, wait for the receipt between steps.
  * The connected wallet must be the attested one: the quote was made for it,
  * and the origin transaction it sends is what the proof will name.
@@ -229,7 +229,7 @@ export function RelayPay({
     return (
       <p
         role="status"
-        className="mt-4 rounded-[10px] border border-line bg-raised px-3.5 py-3 text-[13px] leading-relaxed text-muted"
+        className="mt-4 rounded-[8px] border border-line bg-raised px-3.5 py-3 text-[13px] leading-relaxed text-muted"
       >
         {following.status === "filled"
           ? `Relay delivered your payment on ${payment.chain.name}.`
@@ -247,7 +247,7 @@ export function RelayPay({
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex w-full items-center justify-between gap-3 rounded-[10px] border border-line px-3.5 py-3 text-left transition-colors hover:border-muted"
+        className="flex w-full items-center justify-between gap-3 rounded-[8px] border border-line px-3.5 py-3 text-left transition-colors hover:border-muted"
       >
         <span className="flex items-center gap-2.5">
           <ArrowLeftRight className="size-4 text-faint" />
@@ -263,7 +263,7 @@ export function RelayPay({
       </button>
 
       {open ? (
-        <div className="mt-3 grid gap-3 rounded-[10px] border border-line bg-surface p-3.5">
+        <div className="mt-3 grid gap-3 rounded-[8px] border border-line bg-surface p-3.5">
           {chains === null && !error ? (
             <p className="text-[13px] text-muted">Loading networks…</p>
           ) : null}

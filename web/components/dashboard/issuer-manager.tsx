@@ -22,7 +22,7 @@ import { useMerchant } from "./session";
  * the actions — rename it, move its contact address (which unproves it,
  * because a different mailbox is a different claim), prove the one it has,
  * and attach or drop saved wallets. Deposits settle to the account's own
- * Payday wallet unless a saved one is chosen on the request, so an identity
+ * Gum wallet unless a saved one is chosen on the request, so an identity
  * needs none to be issued under. Nothing here can reach a deposit request already
  * issued; those carry their own snapshot.
  */
@@ -44,11 +44,11 @@ export function IssuerManager({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="font-heading text-[24px] leading-tight font-medium tracking-[-0.04em]">
-            Issuer identities<span className="text-brand-yellow">.</span>
+            Issuer identities.
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
             Manage the identity used to issue deposit requests. By default, deposits settle to your
-            Payday wallet, unless you override this for an identity.
+            Gum wallet, unless you override this for an identity.
           </p>
         </div>
         <AddButton label="New issuer identity" onClick={onAdd} />
@@ -292,7 +292,7 @@ function IssuerRow({
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-[12px] border bg-surface transition-colors",
+        "overflow-hidden rounded-[10px] border bg-surface transition-colors",
         open ? "border-line-strong" : "border-line",
       )}
     >
@@ -314,7 +314,7 @@ function IssuerRow({
         />
         <span className="truncate text-[14px] font-medium">{issuer.name}</span>
         {issuer.email_verified ? (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-brand-green/40 px-2 py-0.5 text-[11px] text-brand-green">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gum-pink/40 px-2 py-0.5 text-[11px] text-gum-pink">
             <Check className="size-3" />
             Verified
           </span>
@@ -327,7 +327,7 @@ function IssuerRow({
           {issuer.contact_email}
         </span>
         <span className="tabular shrink-0 text-[12px] text-faint">
-          {count === 0 ? "Payday wallet" : `${count} saved wallet${count === 1 ? "" : "s"}`}
+          {count === 0 ? "Gum wallet" : `${count} saved wallet${count === 1 ? "" : "s"}`}
         </span>
       </button>
 
@@ -339,7 +339,7 @@ function IssuerRow({
             <div className="flex flex-wrap items-center gap-2">
               {wallets.length === 0 && !adding ? (
                 <span className="text-[12px] text-muted">
-                  Settles to your Payday wallet. Add a saved wallet to offer another destination.
+                  Settles to your Gum wallet. Add a saved wallet to offer another destination.
                 </span>
               ) : null}
               {wallets.map((entry) => {
@@ -350,7 +350,7 @@ function IssuerRow({
                     className={cn(
                       "inline-flex items-center gap-2 rounded-[8px] border py-1.5 pr-1.5 pl-3 text-[12px] transition-opacity",
                       entry.kind === "new"
-                        ? "border-brand-green/40 bg-brand-green/[0.07]"
+                        ? "border-gum-pink/40 bg-gum-pink/[0.07]"
                         : "border-line bg-raised",
                     )}
                   >

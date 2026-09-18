@@ -25,7 +25,7 @@ export function RecoveredFunds({ payment }: { payment: DepositRequest }) {
   return (
     <section
       aria-labelledby="recovered-funds"
-      className="min-w-0 rounded-[16px] border border-line bg-surface p-5"
+      className="min-w-0 rounded-[12px] border border-line bg-surface p-5"
     >
       <h2 id="recovered-funds" className="text-[13px] font-semibold tracking-tight">
         Returned to the payer
@@ -38,7 +38,7 @@ export function RecoveredFunds({ payment }: { payment: DepositRequest }) {
             (<span className="font-mono break-all">{payment.payer_wallet}</span>)
           </>
         ) : null}
-        , not to the payout address. Nothing is held by Payday.
+        , not to the payout address. Nothing is held by Gum.
       </p>
       <ul className="mt-4 divide-y divide-line text-[13px]">
         {remainder > 0n ? (

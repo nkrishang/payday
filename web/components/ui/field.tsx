@@ -9,7 +9,7 @@ import { cn } from "@/lib/cn";
  */
 
 export const controlStyles =
-  "w-full rounded-[10px] border border-line-strong bg-surface px-3 text-[14px] text-ink placeholder:text-faint disabled:opacity-50";
+  "w-full rounded-[8px] border border-line-strong bg-surface px-3 text-[14px] text-ink transition-colors placeholder:text-faint focus:border-ink disabled:opacity-50";
 
 export function Field({
   label,
@@ -75,7 +75,7 @@ export function Fieldset({
   children: React.ReactNode;
 }) {
   return (
-    <fieldset className="rounded-[16px] border border-line bg-surface p-5">
+    <fieldset className="rounded-[12px] border border-line bg-surface p-5">
       <legend className="px-1 text-[13px] font-semibold tracking-tight">{legend}</legend>
       {description ? <p className="mb-4 text-[13px] text-muted">{description}</p> : null}
       <div className="grid gap-4">{children}</div>

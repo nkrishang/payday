@@ -19,7 +19,7 @@ import { WithdrawPanel } from "./withdraw-panel";
  * The account: who is signed in, and the wallet that is theirs.
  *
  * Every account gets an embedded EVM wallet from Privy at its first sign-in.
- * It is the merchant's own — Payday never holds its key — and it is where
+ * It is the merchant's own — Gum never holds its key — and it is where
  * deposit requests settle unless one of an identity's saved wallets is
  * chosen instead. So it is shown here with what a merchant wants to know
  * about a wallet: the full address, ready to copy, and what is in it right
@@ -50,10 +50,10 @@ export function AccountSection({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="font-heading text-[24px] leading-tight font-medium tracking-[-0.04em]">
-            Account<span className="text-brand-yellow">.</span>
+            Account.
           </h2>
           <p className="mt-1.5 text-[13px] text-muted">
-            View your account details: sign-up email, Payday wallet and its balance.
+            View your account details: sign-up email, Gum wallet and its balance.
           </p>
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={signOut}>
@@ -62,12 +62,12 @@ export function AccountSection({
         </Button>
       </div>
 
-      <dl className="mt-6 grid gap-px overflow-hidden rounded-[12px] border border-line bg-line">
+      <dl className="mt-6 grid gap-px overflow-hidden rounded-[10px] border border-line bg-line">
         <Row label="Signed in as">
           <span className="text-[14px]">{account.email ?? email ?? "—"}</span>
         </Row>
 
-        <Row label="Payday wallet">
+        <Row label="Gum wallet">
           {wallet ? (
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <span className="min-w-0 font-mono text-[13px] break-all">{wallet}</span>
@@ -109,7 +109,7 @@ export function AccountSection({
               Export wallet key
             </Button>
             <span className="text-[12px] text-faint">
-              Payday never sees your private key. An exported key is needed for{" "}
+              Gum never sees your private key. An exported key is needed for{" "}
               <Link href="/docs/withdrawals" className="underline decoration-line underline-offset-2">
                 withdrawing from a server
               </Link>

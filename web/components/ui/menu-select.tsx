@@ -129,9 +129,9 @@ export function MenuSelect({
         onKeyDown={onTriggerKey}
         disabled={disabled}
         className={cn(
-          "mt-1.5 flex h-10 w-full items-center gap-2 rounded-[10px] border bg-surface pr-3 pl-3.5",
+          "mt-1.5 flex h-10 w-full items-center gap-2 rounded-[8px] border bg-surface pr-3 pl-3.5",
           "text-[13.5px] transition-colors hover:border-line-strong",
-          open ? "border-brand-green/60" : "border-line-strong",
+          open ? "border-ink" : "border-line-strong",
         )}
       >
         {selected?.badge}
@@ -153,7 +153,7 @@ export function MenuSelect({
           tabIndex={-1}
           ref={(node) => node?.focus()}
           onKeyDown={onListKey}
-          className="dash-menu absolute z-30 mt-1.5 max-h-[320px] w-full min-w-[200px] overflow-y-auto rounded-[10px] border border-line-strong bg-raised p-1 shadow-xl outline-none"
+          className="dash-menu absolute z-30 mt-1.5 max-h-[320px] w-full min-w-[200px] overflow-y-auto rounded-[10px] border border-line-strong bg-surface p-1 shadow-[0_18px_40px_-16px_rgb(18_18_18/0.35)] outline-none"
         >
           {options.map((option, index) => (
             <li
@@ -165,7 +165,7 @@ export function MenuSelect({
               onClick={() => choose(option.value)}
               className={cn(
                 "flex cursor-pointer items-center gap-2 rounded-[7px] px-2.5 py-2 text-[13.5px]",
-                index === active ? "bg-surface text-ink" : "text-muted",
+                index === active ? "bg-raised text-ink" : "text-muted",
               )}
             >
               {option.badge}
@@ -174,7 +174,7 @@ export function MenuSelect({
                 <span className="truncate text-[12px] text-faint">{option.detail}</span>
               ) : null}
               {option.value === value ? (
-                <Check className="ml-auto size-3.5 shrink-0 text-brand-green" />
+                <Check className="ml-auto size-3.5 shrink-0 text-gum-pink" />
               ) : null}
             </li>
           ))}

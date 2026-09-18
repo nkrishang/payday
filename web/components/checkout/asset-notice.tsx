@@ -11,7 +11,7 @@ export function AssetNotice({ payment }: { payment: ReadyPayerDepositRequest }) 
   const explorer = chainById(payment.chain.id)?.explorerUrl ?? null;
   const tokenExplorer = explorerTokenUrl(explorer, payment.token.address);
   return (
-    <div className="rounded-[10px] border border-line bg-raised px-3.5 py-3">
+    <div className="rounded-[8px] border border-line bg-raised px-3.5 py-3">
       <p className="text-[13px] leading-relaxed text-muted">
         Send only native{" "}
         <span className="font-medium text-ink">{payment.token.symbol}</span> on{" "}

@@ -102,16 +102,16 @@ test("a new merchant is put straight to work: identity, contact, first request",
 
   // Setting up leads into a guided tour, not the blank composer — and there
   // is no way to skip it.
-  await expect(page.getByRole("heading", { name: "Welcome to Payday." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome to Gum." })).toBeVisible();
   await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 
-  // Every field is fixed and inert: this is Payday billing itself, so the
+  // Every field is fixed and inert: this is Gum billing itself, so the
   // merchant can watch the whole product work before using it for real. It
   // settles to the account's own wallet.
   await expect(page.getByLabel("Amount")).toHaveValue("0.000001");
   await expect(page.getByText(truncate(wallet))).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByLabel("Payer")).toHaveValue("Payday");
+  await expect(page.getByLabel("Payer")).toHaveValue("Gum");
   await expect(page.getByLabel("Email")).toHaveValue("onboarding@payday.sh");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Expected payer email")).toHaveValue("onboarding@payday.sh");
@@ -121,11 +121,11 @@ test("a new merchant is put straight to work: identity, contact, first request",
   const summary = page.getByLabel("Request summary");
   await expect(summary).toContainText("0.000001");
   await expect(summary).toContainText("Acme Inc.");
-  await expect(summary).toContainText("Payday");
+  await expect(summary).toContainText("Gum");
   await expect(summary).toContainText("Verified email");
   await expect(summary).toContainText(truncate(wallet));
 
-  // A payer typed fresh, exactly like the real composer: Payday
+  // A payer typed fresh, exactly like the real composer: Gum
   // becomes a saved customer, not just a name on this one invoice.
   const customerCreated = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/v1/customers"),
@@ -135,13 +135,13 @@ test("a new merchant is put straight to work: identity, contact, first request",
   );
   await page.getByRole("button", { name: "Issue deposit request" }).click();
   expect((await customerCreated).postDataJSON()).toEqual({
-    name: "Payday",
+    name: "Gum",
     email: "onboarding@payday.sh",
   });
   const body = (await created).postDataJSON();
   expect(body.customer_id).toBeTruthy();
   expect(body.payout_address).toBe(wallet);
-  expect(body.payer).toMatchObject({ name: "Payday", email: "onboarding@payday.sh" });
+  expect(body.payer).toMatchObject({ name: "Gum", email: "onboarding@payday.sh" });
   expect(body.payer_policy).toEqual({
     mode: "verified_email",
     expected_email: "onboarding@payday.sh",
@@ -168,12 +168,10 @@ test("a new merchant is put straight to work: identity, contact, first request",
   await expect(requests.getByText("No deposit requests yet.")).toBeVisible();
   await expect(requests.getByRole("button", { name: "New deposit request" })).toHaveCount(1);
 
-  // Payday itself is there in the customers table, not hidden: a real,
+  // Gum itself is there in the customers table, not hidden: a real,
   // reusable counterparty like any other. Scoped to the customer row's own
-  // link (by href) since the wordmark in the header is also named "Payday".
-  await expect(
-    page.locator('a[href*="/dashboard/customers/"]', { hasText: "Payday" }),
-  ).toBeVisible();
+  // link (by href) since the wordmark in the header is also named "Gum".
+  await expect(page.locator('a[href*="/dashboard/customers/"]', { hasText: "Gum" })).toBeVisible();
 });
 
 test("the composer keeps a running preview and can be stepped back through", async ({ page }) => {
@@ -226,10 +224,10 @@ test("a set-up merchant sees their requests, identities, and customers on one pa
   const row = identities.getByRole("button", { expanded: false });
   await expect(row).toContainText("Acme Inc.");
   await expect(row).toContainText("Verified");
-  await expect(row).toContainText("Payday wallet");
+  await expect(row).toContainText("Gum wallet");
   await row.click();
   // Opening a row opens its form: the fields are there, not behind an Edit.
-  await expect(identities.getByText(/Settles to your Payday wallet/)).toBeVisible();
+  await expect(identities.getByText(/Settles to your Gum wallet/)).toBeVisible();
   await expect(identities.getByLabel("Issued by")).toHaveValue("Acme Inc.");
   await expect(identities.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
 
@@ -277,7 +275,7 @@ test("a saved wallet can be added, chosen on a request, and removed again", asyn
 
   const identities = page.getByRole("region", { name: "Issuer identities" });
   const row = identities.getByRole("button", { expanded: false });
-  await expect(row).toContainText("Payday wallet");
+  await expect(row).toContainText("Gum wallet");
   await row.click();
 
   await identities.getByRole("button", { name: "Add wallet" }).click();
@@ -299,7 +297,7 @@ test("a saved wallet can be added, chosen on a request, and removed again", asyn
   // With two destinations the composer asks, defaulting to the account's own.
   await page.getByRole("button", { name: "New deposit request" }).click();
   const settles = page.getByRole("radiogroup", { name: "Settles to" });
-  await expect(settles.getByRole("radio", { name: "Payday wallet" })).toBeChecked();
+  await expect(settles.getByRole("radio", { name: "Gum wallet" })).toBeChecked();
   const preview = page.getByRole("complementary");
   await expect(preview).toContainText(truncate(wallet));
   await settles.getByRole("radio", { name: "Treasury" }).click();
@@ -311,7 +309,7 @@ test("a saved wallet can be added, chosen on a request, and removed again", asyn
   await identities.getByRole("button", { name: "Remove Treasury" }).click();
   await expect(save).toBeEnabled();
   await save.click();
-  await expect(identities.getByRole("button", { expanded: true })).toContainText("Payday wallet");
+  await expect(identities.getByRole("button", { expanded: true })).toContainText("Gum wallet");
   await expect(identities.getByText("Treasury")).toBeHidden();
 });
 
@@ -537,7 +535,7 @@ test("a read that keeps failing becomes a page that says so, and recovers on ret
   const problem = page.getByRole("alert").filter({ hasText: "Couldn't load your dashboard." });
   await expect(problem).toBeVisible({ timeout: 30_000 });
   await expect(problem).toContainText("Couldn't load your dashboard.");
-  await expect(problem).toContainText("Payday is temporarily unavailable.");
+  await expect(problem).toContainText("Gum is temporarily unavailable.");
   await expect(problem).toContainText(
     "upstream timeout (request 01a09f98-0000-7551-bb0c-61a13ec56e1d)",
   );

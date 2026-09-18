@@ -10,10 +10,10 @@ import { useInView } from "./stage";
 
 /**
  * The route a deposit takes, left to right: from wherever the payer's funds
- * are, through the deposit's own address, to the merchant's wallet on the
- * chain they chose. Every cycle of the pay button lights the source it
- * names, a chain the funds could be on, and the chain they settle on; the
- * packets on the connectors never stop.
+ * are, through the deposit's own address, to the user's balance in the
+ * merchant's app, settled on the chain the merchant chose. Every cycle of
+ * the pay button lights the source it names, a chain the funds could be on,
+ * and the chain they settle on; the packets on the connectors never stop.
  */
 
 /** Where a deposit can settle. */
@@ -23,7 +23,8 @@ const SETTLES_ON = [
   { name: "Arbitrum", src: "/logos/arbitrum.svg" },
 ] as const;
 
-const WALLET = "0x3C44…93BC";
+/** Whose balance the deposit lands in: a user of the merchant's app. */
+const USER = "james@myapp.xyz";
 
 /** Where each currency can settle: USDT has no Base contract Gum will use. */
 const SETTLES_FOR: Record<Currency, readonly number[]> = {
@@ -106,9 +107,17 @@ export function Router() {
         className="rounded-[14px] border border-gum-grey/30 bg-gum-white p-5"
       >
         <p className="text-[11px] font-medium tracking-[0.14em] text-gum-grey uppercase">
-          Your wallet
+          App balance
         </p>
-        <p className="mt-1.5 font-mono text-[15px]">{WALLET}</p>
+        <p className="mt-1.5 flex items-center gap-2 text-[15px] font-medium">
+          <span
+            aria-hidden="true"
+            className="flex size-5 items-center justify-center rounded-full bg-gum-black text-[10px] font-semibold text-gum-white"
+          >
+            J
+          </span>
+          {USER}
+        </p>
         <p className="mt-5 text-[11px] font-medium tracking-[0.14em] text-gum-grey uppercase">
           Settles on
         </p>

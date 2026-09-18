@@ -156,7 +156,7 @@ export function WalletPay({
 
   if (!supported || !target || !configured) {
     return (
-      <p className="rounded-[10px] border border-line px-3.5 py-3 text-[13px] leading-relaxed text-muted">
+      <p className="rounded-[8px] border border-line px-3.5 py-3 text-[13px] leading-relaxed text-muted">
         This checkout cannot pay on {payment.chain.name} with {truncateAddress(payment.token.address)}
         {configured ? " (the token contract does not match its configuration)" : ""}. Pay by
         scanning the code or copying the address instead, on {payment.chain.name}.

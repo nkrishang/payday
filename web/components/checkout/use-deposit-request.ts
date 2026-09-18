@@ -30,7 +30,7 @@ export interface LiveDepositRequest {
 /**
  * Keeps the server-rendered deposit request live.
  *
- * Reads go straight to the Payday API rather than through this app's server:
+ * Reads go straight to the Gum API rather than through this app's server:
  * the payer routes are public, keyless and CORS-enabled, so a proxy would add a
  * hop and a second copy of the contract without buying anything.
  *

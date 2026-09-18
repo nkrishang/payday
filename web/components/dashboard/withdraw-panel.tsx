@@ -29,10 +29,10 @@ import { useMerchant, useResource } from "./session";
 import type { BalanceSnapshot } from "./account-section";
 
 /**
- * Withdrawing: the Payday wallet's whole balance in one currency to one
+ * Withdrawing: the Gum wallet's whole balance in one currency to one
  * address the merchant names: USDC from every network, since it bridges
  * through CCTP at 1:1; USDT from the destination network alone, since it
- * does not bridge and Payday never quotes the merchant a rate.
+ * does not bridge and Gum never quotes the merchant a rate.
  *
  * Prepare, sign, submit, poll — the same four steps the API offers a server,
  * done here with the wallet Privy holds for the merchant. The API snapshots
@@ -40,9 +40,9 @@ import type { BalanceSnapshot } from "./account-section";
  * document to sign under that network's token contract (an EIP-3009
  * authorization).
  * The page checks each document against the leg before asking the wallet
- * for a signature, then hands the signatures back; from there Payday relays
+ * for a signature, then hands the signatures back; from there Gum relays
  * and pays gas, and this panel only watches. A leg's signature fixes where
- * its funds may land, so nothing Payday does afterwards can redirect them.
+ * its funds may land, so nothing Gum does afterwards can redirect them.
  */
 
 type Stage =
@@ -93,8 +93,8 @@ export function WithdrawPanel({
       if (cause instanceof PaydayError && cause.code === "nothing_to_withdraw") {
         setFailure(
           bridges(currency)
-            ? `Your Payday wallet holds no ${currency} on any network right now.`
-            : `Your Payday wallet holds no ${currency} on ${chainById(destinationChain)?.name ?? "that network"}. ${currency} does not bridge: withdraw each network's balance to an address on that network.`,
+            ? `Your Gum wallet holds no ${currency} on any network right now.`
+            : `Your Gum wallet holds no ${currency} on ${chainById(destinationChain)?.name ?? "that network"}. ${currency} does not bridge: withdraw each network's balance to an address on that network.`,
         );
       } else if (cause instanceof PaydayError && cause.code === "withdrawal_in_progress") {
         setFailure("A withdrawal is already in progress. Continue it below, or cancel it first.");
@@ -271,14 +271,14 @@ export function WithdrawPanel({
   };
 
   return (
-    <div className="overflow-hidden rounded-[12px] border border-line bg-surface" aria-label="Withdraw">
+    <div className="overflow-hidden rounded-[10px] border border-line bg-surface" aria-label="Withdraw">
       <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
         <span className="text-[14px] font-medium">Withdraw</span>
-        <span className="min-w-0 flex-1 text-[12px] text-faint">
-          Move everything in your Payday wallet to your selected destination address and chain.
+        <span className="min-w-[260px] flex-1 basis-0 text-[12px] text-faint">
+          Move everything in your Gum wallet to your selected destination address and chain.
           USDC moves from every network; USDT moves from the destination network only. The
           wait-time depends on the destination chain.{" "}
-          <span className="font-medium text-brand-green">No fees apply.</span>
+          <span className="font-medium text-gum-pink">No fees apply.</span>
         </span>
         {stage.kind === "idle" ? (
           <Button
@@ -383,7 +383,7 @@ export function WithdrawPanel({
             to {stage.withdrawal.destination.chain.name}
           </p>
           <p className="mt-1 text-[12.5px] text-muted">
-            Your wallet signs one authorization per network. Payday relays them and pays the gas;
+            Your wallet signs one authorization per network. Gum relays them and pays the gas;
             each signature only permits that leg&apos;s funds to reach{" "}
             <span className="font-mono">{truncateAddress(stage.withdrawal.destination.address)}</span>.
           </p>
@@ -492,7 +492,7 @@ function CurrencyChoice({
       disabled={disabled}
       onClick={onSelect}
       className={cn(
-        "flex w-full items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3 text-left transition-colors",
+        "flex w-full items-center justify-between gap-3 rounded-[8px] border px-3.5 py-3 text-left transition-colors",
         checked ? "border-ink bg-raised" : "border-line hover:border-muted disabled:opacity-60",
       )}
     >
@@ -542,7 +542,7 @@ function NetworkChoice({
       disabled={disabled}
       onClick={onSelect}
       className={cn(
-        "flex w-full items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3 text-left transition-colors",
+        "flex w-full items-center justify-between gap-3 rounded-[8px] border px-3.5 py-3 text-left transition-colors",
         checked ? "border-ink bg-raised" : "border-line hover:border-muted disabled:opacity-60",
       )}
     >
@@ -568,7 +568,7 @@ function NetworkChoice({
 
 function LegList({ withdrawal }: { withdrawal: Withdrawal }) {
   return (
-    <ul className="mt-3 divide-y divide-line rounded-[10px] border border-line" aria-label="Legs">
+    <ul className="mt-3 divide-y divide-line rounded-[8px] border border-line" aria-label="Legs">
       {withdrawal.legs.map((leg) => (
         <LegRow key={leg.id} leg={leg} withdrawal={withdrawal} />
       ))}
@@ -613,7 +613,7 @@ function LegRow({ leg, withdrawal }: { leg: WithdrawalLeg; withdrawal: Withdrawa
       ))}
       {leg.kind === "bridge" && leg.state === "awaiting_signature" && leg.authorization?.forwarder ? (
         <span className="basis-full text-[11.5px] text-faint">
-          Pays Payday&apos;s forwarder{" "}
+          Pays Gum&apos;s forwarder{" "}
           <span className="font-mono">{truncateAddress(leg.authorization.forwarder)}</span>, which can
           only burn towards your address.{" "}
           <Link href="/docs/withdrawals" className="underline decoration-line underline-offset-2">

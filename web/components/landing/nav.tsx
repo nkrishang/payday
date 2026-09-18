@@ -1,15 +1,46 @@
 "use client";
 
-import { ChevronDown } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { ChevronDown, Mail } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ComponentType, type SVGProps } from "react";
 import { cn } from "@/lib/cn";
+import { GitHubIcon, XIcon } from "./icons";
 import { RESOURCES } from "./links";
 
-/** The header's one dropdown: a button, a list, and the usual ways to close it. */
-export function ResourcesMenu() {
+const ICONS: Record<(typeof RESOURCES)[number]["label"], ComponentType<SVGProps<SVGSVGElement>>> = {
+  GitHub: GitHubIcon,
+  X: XIcon,
+  Support: Mail,
+};
+
+/** How long the pointer may be off the menu before it closes: long enough
+ *  to cross from the button to the list, or to overshoot a row. */
+const CLOSE_DELAY_MS = 140;
+
+/**
+ * The header's one dropdown. It opens under the pointer and closes once the
+ * pointer has left it; a tap or a keypress toggles it for touch and keyboard
+ * users, and Escape, an outside click or focus leaving it all close it.
+ */
+export function ResourcesMenu({ tone = "light" }: { tone?: "light" | "dark" }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const menuId = useId();
+
+  const cancelClose = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+  };
+  const show = () => {
+    cancelClose();
+    setOpen(true);
+  };
+  const hideSoon = () => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => setOpen(false), CLOSE_DELAY_MS);
+  };
+
+  useEffect(() => cancelClose, []);
 
   useEffect(() => {
     if (!open) return;
@@ -29,7 +60,15 @@ export function ResourcesMenu() {
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div
+      ref={rootRef}
+      className="relative"
+      onMouseEnter={show}
+      onMouseLeave={hideSoon}
+      onBlur={(event) => {
+        if (!rootRef.current?.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
       <button
         type="button"
         aria-haspopup="menu"
@@ -37,8 +76,9 @@ export function ResourcesMenu() {
         aria-controls={menuId}
         onClick={() => setOpen((current) => !current)}
         className={cn(
-          "flex items-center gap-1.5 rounded-[4px] transition-colors hover:text-gum-black",
-          open && "text-gum-black",
+          "flex items-center gap-1.5 rounded-[4px] transition-colors",
+          tone === "dark" ? "hover:text-gum-white" : "hover:text-gum-black",
+          open && (tone === "dark" ? "text-gum-white" : "text-gum-black"),
         )}
       >
         Resources
@@ -48,26 +88,34 @@ export function ResourcesMenu() {
         />
       </button>
       {open ? (
-        <ul
-          id={menuId}
-          role="menu"
-          className="landing-dialog absolute top-full right-0 z-50 mt-3 w-[172px] rounded-[10px] border border-gum-grey/30 bg-gum-white p-1.5 text-[15px] text-gum-black shadow-[0_18px_40px_-16px_rgb(18_18_18/0.35)]"
-        >
-          {RESOURCES.map((entry) => (
-            <li key={entry.label} role="none">
-              <a
-                role="menuitem"
-                href={entry.href}
-                target={entry.href.startsWith("mailto:") ? undefined : "_blank"}
-                rel={entry.href.startsWith("mailto:") ? undefined : "noopener noreferrer"}
-                onClick={() => setOpen(false)}
-                className="block rounded-[6px] px-3 py-2 transition-colors hover:bg-gum-black/[0.05]"
-              >
-                {entry.label}
-              </a>
-            </li>
-          ))}
-        </ul>
+        // The padding is the bridge: the gap between the button and the list
+        // stays inside the menu, so crossing it never counts as leaving.
+        <div className="absolute top-full right-0 z-50 pt-3">
+          <ul
+            id={menuId}
+            role="menu"
+            className="landing-dialog w-[188px] rounded-[10px] border border-gum-grey/30 bg-gum-white p-1.5 text-[15px] text-gum-black shadow-[0_18px_40px_-16px_rgb(18_18_18/0.35)]"
+          >
+            {RESOURCES.map((entry) => {
+              const Icon = ICONS[entry.label];
+              return (
+                <li key={entry.label} role="none">
+                  <a
+                    role="menuitem"
+                    href={entry.href}
+                    target={entry.href.startsWith("mailto:") ? undefined : "_blank"}
+                    rel={entry.href.startsWith("mailto:") ? undefined : "noopener noreferrer"}
+                    onClick={() => setOpen(false)}
+                    className="group flex items-center gap-2.5 rounded-[6px] px-3 py-2 transition-colors hover:bg-gum-black/[0.05]"
+                  >
+                    <Icon className="size-4 shrink-0 text-gum-grey transition-colors group-hover:text-gum-black" />
+                    {entry.label}
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       ) : null}
     </div>
   );

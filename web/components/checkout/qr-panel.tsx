@@ -59,9 +59,9 @@ export function QrPanel({
 
   return (
     <div className="flex flex-col items-center">
-      <div className="relative rounded-[12px] border border-line bg-white p-3">
+      <div className="relative rounded-[10px] border border-line bg-surface p-3">
         {state.status === "loading" ? (
-          <div className="size-[196px] animate-pulse rounded-md bg-neutral-200" aria-hidden />
+          <div className="size-[196px] animate-pulse rounded-md bg-raised" aria-hidden />
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
           <img

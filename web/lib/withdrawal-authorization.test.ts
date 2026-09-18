@@ -145,7 +145,7 @@ describe("checkLegAuthorization", () => {
     });
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ to: DESTINATION }))).toMatch(/forwarder/);
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ value: "1" }))).toMatch(/amount/);
-    expect(checkLegAuthorization(WITHDRAWAL, withMessage({ from: FORWARDER }))).toMatch(/Payday wallet/);
+    expect(checkLegAuthorization(WITHDRAWAL, withMessage({ from: FORWARDER }))).toMatch(/Gum wallet/);
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ nonce: `0x${"99".repeat(32)}` }))).toMatch(/nonce/);
     expect(checkLegAuthorization(WITHDRAWAL, withMessage({ validBefore: "1" }))).toMatch(/expired/);
     expect(

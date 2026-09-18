@@ -1,17 +1,15 @@
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
 import type { CSSProperties, ReactNode } from "react";
 import { GumMark } from "@/components/landing/gum-mark";
-import { RESOURCES } from "@/components/landing/links";
-import { ResourcesMenu } from "@/components/landing/nav";
 import { Policies } from "@/components/landing/policies";
 import { Reveal } from "@/components/landing/reveal";
 import { Router } from "@/components/landing/router";
 import { GetStarted } from "@/components/landing/signup-dialog";
 import { Surfaces } from "@/components/landing/surfaces";
 import { MerchantAuth } from "@/components/merchant-auth";
-import { PricingDialog } from "@/components/pricing-dialog";
+import { SiteFooter } from "@/components/site-footer";
+import { SiteHeader } from "@/components/site-header";
 
 export const metadata: Metadata = {
   title: "Gum — stablecoin deposits that stick.",
@@ -19,8 +17,6 @@ export const metadata: Metadata = {
     "Gum mints a programmable address for every deposit: who can fund it, when it expires, where it settles. Your user pays from any wallet, exchange or chain. You get one webhook.",
   alternates: { canonical: "/" },
 };
-
-const SUPPORT_EMAIL = "support@gum.money";
 
 /**
  * The landing page. One ruled column; the hero is the route a deposit
@@ -33,29 +29,7 @@ export default function Home() {
   return (
     <MerchantAuth>
       <div className="landing flex min-h-screen flex-col bg-gum-white text-gum-black">
-        <header className="landing-reveal relative z-40 border-b border-gum-grey/30">
-          <nav className="mx-auto flex h-[60px] max-w-[1360px] items-center justify-between px-4 sm:h-[76px] sm:px-10">
-            <Link href="/" aria-label="Gum" className="rounded-[4px]">
-              <Image
-                src="/gum/logo.png"
-                width={1279}
-                height={465}
-                priority
-                sizes="100px"
-                alt="Gum"
-                className="h-auto w-[70px] sm:w-[96px]"
-              />
-            </Link>
-
-            <div className="flex items-center gap-4 text-[14px] text-gum-grey sm:gap-8 sm:text-[16px]">
-              <PricingDialog appearance="light" />
-              <Link href="/docs" className="transition-colors hover:text-gum-black">
-                Docs
-              </Link>
-              <ResourcesMenu />
-            </div>
-          </nav>
-        </header>
+        <SiteHeader reveal />
 
         <main className="relative mx-auto flex w-full max-w-[1360px] flex-1 flex-col border-gum-grey/30 xl:border-x">
           <span
@@ -171,33 +145,7 @@ export default function Home() {
           </Reveal>
         </main>
 
-        <footer className="bg-gum-black text-gum-white">
-          <div className="mx-auto flex h-[56px] max-w-[1360px] items-center justify-between gap-3 px-4 sm:h-[64px] sm:px-10">
-            <Image
-              src="/gum/logo-on-dark.png"
-              width={1279}
-              height={465}
-              sizes="90px"
-              alt="Gum"
-              className="h-auto w-[62px] shrink-0 sm:w-[86px]"
-            />
-
-            <div className="flex min-w-0 items-center gap-2 sm:gap-4">
-              <a
-                href={`mailto:${SUPPORT_EMAIL}`}
-                className="truncate text-[13px] text-gum-pink transition-colors hover:text-gum-white sm:mr-2 sm:text-[15px]"
-              >
-                {SUPPORT_EMAIL}
-              </a>
-              <SocialLink label="X">
-                <XIcon />
-              </SocialLink>
-              <SocialLink label="GitHub">
-                <GitHubIcon />
-              </SocialLink>
-            </div>
-          </div>
-        </footer>
+        <SiteFooter />
       </div>
     </MerchantAuth>
   );
@@ -284,21 +232,6 @@ function Chapter({
   );
 }
 
-function SocialLink({ label, children }: { label: string; children: ReactNode }) {
-  const href = RESOURCES.find((entry) => entry.label === label)?.href;
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={label}
-      className="flex size-7 shrink-0 items-center justify-center rounded-[6px] text-gum-white transition-colors hover:text-gum-pink sm:size-8 [&>svg]:size-[16px] sm:[&>svg]:size-[18px]"
-    >
-      {children}
-    </a>
-  );
-}
-
 function BookIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="size-5" fill="none">
@@ -308,22 +241,6 @@ function BookIcon() {
         strokeWidth="1.6"
         strokeLinejoin="round"
       />
-    </svg>
-  );
-}
-
-function XIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M17.75 3h3.07l-6.7 7.66L22 21h-6.17l-4.84-6.32L5.46 21H2.39l7.17-8.2L2 3h6.33l4.37 5.78L17.75 3Zm-1.08 16.16h1.7L7.4 4.74H5.57l11.1 14.42Z" />
-    </svg>
-  );
-}
-
-function GitHubIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.57 9.57 0 0 1 12 6.83c.85 0 1.69.11 2.49.34 1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.86v2.75c0 .27.18.58.69.48A10 10 0 0 0 12 2Z" />
     </svg>
   );
 }

@@ -128,7 +128,7 @@ export function DepositTable({
       {lockedCustomerId ? null : (
         <div>
           <h1 className="font-heading text-[30px] leading-tight font-medium tracking-[-0.045em]">
-            Deposits<span className="text-brand-yellow">.</span>
+            Deposits.
           </h1>
           <p className="mt-1.5 text-[13px] text-muted">
             Create deposit requests, monitor them and filter them by status.
@@ -227,7 +227,7 @@ export function DepositTable({
         />
       ) : null}
 
-      <div className="mt-4 overflow-x-auto rounded-[16px] border border-line bg-surface">
+      <div className="mt-4 overflow-x-auto rounded-[12px] border border-line bg-surface">
         {/* Fixed rather than content-driven, so the headers sit over their own
             column whatever the rows hold — including when there are none.
             Request is the widest because it also carries the disclosure

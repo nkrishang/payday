@@ -293,8 +293,8 @@ export function GetStarted({
         >
           <div className="flex items-start justify-between gap-4">
             <Image
-              src="/gum/logo.png"
-              width={1279}
+              src="/gum/logo.svg"
+              width={1280}
               height={465}
               alt="Gum"
               className="mt-0.5 h-auto w-[76px]"
