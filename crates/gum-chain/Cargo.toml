@@ -1,0 +1,29 @@
+[package]
+name = "gum-chain"
+version = "0.1.0"
+edition = "2024"
+description = "Chain adapter: read-only ChainReader, signing ChainExecutor, Alloy implementation and a test MockChain"
+
+[features]
+# In-memory chain fixture shared by gum-indexer and gum-signers tests.
+mock = []
+
+[dependencies]
+gum-core = { path = "../gum-core" }
+alloy-primitives = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-json-rpc = { workspace = true }
+alloy-provider = { workspace = true, features = ["ws"] }
+alloy-sol-types = { workspace = true }
+alloy-network = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-transport = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+alloy-consensus = { workspace = true }
+alloy-signer-local = { workspace = true }
+serde_json = { workspace = true }

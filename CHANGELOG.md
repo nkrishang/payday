@@ -53,7 +53,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   balance in one `TransferWithAuthorization` leg and nothing else; a
   balance elsewhere is withdrawn separately to an address on that network,
   and `409 nothing_to_withdraw` names it. Every leg carries `token`, the
-  contract its authorization is signed under. gatewayd reads each contract's
+  contract its authorization is signed under. gum-server reads each contract's
   `decimals()`, `name()`, `version()` and `DOMAIN_SEPARATOR()` at startup and
   refuses to start on a mismatch; USDT0 exposes no `version()`, and its
   separator hashes under `"1"`, which the reader settles by trying it. The
@@ -321,14 +321,14 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 - The public status page is gone: the `status.payday.sh` hostname, the
   separate ECS `status` service with its target group, listener rule, alarms,
-  log group, and IAM role, `gatewayd`'s `PAYDAY_STATUS_ONLY` mode and its
+  log group, and IAM role, `gum-server`'s `PAYDAY_STATUS_ONLY` mode and its
   `/`, `/live`, and unauthenticated `/v1/status` routes, the
   `PAYDAY_STATUS_INDEXER_STALE_SECONDS` setting, the API heartbeat and the
   `api_status` table that existed only to feed the page, and the
   public-status-incident runbook. The authenticated merchant `GET /v1/status`
   and the SDK's `status()` are unchanged.
 - The database schema is one baseline migration again.
-  `crates/gateway-db/migrations/0001_initial_schema.sql` now holds the whole
+  `crates/gum-ledger/migrations/0001_initial_schema.sql` now holds the whole
   schema that the pre-release chain of 21 migrations ended with (same
   tables, columns, constraints, indexes, functions, and triggers; the one
   constraint name PostgreSQL had truncated at 63 characters is spelled out
@@ -405,7 +405,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `PaymentFactory` and `Payment` contracts are unchanged.
 - The platform recovery wallet is gone. Overpayment remainders, expired
   balances, and late transfers return on-chain to the payer's attested
-  wallet; Payday custodies nothing. `gatewayd` no longer reads
+  wallet; Payday custodies nothing. `gum-server` no longer reads
   `PAYDAY_RECOVERY_ADDRESS`, Terraform drops `recovery_address` and the
   API task's precondition on it, and the `recovery` KMS key stays only as a
   legacy resource until any balance it holds is returned. The
@@ -413,7 +413,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   describe returns to the payer.
 - Proof of Payment v2 (`payday.proof.v2`): the proof carries the payer's
   wallet attestation (the exact typed data signed, its digest, and the
-  signature) and the recovery address, and `gateway_core::verify_proof`
+  signature) and the recovery address, and `gum_core::verify_proof`
   checks hash → attestation → salt → CREATE3 address, that every credited
   transfer came from the attested wallet, and a Payday attestation
   (`payday.attestation.v2`) that names the wallet, the challenge nonce, and
@@ -432,7 +432,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   returns `email` and `wallet_address`. Auth0 stays for the flows that prove
   a mailbox without creating an account — payers on gated invoices and
   issuer contact addresses — which outnumber merchant sign-ups many times
-  over. `gatewayd` takes `PAYDAY_PRIVY_APP_ID` (the app's public id; it
+  over. `gum-server` takes `PAYDAY_PRIVY_APP_ID` (the app's public id; it
   verifies ES256 identity tokens against Privy's published JWKS, `iss`
   `privy.io`, `aud` the app) and no longer reads `PAYDAY_AUTH0_ISSUER`,
   `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID`, or
@@ -482,7 +482,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   Payday is API-first with the dashboard for management: every command had an
   API route or a dashboard control behind it, and those remain. The offline
   Proof of Payment checks the CLI itemised live on in
-  `gateway_core::verify_proof`; the CLI's optional live receipt checks over
+  `gum_core::verify_proof`; the CLI's optional live receipt checks over
   JSON-RPC have no replacement yet.
 - The landing page's unused terminal demo and install components.
 
@@ -602,7 +602,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   attachment upload with scan progress. It signs in with the same emailed
   code as the CLI, and the API accepts the resulting short-lived identity
   token as a session credential on the payment, customer, and attachment
-  routes, so no API key ever reaches a browser. `gatewayd` reads
+  routes, so no API key ever reaches a browser. `gum-server` reads
   `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` to admit it.
 - Gated payer responses: for the verified policies the payer route returns
   only the issuer name, heading, requirements, and a masked expected mailbox
@@ -630,11 +630,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `verification_completed_at`, and `likely_unsolicited_at`; the event
   vocabulary gains `verification.approved`, `verification.declined`, and
   `payment.likely_unsolicited`.
-- Deployment code-hash pinning: `gatewayd` and the indexer require
+- Deployment code-hash pinning: `gum-server` and the indexer require
   `PAYDAY_FACTORY_CODE_HASH` and `PAYDAY_BATCH_SWEEPER_CODE_HASH` (keccak256 of
   the deployed runtime bytecode), compare them with the chain at startup,
   verify `BatchSweeper.factory()`, and refuse to start on a mismatch.
-  `gatewayd` therefore also reads `PAYDAY_RPC_URL` and
+  `gum-server` therefore also reads `PAYDAY_RPC_URL` and
   `PAYDAY_BATCH_SWEEPER_ADDRESS`; a status-only instance skips all of this.
   `just dev` and `just e2e` compute the hashes from the running chain, and
   Terraform gains `factory_code_hash`, `batch_sweeper_code_hash`, and
@@ -773,7 +773,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 ### Changed
 
 - `PAYDAY_AUTH0_CLIENT_ID` now names the `Payday Dashboard` single-page
-  application, the one merchant client `gatewayd` accepts: its tokens are the
+  application, the one merchant client `gum-server` accepts: its tokens are the
   session credential and, while fresh, the credential that issues an API key.
   `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`, the Terraform variable
   `dashboard_auth0_client_id`, and the Auth0 Action secret
@@ -819,7 +819,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   still sends the whole balance to recovery once expired. `PaymentFactory` and
   `BatchSweeper` are redeployed together as a new generation; their interfaces
   and the address formula are unchanged.
-- Recovery is platform-controlled. `gatewayd` reads `PAYDAY_RECOVERY_ADDRESS`
+- Recovery is platform-controlled. `gum-server` reads `PAYDAY_RECOVERY_ADDRESS`
   and stamps it on every payment; merchants can no longer choose where
   overpayments, expired balances, or late transfers go. Recovered funds are
   held by Payday, reviewed manually, and returned by the operator. Payday takes

@@ -25,9 +25,9 @@ address's recovery term. Payday custodies no stablecoin.
 | Component | Runs on | Public name | Source |
 |---|---|---|---|
 | Landing page, hosted checkout (`/pay/{id}`), merchant dashboard (`/dashboard`) | Vercel project rooted at `web/` | `payday.sh`, `www.payday.sh` | `web/` |
-| Merchant and payer API (`gatewayd`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gatewayd` |
-| Stablecoin indexer and sweep worker | ECS Fargate service `indexer`, one task running one worker per network watching every configured token contract, no inbound access | none | `crates/gateway-indexer` |
-| Database | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA | none | `crates/gateway-db/migrations` |
+| Merchant and payer API (`gum-server`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gum-server` |
+| Stablecoin indexer and sweep worker | ECS Fargate service `indexer`, one task running one worker per network watching every configured token contract, no inbound access | none | `crates/gum-indexer` |
+| Database | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA | none | `crates/gum-ledger/migrations` |
 | Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
 | Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
 | Merchant notification email | SES identity for `payday.sh` | `alerts@payday.sh` | `infra/` |
@@ -38,8 +38,8 @@ address's recovery term. Payday custodies no stablecoin.
 | RPC | One QuickNode paid endpoint per network, each its own Secrets Manager secret | | |
 | DNS | `payday.sh` at Vercel DNS; a Route53 public hosted zone for `api.payday.sh` delegated from it | | `infra/` |
 
-The `api` service runs the `gatewayd` image and the `indexer` service runs
-the `gateway-indexer` image. Both are built from the root `Dockerfile` and
+The `api` service runs the `gum-server` image and the `indexer` service runs
+the `gum-indexer` image. Both are built from the root `Dockerfile` and
 tagged `git-<full SHA>`.
 
 ## Accounts and assets the operator must provide
@@ -476,7 +476,7 @@ the image-to-source relationship and rollback deterministic.
 
 ### The database starts empty
 
-The schema is a single baseline, `crates/gateway-db/migrations/0001_initial_schema.sql`,
+The schema is a single baseline, `crates/gum-ledger/migrations/0001_initial_schema.sql`,
 embedded in both service images and applied by whichever service connects
 first. There is no migration from any earlier pre-release schema: a database
 that ran the old 21-file chain refuses the baseline outright, because its
@@ -607,7 +607,7 @@ cast wallet address --aws
 
 Publish that address as Payday's trusted attestor, in the API documentation
 and wherever proofs are downloaded, so merchants and auditors can hand it to
-whatever runs `gateway_core::verify_proof`; an attestation signed by anything
+whatever runs `gum_core::verify_proof`; an attestation signed by anything
 else must fail verification. The address changes only if the key is
 replaced, which changes the trust anchor of every earlier proof, so treat
 replacement as an announced cut-over, never as routine rotation.
@@ -616,7 +616,7 @@ replacement as an announced cut-over, never as routine rotation.
 
 The dashboard's onboarding walkthrough can pay one self-issued deposit
 request per account from a Payday-funded wallet. Terraform does not
-provision that key; the endpoint is disabled unless `gatewayd` is given
+provision that key; the endpoint is disabled unless `gum-server` is given
 `PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
 with, funded with a little gas and USDC on the onboarding chain:
 `PAYDAY_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
@@ -663,7 +663,7 @@ Vercel and a changed value needs a redeploy.
    domains. Preview deployments get their own `*.vercel.app` origins: the
    checkout works there because the payer API is public and CORS-open, but
    the dashboard does not, since Privy allows only the listed domains and
-   `gatewayd` accepts merchant-route requests from `checkout_base_url` only.
+   `gum-server` accepts merchant-route requests from `checkout_base_url` only.
    Test dashboard changes locally or on production.
 
 Vercel redeploys on every push to `main`. Because the web app and the API
@@ -760,7 +760,7 @@ before accepting real deposits. Confirm that:
 6. API and indexer logs contain no repeated errors.
 7. CloudWatch alarms and RDS backups are configured.
 8. `GET /v1/deposit-requests/{id}/proof` returns a proof whose attestation
-   `signer` is the address from §8, and `gateway_core::verify_proof` accepts
+   `signer` is the address from §8, and `gum_core::verify_proof` accepts
    it with that address as the trusted attestor.
 
 Do not advertise or depend on the service until this succeeds.
@@ -799,7 +799,7 @@ new migration has applied, a manual rollback to the pre-migration image
 will fail at startup on every task restart, including ECS's own circuit
 breaker. Roll back to an image built from the post-migration commit instead
 (same schema, previous behavior), or build a rollback image from the old
-application commit with the new `crates/gateway-db/migrations/` files added
+application commit with the new `crates/gum-ledger/migrations/` files added
 to it. Do not delete the row from `_sqlx_migrations` to force the old image
 to start: its notion of the schema is then missing an index it never reads,
 and the next migration to assume the table shape will not be the last thing

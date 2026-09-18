@@ -1,0 +1,8 @@
+[package]
+name = "gum-schema"
+version = "0.1.0"
+edition = "2024"
+description = "The one migration set for Gum's database: application, bus and execution schemas."
+
+[dependencies]
+sqlx = { workspace = true }

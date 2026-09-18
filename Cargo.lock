@@ -2536,141 +2536,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
-name = "gateway-core"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "alloy-sol-types",
- "chrono",
- "humantime",
- "k256",
- "rand 0.9.5",
- "serde",
- "serde_jcs",
- "serde_json",
- "sha2 0.10.9",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "gateway-db"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "base64",
- "chrono",
- "gateway-core",
- "hmac 0.12.1",
- "rand 0.9.5",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "gateway-indexer"
-version = "0.1.0"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-json-rpc",
- "alloy-network",
- "alloy-primitives",
- "alloy-provider",
- "alloy-pubsub",
- "alloy-rpc-client",
- "alloy-rpc-types-eth",
- "alloy-signer-aws",
- "alloy-signer-local",
- "alloy-sol-types",
- "alloy-transport",
- "alloy-transport-ws",
- "async-trait",
- "aws-config",
- "aws-sdk-kms",
- "chrono",
- "futures",
- "gateway-core",
- "gateway-db",
- "gateway-relay",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "gateway-relay"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "async-trait",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "gatewayd"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "alloy-network",
- "alloy-primitives",
- "alloy-provider",
- "alloy-rpc-types-eth",
- "alloy-signer",
- "alloy-signer-aws",
- "alloy-signer-local",
- "alloy-sol-types",
- "async-trait",
- "aws-config",
- "aws-sdk-kms",
- "aws-sdk-s3",
- "aws-sdk-sesv2",
- "axum",
- "base64",
- "chrono",
- "futures",
- "gateway-core",
- "gateway-db",
- "gateway-relay",
- "hex",
- "hmac 0.12.1",
- "jsonwebtoken",
- "p256",
- "pdf-writer",
- "qrcode",
- "rand 0.8.7",
- "rand 0.9.5",
- "reqwest 0.12.28",
- "rsa",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "utoipa",
- "uuid",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2745,6 +2610,248 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "gum-bus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gum-contracts",
+ "gum-schema",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "gum-chain"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-json-rpc",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "alloy-transport",
+ "async-trait",
+ "gum-core",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gum-contracts"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "chrono",
+ "gum-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "gum-core"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "chrono",
+ "humantime",
+ "k256",
+ "rand 0.9.5",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "gum-indexer"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-pubsub",
+ "alloy-rpc-client",
+ "alloy-rpc-types-eth",
+ "alloy-transport",
+ "alloy-transport-ws",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "gum-bus",
+ "gum-chain",
+ "gum-contracts",
+ "gum-core",
+ "gum-ledger",
+ "gum-schema",
+ "gum-telemetry",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "gum-ledger"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "base64",
+ "chrono",
+ "gum-bus",
+ "gum-contracts",
+ "gum-core",
+ "gum-schema",
+ "hmac 0.12.1",
+ "rand 0.9.5",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "gum-relay"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "gum-schema"
+version = "0.1.0"
+dependencies = [
+ "sqlx",
+]
+
+[[package]]
+name = "gum-server"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-signer",
+ "alloy-signer-aws",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-kms",
+ "aws-sdk-s3",
+ "aws-sdk-sesv2",
+ "axum",
+ "base64",
+ "chrono",
+ "futures",
+ "gum-core",
+ "gum-ledger",
+ "gum-relay",
+ "hex",
+ "hmac 0.12.1",
+ "jsonwebtoken",
+ "p256",
+ "pdf-writer",
+ "qrcode",
+ "rand 0.8.7",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "gum-signers"
+version = "0.1.0"
+dependencies = [
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-signer-aws",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-kms",
+ "axum",
+ "chrono",
+ "futures",
+ "gum-bus",
+ "gum-chain",
+ "gum-contracts",
+ "gum-core",
+ "gum-schema",
+ "gum-telemetry",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "gum-telemetry"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "gum-contracts",
+ "http 1.5.0",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -5626,6 +5733,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5635,12 +5752,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

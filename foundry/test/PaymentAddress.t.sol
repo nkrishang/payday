@@ -6,7 +6,7 @@ import {PaymentFactory} from "foundry/src/PaymentFactory.sol";
 
 /// @title PaymentAddress.t.sol
 /// @notice Cross-language parity test: Rust CREATE3 derivation vs Solidity.
-///         Uses vm.ffi to call the `derive-address` binary in gateway-core.
+///         Uses vm.ffi to call the `derive-address` binary in gum-core.
 contract PaymentAddressTest is Test {
     PaymentFactory public factory;
 
@@ -29,7 +29,7 @@ contract PaymentAddressTest is Test {
         address expected = factory.paymentAddress(token, amount, receiver, expirationTimestamp, recovery, salt, chainId);
 
         // --- Rust side via vm.ffi ---
-        // Uses the pre-built binary. Run `cargo build -p gateway-core --bin derive-address` first.
+        // Uses the pre-built binary. Run `cargo build -p gum-core --bin derive-address` first.
         string[] memory inputs = new string[](9);
         inputs[0] = "target/debug/derive-address";
         inputs[1] = vm.toString(address(factory));

@@ -77,7 +77,7 @@ the issuer's contract and are not served; Base carries USDC only.
 ### Chain registry
 
 Both services read one reviewed registry, `PAYDAY_CHAINS`, a JSON array
-parsed by `gateway_core::ChainRegistry` with one entry per network:
+parsed by `gum_core::ChainRegistry` with one entry per network:
 
 | Field | Meaning |
 |---|---|
@@ -98,7 +98,7 @@ Registry order is the order the checkout offers networks. The RPC endpoints
 stay out of the registry: `PAYDAY_RPC_URL_<chain_id>` per chain, with
 `PAYDAY_RPC_WS_URL_<chain_id>` overriding the derived WebSocket URL or
 `off` disabling the signal on that chain. Chain display names and native
-gas symbols are a table in `gateway_core::chain`, not configuration.
+gas symbols are a table in `gum_core::chain`, not configuration.
 
 Every deposit request is issued in one currency against every registry
 chain that serves it (a USDT request pins one, because USDT has no 1:1
@@ -118,7 +118,7 @@ until its transfer/log invariants have been checked.
 Deposit request creation carries a `currency` (USDC by default) and, for
 USDT, a `chain_id`; a USDC request offers every registry network and the
 payer chooses among them. The token is always that chain's configured
-contract for the currency. gatewayd reads each contract's `decimals()`,
+contract for the currency. gum-server reads each contract's `decimals()`,
 `name()`, and `version()` at startup (a missing getter is tolerated by
 trying `"1"` then `"2"` against `DOMAIN_SEPARATOR`) and refuses to start
 on a mismatch. Every served stablecoin has six decimals: parse and display

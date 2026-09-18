@@ -4,8 +4,8 @@ FROM rust:1.98.0-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --locked --release -p gatewayd -p gateway-indexer \
-    && strip target/release/gatewayd target/release/gateway-indexer
+RUN cargo build --locked --release -p gum-server -p gum-indexer \
+    && strip target/release/gum-server target/release/gum-indexer
 
 FROM debian:bookworm-slim AS rds-certs
 RUN apt-get update \
@@ -24,11 +24,11 @@ RUN apt-get update \
 COPY --from=rds-certs /aws-rds-global-bundle.pem /usr/local/share/ca-certificates/aws-rds-global-bundle.pem
 USER gateway
 
-FROM runtime AS gatewayd
-COPY --from=builder /app/target/release/gatewayd /usr/local/bin/gatewayd
+FROM runtime AS gum-server
+COPY --from=builder /app/target/release/gum-server /usr/local/bin/gum-server
 EXPOSE 8080
-ENTRYPOINT ["gatewayd"]
+ENTRYPOINT ["gum-server"]
 
-FROM runtime AS gateway-indexer
-COPY --from=builder /app/target/release/gateway-indexer /usr/local/bin/gateway-indexer
-ENTRYPOINT ["gateway-indexer"]
+FROM runtime AS gum-indexer
+COPY --from=builder /app/target/release/gum-indexer /usr/local/bin/gum-indexer
+ENTRYPOINT ["gum-indexer"]

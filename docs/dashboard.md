@@ -36,7 +36,7 @@ so a merchant is not sent into Privy's rate limit or left holding two live
 codes wondering which one the page wants.
 
 The web app is configured with the app it signs in to as
-`NEXT_PUBLIC_PRIVY_APP_ID` (see `web/.env.example`), the same id `gatewayd`
+`NEXT_PUBLIC_PRIVY_APP_ID` (see `web/.env.example`), the same id `gum-server`
 verifies sessions against. Locally that is the real development Privy app —
 there is no stand-in — so the code arrives in a real mailbox, and
 `http://127.0.0.1:3002` must be among the app's allowed domains.
@@ -46,7 +46,7 @@ or token is in server-rendered HTML or any build artifact, and every page is
 marked `noindex`.
 
 The dashboard calls the API from the browser with `GET`, `POST`, `PATCH`,
-`PUT`, and `DELETE`, so `gatewayd` answers cross-origin requests on the
+`PUT`, and `DELETE`, so `gum-server` answers cross-origin requests on the
 merchant routes from exactly one origin: the
 web origin it is configured with as `PAYDAY_PUBLIC_BASE_URL`. The dashboard
 must be served from that origin — `http://127.0.0.1:3002` locally,
@@ -282,7 +282,7 @@ merchant came for:
   the deterministic deposit request PDF (`GET /v1/deposit-requests/{id}/request.pdf`), and the
   Proof of Payment as JSON (`GET /v1/deposit-requests/{id}/proof`), which becomes
   available once the request settles and verifies offline
-  (`gateway_core::verify_proof`).
+  (`gum_core::verify_proof`).
 
 
 ## Verification and recovery indicators

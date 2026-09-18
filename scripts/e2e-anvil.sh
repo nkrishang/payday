@@ -47,13 +47,13 @@ MINIO_PORT="${PAYDAY_MINIO_PORT:-9000}"
 # MinIO removed its Docker Hub images; quay.io is the official registry now.
 MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
 MC_IMAGE="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
-# MinIO's root credentials double as the AWS credentials gatewayd signs with.
+# MinIO's root credentials double as the AWS credentials gum-server signs with.
 MINIO_CREDENTIAL="payday-local"
 ATTACHMENT_BUCKET="payday-attachments-local"
 
 export PAYDAY_RPC_URL="$RPC_URL"
 export PAYDAY_API_URL="$API_URL"
-# gatewayd listens where its clients (this suite, on PAYDAY_API_URL) expect it:
+# gum-server listens where its clients (this suite, on PAYDAY_API_URL) expect it:
 # derive the bind from the API URL so a suite run on shifted ports needs no
 # separate bind setting.
 export PAYDAY_BIND_ADDR="${PAYDAY_API_URL#http://}"
@@ -82,7 +82,7 @@ export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
 export PAYDAY_DEV_IDENTITY_BIND="${PAYDAY_DEV_IDENTITY_BIND:-127.0.0.1:3001}"
 export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://${PAYDAY_DEV_IDENTITY_BIND}}"
 # No PAYDAY_PRIVY_APP_ID: this suite runs offline on API keys minted straight
-# into its database, and gatewayd simply refuses dashboard sessions.
+# into its database, and gum-server simply refuses dashboard sessions.
 export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
 export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
 export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
@@ -161,7 +161,7 @@ wait_for_api() {
     fi
     sleep 0.1
   done
-  echo "gatewayd did not become ready" >&2
+  echo "gum-server did not become ready" >&2
   return 1
 }
 
@@ -233,7 +233,7 @@ chain_entry() {
       block_time_ms: 1000, log_range_size: 100}'
 }
 
-# gatewayd and the indexer read PAYDAY_CHAINS and refuse to start unless the
+# gum-server and the indexer read PAYDAY_CHAINS and refuse to start unless the
 # deployed runtime bytecode on each chain hashes to the registry's values, so
 # the registry is built from the freshly bootstrapped chains.
 build_chain_registry() {
@@ -582,15 +582,15 @@ curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known
 # The suite makes hundreds of API calls in a few minutes, well past a
 # production account's allowance; the scenario asserts on 429s only where the
 # limiter is the subject, so open the bucket up rather than pace every read.
-PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gatewayd >"$logs/gatewayd.log" 2>&1 &
-gatewayd_pid=$!
-pids+=("$gatewayd_pid")
+PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gum-server >"$logs/gum-server.log" 2>&1 &
+gum-server_pid=$!
+pids+=("$gum-server_pid")
 wait_for_api
 echo "Creating two accounts with keys minted straight into the database"
 PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test)"
 export PAYDAY_API_KEY
 SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test)"
-./target/debug/gateway-indexer >"$logs/indexer.log" 2>&1 &
+./target/debug/gum-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
 pids+=("$indexer_pid")
 
@@ -1517,7 +1517,7 @@ assert_eq 0 "$(usdt_balance "$MERCHANT_WALLET")" "the merchant wallet still hold
 
 assert_process_alive Anvil "$anvil_pid"
 assert_process_alive "second Anvil" "$second_anvil_pid"
-assert_process_alive gatewayd "$gatewayd_pid"
-assert_process_alive gateway-indexer "$indexer_pid"
+assert_process_alive gum-server "$gum-server_pid"
+assert_process_alive gum-indexer "$indexer_pid"
 
 echo "All Anvil end-to-end flows passed"

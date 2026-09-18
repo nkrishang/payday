@@ -25,7 +25,7 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 | `payday-indexer-cursor-lagging` | Cursor trails finality by more than 1,000 blocks | [stuck-deposit-request.md](stuck-deposit-request.md) step 3 |
 | `payday-indexer-sweep-backlog-stale` | Collectable funds have waited more than 15 minutes | [stuck-deposit-request.md](stuck-deposit-request.md) step 4 |
 | `payday-indexer-retryable-failures` | More than ten retryable RPC/database failures in five minutes | check the provider status page and indexer logs |
-| `payday-notification-delivery-failures` | Merchant email or webhook delivery repeatedly failed | inspect gatewayd logs and pending rows in `notification_outbox`; delivery retries automatically |
+| `payday-notification-delivery-failures` | Merchant email or webhook delivery repeatedly failed | inspect gum-server logs and pending rows in `notification_outbox`; delivery retries automatically |
 | `payday-notification-missing-contact` | A blocked legacy deposit request has neither an email nor webhook snapshot | recover the account contact, notify the merchant manually, and inspect `notification_outbox` |
 | `payday-db-high-cpu` | RDS CPU > 80% for 15 min | scale the instance |
 | `payday-db-low-storage` | RDS has < 5 GB free storage | raise `db_max_allocated_storage` |

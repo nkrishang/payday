@@ -1,0 +1,25 @@
+[package]
+name = "gum-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gum-core = { path = "../gum-core" }
+gum-schema = { path = "../gum-schema" }
+gum-contracts = { path = "../gum-contracts" }
+gum-bus = { path = "../gum-bus" }
+alloy-primitives = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+gum-core = { path = "../gum-core", features = ["test-helpers"] }

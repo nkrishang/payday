@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A stand-in for Relay (api.relay.link) for the local Anvil stack: enough of
 // `/chains`, `/quote/v2`, `/intents/status/v3`, and `/requests/v3` for
-// gatewayd to quote a cross-chain payment and for gateway-indexer to follow
+// gum-server to quote a cross-chain payment and for gum-indexer to follow
 // it, plus the solver's side, which Relay itself never exposes: once the
 // payer's deposit is seen on the origin Anvil, the stub sends the quoted
 // destination token from its own solver key to the recipient on the

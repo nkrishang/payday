@@ -114,7 +114,7 @@ curl -fsS "$API/v1/deposit-requests?limit=20&starting_after=<NEXT-CURSOR>" \
 Once settled, download the Proof of Payment. It ties the exact deposit request to its
 deposit address and the transfers that paid it, and verifies offline without
 trusting Payday's database; the checks are the ones in
-`gateway_core::verify_proof`, and the [API reference](api-reference.md)
+`gum_core::verify_proof`, and the [API reference](api-reference.md)
 describes what each field commits to:
 
 ```sh

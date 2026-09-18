@@ -130,7 +130,7 @@ such role.
 ## Schema changes
 
 Payday is pre-release, so the schema is one baseline file,
-`crates/gateway-db/migrations/0001_initial_schema.sql`, edited in place;
+`crates/gum-ledger/migrations/0001_initial_schema.sql`, edited in place;
 there are no incremental migrations to write. A database that applied the
 old file refuses the edited one (its checksum differs), so the deploy
 workflow compares the migrations directory between the deployed commit and

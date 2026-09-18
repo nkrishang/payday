@@ -33,9 +33,9 @@ fi
 aws ecr get-login-password --region "$region" \
   | docker login --username AWS --password-stdin "$registry"
 
-docker build --platform linux/amd64 --target gatewayd \
+docker build --platform linux/amd64 --target gum-server \
   --tag "$api_repository:$tag" .
-docker build --platform linux/amd64 --target gateway-indexer \
+docker build --platform linux/amd64 --target gum-indexer \
   --tag "$indexer_repository:$tag" .
 
 docker push "$api_repository:$tag"

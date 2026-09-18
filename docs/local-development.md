@@ -30,7 +30,7 @@ resolves the batch, and each ledger row raises a `deposit_request.recovered_fund
 webhook.
 
 The recovery wallet is the payer's attested wallet, never a configured or
-requested value: `gatewayd` rejects a create request that carries
+requested value: `gum-server` rejects a create request that carries
 `refund_address`.
 
 ```
@@ -116,7 +116,7 @@ skipped.
 
 Copy `.env.example` to `.env` if you want to override the checked-in local
 defaults. Start PostgreSQL, MinIO, Anvil, the development identity provider,
-`gatewayd`, and the indexer with multiplexed logs:
+`gum-server`, and the indexer with multiplexed logs:
 
 ```bash
 just dev
@@ -156,7 +156,7 @@ answer only that origin). Port 3002 rather than 3001, which belongs to the
 development identity provider. See [web/README.md](../web/README.md).
 
 For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_PRIVY_APP_ID`
-(the development Privy app, the same id the runner gives `gatewayd` as
+(the development Privy app, the same id the runner gives `gum-server` as
 `PAYDAY_PRIVY_APP_ID`; `http://127.0.0.1:3002` must be among that app's
 allowed domains) and `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
 `http://127.0.0.1:9000`, so the page may PUT PDFs there). The example file
@@ -274,12 +274,12 @@ set -a; source .env; set +a
 ./target/debug/payday-dev-identity
 ```
 
-Start `gatewayd` in another shell so it fetches the local signing key and
+Start `gum-server` in another shell so it fetches the local signing key and
 applies the database schema:
 
 ```bash
 set -a; source .env; set +a
-./target/debug/gatewayd
+./target/debug/gum-server
 ```
 
 Then mint an account and key with `scripts/local-api-key.sh` (it reads
@@ -290,7 +290,7 @@ In another terminal:
 
 ```bash
 set -a; source .env; set +a
-PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gateway-indexer
+PAYDAY_INDEXER_POLL_INTERVAL_MS=1000 ./target/debug/gum-indexer
 ```
 
 ### 5. Create a deposit request
@@ -374,7 +374,7 @@ uploads stay until the container is removed.
 
 ```bash
 DATABASE_URL=postgresql:///gateway?user="$USER" cargo test --workspace
-cargo build -p gateway-core --bin derive-address
+cargo build -p gum-core --bin derive-address
 forge test
 just web-check   # SDK and web app: build, types, lint, unit tests
 ```
@@ -395,7 +395,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 
 - `DATABASE_URL`
 - `PAYDAY_API_KEY` — CLI-only per-account bearer key for deposit requests
-- `PAYDAY_PRIVY_APP_ID` — the Privy app merchants sign in to; `gatewayd`
+- `PAYDAY_PRIVY_APP_ID` — the Privy app merchants sign in to; `gum-server`
   verifies dashboard sessions against its published keys, fetched at startup
   (see `docs/authentication.md`). `just dev` sets the development app; unset,
   only API keys authenticate, which is how `just e2e` runs
@@ -403,7 +403,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   Enables `POST /v1/wallets/pregenerate`, which the sign-up dialog calls the
   moment a merchant submits their email so Privy can create the embedded
   wallet in parallel with sending the code, instead of only starting once the
-  code is verified (`crates/gatewayd/src/pregenerated_wallet.rs`). Unset
+  code is verified (`crates/gum-server/src/pregenerated_wallet.rs`). Unset
   anywhere, sign-in still creates the wallet itself; the dialog just waits
   slightly longer for it. Rate-limited to one request per email per 30
   seconds, in memory, bounded the same way the proof cache is
@@ -461,7 +461,7 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `docs/indexer-architecture.md`)
 - `PAYDAY_RPC_URL_<chain_id>` — one HTTPS endpoint per registry chain
   (QuickNode in production, an Anvil locally); read by both services
-  (`gatewayd` uses it for deployment verification)
+  (`gum-server` uses it for deployment verification)
 - `PAYDAY_RPC_WS_URL_<chain_id>` — WebSocket endpoint for that chain's
   transfer signal; unset derives it from the HTTP URL (`https` → `wss`,
   `http` → `ws`, same host, path and token), `off` disables the signal
@@ -497,8 +497,8 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   polls for a bridge leg's burn, default `https://iris-api.circle.com`; the
   local Anvil chains have no `cctp` block, so nothing polls it there
 - `PAYDAY_RELAY_URL` and `PAYDAY_RELAY_API_KEY` — Relay (relay.link), for
-  paying a deposit request from another network; both `gatewayd` (quotes)
-  and `gateway-indexer` (following reported quotes) read them. Unset key:
+  paying a deposit request from another network; both `gum-server` (quotes)
+  and `gum-indexer` (following reported quotes) read them. Unset key:
   the hosted checkout does not offer it. `just dev` and `just e2e` point
   them at `scripts/relay-stub.mjs`, a stand-in on port 4020 that quotes a
   transfer of the local USDC or USDT (`RELAY_STUB_USDC`, `RELAY_STUB_USDT`)

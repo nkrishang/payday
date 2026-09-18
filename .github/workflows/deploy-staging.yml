@@ -121,7 +121,7 @@ jobs:
           if [[ "$deployed" =~ ^git-[0-9a-f]{40}$ && "$old_sha" != "$sha" ]]; then
             git fetch --no-tags --depth=1 origin "$old_sha" 2>/dev/null || true
             if git cat-file -e "${old_sha}^{commit}" 2>/dev/null; then
-              if git diff --quiet "$old_sha" "$sha" -- crates/gateway-db/migrations; then
+              if git diff --quiet "$old_sha" "$sha" -- crates/gum-ledger/migrations; then
                 echo "schema unchanged since $deployed"
               else
                 echo "schema changed since $deployed; recreating staging's database"

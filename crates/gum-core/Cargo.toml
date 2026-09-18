@@ -1,0 +1,30 @@
+[package]
+name = "gum-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_jcs = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+humantime = { workspace = true }
+k256 = { workspace = true, optional = true }
+
+[features]
+## Raw-key signing of payer attestations, for tests and local tooling.
+test-helpers = ["dep:k256"]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+k256 = { workspace = true }
+
+[[bin]]
+name = "derive-address"
+path = "test-helpers/derive_address.rs"

@@ -15,11 +15,11 @@ Every same-chain leg, USDC or USDT0, is an EIP-3009
 | Leg state | Funds are | Who acts next |
 |---|---|---|
 | `awaiting_signature` | In the Payday wallet, untouched | The merchant (sign, or cancel). Expires 24 h after creation. |
-| `authorized` | In the Payday wallet, untouched | gateway-indexer on the source chain (`relay_step`). |
-| `relaying` | Moving: a `transferWithAuthorization` or (USDC only) `WithdrawalForwarder.bridge` is in flight | gateway-indexer: receipt, fee bump, or reconciliation of a consumed nonce. |
+| `authorized` | In the Payday wallet, untouched | gum-indexer on the source chain (`relay_step`). |
+| `relaying` | Moving: a `transferWithAuthorization` or (USDC only) `WithdrawalForwarder.bridge` is in flight | gum-indexer: receipt, fee bump, or reconciliation of a consumed nonce. |
 | `burned` | Burned on the source chain; Circle owes the mint | Circle's attestation service (Iris). Monad: seconds. Base/Arbitrum: ~15–19 minutes. |
-| `attested` | Burned; attestation stored on the leg | gateway-indexer on the **destination** chain (`receiveMessage`). |
-| `minting` | The mint is in flight on the destination chain | gateway-indexer: receipt or fee bump. |
+| `attested` | Burned; attestation stored on the leg | gum-indexer on the **destination** chain (`receiveMessage`). |
+| `minting` | The mint is in flight on the destination chain | gum-indexer: receipt or fee bump. |
 | `completed` | At the destination address | Nobody. |
 | `failed` | Wherever the last successful step left them; `failure_reason` says which | An operator, if the reason is not the merchant's to fix. |
 | `expired` | In the Payday wallet, untouched | The merchant: create a new withdrawal. |

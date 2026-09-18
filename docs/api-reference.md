@@ -314,7 +314,7 @@ deposit address, payer wallet, and the nonce inside the wallet's attestation,
 so an attestation is bound to the document and the payer it was issued for
 and cannot be transplanted onto a proof for another deposit request or another
 wallet. Anyone holding the proof (and, if attached, the PDF) can recompute
-hash → attestation → salt → CREATE3 address offline — `gateway_core::verify_proof`
+hash → attestation → salt → CREATE3 address offline — `gum_core::verify_proof`
 is the reference — which also requires every listed transfer to come from the
 attested wallet and the transfers to sum to at least the requested amount;
 whether the transfers and the settlement transaction really executed is
@@ -555,7 +555,7 @@ network's USDC, or the destination network's USDT.
 Prepare, sign, submit, poll: the API snapshots the balances into legs, the
 merchant signs each leg's EIP-712 document with the wallet's key (Privy's
 `useSignTypedData` in the dashboard, or the key exported once from the
-dashboard on a server), and gateway-indexer relays. A transfer leg (funds
+dashboard on a server), and gum-indexer relays. A transfer leg (funds
 already on the destination network) is one EIP-3009 `transferWithAuthorization`
 on the currency's contract there (USDC or USDT0); a bridge leg, USDC only, is
 `WithdrawalForwarder.bridge` (a CCTP V2 burn) and, once Circle attests it,

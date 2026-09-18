@@ -1,0 +1,18 @@
+[package]
+name = "gum-telemetry"
+version = "0.1.0"
+edition = "2024"
+description = "Structured logging, correlation propagation and health endpoints shared by Gum services."
+
+[dependencies]
+gum-contracts = { path = "../gum-contracts" }
+axum = { workspace = true }
+async-trait = { workspace = true }
+http = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json", "fmt"] }
+uuid = { workspace = true }

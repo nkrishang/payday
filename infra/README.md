@@ -9,13 +9,13 @@ The contract generation is pinned: `factory_code_hash` and
 as one generation. Both services compare them with the chain at startup and
 refuse to start on a mismatch, which is why the API task now also reads the RPC
 secret. The `recovery` KMS key is legacy: deposits now return excess and late
-funds to the payer's own attested wallet, so gatewayd no longer reads its
+funds to the payer's own attested wallet, so gum-server no longer reads its
 address; keep it only until any balance it holds has been returned by hand
 (see `docs/production-runbook.md`). The API task definition's
 precondition fails the plan until it is set.
 
 The API task also requires the Privy app merchants sign in to
-(`privy_app_id`, public; gatewayd verifies dashboard sessions against that
+(`privy_app_id`, public; gum-server verifies dashboard sessions against that
 app's published keys), an externally configured Auth0 tenant issuer, and the
 payer verification API and Native application once they exist
 (`payer_auth0_audience` and `payer_auth0_client_id`, set together; while
@@ -106,7 +106,7 @@ state. The examples document planning only and do not change external state.
 `<name>-invoice-attachments` holds one PDF per deposit request (S3 bucket names are
 global; change `name` if it is taken). It is private, versioned, encrypted
 with `aws_kms_key.attachments`, and answers browser preflights only from
-`checkout_base_url`, where the dashboard lives. gatewayd never proxies upload
+`checkout_base_url`, where the dashboard lives. gum-server never proxies upload
 bytes: it signs a presigned PUT with the API task role and the client uploads
 to `uploads/<account_id>/<attachment_id>.pdf`. Objects are never moved. The
 web deployment needs the bucket's virtual-hosted origin
@@ -120,7 +120,7 @@ A GuardDuty Malware Protection plan scans every new object through
 without the GuardDuty detector being enabled. The bucket policy denies
 `s3:GetObject` on any object not tagged `NO_THREATS_FOUND` to every principal
 except that scanner role and the API task role. The task role is exempt
-because `HeadObject` is `s3:GetObject` too: gatewayd must be able to answer
+because `HeadObject` is `s3:GetObject` too: gum-server must be able to answer
 `409 attachment_scan_pending` for an object the scanner has not reached, and
 it re-checks the tag in code before it streams anything or signs a download.
 GuardDuty enables EventBridge notifications on the bucket and writes a
@@ -131,7 +131,7 @@ created; both happen outside Terraform, so never manage
 Cleanup is tag-based so the gateway never has to move objects. The presigned
 PUT carries `x-amz-tagging: payday-upload=pending` and `If-None-Match: *` as
 signed headers, so no upload can omit the tag and no key can be written twice
-(a replayed PUT fails with 412); gatewayd pins the version it hashed at
+(a replayed PUT fails with 412); gum-server pins the version it hashed at
 finalization and refers to it on every later read. Issuing a deposit request
 rewrites the tag to `payday-upload=attached` (keeping the GuardDuty tag); an
 issuance that fails leaves the tag `pending`, so the object still expires.
@@ -163,7 +163,7 @@ rotation is not observed by running ECS tasks. Force a new API deployment after
 rotating the webhook key, and retain prior application key material until
 ciphertext associated with its key ID has been re-encrypted.
 
-KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use, for every key in `kms_key_arns` (the sweep signer pool, `sweep_signer_count` keys; each address needs gas on every chain). KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gateway_core::verify_proof`).
+KMS does not return an Ethereum address. Derive it from `GetPublicKey` (uncompressed secp256k1 public key, Keccak-256, last 20 bytes) and independently verify it before use, for every key in `kms_key_arns` (the sweep signer pool, `sweep_signer_count` keys; each address needs gas on every chain). KMS signatures also require application-side Ethereum digest/signature normalization. The same derivation on `attestation_kms_key_arn` gives the Proof of Payment attestor address; publish it so merchants can verify proofs against it (`gum_core::verify_proof`).
 
 WAF request sampling is disabled because samples can contain the bearer `Authorization` header. Fatal indexer safety errors and loss of its database lock exit the process and publish a log-derived CloudWatch alarm. RDS Multi-AZ, ALB, WAF, public IPv4 addresses, Container Insights, logs, Secrets Manager, and KMS incur ongoing charges. Public IPv4 and cross-AZ traffic are billed. This stack has no autoscaling, VPC endpoints, bastion, or automatic finality-reorg recovery.
 

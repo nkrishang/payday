@@ -206,7 +206,7 @@ credited from any other wallet make the proof unavailable
 (`409 deposit_sender_mismatch`): Payday does not issue a proof it cannot
 stand behind. The proof is available to the merchant
 (`GET /v1/deposit-requests/{id}/proof`) and shared at the merchant's discretion;
-`gateway_core::verify_proof` checks it offline.
+`gum_core::verify_proof` checks it offline.
 
 ## Safety boundaries
 

@@ -2,7 +2,7 @@ data "aws_availability_zones" "available" { state = "available" }
 data "aws_caller_identity" "current" {}
 
 locals {
-  # Payer links point at the hosted checkout; gatewayd validates this as a
+  # Payer links point at the hosted checkout; gum-server validates this as a
   # bare HTTPS origin and allows merchant-route CORS from it alone.
   checkout_base_url = var.checkout_base_url
 
@@ -19,7 +19,7 @@ locals {
   ]
   # Payer email verification needs its own Auth0 API and application (see
   # docs/authentication.md). Until both identifiers exist the settings are
-  # omitted as a group, and gatewayd answers verification_unavailable.
+  # omitted as a group, and gum-server answers verification_unavailable.
   payer_verification_enabled = var.payer_auth0_audience != "" && var.payer_auth0_client_id != ""
   payer_environment = local.payer_verification_enabled ? [
     { name = "PAYDAY_PAYER_AUTH0_ISSUER", value = var.auth0_issuer },
@@ -219,7 +219,7 @@ resource "aws_secretsmanager_secret_version" "payer_ref_master_key" {
 
 # The payer's deposit request email goes out through Resend with a key the
 # operator supplies. Empty means not configured: no secret, no setting, and
-# gatewayd leaves those emails queued.
+# gum-server leaves those emails queued.
 locals {
   resend_enabled = nonsensitive(var.resend_api_key != "")
 }
@@ -264,7 +264,7 @@ locals {
 }
 
 # Privy wallet pregeneration is a latency optimization for email sign-up:
-# empty means gatewayd answers pregenerate with 503 and sign-in still
+# empty means gum-server answers pregenerate with 503 and sign-in still
 # creates the wallet itself (config.rs's PrivyConfig doc comment).
 locals {
   privy_enabled = nonsensitive(var.privy_app_secret != "")
@@ -327,7 +327,7 @@ moved {
 # Retained for any balance recovered under the pre-2026-09 scheme, in which
 # this wallet was every payment's recovery term. Payments now return excess
 # and late funds to the payer's own attested wallet, so nothing new lands
-# here and gatewayd no longer reads its address; remove it once the balance
+# here and gum-server no longer reads its address; remove it once the balance
 # is confirmed empty (it carries prevent_destroy, see the README).
 # The recovery wallet takes custody of overpayment remainders, expired
 # balances, and late transfers. Nothing in the stack signs with it: recovered
@@ -474,7 +474,7 @@ resource "aws_iam_role_policy" "indexer_kms" {
 # ---------------------------------------------------------------------------
 # Deposit request attachments. One PDF per deposit request, uploaded straight to S3 through a
 # presigned PUT signed by the API task role, scanned by GuardDuty Malware
-# Protection, and finalized by gatewayd only once the managed tag
+# Protection, and finalized by gum-server only once the managed tag
 # GuardDutyMalwareScanStatus=NO_THREATS_FOUND is present.
 #
 # Object layout: every upload lands at uploads/<account_id>/<attachment_id>.pdf
@@ -483,7 +483,7 @@ resource "aws_iam_role_policy" "indexer_kms" {
 # that tag to payday-upload=attached before the deposit request commits. The lifecycle
 # rule expires only objects still tagged pending, so infrastructure can never
 # expire an attached PDF, and an abandoned upload is gone after seven days
-# without gatewayd having to track it.
+# without gum-server having to track it.
 # ---------------------------------------------------------------------------
 
 resource "aws_kms_key" "attachments" {
@@ -682,7 +682,7 @@ resource "aws_s3_bucket_policy" "attachments" {
   depends_on = [aws_s3_bucket_public_access_block.attachments]
 }
 
-# What gatewayd may do with uploads, and nothing else: sign PUTs that carry the
+# What gum-server may do with uploads, and nothing else: sign PUTs that carry the
 # pending tag, inspect and stream objects, read and rewrite tags, and delete
 # rejected uploads. No ListBucket, nothing outside uploads/.
 resource "aws_iam_role_policy" "api_attachments" {
@@ -1005,7 +1005,7 @@ resource "aws_cloudwatch_log_metric_filter" "notification_failures" {
 }
 resource "aws_cloudwatch_metric_alarm" "notification_failures" {
   alarm_name          = "${var.name}-notification-delivery-failures"
-  alarm_description   = "Merchant email or webhook delivery failed repeatedly; inspect gatewayd logs and notification_outbox"
+  alarm_description   = "Merchant email or webhook delivery failed repeatedly; inspect gum-server logs and notification_outbox"
   namespace           = var.name
   metric_name         = aws_cloudwatch_log_metric_filter.notification_failures.metric_transformation[0].name
   statistic           = "Sum"

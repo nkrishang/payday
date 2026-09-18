@@ -174,7 +174,7 @@ contract WithdrawalForwarderTest is Eip3009Test {
         forwarder.bridge(IERC3009(address(token)), merchant, 25e6, 6, RECIPIENT, SALT, validBefore, signature);
     }
 
-    /// @dev The vectors `gateway-core`'s `withdrawal_authorization` tests,
+    /// @dev The vectors `gum-core`'s `withdrawal_authorization` tests,
     /// the SDK, and the web adapter pin, computed here from the type hash
     /// and `abi.encode` alone so every implementation agrees with Solidity.
     function test_nonce_and_digest_vectors_match_the_other_implementations() public view {
