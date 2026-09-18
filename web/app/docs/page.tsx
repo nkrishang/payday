@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   // itself the way the rest of the docs are named.
   title: { absolute: "Gum Docs · Introduction" },
   description:
-    "What Payday does, how a deposit flows from request to settlement, and where to start.",
+    "What Gum does, how a deposit flows from request to settlement, and where to start.",
 };
 
 export default function IntroductionPage() {
@@ -28,18 +28,18 @@ export default function IntroductionPage() {
     <DocsPage
       eyebrow="Getting started"
       title={<>Stablecoin deposits that settle themselves.</>}
-      lead="Payday turns USDC and USDT transfers into verified customer deposits. You state what you are owed and by whom; Payday gives that one payer a one-time address, watches the chain, and moves exactly the requested amount to your wallet."
+      lead="Gum turns USDC and USDT transfers into verified customer deposits. You state what you are owed and by whom; Gum gives that one payer a one-time address, watches the chain, and moves exactly the requested amount to your wallet."
     >
       <p>
-        You create a <strong>deposit request</strong> through a small API or the dashboard. Payday
+        You create a <strong>deposit request</strong> through a small API or the dashboard. Gum
         gives you a link. The payer opens it, proves whatever your policy asks of them, and signs
         once from the wallet they will pay from. That signature creates the one-time address they
-        pay into. When finalized funds reach it, Payday settles exactly the amount you asked for to
+        pay into. When finalized funds reach it, Gum settles exactly the amount you asked for to
         your wallet, and anything left over goes straight back to the payer&apos;s own wallet
         on-chain.
       </p>
 
-      <Figure caption="One deposit, end to end. Solid arrows are money and messages; the dashed arrow is the webhooks that tell your server what happened. Payday never holds the funds at any point.">
+      <Figure caption="One deposit, end to end. Solid arrows are money and messages; the dashed arrow is the webhooks that tell your server what happened. Gum never holds the funds at any point.">
         <DepositFlowDiagram />
       </Figure>
 
@@ -61,20 +61,20 @@ export default function IntroductionPage() {
         </Step>
         <Step title="The payer signs from the wallet they will pay from">
           <p>
-            One signature, no transaction. It binds that wallet to this request, and Payday derives
+            One signature, no transaction. It binds that wallet to this request, and Gum derives
             the one-time deposit address from it. Only transfers from that wallet are the
             payer&apos;s, and anything returned goes back to it.
           </p>
         </Step>
         <Step title="Funds arrive and are finalized">
           <p>
-            Payday credits only finalized transfers of the request&apos;s currency, as its
+            Gum credits only finalized transfers of the request&apos;s currency, as its
             issuer&apos;s exact contract on the chosen chain. Partial transfers accumulate. The
             request moves through <code>awaiting_deposit</code>, <code>partially_deposited</code>,
             and <code>deposited</code>, and webhooks report each step.
           </p>
         </Step>
-        <Step title="Payday settles">
+        <Step title="Gum settles">
           <p>
             Exactly the requested amount goes to your payout address in one transaction. An
             overpayment remainder, an expired balance, or a late transfer goes back to the
@@ -109,23 +109,23 @@ export default function IntroductionPage() {
         </CompareItem>
       </Compare>
 
-      <H2 id="what-payday-is-not">What Payday deliberately is not</H2>
+      <H2 id="what-gum-is-not">What Gum deliberately is not</H2>
       <ul>
         <li>
           <strong>Not a custodian.</strong> The requested amount moves from the one-time address to
           your wallet. Returns move from the address to the payer&apos;s wallet. Nothing sits with
-          Payday, so there is nothing to withdraw and nothing to freeze.
+          Gum, so there is nothing to withdraw and nothing to freeze.
         </li>
         <li>
           <strong>Not an invoicing system.</strong> A request has one amount, used exactly as given.
           There are no line items, tax fields, or fiat conversions. Attach a PDF when you need an
-          itemised breakdown; Payday stores and hashes it but never parses it.
+          itemised breakdown; Gum stores and hashes it but never parses it.
         </li>
       </ul>
 
       <Callout title="Currencies">
         USDC on every supported network, and USDT (as Tether&apos;s USDT0) on Monad and Arbitrum
-        One. A request is denominated in one currency, USDC unless you say otherwise, and Payday
+        One. A request is denominated in one currency, USDC unless you say otherwise, and Gum
         never gives you a rate worse than 1:1: USDC bridges through Circle&apos;s CCTP at exactly
         1:1, so a USDC request may be paid on any network and withdrawn to whichever you choose;
         USDT has no such path, so a USDT request pins its network. Bridged or wrapped versions and
@@ -133,7 +133,7 @@ export default function IntroductionPage() {
       </Callout>
 
       <Callout title="Free while in beta">
-        Payday is free to use today. When pricing is introduced it will not disrupt an integration
+        Gum is free to use today. When pricing is introduced it will not disrupt an integration
         you have already built.
       </Callout>
 
@@ -154,7 +154,7 @@ export default function IntroductionPage() {
         <Card href="/docs/api" title="API reference">
           Every route, field, and error code, with examples.
         </Card>
-        <Card href="/docs/security" title="How Payday works">
+        <Card href="/docs/security" title="How Gum works">
           The architecture and the security properties, for due diligence.
         </Card>
       </Cards>

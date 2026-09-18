@@ -45,10 +45,10 @@ const MAX_PARTY_DETAILS_BYTES: usize = 4000;
 const MAX_NOTES_BYTES: usize = 4000;
 const MAX_HEADING_BYTES: usize = 200;
 const MAX_REFERENCE_CHARS: usize = 128;
-/// The onboarding walkthrough's reserved, Payday-owned mailbox. The only
+/// The onboarding walkthrough's reserved, Gum-owned mailbox. The only
 /// thing `onboarding_deposit` can ever pay is an invoice addressed to this
 /// exact email — never a real payer's.
-const ONBOARDING_EMAIL: &str = "onboarding@payday.sh";
+const ONBOARDING_EMAIL: &str = "onboarding@gum.money";
 
 /// Project a DB row onto the wire response, going through the domain model so
 /// the row is never serialized directly. Fails only if the stored row is
@@ -622,7 +622,7 @@ pub async fn transfers(
     }))
 }
 
-/// Payday's invoice summary as a PDF download, rendered deterministically
+/// Gum's invoice summary as a PDF download, rendered deterministically
 /// from the same response the JSON route serves.
 pub async fn request_pdf(
     State(state): State<AppState>,
@@ -822,13 +822,13 @@ pub async fn cancel_deposit_request(
 ///
 /// This is deliberately narrow, not a general "settle any invoice" or
 /// "verify any payer" affordance: it refuses anything not addressed to
-/// Payday's own reserved mailbox, and at most one call per account ever
+/// Gum's own reserved mailbox, and at most one call per account ever
 /// reaches the chain (`gum_ledger::OnboardingDemoPaymentRepository`).
 /// Verification is completed the same way `payer_verification::confirm_email`
 /// does after a real Auth0 code checks out — minting a session, then
-/// approving its email fact — except there is no code to check: Payday
-/// owns `onboarding@payday.sh`, so proving control of it here would only
-/// ever be proving Payday's own address to Payday. The wallet step is real:
+/// approving its email fact — except there is no code to check: Gum
+/// owns `onboarding@gum.money`, so proving control of it here would only
+/// ever be proving Gum's own address to Gum. The wallet step is real:
 /// the demo payer signs the same attestation a payer's wallet would, which
 /// is what gives the request its address.
 pub async fn onboarding_deposit(
@@ -1078,7 +1078,7 @@ fn unix_now() -> u64 {
 /// Whom to email the request to, if anyone: the payer the merchant named,
 /// provided the link in that email would open for them. A merchant-session
 /// request opens only from inside the merchant's own app, and the onboarding
-/// walkthrough's payer is Payday's reserved mailbox.
+/// walkthrough's payer is Gum's reserved mailbox.
 fn payer_notification_email(payer: &Party, policy: &PayerPolicy) -> Option<String> {
     let email = payer.email.as_deref()?.trim();
     if email.is_empty()
@@ -1352,7 +1352,7 @@ mod tests {
             None
         );
         assert_eq!(
-            payer_notification_email(&payer(Some("Onboarding@payday.sh")), &gated),
+            payer_notification_email(&payer(Some("Onboarding@gum.money")), &gated),
             None
         );
     }

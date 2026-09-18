@@ -12,14 +12,14 @@ signing, real S3 scanning, and real email.
 | | Local (`just dev`) | Staging | Production |
 |---|---|---|---|
 | Code | your working tree | every commit on `main` that passes CI | the `image_tag` in the production tfvars, applied by hand |
-| API, indexer, signers, database | on this machine | AWS, `api.staging.payday.sh` | AWS, `api.payday.sh` |
+| API, indexer, signers, database | on this machine | AWS, `api.staging.gum.money` | AWS, `api.gum.money` |
 | Chains and stablecoins | two Anvils, mock USDC and USDT | Monad, Base, Arbitrum One; Circle USDC, Tether USDT0 on Monad and Arbitrum | Monad, Base, Arbitrum One; Circle USDC, Tether USDT0 on Monad and Arbitrum |
 | Contracts | bootstrapped on Anvil each run | staging's own `PaymentFactory` generation | production's generation |
-| Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `payday.sh` |
+| Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `gum.money` |
 | Merchant sign-in | development Privy app | development Privy app | production Privy app |
 | Payer and issuer codes | the local identity provider, fixed code | production Auth0 tenant, real mail | production Auth0 tenant |
 | Attachments | MinIO, verdict tagged by hand | S3 and GuardDuty | S3 and GuardDuty |
-| Merchant email | not sent | SES from `alerts@staging.payday.sh` | SES from `alerts@payday.sh` |
+| Merchant email | not sent | SES from `alerts@staging.gum.money` | SES from `alerts@gum.money` |
 | Keys | Anvil accounts | staging's own KMS keys | production's KMS keys |
 
 Staging's checkout origin is `http://127.0.0.1:3002`, the web app on your
@@ -45,7 +45,7 @@ just web-staging            # http://127.0.0.1:3002, pointed at staging
 
 Open the dashboard, sign in with an emailed code (the development Privy app,
 so the same mailbox you use locally), and mint an API key in the API key
-section. It is a `payday_test_` key that only staging accepts. Issue a
+section. It is a `gum_test_` key that only staging accepts. Issue a
 deposit request from the dashboard, open its link in the same browser,
 choose a network, connect a wallet holding a little of the request's
 currency and gas there, and pay it; everything from the wallet attestation
@@ -54,26 +54,26 @@ to the Proof of Payment happens on the live stack.
 Scripts and the SDK use the staging origin and that key:
 
 ```bash
-export PAYDAY_API_URL="https://api.staging.payday.sh"
-export PAYDAY_API_KEY="payday_test_..."
-curl --fail -sS "$PAYDAY_API_URL/v1/deposit-requests" -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+export GUM_API_URL="https://api.staging.gum.money"
+export GUM_API_KEY="gum_test_..."
+curl --fail -sS "$GUM_API_URL/v1/deposit-requests" -H "Authorization: Bearer $GUM_API_KEY" | jq
 ```
 
-In the SDK, pass `baseUrl: "https://api.staging.payday.sh"` to `PaydayClient`.
+In the SDK, pass `baseUrl: "https://api.staging.gum.money"` to `GumClient`.
 
 The scripted end-to-end check is a real deposit that costs only gas:
 
 ```bash
-export PAYDAY_CHAIN_ID=143    # the network to pay on: 143, 8453, or 42161
-export PAYDAY_RPC_URL='https://your-rpc-endpoint'   # any HTTPS RPC for that chain
-export PAYDAY_TOKEN_ADDRESS=0x754704Bc059F8C67012fEd69BC8A327a5aafb603   # that chain's USDC
+export GUM_CHAIN_ID=143    # the network to pay on: 143, 8453, or 42161
+export GUM_RPC_URL='https://your-rpc-endpoint'   # any HTTPS RPC for that chain
+export GUM_TOKEN_ADDRESS=0x754704Bc059F8C67012fEd69BC8A327a5aafb603   # that chain's USDC
 export PAYER_KEY='0x...'      # a wallet holding at least 0.01 USDC and some gas there
 just live-smoke
 ```
 
-Run it once per network; only the three exports change. `PAYDAY_CURRENCY=USDT`
-runs it in USDT0 instead: the request is pinned to `PAYDAY_CHAIN_ID` (Monad
-or Arbitrum One) and `PAYDAY_TOKEN_ADDRESS` names that chain's USDT0
+Run it once per network; only the three exports change. `GUM_CURRENCY=USDT`
+runs it in USDT0 instead: the request is pinned to `GUM_CHAIN_ID` (Monad
+or Arbitrum One) and `GUM_TOKEN_ADDRESS` names that chain's USDT0
 contract (the Monad address is the default), so run it once more on each
 chain that serves USDT.
 
@@ -82,9 +82,9 @@ binds that wallet with an EIP-712 attestation signed by `cast` exactly as
 the checkout does, transfers the stablecoin, waits for finalized settlement,
 checks that the payout arrived and the deposit address is empty, and
 validates the Proof of Payment. `LATE_TRANSFER=1` also sends one base unit
-after settlement and waits for it to come back. `PAYDAY_ATTESTOR=0x…` makes
+after settlement and waits for it to come back. `GUM_ATTESTOR=0x…` makes
 it check the proof's signer against the address you published. The same
-script runs against production with `PAYDAY_API_URL=https://api.payday.sh`
+script runs against production with `GUM_API_URL=https://api.gum.money`
 and a live key; that is the launch check in the production runbook. Before
 the first withdrawal on a chain, `just forge-fork` runs the forwarder's fork
 tests and the USDT0 authorization fork tests (`MonadUsdt0ForkTest`,
@@ -131,7 +131,7 @@ such role.
 
 ## Schema changes
 
-Payday is pre-release, so the schema is three baseline files in
+Gum is pre-release, so the schema is three baseline files in
 `crates/gum-schema/migrations` (`0001_application.sql`, `0002_bus.sql`,
 `0003_execution.sql`), edited in place; there are no incremental migrations
 to write. A database that applied the old files refuses the edited ones
@@ -166,13 +166,13 @@ database, and ECS restarts the tasks until the migrate task has run.
 The stack is created by hand the first time, because the workflow's own
 role is one of the things it creates. All of this mirrors the production
 runbook with staging's names; do it from a shell authenticated to the
-Payday AWS account.
+Gum AWS account.
 
-1. **DNS.** Create a Route53 public hosted zone for `api.staging.payday.sh`
-   and, in Vercel's DNS settings for `payday.sh`, add its four nameservers
+1. **DNS.** Create a Route53 public hosted zone for `api.staging.gum.money`
+   and, in Vercel's DNS settings for `gum.money`, add its four nameservers
    as `NS` records named `api.staging`. Put the zone ID in
    `infra/environments/staging.tfvars` as `route53_zone_id`. Wait for
-   `dig NS api.staging.payday.sh` to return the Route53 names.
+   `dig NS api.staging.gum.money` to return the Route53 names.
 2. **Contracts.** Deploy a `PaymentFactory` and `BatchSweeper` generation
    for staging on Monad, Base, and Arbitrum One exactly as in the
    production runbook §2, from one fresh deployment wallet with a little
@@ -214,11 +214,11 @@ Payday AWS account.
    ETH on Base and Arbitrum One, and derive the attestation signer, as in
    the production runbook §8; note
    staging's attestor address in the team's records, since proofs from
-   staging are signed by it and `PAYDAY_ATTESTOR` in the smoke test checks
+   staging are signed by it and `GUM_ATTESTOR` in the smoke test checks
    it.
 6. **Email.** Add the three `CNAME`s from
    `terraform -chdir=infra output notification_dkim_records` in Vercel DNS
-   (they are names under `staging.payday.sh`). SES verifies the identity
+   (they are names under `staging.gum.money`). SES verifies the identity
    once they resolve; the region's SES sandbox limits apply to staging the
    same way.
 7. **Hand over to the workflow.** In the GitHub repository, create an
@@ -245,8 +245,8 @@ chains cost the indexer two RPC calls every five minutes. Keep only what a test 
 the payer wallet; the payout defaults to that same wallet, so a smoke run
 costs gas alone.
 
-Staging keys are `payday_test_`, production keys `payday_live_`; neither is
+Staging keys are `gum_test_`, production keys `gum_live_`; neither is
 accepted by the other environment. Staging's database is not backed up
 beyond RDS's own automated backups and is meant to be reset. Do not send it
 anything you would mind losing, and do not treat its Proofs of Payment as
-Payday's: they are signed by staging's attestor, not the published one.
+Gum's: they are signed by staging's attestor, not the published one.

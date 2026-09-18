@@ -29,11 +29,11 @@ export default function PayerVerificationPage() {
     <DocsPage
       eyebrow="Getting started"
       title="Verifying the payer"
-      lead="Every deposit request names who may pay and what they must prove first. You assert; Payday confirms; and whatever the policy, the payer signs once from the wallet they will pay from before an address exists."
+      lead="Every deposit request names who may pay and what they must prove first. You assert; Gum confirms; and whatever the policy, the payer signs once from the wallet they will pay from before an address exists."
     >
       <p>
         Verification answers a question a bank transfer never could: was the money sent by the
-        person you were expecting, and did they see what they were paying for? Payday splits that
+        person you were expecting, and did they see what they were paying for? Gum splits that
         into two parts. The <strong>payer policy</strong> decides what a person proves before the
         request&apos;s content is shown to them. The <strong>wallet step</strong> then ties that
         person to the wallet the funds will come from.
@@ -56,7 +56,7 @@ export default function PayerVerificationPage() {
         <CompareItem title="Verified email" badge={<Pill tone="green">emailed code</Pill>}>
           <p>
             You name the mailbox. The checkout shows only your name and the heading until the payer
-            types a code sent to that mailbox. Payday sends the code; the payer never types an
+            types a code sent to that mailbox. Gum sends the code; the payer never types an
             address.
           </p>
           <p>
@@ -78,7 +78,7 @@ export default function PayerVerificationPage() {
       </Compare>
 
       <p>
-        The merchant asserts, Payday confirms. Payday tells you whether the check passed and when,
+        The merchant asserts, Gum confirms. Gum tells you whether the check passed and when,
         never the payer&apos;s own data. The full policy, including the expected email or the payer
         reference, is returned only to you; the payer page shows a masked hint such as{" "}
         <code>a****@c***.example</code> for verified email, and nothing at all for a merchant
@@ -100,8 +100,8 @@ export default function PayerVerificationPage() {
       <H2 id="verified-email">Verified email, step by step</H2>
       <Figure caption="The emailed-code exchange. The payer's browser holds a session token, which travels in a header on every later read and unlocks exactly this request.">
         <Sequence
-          label="Verified email sequence: the payer opens the link, Payday sends a code to the asserted mailbox, the payer confirms it, the session unlocks the content, the payer signs the wallet attestation and the address appears."
-          lanes={["Payer's browser", "Payday", "Asserted mailbox"]}
+          label="Verified email sequence: the payer opens the link, Gum sends a code to the asserted mailbox, the payer confirms it, the session unlocks the content, the payer signs the wallet attestation and the address appears."
+          lanes={["Payer's browser", "Gum", "Asserted mailbox"]}
           messages={[
             { from: 0, to: 1, label: "open deposit_url", note: "issuer name and heading only" },
             { from: 0, to: 1, label: "start email verification" },
@@ -125,7 +125,7 @@ export default function PayerVerificationPage() {
           One code per request per minute, whoever asks. A wrong, spent, or expired code fails.
         </li>
         <li>
-          The code is delivered by Payday&apos;s email provider from a Payday domain and names no
+          The code is delivered by Gum&apos;s email provider from a Gum domain and names no
           deposit data.
         </li>
         <li>
@@ -147,7 +147,7 @@ export default function PayerVerificationPage() {
       <Figure caption="The merchant-session exchange. The secret rides in the URL fragment, which browsers never send to a server, so it reaches no log, Referer header, or analytics beacon.">
         <Sequence
           label="Merchant session sequence: your server creates the request and receives a client secret, redirects the signed-in user to the deposit URL with the secret in the fragment, the checkout exchanges it for a session, the payer signs and pays, and webhooks carrying the payer reference reach your server."
-          lanes={["Your server", "Payer's browser", "Payday"]}
+          lanes={["Your server", "Payer's browser", "Gum"]}
           messages={[
             { from: 0, to: 2, label: "create { mode: merchant_session, payer_reference }" },
             {
@@ -175,7 +175,7 @@ export default function PayerVerificationPage() {
       <ul>
         <li>
           The secret is returned exactly once, on the <code>201</code>. It is never on a replay or a
-          later read; Payday stores only its hash. If your server loses it, mint another with{" "}
+          later read; Gum stores only its hash. If your server loses it, mint another with{" "}
           <code>POST /v1/deposit-requests/&#123;id&#125;/client-secret</code>.
         </li>
         <li>
@@ -188,7 +188,7 @@ export default function PayerVerificationPage() {
           credits the right ledger with no lookup.
         </li>
         <li>
-          What Payday attests is narrow and stated plainly: your server released this secret, and it
+          What Gum attests is narrow and stated plainly: your server released this secret, and it
           was exchanged before this session saw the request. Who the payer is remains your
           assertion.
         </li>

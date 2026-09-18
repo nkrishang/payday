@@ -30,17 +30,17 @@ export const ATTACHMENTS: EndpointGroup = {
       },
       examples: {
         curl: `SLOT=$(curl -fsS "$API/v1/attachments" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $GUM_API_KEY" -H "Content-Type: application/json" \\
   -d '{ "filename": "INV-1042.pdf" }')
 
 curl -fsS -X PUT "$(echo "$SLOT" | jq -r .upload_url)" \\
   $(echo "$SLOT" | jq -r '.headers | to_entries[] | "-H \\"\\(.key): \\(.value)\\""' | xargs) \\
   --data-binary @INV-1042.pdf`,
-        ts: `const slot = await payday.attachments.create({ filename: "INV-1042.pdf" });
+        ts: `const slot = await gum.attachments.create({ filename: "INV-1042.pdf" });
 await fetch(slot.upload_url, { method: "PUT", headers: slot.headers, body: bytes });
 
 // Reserve + PUT + finalize with backoff:
-const pdf = await payday.attachments.upload(bytes, "INV-1042.pdf");`,
+const pdf = await gum.attachments.upload(bytes, "INV-1042.pdf");`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "upload_url": "https://…",
@@ -59,7 +59,7 @@ const pdf = await payday.attachments.upload(bytes, "INV-1042.pdf");`,
       summary: "Admits the uploaded object once scanned. Idempotent.",
       body: (
         <p>
-          Payday hashes the stored bytes and pins the admitted object version. Client-supplied MIME
+          Gum hashes the stored bytes and pins the admitted object version. Client-supplied MIME
           types, extensions, and digests are ignored. Rejected objects are deleted. Unattached
           uploads are deleted after seven days.
         </p>
@@ -93,8 +93,8 @@ const pdf = await payday.attachments.upload(bytes, "INV-1042.pdf");`,
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/attachments/att_0198f80c-…/finalize" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const descriptor = await payday.attachments.finalize(slot.id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const descriptor = await gum.attachments.finalize(slot.id);`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "filename": "INV-1042.pdf",

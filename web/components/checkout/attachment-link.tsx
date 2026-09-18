@@ -1,10 +1,10 @@
 "use client";
 
-import { type AttachmentDescriptor, PaydayError } from "@payday/sdk";
+import { type AttachmentDescriptor, GumError } from "@gum/sdk";
 import { FileText, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { formatBytes } from "@/lib/format";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 type LinkState =
   | { status: "idle" }
@@ -56,7 +56,7 @@ export function AttachmentLink({
       setState({
         status: "failed",
         message:
-          error instanceof PaydayError && error.code === "verification_required"
+          error instanceof GumError && error.code === "verification_required"
             ? "Verify first to open the attachment."
             : "The attachment could not be fetched. Try again in a moment.",
       });

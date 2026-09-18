@@ -142,7 +142,7 @@ export function SignatureFigure() {
   return (
     <div className="flex flex-col gap-4">
       <p className="overflow-x-auto font-mono text-[13px] whitespace-nowrap text-ink">
-        <span className="text-faint">Payday-Signature: </span>
+        <span className="text-faint">Gum-Signature: </span>
         <span className="rounded bg-gum-pink/15 px-1 text-gum-pink">v1</span>
         <span className="text-faint">,</span>
         <span className="rounded bg-warning/15 px-1 text-warning">t=1756728000</span>
@@ -154,7 +154,7 @@ export function SignatureFigure() {
         <dd className="text-muted">The scheme. Reject anything else.</dd>
         <dt className="font-mono text-warning">t</dt>
         <dd className="text-muted">
-          Unix seconds when Payday signed the delivery. Reject a timestamp older than your tolerance
+          Unix seconds when Gum signed the delivery. Reject a timestamp older than your tolerance
           (five minutes is usual).
         </dd>
         <dt className="font-mono text-term-id">sha256</dt>
@@ -228,7 +228,7 @@ function MockCard({
             {locked ? (
               <div className="size-full bg-[repeating-linear-gradient(45deg,#e6e6e4_0_6px,#f7f7f5_6px_12px)]" />
             ) : (
-              <Image src="/payday-qr.svg" alt="" width={88} height={88} className="size-[88px]" />
+              <Image src="/gum-qr.svg" alt="" width={88} height={88} className="size-[88px]" />
             )}
           </div>
           <div className="flex flex-col gap-2 text-[12px]">

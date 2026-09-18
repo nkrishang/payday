@@ -1,7 +1,7 @@
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { EmailVerification } from "./email-verification";
 
 const APPROVED = {
@@ -71,7 +71,7 @@ describe("EmailVerification", () => {
       expires_at: "2026-09-03T00:00:00Z",
     });
     vi.spyOn(payerClient.verification, "confirmEmail").mockRejectedValue(
-      new PaydayError("nope", "otp_invalid", 401),
+      new GumError("nope", "otp_invalid", 401),
     );
     const { onVerified, rerender, onSession, onCodeSent } = renderForm();
     fireEvent.click(screen.getByRole("button", { name: /send a code/i }));
@@ -100,7 +100,7 @@ describe("EmailVerification", () => {
   it("resends on the same session and lets a recent code be entered during the cooldown", async () => {
     const start = vi
       .spyOn(payerClient.verification, "startEmail")
-      .mockRejectedValue(new PaydayError("wait", "otp_resend_cooldown", 429));
+      .mockRejectedValue(new GumError("wait", "otp_resend_cooldown", 429));
     renderForm({ payerSession: "pps_stored" });
 
     fireEvent.click(screen.getByRole("button", { name: /send a code/i }));
@@ -112,7 +112,7 @@ describe("EmailVerification", () => {
 
   it("does not offer code entry when another tab owns the cooled-down session", async () => {
     vi.spyOn(payerClient.verification, "startEmail").mockRejectedValue(
-      new PaydayError("wait", "otp_resend_cooldown", 429),
+      new GumError("wait", "otp_resend_cooldown", 429),
     );
     renderForm();
     fireEvent.click(screen.getByRole("button", { name: /send a code/i }));
@@ -122,10 +122,10 @@ describe("EmailVerification", () => {
 
   it("drops an expired session and starts over", async () => {
     vi.spyOn(payerClient.verification, "confirmEmail").mockRejectedValue(
-      new PaydayError("gone", "payer_session_invalid", 401),
+      new GumError("gone", "payer_session_invalid", 401),
     );
     vi.spyOn(payerClient.verification, "startEmail").mockRejectedValue(
-      new PaydayError("wait", "otp_resend_cooldown", 429),
+      new GumError("wait", "otp_resend_cooldown", 429),
     );
     const { onSession } = renderForm({ payerSession: "pps_stale" });
     // Reach the code step through the cooldown path, then confirm.

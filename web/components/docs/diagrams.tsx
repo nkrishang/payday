@@ -190,7 +190,7 @@ export function DepositFlowDiagram() {
     <Svg
       viewBox="0 0 960 330"
       minWidth={760}
-      label="A deposit from creation to settlement: your server creates a request, the payer opens the link and attests a wallet, the one-time address receives the funds, and Payday settles exactly the amount to your wallet while any remainder returns to the payer."
+      label="A deposit from creation to settlement: your server creates a request, the payer opens the link and attests a wallet, the one-time address receives the funds, and Gum settles exactly the amount to your wallet while any remainder returns to the payer."
     >
       {/* Row one: issuing and opening. */}
       <Node x={20} y={40} w={170} title="Your server" subtitle="or the dashboard" />
@@ -201,7 +201,7 @@ export function DepositFlowDiagram() {
         ]}
         label="create"
       />
-      <Node x={270} y={40} w={170} title="Payday API" subtitle="deposit request" accent="green" />
+      <Node x={270} y={40} w={170} title="Gum API" subtitle="deposit request" accent="green" />
       <Arrow
         points={[
           [440, 68],
@@ -257,7 +257,7 @@ export function DepositFlowDiagram() {
         x={520}
         y={150}
         w={170}
-        title="Payday settles"
+        title="Gum settles"
         subtitle="one transaction"
         accent="green"
       />
@@ -671,7 +671,7 @@ export function IndexerDiagram() {
     <Svg
       viewBox="0 0 960 230"
       minWidth={760}
-      label="Payday reads finalized transfer logs from the chain into a durable ledger, updates each deposit request's state from that ledger, and queues eligible requests for one settlement transaction that moves the funds under the address's own terms."
+      label="Gum reads finalized transfer logs from the chain into a durable ledger, updates each deposit request's state from that ledger, and queues eligible requests for one settlement transaction that moves the funds under the address's own terms."
     >
       <Node x={20} y={40} w={160} title="Chain" subtitle="Transfer logs" />
       <Arrow

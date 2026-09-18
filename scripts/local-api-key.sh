@@ -21,10 +21,10 @@ esac
 
 # The same shape gum-server mints: the configured prefix and 32 random bytes,
 # base64url without padding.
-prefix="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
+prefix="${GUM_API_KEY_PREFIX:-gum_test_}"
 case "$prefix" in
-  payday_test_|payday_live_) ;;
-  *) echo "PAYDAY_API_KEY_PREFIX must be payday_test_ or payday_live_" >&2; exit 2 ;;
+  gum_test_|gum_live_) ;;
+  *) echo "GUM_API_KEY_PREFIX must be gum_test_ or gum_live_" >&2; exit 2 ;;
 esac
 random="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
 key="${prefix}${random}"
@@ -46,12 +46,12 @@ SQL
 if [[ -n "${DATABASE_URL:-}" ]] && command -v psql >/dev/null 2>&1; then
   psql "$DATABASE_URL" --quiet --set ON_ERROR_STOP=1 --command "$sql" >/dev/null
 else
-  container="$(docker ps --filter 'name=payday-postgres-' --format '{{.Names}}' | head -n 1)"
+  container="$(docker ps --filter 'name=gum-postgres-' --format '{{.Names}}' | head -n 1)"
   [[ -n "$container" ]] || {
     echo "no local database: set DATABASE_URL, or start the stack with 'just dev'" >&2
     exit 1
   }
-  docker exec -i "$container" psql -U payday -d gateway --quiet --set ON_ERROR_STOP=1 \
+  docker exec -i "$container" psql -U gum -d gateway --quiet --set ON_ERROR_STOP=1 \
     --command "$sql" >/dev/null
 fi
 

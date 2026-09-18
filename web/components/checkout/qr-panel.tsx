@@ -3,7 +3,7 @@
 import type { ReadyPayerDepositRequest } from "@/lib/checkout-state";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 /** The outcome of one fetch, tagged with the inputs it was made for. */
 type QrOutcome = { key: string; status: "ready"; src: string } | { key: string; status: "failed" };

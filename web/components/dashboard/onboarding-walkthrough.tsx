@@ -1,6 +1,6 @@
 "use client";
 
-import { type Issuer, PaydayError, type DepositRequest } from "@payday/sdk";
+import { type Issuer, GumError, type DepositRequest } from "@gum/sdk";
 import { ArrowLeft, ArrowRight, Loader2, Sparkles } from "lucide-react";
 import Image from "next/image";
 import { useRef, useState, type ReactNode } from "react";
@@ -30,7 +30,7 @@ import { useMerchant } from "./session";
 const STEPS = ["Amount", "Billing", "Verification", "Review"] as const;
 const AMOUNT = "0.000001";
 const BILL_NAME = "Gum";
-const BILL_EMAIL = "onboarding@payday.sh";
+const BILL_EMAIL = "onboarding@gum.money";
 const HEADING = "Onboarding";
 
 const GUIDANCE = [
@@ -103,7 +103,7 @@ export function OnboardingWalkthrough({
       );
       onIssued(payment);
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.status === 401) {
+      if (cause instanceof GumError && cause.status === 401) {
         signOut();
         return;
       }

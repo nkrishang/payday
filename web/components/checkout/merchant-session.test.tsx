@@ -1,7 +1,7 @@
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { ClientSecretExchange, MerchantSessionGate } from "./merchant-session";
 
 const SECRET = "cs_" + "b".repeat(43);
@@ -79,7 +79,7 @@ describe("ClientSecretExchange", () => {
   ])("maps %s to the %s state", async (code, status, expected) => {
     window.history.replaceState(null, "", `/pay/dr_1#cs=${SECRET}`);
     vi.spyOn(payerClient.verification, "exchangeClientSecret").mockRejectedValue(
-      new PaydayError(code, code, status, "req"),
+      new GumError(code, code, status, "req"),
     );
     const { onStatus, onSession } = renderExchange();
     await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith(expected));

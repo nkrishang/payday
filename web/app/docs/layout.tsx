@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { DocsShell } from "@/components/docs/shell";
 
 /**
- * Documentation for Payday's customers: what it does, how to use it, and how
+ * Documentation for Gum's customers: what it does, how to use it, and how
  * it works. Every page under here is static, prerendered at build time, and
  * reads nothing from the API — the shell is the landing page's, and the
  * content is written in `web/app/docs/**`.
@@ -11,7 +11,7 @@ import { DocsShell } from "@/components/docs/shell";
 export const metadata: Metadata = {
   title: { default: "Docs", template: "Gum Docs · %s" },
   description:
-    "How to accept USDC and USDT deposits with Payday: concepts, the dashboard, the hosted checkout, webhooks, the TypeScript SDK, and the full HTTP API reference.",
+    "How to accept USDC and USDT deposits with Gum: concepts, the dashboard, the hosted checkout, webhooks, the TypeScript SDK, and the full HTTP API reference.",
 };
 
 export default function DocsLayout({ children }: { children: ReactNode }) {

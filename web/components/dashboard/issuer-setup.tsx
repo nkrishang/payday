@@ -1,6 +1,6 @@
 "use client";
 
-import { type Issuer, PaydayError } from "@payday/sdk";
+import { type Issuer, GumError } from "@gum/sdk";
 import { ArrowRight, Check, Loader2 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -110,7 +110,7 @@ export function IssuerSetup({
       : "Not a valid email address.";
 
   const failed = (cause: unknown) => {
-    if (cause instanceof PaydayError && cause.status === 401 && cause.code === "unauthorized") {
+    if (cause instanceof GumError && cause.status === 401 && cause.code === "unauthorized") {
       signOut();
       return;
     }
@@ -173,7 +173,7 @@ export function IssuerSetup({
       const verified = await client.issuers.confirmEmailVerification(issuer.id, otp.trim());
       onDone(verified);
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.code === "otp_invalid") {
+      if (cause instanceof GumError && cause.code === "otp_invalid") {
         setFailure("That code is not valid. Check the email, or send a new one.");
         setBusy(false);
         return;

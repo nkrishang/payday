@@ -1,4 +1,4 @@
-import type { PayerPolicy, PayerPolicyMode } from "@payday/sdk";
+import type { PayerPolicy, PayerPolicyMode } from "@gum/sdk";
 import { AlertTriangle } from "lucide-react";
 import { StatusDot } from "@/components/ui/status-dot";
 import { formatDate, modeLabel } from "./labels";

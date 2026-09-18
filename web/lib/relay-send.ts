@@ -7,7 +7,7 @@ export interface RelayBroadcast {
   at: number;
 }
 
-const prefix = "payday:relay-send:";
+const prefix = "gum:relay-send:";
 
 export function recordRelayBroadcast(requestId: string, broadcast: RelayBroadcast): void {
   try {

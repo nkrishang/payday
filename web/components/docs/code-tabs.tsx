@@ -11,8 +11,8 @@ import { cn } from "@/lib/cn";
  * The content itself is rendered on the server and handed in as nodes.
  */
 
-const STORAGE_KEY = "payday.docs.lang";
-const CHANGE_EVENT = "payday:docs-lang";
+const STORAGE_KEY = "gum.docs.lang";
+const CHANGE_EVENT = "gum:docs-lang";
 
 export interface CodeTab {
   label: string;

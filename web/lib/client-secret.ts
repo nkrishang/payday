@@ -1,4 +1,4 @@
-import { CLIENT_SECRET_FRAGMENT_KEY } from "@payday/sdk";
+import { CLIENT_SECRET_FRAGMENT_KEY } from "@gum/sdk";
 
 /**
  * A merchant-session deposit request arrives with its single-use client secret in the

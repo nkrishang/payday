@@ -28,10 +28,10 @@ export const CUSTOMERS: EndpointGroup = {
       response: { description: "Customer." },
       examples: {
         curl: `curl -fsS "$API/v1/customers" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "name": "Globex", "email": "ap@globex.example", "details": "Attn: Accounts Payable" }'`,
-        ts: `const globex = await payday.customers.create({
+        ts: `const globex = await gum.customers.create({
   name: "Globex",
   email: "ap@globex.example",
   details: "Attn: Accounts Payable",
@@ -54,8 +54,8 @@ export const CUSTOMERS: EndpointGroup = {
       response: { description: "{ customers: Customer[], next_cursor: cus_ id | null }." },
       examples: {
         curl: `curl -fsS "$API/v1/customers?limit=50" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const page = await payday.customers.list({ limit: 50 });`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const page = await gum.customers.list({ limit: 50 });`,
         response: `{
   "customers": [ ${CUSTOMER.replace(/\n/g, "\n    ")} ],
   "next_cursor": null
@@ -84,8 +84,8 @@ export const CUSTOMERS: EndpointGroup = {
       answers: [{ status: 404, code: "customer_not_found", when: "" }],
       examples: {
         curl: `curl -fsS "$API/v1/customers/cus_0198f80c-1111-7dc1-a369-90556a64f700" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const customer = await payday.customers.get(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const customer = await gum.customers.get(id);`,
         response: CUSTOMER.replace(
           '"updated_at": "2026-09-06T12:00:00Z"',
           '"updated_at": "2026-09-06T12:00:00Z",\n  "stats": {\n    "request_count": 3,\n    "totals": [\n      { "currency": "USDC", "request_count": 2, "collected_base_units": "2500000000", "pending_base_units": "0" },\n      { "currency": "USDT", "request_count": 1, "collected_base_units": "0", "pending_base_units": "1250000000" }\n    ]\n  }',
@@ -115,10 +115,10 @@ export const CUSTOMERS: EndpointGroup = {
       response: { description: "Customer." },
       examples: {
         curl: `curl -fsS -X PATCH "$API/v1/customers/cus_0198f80c-…" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "email": null }'`,
-        ts: `await payday.customers.update(id, { email: null });`,
+        ts: `await gum.customers.update(id, { email: null });`,
         response: CUSTOMER.replace('"email": "ap@globex.example"', '"email": null'),
       },
     },

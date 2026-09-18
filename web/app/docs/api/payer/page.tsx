@@ -16,7 +16,7 @@ export default function PayerOverviewPage() {
     <DocsPage
       eyebrow="Payer routes"
       title="The payer view"
-      lead="Unauthenticated. No API key accepted. No merchant data returned. A payer session in Payday-Payer-Session unlocks gated content for exactly one request."
+      lead="Unauthenticated. No API key accepted. No merchant data returned. A payer session in Gum-Payer-Session unlocks gated content for exactly one request."
     >
       <H2 id="sessions">Sessions</H2>
       <ul>
@@ -43,7 +43,7 @@ export default function PayerOverviewPage() {
       <H2 id="cors">CORS</H2>
       <ul>
         <li>
-          Reads (<code>GET</code>): any origin. <code>Payday-Payer-Session</code> allowed.
+          Reads (<code>GET</code>): any origin. <code>Gum-Payer-Session</code> allowed.
         </li>
         <li>
           Writes (verification, session exchange, wallet): hosted checkout origin only. Body limit 8

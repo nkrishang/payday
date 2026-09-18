@@ -26,7 +26,7 @@ async function signIn(page: Page, email: string) {
 /** The account's own wallet, as the Privy stub minted it at sign-in. */
 async function accountWallet(page: Page): Promise<string> {
   return page.evaluate(
-    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+    () => JSON.parse(sessionStorage.getItem("gum.privy-stub.session") ?? "{}").wallet,
   );
 }
 
@@ -112,9 +112,9 @@ test("a new merchant is put straight to work: identity, contact, first request",
   await expect(page.getByText(truncate(wallet))).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Payer")).toHaveValue("Gum");
-  await expect(page.getByLabel("Email")).toHaveValue("onboarding@payday.sh");
+  await expect(page.getByLabel("Email")).toHaveValue("onboarding@gum.money");
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByLabel("Expected payer email")).toHaveValue("onboarding@payday.sh");
+  await expect(page.getByLabel("Expected payer email")).toHaveValue("onboarding@gum.money");
   await page.getByRole("button", { name: "Continue" }).click();
 
   // The review is real values, exactly as the real composer's is.
@@ -136,15 +136,15 @@ test("a new merchant is put straight to work: identity, contact, first request",
   await page.getByRole("button", { name: "Issue deposit request" }).click();
   expect((await customerCreated).postDataJSON()).toEqual({
     name: "Gum",
-    email: "onboarding@payday.sh",
+    email: "onboarding@gum.money",
   });
   const body = (await created).postDataJSON();
   expect(body.customer_id).toBeTruthy();
   expect(body.payout_address).toBe(wallet);
-  expect(body.payer).toMatchObject({ name: "Gum", email: "onboarding@payday.sh" });
+  expect(body.payer).toMatchObject({ name: "Gum", email: "onboarding@gum.money" });
   expect(body.payer_policy).toEqual({
     mode: "verified_email",
-    expected_email: "onboarding@payday.sh",
+    expected_email: "onboarding@gum.money",
   });
 
   // The success screen is not the usual three-CTA one — it shows the real

@@ -106,7 +106,7 @@ jobs:
           terraform_wrapper: false
 
       # The schema is three baseline migrations that are edited in place
-      # while Payday is pre-release (docs/staging.md). A database that
+      # while Gum is pre-release (docs/staging.md). A database that
       # applied the old files refuses the new ones, so when the migrations
       # directory changed since the deployed commit, the RDS instance is
       # replaced and the migrate task below creates the schema from scratch.
@@ -155,5 +155,5 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         run: |
           aws ecs wait services-stable --cluster "$ENVIRONMENT_NAME" --services api indexer signers
-          curl --fail --silent --show-error "https://api.staging.payday.sh/health"
+          curl --fail --silent --show-error "https://api.staging.gum.money/health"
           echo "staging is running git-${sha}"

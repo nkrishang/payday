@@ -34,7 +34,7 @@ use thiserror::Error;
 
 pub const DEFAULT_RELAY_URL: &str = "https://api.relay.link";
 /// The `referrer` Relay attributes our quotes to.
-pub const REFERRER: &str = "payday";
+pub const REFERRER: &str = "gum";
 
 #[derive(Debug, Error)]
 pub enum RelayError {

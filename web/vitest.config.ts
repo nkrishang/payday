@@ -20,7 +20,7 @@ export default defineConfig({
     // Fixed values rather than a developer's .env.local, so a test asserting on
     // the configured chains or tokens means the same thing everywhere.
     env: {
-      NEXT_PUBLIC_PAYDAY_API_URL: "https://api.example.test",
+      NEXT_PUBLIC_GUM_API_URL: "https://api.example.test",
       NEXT_PUBLIC_CHAINS: JSON.stringify([
         {
           id: 143,

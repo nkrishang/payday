@@ -149,8 +149,7 @@ async fn signer_pool(
     match config.signer() {
         SignerConfig::Local(keys) => {
             for key in keys {
-                let signer: PrivateKeySigner =
-                    key.parse().expect("invalid PAYDAY_SIGNER_KEYS entry");
+                let signer: PrivateKeySigner = key.parse().expect("invalid GUM_SIGNER_KEYS entry");
                 register(Box::new(signer), "local");
             }
         }
@@ -186,7 +185,7 @@ async fn register_onboarding(
             SignerConfig::Local(keys) => Box::new(
                 keys[0]
                     .parse::<PrivateKeySigner>()
-                    .expect("invalid PAYDAY_ONBOARDING_PAYER_KEY"),
+                    .expect("invalid GUM_ONBOARDING_PAYER_KEY"),
             ),
             SignerConfig::AwsKms(keys) => Box::new(
                 AwsSigner::new(

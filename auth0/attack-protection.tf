@@ -25,7 +25,7 @@ resource "auth0_attack_protection" "payday" {
     }
   }
 
-  # Payday has no password credentials: its only connection is passwordless
+  # Gum has no password credentials: its only connection is passwordless
   # email OTP. Breached-password detection therefore has nothing to inspect.
   breached_password_detection {
     enabled = false

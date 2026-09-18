@@ -10,7 +10,7 @@ export const metadata: Metadata = {
     "Base URLs, authentication, ids, error shape, pagination, idempotency, formats, rate limits, and body limits.",
 };
 
-const AUTH = `Authorization: Bearer payday_live_…
+const AUTH = `Authorization: Bearer gum_live_…
 Content-Type: application/json`;
 
 const ERROR = `HTTP/1.1 400 Bad Request
@@ -49,20 +49,20 @@ export default function ApiIntroductionPage() {
           <tr>
             <td>Production</td>
             <td>
-              <code>https://api.payday.sh</code>
+              <code>https://api.gum.money</code>
             </td>
             <td>
-              <code>payday_live_</code>
+              <code>gum_live_</code>
             </td>
             <td>Monad 143 · Base 8453 · Arbitrum One 42161</td>
           </tr>
           <tr>
             <td>Sandbox</td>
             <td>
-              <code>https://api.sandbox.payday.sh</code>
+              <code>https://api.sandbox.gum.money</code>
             </td>
             <td>
-              <code>payday_test_</code>
+              <code>gum_test_</code>
             </td>
             <td>Monad testnet 10143 · Base Sepolia 84532 · Arbitrum Sepolia 421614</td>
           </tr>

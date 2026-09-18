@@ -12,15 +12,15 @@
 # is consulted only for test-only ledger and queue invariants.
 set -euo pipefail
 
-RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
-CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
-SECOND_RPC_URL="${PAYDAY_SECOND_RPC_URL:-http://127.0.0.1:8546}"
-SECOND_CHAIN_ID="${PAYDAY_SECOND_CHAIN_ID:-31338}"
-API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
-FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
-BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
-USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
-USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
+RPC_URL="${GUM_RPC_URL:-http://127.0.0.1:8545}"
+CHAIN_ID="${GUM_CHAIN_ID:-31337}"
+SECOND_RPC_URL="${GUM_SECOND_RPC_URL:-http://127.0.0.1:8546}"
+SECOND_CHAIN_ID="${GUM_SECOND_CHAIN_ID:-31338}"
+API_URL="${GUM_API_URL:-http://127.0.0.1:3000}"
+FACTORY="${GUM_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
+BATCH_SWEEPER="${GUM_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
+USDC="${GUM_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
+USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
 # Anvil account #0: deploys the fixtures, is the first sweep signer, and
 # sends the manual wrong-chain recovery below. Mnemonic accounts #10 and #11
 # (both Anvils start with twelve accounts) complete the signer pool, so the
@@ -43,75 +43,75 @@ STRANGER="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 # Proof of Payment attestations are signed with Anvil account #6; its address,
 # 0x976EA74026E726554dB657fA54763abd0C3a0aa9, is the trusted attestor here.
 ATTESTATION_SIGNER_KEY="0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e"
-MINIO_PORT="${PAYDAY_MINIO_PORT:-9000}"
+MINIO_PORT="${GUM_MINIO_PORT:-9000}"
 # MinIO removed its Docker Hub images; quay.io is the official registry now.
-MINIO_IMAGE="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
-MC_IMAGE="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
+MINIO_IMAGE="${GUM_MINIO_IMAGE:-quay.io/minio/minio}"
+MC_IMAGE="${GUM_MC_IMAGE:-quay.io/minio/mc}"
 # MinIO's root credentials double as the AWS credentials gum-server signs with.
-MINIO_CREDENTIAL="payday-local"
-ATTACHMENT_BUCKET="payday-attachments-local"
+MINIO_CREDENTIAL="gum-local"
+ATTACHMENT_BUCKET="gum-attachments-local"
 
-export PAYDAY_RPC_URL="$RPC_URL"
-export PAYDAY_API_URL="$API_URL"
-# gum-server listens where its clients (this suite, on PAYDAY_API_URL) expect it:
+export GUM_RPC_URL="$RPC_URL"
+export GUM_API_URL="$API_URL"
+# gum-server listens where its clients (this suite, on GUM_API_URL) expect it:
 # derive the bind from the API URL so a suite run on shifted ports needs no
 # separate bind setting.
-export PAYDAY_BIND_ADDR="${PAYDAY_API_URL#http://}"
+export GUM_BIND_ADDR="${GUM_API_URL#http://}"
 # gum-server's internal listener (the indexer's RPC, health) and the health
 # listeners of the other two services, on ports the suite does not otherwise
 # use. Port 3001 is the development identity provider.
-export PAYDAY_INTERNAL_BIND_ADDR="${PAYDAY_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
-export PAYDAY_SERVER_INTERNAL_URL="${PAYDAY_SERVER_INTERNAL_URL:-http://$PAYDAY_INTERNAL_BIND_ADDR}"
-export PAYDAY_INTERNAL_TOKEN="${PAYDAY_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
-export PAYDAY_INDEXER_LISTEN_ADDR="${PAYDAY_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
-export PAYDAY_SIGNERS_LISTEN_ADDR="${PAYDAY_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
+export GUM_INTERNAL_BIND_ADDR="${GUM_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
+export GUM_SERVER_INTERNAL_URL="${GUM_SERVER_INTERNAL_URL:-http://$GUM_INTERNAL_BIND_ADDR}"
+export GUM_INTERNAL_TOKEN="${GUM_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
+export GUM_INDEXER_LISTEN_ADDR="${GUM_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
+export GUM_SIGNERS_LISTEN_ADDR="${GUM_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
 # The signers act on a sweep the moment the command lands, but their timer
 # is also what re-checks pending transactions; keep it quick.
-export PAYDAY_SIGNERS_POLL_INTERVAL_MS="${PAYDAY_SIGNERS_POLL_INTERVAL_MS:-500}"
-export PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS="${PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS:-500}"
+export GUM_SIGNERS_POLL_INTERVAL_MS="${GUM_SIGNERS_POLL_INTERVAL_MS:-500}"
+export GUM_SWEEP_SCHEDULER_INTERVAL_MS="${GUM_SWEEP_SCHEDULER_INTERVAL_MS:-500}"
 # The binary's EnvFilter defaults to silent when RUST_LOG is unset (production
 # sets it in infra/main.tf). The assertions below read the indexer's log
 # trail, so give every service the same level production runs at.
 export RUST_LOG="${RUST_LOG:-info}"
-export "PAYDAY_RPC_URL_${CHAIN_ID}=$RPC_URL"
-export "PAYDAY_RPC_URL_${SECOND_CHAIN_ID}=$SECOND_RPC_URL"
-export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-250}"
+export "GUM_RPC_URL_${CHAIN_ID}=$RPC_URL"
+export "GUM_RPC_URL_${SECOND_CHAIN_ID}=$SECOND_RPC_URL"
+export GUM_INDEXER_POLL_INTERVAL_MS="${GUM_INDEXER_POLL_INTERVAL_MS:-250}"
 # An idle chain fast-forwards its cursor on this cadence; the expiry flow
 # below relies on the chain clock moving within a few seconds.
-export PAYDAY_INDEXER_IDLE_INTERVAL_MS="${PAYDAY_INDEXER_IDLE_INTERVAL_MS:-2000}"
+export GUM_INDEXER_IDLE_INTERVAL_MS="${GUM_INDEXER_IDLE_INTERVAL_MS:-2000}"
 # The transfer signal runs against Anvil's WebSocket on the same port (derived
 # from the RPC URL, standard `logs` fallback). The timer backstop is kept
 # deliberately slow here so the flows below prove the wake path works: a
 # deposit that only the timer would catch takes visibly longer.
-export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-15000}"
-export PAYDAY_SIGNER_KEYS="${PAYDAY_SIGNER_KEYS:-$SIGNER_POOL}"
-export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-$API_URL}"
-export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
-export PAYDAY_ADMIN_SECRET="${PAYDAY_ADMIN_SECRET:-$PAYDAY_ADMIN_BEARER_SECRET}"
-export PAYDAY_API_KEY_PREFIX="payday_test_"
-export PAYDAY_DEV_IDENTITY=1
-export PAYDAY_DEV_IDENTITY_OTP="${PAYDAY_DEV_IDENTITY_OTP:-123456}"
-export PAYDAY_DEV_IDENTITY_BIND="${PAYDAY_DEV_IDENTITY_BIND:-127.0.0.1:3001}"
-export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://${PAYDAY_DEV_IDENTITY_BIND}}"
-# No PAYDAY_PRIVY_APP_ID: this suite runs offline on API keys minted straight
+export GUM_INDEXER_RECONCILE_INTERVAL_MS="${GUM_INDEXER_RECONCILE_INTERVAL_MS:-15000}"
+export GUM_SIGNER_KEYS="${GUM_SIGNER_KEYS:-$SIGNER_POOL}"
+export GUM_PUBLIC_BASE_URL="${GUM_PUBLIC_BASE_URL:-$API_URL}"
+export GUM_ADMIN_BEARER_SECRET="${GUM_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+export GUM_ADMIN_SECRET="${GUM_ADMIN_SECRET:-$GUM_ADMIN_BEARER_SECRET}"
+export GUM_API_KEY_PREFIX="gum_test_"
+export GUM_DEV_IDENTITY=1
+export GUM_DEV_IDENTITY_OTP="${GUM_DEV_IDENTITY_OTP:-123456}"
+export GUM_DEV_IDENTITY_BIND="${GUM_DEV_IDENTITY_BIND:-127.0.0.1:3001}"
+export GUM_DEV_IDENTITY_ISSUER="${GUM_DEV_IDENTITY_ISSUER:-http://${GUM_DEV_IDENTITY_BIND}}"
+# No GUM_PRIVY_APP_ID: this suite runs offline on API keys minted straight
 # into its database, and gum-server simply refuses dashboard sessions.
-export PAYDAY_PAYER_AUTH0_ISSUER="$PAYDAY_DEV_IDENTITY_ISSUER"
-export PAYDAY_PAYER_AUTH0_AUDIENCE="payday-payer-local"
-export PAYDAY_PAYER_AUTH0_CLIENT_ID="payday-payer-local"
-export PAYDAY_PAYER_REF_MASTER_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
-export PAYDAY_HOSTED_CHECKOUT_ORIGIN="$API_URL"
-export PAYDAY_ATTESTATION_SIGNER_KEY="$ATTESTATION_SIGNER_KEY"
+export GUM_PAYER_AUTH0_ISSUER="$GUM_DEV_IDENTITY_ISSUER"
+export GUM_PAYER_AUTH0_AUDIENCE="gum-payer-local"
+export GUM_PAYER_AUTH0_CLIENT_ID="gum-payer-local"
+export GUM_PAYER_REF_MASTER_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+export GUM_HOSTED_CHECKOUT_ORIGIN="$API_URL"
+export GUM_ATTESTATION_SIGNER_KEY="$ATTESTATION_SIGNER_KEY"
 # MinIO stands in for the S3 attachment bucket; see start_minio below.
-export PAYDAY_ATTACHMENT_BUCKET="$ATTACHMENT_BUCKET"
-export PAYDAY_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${MINIO_PORT}"
-export PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE=1
+export GUM_ATTACHMENT_BUCKET="$ATTACHMENT_BUCKET"
+export GUM_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${MINIO_PORT}"
+export GUM_ATTACHMENT_S3_FORCE_PATH_STYLE=1
 export AWS_ACCESS_KEY_ID="$MINIO_CREDENTIAL"
 export AWS_SECRET_ACCESS_KEY="$MINIO_CREDENTIAL"
 export AWS_REGION=us-east-1
 
 logs="$(mktemp -d)"
 pids=()
-minio_container="payday-minio-e2e-$$"
+minio_container="gum-minio-e2e-$$"
 minio_started=false
 
 cleanup() {
@@ -168,7 +168,7 @@ wait_for_rpc() {
 
 wait_for_api() {
   for _ in {1..100}; do
-    if curl --fail --silent --output /dev/null "$PAYDAY_SERVER_INTERNAL_URL/health/ready"; then
+    if curl --fail --silent --output /dev/null "$GUM_SERVER_INTERNAL_URL/health/ready"; then
       return
     fi
     sleep 0.1
@@ -217,7 +217,7 @@ tag_object_scanned() {
 }
 
 
-# One PAYDAY_CHAINS entry for a bootstrapped Anvil: the fixture addresses are
+# One GUM_CHAINS entry for a bootstrapped Anvil: the fixture addresses are
 # the same on every Anvil (account #0's first CREATE addresses), and both
 # services compare the deployed runtime bytecode with the hashes at startup
 # and refuse to start on a mismatch, so the hashes are always read from the
@@ -245,7 +245,7 @@ chain_entry() {
       block_time_ms: 1000, log_range_size: 100}'
 }
 
-# gum-server and the indexer read PAYDAY_CHAINS and refuse to start unless the
+# gum-server and the indexer read GUM_CHAINS and refuse to start unless the
 # deployed runtime bytecode on each chain hashes to the registry's values, so
 # the registry is built from the freshly bootstrapped chains.
 build_chain_registry() {
@@ -256,8 +256,8 @@ build_chain_registry() {
     "$(jq -cn --arg usdc "$USDC" --arg usdt "$USDT" '[{currency: "USDC", address: $usdc}, {currency: "USDT", address: $usdt}]')")"
   second="$(chain_entry "$SECOND_CHAIN_ID" "$SECOND_RPC_URL" latest 2 \
     "$(jq -cn --arg usdc "$USDC" '[{currency: "USDC", address: $usdc}]')")"
-  PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
-  export PAYDAY_CHAINS
+  GUM_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
+  export GUM_CHAINS
 }
 
 # Issue a permissionless request and bind the payer's wallet to it, so the
@@ -286,7 +286,7 @@ issue_invoice() {
     body="$(jq -c --arg currency "$currency" '. + {currency: $currency}' <<<"$body")"
   fi
   curl --fail --silent \
-    --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    --header "Authorization: Bearer $GUM_API_KEY" \
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: $idempotency_key" \
     --data "$body" \
@@ -303,10 +303,10 @@ bind_payer_wallet() {
   local id=$1 session=${2:-} chain_id=${3:-$CHAIN_ID} challenge typed signature
   local -a session_header=()
   if [[ -n "$session" ]]; then
-    session_header=(--header "Payday-Payer-Session: $session")
+    session_header=(--header "Gum-Payer-Session: $session")
   fi
   challenge="$(curl --fail --silent --request POST \
-    --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+    --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
     ${session_header[@]+"${session_header[@]}"} \
     --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$chain_id" '{wallet: $wallet, chain_id: $chain}')" \
     "$API_URL/v1/payer/deposit-requests/$id/wallet/challenge")"
@@ -318,8 +318,8 @@ bind_payer_wallet() {
   jq -c .typed_data <<<"$challenge" >"$typed"
   signature="$(cast wallet sign --private-key "$PAYER_KEY" --data --from-file "$typed")"
   curl --fail --silent --output /dev/null --request POST \
-    --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
-    --header "Payday-Payer-Session: $session" \
+    --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+    --header "Gum-Payer-Session: $session" \
     --data "$(jq -cn --arg wallet "$PAYER" --arg signature "$signature" '{wallet: $wallet, signature: $signature}')" \
     "$API_URL/v1/payer/deposit-requests/$id/wallet/attest"
   echo "$session"
@@ -327,7 +327,7 @@ bind_payer_wallet() {
 
 get_invoice() {
   curl --fail --silent \
-    --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    --header "Authorization: Bearer $GUM_API_KEY" \
     "$API_URL/v1/deposit-requests/$1"
 }
 
@@ -408,7 +408,7 @@ invoice_body() {
     --arg amount "$amount" --argjson expires_in "$expires_in" \
     '{payout_address: $beneficiary,
       amount: $amount, expires_in: $expires_in,
-      issuer: {name: "Payday E2E Issuer"}, payer: {name: "Payday E2E Customer"},
+      issuer: {name: "Gum E2E Issuer"}, payer: {name: "Gum E2E Customer"},
       payer_policy: {mode: "permissionless"}}'
 }
 
@@ -418,10 +418,10 @@ merchant_curl() {
   local method=$1 path=$2 body=${3:-}
   shift 3
   if [[ -n "$body" ]]; then
-    curl --silent --request "$method" --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    curl --silent --request "$method" --header "Authorization: Bearer $GUM_API_KEY" \
       --header "Content-Type: application/json" --data "$body" "$@" "$API_URL$path"
   else
-    curl --silent --request "$method" --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    curl --silent --request "$method" --header "Authorization: Bearer $GUM_API_KEY" \
       "$@" "$API_URL$path"
   fi
 }
@@ -506,7 +506,7 @@ recovery_ledger_query() {
 api_status_code() {
   local body=$1
   curl --silent --output /dev/null --write-out '%{http_code}' \
-    --header "Authorization: Bearer $PAYDAY_API_KEY" \
+    --header "Authorization: Bearer $GUM_API_KEY" \
     --header "Content-Type: application/json" \
     --header "Idempotency-Key: validation-$RANDOM-$RANDOM" \
     --data "$body" "$API_URL/v1/deposit-requests"
@@ -562,17 +562,17 @@ start_minio
 # against the real API and indexer. The solver is a fixed key outside Anvil's ten accounts.
 echo "Starting the Relay stand-in"
 RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
-export PAYDAY_RELAY_URL="${PAYDAY_RELAY_URL:-http://127.0.0.1:4020}"
-export PAYDAY_RELAY_API_KEY="local"
-RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" \
+export GUM_RELAY_URL="${GUM_RELAY_URL:-http://127.0.0.1:4020}"
+export GUM_RELAY_API_KEY="local"
+RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${GUM_RELAY_URL##*:}" RELAY_STUB_API_KEY="$GUM_RELAY_API_KEY" \
   node scripts/relay-stub.mjs >"$logs/relay-stub.log" 2>&1 &
 relay_stub_pid=$!
 pids+=("$relay_stub_pid")
 for _ in {1..100}; do
-  curl --silent --output /dev/null --header "x-api-key: $PAYDAY_RELAY_API_KEY" "$PAYDAY_RELAY_URL/chains" && break
+  curl --silent --output /dev/null --header "x-api-key: $GUM_RELAY_API_KEY" "$GUM_RELAY_URL/chains" && break
   sleep 0.1
 done
-curl --fail --silent --output /dev/null --header "x-api-key: $PAYDAY_RELAY_API_KEY" "$PAYDAY_RELAY_URL/chains" || {
+curl --fail --silent --output /dev/null --header "x-api-key: $GUM_RELAY_API_KEY" "$GUM_RELAY_URL/chains" || {
   echo "the Relay stand-in did not become ready" >&2
   exit 1
 }
@@ -581,14 +581,14 @@ send_usdc "$RELAY_SOLVER" 100000000
 send_usdt "$RELAY_SOLVER" 100000000
 
 echo "Starting gateway services"
-./target/debug/payday-dev-identity >"$logs/dev-identity.log" 2>&1 &
+./target/debug/gum-dev-identity >"$logs/dev-identity.log" 2>&1 &
 identity_pid=$!
 pids+=("$identity_pid")
 for _ in {1..100}; do
-  curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" && break
+  curl --fail --silent --output /dev/null "$GUM_DEV_IDENTITY_ISSUER/.well-known/jwks.json" && break
   sleep 0.1
 done
-curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" || {
+curl --fail --silent --output /dev/null "$GUM_DEV_IDENTITY_ISSUER/.well-known/jwks.json" || {
   echo "development identity provider did not become ready" >&2
   exit 1
 }
@@ -597,13 +597,13 @@ curl --fail --silent --output /dev/null "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known
 # limiter is the subject, so open the bucket up rather than pace every read.
 echo "Applying schema migrations"
 ./target/debug/gum-server migrate
-PAYDAY_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gum-server >"$logs/gum-server.log" 2>&1 &
+GUM_RATE_LIMIT_PER_MINUTE=6000 ./target/debug/gum-server >"$logs/gum-server.log" 2>&1 &
 server_pid=$!
 pids+=("$server_pid")
 wait_for_api
 echo "Creating two accounts with keys minted straight into the database"
-PAYDAY_API_KEY="$(./scripts/local-api-key.sh primary@example.test)"
-export PAYDAY_API_KEY
+GUM_API_KEY="$(./scripts/local-api-key.sh primary@example.test)"
+export GUM_API_KEY
 SECOND_API_KEY="$(./scripts/local-api-key.sh secondary@example.test)"
 ./target/debug/gum-indexer >"$logs/indexer.log" 2>&1 &
 indexer_pid=$!
@@ -655,7 +655,7 @@ assert_eq "$CHAIN_ID $SECOND_CHAIN_ID" "$(jq -r '[.networks[].chain.id] | join("
   "the issued request does not offer both networks"
 # A chain the request does not offer is refused before any signature.
 assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$PAYER" '{wallet: $wallet, chain_id: "999"}')" \
   "$API_URL/v1/payer/deposit-requests/$exact_id/wallet/challenge")" \
   "a challenge was minted for a chain the request does not offer"
@@ -681,7 +681,7 @@ wait_for_sql 1 "SELECT count(*) FROM webhook_events
   "binding the wallet did not raise deposit_request.ready"
 # The address is final: another wallet cannot take the request.
 assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$STRANGER" --arg chain "$SECOND_CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$exact_id/wallet/challenge")" \
   "a second wallet was offered a challenge on a bound request"
@@ -695,7 +695,7 @@ assert_eq approved "$(jq -r .requirements.wallet <<<"$exact_payer")" "the payer 
   echo "the merchant response still exposes refund_address" >&2
   exit 1
 }
-second_account_invoice="$(PAYDAY_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
+second_account_invoice="$(GUM_API_KEY="$SECOND_API_KEY" create_invoice 1.5 "$BENEFICIARY_EXACT" 3600 "exact-payment-$run_id")"
 [[ "$(jq -r .id <<<"$second_account_invoice")" != "$exact_id" ]] || {
   echo "account-scoped idempotency returned another account's invoice" >&2
   exit 1
@@ -710,11 +710,11 @@ send_usdc "$exact_address" 1500000
 # `cast send` returns once the transfer is mined; Anvil finalizes it two
 # blocks (two seconds) later. The transfer signal must wake the indexer at
 # that point: the timer backstop alone would take up to
-# PAYDAY_INDEXER_RECONCILE_INTERVAL_MS, which this bound sits well inside.
+# GUM_INDEXER_RECONCILE_INTERVAL_MS, which this bound sits well inside.
 wait_for_invoice "$exact_id" '.received_base_units == "1500000"' "exact deposit was not detected"
 detected_in="$(( $(date +%s) - paid_at ))"
 [[ "$detected_in" -le 8 ]] || {
-  echo "deposit detection took ${detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
+  echo "deposit detection took ${detected_in}s: the transfer signal wake path is not working (timer backstop is ${GUM_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
   exit 1
 }
 # The elapsed-time bound alone cannot tell the wake path from a well-timed
@@ -725,7 +725,7 @@ detected_in="$(( $(date +%s) - paid_at ))"
 # already bound, or a race this tight that CI can lose by milliseconds) — the
 # session's own wake at subscription time, whose catch-up covers everything
 # the subscription could have missed. Only the timer backstop produces
-# neither; with the timer at PAYDAY_INDEXER_RECONCILE_INTERVAL_MS the latency
+# neither; with the timer at GUM_INDEXER_RECONCILE_INTERVAL_MS the latency
 # bound above already fails that case, so this is the corroborating trail.
 grep -q 'transfer signal connected' "$logs/indexer.log" || {
   echo "the indexer never connected the transfer signal; the latency bound was met by fallback polling" >&2
@@ -764,7 +764,7 @@ assert_eq 400000 "$(token_balance "$partial_address")" "first partial payment wa
 wait_for_invoice "$partial_id" '.received_base_units == "400000" and .status == "partially_deposited"' "partial credit visible while still open"
 partial_detected_in="$(( $(date +%s) - partial_paid_at ))"
 [[ "$partial_detected_in" -le 8 ]] || {
-  echo "partial deposit detection took ${partial_detected_in}s: the transfer signal wake path is not working (timer backstop is ${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
+  echo "partial deposit detection took ${partial_detected_in}s: the transfer signal wake path is not working (timer backstop is ${GUM_INDEXER_RECONCILE_INTERVAL_MS}ms)" >&2
   exit 1
 }
 send_usdc "$partial_address" 600000
@@ -891,7 +891,7 @@ assert_eq 250000 "$(token_balance "$blacklisted_address")" "funds must stay at t
 set_blacklisted "$BENEFICIARY_BLACKLISTED" false
 # Audited operator procedure from docs/runbooks/stuck-deposit-request.md.
 curl --fail --silent --output /dev/null --request POST \
-  --header "Authorization: Bearer $PAYDAY_ADMIN_SECRET" \
+  --header "Authorization: Bearer $GUM_ADMIN_SECRET" \
   "$API_URL/v1/admin/deposit-requests/$blacklisted_id/release"
 wait_for_status "$blacklisted_id" settled
 assert_eq 250000 "$(token_balance "$BENEFICIARY_BLACKLISTED")" "released invoice was not settled"
@@ -969,7 +969,7 @@ assert_eq "$SECOND_CHAIN_ID" "$(jq -r .chain.id <<<"$(curl --fail --silent "$API
   "the payer page does not name the pinned chain"
 # The payer cannot take it elsewhere.
 assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$pinned_id/wallet/challenge")" \
   "a challenge was minted on a chain the merchant excluded"
@@ -1004,11 +1004,11 @@ assert_eq "$SECOND_CHAIN_ID" "$(curl --fail --silent "$API_URL/v1/payer/deposit-
 relay_post() {
   local path=$1 body=$2
   curl --fail --silent --request POST \
-    --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+    --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
     --data "$body" "$API_URL/v1/payer/deposit-requests/$relay_id$path"
 }
 assert_eq 422 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg chain "$CHAIN_ID" '{origin_chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes")" \
   "a quote from the request's own chain was accepted"
@@ -1025,12 +1025,12 @@ relay_tx="$(cast send "$(jq -r .steps[0].transaction.to <<<"$relay_quote")" \
 relay_sent="$(relay_post "/relay/quotes/$rli/sent" "$(jq -cn --arg hash "$relay_tx" '{transaction_hash: $hash}')")"
 assert_eq sent "$(jq -r .relay.status <<<"$relay_sent")" "reporting the deposit did not mark the quote sent"
 assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg hash "$relay_tx" '{transaction_hash: $hash}')" \
   "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes/$rli/sent")" \
   "the same report again was not idempotent"
 assert_eq 409 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn '{transaction_hash: "0x0000000000000000000000000000000000000000000000000000000000000001"}')" \
   "$API_URL/v1/payer/deposit-requests/$relay_id/relay/quotes/$rli/sent")" \
   "a different transaction was accepted for a reported quote"
@@ -1048,7 +1048,7 @@ assert_eq "$relay_tx" "$(jq -r .transfers[0].relay.origin_transaction_hash <<<"$
 assert_eq filled "$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$relay_id" | jq -r .relay.status)" \
   "the payer view does not report the fill"
 relay_proof="$(api_json GET "/v1/deposit-requests/$relay_id/proof")"
-jq -e '.version == "payday.proof.v4"
+jq -e '.version == "gum.proof.v4"
   and (.transfers | length) == 1
   and (.transfers[0].sender | ascii_downcase) != ($payer | ascii_downcase)
   and .transfers[0].relay.origin_sender == $payer
@@ -1068,7 +1068,7 @@ parked_id="$(jq -er .id <<<"$parked_issued")"
 bind_payer_wallet "$parked_id" "" "$CHAIN_ID" >/dev/null
 parked_address="$(get_invoice "$parked_id" | jq -er .address)"
 parked_quote="$(curl --fail --silent --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" '{origin_chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$parked_id/relay/quotes")"
 parked_rli="$(jq -er .id <<<"$parked_quote")"
@@ -1076,10 +1076,10 @@ parked_request="$(jq -er .request_id <<<"$parked_quote")"
 # Reported as sent with a transaction nobody made; the stand-in is told to
 # fail the request, and a stranger pays the exact amount directly meanwhile.
 curl --fail --silent --output /dev/null --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn '{transaction_hash: "0x00000000000000000000000000000000000000000000000000000000000000aa"}')" \
   "$API_URL/v1/payer/deposit-requests/$parked_id/relay/quotes/$parked_rli/sent"
-curl --fail --silent --output /dev/null --request POST "$PAYDAY_RELAY_URL/__fail/$parked_request"
+curl --fail --silent --output /dev/null --request POST "$GUM_RELAY_URL/__fail/$parked_request"
 send_usdc "$STRANGER" 3000000
 cast send "$USDC" 'transfer(address,uint256)' "$parked_address" 3000000 \
   --private-key "$STRANGER_KEY" --rpc-url "$RPC_URL" >/dev/null
@@ -1199,7 +1199,7 @@ document_body="$(jq -c --arg customer "$customer_id" --arg attachment "$attachme
         reference: "INV-2026-03", notes: "Net 30", issuer: {name: "Acme Corp", email: "billing@acme.example"},
         payer: {name: "Globex Corporation"}}' <<<"$(invoice_body 3 "$BENEFICIARY_EXACT" 3600)")"
 documented="$(curl --fail --silent \
-  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $GUM_API_KEY" --header "Content-Type: application/json" \
   --header "Idempotency-Key: document-$run_id" --data "$document_body" "$API_URL/v1/deposit-requests")"
 documented_id="$(jq -er .id <<<"$documented")"
 assert_eq "$pdf_sha256" "$(jq -r .attachment.sha256 <<<"$documented")" \
@@ -1211,7 +1211,7 @@ downloaded="$logs/downloaded.pdf"
 curl --fail --silent --output "$downloaded" "$(jq -er .download_url <<<"$descriptor")"
 assert_eq "$pdf_sha256" "$(sha256_of "$downloaded")" "downloaded attachment bytes differ from the upload"
 reuse_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $GUM_API_KEY" --header "Content-Type: application/json" \
   --header "Idempotency-Key: document-reuse-$run_id" --data "$document_body" "$API_URL/v1/deposit-requests")"
 assert_eq 409 "$reuse_status" "an attached PDF was attached to a second invoice"
 
@@ -1219,7 +1219,7 @@ gated_body="$(jq -c '. + {heading: "Gated retainer",
   payer_policy: {mode: "verified_email", expected_email: "alice@example.test"}}' \
   <<<"$(invoice_body 2 "$BENEFICIARY_EXACT" 3600)")"
 gated="$(curl --fail --silent \
-  --header "Authorization: Bearer $PAYDAY_API_KEY" --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $GUM_API_KEY" --header "Content-Type: application/json" \
   --header "Idempotency-Key: gated-$run_id" --data "$gated_body" "$API_URL/v1/deposit-requests")"
 gated_id="$(jq -er .id <<<"$gated")"
 gated_payer="$(curl --fail --silent "$API_URL/v1/payer/deposit-requests/$gated_id")"
@@ -1235,16 +1235,16 @@ assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 # the payer's behalf; the payer supplies nothing but the code.
 verify_payer_email() {
   local id=$1 started session
-  started="$(curl --fail --silent --request POST --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" \
+  started="$(curl --fail --silent --request POST --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" \
     "$API_URL/v1/payer/deposit-requests/$id/verify/email/start")"
   session="$(jq -er .payer_session <<<"$started")"
   assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-    --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
+    --header "Content-Type: application/json" --header "Gum-Payer-Session: $session" \
     --data '{"otp":"000000"}' "$API_URL/v1/payer/deposit-requests/$id/verify/email/confirm")" \
     "a wrong code was accepted"
   assert_eq 200 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-    --header "Content-Type: application/json" --header "Payday-Payer-Session: $session" \
-    --data "$(jq -cn --arg otp "$PAYDAY_DEV_IDENTITY_OTP" '{otp: $otp}')" \
+    --header "Content-Type: application/json" --header "Gum-Payer-Session: $session" \
+    --data "$(jq -cn --arg otp "$GUM_DEV_IDENTITY_OTP" '{otp: $otp}')" \
     "$API_URL/v1/payer/deposit-requests/$id/verify/email/confirm")" \
     "the right code was not accepted"
   echo "$session"
@@ -1254,15 +1254,15 @@ echo "Testing that a gated request takes the wallet step only from a verified se
 gated_before="$(token_balance "$BENEFICIARY_EXACT")"
 # No session, no wallet step: the identity policy comes first.
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg wallet "$PAYER" --arg chain "$CHAIN_ID" '{wallet: $wallet, chain_id: $chain}')" \
   "$API_URL/v1/payer/deposit-requests/$gated_id/wallet/challenge")" \
   "a gated request offered a wallet challenge without a verified session"
 gated_session="$(verify_payer_email "$gated_id")"
-gated_unlocked="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
+gated_unlocked="$(curl --fail --silent --header "Gum-Payer-Session: $gated_session" \
   "$API_URL/v1/payer/deposit-requests/$gated_id")"
 assert_eq true "$(jq -r .content_unlocked <<<"$gated_unlocked")" "verified session did not unlock the invoice"
-assert_eq "Payday E2E Customer" "$(jq -r .details.payer.name <<<"$gated_unlocked")" "verified session did not see the document"
+assert_eq "Gum E2E Customer" "$(jq -r .details.payer.name <<<"$gated_unlocked")" "verified session did not see the document"
 assert_eq null "$(jq -r .address <<<"$gated_unlocked")" "an unlocked request had an address before the wallet step"
 assert_eq pending "$(jq -r .requirements.wallet <<<"$gated_unlocked")" "the wallet fact is not pending before the wallet step"
 [[ "$(get_invoice "$gated_id" | jq -r .verification_completed_at)" != null ]] || {
@@ -1271,7 +1271,7 @@ assert_eq pending "$(jq -r .requirements.wallet <<<"$gated_unlocked")" "the wall
 }
 # The verified session signs; the request now has its address.
 bind_payer_wallet "$gated_id" "$gated_session" >/dev/null
-gated_bound="$(curl --fail --silent --header "Payday-Payer-Session: $gated_session" \
+gated_bound="$(curl --fail --silent --header "Gum-Payer-Session: $gated_session" \
   "$API_URL/v1/payer/deposit-requests/$gated_id")"
 gated_address="$(jq -er .address <<<"$gated_bound")"
 assert_eq "$gated_address" "$(get_invoice "$gated_id" | jq -r .address)" "merchant and payer disagree on the address"
@@ -1284,7 +1284,7 @@ wait_for_invoice "$gated_id" '.received_base_units == "2000000" and .status == "
 # address must not be offered for a second payment. The bare link is refused
 # earlier, for want of a session.
 assert_eq 410 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "Payday-Payer-Session: $gated_session" "$API_URL/v1/payer/deposit-requests/$gated_id/qr")" \
+  --header "Gum-Payer-Session: $gated_session" "$API_URL/v1/payer/deposit-requests/$gated_id/qr")" \
   "a funded invoice offered its QR to the verified session"
 assert_eq 401 "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   "$API_URL/v1/payer/deposit-requests/$gated_id/qr")" "the bare link fetched the QR"
@@ -1324,7 +1324,7 @@ api_json GET "/v1/deposit-requests/$documented_id/request.pdf" "" --output "$inv
 assert_eq "%PDF-" "$(head -c 5 "$invoice_pdf")" "invoice document is not a PDF"
 
 proof="$(api_json GET "/v1/deposit-requests/$exact_id/proof")"
-jq -e '.version == "payday.proof.v4" and .payment_address != null and .salt != null
+jq -e '.version == "gum.proof.v4" and .payment_address != null and .salt != null
   and .chain_id == $chain and (.canonical_issuance_snapshot.networks | length) == 2
   and .attribution_hash != null and .payer_wallet.signature != null
   and .payer_wallet.typed_data.primaryType == "PayerAttestation"
@@ -1363,7 +1363,7 @@ assert_eq attachment_rejected "$(api_error_code POST "/v1/attachments/$rejected_
 
 
 echo "Testing a same-chain withdrawal: a signed EIP-3009 authorization relayed by the indexer"
-# The merchant's Payday wallet is an ordinary key here, fresh so no earlier
+# The merchant's Gum wallet is an ordinary key here, fresh so no earlier
 # scenario has touched it; the API learns of it the way a dashboard session
 # would record it.
 merchant_wallet_json="$(cast wallet new --json)"
@@ -1487,14 +1487,14 @@ assert_eq "$((payer_usdc_before + 1000000))" "$(token_balance "$PAYER")" \
 echo "Testing a USDT request paid with USDC from another chain through Relay"
 usdt_relay="$(create_invoice 2 "$BENEFICIARY_PARTIAL" 3600 "usdt-relay-$run_id" "$CHAIN_ID" USDT)"
 usdt_relay_id="$(jq -r .id <<<"$usdt_relay")"
-usdt_relay_chains="$(curl --fail --silent --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" \
+usdt_relay_chains="$(curl --fail --silent --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" \
   "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/chains")"
 assert_eq "$SECOND_CHAIN_ID" "$(jq -r '.chains[0].chain_id' <<<"$usdt_relay_chains")" "the origin chain is not offered"
 assert_eq USDC "$(jq -r '.chains[0].tokens[0].currency' <<<"$usdt_relay_chains")" \
   "the origin chain does not offer USDC"
 usdt_origin_token="$(jq -r '.chains[0].tokens[0].address' <<<"$usdt_relay_chains")"
 usdt_quote="$(curl --fail --silent --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg chain "$SECOND_CHAIN_ID" --arg token "$usdt_origin_token" '{origin_chain_id: $chain, origin_token: $token}')" \
   "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/quotes")"
 usdt_rli="$(jq -er .id <<<"$usdt_quote")"
@@ -1504,7 +1504,7 @@ usdt_relay_tx="$(cast send "$(jq -r .steps[0].transaction.to <<<"$usdt_quote")" 
   "$(jq -r .steps[0].transaction.data <<<"$usdt_quote")" \
   --private-key "$PAYER_KEY" --rpc-url "$SECOND_RPC_URL" --json | jq -r .transactionHash)"
 curl --fail --silent --output /dev/null --request POST \
-  --header "Origin: $PAYDAY_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
+  --header "Origin: $GUM_HOSTED_CHECKOUT_ORIGIN" --header "Content-Type: application/json" \
   --data "$(jq -cn --arg hash "$usdt_relay_tx" '{transaction_hash: $hash}')" \
   "$API_URL/v1/payer/deposit-requests/$usdt_relay_id/relay/quotes/$usdt_rli/sent"
 wait_for_status "$usdt_relay_id" settled

@@ -26,6 +26,26 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ## [Unreleased]
 
+### Changed
+
+- The product is Gum. Every surface carries the new name: the TypeScript
+  SDK is `@gum/sdk` with `GumClient`, `GumPayerClient`, and `GumError`
+  (was `@payday/sdk`, `PaydayClient`, `PaydayPayerClient`, `PaydayError`);
+  the web app is `@gum/web`; every environment variable is `GUM_*`; the
+  webhook and payer-session headers are `Gum-Event-Id`, `Gum-Event-Type`,
+  `Gum-Signature`, and `Gum-Payer-Session`; API keys mint as `gum_live_`,
+  `gum_test_`, and `gum_dev_`; the canonical schema strings are
+  `gum.invoice.v4`, `gum.attestation.v4`, and `gum.proof.v4`; the
+  attestation's EIP-712 domain and statement name Gum; the proof's wallet
+  fact is `provider: "gum"`; and the product domain and mail are
+  `gum.money`, `api.gum.money`, and `@gum.money`. A new migration
+  (`0004_gum_provider.sql`) rewrites the recorded `provider` value and
+  re-pins its check constraint. The pinned canonicalization and
+  attestation digests moved with the renamed bytes, in the Rust and web
+  pinning tests together. Existing staging API keys minted with the old
+  prefix must be re-minted after deploy.
+
+
 ### Added
 
 - USDT, alongside USDC. A deposit request is denominated in one `currency`

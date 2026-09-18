@@ -23,7 +23,7 @@ contract PaymentFactoryScript is Script {
     function setUp() public {}
 
     function run() public {
-        uint256 expectedChainId = vm.envUint("PAYDAY_CHAIN_ID");
+        uint256 expectedChainId = vm.envUint("GUM_CHAIN_ID");
         require(block.chainid == expectedChainId, "unexpected deployment chain");
         (, address deployer,) = vm.readCallers();
         require(
@@ -40,9 +40,9 @@ contract PaymentFactoryScript is Script {
         // gum-server and gum-indexer refuse to start unless the live code
         // hashes match these values, so print them ready to paste into the
         // environment alongside the addresses.
-        console.log("PAYDAY_FACTORY_ADDRESS=%s", vm.toString(address(factory)));
-        console.log("PAYDAY_FACTORY_CODE_HASH=%s", vm.toString(address(factory).codehash));
-        console.log("PAYDAY_BATCH_SWEEPER_ADDRESS=%s", vm.toString(address(batchSweeper)));
-        console.log("PAYDAY_BATCH_SWEEPER_CODE_HASH=%s", vm.toString(address(batchSweeper).codehash));
+        console.log("GUM_FACTORY_ADDRESS=%s", vm.toString(address(factory)));
+        console.log("GUM_FACTORY_CODE_HASH=%s", vm.toString(address(factory).codehash));
+        console.log("GUM_BATCH_SWEEPER_ADDRESS=%s", vm.toString(address(batchSweeper)));
+        console.log("GUM_BATCH_SWEEPER_CODE_HASH=%s", vm.toString(address(batchSweeper).codehash));
     }
 }

@@ -7,8 +7,8 @@
 // destination token from its own solver key to the recipient on the
 // destination Anvil, exactly as a Relay solver fills a request.
 //
-// Origin chain: PAYDAY_SECOND_CHAIN_ID at PAYDAY_SECOND_RPC_URL (31338).
-// Destination chain: PAYDAY_CHAIN_ID at PAYDAY_RPC_URL (31337). Both hold
+// Origin chain: GUM_SECOND_CHAIN_ID at GUM_SECOND_RPC_URL (31338).
+// Destination chain: GUM_CHAIN_ID at GUM_RPC_URL (31337). Both hold
 // the same mock USDC and USDT at RELAY_STUB_USDC and RELAY_STUB_USDT; the
 // solver key holds both on the destination chain (the suite funds it; the
 // stub gives it gas with anvil_setBalance) and is a fixed key outside Anvil's
@@ -24,8 +24,8 @@
 // Every call must carry `x-api-key`, as Relay requires from 2026-10-02.
 //
 // Environment: RELAY_STUB_PORT (4020), RELAY_STUB_API_KEY (local),
-// RELAY_STUB_USDC, RELAY_STUB_USDT, RELAY_STUB_SOLVER_KEY, PAYDAY_RPC_URL, PAYDAY_CHAIN_ID,
-// PAYDAY_SECOND_RPC_URL, PAYDAY_SECOND_CHAIN_ID. Needs `cast` on the PATH.
+// RELAY_STUB_USDC, RELAY_STUB_USDT, RELAY_STUB_SOLVER_KEY, GUM_RPC_URL, GUM_CHAIN_ID,
+// GUM_SECOND_RPC_URL, GUM_SECOND_CHAIN_ID. Needs `cast` on the PATH.
 //
 // Control endpoints for the suite: `POST /__fail/{requestId}` makes the stub
 // report `failure` for that request instead of filling it.
@@ -42,12 +42,12 @@ const SOLVER_KEY =
   process.env.RELAY_STUB_SOLVER_KEY ??
   "0x1111111111111111111111111111111111111111111111111111111111111111";
 const DESTINATION = {
-  id: Number(process.env.PAYDAY_CHAIN_ID ?? 31337),
-  rpc: process.env.PAYDAY_RPC_URL ?? "http://127.0.0.1:8545",
+  id: Number(process.env.GUM_CHAIN_ID ?? 31337),
+  rpc: process.env.GUM_RPC_URL ?? "http://127.0.0.1:8545",
 };
 const ORIGIN = {
-  id: Number(process.env.PAYDAY_SECOND_CHAIN_ID ?? 31338),
-  rpc: process.env.PAYDAY_SECOND_RPC_URL ?? "http://127.0.0.1:8546",
+  id: Number(process.env.GUM_SECOND_CHAIN_ID ?? 31338),
+  rpc: process.env.GUM_SECOND_RPC_URL ?? "http://127.0.0.1:8546",
 };
 /** What the solver charges on top of the exact output, in base units. */
 const FEE = 20_000n;

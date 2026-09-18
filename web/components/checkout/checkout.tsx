@@ -1,6 +1,6 @@
 "use client";
 
-import type { PayerDepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest } from "@gum/sdk";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { checkoutView, readyDepositRequest, unlockedDepositRequest } from "@/lib/checkout-state";
 import { takePreviewSession, usePayerSession } from "@/lib/payer-session";
@@ -66,7 +66,7 @@ function readChosenNetwork(key: string): string | null {
  * ever binds the chain the challenge was minted for.
  */
 function useChosenNetwork(id: string): [string | null, (chainId: string) => void] {
-  const key = `payday:network:${id}`;
+  const key = `gum:network:${id}`;
   const chosen = useSyncExternalStore(
     subscribeNetwork,
     () => readChosenNetwork(key),

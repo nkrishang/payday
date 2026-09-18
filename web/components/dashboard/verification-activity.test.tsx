@@ -1,4 +1,4 @@
-import type { PaydayClient, VerificationAttempt, VerificationDetail } from "@payday/sdk";
+import type { GumClient, VerificationAttempt, VerificationDetail } from "@gum/sdk";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MerchantProvider } from "./session";
@@ -30,7 +30,7 @@ const VERIFIED: VerificationDetail = {
 
 function renderActivity(detail: VerificationDetail) {
   const verification = vi.fn().mockResolvedValue(detail);
-  const client = { depositRequests: { verification } } as unknown as PaydayClient;
+  const client = { depositRequests: { verification } } as unknown as GumClient;
   render(
     <MerchantProvider
       value={{ client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut: vi.fn() }}

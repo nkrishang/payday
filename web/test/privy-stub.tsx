@@ -7,7 +7,7 @@ import { useCallback, useSyncExternalStore, type ReactNode } from "react";
  * component tests.
  *
  * Privy cannot be driven by a test: a sign-in needs a real mailbox and a real
- * code. So when the suite asks (`PAYDAY_PRIVY_STUB=1`, see next.config.ts)
+ * code. So when the suite asks (`GUM_PRIVY_STUB=1`, see next.config.ts)
  * this module takes the SDK's place at bundle time, with the same hooks and
  * the same shapes the app reads — `usePrivy`, `useLoginWithEmail`,
  * `useIdentityToken`, `getIdentityToken`, `useCreateWallet`, `useUser` —
@@ -21,7 +21,7 @@ import { useCallback, useSyncExternalStore, type ReactNode } from "react";
  * the real API keeps accounts apart.
  */
 
-const SESSION_KEY = "payday.privy-stub.session";
+const SESSION_KEY = "gum.privy-stub.session";
 const TOKEN_PREFIX = "stub-dashboard-token";
 export const STUB_OTP = "123456";
 

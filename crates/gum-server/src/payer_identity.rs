@@ -26,7 +26,7 @@ use crate::api::error::ApiError;
 use crate::api::{Auth0Verifier, Identity};
 
 const PASSWORDLESS_OTP_GRANT: &str = "http://auth0.com/oauth/grant-type/passwordless/otp";
-const CONTINUATION_DOMAIN: &[u8] = b"PAYDAY_PAYER_EMAIL_CONTINUATION_V1";
+const CONTINUATION_DOMAIN: &[u8] = b"GUM_PAYER_EMAIL_CONTINUATION_V1";
 const CONTINUATION_TTL_SECS: u64 = 5 * 60;
 
 #[derive(Serialize, Deserialize)]
@@ -311,15 +311,15 @@ pub mod testing {
         aud: &'a str,
         exp: u64,
         azp: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/method")]
+        #[serde(rename = "https://api.gum.money/auth/method")]
         authentication_method: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/client_id")]
+        #[serde(rename = "https://api.gum.money/auth/client_id")]
         authentication_client_id: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/authenticated_at")]
+        #[serde(rename = "https://api.gum.money/auth/authenticated_at")]
         authenticated_at: u64,
-        #[serde(rename = "https://api.payday.sh/auth/event_id")]
+        #[serde(rename = "https://api.gum.money/auth/event_id")]
         authentication_event_id: String,
-        #[serde(rename = "https://api.payday.sh/auth/email")]
+        #[serde(rename = "https://api.gum.money/auth/email")]
         email: &'a str,
     }
 

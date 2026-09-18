@@ -1,6 +1,6 @@
 "use client";
 
-import type { AccountMetadata, Customer, Issuer, DepositRequest } from "@payday/sdk";
+import type { AccountMetadata, Customer, Issuer, DepositRequest } from "@gum/sdk";
 import { ArrowUpRight } from "lucide-react";
 import { CurrencyMark } from "@/components/ui/amount";
 import { useRouter, useSearchParams } from "next/navigation";

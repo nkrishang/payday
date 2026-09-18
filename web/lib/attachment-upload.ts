@@ -1,5 +1,5 @@
-import { type AttachmentDescriptor, PaydayError } from "@payday/sdk";
-import { createMerchantClient } from "./merchant-payday";
+import { type AttachmentDescriptor, GumError } from "@gum/sdk";
+import { createMerchantClient } from "./merchant-gum";
 
 /** The API's limit; checked here only so the form can answer before a wasted upload. */
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -65,7 +65,7 @@ export async function uploadAttachment(
       onState({ status: "idle" });
       return null;
     }
-    if (error instanceof PaydayError && error.code === "attachment_rejected") {
+    if (error instanceof GumError && error.code === "attachment_rejected") {
       onState({ status: "rejected", filename, message: error.message });
     } else {
       onState({ status: "failed", filename, message: describeError(error) });
@@ -76,7 +76,7 @@ export async function uploadAttachment(
 
 /** A sentence for the merchant; never the raw object. */
 export function describeError(error: unknown): string {
-  if (error instanceof PaydayError) {
+  if (error instanceof GumError) {
     return error.requestId ? `${error.message} (request ${error.requestId})` : error.message;
   }
   if (error instanceof Error && error.message) return error.message;

@@ -30,7 +30,7 @@ const securityHeaders = [
  * by a session kept in the tab. Nothing else in the app knows the
  * difference, which is the point. Never set outside the suite.
  */
-const privyStub = process.env.PAYDAY_PRIVY_STUB === "1";
+const privyStub = process.env.GUM_PRIVY_STUB === "1";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -40,7 +40,7 @@ const nextConfig: NextConfig = {
   // Next emits `crossorigin` on its own script tags, so the browser sends an
   // Origin header even same-origin, and the dev server answers 403 for any
   // origin it does not trust. It trusts localhost but not the literal loopback
-  // address, which is what `just web` and PAYDAY_PUBLIC_BASE_URL both use —
+  // address, which is what `just web` and GUM_PUBLIC_BASE_URL both use —
   // without this, dev serves HTML that never hydrates.
   allowedDevOrigins: ["127.0.0.1", "localhost", "[::1]"],
   // This repo documents itself in docs/ and CLAUDE-less conventions; Next's

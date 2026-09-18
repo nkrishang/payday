@@ -139,7 +139,7 @@ The boundaries are drawn along three lines that must never blur:
 | per-chain indexer cursor, finalized head (chain clock), chain faults | `gum-server` | `indexer_cursor`, `chain_faults` | indexer reads via RPC; CAS on write |
 | execution jobs, transaction lanes, attempts, chain halts, executor/signer health | `gum-signers` | `execution.*` | server reads `executor_status`/`signer_status` for `/v1/status` only |
 | bus messages and deliveries | `gum-bus` (library) | `bus.*` | each process is a named consumer |
-| signing keys | `gum-signers` | KMS / `PAYDAY_SIGNER_KEYS` | nobody |
+| signing keys | `gum-signers` | KMS / `GUM_SIGNER_KEYS` | nobody |
 
 Rejected alternatives:
 
@@ -303,7 +303,7 @@ Crash boundaries:
   with jitter up to `max(idle interval, 30 s)`; other chains are
   unaffected.
 
-Confirmation rules are per chain in `PAYDAY_CHAINS`:
+Confirmation rules are per chain in `GUM_CHAINS`:
 `finality_source: finalized` (Monad-shaped) trusts the node's `finalized`
 tag; `latest` + `finality_confirmations` (L2-shaped) waits N blocks. Both
 are enforced in one place (`gum_chain::finality_boundary`) and used by
@@ -318,7 +318,7 @@ in `SWEEPABLE_STATUSES`, no `sweep_job_id`, no `attention_reason`,
 locks a batch `FOR UPDATE SKIP LOCKED`, inserts the `sweep_jobs` row, sets
 `sweep_job_id` on the items, publishes the command — one transaction.
 
-The loop runs every `PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS` (5 s) and is woken
+The loop runs every `GUM_SWEEP_SCHEDULER_INTERVAL_MS` (5 s) and is woken
 by the internal RPC when a range funds a request, so scheduling latency is
 normally under a second. A crash mid-pass loses nothing: uncommitted items
 are still eligible, committed jobs are on the bus. Two servers running the
@@ -382,7 +382,7 @@ Crash boundaries (also documented at the top of `executor.rs`):
 Health: `execution.executor_status` (per chain: running/halted/failing +
 heartbeat) and `execution.signer_status` (balance, low-balance flag) are
 written each pass and read by `gum-server` for `/v1/status`. The
-`PAYDAY_SIGNER_LOW_BALANCE_WEI` warning is logged with the `signer` field
+`GUM_SIGNER_LOW_BALANCE_WEI` warning is logged with the `signer` field
 so an alarm can key on it.
 
 ### 6.4 Settlement (server consumes events)
@@ -441,7 +441,7 @@ joined on `correlation_id` is the full causal history of a request.
 
 `gum-telemetry` is linked by all three binaries:
 
-* `tracing` with a JSON encoder in production (`PAYDAY_LOG_FORMAT=json`,
+* `tracing` with a JSON encoder in production (`GUM_LOG_FORMAT=json`,
   the default when stdout is not a terminal) and a pretty encoder locally.
 * Every line carries `service`. Span fields are flattened into events, so
   a range span opened with `chain_id`, `from_block`, `to_block` labels every

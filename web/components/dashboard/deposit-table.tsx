@@ -1,6 +1,6 @@
 "use client";
 
-import type { Customer, Issuer, DepositRequestStatus } from "@payday/sdk";
+import type { Customer, Issuer, DepositRequestStatus } from "@gum/sdk";
 import { ChevronRight, Paperclip, Plus } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";

@@ -5,15 +5,15 @@ import { Callout, DocsPage, H2, H3, Step, Steps, Table } from "@/components/docs
 export const metadata: Metadata = {
   title: "Dashboard",
   description:
-    "Issue and track deposit requests from the Payday dashboard: sign-in, issuer identities, the composer, the request detail, customers, and API keys.",
+    "Issue and track deposit requests from the Gum dashboard: sign-in, issuer identities, the composer, the request detail, customers, and API keys.",
 };
 
 export default function DashboardPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Dashboard"
-      lead="The dashboard at payday.sh/dashboard is the browser face of the same API the SDK uses. It issues deposit requests, keeps customers, uploads the one PDF a request may carry, and shows what happened to each one."
+      lead="The dashboard at gum.money/dashboard is the browser face of the same API the SDK uses. It issues deposit requests, keeps customers, uploads the one PDF a request may carry, and shows what happened to each one."
     >
       <p>
         It adds no rules of its own. Every limit, policy check, and status comes from the API; the
@@ -46,7 +46,7 @@ export default function DashboardPage() {
         <Step title="Name the identity and its contact address">
           <p>
             The name appears on every request as the issuer. The contact address is where payers are
-            told to write, so Payday proves it with an emailed code before any request carries it.
+            told to write, so Gum proves it with an emailed code before any request carries it.
           </p>
         </Step>
         <Step title="Confirm the code">
@@ -129,7 +129,7 @@ export default function DashboardPage() {
           <tr>
             <td>Files</td>
             <td>
-              The attached PDF, Payday&apos;s own PDF rendering of the request, and, once settled,
+              The attached PDF, Gum&apos;s own PDF rendering of the request, and, once settled,
               the Proof of Payment as JSON.
             </td>
           </tr>
@@ -146,7 +146,7 @@ export default function DashboardPage() {
           <strong>Amount.</strong> The currency, USDC or USDT, then the amount, used directly. The
           network: for USDC, the payer&apos;s choice or one pinned network; for USDT, Monad or
           Arbitrum One, since a USDT request is always pinned. The identity when you have more
-          than one, the payout wallet when the identity offers alternatives to your Payday wallet,
+          than one, the payout wallet when the identity offers alternatives to your Gum wallet,
           and the deadline: 24 hours, 7 days, 30 days, or a moment you pick.
         </li>
         <li>
@@ -187,7 +187,7 @@ export default function DashboardPage() {
 
       <H3 id="account-and-api-key">Account and API key</H3>
       <p>
-        The foot of the page is the account: the mailbox you signed in with, your Payday wallet in
+        The foot of the page is the account: the mailbox you signed in with, your Gum wallet in
         full with its balance in every stablecoin each network serves, read from the public chain,
         and a sign-out. <strong>Withdraw</strong> beneath the balances moves everything the wallet
         holds in one currency to one address you name, offering only the networks that serve it:

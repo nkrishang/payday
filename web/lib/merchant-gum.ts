@@ -1,4 +1,4 @@
-import { PaydayClient } from "@payday/sdk";
+import { GumClient } from "@gum/sdk";
 import { config } from "./config";
 
 /**
@@ -135,8 +135,8 @@ export function retryingFetch(base: typeof globalThis.fetch): typeof globalThis.
 export function createMerchantClient(
   sessionToken: string,
   fetcher?: typeof globalThis.fetch,
-): PaydayClient {
-  return new PaydayClient({
+): GumClient {
+  return new GumClient({
     accessToken: sessionToken,
     baseUrl: config.apiUrl,
     fetch: retryingFetch(fetcher ?? ((...args) => globalThis.fetch(...args))),
@@ -149,7 +149,7 @@ export function createMerchantClient(
  * (crates/gatewayd/src/pregenerated_wallet.rs), so it is often already there
  * by the time the code comes back. Fire-and-forget: sign-in's own explicit
  * wallet creation is the correctness guarantee regardless, so a failure here
- * — including a deployment with no `PAYDAY_PRIVY_APP_SECRET` configured — is
+ * — including a deployment with no `GUM_PRIVY_APP_SECRET` configured — is
  * never worth surfacing.
  */
 export function pregenerateWallet(email: string): void {

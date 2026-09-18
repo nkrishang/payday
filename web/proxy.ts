@@ -65,7 +65,7 @@ const PRIVY_FRAMES = ["https://auth.privy.io", "https://challenges.cloudflare.co
 const PRIVY_SCRIPTS = ["https://challenges.cloudflare.com"];
 
 function policy(nonce: string | null, isDev: boolean): string {
-  const api = origin(process.env.NEXT_PUBLIC_PAYDAY_API_URL);
+  const api = origin(process.env.NEXT_PUBLIC_GUM_API_URL);
   const connect = [
     "'self'",
     ...api,

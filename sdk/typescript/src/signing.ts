@@ -1,7 +1,7 @@
 /**
- * Signing a withdrawal from a server: `@payday/sdk/signing`.
+ * Signing a withdrawal from a server: `@gum/sdk/signing`.
  *
- * `POST /v1/withdrawals` returns one leg per network the Payday wallet holds
+ * `POST /v1/withdrawals` returns one leg per network the Gum wallet holds
  * USDC on, each with EIP-712 typed data (an EIP-3009 authorization under
  * that chain's USDC). This module turns a withdrawal into the signed
  * `authorizations` array `client.withdrawals.authorize` takes, using any
@@ -18,7 +18,7 @@
 
 import type { LegAuthorizationInput, Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "./index.js";
 
-/** Anything that can sign EIP-712 typed data for the Payday wallet. */
+/** Anything that can sign EIP-712 typed data for the Gum wallet. */
 export interface WithdrawalSigner {
   signTypedData(typedData: SignableTypedData): Promise<string>;
 }
@@ -96,7 +96,7 @@ export function assertLegAuthorization(withdrawal: Withdrawal, leg: WithdrawalLe
   if (typed.primaryType !== authorization.primary_type) throw problem("names another type than the leg");
   const expectedType = leg.kind === "bridge" ? "ReceiveWithAuthorization" : "TransferWithAuthorization";
   if (typed.primaryType !== expectedType) throw problem(`is a ${typed.primaryType} for a ${leg.kind} leg`);
-  if (!sameAddress(typed.message.from, withdrawal.wallet_address)) throw problem("is not signed from the Payday wallet");
+  if (!sameAddress(typed.message.from, withdrawal.wallet_address)) throw problem("is not signed from the Gum wallet");
   if (typed.domain.chainId !== Number(leg.source_chain.id)) throw problem("is under another chain's domain");
   // A transfer leg must move funds on the chain the withdrawal settles on:
   // the planner never puts one elsewhere, so a leg sourced from another
@@ -185,9 +185,9 @@ export async function signWithdrawal(
 }
 
 /**
- * A signer from the Payday wallet's private key (export it once from the
+ * A signer from the Gum wallet's private key (export it once from the
  * dashboard and keep it in a secret manager). Loads viem on demand; install
- * `viem` alongside `@payday/sdk` to use it. The returned signer also
+ * `viem` alongside `@gum/sdk` to use it. The returned signer also
  * carries `verifyNonce`, which recomputes a bridge leg's nonce from its
  * documented preimage and refuses a document whose nonce differs.
  */
