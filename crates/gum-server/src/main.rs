@@ -70,7 +70,7 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let pool = gum_ledger::connect(config.database_url(), 16)
+    let pool = gum_ledger::connect(config.database_url(), config.db_max_connections())
         .await
         .expect("failed to connect to database");
 
