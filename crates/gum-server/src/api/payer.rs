@@ -322,11 +322,14 @@ pub async fn authorized_invoice(
                 ..session.facts()
             },
         ),
-        None => VerificationRequirementsResponse::for_verification(
-            &verification,
-            row.verification_completed_at.is_some(),
-            wallet_bound,
-        ),
+        // Without a session, the payer's own facts are the wallet's: every
+        // attached identity add-on is still to prove, even when the invoice
+        // was verified by an earlier session — this view never leaks that a
+        // stale or foreign browser may act on, and shows the controls to
+        // re-authenticate instead of a lock with nothing to do.
+        None => {
+            VerificationRequirementsResponse::for_verification(&verification, false, wallet_bound)
+        }
     };
     let content_unlocked = !verification.is_gated()
         || session

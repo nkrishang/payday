@@ -219,7 +219,7 @@ struct DepositRequest {
     customer_id: Option<String>,
     issuer_id: Option<String>,
     /// The verification add-ons attached, including the merchant's
-    /// assertions; omitted when none are attached. Never shown to payers
+    /// assertions; always present. Never shown to payers
     /// beyond what the verification views disclose.
     verification: Option<PayerVerification>,
     attachment: Option<AttachmentDescriptor>,
@@ -282,7 +282,7 @@ struct DepositRequestSummary {
     status: DepositRequestStatus,
     amount: String,
     received: String,
-    /// The verification add-ons attached; omitted when none are attached.
+    /// The verification add-ons attached; always present.
     verification: Option<PayerVerification>,
     customer_id: Option<String>,
     issuer_id: Option<String>,
@@ -326,7 +326,7 @@ struct VerificationAttempt {
 }
 #[derive(Serialize, ToSchema)]
 struct VerificationDetail {
-    /// The add-ons the request attached; omitted when none are attached.
+    /// The add-ons the request attached; always present.
     verification: Option<PayerVerification>,
     verification_completed_at: Option<String>,
     likely_unsolicited_at: Option<String>,

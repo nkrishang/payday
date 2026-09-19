@@ -553,13 +553,18 @@ impl PayerSessionRepository {
         // after the expected mailbox is proven again: the session above
         // satisfies the policy on its own. This never revives an invoice or
         // extends the old bearer, and the update below leaves terminal
-        // invoices alone.
+        // invoices alone. On a request that also attached the merchant-auth
+        // add-on, the mailbox alone is not enough: completion waits for the
+        // session's merchant fact, established by exchanging the client
+        // secret.
         let invoice_completed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             r#"
             UPDATE invoices
             SET verification_completed_at = $2, updated_at = now()
             WHERE id = $1
               AND expected_email IS NOT NULL
+              AND (payer_reference IS NULL OR EXISTS (SELECT 1 FROM payer_sessions s
+                                                       WHERE s.id = $3 AND s.merchant_session_verified_at IS NOT NULL))
               AND verification_completed_at IS NULL
               AND status IN ('created', 'funded')
               AND expiration_timestamp >= EXTRACT(EPOCH FROM $2)::bigint
@@ -702,14 +707,19 @@ impl PayerSessionRepository {
         .execute(&mut *tx)
         .await?;
         // As for a proven mailbox: the first exchange while the invoice is
-        // live completes its verification; a terminal invoice only gains a
-        // fresh receipt session.
+        // live completes its verification — but only when the merchant fact
+        // is all the invoice asks for. A request that also attached the
+        // email add-on completes when its mailbox is proven in this session,
+        // in `approve_email`; a terminal invoice only gains a fresh receipt
+        // session.
         let invoice_completed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             r#"
             UPDATE invoices
             SET verification_completed_at = $2, updated_at = now()
             WHERE id = $1
               AND payer_reference IS NOT NULL
+              AND (expected_email IS NULL OR EXISTS (SELECT 1 FROM payer_sessions s
+                                                     WHERE s.id = $3 AND s.email_verified_at IS NOT NULL))
               AND verification_completed_at IS NULL
               AND status IN ('created', 'funded')
               AND expiration_timestamp >= EXTRACT(EPOCH FROM $2)::bigint
@@ -1262,5 +1272,85 @@ mod tests {
                 .iter()
                 .all(|attempt| attempt.kind == "merchant_session" || attempt.kind == "wallet")
         );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn a_combined_email_and_merchant_request_completes_only_when_both_facts_are_in_one_session(
+        pool: PgPool,
+    ) {
+        let repo = PayerSessionRepository::new(pool.clone());
+        let combined = PayerVerification {
+            email: Some(EmailVerification {
+                expected_email: "alice@example.com".into(),
+            }),
+            merchant_auth: Some(MerchantAuth {
+                payer_reference: "user_123".into(),
+            }),
+            wallet_attestation: false,
+        };
+        let row = invoice(&pool, "combined", combined.clone()).await;
+
+        // Email alone does not complete the invoice: the merchant fact is
+        // still missing.
+        let email_only = repo.create(row.id, PAYER_SESSION_TTL).await.unwrap();
+        repo.begin_email_verification(email_only.id, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let reference = payer_ref(&[1u8; 32], row.account_id, "alice@example.com");
+        let email_completion = repo
+            .approve_email(email_only.id, reference, Utc::now(), "event-1")
+            .await
+            .unwrap();
+        assert!(email_completion.invoice_completed_at.is_none());
+        let completed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT verification_completed_at FROM invoices WHERE id = $1")
+                .bind(row.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(completed.is_none());
+
+        // The merchant fact alone does not complete it either: the exchange
+        // mints a fresh session, and the email fact is bound to the session
+        // that proved it.
+        let minted = repo
+            .create_client_secret(row.id, row.account_id, CLIENT_SECRET_TTL)
+            .await
+            .unwrap();
+        let exchange = repo
+            .exchange_client_secret(&minted.secret, row.id, PAYER_SESSION_TTL)
+            .await
+            .unwrap();
+        assert!(exchange.invoice_completed_at.is_none());
+        assert!(!exchange.session.satisfies(&combined));
+        let completed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT verification_completed_at FROM invoices WHERE id = $1")
+                .bind(row.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(completed.is_none());
+
+        // Proving the expected mailbox in the merchant's session completes
+        // the invoice exactly once. The abandoned attempt above shares the
+        // invoice's email cooldown; a real flow never makes two attempts,
+        // so retire the pending one and backdate the approved one before
+        // re-trying.
+        sqlx::query(
+            "UPDATE payer_verifications SET status = 'abandoned', created_at = now() - interval '1 hour' WHERE invoice_id = $1 AND kind = 'email'",
+        )
+        .bind(row.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        repo.begin_email_verification(exchange.session.id, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let both = repo
+            .approve_email(exchange.session.id, reference, Utc::now(), "event-2")
+            .await
+            .unwrap();
+        assert!(both.invoice_completed_at.is_some());
+        assert!(both.session.satisfies(&combined));
     }
 }

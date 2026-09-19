@@ -56,7 +56,7 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
   {
     name: "recovery_address",
     type: "string | null",
-    description: "Equals payer_wallet. Destination of all returns.",
+    description: "Gum's own custody wallet. Destination of all returns; never the payer's wallet.",
   },
   { name: "wallet_bound_at", type: "timestamp | null", description: "" },
   {

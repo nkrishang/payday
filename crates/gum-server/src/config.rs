@@ -369,11 +369,19 @@ fn payer_email_from(value: Option<String>) -> Result<String, String> {
     }
 }
 
-/// The recovery wallet: a 20-byte address, checksummed or not.
+/// The recovery wallet: a 20-byte address, checksummed or not, never the
+/// zero address — the contracts forward recoveries straight to it, where
+/// they would be uncollectible.
 fn recovery_address(value: &str) -> Result<Address, String> {
-    value
+    let address: Address = value
         .parse::<Address>()
-        .map_err(|_| format!("invalid GUM_RECOVERY_ADDRESS '{value}': expected an EVM address"))
+        .map_err(|_| format!("invalid GUM_RECOVERY_ADDRESS '{value}': expected an EVM address"))?;
+    if address == Address::ZERO {
+        return Err(format!(
+            "invalid GUM_RECOVERY_ADDRESS '{value}': the zero address cannot custody recovered funds"
+        ));
+    }
+    Ok(address)
 }
 
 /// The chain the onboarding demo pays on: the first registered chain unless
@@ -546,6 +554,18 @@ mod tests {
         assert!(validate_api_key_prefix("gum_test_").is_ok());
         assert!(validate_api_key_prefix("gum_dev_").is_err());
         assert!(validate_api_key_prefix("gum_live").is_err());
+    }
+
+    #[test]
+    fn recovery_address_parses_but_never_accepts_the_zero_address() {
+        let parsed = recovery_address("0xf78b72F68d560c06C36c3BeF86F1f055b83221e5").unwrap();
+        assert_eq!(
+            parsed.to_checksum(None),
+            "0xf78b72F68d560c06C36c3BeF86F1f055b83221e5"
+        );
+        assert!(recovery_address("not-an-address").is_err());
+        let zero = recovery_address(&format!("0x{}", "0".repeat(40))).unwrap_err();
+        assert!(zero.contains("zero address"), "{zero}");
     }
 
     #[test]

@@ -1383,8 +1383,8 @@ mod tests {
         assert!(created.get("memo").is_none());
         assert_eq!(created["issuer"]["name"], "Acme");
         assert_eq!(created["payer"]["name"], "Globex");
-        // No add-ons attached: the response carries no `verification` at all.
-        assert!(created.get("verification").is_none());
+        // No add-ons attached: `verification` serializes the empty default.
+        assert_eq!(created["verification"]["wallet_attestation"], false);
         assert_eq!(created["attribution"]["version"], 5);
         assert_eq!(created["currency"], "USDC");
         assert!(created["attachment"].is_null());
@@ -1453,7 +1453,11 @@ mod tests {
         )
         .await;
         assert_eq!(transfers["transfers"], json!([]));
-        assert!(listed["deposit_requests"][0].get("verification").is_none());
+        // Always present, empty for the permissionless default.
+        assert_eq!(
+            listed["deposit_requests"][0]["verification"]["wallet_attestation"],
+            false
+        );
         assert_eq!(listed["deposit_requests"][0]["has_attachment"], false);
 
         // A retry that names a staged-but-unfinalized upload is a different
@@ -2020,10 +2024,11 @@ mod tests {
             .await
             .unwrap();
         let completed = json_body(completed).await;
-        // Without a session the facts read invoice-level: the mailbox was
-        // proved, but this browser's view stays locked all the same.
-        assert_eq!(completed["requirements"]["email"], "approved");
-        assert_eq!(completed["requirements"]["complete"], true);
+        // Without a session every attached add-on still reads pending, so
+        // the checkout offers its controls: this browser's view stays
+        // locked all the same.
+        assert_eq!(completed["requirements"]["email"], "pending");
+        assert_eq!(completed["requirements"]["complete"], false);
         assert_eq!(completed["content_unlocked"], false);
         assert!(completed["settlement_tx_hash"].is_null());
         assert!(completed["settlement_explorer_url"].is_null());
@@ -2199,6 +2204,62 @@ mod tests {
         let (on_one, _) = choose_network(&app, other["id"].as_str().unwrap()).await;
         assert_eq!(on_one["chain"]["id"], "1");
         assert_ne!(on_one["address"], bound["address"]);
+
+        // Re-choosing the chosen network is the idempotent replay the
+        // endpoint promises: it answers with the request's current state,
+        // not a conflict.
+        let (replayed, _) = choose_network(&app, other["id"].as_str().unwrap()).await;
+        assert_eq!(replayed["address"], on_one["address"]);
+    }
+
+    /// A merchant-preview session sees everything but proves nothing and
+    /// binds nothing: network selection is a payer action, so a preview
+    /// session is refused like any session that is not the payer's.
+    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
+    async fn a_preview_session_cannot_choose_the_network(pool: PgPool) {
+        let app = app(pool).await;
+        let (id, _) = create_gated(
+            &app,
+            "preview-network",
+            json!({"email": {"expected_email": "alice@example.com"}}),
+            "Preview network",
+        )
+        .await;
+
+        let minted = app
+            .clone()
+            .oneshot(preview_session_request(KEY, &id))
+            .await
+            .unwrap();
+        assert_eq!(minted.status(), StatusCode::OK);
+        let session = json_body(minted).await["payer_session"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let refused = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/network"),
+                Some(&session),
+                Some(&json!({"chain_id": "1"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "payer_session_invalid"
+        );
+        // Nothing bound: the payer still gets to choose.
+        let merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(merchant["chain"].is_null());
     }
 
     /// A merchant may pin the network at issuance. The request then offers
@@ -5037,9 +5098,9 @@ mod tests {
             .unwrap();
         let bare = json_body(bare).await;
         assert_eq!(bare["content_unlocked"], false);
-        // Without a session the facts read invoice-level: the mailbox was
-        // proved, but this browser's view stays locked all the same.
-        assert_eq!(bare["requirements"]["email"], "approved");
+        // Without a session every attached add-on still reads pending, so
+        // the checkout offers its controls rather than a bare lock.
+        assert_eq!(bare["requirements"]["email"], "pending");
         assert!(bare["address"].is_null());
         let stale = app
             .clone()
@@ -5572,8 +5633,10 @@ mod tests {
         let still_bare = payer_read(&app, &id, None).await;
         assert_eq!(still_bare["content_unlocked"], false);
         // The bare link stays locked even though the facts read invoice-level
-        // now: content belongs to the session that proved them.
-        assert_eq!(still_bare["requirements"]["merchant_session"], "approved");
+        // now: content belongs to the session that proved them. Without a
+        // session the requirements read pending, so the checkout offers the
+        // way back in (open from the merchant's app) instead of a bare lock.
+        assert_eq!(still_bare["requirements"]["merchant_session"], "pending");
         let stranger = payer_read(&app, &other_id, Some(&session)).await;
         assert_eq!(stranger["content_unlocked"], false);
         let own_status = json_body(

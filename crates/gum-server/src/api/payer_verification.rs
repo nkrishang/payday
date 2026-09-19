@@ -90,10 +90,12 @@ fn unix_now() -> u64 {
 }
 
 /// The email-gated invoice behind `id`, still open to verification:
-/// permissionless invoices have nothing to verify, merchant-auth invoices
-/// are opened by a client secret rather than a code, and verification after
-/// the deadline or after settlement cannot change anything, so all are
-/// refused up front.
+/// permissionless invoices have nothing to verify, merchant-auth-only
+/// invoices are opened by a client secret rather than a code, and
+/// verification after the deadline or after settlement cannot change
+/// anything, so all are refused up front. A request that attached both
+/// identity add-ons still verifies its email here: the secret establishes
+/// the merchant fact, the code proves the mailbox.
 pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Invoice), ApiError> {
     let uuid = parse_invoice_id(id)?;
     let row = state
@@ -103,12 +105,12 @@ pub async fn gated_invoice(state: &AppState, id: &str) -> Result<(DbInvoice, Inv
         .ok_or_else(ApiError::payer_unauthorized)?;
     let invoice = Invoice::try_from(&row)?;
     let verification = &invoice.issuance_snapshot.payer_verification;
-    if verification.merchant_auth.is_some() {
-        return Err(ApiError::verification_method_not_applicable(
-            "This deposit request is opened by the issuer's application; it does not send email codes",
-        ));
-    }
     if verification.email.is_none() {
+        if verification.merchant_auth.is_some() {
+            return Err(ApiError::verification_method_not_applicable(
+                "This deposit request is opened by the issuer's application; it does not send email codes",
+            ));
+        }
         return Err(ApiError::verification_not_required());
     }
     let open = matches!(
@@ -344,9 +346,13 @@ pub async fn status(
             status_response(&verification, &session, row.payment_address.is_some())
         }
         None => VerificationStatusResponse {
+            // Session-scoped, like the payer view: without a session every
+            // attached identity add-on is still to prove, even when an
+            // earlier session finished them — the checkout renders its
+            // controls from these statuses.
             requirements: VerificationRequirementsResponse::for_verification(
                 &verification,
-                row.verification_completed_at.is_some(),
+                false,
                 row.payment_address.is_some(),
             ),
         },

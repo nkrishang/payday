@@ -3004,4 +3004,45 @@ pub(crate) mod tests {
                 .is_none()
         );
     }
+
+    /// Two concurrent network selections race in `bind_network`; the loser
+    /// gets the winner's row back. The handler treats the same chain as the
+    /// idempotent replay and any other chain as a conflict, so the row it
+    /// receives must carry the chain the binding actually landed on.
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn a_lost_network_race_returns_the_winning_binding(pool: PgPool) {
+        let owner = account(&pool, 1).await;
+        let repo = InvoiceRepository::new(pool.clone());
+        let issued = repo
+            .insert_issued(&issuance_input(owner, "network-race", None), None)
+            .await
+            .unwrap()
+            .row;
+        let invoice = Invoice::try_from(&issued).unwrap();
+
+        let winner = invoice
+            .bind_network(invoice.networks[0].chain_id, Utc::now().to_rfc3339())
+            .unwrap();
+        let bound = match repo
+            .bind_network(issued.id, &winner, Utc::now())
+            .await
+            .unwrap()
+        {
+            BindPayerWallet::Bound(row) => row,
+            other => panic!("first binding should win: {other:?}"),
+        };
+
+        // The loser re-derived its binding from the still-unbound snapshot
+        // it read before the winner committed, on the same chain.
+        let loser = Invoice::try_from(&issued).unwrap();
+        let loser_binding = loser
+            .bind_network(loser.networks[0].chain_id, Utc::now().to_rfc3339())
+            .unwrap();
+        assert!(matches!(
+            repo.bind_network(issued.id, &loser_binding, Utc::now())
+                .await
+                .unwrap(),
+            BindPayerWallet::AlreadyBound(row) if row.chain_id == bound.chain_id
+        ));
+    }
 }

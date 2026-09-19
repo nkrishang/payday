@@ -71,8 +71,7 @@ pub struct PayerVerification {
     pub email: Option<EmailVerification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merchant_auth: Option<MerchantAuth>,
-    /// Serialized even when false, so the canonical form is stable. Response
-    /// payloads omit the whole field when no add-on is attached.
+    /// Serialized even when false, so the canonical form is stable.
     #[serde(default)]
     pub wallet_attestation: bool,
 }
@@ -192,8 +191,7 @@ impl PayerVerification {
         addons
     }
 
-    /// True when no add-on is attached: the permissionless default, which
-    /// response payloads omit entirely.
+    /// True when no add-on is attached: the permissionless default.
     pub fn is_default(&self) -> bool {
         self.addons().is_empty()
     }

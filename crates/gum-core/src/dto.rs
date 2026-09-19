@@ -301,8 +301,9 @@ pub struct DepositRequestResponse {
     pub customer_id: Option<String>,
     pub issuer_id: Option<String>,
     /// The verification add-ons attached, including the merchant's
-    /// assertions: merchant-only. Omitted when none are attached.
-    #[serde(skip_serializing_if = "PayerVerification::is_default")]
+    /// assertions: merchant-only. Always present, so consumers can read it
+    /// unconditionally; a permissionless request serializes the empty
+    /// default.
     pub verification: PayerVerification,
     pub attachment: Option<AttachmentDescriptor>,
     pub verification_completed_at: Option<String>,
@@ -451,7 +452,6 @@ pub struct VerificationAttemptResponse {
 /// and every attempt (product plan §7.2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationDetailResponse {
-    #[serde(skip_serializing_if = "PayerVerification::is_default")]
     pub verification: PayerVerification,
     pub verification_completed_at: Option<String>,
     pub likely_unsolicited_at: Option<String>,
@@ -545,7 +545,6 @@ pub struct DepositRequestSummaryResponse {
     pub amount: String,
     pub received: String,
     pub currency: String,
-    #[serde(skip_serializing_if = "PayerVerification::is_default")]
     pub verification: PayerVerification,
     pub customer_id: Option<String>,
     pub issuer_id: Option<String>,
@@ -1048,8 +1047,11 @@ mod tests {
         assert!(json.get("bill_to").is_none());
         assert_eq!(json["heading"], "March retainer");
         assert_eq!(json["reference"], "INV-7");
-        // The default request carries no add-ons at all.
-        assert!(json["verification"].is_null());
+        // The default request carries no add-ons at all, and `verification`
+        // is always present so consumers can read it unconditionally.
+        assert_eq!(json["verification"]["wallet_attestation"], false);
+        assert!(json["verification"]["email"].is_null());
+        assert!(json["verification"]["merchant_auth"].is_null());
         assert_eq!(json["attribution"]["version"], 5);
         assert!(
             json["attribution"]["hash"]
@@ -1083,7 +1085,8 @@ mod tests {
         let summary = serde_json::to_value(summary).unwrap();
         assert!(summary.get("transfers").is_none());
         assert!(summary.get("self_settlement").is_none());
-        assert!(summary.get("verification").is_none());
+        // Always present, empty for the permissionless default.
+        assert_eq!(summary["verification"]["wallet_attestation"], false);
     }
 
     #[test]

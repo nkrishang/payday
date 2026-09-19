@@ -152,6 +152,9 @@ pub async fn select_network(
     let chain = parse_chain(&invoice, &request.chain_id)?;
     // A gated request answers only a session that satisfies its identity
     // add-ons, exactly like the wallet step; an open one needs no session.
+    // A merchant-preview session carries every fact but proves nothing, so
+    // it never drives this binding write — the same exclusion the wallet
+    // challenge applies by only issuing to `payer` sessions.
     let verification = &invoice.issuance_snapshot.payer_verification;
     if verification.is_gated() {
         let token = session_token(&headers).ok_or_else(ApiError::payer_session_invalid)?;
@@ -160,6 +163,9 @@ pub async fn select_network(
             .find_active(token, row.id)
             .await?
             .ok_or_else(ApiError::payer_session_invalid)?;
+        if session.is_merchant_preview() {
+            return Err(ApiError::payer_session_invalid());
+        }
         if !session.satisfies(verification) {
             return Err(ApiError::verification_required());
         }
@@ -182,9 +188,15 @@ pub async fn select_network(
     })?;
     match state.repo.bind_network(row.id, &binding, now).await? {
         BindPayerWallet::Bound(_) => {}
-        // Another caller chose first while this call was in flight; the
-        // same answer as if the row had carried it all along.
-        BindPayerWallet::AlreadyBound(_) => return Err(ApiError::network_already_chosen()),
+        // Another caller chose first while this call was in flight. The
+        // same chain is the idempotent replay the endpoint promises and
+        // answers with the request's current state; any other network is
+        // the same conflict as if the row had carried it all along.
+        BindPayerWallet::AlreadyBound(bound) => {
+            if bound.chain_id != Some(chain.0 as i64) {
+                return Err(ApiError::network_already_chosen());
+            }
+        }
         BindPayerWallet::NotBindable(_) => return Err(ApiError::deposit_request_not_payable()),
     }
     let access = authorized_invoice(&state, &id, session_token(&headers)).await?;
