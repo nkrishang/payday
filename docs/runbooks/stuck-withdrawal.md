@@ -14,17 +14,17 @@ Every same-chain leg, USDC or USDT0, is an EIP-3009
 
 | Leg state | Funds are | Who acts next |
 |---|---|---|
-| `awaiting_signature` | In the Payday wallet, untouched | The merchant (sign, or cancel). Expires 24 h after creation. |
-| `authorized` | In the Payday wallet, untouched | gum-server orchestrates the next `withdrawal_step`. |
+| `awaiting_signature` | In the Gum wallet, untouched | The merchant (sign, or cancel). Expires 24 h after creation. |
+| `authorized` | In the Gum wallet, untouched | gum-server orchestrates the next `withdrawal_step`. |
 | `relaying` | Moving: a `transferWithAuthorization` or (USDC only) `WithdrawalForwarder.bridge` is in flight | gum-signers: receipt, fee replacement, or reconciliation. |
 | `burned` | Burned on the source chain; Circle owes the mint | Circle's attestation service (Iris). Monad: seconds. Base/Arbitrum: ~15–19 minutes. |
 | `attested` | Burned; attestation stored on the leg | gum-server orchestrates `receiveMessage` on the destination chain. |
 | `minting` | The mint is in flight on the destination chain | gum-signers: receipt or fee replacement. |
 | `completed` | At the destination address | Nobody. |
 | `failed` | Wherever the last successful step left them; `failure_reason` says which | An operator, if the reason is not the merchant's to fix. |
-| `expired` | In the Payday wallet, untouched | The merchant: create a new withdrawal. |
+| `expired` | In the Gum wallet, untouched | The merchant: create a new withdrawal. |
 
-Nothing Payday runs can send a leg's funds anywhere but the destination the
+Nothing Gum runs can send a leg's funds anywhere but the destination the
 merchant signed: a transfer leg's authorization names the destination, a
 bridge leg's (USDC only) names the forwarder and commits to the destination
 through its nonce, and CCTP mints to the recipient inside Circle's message.
@@ -82,7 +82,7 @@ it from any funded key, and reconciliation will observe the result:
 psql "$DATABASE_URL" -Atc "SELECT encode(attestation_message,'hex'), encode(attestation,'hex') FROM withdrawal_legs WHERE id = '<leg uuid>'"
 cast send 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64 \
   'receiveMessage(bytes,bytes)' 0x<message> 0x<attestation> \
-  --rpc-url "$DESTINATION_RPC_URL" --account payday-ops
+  --rpc-url "$DESTINATION_RPC_URL" --account gum-ops
 ```
 
 ## `failed`
@@ -102,7 +102,7 @@ pass. Past the replacement limit fees are no longer raised, an
 `ExecutionStalled` event is published, and reconciliation continues.
 
 A reverted transfer or burn left
-the funds in the Payday wallet; the merchant creates a new withdrawal. A
+the funds in the Gum wallet; the merchant creates a new withdrawal. A
 reverted mint whose message nonce is already used means somebody else
 minted it (the relayer completes the leg by itself when it sees that);
 otherwise re-submit `receiveMessage` by hand as above and set the leg

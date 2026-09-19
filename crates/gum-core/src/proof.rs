@@ -2,13 +2,13 @@
 //! request to the CREATE3 address it commits to, to the transfers that paid
 //! it, and to the transaction that settled it. Everything except the
 //! verification attestation is recomputable from the proof alone; the
-//! attestation is Payday-signed because the verification facts (a proven
+//! attestation is Gum-signed because the verification facts (a proven
 //! mailbox, a released client secret, and the order in which the steps
 //! happened) cannot be committed into the address.
 //!
 //! ```text
-//! attribution_hash = keccak256("PAYDAY_ATTRIBUTION_V5" || JCS(snapshot))
-//! salt             = keccak256("PAYDAY_SALT_V5" || issuance_nonce || attribution_hash [+ digest])
+//! attribution_hash = keccak256("GUM_ATTRIBUTION_V5" || JCS(snapshot))
+//! salt             = keccak256("GUM_SALT_V5" || issuance_nonce || attribution_hash [+ digest])
 //! network          = snapshot.networks[chain_id]
 //! payment_address  = CREATE3(network.factory, network.token, amount, receiver, deadline,
 //!                             snapshot.recovery_address, salt, network.chain_id)
@@ -21,7 +21,7 @@
 //!
 //! The request commits to one currency and to every network it may be paid
 //! on, each being that currency's contract on its chain, and to its recovery
-//! term: always Payday's own recovery wallet, stated in the snapshot and in
+//! term: always Gum's own recovery wallet, stated in the snapshot and in
 //! the proof as `recovery_address`. A verifier accepts the proof only if the
 //! proof's chain is one the request offered and its factory and token are
 //! that network's.
@@ -39,7 +39,7 @@
 //! settlement proof of a different kind — the verifier recomputes the
 //! required scope from the snapshot and refuses the mismatch.
 //!
-//! Offline limits: the hash → salt → address chain, the attachment, Payday's
+//! Offline limits: the hash → salt → address chain, the attachment, Gum's
 //! attestation, and the transfers' recipient and total are all checkable
 //! from the proof. Whether the transfers happened and whether the settlement
 //! transaction really forwarded the funds is provable only against the
@@ -61,13 +61,13 @@ use crate::{
     recompute_salt, verify_payer_attestation,
 };
 
-pub const PROOF_VERSION: &str = "payday.proof.v5";
-pub const ATTESTATION_VERSION: &str = "payday.attestation.v5";
-pub const ATTESTATION_DOMAIN: &[u8] = b"PAYDAY_VERIFICATION_ATTESTATION_V5";
+pub const PROOF_VERSION: &str = "gum.proof.v5";
+pub const ATTESTATION_VERSION: &str = "gum.attestation.v5";
+pub const ATTESTATION_DOMAIN: &[u8] = b"GUM_VERIFICATION_ATTESTATION_V5";
 
 /// What the proof stands behind. Committed to the snapshot (a request with
 /// the wallet-attestation add-on can only prove `wallet_attributed`, one
-/// without it only `settlement`) and to Payday's signed attestation.
+/// without it only `settlement`) and to Gum's signed attestation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProofScope {
@@ -106,7 +106,7 @@ pub struct RelayAttribution {
     pub origin_transaction_hash: String,
     /// EIP-55 checksummed: always the attested wallet.
     pub origin_sender: String,
-    /// Always `receipt`: Payday read the origin payment from a chain it
+    /// Always `receipt`: Gum read the origin payment from a chain it
     /// serves. A proof whose attribution names any other source — Relay's
     /// record of a depositor, say — is not a proof the attested wallet
     /// spent the funds, and the verifier refuses it.
@@ -123,7 +123,7 @@ pub struct AttestedRelayFill {
     pub relay: RelayAttribution,
 }
 
-/// One fact Payday observed in the payer's session, with the provider that
+/// One fact Gum observed in the payer's session, with the provider that
 /// established it. `mailbox` is the expected email proven by a one-time
 /// code; `merchant_session` is the merchant's client secret being exchanged;
 /// `wallet` is the attestation signature being accepted. Never a name, an
@@ -133,13 +133,13 @@ pub struct VerificationFact {
     /// `mailbox`, `merchant_session`, or `wallet`.
     pub kind: String,
     /// `auth0` for the mailbox code, `merchant` for the client secret,
-    /// `payday` for the wallet attestation.
+    /// `gum` for the wallet attestation.
     pub provider: String,
     /// RFC 3339.
     pub at: String,
 }
 
-/// What Payday signs about a verification outcome (`payday.attestation.v5`).
+/// What Gum signs about a verification outcome (`gum.attestation.v5`).
 ///
 /// The issuance commitment is part of the payload because the payment id is
 /// a free-form string a proof holder can set to anything: without the
@@ -148,7 +148,7 @@ pub struct VerificationFact {
 /// that reuses its id. `verify_proof` recomputes all of them from the
 /// snapshot and requires them to agree.
 ///
-/// `wallet_nonce` is the one-time challenge the payer signed; Payday's word
+/// `wallet_nonce` is the one-time challenge the payer signed; Gum's word
 /// is that it was issued to the session only after its identity add-ons
 /// passed, which is what orders the identity facts before the wallet
 /// signature. It is present exactly when the scope is `wallet_attributed`.
@@ -185,7 +185,7 @@ pub struct VerificationAttestationPayload {
     pub wallet_bound_at: Option<String>,
     pub facts: Vec<VerificationFact>,
     /// The transfers Relay's solver made for cross-chain payments the
-    /// attested wallet sent, each with the origin Payday verified. Empty
+    /// attested wallet sent, each with the origin Gum verified. Empty
     /// when every transfer came from the wallet itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relay_fills: Vec<AttestedRelayFill>,
@@ -228,10 +228,10 @@ pub struct ProofOfPayment {
     pub factory_address: String,
     pub payment_address: String,
     pub token_address: String,
-    /// Always the snapshot's recovery term — Payday's recovery wallet —
+    /// Always the snapshot's recovery term — Gum's recovery wallet —
     /// stated so the address derivation reads as the factory computes it.
     pub recovery_address: String,
-    /// The fulfilment transaction: the `PaymentFactory.execute` call (Payday's
+    /// The fulfilment transaction: the `PaymentFactory.execute` call (Gum's
     /// batch sweep or a third party's) that drained the payment address to
     /// the receiver. It is not one of `transfers`, which are the deposits
     /// into the address. Offline, only its shape is checked; that it
@@ -330,7 +330,7 @@ pub fn attestation_digest(
 }
 
 /// Verify a proof offline. `attachment` is the PDF's bytes when the holder
-/// has them; `trusted_attestors`, when non-empty, is the set of Payday
+/// has them; `trusted_attestors`, when non-empty, is the set of Gum
 /// attestation keys the holder accepts.
 pub fn verify_proof(
     proof: &ProofOfPayment,
@@ -461,7 +461,7 @@ pub fn verify_proof(
         }
     };
 
-    // 7. The Payday-attested verification outcome.
+    // 7. The Gum-attested verification outcome.
     let attestation = &proof.verification;
     let digest = attestation_digest(&attestation.payload)?;
     let signature = hex::decode(&attestation.signature)
@@ -573,7 +573,7 @@ pub fn verify_proof(
                     .as_ref()
                     .ok_or(ProofError::TransferSenderMismatch)?;
                 if relay.attribution_source != "receipt" {
-                    // The attestation is where Payday vouches that it verified
+                    // The attestation is where Gum vouches that it verified
                     // who spent the funds from the origin chain itself; anything
                     // else is Relay's or the page's word, which is no evidence.
                     return Err(ProofError::RelayOriginNotVerified);
@@ -666,7 +666,7 @@ mod tests {
 
     const MONAD: ChainId = ChainId(143);
     const BASE: ChainId = ChainId(8453);
-    /// The snapshot's recovery term in tests: Payday's recovery wallet.
+    /// The snapshot's recovery term in tests: Gum's recovery wallet.
     const RECOVERY: Address = address!("0x14dC79964da2C08b23698B3D3cc7Ca32193d9955");
 
     fn networks() -> Vec<NetworkTerms> {
@@ -873,7 +873,7 @@ mod tests {
                     },
                     VerificationFact {
                         kind: "wallet".into(),
-                        provider: "payday".into(),
+                        provider: "gum".into(),
                         at: binding.ready_at.clone(),
                     },
                 ]
@@ -1372,7 +1372,7 @@ mod tests {
             ProofError::Malformed("settlement_transaction_hash")
         ));
         assert!(matches!(
-            check(|p| p.version = "payday.proof.v1".into(), None),
+            check(|p| p.version = "gum.proof.v1".into(), None),
             ProofError::Unsupported("proof version")
         ));
     }

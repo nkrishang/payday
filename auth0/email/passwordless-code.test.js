@@ -17,7 +17,7 @@ test("contains the complete, non-enumerating sign-in message", () => {
     "Enter this one-time code in your terminal",
     "This code expires in 5 minutes",
     "If you didn't request this, you can safely ignore this email",
-    "support@payday.sh",
+    "support@gum.money",
   ]) {
     assert.match(template, new RegExp(copy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }

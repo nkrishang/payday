@@ -1,6 +1,6 @@
 # Deposit indexer architecture
 
-> Scope: how Payday observes stablecoin deposits on a chain — asset
+> Scope: how Gum observes stablecoin deposits on a chain — asset
 > identity, the funding predicate, log acquisition, the transfer signal,
 > finality and reorg policy, and the RPC budget. Which *process* does what,
 > how a detected payment becomes a sweep, and how transactions are executed
@@ -84,12 +84,12 @@ the issuer's contract and are not served; Base carries USDC only.
 
 ### Chain registry
 
-Both services read one reviewed registry, `PAYDAY_CHAINS`, a JSON array
+Both services read one reviewed registry, `GUM_CHAINS`, a JSON array
 parsed by `gum_core::ChainRegistry` with one entry per network:
 
 | Field | Meaning |
 |---|---|
-| `chain_id` | EVM chain id; the entry's identity and the `PAYDAY_RPC_URL_<chain_id>` secret it reads |
+| `chain_id` | EVM chain id; the entry's identity and the `GUM_RPC_URL_<chain_id>` secret it reads |
 | `tokens` | the currencies the chain serves, each `{currency, address}` naming the issuer's canonical contract; a currency absent here is not offered on that chain. At least one chain must list USDC |
 | `factory`, `batch_sweeper` | the contract generation, at the same addresses on every chain |
 | `factory_code_hash`, `batch_sweeper_code_hash` | keccak256 of the runtime bytecode, verified at startup on every chain |
@@ -103,8 +103,8 @@ parsed by `gum_core::ChainRegistry` with one entry per network:
 | `explorer_base_url` | optional; the API's address and transaction links |
 
 Registry order is the order the checkout offers networks. The RPC endpoints
-stay out of the registry: `PAYDAY_RPC_URL_<chain_id>` per chain, with
-`PAYDAY_RPC_WS_URL_<chain_id>` overriding the derived WebSocket URL or
+stay out of the registry: `GUM_RPC_URL_<chain_id>` per chain, with
+`GUM_RPC_WS_URL_<chain_id>` overriding the derived WebSocket URL or
 `off` disabling the signal on that chain. Chain display names and native
 gas symbols are a table in `gum_core::chain`, not configuration.
 
@@ -148,7 +148,7 @@ Credit an observation only when:
    address is seen (the filter carries every configured contract) but never
    credited: it stays at the address and the permissionless
    `recover(token)` on the deployed Payment forwards it to the deposit
-   address's recovery term, Payday's recovery custody, from which Payday
+   address's recovery term, Gum's recovery custody, from which Gum
    returns it to the payer after review.
 3. `topic0` equals `keccak256("Transfer(address,address,uint256)")`.
 4. The recipient is a known deposit address for that chain and token.
@@ -162,7 +162,7 @@ Any genuine nonzero inbound transfer of the request's token to a `created` or
 credited because the resulting balance is spendable by the deposit contract. A zero-value transfer is retained
 with an `error` disposition. A transfer to a deposit request in any other status is
 retained with a `late` disposition: it never counts toward the amount, but it
-sits at the address and is queued for recovery into Payday's custody through
+sits at the address and is queued for recovery into Gum's custody through
 `Deposit.recover`. On a wallet-attested request, a nonzero transfer from any
 wallet but the deposit request's
 attested payer wallet is credited too, but flags the deposit request
@@ -229,7 +229,7 @@ being supported by the provider.
 Acquisition has two halves that never trust each other:
 
 - **The reconciler** is the only writer. It runs a pass every
-  `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s in production) and immediately
+  `GUM_INDEXER_RECONCILE_INTERVAL_MS` (60 s in production) and immediately
   when the signal wakes it.
 - **The transfer signal** (`signal.rs`) holds a WebSocket to the same node
   subscribed to `monadLogs` with the chain's token addresses, the `Transfer`
@@ -250,7 +250,7 @@ Acquisition has two halves that never trust each other:
   subscription by its request, so an unchanged chunk must never be
   resubscribed and then unsubscribed), and it flips a
   health flag the reconciler reads to choose its cadence: 60 s while
-  connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
+  connected, `GUM_INDEXER_POLL_INTERVAL_MS` while not.
 
 For each pass:
 
@@ -269,7 +269,7 @@ For each pass:
    fast-forward the cursor to the boundary by reporting an empty range, so
    expiry transitions and the chain clock still advance, and stop: no
    `eth_getLogs` is issued.
-6. For each bounded range up to `PAYDAY_INDEXER_MAX_RANGES_PER_TICK`: read
+6. For each bounded range up to `GUM_INDEXER_MAX_RANGES_PER_TICK`: read
    the range-end header, request `eth_getLogs` for the `Transfer` topic
    from the chain's configured contracts (one address array) with
    `topics[2]` = the watch list (500 addresses per call), sort
@@ -310,7 +310,7 @@ cursor-hash and finalized-reorg halts, not by more header reads.
 The watch list, per chain, is every address bound on that chain whose
 request is not `fulfilled`/`recovered`, every address with uncollected
 funds, and every address whose request changed within
-`PAYDAY_INDEXER_LATE_WATCH_DAYS`. The reconciler fingerprints that set every
+`GUM_INDEXER_LATE_WATCH_DAYS`. The reconciler fingerprints that set every
 two seconds with one indexed aggregate (`invoices_watch_open`,
 `invoices_watch_recent`, `invoices_sweep_queue`) and loads the list only
 when the fingerprint moves.
@@ -319,19 +319,19 @@ The list decides three things:
 
 - **Whether to scan.** Empty list: the pass fast-forwards the cursor
   (step 5) and the chain is *idle*.
-- **The cadence.** Idle: `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes)
+- **The cadence.** Idle: `GUM_INDEXER_IDLE_INTERVAL_MS` (five minutes)
   regardless of socket health, and no socket. Active: 60 s while the
-  signal is connected, `PAYDAY_INDEXER_POLL_INTERVAL_MS` while not.
+  signal is connected, `GUM_INDEXER_POLL_INTERVAL_MS` while not.
 - **The filter.** Every range fetch puts the list in `topics[2]`, 500
   addresses per call, on every chain. The cost of a range therefore grows
-  with the addresses Payday watches and never with the chain's stablecoin
+  with the addresses Gum watches and never with the chain's stablecoin
   volume,
   which no measurement today can bound for tomorrow (an unfiltered scan on
   a chain whose stablecoin volume outgrew the provider's result cap would shrink
   to one-block ranges and multiply the call count by the range cap). The
   list is loaded *after* the boundary read so the race-freedom argument
   below still holds. The trade is that a transfer to an address outside
-  the late-watch window (`PAYDAY_INDEXER_LATE_WATCH_DAYS`, a year by
+  the late-watch window (`GUM_INDEXER_LATE_WATCH_DAYS`, a year by
   default) is not ledgered automatically: `recover(token)` is permissionless
   and the wrong-network runbook covers it by hand. Widening the window
   costs one call per 500 addresses per range.
@@ -505,20 +505,20 @@ the cumulative amount reaches the requested amount.
 
 Before expiration, the deposit request constructor requires a balance of at least the
 requested amount, transfers exactly that amount to the beneficiary, and sends any
-remainder to the deposit address's recovery term, Payday's dedicated KMS
+remainder to the deposit address's recovery term, Gum's dedicated KMS
 recovery wallet, so an overpayment present
 before execution is neither stranded nor forwarded to the merchant. After
 expiration, execution instead transfers the complete balance to that same
 recovery wallet without requiring the requested amount. Both the expiration
 timestamp and the recovery wallet are committed into the deterministic
-address; the recovery wallet is Payday's configured recovery custody
-(`PAYDAY_RECOVERY_ADDRESS`), never a payer-chosen value, and Payday returns
+address; the recovery wallet is Gum's configured recovery custody
+(`GUM_RECOVERY_ADDRESS`), never a payer-chosen value, and Gum returns
 recovered funds to the payer manually after review. A deposit request whose
 network is not yet fixed has no address and nothing
 to sweep.
 
 Factory execution is permissionless, so anyone can recover an expired partial
-deposit; Payday also does it automatically once the deposit request is `expired`,
+deposit; Gum also does it automatically once the deposit request is `expired`,
 reporting the outcome as `recovered`.
 
 Transfers sent after the Deposit contract has executed are forwarded to the
@@ -636,7 +636,7 @@ Benefits:
 - the request budget is set by the range cap and the block rate, not by
   how fast payments must be noticed;
 - provider-native filtering: the chain's few contracts, one event, and our
-  own recipient set on every scan and subscription, so spend follows Payday's activity and
+  own recipient set on every scan and subscription, so spend follows Gum's activity and
   not the chain's, and an idle chain issues no scan and holds no socket;
 - exact control over finality and failure policy; the socket has no ledger
   authority, so its outages degrade latency only;
@@ -673,8 +673,8 @@ filter and no inbound endpoint to secure.
 
 Switching acquisition does not change the database ledger, event identity,
 finality gate, sweep rules, or halt-on-finalized-reorg invariant: set
-`PAYDAY_RPC_WS_URL_<chain_id>=off` and that chain's reconciler runs on
-`PAYDAY_INDEXER_POLL_INTERVAL_MS` alone while active, at the cost of latency
+`GUM_RPC_WS_URL_<chain_id>=off` and that chain's reconciler runs on
+`GUM_INDEXER_POLL_INTERVAL_MS` alone while active, at the cost of latency
 and calls.
 
 ## Verification and operations

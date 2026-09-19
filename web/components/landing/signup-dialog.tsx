@@ -19,7 +19,7 @@ import {
   describeLoginError,
   pregenerateWallet,
   RESEND_COOLDOWN_MS,
-} from "@/lib/merchant-payday";
+} from "@/lib/merchant-gum";
 
 const WALLET_POLL_INTERVAL_MS = 900;
 const WALLET_POLL_TIMEOUT_MS = 30_000;

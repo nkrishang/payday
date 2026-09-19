@@ -55,10 +55,10 @@ export const ISSUERS: EndpointGroup = {
       answers: [{ status: 409, code: "issuer_name_taken", when: "" }],
       examples: {
         curl: `curl -fsS "$API/v1/issuers" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "name": "Acme LLC", "contact_email": "billing@acme.example" }'`,
-        ts: `const acme = await payday.issuers.create({ name: "Acme LLC", contact_email: "billing@acme.example" });`,
+        ts: `const acme = await gum.issuers.create({ name: "Acme LLC", contact_email: "billing@acme.example" });`,
         response: ISSUER,
         responseTitle: "201 Created",
       },
@@ -76,8 +76,8 @@ export const ISSUERS: EndpointGroup = {
       ],
       response: { description: "{ issuers: Issuer[], next_cursor: iss_ id | null }." },
       examples: {
-        curl: `curl -fsS "$API/v1/issuers" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { issuers } = await payday.issuers.list();`,
+        curl: `curl -fsS "$API/v1/issuers" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { issuers } = await gum.issuers.list();`,
         response: `{
   "issuers": [ ${VERIFIED.replace(/\n/g, "\n    ")} ],
   "next_cursor": null
@@ -96,8 +96,8 @@ export const ISSUERS: EndpointGroup = {
       answers: [{ status: 404, code: "issuer_not_found", when: "" }],
       examples: {
         curl: `curl -fsS "$API/v1/issuers/iss_0198f80c-2222-7dc1-a369-90556a64f700" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const acme = await payday.issuers.get(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const acme = await gum.issuers.get(id);`,
         response: VERIFIED,
       },
     },
@@ -125,10 +125,10 @@ export const ISSUERS: EndpointGroup = {
       answers: [{ status: 409, code: "issuer_name_taken", when: "" }],
       examples: {
         curl: `curl -fsS -X PATCH "$API/v1/issuers/iss_0198f80c-…" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "name": "Acme Holdings LLC" }'`,
-        ts: `await payday.issuers.update(id, { name: "Acme Holdings LLC" });`,
+        ts: `await gum.issuers.update(id, { name: "Acme Holdings LLC" });`,
         response: VERIFIED.replace('"name": "Acme LLC"', '"name": "Acme Holdings LLC"'),
       },
     },
@@ -146,8 +146,8 @@ export const ISSUERS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS -X DELETE "$API/v1/issuers/iss_0198f80c-…" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `await payday.issuers.remove(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `await gum.issuers.remove(id);`,
         response: `HTTP/1.1 204 No Content`,
         responseLang: "http",
       },
@@ -175,8 +175,8 @@ export const ISSUERS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/issuers/iss_0198f80c-…/verify/email/start" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { contact_email, resend_available_at } = await payday.issuers.startEmailVerification(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { contact_email, resend_available_at } = await gum.issuers.startEmailVerification(id);`,
         response: `{
   "contact_email": "billing@acme.example",
   "resend_available_at": "2026-09-06T12:01:00Z"
@@ -203,10 +203,10 @@ export const ISSUERS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/issuers/iss_0198f80c-…/verify/email/confirm" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "otp": "123456" }'`,
-        ts: `const verified = await payday.issuers.confirmEmailVerification(id, "123456");`,
+        ts: `const verified = await gum.issuers.confirmEmailVerification(id, "123456");`,
         response: VERIFIED,
       },
     },
@@ -231,10 +231,10 @@ export const ISSUERS: EndpointGroup = {
       answers: [{ status: 404, code: "payout_address_not_found", when: "" }],
       examples: {
         curl: `curl -fsS -X PUT "$API/v1/issuers/iss_0198f80c-…/payout-addresses" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "payout_address_ids": ["pa_0198f80c-4444-7dc1-a369-90556a64f700"] }'`,
-        ts: `await payday.issuers.setPayoutAddresses(id, [treasury.id]);`,
+        ts: `await gum.issuers.setPayoutAddresses(id, [treasury.id]);`,
         response: VERIFIED.replace(
           '"payout_addresses": []',
           `"payout_addresses": [ ${PAYOUT.replace(/\n/g, "\n    ")} ]`,
@@ -272,10 +272,10 @@ export const PAYOUT_ADDRESSES: EndpointGroup = {
       response: { description: "PayoutAddress." },
       examples: {
         curl: `curl -fsS "$API/v1/payout-addresses" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "address": "0x1111111111111111111111111111111111111111", "label": "Treasury" }'`,
-        ts: `const treasury = await payday.payoutAddresses.create({ address: "0x1111…", label: "Treasury" });`,
+        ts: `const treasury = await gum.payoutAddresses.create({ address: "0x1111…", label: "Treasury" });`,
         response: PAYOUT,
         responseTitle: "201 Created",
       },
@@ -289,8 +289,8 @@ export const PAYOUT_ADDRESSES: EndpointGroup = {
       summary: "Lists payout addresses.",
       response: { description: "{ payout_addresses: PayoutAddress[] }." },
       examples: {
-        curl: `curl -fsS "$API/v1/payout-addresses" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { payout_addresses } = await payday.payoutAddresses.list();`,
+        curl: `curl -fsS "$API/v1/payout-addresses" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { payout_addresses } = await gum.payoutAddresses.list();`,
         response: `{
   "payout_addresses": [ ${PAYOUT.replace(/\n/g, "\n    ")} ]
 }`,
@@ -308,8 +308,8 @@ export const PAYOUT_ADDRESSES: EndpointGroup = {
       answers: [{ status: 404, code: "payout_address_not_found", when: "" }],
       examples: {
         curl: `curl -fsS -X DELETE "$API/v1/payout-addresses/pa_0198f80c-…" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `await payday.payoutAddresses.remove(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `await gum.payoutAddresses.remove(id);`,
         response: `HTTP/1.1 204 No Content`,
         responseLang: "http",
       },

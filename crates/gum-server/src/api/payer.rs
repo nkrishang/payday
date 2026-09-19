@@ -220,7 +220,7 @@ pub(crate) fn payer_response(
         .map(|network| NetworkDto::from_terms(network, currency))
         .collect();
     let payer_message = invoice.attention_reason.as_ref().map(|_| {
-        "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.".into()
+        "Payout is paused, but your funds remain safe. The merchant and Gum support are resolving settlement; do not send a second transfer.".into()
     });
     let policy = &invoice.issuance_snapshot.payer_verification;
     let expected_email_hint = policy.expected_email().map(masked_email);
@@ -499,17 +499,17 @@ mod tests {
     #[test]
     fn payment_url_is_tokenless_and_payment_uri_is_eip_681() {
         let access = PayerAccess::new(
-            "https://payday.sh/",
+            "https://gum.money/",
             vec![(143, "https://monadvision.com/".into())],
             None,
         )
         .unwrap();
         let invoice = invoice();
         let url = access.deposit_url(&invoice).unwrap();
-        assert_eq!(url, format!("https://payday.sh/pay/{}", invoice.id));
+        assert_eq!(url, format!("https://gum.money/pay/{}", invoice.id));
         assert!(!url.contains("token"));
-        assert_eq!(access.origin(), "https://payday.sh");
-        assert_eq!(access.origin_header(), "https://payday.sh");
+        assert_eq!(access.origin(), "https://gum.money");
+        assert_eq!(access.origin_header(), "https://gum.money");
         let binding = invoice.binding.as_ref().unwrap();
         assert_eq!(
             deposit_uri(binding, invoice.amount.0),
@@ -543,13 +543,13 @@ mod tests {
 
     #[test]
     fn configuration_rejects_insecure_remote_urls() {
-        assert!(PayerAccess::new("http://payday.sh", vec![], None).is_err());
-        assert!(PayerAccess::new("https://payday.sh/base", vec![], None).is_err());
-        assert!(PayerAccess::new("https://user@payday.sh", vec![], None).is_err());
+        assert!(PayerAccess::new("http://gum.money", vec![], None).is_err());
+        assert!(PayerAccess::new("https://gum.money/base", vec![], None).is_err());
+        assert!(PayerAccess::new("https://user@gum.money", vec![], None).is_err());
         assert!(PayerAccess::new("http://127.0.0.1:3000", vec![], None).is_ok());
         assert!(
             PayerAccess::new(
-                "https://payday.sh",
+                "https://gum.money",
                 vec![(143, "http://monadvision.com".into())],
                 None,
             )
@@ -557,21 +557,21 @@ mod tests {
         );
         assert!(
             PayerAccess::new(
-                "https://payday.sh",
+                "https://gum.money",
                 vec![],
-                Some("http://checkout.payday.sh".into()),
+                Some("http://checkout.gum.money".into()),
             )
             .is_err()
         );
         let split = PayerAccess::new(
-            "https://api.payday.sh",
+            "https://api.gum.money",
             vec![],
-            Some("https://payday.sh/".into()),
+            Some("https://gum.money/".into()),
         )
         .unwrap();
-        assert_eq!(split.checkout_origin_header(), "https://payday.sh");
-        assert_eq!(split.origin_header(), "https://api.payday.sh");
-        let same = PayerAccess::new("https://payday.sh", vec![], None).unwrap();
-        assert_eq!(same.checkout_origin_header(), "https://payday.sh");
+        assert_eq!(split.checkout_origin_header(), "https://gum.money");
+        assert_eq!(split.origin_header(), "https://api.gum.money");
+        let same = PayerAccess::new("https://gum.money", vec![], None).unwrap();
+        assert_eq!(same.checkout_origin_header(), "https://gum.money");
     }
 }

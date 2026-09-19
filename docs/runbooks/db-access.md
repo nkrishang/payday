@@ -43,7 +43,7 @@ group** (which has DB access). The indexer has no database connection.
 ```bash
 cat > /tmp/db-access-task.json << 'ENDJSON'
 {
-  "family": "payday-db-access",
+  "family": "gum-db-access",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
@@ -89,9 +89,9 @@ ENDJSON
 
 ```bash
 aws ecs run-task \
-  --cluster payday \
+  --cluster gum \
   --launch-type FARGATE \
-  --task-definition payday-db-access:1 \
+  --task-definition gum-db-access:1 \
   --count 1 \
   --region "$AWS_REGION" \
   --network-configuration "awsvpcConfiguration={subnets=[SUBNET_A,SUBNET_B],securityGroups=[API_SG],assignPublicIp=ENABLED}" \
@@ -105,7 +105,7 @@ aws ecs run-task \
 TASK_ID="<task ID from the ARN in step 3>"
 
 # Wait ~30 seconds, then check:
-aws ecs describe-tasks --cluster payday --tasks "$TASK_ID" \
+aws ecs describe-tasks --cluster gum --tasks "$TASK_ID" \
   --region "$AWS_REGION" \
   --query 'tasks[0].{status:lastStatus,exitCode:containers[0].exitCode}' \
   --output json
@@ -115,10 +115,10 @@ Exit code `0` means the SQL executed successfully. The output goes to
 CloudWatch logs:
 
 ```bash
-aws logs tail /ecs/payday/db-access --since 5m --region "$AWS_REGION"
+aws logs tail /ecs/gum/db-access --since 5m --region "$AWS_REGION"
 ```
 
-> If no log group exists for `payday-db-access`, the task output won't be
+> If no log group exists for `gum-db-access`, the task output won't be
 > captured. For important operations, create a log group first or check the
 > task's `stoppedReason`.
 
@@ -127,9 +127,9 @@ aws logs tail /ecs/payday/db-access --since 5m --region "$AWS_REGION"
 If you need an interactive shell, enable ECS Exec on the API service:
 
 ```bash
-aws ecs update-service --cluster payday --service api \
+aws ecs update-service --cluster gum --service api \
   --enable-execute-command --region "$AWS_REGION"
-aws ecs update-service --cluster payday --service api \
+aws ecs update-service --cluster gum --service api \
   --force-new-deployment --region "$AWS_REGION"
 ```
 
@@ -139,10 +139,10 @@ Then exec into the running API container:
 # Requires the Session Manager plugin installed locally:
 # brew install --cask session-manager-plugin
 
-TASK_ARN=$(aws ecs list-tasks --cluster payday --service-name api \
+TASK_ARN=$(aws ecs list-tasks --cluster gum --service-name api \
   --desired-status RUNNING --region "$AWS_REGION" --output text --query 'taskArns[0]')
 
-aws ecs execute-command --cluster payday --task "$TASK_ARN" \
+aws ecs execute-command --cluster gum --task "$TASK_ARN" \
   --container api --command "sh" --interactive --region "$AWS_REGION"
 ```
 

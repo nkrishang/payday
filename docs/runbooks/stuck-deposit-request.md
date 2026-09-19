@@ -9,8 +9,8 @@ is set. See [`docs/architecture.md`](../architecture.md) for the full flow.
 ## Step 1: Check the deposit request status
 
 ```bash
-curl -s -H "Authorization: Bearer $PAYDAY_API_KEY" \
-  "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $GUM_API_KEY" \
+  "$GUM_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" | python3 -m json.tool
 ```
 
 Note `status`, `received_base_units`, `attention`, and `address`. Database
@@ -34,7 +34,7 @@ request's stablecoin, or used the wrong network or asset. See
 
 ## Step 3: Stuck in `created` (the stablecoin was sent)
 
-Check the `indexer` service and `/ecs/payday/indexer` logs. A
+Check the `indexer` service and `/ecs/gum/indexer` logs. A
 `finality violation; chain halted` requires the chain-halt flow in
 [indexer-fatal-halt.md](indexer-fatal-halt.md). Provider failures and a growing
 cursor lag point to [quicknode-rpc-limits.md](quicknode-rpc-limits.md). The
@@ -65,18 +65,18 @@ JOIN invoices i ON i.sweep_job_id = t.job_id
 WHERE i.id = '<DEPOSIT_REQUEST_UUID>';
 ```
 
-Search `/ecs/payday/api`, `/ecs/payday/indexer`, and `/ecs/payday/signers` for
+Search `/ecs/gum/api`, `/ecs/gum/indexer`, and `/ecs/gum/signers` for
 the same `correlation_id`. Common causes:
 
 - `signer balance is low`: fund the signer named in
-  `execution.signer_status`; the `payday-signers-low-balance` alarm identifies
+  `execution.signer_status`; the `gum-signers-low-balance` alarm identifies
   the condition.
 - `broadcast failed; the signed transaction stays durable for the next pass`:
   the signed attempt remains in `execution.transaction_attempts` and retries.
 - `job deferred after a transient failure` or `reconciling transaction failed`:
   inspect `last_error`; retry and reconciliation continue.
 - `transaction unconfirmed after the replacement limit; fees are no longer
-  raised`: `payday-signers-stalled` fires and an `ExecutionStalled` event is
+  raised`: `gum-signers-stalled` fires and an `ExecutionStalled` event is
   published. The lane is not paused; reconciliation continues every pass.
 - A dead bus delivery: list it with `gum-server bus dead [limit]`, correct the
   cause, then run `gum-server bus retry <message-id>` in a one-off `api` task.
@@ -98,17 +98,17 @@ Once the cause is resolved, use the audited release endpoint; do not clear the
 column directly:
 
 ```bash
-export PAYDAY_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
-  --secret-id payday/admin-bearer --query SecretString --output text)"
-curl -fsS -X POST "$PAYDAY_API_URL/v1/admin/deposit-requests/<DEPOSIT_REQUEST_ID>/release" \
-  -H "Authorization: Bearer $PAYDAY_ADMIN_SECRET" | jq
-unset PAYDAY_ADMIN_SECRET
+export GUM_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
+  --secret-id gum/admin-bearer --query SecretString --output text)"
+curl -fsS -X POST "$GUM_API_URL/v1/admin/deposit-requests/<DEPOSIT_REQUEST_ID>/release" \
+  -H "Authorization: Bearer $GUM_ADMIN_SECRET" | jq
+unset GUM_ADMIN_SECRET
 ```
 
 ## Reconciling recovered funds
 
 Overpayment remainders, expired balances, and late transfers are recovered
-on-chain into Payday's recovery custody (`recovery_address` on the request,
+on-chain into Gum's recovery custody (`recovery_address` on the request,
 the dedicated KMS recovery wallet). Returning each amount to the payer is a
 manual step, signed with that key after review ("Recovery custody and manual
 returns" in the production runbook). The ledger records what was recovered:
@@ -122,7 +122,7 @@ ORDER BY r.recovered_at DESC;
 ```
 
 For every row not yet matched by a manual return, complete the review and
-the return; until then, Payday is holding those funds in custody.
+the return; until then, Gum is holding those funds in custody.
 
 ## Stalled execution lane
 
@@ -137,7 +137,7 @@ ORDER BY a.replacement_number;
 ```
 
 The open lane is unique per `(chain_id, signer)`. After
-`PAYDAY_SWEEP_PENDING_TIMEOUT_SECS`, signers raise fees up to
-`PAYDAY_SWEEP_MAX_SUBMISSIONS`; after that they stop raising fees but continue
+`GUM_SWEEP_PENDING_TIMEOUT_SECS`, signers raise fees up to
+`GUM_SWEEP_MAX_SUBMISSIONS`; after that they stop raising fees but continue
 reconciliation. Do not alter the nonce lane or send from its KMS key until the
 existing attempts and canonical nonce are understood.

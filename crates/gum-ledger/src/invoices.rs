@@ -47,7 +47,7 @@ pub struct DbInvoice {
     pub payer_wallet: Option<Vec<u8>>,
     pub payer_attestation: Option<sqlx::types::Json<PayerWalletAttestation>>,
     pub wallet_bound_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
-    /// The snapshot's recovery term: always Payday's own recovery wallet,
+    /// The snapshot's recovery term: always Gum's own recovery wallet,
     /// fixed at issuance — never the payer's wallet.
     pub recovery_address: Vec<u8>,
     pub salt: Option<Vec<u8>>,
@@ -108,7 +108,7 @@ pub struct DbInvoice {
     /// The verification add-ons' columns, independent of one another.
     pub expected_email: Option<String>,
     /// The merchant's own identifier for the authenticated payer
-    /// (merchant-auth add-on), opaque to Payday.
+    /// (merchant-auth add-on), opaque to Gum.
     pub payer_reference: Option<String>,
     /// The wallet-attestation add-on: deposits from any other wallet are
     /// likely unsolicited.
@@ -403,7 +403,7 @@ pub struct CreateInvoiceInput {
     /// The salt input drawn at issuance; undisclosed until the address is
     /// registered.
     pub issuance_nonce: [u8; 32],
-    /// The snapshot's recovery term: Payday's own recovery wallet.
+    /// The snapshot's recovery term: Gum's own recovery wallet.
     pub recovery_address: [u8; 20],
     /// The address binding written at issuance, when the request attaches no
     /// wallet attestation and its network is pinned: a single-network request
@@ -818,7 +818,7 @@ impl InvoiceRepository {
             r#"
             INSERT INTO payer_verifications
                 (id, invoice_id, account_id, payer_session_id, kind, status, provider, verified_at)
-            VALUES ($1, $2, $3, $4, 'wallet', 'approved', 'payday', $5)
+            VALUES ($1, $2, $3, $4, 'wallet', 'approved', 'gum', $5)
             "#,
         )
         .bind(Uuid::now_v7())
@@ -1832,7 +1832,7 @@ pub(crate) mod tests {
         assert_eq!(invoice.amount.0.to_string(), "100");
         assert_eq!(invoice.expiration_timestamp, 1_900_000_000);
         let binding = invoice.binding.as_ref().unwrap();
-        // Recovery is the snapshot's term — Payday's wallet — whatever the
+        // Recovery is the snapshot's term — Gum's wallet — whatever the
         // payer attested.
         assert_eq!(binding.recovery.0, Address::repeat_byte(9));
         assert_eq!(

@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { payment } from "@/test/fixtures";
 import { QrPanel } from "./qr-panel";
 
@@ -49,7 +49,7 @@ describe("QrPanel", () => {
   it("removes itself when the gateway stops serving the code", async () => {
     // The QR route answers 410 once the deposit request is no longer payable, which
     // reaches this component as a failed fetch. Showing a stale address after
-    // that would invite a transfer that routes to the Payday recovery wallet
+    // that would invite a transfer that routes to the Gum recovery wallet
     // rather than back to the payer.
     vi.spyOn(payerClient.depositRequests, "qr").mockRejectedValue(new Error("410"));
 

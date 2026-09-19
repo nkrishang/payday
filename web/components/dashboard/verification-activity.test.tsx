@@ -1,4 +1,4 @@
-import type { PaydayClient, VerificationAttempt, VerificationDetail } from "@payday/sdk";
+import type { GumClient, VerificationAttempt, VerificationDetail } from "@gum/sdk";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MerchantProvider } from "./session";
@@ -21,7 +21,7 @@ const EMAIL_ATTEMPT: VerificationAttempt = {
 };
 
 const VERIFIED: VerificationDetail = {
-  verification: { email: { expected_email: "onboarding@payday.sh" }, wallet_attestation: false },
+  verification: { email: { expected_email: "onboarding@gum.money" }, wallet_attestation: false },
   verification_completed_at: "2026-08-25T10:05:00Z",
   likely_unsolicited_at: null,
   facts: { email: "approved", wallet: "pending", merchant_session: "not_required", complete: true },
@@ -30,7 +30,7 @@ const VERIFIED: VerificationDetail = {
 
 function renderActivity(detail: VerificationDetail) {
   const verification = vi.fn().mockResolvedValue(detail);
-  const client = { depositRequests: { verification } } as unknown as PaydayClient;
+  const client = { depositRequests: { verification } } as unknown as GumClient;
   render(
     <MerchantProvider
       value={{ client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut: vi.fn() }}

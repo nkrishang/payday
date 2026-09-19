@@ -1,18 +1,18 @@
-# Payday quickstart
+# Gum quickstart
 
 Issue a deposit request, share its hosted checkout, and watch finalized funds
 settle to your wallet. The deposit request is the document; the deposit request is its on-chain
 fulfilment. Everything below is also available in the dashboard at
-`payday.sh/dashboard`, which signs in with an emailed code and needs no API
+`gum.money/dashboard`, which signs in with an emailed code and needs no API
 key.
 
 ## 1. Sign in and mint an API key
 
-Open `payday.sh`, choose **Start Building**, and sign in with the emailed
+Open `gum.money`, choose **Start Building**, and sign in with the emailed
 one-time code. The account is created the first time the code is accepted.
 In the dashboard's **API key** section, mint a key; it asks for a fresh code
 first and shows the key exactly once. Put it in your server's secret store as
-`PAYDAY_API_KEY`. See
+`GUM_API_KEY`. See
 [Authentication and API keys](authentication.md) for rotation, revocation,
 and what the key may do.
 
@@ -21,15 +21,15 @@ zero-dependency client in [`sdk/typescript`](../sdk/typescript/README.md),
 which wraps the same calls.
 
 ```sh
-export API=https://api.payday.sh
-export PAYDAY_API_KEY=payday_live_...
+export API=https://api.gum.money
+export GUM_API_KEY=gum_live_...
 ```
 
 ## 2. Issue a deposit request
 
 ```sh
 curl -fsS "$API/v1/deposit-requests" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+  -H "Authorization: Bearer $GUM_API_KEY" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: order-1042" \
   -d '{
@@ -66,8 +66,8 @@ curl -fsS "$API/v1/deposit-requests" \
   address appears only after the payer signs the attestation on the hosted
   page (`deposit_request.ready` reports it). Unpinned and unattested, the
   payer picks a network on the checkout and the address follows. Overpayments,
-  late transfers, and expired balances are recovered on-chain into Payday's
-  own recovery custody, and Payday returns them to the payer manually, after
+  late transfers, and expired balances are recovered on-chain into Gum's
+  own recovery custody, and Gum returns them to the payer manually, after
   review; you cannot choose the recovery address, and `refund_address` is
   rejected.
 - Expiry defaults to 24 hours. Use `expires_in` in seconds or an RFC 3339
@@ -101,15 +101,15 @@ carries no merchant data — no payout address, recovery address, metadata, or
 verification assertions.
 
 Track settlement by polling, or register a webhook
-([Webhooks](webhooks.md)) and let Payday tell you:
+([Webhooks](webhooks.md)) and let Gum tell you:
 
 ```sh
 curl -fsS "$API/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq '{status, received_base_units, settlement_tx_hash}'
+  -H "Authorization: Bearer $GUM_API_KEY" | jq '{status, received_base_units, settlement_tx_hash}'
 ```
 
 A normal deposit moves through `awaiting_deposit` → `deposited` → `settled`.
-`partially_deposited` appears when finalized transfers are still short. Payday does
+`partially_deposited` appears when finalized transfers are still short. Gum does
 not credit wallet-submitted or merely included transactions; reads report the
 indexer's `as_of` block and freshness.
 
@@ -117,15 +117,15 @@ List recent deposit requests or continue a page:
 
 ```sh
 curl -fsS "$API/v1/deposit-requests?status=partially_deposited&limit=20" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+  -H "Authorization: Bearer $GUM_API_KEY" | jq
 curl -fsS "$API/v1/deposit-requests?limit=20&starting_after=<NEXT-CURSOR>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+  -H "Authorization: Bearer $GUM_API_KEY" | jq
 ```
 
 Once settled, download the Proof of Payment. It ties the exact deposit request to its
 deposit address, the transfers that paid it, and the settlement, and verifies
 offline without
-trusting Payday's database; on a request that carried the wallet-attestation
+trusting Gum's database; on a request that carried the wallet-attestation
 add-on it additionally attributes every transfer to the attested wallet, and
 otherwise it makes no claim about who paid. The checks are the ones in
 `gum_core::verify_proof`, and the [API reference](api-reference.md)
@@ -133,8 +133,8 @@ describes what each field commits to:
 
 ```sh
 curl -fsS "$API/v1/deposit-requests/<DEPOSIT_REQUEST_ID>/proof" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" > proof.json
+  -H "Authorization: Bearer $GUM_API_KEY" > proof.json
 ```
 
-Save the Payday-rendered deposit request PDF at any time from
+Save the Gum-rendered deposit request PDF at any time from
 `GET /v1/deposit-requests/<DEPOSIT_REQUEST_ID>/request.pdf`.

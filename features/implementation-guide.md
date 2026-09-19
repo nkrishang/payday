@@ -1,4 +1,4 @@
-# Payday implementation guide
+# Gum implementation guide
 
 > **Superseded on 2026-09-05.** Identity verification is no longer part of
 > the product. Everything below about `verified_identity`,
@@ -12,7 +12,7 @@
 > including the two-mode state this note described — are gone. The current
 > model is an optional `verification` object of three independent add-ons
 > (`email`, `merchant_auth`, `wallet_attestation`), with recovery always in
-> Payday's own custody. The authoritative description is `docs/concepts.md`
+> Gum's own custody. The authoritative description is `docs/concepts.md`
 > and `docs/api-reference.md`; this document is a planning record only.
 
 This guide implements Slices 1–4 from `features/product-plan.md`. Slices 0, 5, and 6 are prerequisites or future work and are not expanded here.
@@ -21,10 +21,10 @@ Line references describe the repository before these changes.
 
 ## Cross-slice decisions
 
-1. Add one consolidated migration: `crates/gateway-db/migrations/0011_verified_customer_funds.sql`. Keep editing that migration while Slices 1–4 are under development. Because Payday has no production data, reset development databases as needed and squash `0011` into the baseline before the first production release.
+1. Add one consolidated migration: `crates/gateway-db/migrations/0011_verified_customer_funds.sql`. Keep editing that migration while Slices 1–4 are under development. Because Gum has no production data, reset development databases as needed and squash `0011` into the baseline before the first production release.
 2. Keep `/v1/payments` as the compatibility API path, but use **invoice** for new domain, dashboard, and documentation terminology.
 3. Use S3 presigned PUTs and GuardDuty Malware Protection for S3. Only the managed tag `GuardDutyMalwareScanStatus=NO_THREATS_FOUND` permits finalization.
-4. Payer sessions use opaque bearer tokens in the `Payday-Payer-Session` header. Do not use query-string tokens or third-party cookies.
+4. Payer sessions use opaque bearer tokens in the `Gum-Payer-Session` header. Do not use query-string tokens or third-party cookies.
 5. The current Didit V3 API accepts `expected_details.first_name` and `expected_details.last_name`; it does not document `legal_name` or `expected_details_mismatch_action`. Therefore the implementation uses:
    ```rust
    pub struct ExpectedIdentity {
@@ -527,7 +527,7 @@ Add an immutable-issuance trigger preventing updates to chain parameters, amount
 
 Modify:
 
-- `gatewayd/src/config.rs`: require `PAYDAY_RECOVERY_ADDRESS`.
+- `gatewayd/src/config.rs`: require `GUM_RECOVERY_ADDRESS`.
 - `gatewayd/src/state.rs`: add `recovery_address: Address`.
 - `gatewayd/src/api/invoices.rs`:
   - remove all `refund_address` parsing;
@@ -536,7 +536,7 @@ Modify:
 - `gateway-core/src/dto.rs`: remove `CreatePaymentRequest.refund_address`.
 - Rename merchant response `refund_address` to `recovery_address`; it remains visible to merchants but not payers.
 - `sdk/typescript/src/index.ts`: remove `CreatePayment.refund_address`; rename the response field.
-- Change checkout copy in `checkout-state.ts` from "merchant refund address" to "Payday recovery wallet; contact the merchant and Payday support for return handling."
+- Change checkout copy in `checkout-state.ts` from "merchant refund address" to "Gum recovery wallet; contact the merchant and Gum support for return handling."
 
 ## 6. Validate deployed contract generations
 
@@ -544,8 +544,8 @@ The indexer already checks `BatchSweeper.factory()` in `main.rs`. Extend this:
 
 - Add `ChainClient::code_hash(address) -> Result<B256, ChainError>`.
 - Require:
-  - `PAYDAY_FACTORY_CODE_HASH`
-  - `PAYDAY_BATCH_SWEEPER_CODE_HASH`
+  - `GUM_FACTORY_CODE_HASH`
+  - `GUM_BATCH_SWEEPER_CODE_HASH`
 - At startup, compare both deployed runtime bytecode hashes and verify `BatchSweeper.factory()`.
 
 Create `crates/gatewayd/src/deployment.rs` with:
@@ -611,8 +611,8 @@ forge test --match-contract BatchSweeperTest -vvv
 cargo fmt --all -- --check
 cargo test -p gateway-core -p gateway-db -p gateway-indexer -p gatewayd
 cargo clippy --workspace --all-targets --no-deps
-npm test --workspace @payday/sdk
-npm run typecheck --workspace @payday/web
+npm test --workspace @gum/sdk
+npm run typecheck --workspace @gum/web
 terraform -chdir=infra fmt -check -recursive
 terraform -chdir=infra init -backend=false
 terraform -chdir=infra validate
@@ -636,8 +636,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const ATTRIBUTION_VERSION: u16 = 1;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V1";
-pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V1";
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"GUM_ATTRIBUTION_V1";
+pub const SALT_DOMAIN: &[u8] = b"GUM_SALT_V1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1071,7 +1071,7 @@ Sign:
 
 ```text
 keccak256(
-  "PAYDAY_VERIFICATION_ATTESTATION_V1" ||
+  "GUM_VERIFICATION_ATTESTATION_V1" ||
   JCS(VerificationAttestationPayload)
 )
 ```
@@ -1110,7 +1110,7 @@ web/components/dashboard/customer-form.tsx
 web/components/dashboard/attachment-upload.tsx
 web/components/dashboard/verification-status.tsx
 web/components/dashboard/recovered-funds.tsx
-web/lib/merchant-payday.ts
+web/lib/merchant-gum.ts
 ```
 
 Use the same API routes as SDK users. Do not reproduce payer-policy, attachment, or amount validation in server actions; only provide immediate form feedback.
@@ -1188,11 +1188,11 @@ Add SDK clients for customers, attachments, invoice PDF, and proof.
 cargo fmt --all -- --check
 cargo test -p gateway-core -p gateway-db -p gatewayd
 cargo clippy --workspace --all-targets --no-deps
-npm test --workspace @payday/sdk
-npm run typecheck --workspace @payday/web
-npm run lint --workspace @payday/web
-npm test --workspace @payday/web
-npm run build --workspace @payday/web
+npm test --workspace @gum/sdk
+npm run typecheck --workspace @gum/web
+npm run lint --workspace @gum/web
+npm test --workspace @gum/web
+npm run build --workspace @gum/web
 just web-check
 just web-e2e
 just e2e
@@ -1307,11 +1307,11 @@ pub fn payer_ref(
 Derive an account-specific key first:
 
 ```text
-account_key = HMAC(master_key, "PAYDAY_PAYER_REF_ACCOUNT_V1" || account_id)
+account_key = HMAC(master_key, "GUM_PAYER_REF_ACCOUNT_V1" || account_id)
 payer_ref   = HMAC(account_key, normalized_email)
 ```
 
-Require `PAYDAY_PAYER_REF_MASTER_KEY` as base64-encoded 32 bytes.
+Require `GUM_PAYER_REF_MASTER_KEY` as base64-encoded 32 bytes.
 
 ## 3. Add dedicated payer Auth0 flow
 
@@ -1320,14 +1320,14 @@ Refactor `Auth0Verifier` so merchant and payer verifiers have separate audience/
 Add configuration:
 
 ```text
-PAYDAY_PAYER_AUTH0_ISSUER
-PAYDAY_PAYER_AUTH0_AUDIENCE
-PAYDAY_PAYER_AUTH0_CLIENT_ID
-PAYDAY_PAYER_REF_MASTER_KEY
-PAYDAY_HOSTED_CHECKOUT_ORIGIN
+GUM_PAYER_AUTH0_ISSUER
+GUM_PAYER_AUTH0_AUDIENCE
+GUM_PAYER_AUTH0_CLIENT_ID
+GUM_PAYER_REF_MASTER_KEY
+GUM_HOSTED_CHECKOUT_ORIGIN
 ```
 
-Modify `auth0/actions/payday-email-otp.js` or add `payday-payer-email-otp.js` so the payer audience receives only:
+Modify `auth0/actions/gum-email-otp.js` or add `gum-payer-email-otp.js` so the payer audience receives only:
 
 - authentication method;
 - client ID;
@@ -1375,7 +1375,7 @@ Flow:
 2. Create or reuse a pending email attempt with resend cooldown.
 3. Gateway calls Auth0 passwordless start using the server-stored expected email.
 4. Return the opaque payer-session token.
-5. `email/confirm` reads `Payday-Payer-Session`, exchanges OTP with Auth0, verifies the returned JWT, and compares normalized email.
+5. `email/confirm` reads `Gum-Payer-Session`, exchanges OTP with Auth0, verifies the returned JWT, and compares normalized email.
 6. Store payer reference and email fact.
 7. For `verified_email`, atomically set `invoices.verification_completed_at`.
 8. For identity modes, leave invoice completion null.
@@ -1387,11 +1387,11 @@ Never accept an email from the payer request.
 Modify `routes.rs`:
 
 - Keep public GET routes under `allow_origin(Any)`.
-- Add `Payday-Payer-Session` to allowed GET headers.
+- Add `Gum-Payer-Session` to allowed GET headers.
 - Place verification POST routes in a separate router:
-  - exact `PAYDAY_HOSTED_CHECKOUT_ORIGIN`;
+  - exact `GUM_HOSTED_CHECKOUT_ORIGIN`;
   - methods POST/OPTIONS;
-  - allowed headers `Content-Type` and `Payday-Payer-Session`;
+  - allowed headers `Content-Type` and `Gum-Payer-Session`;
   - no `Any` origin.
 
 Add a small JSON body limit, e.g. 8 KiB, to verification writes.
@@ -1547,7 +1547,7 @@ Before unlock, render only issuer name, heading, masked email, and verification 
 cargo fmt --all -- --check
 cargo test -p gateway-core -p gateway-db -p gatewayd -p gateway-indexer
 node --test auth0/actions/*.test.js
-npm test --workspace @payday/sdk
+npm test --workspace @gum/sdk
 just web-check
 just web-e2e
 just e2e
@@ -1682,7 +1682,7 @@ Set:
 
 - `vendor_data = hex(payer_ref)`; it is merchant-specific because `payer_ref` is.
 - `callback_method = "both"`.
-- metadata contains only Payday's verification attempt ID.
+- metadata contains only Gum's verification attempt ID.
 - omit `contact_details` to avoid giving Didit an email it does not need.
 - matched mode supplies `expected_details`;
 - unattributed mode omits it.
@@ -1859,7 +1859,7 @@ Change admin middleware to insert a configured reviewer ID rather than `()`. Rec
 Checkout:
 
 - show explicit consent before redirect;
-- link Payday and Didit privacy notices;
+- link Gum and Didit privacy notices;
 - distinguish "identity matched to merchant-provided details" from "document and liveness verified without identity attribution";
 - restore the payer token from `sessionStorage` after Didit returns;
 - ignore callback query status and call `/verify`;
@@ -1917,7 +1917,7 @@ cargo fmt --all -- --check
 cargo test -p gateway-db -p gatewayd -p gateway-indexer
 cargo clippy --workspace --all-targets --no-deps
 node --test auth0/actions/*.test.js
-npm test --workspace @payday/sdk
+npm test --workspace @gum/sdk
 just web-check
 just web-e2e
 just e2e

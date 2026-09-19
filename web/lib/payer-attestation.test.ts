@@ -1,4 +1,4 @@
-import type { PayerAttestationTypedData } from "@payday/sdk";
+import type { PayerAttestationTypedData } from "@gum/sdk";
 import { hashTypedData } from "viem";
 import { describe, expect, it } from "vitest";
 import { payerAttestationDefinition } from "./payer-attestation";
@@ -12,7 +12,7 @@ import { payerAttestationDefinition } from "./payer-attestation";
  */
 const TYPED: PayerAttestationTypedData = {
   domain: {
-    name: "Payday",
+    name: "Gum",
     version: "2",
     chainId: 143,
     verifyingContract: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
@@ -35,7 +35,7 @@ const TYPED: PayerAttestationTypedData = {
   },
   message: {
     statement:
-      "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request.",
+      "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request.",
     attributionHash: "0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a",
     // The wallet of the secp256k1 key 0x0707…07, as gateway-core's test signs.
     wallet: "0x4a62316623ad457F02cDC5D997deD67a383EC569",
@@ -47,7 +47,7 @@ const TYPED: PayerAttestationTypedData = {
 describe("payerAttestationDefinition", () => {
   it("hashes to the digest gateway-core pins for the same document", () => {
     expect(hashTypedData(payerAttestationDefinition(TYPED))).toBe(
-      "0x85dd838bc661cc9ad621f423fd551d95b2f69817787092ed4cc51f0e94b16498",
+      "0xdf86ba58be5c6f1988b5835a63c26ab6ebd00f02b11b975af4fa5e473227a32e",
     );
   });
 

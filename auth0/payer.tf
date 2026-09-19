@@ -3,11 +3,11 @@
 # gatewayd drives the passwordless exchange for them against this one public
 # application and a dedicated payer API audience. The merchant Post-Login
 # Action never sees that audience, and the payer Action
-# (`actions/payday-payer-email-otp.js`) admits only this client, so a payer
+# (`actions/gum-payer-email-otp.js`) admits only this client, so a payer
 # token can never reach the merchant API and a merchant token never unlocks an
 # deposit request.
 resource "auth0_client" "payer" {
-  name            = "Payday Payer Verification"
+  name            = "Gum Payer Verification"
   app_type        = "native"
   oidc_conformant = true
 

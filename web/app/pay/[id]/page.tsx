@@ -1,8 +1,8 @@
-import { PaydayError, type PayerDepositRequest } from "@payday/sdk";
+import { GumError, type PayerDepositRequest } from "@gum/sdk";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Checkout } from "@/components/checkout/checkout";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 /**
  * The deposit request is fetched on the server so the page arrives complete — amount,
@@ -24,7 +24,7 @@ async function loadDepositRequest(id: string): Promise<PayerDepositRequest> {
     // gatewayd answers 401 `invalid_deposit_link` for an unknown or malformed
     // id, so an unusable link is a not-found, not a server fault. Anything else
     // reaches error.tsx, which offers a retry.
-    if (error instanceof PaydayError && (error.status === 401 || error.status === 404)) {
+    if (error instanceof GumError && (error.status === 401 || error.status === 404)) {
       notFound();
     }
     throw error;

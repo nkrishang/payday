@@ -1,6 +1,6 @@
 "use client";
 
-import { type DepositRequest, PaydayError } from "@payday/sdk";
+import { type DepositRequest, GumError } from "@gum/sdk";
 import {
   ArrowUpRight,
   Download,
@@ -303,7 +303,7 @@ function Files({ payment }: { payment: DepositRequest }) {
       await action();
     } catch (cause) {
       setError(
-        cause instanceof PaydayError && cause.code === "deposit_request_not_settled"
+        cause instanceof GumError && cause.code === "deposit_request_not_settled"
           ? "The Proof of Payment is available once the request settles."
           : describeError(cause),
       );

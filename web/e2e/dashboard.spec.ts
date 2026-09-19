@@ -147,7 +147,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   });
   const put = await uploads;
   expect(put.headers()["content-type"]).toBe("application/pdf");
-  expect(put.headers()["x-amz-tagging"]).toBe("payday-upload=pending");
+  expect(put.headers()["x-amz-tagging"]).toBe("gum-upload=pending");
   expect(put.headers()["authorization"]).toBeUndefined();
   await expect(page.getByRole("status")).toContainText(/Scanning retainer\.pdf/);
   await expect(page.getByText(/Ready · /)).toBeVisible({ timeout: 15_000 });
@@ -180,7 +180,7 @@ test("a merchant can create a customer, upload a PDF, issue a request, and open 
   expect(body.chain_id).toBe("8453");
   // Settles to the account's own wallet, never typed by anyone.
   const wallet = await page.evaluate(
-    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+    () => JSON.parse(sessionStorage.getItem("gum.privy-stub.session") ?? "{}").wallet,
   );
   expect(body.payout_address).toBe(wallet);
 
@@ -254,12 +254,12 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("payday.proof.v5");
+  expect(body.version).toBe("gum.proof.v5");
   // The seed's payer completed the wallet attestation add-on, so the proof
   // attributes the transfers to that wallet.
   expect(body.scope).toBe("wallet_attributed");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
-  // Recovery is Payday's own wallet now, never the payer's.
+  // Recovery is Gum's own wallet now, never the payer's.
   expect(body.recovery_address).not.toBe(body.payer_wallet.address);
   expect(body.recovery_address).toMatch(/^0x[0-9a-fA-F]{40}$/);
   expect(body.issuance_nonce).toMatch(/^0x[0-9a-f]{64}$/);
@@ -298,7 +298,7 @@ test("the account section shows the signed-in mailbox and the Gum wallet", async
   await expect(section).toContainText("account-view@example.com");
   // The wallet is the account's own, shown in full and ready to copy.
   const wallet = await page.evaluate(
-    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+    () => JSON.parse(sessionStorage.getItem("gum.privy-stub.session") ?? "{}").wallet,
   );
   expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
   await expect(section).toContainText(wallet);
@@ -325,7 +325,7 @@ test("a merchant can generate, roll, and revoke their API key from the session",
 
   await expect(section.getByText("Key generated")).toBeVisible();
   const firstKey = await section.locator("code").innerText();
-  expect(firstKey).toMatch(/^payday_test_stub/);
+  expect(firstKey).toMatch(/^gum_test_stub/);
   await section.getByRole("button", { name: "Done" }).click();
   await expect(section).toContainText(firstKey.slice(-6));
   await expect(section.getByRole("button", { name: "Roll key" })).toBeVisible();
@@ -357,7 +357,7 @@ test("signing out ends the session", async ({ page }) => {
   await signIn(page);
   await page.getByRole("button", { name: "Sign out" }).first().click();
   await expect(page).toHaveURL("/");
-  expect(await page.evaluate(() => sessionStorage.getItem("payday.privy-stub.session"))).toBeNull();
+  expect(await page.evaluate(() => sessionStorage.getItem("gum.privy-stub.session"))).toBeNull();
   // And the dashboard is closed again.
   await page.goto("/dashboard");
   await expect(page).toHaveURL("/");

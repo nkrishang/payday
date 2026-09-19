@@ -5,8 +5,8 @@ import {
   type Customer,
   type Issuer,
   type DepositRequest,
-  PaydayError,
-} from "@payday/sdk";
+  GumError,
+} from "@gum/sdk";
 import { ArrowLeft, ArrowRight, Loader2 } from "lucide-react";
 import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -418,7 +418,7 @@ export function RequestComposer({
       );
       onIssued(payment);
     } catch (cause) {
-      if (cause instanceof PaydayError && cause.status === 401) {
+      if (cause instanceof GumError && cause.status === 401) {
         signOut();
         return;
       }

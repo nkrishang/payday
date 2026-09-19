@@ -4,7 +4,7 @@ How to rotate an account API key and infrastructure secrets.
 
 ## Rotate the API key
 
-Sign in at `https://payday.sh` as the account owner, open the dashboard's
+Sign in at `https://gum.money` as the account owner, open the dashboard's
 **API key** section, and choose **Roll key**; it confirms, then shows the
 replacement exactly once. Copy it directly into the approved secret manager.
 The previous key remains valid for 24 hours. The same step is
@@ -17,11 +17,11 @@ management process. The service does not retain recoverable plaintext and does
 not need a restart. Verify the new key against a deposit request owned by this account:
 
 ```bash
-curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
+curl -fsS "$GUM_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
+  -H "Authorization: Bearer $GUM_API_KEY" | jq .status
 ```
 
-CI should receive `PAYDAY_API_KEY` from its secret store rather than performing
+CI should receive `GUM_API_KEY` from its secret store rather than performing
 an OTP login. Once consumers migrate, the prior key expires after 24 hours.
 
 ## Revoke API keys
@@ -33,11 +33,11 @@ current and grace-period keys. Signing out of the dashboard revokes nothing.
 
 ## Rotate the Resend API key
 
-The Resend API key is held by Auth0, not by Payday's services or Terraform.
+The Resend API key is held by Auth0, not by Gum's services or Terraform.
 Create a replacement sending-only key in Resend, update **Branding → Email
 Provider** in Auth0, and send a test email before revoking the old key. Then run
 one complete staging email-OTP login. A failed rotation prevents login but does
-not affect existing Payday API keys.
+not affect existing Gum API keys.
 
 ## Rotate the RPC URL
 
@@ -54,7 +54,7 @@ aws secretsmanager put-secret-value \
   --region "$AWS_REGION"
 ```
 
-If `PAYDAY_RPC_WS_URL_<chain_id>` is set for the chain, rotate that override
+If `GUM_RPC_WS_URL_<chain_id>` is set for the chain, rotate that override
 the same way; when it is unset, restarting the indexer (Step 2) re-derives the
 WebSocket URL from the new HTTP endpoint automatically.
 
@@ -63,11 +63,11 @@ WebSocket URL from the new HTTP endpoint automatically.
 All three tasks read RPC secrets, so restart all three:
 
 ```bash
-aws ecs update-service --cluster payday --service indexer \
+aws ecs update-service --cluster gum --service indexer \
   --force-new-deployment --region "$AWS_REGION"
-aws ecs update-service --cluster payday --service api \
+aws ecs update-service --cluster gum --service api \
   --force-new-deployment --region "$AWS_REGION"
-aws ecs update-service --cluster payday --service signers \
+aws ecs update-service --cluster gum --service signers \
   --force-new-deployment --region "$AWS_REGION"
 ```
 
@@ -84,7 +84,7 @@ planned carefully as it causes a brief downtime.
    NEW_PASSWORD=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
 
    aws rds modify-db-instance \
-     --db-instance-identifier payday \
+     --db-instance-identifier gum \
      --master-user-password "$NEW_PASSWORD" \
      --apply-immediately \
      --region "$AWS_REGION"
@@ -107,9 +107,9 @@ planned carefully as it causes a brief downtime.
 3. Wait for the RDS modification to complete, then restart the API and signers:
 
    ```bash
-   aws ecs update-service --cluster payday --service api \
+   aws ecs update-service --cluster gum --service api \
      --force-new-deployment --region "$AWS_REGION"
-   aws ecs update-service --cluster payday --service signers \
+   aws ecs update-service --cluster gum --service signers \
      --force-new-deployment --region "$AWS_REGION"
    ```
 

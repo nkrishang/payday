@@ -1,4 +1,4 @@
-import type { PayerDepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest } from "@gum/sdk";
 import type { ReadyPayerDepositRequest, UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 
 const ADDRESS = "0x9a3f0000000000000000000000000000000000c2";

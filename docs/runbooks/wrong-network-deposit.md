@@ -6,7 +6,7 @@ request's stablecoin to the deposit address on another supported network
 happens on its own: the request stays `awaiting_deposit`, the indexer on
 the other chain does not watch that address (it is bound to Monad), and the
 funds sit at an address with no code on Base. This runbook recovers them
-into Payday's recovery custody; returning them to the payer is then the
+into Gum's recovery custody; returning them to the payer is then the
 manual review process described in the production runbook ("Recovery custody
 and manual returns"). It is manual by design; see "Why this is safe".
 
@@ -21,7 +21,7 @@ and manual returns"). It is manual by design; see "Why this is safe".
   receiver and never settles.
 - `recover(address token)` is permissionless: anyone can forward the whole
   balance of any token at the address to the committed recovery wallet,
-  which is Payday's dedicated KMS recovery custody. The receiver cannot be paid from
+  which is Gum's dedicated KMS recovery custody. The receiver cannot be paid from
   the wrong chain and the funds cannot go anywhere but into that custody;
   the return to the payer happens after review, by hand.
 
@@ -43,16 +43,16 @@ Read the request. `chain.id` is the network the payer chose; `address` is
 the deposit address; `self_settlement` carries the terms the factory needs.
 
 ```bash
-export PAYDAY_API_URL="https://api.payday.sh"
-export PAYDAY_API_KEY="<merchant account api key>"
-req=$(curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<dr_id>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY")
+export GUM_API_URL="https://api.gum.money"
+export GUM_API_KEY="<merchant account api key>"
+req=$(curl -fsS "$GUM_API_URL/v1/deposit-requests/<dr_id>" \
+  -H "Authorization: Bearer $GUM_API_KEY")
 echo "$req" | jq '{status, chain, token, address, payer_wallet, recovery_address, payout_address, amount_base_units, expires_at, self_settlement}'
 ```
 
 Then check the address's balance on the chain the payer says they used,
 with that chain's contract for the request's `currency` (the matching
-`tokens` entry of its `PAYDAY_CHAINS` entry; the table in the production
+`tokens` entry of its `GUM_CHAINS` entry; the table in the production
 runbook lists them). USDT0 is served on Monad and Arbitrum only, so a USDT
 request's funds on Base sit in whatever contract the payer's wallet used
 there; `recover` takes that contract's address either way:
@@ -124,8 +124,8 @@ cast call "$WRONG_TOKEN" 'balanceOf(address)(uint256)' "$RECOVERY" --rpc-url "$W
 ```
 
 The receipt carries `Recovered(recovery, token, amount)` with `recovery`
-equal to Payday's recovery custody address (`recovery_address` on the
-request). Tell the payer that the funds are safe in custody and that Payday
+equal to Gum's recovery custody address (`recovery_address` on the
+request). Tell the payer that the funds are safe in custody and that Gum
 returns them to a wallet or address they name, after review, and open or
 update the support case that records that review — the manual return itself
 is the production runbook's "Recovery custody and manual returns" procedure.
@@ -145,7 +145,7 @@ request does not advance. Once the sweep has deployed the `Payment` on
 `chain.id` (at settlement or expiry; do not deploy it by hand there, the
 constructor would route the committed token), call `recover(address)` with
 the stray contract on that chain: it is permissionless and forwards that
-token's whole balance to Payday's recovery custody, from which the manual
+token's whole balance to Gum's recovery custody, from which the manual
 review process returns it to the payer. Nothing about it appears in
 `transfers` or `recovered_funds`.
 
@@ -165,6 +165,6 @@ review process returns it to the payer. Nothing about it appears in
 Watching every deposit address on every chain would multiply the
 indexer's RPC spend by the number of supported networks for an event that
 should be rare (the checkout switches the wallet to the chosen network
-before signing, and the wallet signs a domain naming that chain). Payday's
+before signing, and the wallet signs a domain naming that chain). Gum's
 decision (2026-09-10) is to handle these case by case. If they become
 common, the two calls above are the whole automation.

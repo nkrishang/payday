@@ -42,13 +42,13 @@ pub const CLIENT_SECRET_TTL: Duration = Duration::from_secs(15 * 60);
 /// spotting one in a log knows what leaked.
 pub const CLIENT_SECRET_PREFIX: &str = "cs_";
 
-const PAYER_REF_ACCOUNT_DOMAIN: &[u8] = b"PAYDAY_PAYER_REF_ACCOUNT_V1";
+const PAYER_REF_ACCOUNT_DOMAIN: &[u8] = b"GUM_PAYER_REF_ACCOUNT_V1";
 
 /// The merchant-scoped payer reference (product plan §4.6). The account key is
 /// derived first so a reference never links the same mailbox across merchants:
 ///
 /// ```text
-/// account_key = HMAC(master_key, "PAYDAY_PAYER_REF_ACCOUNT_V1" || account_id)
+/// account_key = HMAC(master_key, "GUM_PAYER_REF_ACCOUNT_V1" || account_id)
 /// payer_ref   = HMAC(account_key, normalized_email)
 /// ```
 pub fn payer_ref(master_key: &[u8; 32], account_id: Uuid, normalized_email: &str) -> B256 {

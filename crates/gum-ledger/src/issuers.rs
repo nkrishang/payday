@@ -559,33 +559,27 @@ mod tests {
         let repo = IssuerRepository::new(pool);
 
         let first = repo
-            .create(&issuer(mine, "Payday", "billing@payday.sh"))
+            .create(&issuer(mine, "Gum", "billing@gum.money"))
             .await
             .unwrap();
-        for taken in ["Payday", "payday", "  PAYDAY  "] {
+        for taken in ["Gum", "gum", "  GUM  "] {
             let refused = repo
-                .create(&issuer(mine, taken, "other@payday.sh"))
+                .create(&issuer(mine, taken, "other@gum.money"))
                 .await
                 .expect_err(taken);
             assert!(is_duplicate_issuer_name(&refused), "{taken}");
         }
         // Another account's list is its own.
-        repo.create(&issuer(theirs, "Payday", "billing@payday.sh"))
+        repo.create(&issuer(theirs, "Gum", "billing@gum.money"))
             .await
             .unwrap();
         // And a rename onto a name already taken is refused the same way.
         let second = repo
-            .create(&issuer(mine, "Payday EU", "eu@payday.sh"))
+            .create(&issuer(mine, "Gum EU", "eu@gum.money"))
             .await
             .unwrap();
         let clash = repo
-            .update(
-                mine,
-                second.id,
-                "payday".into(),
-                "eu@payday.sh".into(),
-                None,
-            )
+            .update(mine, second.id, "gum".into(), "eu@gum.money".into(), None)
             .await
             .expect_err("rename onto a taken name");
         assert!(is_duplicate_issuer_name(&clash));
@@ -593,8 +587,8 @@ mod tests {
         repo.update(
             mine,
             first.id,
-            "Payday".into(),
-            "billing@payday.sh".into(),
+            "Gum".into(),
+            "billing@gum.money".into(),
             None,
         )
         .await

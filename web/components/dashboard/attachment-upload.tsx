@@ -1,6 +1,6 @@
 "use client";
 
-import type { AttachmentDescriptor } from "@payday/sdk";
+import type { AttachmentDescriptor } from "@gum/sdk";
 import { FileText, Loader2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { controlStyles, Problem } from "@/components/ui/field";

@@ -1,4 +1,4 @@
-import type { PayerVerification, DepositRequestStatus } from "@payday/sdk";
+import type { PayerVerification, DepositRequestStatus } from "@gum/sdk";
 import type { CheckoutTone } from "@/lib/checkout-state";
 
 /** Merchant-facing words for the API's status values, in lifecycle order. */

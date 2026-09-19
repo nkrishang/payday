@@ -1,6 +1,6 @@
 # Pin Auth0's documented defaults so a dashboard edit cannot silently alter the
 # tenant's launch security posture. Empty allowlists are intentional.
-resource "auth0_attack_protection" "payday" {
+resource "auth0_attack_protection" "gum" {
   brute_force_protection {
     allowlist    = []
     enabled      = true
@@ -25,7 +25,7 @@ resource "auth0_attack_protection" "payday" {
     }
   }
 
-  # Payday has no password credentials: its only connection is passwordless
+  # Gum has no password credentials: its only connection is passwordless
   # email OTP. Breached-password detection therefore has nothing to inspect.
   breached_password_detection {
     enabled = false

@@ -1,7 +1,7 @@
 //! Withdrawals: the merchant's whole balance in one currency, moved to one
 //! address they name.
 //!
-//! Prepare, sign, submit, poll. `POST /v1/withdrawals` reads the Payday
+//! Prepare, sign, submit, poll. `POST /v1/withdrawals` reads the Gum
 //! wallet's balance in the currency on every chain serving it and returns
 //! one leg per non-zero balance, each with the EIP-712 typed data the
 //! merchant must sign (an EIP-3009 authorization under that chain's token
@@ -11,7 +11,7 @@
 //! `gum-indexer` relays: a same-chain `transferWithAuthorization`, or
 //! the forwarder's CCTP burn and, once Circle attests, the mint on the
 //! destination chain. The merchant's signature fixes where every leg's
-//! funds may land; Payday pays gas and can redirect nothing.
+//! funds may land; Gum pays gas and can redirect nothing.
 //!
 //! Only USDC bridges: CCTP burns and mints USDC alone, at exactly 1:1. A
 //! withdrawal in any other currency moves the destination chain's balance

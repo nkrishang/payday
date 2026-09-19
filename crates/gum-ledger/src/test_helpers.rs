@@ -23,7 +23,7 @@ pub const TEST_PAYER_KEY: [u8; 32] = [7u8; 32];
 /// The token every test request on the fixture chain is denominated in.
 pub const TEST_TOKEN: Address = address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512");
 
-/// The recovery term every test request commits to: Payday's own recovery
+/// The recovery term every test request commits to: Gum's own recovery
 /// wallet, fixed at issuance and never a payer's.
 pub const TEST_RECOVERY: Address = address!("0x14dC79964da2C08b23698B3D3cc7Ca32193d9955");
 

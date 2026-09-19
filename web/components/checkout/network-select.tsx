@@ -1,6 +1,6 @@
 "use client";
 
-import type { Network } from "@payday/sdk";
+import type { Network } from "@gum/sdk";
 import { Check } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { chainById } from "@/lib/config";

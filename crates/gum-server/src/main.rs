@@ -92,7 +92,7 @@ async fn main() {
                 ),
                 None => {
                     tracing::warn!(
-                        "PAYDAY_PRIVY_APP_ID is unset; dashboard sessions are refused and only API keys authenticate"
+                        "GUM_PRIVY_APP_ID is unset; dashboard sessions are refused and only API keys authenticate"
                     );
                     None
                 }
@@ -144,7 +144,7 @@ async fn main() {
     if let Some(onboarding_payer) = &onboarding_payer {
         tracing::info!(address = %onboarding_payer.address(), chain_id = onboarding_chain.chain_id, "configured onboarding payer signer");
     }
-    // Absent whenever PAYDAY_PRIVY_APP_SECRET isn't set — a latency
+    // Absent whenever GUM_PRIVY_APP_SECRET isn't set — a latency
     // optimization, not a dependency: sign-in still creates a merchant's
     // wallet itself either way (config.rs's PrivyConfig doc comment).
     let pregenerated_wallets: Option<Arc<dyn pregenerated_wallet::WalletPregenerator>> =
@@ -203,7 +203,7 @@ async fn main() {
         }
         None => {
             tracing::warn!(
-                "PAYDAY_PAYER_AUTH0_* and PAYDAY_PAYER_REF_MASTER_KEY are unset; gated invoices cannot be verified"
+                "GUM_PAYER_AUTH0_* and GUM_PAYER_REF_MASTER_KEY are unset; gated invoices cannot be verified"
             );
             None
         }
@@ -254,7 +254,7 @@ async fn main() {
         )),
         None => {
             tracing::warn!(
-                "PAYDAY_RELAY_API_KEY is unset; paying from another network is unavailable"
+                "GUM_RELAY_API_KEY is unset; paying from another network is unavailable"
             );
             None
         }
@@ -280,7 +280,7 @@ async fn main() {
         tokio::spawn(webhook_worker::run(state.webhooks.clone(), key));
     } else {
         tracing::warn!(
-            "PAYDAY_WEBHOOK_ENCRYPTION_KEY is unset; webhook API and delivery are disabled"
+            "GUM_WEBHOOK_ENCRYPTION_KEY is unset; webhook API and delivery are disabled"
         );
     }
 
@@ -386,7 +386,7 @@ async fn main() {
     };
     if senders.payer.is_none() {
         tracing::warn!(
-            "PAYDAY_RESEND_API_KEY is unset; payers named on a deposit request are not emailed"
+            "GUM_RESEND_API_KEY is unset; payers named on a deposit request are not emailed"
         );
     }
     let dispatcher = (!senders.recipients().is_empty()).then(|| {

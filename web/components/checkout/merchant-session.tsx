@@ -1,10 +1,10 @@
 "use client";
 
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 import { Loader2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { takeClientSecret } from "@/lib/client-secret";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 
 /**
  * Where a merchant-session checkout stands with its client secret. The
@@ -92,7 +92,7 @@ interface Outcome {
 }
 
 function describe(cause: unknown): ClientSecretStatus {
-  if (!(cause instanceof PaydayError)) return "unavailable";
+  if (!(cause instanceof GumError)) return "unavailable";
   switch (cause.code) {
     case "client_secret_used":
       return "used";

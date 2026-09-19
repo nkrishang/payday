@@ -1,7 +1,7 @@
 import type { EndpointGroup, FieldDoc } from "./types";
 
 const SESSION_HEADER: FieldDoc[] = [
-  { name: "Payday-Payer-Session", type: "string", description: "Payer session token." },
+  { name: "Gum-Payer-Session", type: "string", description: "Payer session token." },
 ];
 
 const LOCKED = `{
@@ -185,10 +185,10 @@ export const PAYER: EndpointGroup = {
       answers: [{ status: 401, code: "invalid_deposit_link", when: "Unknown id." }],
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-8d2f-7dc1-a369-90556a64f700" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION"`,
-        ts: `import { PaydayPayerClient } from "@payday/sdk";
+  -H "Gum-Payer-Session: $PAYER_SESSION"`,
+        ts: `import { GumPayerClient } from "@gum/sdk";
 
-const payer = new PaydayPayerClient();
+const payer = new GumPayerClient();
 const view = await payer.depositRequests.get(id, { payerSession });`,
         response: UNLOCKED,
         responseTitle: "200 OK — unlocked, bound",
@@ -211,7 +211,7 @@ const view = await payer.depositRequests.get(id, { payerSession });`,
       ],
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/qr" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION" -o qr.svg`,
+  -H "Gum-Payer-Session: $PAYER_SESSION" -o qr.svg`,
         ts: `const svg = await payer.depositRequests.qr(id, payerSession);`,
         response: `HTTP/1.1 200 OK
 Content-Type: image/svg+xml
@@ -235,7 +235,7 @@ Cache-Control: no-store`,
       ],
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/attachment" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION"`,
+  -H "Gum-Payer-Session: $PAYER_SESSION"`,
         ts: `const pdf = await payer.depositRequests.attachment(id, payerSession);`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
@@ -259,7 +259,7 @@ Cache-Control: no-store`,
       response: { description: "{ requirements }." },
       examples: {
         curl: `curl -fsS "$API/v1/payer/deposit-requests/dr_0198f80c-…/verify" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION"`,
+  -H "Gum-Payer-Session: $PAYER_SESSION"`,
         ts: `const { requirements } = await payer.verification.status(id, { payerSession });`,
         response: REQUIREMENTS,
       },
@@ -343,7 +343,7 @@ Cache-Control: no-store`,
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/verify/email/confirm" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION" \\
+  -H "Gum-Payer-Session: $PAYER_SESSION" \\
   -H "Content-Type: application/json" \\
   -d '{ "otp": "123456" }'`,
         ts: `const { requirements } = await payer.verification.confirmEmail(id, "123456", payer_session);`,
@@ -425,7 +425,7 @@ Cache-Control: no-store`,
             name: "typed_data",
             type: "object",
             description:
-              'Domain { name: "Payday", version: "2", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
+              'Domain { name: "Gum", version: "2", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
           },
         ],
       },
@@ -441,7 +441,7 @@ Cache-Control: no-store`,
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/wallet/challenge" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION" \\
+  -H "Gum-Payer-Session: $PAYER_SESSION" \\
   -H "Content-Type: application/json" \\
   -d '{ "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "chain_id": "143" }'`,
         ts: `const challenge = await payer.wallet.challenge(id, account, "143", { payerSession });
@@ -451,11 +451,11 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
   "expires_at": "2026-09-06T12:15:00Z",
   "chain": { "id": "143", "name": "Monad" },
   "typed_data": {
-    "domain": { "name": "Payday", "version": "2", "chainId": 143, "verifyingContract": "0x…" },
+    "domain": { "name": "Gum", "version": "2", "chainId": 143, "verifyingContract": "0x…" },
     "primaryType": "PayerAttestation",
     "types": { "EIP712Domain": [ "…" ], "PayerAttestation": [ "…" ] },
     "message": {
-      "statement": "I will pay this Payday deposit request from this wallet.",
+      "statement": "I will pay this Gum deposit request from this wallet.",
       "attributionHash": "0x…",
       "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
       "nonce": "0x…",
@@ -498,7 +498,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/wallet/attest" \\
-  -H "Payday-Payer-Session: $PAYER_SESSION" \\
+  -H "Gum-Payer-Session: $PAYER_SESSION" \\
   -H "Content-Type: application/json" \\
   -d '{ "wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "signature": "0x…" }'`,
         ts: `const ready = await payer.wallet.attest(id, account, signature, challenge.payer_session);`,
@@ -564,7 +564,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       summary: "Asks Relay for a route and records it as a quote.",
       body: (
         <p>
-          Payday makes the quote, never the page: it pins the sending wallet the request names, the
+          Gum makes the quote, never the page: it pins the sending wallet the request names, the
           payment address as the recipient, the request&apos;s currency on its network as what
           lands, and exactly the amount still due as the output. The payer sends any of the
           origin&apos;s listed tokens; Relay swaps it, and the payer bears the spread. The answer is
@@ -662,7 +662,7 @@ for (const step of quote.steps) {
       method: "POST",
       path: "/v1/payer/deposit-requests/{id}/relay/quotes/{rli}/sent",
       auth: "payer_session",
-      summary: "The wallet sent the quote's deposit; Payday follows it from here.",
+      summary: "The wallet sent the quote's deposit; Gum follows it from here.",
       body: (
         <p>
           Once. From then on the indexer asks Relay what became of the request, attributes the

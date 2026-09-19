@@ -1,0 +1,1 @@
+{"version":1,"failures":[{"contract":"foundry/test/PaymentAddress.t.sol:PaymentAddressTest","test":"testFuzz_address_parity"}]}

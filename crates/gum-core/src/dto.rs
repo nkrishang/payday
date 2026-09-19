@@ -10,7 +10,7 @@ use crate::{
     PayerVerification, chain_name, native_symbol,
 };
 
-/// The only attachment type Payday accepts (product plan §4.2).
+/// The only attachment type Gum accepts (product plan §4.2).
 pub const PDF_MIME_TYPE: &str = "application/pdf";
 
 /// Every timestamp the API emits, in one shape: RFC 3339, UTC, whole
@@ -254,8 +254,8 @@ pub struct DepositRequestResponse {
     /// The wallet the payer attested, once they have — only a request that
     /// attached the wallet-attestation add-on ever has one.
     pub payer_wallet: Option<String>,
-    /// Always present: Payday's recovery wallet, the payment contract's
-    /// recovery term. Funds Payday recovers land here and are returned to
+    /// Always present: Gum's recovery wallet, the payment contract's
+    /// recovery term. Funds Gum recovers land here and are returned to
     /// the payer manually.
     pub recovery_address: Option<String>,
     /// When the payer's attestation was accepted, for a request with the
@@ -512,7 +512,7 @@ pub struct PayerDepositRequestResponse {
     pub remaining: Option<String>,
     pub remaining_base_units: Option<String>,
     /// The wallet bound to this request, once a payer has attested one.
-    /// Only transfers from it count; anything Payday returns goes to it.
+    /// Only transfers from it count; anything Gum returns goes to it.
     pub payer_wallet: Option<String>,
     /// Present once unlocked and a wallet is bound; the address does not
     /// exist before the attestation it commits to.
@@ -823,7 +823,7 @@ pub fn attention(code: &str, currency: Currency) -> AttentionDto {
             format!(
                 "The payer's wallet, where excess funds return, is restricted by {issuer}, the {currency} issuer."
             ),
-            "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
+            "Contact Gum support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
             format!("{issuer} has blacklisted the deposit address."),
@@ -831,7 +831,7 @@ pub fn attention(code: &str, currency: Currency) -> AttentionDto {
         ),
         "balance_below_amount" => (
             "The deposit address balance is lower than the confirmed amount.".into(),
-            "Contact support so Payday can investigate safely.",
+            "Contact support so Gum can investigate safely.",
         ),
         _ => (
             "Automatic settlement has paused.".into(),
@@ -1007,7 +1007,7 @@ mod tests {
             json["payer_wallet"],
             wallet_of(&PAYER_KEY).to_checksum(None)
         );
-        // Recovery is Payday's recovery wallet in every case, never the
+        // Recovery is Gum's recovery wallet in every case, never the
         // payer's.
         assert_eq!(json["recovery_address"], RECOVERY.to_checksum(None));
         assert_ne!(json["recovery_address"], json["payer_wallet"]);

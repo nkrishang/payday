@@ -77,7 +77,7 @@ export interface CreateDepositRequest {
    * Pin the network the payer must pay on: one of the deployment's chain ids
    * as a decimal string (`"143"`). Left out, the payer chooses among every
    * network serving the currency when they sign; required for USDT. A chain
-   * Payday does not serve the currency on is refused with `422 unsupported_chain`.
+   * Gum does not serve the currency on is refused with `422 unsupported_chain`.
    */
   chain_id?: string;
   /**
@@ -153,7 +153,7 @@ export interface DepositRequest {
    */
   payer_wallet: string | null;
   /**
-   * Always present: Payday's own recovery wallet, the term every deposit
+   * Always present: Gum's own recovery wallet, the term every deposit
    * address returns overpayment remainders, expired balances, and late
    * transfers to. Never the payer's wallet, attested or not.
    */
@@ -646,11 +646,11 @@ export interface AttachmentCommitment { id: string; byte_length: string; sha256:
 /**
  * The exact document hashed at issuance; every string is canonical (decimal
  * amounts, EIP-55 addresses). It carries no recovery address: that is always
- * Payday's own recovery wallet, which the deposit address carries as its
+ * Gum's own recovery wallet, which the deposit address carries as its
  * recovery term rather than through this document.
  */
 export interface CanonicalIssuanceSnapshot {
-  schema: "payday.invoice.v4";
+  schema: "gum.invoice.v4";
   canonicalization: "RFC8785";
   issuer: Party;
   bill_to: Party;
@@ -676,7 +676,7 @@ export interface CanonicalIssuanceSnapshot {
  * data the wallet signed (under the chosen chain's domain), its EIP-712
  * digest, and the signature. Present only on a `wallet_attributed`-scope
  * proof, where the salt is
- * `keccak256("PAYDAY_SALT_V5" || issuance_nonce || attribution_hash || digest)`.
+ * `keccak256("GUM_SALT_V5" || issuance_nonce || attribution_hash || digest)`.
  */
 export interface PayerWalletAttestation {
   address: string;
@@ -686,10 +686,10 @@ export interface PayerWalletAttestation {
   method: "ecdsa";
 }
 
-/** One fact Payday observed: the proven mailbox or the accepted wallet signature. */
+/** One fact Gum observed: the proven mailbox or the accepted wallet signature. */
 export interface VerificationFact {
   kind: "mailbox" | "merchant_session" | "wallet";
-  provider: "auth0" | "merchant" | "payday";
+  provider: "auth0" | "merchant" | "gum";
   at: string;
 }
 
@@ -741,7 +741,7 @@ export interface AttestedRelayFill extends RelayAttribution {
 export type ProofScope = "wallet_attributed" | "settlement";
 
 /**
- * What Payday signs about a verification outcome. The commitment (attribution
+ * What Gum signs about a verification outcome. The commitment (attribution
  * hash, chain, CREATE3 address, and, with the wallet attestation add-on, the
  * payer wallet and the nonce inside its attestation) is in the signed payload
  * so it vouches for this request and this payer only, not for any proof
@@ -764,7 +764,7 @@ export interface VerificationAttestationPayload {
   wallet_nonce?: string;
   /**
    * The transfers Relay's solver made for cross-chain payments the attested
-   * wallet sent, each with the origin Payday verified; absent when every
+   * wallet sent, each with the origin Gum verified; absent when every
    * transfer came from the wallet itself.
    */
   relay_fills?: AttestedRelayFill[];
@@ -775,7 +775,7 @@ export interface VerificationAttestationPayload {
   facts: VerificationFact[];
 }
 
-/** Payday-attested, not address-committed: verification happens after issuance. */
+/** Gum-attested, not address-committed: verification happens after issuance. */
 export interface SignedVerificationAttestation {
   payload: VerificationAttestationPayload;
   signer: string;
@@ -785,13 +785,13 @@ export interface SignedVerificationAttestation {
 /**
  * Offline-verifiable record tying the issued deposit request to its payment
  * address, to the transfers that paid it, and to the transaction that settled
- * it. It is checked without Payday: `gateway_core::verify_proof` holds the
+ * it. It is checked without Gum: `gateway_core::verify_proof` holds the
  * offline checks. With the wallet attestation add-on attached
  * (`scope: "wallet_attributed"`) it also ties the payer's attested wallet in;
  * without it (`scope: "settlement"`) it claims nothing about the sender.
  */
 export interface ProofOfPayment {
-  /** `payday.proof.v5`. Old v4 proofs remain valid historical artifacts (`ProofOfPaymentV4`). */
+  /** `gum.proof.v5`. Old `payday.proof.v4` proofs remain valid historical artifacts (`ProofOfPaymentV4`). */
   version: string;
   /** Whether the payer's wallet is attested into the proof or the sender is unclaimed. */
   scope: ProofScope;
@@ -804,7 +804,7 @@ export interface ProofOfPayment {
   /**
    * The payer's wallet attestation, present exactly when `scope` is
    * `wallet_attributed`. The proof's salt is
-   * `keccak256("PAYDAY_SALT_V5" || issuance_nonce || attribution_hash ||
+   * `keccak256("GUM_SALT_V5" || issuance_nonce || attribution_hash ||
    * digest)`, the digest being the attestation's; a settlement-scope salt is
    * derived without it.
    */
@@ -815,7 +815,7 @@ export interface ProofOfPayment {
   factory_address: string;
   payment_address: string;
   token_address: string;
-  /** Always Payday's own recovery wallet: the address's recovery term. */
+  /** Always Gum's own recovery wallet: the address's recovery term. */
   recovery_address: string;
   /**
    * The fulfilment transaction (the deposit request's `settlement_tx_hash`) that
@@ -857,7 +857,7 @@ export interface CanonicalIssuanceSnapshotV4 extends Omit<CanonicalIssuanceSnaps
   payer_policy: { mode: "permissionless" | "verified_email" | "merchant_session" } & Record<string, unknown>;
 }
 
-/** The Payday attestation a v4 proof carries, with the retired `payer_policy_mode`. */
+/** The Gum attestation a v4 proof carries, with the retired `payer_policy_mode`. */
 export interface SignedVerificationAttestationV4 extends Omit<SignedVerificationAttestation, "payload"> {
   payload: Omit<VerificationAttestationPayload, "scope" | "payer_wallet" | "wallet_nonce" | "wallet_bound_at"> & {
     payer_policy_mode: string;
@@ -949,7 +949,7 @@ export interface IssuedApiKey {
   replaced_previous_key: boolean;
 }
 
-interface PaydayClientCommonOptions {
+interface GumClientCommonOptions {
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
 }
@@ -959,10 +959,10 @@ interface PaydayClientCommonOptions {
  * signed-in dashboard holds (its Privy identity token). Both travel as the
  * same bearer header; the API tells them apart.
  */
-export type PaydayClientOptions = PaydayClientCommonOptions &
+export type GumClientOptions = GumClientCommonOptions &
   ({ apiKey: string; accessToken?: undefined } | { accessToken: string; apiKey?: undefined });
 
-export interface PaydayPayerClientOptions {
+export interface GumPayerClientOptions {
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
 }
@@ -973,7 +973,7 @@ export interface UploadOptions {
   scanTimeout?: number;
 }
 
-export class PaydayError extends Error {
+export class GumError extends Error {
   readonly code: string;
   readonly requestId: string | undefined;
   readonly status: number;
@@ -982,7 +982,7 @@ export class PaydayError extends Error {
 
   constructor(message: string, code: string, status: number, requestId?: string, continuation?: string) {
     super(message);
-    this.name = "PaydayError";
+    this.name = "GumError";
     this.code = code;
     this.status = status;
     this.requestId = requestId;
@@ -990,11 +990,11 @@ export class PaydayError extends Error {
   }
 }
 
-const DEFAULT_BASE_URL = "https://api.payday.sh";
+const DEFAULT_BASE_URL = "https://api.gum.money";
 const DEFAULT_SCAN_TIMEOUT_MS = 120_000;
 const SCAN_POLL_INITIAL_MS = 1_000;
 const SCAN_POLL_MAX_MS = 8_000;
-const PAYER_SESSION_HEADER = "Payday-Payer-Session";
+const PAYER_SESSION_HEADER = "Gum-Payer-Session";
 
 interface RequestOptions {
   method?: string;
@@ -1005,7 +1005,7 @@ interface RequestOptions {
 }
 
 /**
- * Every Payday response is `Cache-Control: no-store`, so requests opt out of
+ * Every Gum response is `Cache-Control: no-store`, so requests opt out of
  * caching explicitly. This also stops frameworks that patch `fetch` with a
  * caching default (Next.js) from serving a stale deposit request.
  */
@@ -1028,12 +1028,12 @@ async function send(
   return response;
 }
 
-async function errorFrom(response: Response): Promise<PaydayError> {
+async function errorFrom(response: Response): Promise<GumError> {
   const text = await response.text();
   let wire: { error?: { code?: string; message?: string }; request_id?: string; continuation?: string } | undefined;
   try { wire = text ? JSON.parse(text) : undefined; } catch { wire = undefined; }
-  return new PaydayError(
-    wire?.error?.message ?? response.statusText ?? "Payday API request failed",
+  return new GumError(
+    wire?.error?.message ?? response.statusText ?? "Gum API request failed",
     wire?.error?.code ?? "http_error", response.status,
     wire?.request_id ?? response.headers.get("x-request-id") ?? undefined,
     wire?.continuation,
@@ -1138,7 +1138,7 @@ export type WithdrawalStatus = "awaiting_signature" | "in_progress" | "completed
 export interface Withdrawal {
   id: string;
   status: WithdrawalStatus;
-  /** The Payday wallet every leg is signed from. */
+  /** The Gum wallet every leg is signed from. */
   wallet_address: string;
   /** `USDC` or `USDT`: what every leg moves. */
   currency: string;
@@ -1177,12 +1177,12 @@ export interface ListWithdrawalsParams {
   starting_after?: string;
 }
 
-export class PaydayClient {
+export class GumClient {
   private readonly credential: string;
   private readonly baseUrl: string;
   private readonly fetcher: typeof globalThis.fetch;
 
-  constructor(options: PaydayClientOptions) {
+  constructor(options: GumClientOptions) {
     const { apiKey, accessToken } = options;
     if (Boolean(apiKey) === Boolean(accessToken)) {
       throw new TypeError("exactly one of apiKey or accessToken is required");
@@ -1214,7 +1214,7 @@ export class PaydayClient {
     /**
      * Internal: the dashboard onboarding walkthrough's one real demo
      * transfer and verification. Refuses `409 onboarding_deposit_not_eligible`
-     * for anything not addressed to Payday's own onboarding mailbox — not a
+     * for anything not addressed to Gum's own onboarding mailbox — not a
      * general merchant feature.
      */
     onboardingDeposit: (id: string): Promise<OnboardingDepositResponse> =>
@@ -1225,7 +1225,7 @@ export class PaydayClient {
     /** The deposit request's PDF attachment with a short-lived `download_url`. */
     attachment: (id: string): Promise<AttachmentDescriptor> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/attachment`),
-    /** Payday's deterministic summary of the deposit request as a PDF; the same request always renders byte-identical bytes. */
+    /** Gum's deterministic summary of the deposit request as a PDF; the same request always renders byte-identical bytes. */
     requestPdf: async (id: string): Promise<Blob> => {
       const response = await this.send(`/v1/deposit-requests/${encodeURIComponent(id)}/request.pdf`, { accept: "application/pdf" });
       return response.blob();
@@ -1345,7 +1345,7 @@ export class PaydayClient {
         ...(signal === undefined ? {} : { signal }),
       });
       if (!put.ok) {
-        throw new PaydayError(`Attachment upload failed with HTTP ${put.status}`, "attachment_upload_failed", put.status);
+        throw new GumError(`Attachment upload failed with HTTP ${put.status}`, "attachment_upload_failed", put.status);
       }
       const deadline = Date.now() + (options.scanTimeout ?? DEFAULT_SCAN_TIMEOUT_MS);
       let delay = SCAN_POLL_INITIAL_MS;
@@ -1353,9 +1353,9 @@ export class PaydayClient {
         try {
           return await this.attachments.finalize(slot.id, { ...(signal === undefined ? {} : { signal }) });
         } catch (error) {
-          if (!(error instanceof PaydayError) || error.code !== "attachment_scan_pending") throw error;
+          if (!(error instanceof GumError) || error.code !== "attachment_scan_pending") throw error;
           if (Date.now() + delay > deadline) {
-            throw new PaydayError(
+            throw new GumError(
               `Attachment ${slot.id} was not scanned in time; call attachments.finalize later`,
               "attachment_scan_timeout", error.status, error.requestId,
             );
@@ -1398,7 +1398,7 @@ export class PaydayClient {
    * work only with a dashboard session: whoever holds an API key must not be
    * able to mint another from it, so a client built with `apiKey` gets
    * `identity_unauthorized` (401) from them. Pass `expectedGeneration` from
-   * the account's current `generation`; a mismatch throws `PaydayError` with
+   * the account's current `generation`; a mismatch throws `GumError` with
    * code `api_key_generation_conflict`, meaning something else changed the
    * key first — re-read the account and, if the merchant still wants to
    * proceed, retry with the generation that came back.
@@ -1420,12 +1420,12 @@ export class PaydayClient {
   };
 
   /**
-   * Withdrawals: the Payday wallet's whole balance in one currency to one
+   * Withdrawals: the Gum wallet's whole balance in one currency to one
    * address. Prepare, sign, submit, poll. `create` snapshots the balances
    * into legs, each carrying the EIP-712 document to sign under that
    * chain's token contract (an EIP-3009 authorization); nothing moves until it is
-   * signed. Sign with `@payday/sdk/signing` or any EIP-712 signer holding
-   * the wallet's key, then `authorize`. Payday relays and pays gas; the
+   * signed. Sign with `@gum/sdk/signing` or any EIP-712 signer holding
+   * the wallet's key, then `authorize`. Gum relays and pays gas; the
    * signature itself fixes where the funds may land. One withdrawal may be
    * open per account (`withdrawal_in_progress`, 409).
    */
@@ -1476,13 +1476,13 @@ export class PaydayClient {
  * A deposit link is intentionally open: anyone holding it may view the deposit
  * request and fulfil it. These routes accept no API key, so never pass a secret here.
  * A payer session token, obtained by completing verification on a gated
- * deposit request, travels in `Payday-Payer-Session` and unlocks the withheld content.
+ * deposit request, travels in `Gum-Payer-Session` and unlocks the withheld content.
  */
-export class PaydayPayerClient {
+export class GumPayerClient {
   private readonly baseUrl: string;
   private readonly fetcher: typeof globalThis.fetch;
 
-  constructor(options: PaydayPayerClientOptions = {}) {
+  constructor(options: GumPayerClientOptions = {}) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.fetcher = options.fetch ?? globalThis.fetch;
     if (!this.fetcher) throw new TypeError("fetch is required");
@@ -1620,7 +1620,7 @@ export class PaydayPayerClient {
 
   /**
    * Paying from another network through Relay, once the address exists and
-   * while the request is payable (`relay_available`). Payday makes the quote:
+   * while the request is payable (`relay_available`). Gum makes the quote:
    * it pins the sender — the wallet the quote named, which with the wallet
    * attestation add-on must be the attested one — the payment address as the
    * recipient, and exactly
@@ -1632,7 +1632,7 @@ export class PaydayPayerClient {
    * afterwards.
    */
   readonly relay = {
-    /** The networks a payer may pay from, and the stablecoins they may send on each: every one Relay takes deposits on that Payday serves, except the request's own. */
+    /** The networks a payer may pay from, and the stablecoins they may send on each: every one Relay takes deposits on that Gum serves, except the request's own. */
     chains: (id: string, options: { signal?: AbortSignal; payerSession?: string } = {}): Promise<RelayOriginChains> =>
       request<RelayOriginChains>(
         this.fetcher, this.baseUrl, `/v1/payer/deposit-requests/${encodeURIComponent(id)}/relay/chains`,

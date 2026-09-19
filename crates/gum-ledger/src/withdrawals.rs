@@ -1,6 +1,6 @@
 //! Merchant withdrawals and their legs.
 //!
-//! A withdrawal snapshots the Payday wallet's balance in one currency into legs,
+//! A withdrawal snapshots the Gum wallet's balance in one currency into legs,
 //! one per chain it sits on (one chain at all, unless the currency has a 1:1
 //! bridge).
 //! The merchant signs each leg's EIP-3009 authorization; `gum-server`'s

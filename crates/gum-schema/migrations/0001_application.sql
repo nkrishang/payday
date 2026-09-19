@@ -264,7 +264,7 @@ CREATE TABLE invoices (
     token_decimals SMALLINT NOT NULL,
     beneficiary_address BYTEA NOT NULL,
     expiration_timestamp BIGINT NOT NULL,
-    -- Always Payday's own recovery wallet (its KMS recovery key's address),
+    -- Always Gum's own recovery wallet (its KMS recovery key's address),
     -- fixed at issuance and committed into the snapshot: never the payer's
     -- wallet. Gum handles any recovery manually.
     recovery_address BYTEA NOT NULL,
@@ -668,7 +668,7 @@ CREATE INDEX sweep_job_items_by_invoice ON sweep_job_items (invoice_id);
 --   quoted ─▶ expired          (never reported as sent)
 --   sent   ─▶ failed | refunded
 --
--- `filled` means Payday verified the origin payment itself, from the origin
+-- `filled` means Gum verified the origin payment itself, from the origin
 -- chain's receipt. Relay's record of a depositor and the page's reported
 -- hash are hints for finding the evidence, never the evidence:
 -- `origin_tx_hash` keeps the page's report (an unverified hint), while the
@@ -864,7 +864,7 @@ CREATE TABLE recovered_funds (
 );
 
 -- ---------------------------------------------------------------------------
--- Merchant withdrawals: the whole USDC balance of the account's Payday wallet
+-- Merchant withdrawals: the whole USDC balance of the account's Gum wallet
 -- on every chain, moved to one destination the merchant names. One row per
 -- withdrawal, one leg per source chain. The merchant authorizes each leg
 -- with an EIP-3009 signature (crates/gum-core/src/withdrawal_authorization.rs)
@@ -881,7 +881,7 @@ CREATE TABLE withdrawals (
     id UUID PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES accounts(id),
     idempotency_key TEXT NOT NULL,
-    -- The Payday wallet the legs are signed from, as it was at creation.
+    -- The Gum wallet the legs are signed from, as it was at creation.
     wallet_address TEXT NOT NULL,
     -- The one currency the legs move; a withdrawal never mixes two.
     currency TEXT NOT NULL CHECK (currency IN ('USDC', 'USDT')),
@@ -1101,7 +1101,7 @@ CREATE TABLE payer_sessions (
 CREATE INDEX payer_sessions_invoice ON payer_sessions(invoice_id);
 CREATE INDEX payer_sessions_expiry ON payer_sessions(expires_at);
 
--- An email code (auth0), a wallet attestation (payday), or a merchant-session
+-- An email code (auth0), a wallet attestation (gum), or a merchant-session
 -- exchange (merchant), each recorded as an attempt of its own kind.
 CREATE TABLE payer_verifications (
     id UUID PRIMARY KEY,
@@ -1110,7 +1110,7 @@ CREATE TABLE payer_verifications (
     payer_session_id UUID NOT NULL REFERENCES payer_sessions(id) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('email', 'wallet', 'merchant_session')),
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'abandoned')),
-    provider TEXT NOT NULL CHECK (provider IN ('auth0', 'payday', 'merchant')),
+    provider TEXT NOT NULL CHECK (provider IN ('auth0', 'gum', 'merchant')),
     provider_event_id TEXT,
     payer_ref BYTEA CHECK (payer_ref IS NULL OR octet_length(payer_ref) = 32),
     verified_at TIMESTAMPTZ,
@@ -1375,7 +1375,7 @@ BEGIN
           CASE WHEN attention THEN jsonb_build_object('attention', jsonb_build_object(
             'code', NEW.attention_reason,
             'message', 'Automatic payout requires a manual review. Funds remain safe.',
-            'action', 'Contact Payday support and provide the deposit request ID.'))
+            'action', 'Contact Gum support and provide the deposit request ID.'))
           ELSE '{}'::jsonb END));
     END IF;
   END IF;

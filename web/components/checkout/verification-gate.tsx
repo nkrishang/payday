@@ -1,4 +1,4 @@
-import type { PayerDepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest } from "@gum/sdk";
 import type { CheckoutView } from "@/lib/checkout-state";
 import { Lock } from "lucide-react";
 import { EmailVerification } from "./email-verification";

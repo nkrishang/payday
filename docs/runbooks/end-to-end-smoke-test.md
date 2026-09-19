@@ -2,9 +2,9 @@
 
 Verify the full deposit request lifecycle: create a deposit request, fund it with real USDC,
 and confirm the funds reach the beneficiary. `scripts/live-smoke.sh` runs the
-same flow unattended; `PAYDAY_CURRENCY=USDT` makes it a USDT request pinned
+same flow unattended; `GUM_CURRENCY=USDT` makes it a USDT request pinned
 to `CHAIN_ID` (Monad or Arbitrum, where USDT0 is served) and
-`PAYDAY_TOKEN_ADDRESS` overrides the contract it pays from.
+`GUM_TOKEN_ADDRESS` overrides the contract it pays from.
 
 ## Prerequisites
 
@@ -22,15 +22,15 @@ to `CHAIN_ID` (Monad or Arbitrum, where USDT0 is served) and
 ## Step 1: Create a deposit request
 
 ```bash
-export PAYDAY_API_URL="https://api.payday.sh"
-export PAYDAY_API_KEY="<operator-account-api-key>"
+export GUM_API_URL="https://api.gum.money"
+export GUM_API_KEY="<operator-account-api-key>"
 
-curl -fsS "$PAYDAY_API_URL/v1/deposit-requests" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+curl -fsS "$GUM_API_URL/v1/deposit-requests" \
+  -H "Authorization: Bearer $GUM_API_KEY" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: smoke-$(date +%s)" \
   -d '{"amount":"0.01","payout_address":"<PAYOUT_ADDRESS>",
-       "issuer":{"name":"Payday"},"payer":{"name":"Smoke test"},
+       "issuer":{"name":"Gum"},"payer":{"name":"Smoke test"},
        "verification":{"wallet_attestation":true},"expires_in":3600}' | jq
 ```
 
@@ -38,10 +38,10 @@ Copy `id` and `deposit_url` from the JSON output; `currency` is `USDC`
 (the default) and `address` is null until the payer's wallet is attested. Open `deposit_url` in a browser, connect the wallet
 you will pay from, and sign the attestation it offers. Then re-read the
 deposit and confirm `address` is set, `payer_wallet` is your wallet, and
-`recovery_address` is Payday's recovery custody address:
+`recovery_address` is Gum's recovery custody address:
 
 ```bash
-curl -s "$PAYDAY_API_URL/v1/deposit-requests/<ID>" -H "Authorization: Bearer $PAYDAY_API_KEY" | jq
+curl -s "$GUM_API_URL/v1/deposit-requests/<ID>" -H "Authorization: Bearer $GUM_API_KEY" | jq
 ```
 
 ## Step 2: Send USDC to the deposit address
@@ -59,12 +59,12 @@ cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 
 ```bash
 # One-time check:
-curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
+curl -fsS "$GUM_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
+  -H "Authorization: Bearer $GUM_API_KEY" | jq .status
 
 # Poll every 5 seconds:
-watch -n 5 "curl -fsS $PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID> \
-  -H 'Authorization: Bearer $PAYDAY_API_KEY' | jq .status"
+watch -n 5 "curl -fsS $GUM_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID> \
+  -H 'Authorization: Bearer $GUM_API_KEY' | jq .status"
 ```
 
 The status should progress: `awaiting_deposit → deposited → settled`.
@@ -100,7 +100,7 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
 ## Step 5: Verify late funds are recovered into custody
 
 Send a second, small transfer to the same deposit address from the wallet you
-signed with. It must be recovered into Payday's recovery custody within a
+signed with. It must be recovered into Gum's recovery custody within a
 minute while the status stays `settled`, and the `recovered_funds` ledger
 must record it:
 

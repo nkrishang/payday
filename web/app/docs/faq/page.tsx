@@ -4,7 +4,7 @@ import { DocsPage, H2 } from "@/components/docs/prose";
 
 export const metadata: Metadata = {
   title: "FAQ",
-  description: "Short answers to the questions merchants ask about Payday.",
+  description: "Short answers to the questions merchants ask about Gum.",
 };
 
 export default function FaqPage() {
@@ -26,7 +26,7 @@ export default function FaqPage() {
       <H2 id="line-items">Can I add line items or tax?</H2>
       <p>
         No. State the amount directly and attach a PDF for an itemised breakdown or any
-        jurisdiction-specific content. Payday stores and hashes the file but never parses it, and
+        jurisdiction-specific content. Gum stores and hashes the file but never parses it, and
         does not model line items, tax, or fiat.
       </p>
 
@@ -64,8 +64,8 @@ export default function FaqPage() {
 
       <H2 id="not-appeared">A payer says they paid. Why has nothing changed?</H2>
       <p>
-        Payday credits only finalized transfers. A wallet can show a transaction as confirmed before
-        the chain finalizes it and before Payday&apos;s indexer reaches it. Check <code>as_of</code>
+        Gum credits only finalized transfers. A wallet can show a transaction as confirmed before
+        the chain finalizes it and before Gum&apos;s indexer reaches it. Check <code>as_of</code>
         , <code>indexer_freshness</code>, and the request&apos;s <code>transfers</code>; if the
         transfer went to the right address from the right token, it will be credited. If it was the
         wrong token or the wrong network, it may be unrecoverable.
@@ -75,15 +75,15 @@ export default function FaqPage() {
       <p>
         Partial transfers accumulate. Excess goes back to the payer&apos;s wallet at settlement.
         Funds still short at the deadline, or arriving after it, go back to the payer&apos;s wallet.
-        Nothing is held by Payday. See{" "}
+        Nothing is held by Gum. See{" "}
         <Link href="/docs/concepts#where-the-usdc-goes">Where the USDC goes</Link>.
       </p>
 
-      <H2 id="cancel-refund">Can I cancel or refund through Payday?</H2>
+      <H2 id="cancel-refund">Can I cancel or refund through Gum?</H2>
       <p>
-        Cancelling is advisory: it stops Payday&apos;s pages from presenting the request but cannot
+        Cancelling is advisory: it stops Gum&apos;s pages from presenting the request but cannot
         disable an address. There is no refund endpoint. Funds that settled to your wallet are yours
-        to refund through your own process; funds Payday routes back to the payer go automatically,
+        to refund through your own process; funds Gum routes back to the payer go automatically,
         and <code>deposit_request.recovered_funds</code> tells you when.
       </p>
 
@@ -105,7 +105,7 @@ export default function FaqPage() {
 
       <H2 id="needs-attention">What does needs_attention mean?</H2>
       <p>
-        Automatic movement stopped because Payday could not safely continue. Do not send more funds.
+        Automatic movement stopped because Gum could not safely continue. Do not send more funds.
         Follow <code>attention.action</code> and contact support with the request id and the API
         request id. Funds are neither lost nor delivered until an operator releases it.
       </p>
@@ -133,7 +133,7 @@ export default function FaqPage() {
 
       <H2 id="sandbox">Is there a sandbox?</H2>
       <p>
-        Yes: <code>https://api.sandbox.payday.sh</code> with <code>payday_test_</code> keys, on
+        Yes: <code>https://api.sandbox.gum.money</code> with <code>gum_test_</code> keys, on
         Monad testnet, Base Sepolia, and Arbitrum Sepolia with Circle&apos;s test USDC and the same
         real indexing and finality. See{" "}
         <Link href="/docs/environments">Environments</Link>.
@@ -141,7 +141,7 @@ export default function FaqPage() {
 
       <H2 id="help">Where can I get help?</H2>
       <p>
-        Email <a href="mailto:support@payday.sh">support@payday.sh</a> with the request id and the{" "}
+        Email <a href="mailto:support@gum.money">support@gum.money</a> with the request id and the{" "}
         <code>dr_</code> id. Never send an API key, a verification code, a webhook secret, or more
         data than the question needs.
       </p>

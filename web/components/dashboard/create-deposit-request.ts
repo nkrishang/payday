@@ -1,4 +1,4 @@
-import type { CreateDepositRequest, Party } from "@payday/sdk";
+import type { CreateDepositRequest, Party } from "@gum/sdk";
 
 /**
  * The add-ons the composer can attach. Merchant auth is not one of them: it

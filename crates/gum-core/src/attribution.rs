@@ -3,8 +3,8 @@
 //!
 //! ```text
 //! canonical_bytes    = JCS(canonical_issuance_snapshot)          (RFC 8785)
-//! attribution_hash   = keccak256("PAYDAY_ATTRIBUTION_V5" || canonical_bytes)
-//! salt               = keccak256("PAYDAY_SALT_V5" || issuance_nonce || attribution_hash [+ attestation_digest])
+//! attribution_hash   = keccak256("GUM_ATTRIBUTION_V5" || canonical_bytes)
+//! salt               = keccak256("GUM_SALT_V5" || issuance_nonce || attribution_hash [+ attestation_digest])
 //! ```
 //!
 //! The salt exists from the moment the payment address does. The issuance
@@ -25,15 +25,15 @@ use uuid::Uuid;
 use crate::{Amount, BeneficiaryAddress, Currency, NetworkTerms, RecoveryAddress, Salt};
 
 pub const ATTRIBUTION_VERSION: u16 = 5;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"PAYDAY_ATTRIBUTION_V5";
-pub const SALT_DOMAIN: &[u8] = b"PAYDAY_SALT_V5";
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"GUM_ATTRIBUTION_V5";
+pub const SALT_DOMAIN: &[u8] = b"GUM_SALT_V5";
 /// `CanonicalIssuanceSnapshot::schema`; a new schema means a new version.
 /// v3 commits to the list of networks the request may be paid on instead of
 /// one chain: the payer's attestation selects one of them. v4 names the
 /// currency and its decimals. v5 replaces the exclusive `payer_policy` with
 /// independent verification add-ons and commits to the payment contract's
-/// recovery term, which is always Payday's own recovery wallet.
-pub const SNAPSHOT_SCHEMA: &str = "payday.invoice.v5";
+/// recovery term, which is always Gum's own recovery wallet.
+pub const SNAPSHOT_SCHEMA: &str = "gum.invoice.v5";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
@@ -57,11 +57,11 @@ pub struct Party {
 /// `merchant_session` mode: the merchant's own application has already
 /// authenticated the payer, names them by `payer_reference` (its own user
 /// id), and opens the hosted checkout for them with a single-use client
-/// secret; Payday performs no check of its own. `wallet_attestation` asks the
+/// secret; Gum performs no check of its own. `wallet_attestation` asks the
 /// payer to sign an EIP-712 attestation from the wallet they will pay from;
 /// without it, deposits from any wallet are good.
 ///
-/// The recovery term is deliberately absent: it is always Payday's own
+/// The recovery term is deliberately absent: it is always Gum's own
 /// recovery wallet, snapshotted into the issuance document, and never a
 /// request field.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -276,7 +276,7 @@ impl SnapshotNetwork {
 /// Everything an issued invoice commits to. Numbers are decimal strings and
 /// addresses are EIP-55 checksummed so the canonical form is unambiguous.
 ///
-/// The recovery address is always Payday's own recovery wallet: it is fixed
+/// The recovery address is always Gum's own recovery wallet: it is fixed
 /// at issuance and committed here, never derived from a payer wallet. So is
 /// the chain, when it is not pinned: the request commits to every network it
 /// may be paid on, and the payer picks one — through a wallet attestation's
@@ -304,9 +304,9 @@ pub struct CanonicalIssuanceSnapshot {
     pub attachment: Option<AttachmentCommitment>,
     pub networks: Vec<SnapshotNetwork>,
     pub receiver_address: String,
-    /// EIP-55 checksummed: Payday's recovery wallet, the payment contract's
+    /// EIP-55 checksummed: Gum's recovery wallet, the payment contract's
     /// recovery term. Overpayments, expired balances, and late transfers go
-    /// here, and Payday returns them to the payer manually.
+    /// here, and Gum returns them to the payer manually.
     pub recovery_address: String,
 }
 
@@ -515,7 +515,7 @@ mod tests {
         // whitespace, then reversed keys, an escaped character, and the
         // absent party fields spelled out as null.
         let natural = r#"{
-            "schema": "payday.invoice.v5", "canonicalization": "RFC8785",
+            "schema": "gum.invoice.v5", "canonicalization": "RFC8785",
             "issuer": {"name": "Acme Corp", "email": "billing@acme.example"},
             "bill_to": {"name": "Globex", "details": "1 Main St"},
             "currency": "USDC", "decimals": "6",
@@ -549,7 +549,7 @@ mod tests {
             "bill_to":{"details":"1 Main St","email":null,"name":"Globex"},
             "issuer":{"details":null,"email":"billing@acme.example","name":"Acme Corp"},
             "currency":"USDC",
-            "canonicalization":"RFC8785","schema":"payday.invoice.v5"}"#;
+            "canonicalization":"RFC8785","schema":"gum.invoice.v5"}"#;
         let a: CanonicalIssuanceSnapshot = serde_json::from_str(natural).unwrap();
         let b: CanonicalIssuanceSnapshot = serde_json::from_str(reversed).unwrap();
         assert_eq!(a, snapshot());
@@ -579,13 +579,13 @@ mod tests {
             r#""payer_verification":{"email":{"expected_email":"alice@example.com"},"wallet_attestation":false},"#,
             r#""receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","#,
             r#""recovery_address":"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc","#,
-            r#""reference":"INV-1","schema":"payday.invoice.v5"}"#,
+            r#""reference":"INV-1","schema":"gum.invoice.v5"}"#,
         );
         let bytes = canonical_bytes(&snapshot()).unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
         assert_eq!(
             attribution_hash(&bytes).to_string(),
-            "0xe8a7be778161e8d2a8889deb6dd272114efc552c41e8bd78bffbb7abb000c3a2"
+            "0x5c23e19f826b027f3e42e0ebea21635c6ba60cbf59d1a0caaf753b59471925ae"
         );
     }
 

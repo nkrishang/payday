@@ -9,30 +9,30 @@ locals {
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
   # The chain registry all three services read: every network a payer may pay
   # on, with the contract generation deployed there. The RPC URL for each
-  # is a secret (PAYDAY_RPC_URL_<chain_id>), never part of this JSON.
+  # is a secret (GUM_RPC_URL_<chain_id>), never part of this JSON.
   common_environment = [
-    { name = "PAYDAY_CHAINS", value = jsonencode(var.chains) },
+    { name = "GUM_CHAINS", value = jsonencode(var.chains) },
     { name = "RUST_LOG", value = "info" }
   ]
   rpc_url_secrets = [for id, secret in aws_secretsmanager_secret.rpc_url :
-    { name = "PAYDAY_RPC_URL_${id}", valueFrom = secret.arn }
+    { name = "GUM_RPC_URL_${id}", valueFrom = secret.arn }
   ]
   # Payer email verification needs its own Auth0 API and application (see
   # docs/authentication.md). Until both identifiers exist the settings are
   # omitted as a group, and gum-server answers verification_unavailable.
   payer_verification_enabled = var.payer_auth0_audience != "" && var.payer_auth0_client_id != ""
   payer_environment = local.payer_verification_enabled ? [
-    { name = "PAYDAY_PAYER_AUTH0_ISSUER", value = var.auth0_issuer },
-    { name = "PAYDAY_PAYER_AUTH0_AUDIENCE", value = var.payer_auth0_audience },
-    { name = "PAYDAY_PAYER_AUTH0_CLIENT_ID", value = var.payer_auth0_client_id },
-    { name = "PAYDAY_HOSTED_CHECKOUT_ORIGIN", value = local.checkout_base_url }
+    { name = "GUM_PAYER_AUTH0_ISSUER", value = var.auth0_issuer },
+    { name = "GUM_PAYER_AUTH0_AUDIENCE", value = var.payer_auth0_audience },
+    { name = "GUM_PAYER_AUTH0_CLIENT_ID", value = var.payer_auth0_client_id },
+    { name = "GUM_HOSTED_CHECKOUT_ORIGIN", value = local.checkout_base_url }
   ] : []
   payer_secrets = local.payer_verification_enabled ? [
-    { name = "PAYDAY_PAYER_REF_MASTER_KEY", valueFrom = aws_secretsmanager_secret.payer_ref_master_key.arn }
+    { name = "GUM_PAYER_REF_MASTER_KEY", valueFrom = aws_secretsmanager_secret.payer_ref_master_key.arn }
   ] : []
   # Who operator decisions are recorded against.
   identity_environment = [
-    { name = "PAYDAY_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
+    { name = "GUM_ADMIN_REVIEWER_ID", value = var.admin_reviewer_id }
   ]
   identity_secrets = []
 }
@@ -252,10 +252,10 @@ resource "aws_secretsmanager_secret_version" "resend_api_key" {
 }
 locals {
   payer_email_environment = local.resend_enabled ? [
-    { name = "PAYDAY_PAYER_EMAIL_FROM", value = var.payer_email_from }
+    { name = "GUM_PAYER_EMAIL_FROM", value = var.payer_email_from }
   ] : []
   payer_email_secrets = local.resend_enabled ? [
-    { name = "PAYDAY_RESEND_API_KEY", valueFrom = aws_secretsmanager_secret.resend_api_key[0].arn }
+    { name = "GUM_RESEND_API_KEY", valueFrom = aws_secretsmanager_secret.resend_api_key[0].arn }
   ] : []
 }
 
@@ -277,7 +277,7 @@ resource "aws_secretsmanager_secret_version" "relay_api_key" {
 }
 locals {
   relay_secrets = local.relay_enabled ? [
-    { name = "PAYDAY_RELAY_API_KEY", valueFrom = aws_secretsmanager_secret.relay_api_key[0].arn }
+    { name = "GUM_RELAY_API_KEY", valueFrom = aws_secretsmanager_secret.relay_api_key[0].arn }
   ] : []
 }
 
@@ -298,7 +298,7 @@ resource "aws_secretsmanager_secret_version" "privy_app_secret" {
 }
 locals {
   privy_secrets = local.privy_enabled ? [
-    { name = "PAYDAY_PRIVY_APP_SECRET", valueFrom = aws_secretsmanager_secret.privy_app_secret[0].arn }
+    { name = "GUM_PRIVY_APP_SECRET", valueFrom = aws_secretsmanager_secret.privy_app_secret[0].arn }
   ] : []
 }
 
@@ -360,7 +360,7 @@ moved {
 # balances, late transfers) are reviewed and returned by hand, so no task
 # role is granted kms:Sign.
 resource "aws_kms_key" "recovery" {
-  description              = "Payday recovery wallet; manual operator use only"
+  description              = "Gum recovery wallet; manual operator use only"
   key_usage                = "SIGN_VERIFY"
   customer_master_key_spec = "ECC_SECG_P256K1"
   deletion_window_in_days  = 30
@@ -374,7 +374,7 @@ resource "aws_kms_alias" "recovery" {
   target_key_id = aws_kms_key.recovery.key_id
 }
 
-# Signs the Payday-attested verification result carried in every Proof of
+# Signs the Gum-attested verification result carried in every Proof of
 # Payment. It is deliberately neither the sweep signer nor the recovery key: a
 # proof consumer trusts this address for attestations only, and it can never
 # move funds.
@@ -497,7 +497,7 @@ resource "aws_iam_role" "api_task" {
 resource "aws_sesv2_email_identity" "notifications" {
   email_identity = var.notification_domain_name
 }
-# The DKIM CNAMEs live under notification_domain_name (payday.sh), whose DNS
+# The DKIM CNAMEs live under notification_domain_name (gum.money), whose DNS
 # is hosted at Vercel, not in the API's Route53 zone; they are published as
 # the notification_dkim_records output and added there by hand.
 resource "aws_iam_role_policy" "api_ses" {
@@ -535,9 +535,9 @@ resource "aws_iam_role_policy" "signers_kms" {
 # GuardDutyMalwareScanStatus=NO_THREATS_FOUND is present.
 #
 # Object layout: every upload lands at uploads/<account_id>/<attachment_id>.pdf
-# and is never moved. The presigned PUT stamps the tag payday-upload=pending on
+# and is never moved. The presigned PUT stamps the tag gum-upload=pending on
 # it (a signed header, so no upload can omit it); issuing a deposit request rewrites
-# that tag to payday-upload=attached before the deposit request commits. The lifecycle
+# that tag to gum-upload=attached before the deposit request commits. The lifecycle
 # rule expires only objects still tagged pending, so infrastructure can never
 # expire an attached PDF, and an abandoned upload is gone after seven days
 # without gum-server having to track it.
@@ -596,7 +596,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "attachments" {
     filter {
       and {
         prefix = "uploads/"
-        tags   = { payday-upload = "pending" }
+        tags   = { gum-upload = "pending" }
       }
     }
     expiration {
@@ -785,16 +785,16 @@ resource "aws_ecs_task_definition" "api" {
     ],
     stopTimeout = 120,
     environment = concat(local.common_environment, [
-      { name = "PAYDAY_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
-      { name = "PAYDAY_INTERNAL_BIND_ADDR", value = "0.0.0.0:${var.internal_port}" },
-      { name = "PAYDAY_PRIVY_APP_ID", value = var.privy_app_id },
-      { name = "PAYDAY_API_KEY_PREFIX", value = var.api_key_prefix },
-      { name = "PAYDAY_PUBLIC_BASE_URL", value = local.checkout_base_url },
-      { name = "PAYDAY_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
-      { name = "PAYDAY_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
-      { name = "PAYDAY_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn },
-      { name = "PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
-      { name = "PAYDAY_RECOVERY_ADDRESS", value = var.recovery_address }
+      { name = "GUM_BIND_ADDR", value = "0.0.0.0:${var.api_port}" },
+      { name = "GUM_INTERNAL_BIND_ADDR", value = "0.0.0.0:${var.internal_port}" },
+      { name = "GUM_PRIVY_APP_ID", value = var.privy_app_id },
+      { name = "GUM_API_KEY_PREFIX", value = var.api_key_prefix },
+      { name = "GUM_PUBLIC_BASE_URL", value = local.checkout_base_url },
+      { name = "GUM_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
+      { name = "GUM_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
+      { name = "GUM_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn },
+      { name = "GUM_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
+      { name = "GUM_RECOVERY_ADDRESS", value = var.recovery_address }
     ], local.payer_environment, local.payer_email_environment, local.identity_environment),
     # The recovery address is the custody term committed into every payment
     # contract at deployment; a wrong or zero address would misroute every
@@ -809,9 +809,9 @@ resource "aws_ecs_task_definition" "api" {
     # startup, so it reads each chain through the same RPC secrets as the indexer.
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
-      { name = "PAYDAY_INTERNAL_TOKEN", valueFrom = aws_secretsmanager_secret.internal_token.arn },
-      { name = "PAYDAY_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
-      { name = "PAYDAY_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
+      { name = "GUM_INTERNAL_TOKEN", valueFrom = aws_secretsmanager_secret.internal_token.arn },
+      { name = "GUM_WEBHOOK_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.webhook_encryption_key.arn },
+      { name = "GUM_ADMIN_BEARER_SECRET", valueFrom = aws_secretsmanager_secret.admin_bearer.arn }
     ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets, local.relay_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
@@ -834,13 +834,13 @@ resource "aws_ecs_task_definition" "indexer" {
     readonlyRootFilesystem = true,
     stopTimeout            = 120,
     environment = concat(local.common_environment, [
-      { name = "PAYDAY_SERVER_INTERNAL_URL", value = "http://${local.api_internal_hostname}:${var.internal_port}" },
-      { name = "PAYDAY_INDEXER_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" },
-      { name = "PAYDAY_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
-      { name = "PAYDAY_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
-      { name = "PAYDAY_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
+      { name = "GUM_SERVER_INTERNAL_URL", value = "http://${local.api_internal_hostname}:${var.internal_port}" },
+      { name = "GUM_INDEXER_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" },
+      { name = "GUM_INDEXER_POLL_INTERVAL_MS", value = tostring(var.indexer_poll_interval_ms) },
+      { name = "GUM_INDEXER_RECONCILE_INTERVAL_MS", value = tostring(var.indexer_reconcile_interval_ms) },
+      { name = "GUM_INDEXER_IDLE_INTERVAL_MS", value = tostring(var.indexer_idle_interval_ms) }
     ]),
-    secrets          = concat([{ name = "PAYDAY_INTERNAL_TOKEN", valueFrom = aws_secretsmanager_secret.internal_token.arn }], local.rpc_url_secrets),
+    secrets          = concat([{ name = "GUM_INTERNAL_TOKEN", valueFrom = aws_secretsmanager_secret.internal_token.arn }], local.rpc_url_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.indexer.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "indexer" } }
   }])
 
@@ -871,9 +871,9 @@ resource "aws_ecs_task_definition" "signers" {
     # the stop timeout only lets an in-progress RPC call finish.
     stopTimeout = 120,
     environment = concat(local.common_environment, [
-      { name = "PAYDAY_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
-      { name = "PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
-      { name = "PAYDAY_SIGNERS_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" }
+      { name = "GUM_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
+      { name = "GUM_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
+      { name = "GUM_SIGNERS_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" }
     ]),
     secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.signers.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "signers" } }

@@ -78,7 +78,7 @@ export const WITHDRAWALS: EndpointGroup = {
       path: "/v1/withdrawals",
       auth: "key",
       summary:
-        "Snapshots the Payday wallet's balance in one currency into legs towards one destination: USDC from every network, USDT from the destination network alone. Nothing moves until each leg is signed.",
+        "Snapshots the Gum wallet's balance in one currency into legs towards one destination: USDC from every network, USDT from the destination network alone. Nothing moves until each leg is signed.",
       body: (
         <>
           <p>
@@ -124,7 +124,7 @@ export const WITHDRAWALS: EndpointGroup = {
             type: "string",
             description: "awaiting_signature, in_progress, completed, failed, cancelled.",
           },
-          { name: "wallet_address", type: "string", description: "The Payday wallet every leg is signed from." },
+          { name: "wallet_address", type: "string", description: "The Gum wallet every leg is signed from." },
           { name: "currency", type: "string", description: "USDC or USDT: what every leg moves." },
           { name: "destination", type: "{ chain: Chain, address }", description: "" },
           { name: "legs", type: "Leg[]", description: "USDC: one per network holding any, in registry order. USDT: one, on the destination network." },
@@ -141,7 +141,7 @@ export const WITHDRAWALS: EndpointGroup = {
       ],
       examples: {
         curl: WITHDRAW_CURL,
-        ts: `const withdrawal = await payday.withdrawals.create(
+        ts: `const withdrawal = await gum.withdrawals.create(
   { destination: { chain_id: "8453", address: "0x0000…d00d" } },
   crypto.randomUUID(),
 );`,
@@ -177,14 +177,14 @@ export const WITHDRAWALS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS "$API/v1/withdrawals/wd_0198f80c-…/authorizations" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{ "authorizations": [ { "leg_id": "wdl_0198f80c-…", "signature": "0x…" } ] }'`,
-        ts: `import { privateKeySigner, signWithdrawal } from "@payday/sdk/signing";
+        ts: `import { privateKeySigner, signWithdrawal } from "@gum/sdk/signing";
 
-const signer = await privateKeySigner(process.env.PAYDAY_WALLET_KEY!);
+const signer = await privateKeySigner(process.env.GUM_WALLET_KEY!);
 const { authorizations } = await signWithdrawal(withdrawal, signer, { chains });
-const signed = await payday.withdrawals.authorize(withdrawal.id, authorizations);`,
+const signed = await gum.withdrawals.authorize(withdrawal.id, authorizations);`,
         response: WITHDRAWAL.replace('"status": "awaiting_signature"', '"status": "in_progress"'),
       },
     },
@@ -199,8 +199,8 @@ const signed = await payday.withdrawals.authorize(withdrawal.id, authorizations)
       response: { description: "Withdrawal." },
       answers: [{ status: 404, code: "withdrawal_not_found", when: "" }],
       examples: {
-        curl: `curl -fsS "$API/v1/withdrawals/wd_0198f80c-…" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const withdrawal = await payday.withdrawals.get(id);`,
+        curl: `curl -fsS "$API/v1/withdrawals/wd_0198f80c-…" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const withdrawal = await gum.withdrawals.get(id);`,
         response: WITHDRAWAL,
       },
     },
@@ -217,8 +217,8 @@ const signed = await payday.withdrawals.authorize(withdrawal.id, authorizations)
       ],
       response: { description: "{ withdrawals: Withdrawal[], next_cursor: wd_ id | null }." },
       examples: {
-        curl: `curl -fsS "$API/v1/withdrawals?limit=20" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { withdrawals, next_cursor } = await payday.withdrawals.list({ limit: 20 });`,
+        curl: `curl -fsS "$API/v1/withdrawals?limit=20" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { withdrawals, next_cursor } = await gum.withdrawals.list({ limit: 20 });`,
         response: `{
   "withdrawals": [ ${WITHDRAWAL.replace(/\n/g, "\n    ")} ],
   "next_cursor": null
@@ -239,8 +239,8 @@ const signed = await payday.withdrawals.authorize(withdrawal.id, authorizations)
         { status: 409, code: "withdrawal_finished", when: "" },
       ],
       examples: {
-        curl: `curl -fsS -X POST "$API/v1/withdrawals/wd_0198f80c-…/cancel" -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `await payday.withdrawals.cancel(id);`,
+        curl: `curl -fsS -X POST "$API/v1/withdrawals/wd_0198f80c-…/cancel" -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `await gum.withdrawals.cancel(id);`,
         response: WITHDRAWAL.replace('"status": "awaiting_signature"', '"status": "cancelled"').replace('"cancelled_at": null', '"cancelled_at": "2027-01-14T08:05:00Z"'),
       },
     },

@@ -9,38 +9,38 @@ Docker images contain the Rust services; AWS KMS owns the non-exportable
 sweep key and Proof of Payment attestation key. Do not accept a real deposit
 until the final end-to-end test in this runbook succeeds.
 
-Payday is pre-release with no real users, and this release treats the
+Gum is pre-release with no real users, and this release treats the
 database accordingly: the schema ships as one baseline migration and there
 is no upgrade path from any earlier pre-release database. Every existing
 environment is recreated empty (§7).
 
-What Payday holds and what it never does: the sweep signer holds only gas
+What Gum holds and what it never does: the sweep signer holds only gas
 (MON on Monad, ETH on Base and Arbitrum One) and the dedicated KMS recovery
 wallet is the recovery custody every deposit address commits to — recovered
-funds land there and Payday returns them to the payer manually, after review;
+funds land there and Gum returns them to the payer manually, after review;
 the requested amount moves directly from the deposit address to the
-merchant. Payday custodies no intended deposit amount, but it does hold
+merchant. Gum custodies no intended deposit amount, but it does hold
 recovered funds until the manual return is done.
 
 ## What runs where
 
 | Component | Runs on | Public name | Source |
 |---|---|---|---|
-| Landing page, hosted checkout (`/pay/{id}`), merchant dashboard (`/dashboard`) | Vercel project rooted at `web/` | `payday.sh`, `www.payday.sh` | `web/` |
-| Merchant and payer API (`gum-server`) | ECS Fargate service `api` behind ALB + WAF | `api.payday.sh` | `crates/gum-server` |
+| Landing page, hosted checkout (`/pay/{id}`), merchant dashboard (`/dashboard`) | Vercel project rooted at `web/` | `gum.money`, `www.gum.money` | `web/` |
+| Merchant and payer API (`gum-server`) | ECS Fargate service `api` behind ALB + WAF | `api.gum.money` | `crates/gum-server` |
 | Stablecoin indexer (`gum-indexer`) | ECS Fargate service `indexer`, one task running one read-only chain observer per network; no database, no keys; reports to the API's internal listener over Cloud Map DNS | none | `crates/gum-indexer` |
 | Transaction executor (`gum-signers`) | ECS Fargate service `signers`, one task; the only principal that can `kms:Sign` with the sweep pool; consumes execution commands from the Postgres bus and publishes execution events; no inbound access | none | `crates/gum-signers` |
 | Database (domain tables, `bus.*`, `execution.*`) | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA; reachable from `api` and `signers` only | none | `crates/gum-schema/migrations` |
 | Schema migrations | ECS task definition `migrate` (the `api` image running `gum-server migrate`), run once per deploy by `scripts/run-migrate-task.sh` before the services roll | none | `crates/gum-schema` |
-| Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
-| Signing keys | KMS secp256k1 keys: sweep signer pool, attestation signer, and the dedicated recovery wallet that backs `PAYDAY_RECOVERY_ADDRESS`; a symmetric key for attachments | none | `infra/` |
-| Merchant notification email | SES identity for `payday.sh` | `alerts@payday.sh` | `infra/` |
-| Payer deposit request email | Resend, with the API's own key (`resend_api_key`) | `contact@payday.sh` | `infra/` |
+| Deposit request attachments (PDF) | S3 bucket `gum-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
+| Signing keys | KMS secp256k1 keys: sweep signer pool, attestation signer, and the dedicated recovery wallet that backs `GUM_RECOVERY_ADDRESS`; a symmetric key for attachments | none | `infra/` |
+| Merchant notification email | SES identity for `gum.money` | `alerts@gum.money` | `infra/` |
+| Payer deposit request email | Resend, with the API's own key (`resend_api_key`) | `contact@gum.money` | `infra/` |
 | Merchant sign-in | Privy app (email code, embedded wallet, identity token) | | `docs/authentication.md` |
 | Payer and issuer-mailbox codes | Auth0 tenant (Terraform in `auth0/`) sending through Resend | | `auth0/README.md` |
 | Contracts | `PaymentFactory` + `BatchSweeper`, one generation, at the same addresses on Monad, Base, and Arbitrum One | | `foundry/` |
 | RPC | One QuickNode paid endpoint per network, each its own Secrets Manager secret | | |
-| DNS | `payday.sh` at Vercel DNS; a Route53 public hosted zone for `api.payday.sh` delegated from it | | `infra/` |
+| DNS | `gum.money` at Vercel DNS; a Route53 public hosted zone for `api.gum.money` delegated from it | | `infra/` |
 
 The `api` service (and the `migrate` task) runs the `gum-server` image, the
 `indexer` service the `gum-indexer` image, and the `signers` service the
@@ -53,10 +53,10 @@ does when killed and restarted, is [`architecture.md`](architecture.md).
 1. **AWS account** with billing enabled. Protect the root user with MFA, use
    IAM Identity Center or another non-root administrator identity for daily
    work, and configure the AWS CLI with short-lived SSO credentials.
-2. **Vercel account** with a project for `web/` (§9) and the `payday.sh`
+2. **Vercel account** with a project for `web/` (§9) and the `gum.money`
    domain attached to it.
-3. **The `payday.sh` domain at Vercel**, where it is registered and where its
-   DNS is hosted. Only `api.payday.sh` is delegated to a Route53 hosted zone
+3. **The `gum.money` domain at Vercel**, where it is registered and where its
+   DNS is hosted. Only `api.gum.money` is delegated to a Route53 hosted zone
    (§5); everything else, including the SES DKIM records, is a record in
    Vercel DNS.
 4. **QuickNode account** with a paid HTTPS endpoint for each of Monad
@@ -80,7 +80,7 @@ does when killed and restarted, is [`architecture.md`](architecture.md).
    account** for the embedded passwordless email code that payers and issuer
    mailboxes prove themselves with, all configured as described in
    [authentication.md](authentication.md). Resend must verify a
-   Payday-owned sending domain before real payers verify. Apply the
+   Gum-owned sending domain before real payers verify. Apply the
    reviewable Auth0 attack-protection root and complete its launch checks in
    [`auth0/README.md`](../auth0/README.md); enabled tenant defaults alone are
    not deployment evidence.
@@ -92,26 +92,26 @@ third-party key-management account is required.
 
 ## Production hostnames and DNS
 
-- `https://payday.sh` (and `www`) is the Vercel-hosted web app: landing
+- `https://gum.money` (and `www`) is the Vercel-hosted web app: landing
   page, hosted checkout, and dashboard. Every `deposit_url` points here, the
   API allows merchant-route CORS from exactly this origin, and the attachment
   bucket answers browser preflights from exactly this origin
   (`checkout_base_url`).
-- `https://api.payday.sh` is the public API behind AWS WAF and the
+- `https://api.gum.money` is the public API behind AWS WAF and the
   Application Load Balancer. Merchant servers and the SDK call it with an API
   key; the dashboard and checkout call it from the browser.
 - The indexer and the database have no public hostname.
 
-`payday.sh` stays at Vercel: Vercel is the registrar, hosts the zone, and
+`gum.money` stays at Vercel: Vercel is the registrar, hosts the zone, and
 serves the web app on the apex and `www` with no records to add by hand.
-Terraform needs Route53 only for `api.payday.sh`: it creates the alias
+Terraform needs Route53 only for `api.gum.money`: it creates the alias
 record and the ACM validation record in the zone named by `route53_zone_id`,
-which is a hosted zone for `api.payday.sh` delegated from Vercel DNS with
+which is a hosted zone for `api.gum.money` delegated from Vercel DNS with
 four `NS` records (§5). Terraform touches nothing else in DNS. The one other
-record set the stack needs, the three SES DKIM `CNAME`s under `payday.sh`,
+record set the stack needs, the three SES DKIM `CNAME`s under `gum.money`,
 is published as a Terraform output and added in Vercel DNS by hand (§10).
 
-Wait until `dig NS api.payday.sh` returns the Route53 nameservers before the
+Wait until `dig NS api.gum.money` returns the Route53 nameservers before the
 full Terraform apply, because ACM cannot validate the certificate until the
 delegation is publicly visible.
 
@@ -142,20 +142,20 @@ in that order. Every served stablecoin has six decimals on all of them.
   to twenty minutes behind, and the product decision is to trust the
   sequencer's ordering, as exchange deposits do, with the margin absorbing
   the sequencer's own reorgs. On every chain `eth_getLogs` is filtered to
-  the addresses Payday is watching, 500 per call, with every configured
-  token contract in one address array, so RPC spend follows Payday's
+  the addresses Gum is watching, 500 per call, with every configured
+  token contract in one address array, so RPC spend follows Gum's
   activity and not the chain's stablecoin volume. One worker, one cursor,
   and one socket serve a chain however many currencies it lists.
 - Detection is push-driven on every chain: while a chain has something to
   watch, the indexer holds a WebSocket to that chain's QuickNode endpoint
-  (`wss://` derived from `PAYDAY_RPC_URL_<chain_id>`) subscribed to
+  (`wss://` derived from `GUM_RPC_URL_<chain_id>`) subscribed to
   transfers of its configured tokens to its own payment addresses
   (`monadLogs` on Monad, `logs` elsewhere), and wakes a range scan the
   moment one lands. The scan also
-  runs every `PAYDAY_INDEXER_RECONCILE_INTERVAL_MS` (60 s) as the backstop
+  runs every `GUM_INDEXER_RECONCILE_INTERVAL_MS` (60 s) as the backstop
   and the only writer; the socket has no ledger authority. A chain with
   nothing to watch holds no socket and only advances its cursor every
-  `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (5 min). Expect about 0.9k calls a day
+  `GUM_INDEXER_IDLE_INTERVAL_MS` (5 min). Expect about 0.9k calls a day
   per idle chain, ~14k for an active Monad and ~7–9k for an active L2
   (`docs/runbooks/quicknode-rpc-limits.md`), and `transfer signal
   connected` with the `chain_id` in the indexer log once a chain becomes
@@ -165,7 +165,7 @@ in that order. Every served stablecoin has six decimals on all of them.
   `eth_getTransactionByHash` returns nothing for a transaction still in
   flight, and the `pending` tag reads like `latest`. `gum-signers`
   therefore treats a helper transaction without a receipt after
-  `PAYDAY_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
+  `GUM_SWEEP_PENDING_TIMEOUT_SECS` as replaceable on the same nonce and
   detects a consumed nonce from the signer's mined transaction count.
 - Monad bills the gas *limit*: every helper transaction reserves
   `100k + 400k × items` gas of MON from the pool signer that sends it.
@@ -192,7 +192,7 @@ start if the chain disagrees with the configured currency.
    fresh key.
 3. Configure Privy, Resend, and Auth0.
 4. Create Terraform state storage.
-5. Delegate `api.payday.sh` to Route53 (already done for the current
+5. Delegate `api.gum.money` to Route53 (already done for the current
    deployment).
 6. Choose the first index block and configure Terraform.
 7. Bootstrap ECR, push images, and create the AWS stack against an empty
@@ -258,7 +258,7 @@ have offered the currency before it was configured).
 For an encrypted Foundry keystore:
 
 ```bash
-cast wallet import payday-deployer --interactive
+cast wallet import gum-deployer --interactive
 ```
 
 Fund the displayed address with enough gas for two contract deployments on
@@ -270,18 +270,18 @@ export MONAD_RPC_URL='https://your-quicknode-monad-endpoint'
 export BASE_RPC_URL='https://your-quicknode-base-endpoint'
 export ARBITRUM_RPC_URL='https://your-quicknode-arbitrum-endpoint'
 for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
-  cast nonce "$(cast wallet address --account payday-deployer)" --rpc-url "$rpc"   # must print 0
+  cast nonce "$(cast wallet address --account gum-deployer)" --rpc-url "$rpc"   # must print 0
 done
 
-PAYDAY_CHAIN_ID=143 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
-  --rpc-url "$MONAD_RPC_URL" --account payday-deployer --broadcast
-PAYDAY_CHAIN_ID=8453 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
-  --rpc-url "$BASE_RPC_URL" --account payday-deployer --broadcast
-PAYDAY_CHAIN_ID=42161 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
-  --rpc-url "$ARBITRUM_RPC_URL" --account payday-deployer --broadcast
+GUM_CHAIN_ID=143 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
+  --rpc-url "$MONAD_RPC_URL" --account gum-deployer --broadcast
+GUM_CHAIN_ID=8453 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
+  --rpc-url "$BASE_RPC_URL" --account gum-deployer --broadcast
+GUM_CHAIN_ID=42161 forge script foundry/script/PaymentFactory.s.sol:PaymentFactoryScript \
+  --rpc-url "$ARBITRUM_RPC_URL" --account gum-deployer --broadcast
 ```
 
-The script aborts if the RPC chain ID is not `PAYDAY_CHAIN_ID` or the
+The script aborts if the RPC chain ID is not `GUM_CHAIN_ID` or the
 deployer's nonce is not 0. Save both resulting addresses, the deployment
 transactions, and both code hashes from each run; the addresses must be
 identical across the three chains, and the code hashes normally are too.
@@ -316,16 +316,16 @@ second fresh key at nonce 0, so it has one address everywhere and one runtime
 code hash to pin:
 
 ```bash
-cast wallet import payday-forwarder-deployer --interactive
+cast wallet import gum-forwarder-deployer --interactive
 for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
-  cast nonce "$(cast wallet address --account payday-forwarder-deployer)" --rpc-url "$rpc"   # must print 0
+  cast nonce "$(cast wallet address --account gum-forwarder-deployer)" --rpc-url "$rpc"   # must print 0
 done
-PAYDAY_CHAIN_ID=143 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
-  --rpc-url "$MONAD_RPC_URL" --account payday-forwarder-deployer --broadcast
-PAYDAY_CHAIN_ID=8453 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
-  --rpc-url "$BASE_RPC_URL" --account payday-forwarder-deployer --broadcast
-PAYDAY_CHAIN_ID=42161 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
-  --rpc-url "$ARBITRUM_RPC_URL" --account payday-forwarder-deployer --broadcast
+GUM_CHAIN_ID=143 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
+  --rpc-url "$MONAD_RPC_URL" --account gum-forwarder-deployer --broadcast
+GUM_CHAIN_ID=8453 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
+  --rpc-url "$BASE_RPC_URL" --account gum-forwarder-deployer --broadcast
+GUM_CHAIN_ID=42161 forge script foundry/script/WithdrawalForwarder.s.sol:WithdrawalForwarderScript \
+  --rpc-url "$ARBITRUM_RPC_URL" --account gum-forwarder-deployer --broadcast
 for rpc in "$MONAD_RPC_URL" "$BASE_RPC_URL" "$ARBITRUM_RPC_URL"; do
   cast keccak "$(cast code <FORWARDER_ADDRESS> --rpc-url "$rpc")"
 done
@@ -348,17 +348,17 @@ staging (`docs/staging.md`).
 Follow [authentication.md](authentication.md) §1 through §3, in that order.
 The outputs this runbook needs:
 
-- the Privy **App ID** (public), with `https://payday.sh` among the app's
+- the Privy **App ID** (public), with `https://gum.money` among the app's
   allowed domains, email login only, embedded wallets created on login, and
   identity tokens enabled;
 - the Auth0 tenant issuer, `https://<tenant-domain>/`;
-- the `Payday Payer` API identifier (`https://api.payday.sh/payer`) and the
-  `Payday Payer Verification` application's client ID, both created by the
+- the `Gum Payer` API identifier (`https://api.gum.money/payer`) and the
+  `Gum Payer Verification` application's client ID, both created by the
   Terraform in `auth0/` (`terraform -chdir=auth0 apply`, with its own state
   key as described in [`auth0/README.md`](../auth0/README.md));
 - a Resend sending domain verified and connected to Auth0 as its email
   provider. The API needs a Resend API key of its own as well (§6): it
-  emails payers their deposit requests from `contact@payday.sh`, so the
+  emails payers their deposit requests from `contact@gum.money`, so the
   verified domain must cover that address.
 
 The payer verification settings are optional to Terraform as a group: leave
@@ -380,22 +380,22 @@ sufficient. Restrict bucket access to the deployment identity and recovery
 administrator. Terraform stores generated credentials and the RPC URL in its
 encrypted state: treat state files and saved plans as secrets.
 
-## 5. Delegate `api.payday.sh` to Route53
+## 5. Delegate `api.gum.money` to Route53
 
 This exists already for the current deployment; `route53_zone_id` in the
 untracked `infra/terraform.tfvars` is that zone. For a new environment,
 create a public hosted zone for the API name:
 
 ```bash
-aws route53 create-hosted-zone --name api.payday.sh \
-  --caller-reference "payday-api-$(date +%s)" \
+aws route53 create-hosted-zone --name api.gum.money \
+  --caller-reference "gum-api-$(date +%s)" \
   --query '{zone: HostedZone.Id, nameservers: DelegationSet.NameServers}'
 ```
 
 Record the zone ID (drop the `/hostedzone/` prefix) as `route53_zone_id`.
-In Vercel's DNS settings for `payday.sh`, add four `NS` records with name
+In Vercel's DNS settings for `gum.money`, add four `NS` records with name
 `api`, one per Route53 nameserver. Do not change the nameservers of
-`payday.sh` itself. Wait for `dig NS api.payday.sh` to return the Route53
+`gum.money` itself. Wait for `dig NS api.gum.money` to return the Route53
 names.
 
 ## 6. Choose the first index block and configure Terraform
@@ -420,8 +420,8 @@ cp infra/terraform.tfvars.example infra/terraform.tfvars
 Replace every placeholder in `terraform.tfvars`, including:
 
 - AWS region and alert email
-- `route53_zone_id`, the `api.payday.sh` zone from §5
-- `checkout_base_url = "https://payday.sh"`, the Vercel-hosted site
+- `route53_zone_id`, the `api.gum.money` zone from §5
+- `checkout_base_url = "https://gum.money"`, the Vercel-hosted site
 - `image_tag = "git-<full commit SHA>"` of the commit you will build in §7
 - the `chains` list: one entry per network with the deployed `factory`
   and `batch_sweeper`, their `factory_code_hash` and
@@ -429,7 +429,7 @@ Replace every placeholder in `terraform.tfvars`, including:
   `tokens` (`[{currency = "USDC", address = …}, {currency = "USDT",
   address = …}]`; at least one chain must list USDC, which the onboarding
   demo pays), and the fixed values from the table above. Both tasks receive
-  the list as `PAYDAY_CHAINS`, whose entries carry
+  the list as `GUM_CHAINS`, whose entries carry
   `tokens: [{"currency":"USDC","address":"0x…"},{"currency":"USDT","address":"0x…"}]`
   and `start_block`. Each `tokens` address must be the issuer's **canonical
   deployment** of that currency on that chain (Circle's native USDC;
@@ -444,9 +444,9 @@ Replace every placeholder in `terraform.tfvars`, including:
 - `admin_reviewer_id`, who operator decisions are recorded against
 
 `notification_domain_name` and `notification_from_address` default to
-`payday.sh` and `alerts@payday.sh`. Supply the RPC URLs, one per chain id,
+`gum.money` and `alerts@gum.money`. Supply the RPC URLs, one per chain id,
 without writing them to the tfvars file; Terraform stores each as its own
-Secrets Manager secret and injects it as `PAYDAY_RPC_URL_<chain_id>`:
+Secrets Manager secret and injects it as `GUM_RPC_URL_<chain_id>`:
 
 ```bash
 export TF_VAR_rpc_urls='{"143":"'"$MONAD_RPC_URL"'","8453":"'"$BASE_RPC_URL"'","42161":"'"$ARBITRUM_RPC_URL"'"}'
@@ -454,9 +454,9 @@ export TF_VAR_resend_api_key="$RESEND_API_KEY"
 ```
 
 The Resend key is optional to Terraform: leave it unset and the stack passes
-no `PAYDAY_RESEND_API_KEY`, so the API queues each payer's deposit request
+no `GUM_RESEND_API_KEY`, so the API queues each payer's deposit request
 email but sends none until a key is configured. `payer_email_from` defaults
-to `Payday <contact@payday.sh>`.
+to `Gum <contact@gum.money>`.
 
 ## 7. Bootstrap ECR, push images, and create the AWS stack
 
@@ -551,7 +551,7 @@ RDS CA bundle in the container. Confirm the SNS subscription link sent to
 the configured alert email; alarms do not deliver until it is confirmed.
 
 The stack's `recovery` KMS key is the dedicated recovery wallet: its derived
-Ethereum address is the deployment's `PAYDAY_RECOVERY_ADDRESS`, the recovery
+Ethereum address is the deployment's `GUM_RECOVERY_ADDRESS`, the recovery
 term committed into every deposit address. Overpayment remainders, expired
 balances, late transfers, and wrong-network or wrong-token recoveries land
 there on-chain. No service task role can sign with it — returning funds to
@@ -563,7 +563,7 @@ record its address the same way as the other keys:
 
 ```bash
 export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw recovery_kms_key_arn)"
-cast wallet address --aws   # this is PAYDAY_RECOVERY_ADDRESS
+cast wallet address --aws   # this is GUM_RECOVERY_ADDRESS
 ```
 
 Treat the key as custody: it holds recovered funds until they are returned,
@@ -578,7 +578,7 @@ reported by a `deposit_request.recovered_funds` webhook. Returning the funds
 to the payer is never automatic: an operator reviews the case (who paid, which
 address or wallet is theirs), agrees the destination, and sends from the
 recovery key with `cast` or any wallet holding the key, recording the return
-against the deposit request. Until that review completes, Payday is the
+against the deposit request. Until that review completes, Gum is the
 custodian of the recovered amount; say so plainly in support conversations
 rather than promising an automatic on-chain return.
 
@@ -593,7 +593,7 @@ chain. At boot it logs one `configured signer` line per key and chain with
 the Ethereum address derived from the KMS public key:
 
 ```bash
-aws logs tail /ecs/payday/signers --since 15m \
+aws logs tail /ecs/gum/signers --since 15m \
   --filter-pattern 'configured signer'
 ```
 
@@ -610,7 +610,7 @@ chain, and each sweeps on every chain, so fund **every** address on each
 chain: only enough MON on Monad and ETH on Base and Arbitrum One for expected
 sweeps, spread over the pool (free signers are offered richest first, so
 they drain evenly). `gum-signers` warns per signer and chain below the
-chain's `signer_low_balance_wei` (`PAYDAY_SIGNER_LOW_BALANCE_WEI` as the
+chain's `signer_low_balance_wei` (`GUM_SIGNER_LOW_BALANCE_WEI` as the
 fallback); the `signer balance is low` line names the address and drives
 the `signers-low-balance` alarm. The signers do not custody stablecoins;
 they pay gas to invoke the permissionless factory. Current balances are
@@ -635,7 +635,7 @@ export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw attestation_kms_key_
 cast wallet address --aws
 ```
 
-Publish that address as Payday's trusted attestor, in the API documentation
+Publish that address as Gum's trusted attestor, in the API documentation
 and wherever proofs are downloaded, so merchants and auditors can hand it to
 whatever runs `gum_core::verify_proof`; an attestation signed by anything
 else must fail verification. The address changes only if the key is
@@ -645,17 +645,17 @@ replacement as an announced cut-over, never as routine rotation.
 ### Onboarding demo payer (optional)
 
 The dashboard's onboarding walkthrough can pay one self-issued deposit
-request per account from a Payday-funded wallet. Terraform does not
+request per account from a Gum-funded wallet. Terraform does not
 provision that key; the endpoint is disabled unless `gum-server` is given
-`PAYDAY_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
+`GUM_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
 with, funded with a little gas and USDC on the onboarding chain:
-`PAYDAY_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
+`GUM_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
 it off for launch unless the walkthrough is wanted.
 
 ## 9. Deploy the web app to Vercel
 
 The web app is `web/`, a Next.js app inside the npm workspace at the
-repository root; it depends on `@payday/sdk` from `sdk/typescript`, which its
+repository root; it depends on `@gum/sdk` from `sdk/typescript`, which its
 `prebuild` hook builds. Every configuration value is `NEXT_PUBLIC_` and is
 inlined into the browser bundle at build time, so nothing secret belongs in
 Vercel and a changed value needs a redeploy.
@@ -665,7 +665,7 @@ Vercel and a changed value needs a redeploy.
      Directory" left enabled (the SDK and the root lockfile live above it);
    - **Framework** Next.js;
    - **Install Command** `cd .. && npm ci`;
-   - **Build Command** `cd .. && npm run build --workspace @payday/web`;
+   - **Build Command** `cd .. && npm run build --workspace @gum/web`;
    - **Node.js** 22, matching CI;
    - the production branch set to `main`.
 2. Set these environment variables for the Production environment (they are
@@ -674,22 +674,22 @@ Vercel and a changed value needs a redeploy.
 
    | Variable | Production value |
    |---|---|
-   | `NEXT_PUBLIC_PAYDAY_API_URL` | `https://api.payday.sh` |
-   | `NEXT_PUBLIC_CHAINS` | the same three networks as `chains`, as a JSON array of `{id, name, rpcUrl, tokens, explorerUrl, confirmation}`, each `tokens` entry `{currency, address, symbol?, decimals?}` matching that chain's `PAYDAY_CHAINS` tokens, with *public* RPCs (`https://rpc.monad.xyz`, `https://mainnet.base.org`, `https://arb1.arbitrum.io/rpc`), never the QuickNode endpoints; `web/.env.staging` has the exact value |
+   | `NEXT_PUBLIC_GUM_API_URL` | `https://api.gum.money` |
+   | `NEXT_PUBLIC_CHAINS` | the same three networks as `chains`, as a JSON array of `{id, name, rpcUrl, tokens, explorerUrl, confirmation}`, each `tokens` entry `{currency, address, symbol?, decimals?}` matching that chain's `GUM_CHAINS` tokens, with *public* RPCs (`https://rpc.monad.xyz`, `https://mainnet.base.org`, `https://arb1.arbitrum.io/rpc`), never the QuickNode endpoints; `web/.env.staging` has the exact value |
    | `NEXT_PUBLIC_PRIVY_APP_ID` | the production Privy app ID from §3 |
    | `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` | `https://<attachment_bucket_name>.s3.<region>.amazonaws.com`, from `terraform -chdir=infra output -raw attachment_bucket_name` |
    | `NEXT_PUBLIC_PAYER_APPEAL_EMAIL` | a monitored support address |
    | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | optional; empty offers injected wallets only |
 
-   Do not set `PAYDAY_PRIVY_STUB` (test-only; it replaces Privy with a
+   Do not set `GUM_PRIVY_STUB` (test-only; it replaces Privy with a
    fake).
 3. Deploy `main`. The first production deployment must be the same commit as
    the images pushed in §7, or a later one whose API contract they still
    satisfy.
-4. Under the project's **Domains**, add `payday.sh` and `www.payday.sh`
+4. Under the project's **Domains**, add `gum.money` and `www.gum.money`
    (redirecting `www` to the apex). Because Vercel also hosts the zone, it
    creates the records itself and reports the domain valid at once.
-5. Confirm in Privy that `https://payday.sh` is among the app's allowed
+5. Confirm in Privy that `https://gum.money` is among the app's allowed
    domains. Preview deployments get their own `*.vercel.app` origins: the
    checkout works there because the payer API is public and CORS-open, but
    the dashboard does not, since Privy allows only the listed domains and
@@ -697,7 +697,7 @@ Vercel and a changed value needs a redeploy.
    Test dashboard changes locally or on production.
 
 Vercel redeploys on every push to `main`. Because the web app and the API
-share one contract through `@payday/sdk`, deploy API changes that remove or
+share one contract through `@gum/sdk`, deploy API changes that remove or
 rename fields before the web change that stops sending them, and web changes
 that need new fields after the API that provides them.
 
@@ -726,52 +726,52 @@ descriptor within a few minutes; `aws s3api get-object-tagging` on
 `uploads/<account_id>/<attachment_id>.pdf` then shows
 `GuardDutyMalwareScanStatus=NO_THREATS_FOUND`. Uploading the EICAR test file
 must end in `422 attachment_rejected`. Malware findings appear in the
-GuardDuty console; nothing in Payday alarms on them.
+GuardDuty console; nothing in Gum alarms on them.
 
 ### Merchant email
 
-Terraform created an SES identity for `payday.sh` with Easy DKIM, but its
+Terraform created an SES identity for `gum.money` with Easy DKIM, but its
 DNS lives at Vercel, so add the three `CNAME`s yourself:
 
 ```bash
 terraform -chdir=infra output notification_dkim_records
 ```
 
-Create each as a `CNAME` in Vercel's DNS settings for `payday.sh` (the name
+Create each as a `CNAME` in Vercel's DNS settings for `gum.money` (the name
 is the `<token>._domainkey` part; the value is the `<token>.dkim.amazonses.com`
 host). SES marks the identity verified within an hour of the records
 resolving; confirm in **SES → Identities**. Then move the SES account out of
 the sandbox in this region and confirm a test message from
-`alerts@payday.sh` reaches an external mailbox. Deposit creation refuses to create additional unnotifiable
+`alerts@gum.money` reaches an external mailbox. Deposit creation refuses to create additional unnotifiable
 deposits for an account without a verified email, and
-`payday-notification-missing-contact` alarms if a deposit request snapshots
+`gum-notification-missing-contact` alarms if a deposit request snapshots
 no contact.
 
 ### Sign in and test the API
 
-Sign in at `https://payday.sh` with an emailed code and mint an API key in
+Sign in at `https://gum.money` with an emailed code and mint an API key in
 the dashboard's API key section ([authentication.md](authentication.md)
 §5). Then, with that key:
 
 ```bash
-export PAYDAY_API_KEY="<the key, from your secret store>"
-curl --fail "https://api.payday.sh/health"
-curl --fail -sS "https://api.payday.sh/v1/deposit-requests" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \
+export GUM_API_KEY="<the key, from your secret store>"
+curl --fail "https://api.gum.money/health"
+curl --fail -sS "https://api.gum.money/v1/deposit-requests" \
+  -H "Authorization: Bearer $GUM_API_KEY" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: launch-check-$(date +%s)" \
   -d '{"amount":"0.01","payout_address":"<YOUR_PAYOUT_ADDRESS>",
-       "issuer":{"name":"Payday"},"payer":{"name":"Launch check"},
+       "issuer":{"name":"Gum"},"payer":{"name":"Launch check"},
        "verification":{"wallet_attestation":true},"expires_in":3600}' | jq
 ```
 
 The response's `chain`, `token`, and `address` are null until the wallet is
 attested, and `networks` lists the three chains. Open the returned
-`deposit_url` (on `payday.sh`) in a browser, choose a network, connect the
+`deposit_url` (on `gum.money`) in a browser, choose a network, connect the
 wallet you will pay from (the page switches it to that chain), and sign the
 attestation; `GET /v1/deposit-requests/{id}` then carries `chain`, `token`,
 `address`, and `payer_wallet` (the attested wallet), and `recovery_address`
-names Payday's recovery custody. A
+names Gum's recovery custody. A
 `deposit_request.ready` webhook fires. Pay exactly 0.01 native USDC to that
 address from that wallet on that chain. Repeat once per network, and once
 more with `"currency":"USDT","chain_id":"143"` (and `42161`) paid in USDT0,
@@ -784,7 +784,7 @@ before accepting real deposits. Confirm that:
    currency.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
-5. A second, small deposit to the same address is recovered into Payday's
+5. A second, small deposit to the same address is recovered into Gum's
    recovery custody within a minute while the status stays `settled`, and
    `recovered_funds` records it with reason `late_transfer` (see the
    [smoke test](runbooks/end-to-end-smoke-test.md)). Return it to the payer
@@ -908,9 +908,9 @@ answers `422 unsupported_currency`.
 The same stack can be instantiated a second time against the testnets
 (Monad testnet, Base Sepolia, Arbitrum Sepolia), see [sandbox.md](sandbox.md)
 and `infra/terraform.sandbox.tfvars.example`. It needs its own Terraform
-state key, `name`, Privy app, Auth0 tenant, RPC endpoints, Route53 zone (`api.sandbox.payday.sh`, delegated from Vercel DNS
-like production's), and Vercel project (for `sandbox.payday.sh`), and it
-sends merchant email from `sandbox.payday.sh` so its SES identity and DKIM
+state key, `name`, Privy app, Auth0 tenant, RPC endpoints, Route53 zone (`api.sandbox.gum.money`, delegated from Vercel DNS
+like production's), and Vercel project (for `sandbox.gum.money`), and it
+sends merchant email from `sandbox.gum.money` so its SES identity and DKIM
 records never collide with production's. Never plan sandbox variables
 against production state.
 
@@ -930,14 +930,14 @@ against production state.
   in [secrets-rotation.md](runbooks/secrets-rotation.md). The previous key
   has a 24-hour grace period; revoking invalidates current and grace-period
   keys immediately.
-- The `recovered_funds` ledger records every amount recovered into Payday's
+- The `recovered_funds` ledger records every amount recovered into Gum's
   recovery custody; returning each one to the payer is the manual procedure in
   "Recovery custody and manual returns" above. See
   "Reconciling recovered funds" in
   [stuck-deposit-request.md](runbooks/stuck-deposit-request.md).
 - Attached PDFs stay in the versioned, KMS-encrypted attachment bucket for as
   long as their deposit request; the lifecycle rule removes only uploads that
-  were never attached (still tagged `payday-upload=pending`) after seven
+  were never attached (still tagged `gum-upload=pending`) after seven
   days. Include the bucket in the backup discipline applied to the database.
 - Keep the `indexer` and `signers` services at one task each. A second
   indexer is harmless (every range it reports is a compare-and-set on the

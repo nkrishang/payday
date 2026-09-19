@@ -8,30 +8,30 @@ import { Callout, DocsPage, Figure, H2, H3, Pill, Table } from "@/components/doc
 export const metadata: Metadata = {
   title: "Webhooks",
   description:
-    "Let Payday tell your server what happened: every event, the signed delivery format, how to verify it, and how retries work.",
+    "Let Gum tell your server what happened: every event, the signed delivery format, how to verify it, and how retries work.",
 };
 
 const REGISTER_CURL = `curl -fsS "$API/v1/webhooks" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{ "url": "https://example.com/payday/webhook" }'`;
+  -d '{ "url": "https://example.com/gum/webhook" }'`;
 
-const REGISTER_TS = `const endpoint = await payday.webhooks.add("https://example.com/payday/webhook");
+const REGISTER_TS = `const endpoint = await gum.webhooks.add("https://example.com/gum/webhook");
 // endpoint.secret is returned exactly once. Store it beside the API key.`;
 
 const REGISTER_RESPONSE = `{
   "id": "wh_0198f80c-3333-7dc1-a369-90556a64f700",
-  "url": "https://example.com/payday/webhook",
+  "url": "https://example.com/gum/webhook",
   "secret": "whsec_…",
   "created_at": "2026-09-06T12:00:00Z",
   "disabled_at": null
 }`;
 
-const DELIVERY = `POST /payday/webhook HTTP/1.1
+const DELIVERY = `POST /gum/webhook HTTP/1.1
 Content-Type: application/json
-Payday-Event-Id: evt_0198f80c-4444-7dc1-a369-90556a64f700
-Payday-Event-Type: deposit_request.settled
-Payday-Signature: v1,t=1756728000,sha256=6f1a…9c0e
+Gum-Event-Id: evt_0198f80c-4444-7dc1-a369-90556a64f700
+Gum-Event-Type: deposit_request.settled
+Gum-Signature: v1,t=1756728000,sha256=6f1a…9c0e
 
 {
   "id": "evt_0198f80c-4444-7dc1-a369-90556a64f700",
@@ -104,8 +104,8 @@ export function verify(rawBody: Buffer, header: string, secret: string): boolean
 }
 
 // Express: keep the raw bytes; a re-serialised body will not verify.
-app.post("/payday/webhook", express.raw({ type: "application/json" }), (req, res) => {
-  if (!verify(req.body, req.header("Payday-Signature") ?? "", process.env.PAYDAY_WEBHOOK_SECRET!)) {
+app.post("/gum/webhook", express.raw({ type: "application/json" }), (req, res) => {
+  if (!verify(req.body, req.header("Gum-Signature") ?? "", process.env.GUM_WEBHOOK_SECRET!)) {
     return res.status(400).end();
   }
   const event = JSON.parse(req.body.toString("utf8"));
@@ -134,14 +134,14 @@ def verify(raw_body: bytes, header: str, secret: str) -> bool:
 export default function WebhooksPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Webhooks"
-      lead="Register an HTTPS endpoint and Payday tells your server the moment a request is ready, funded, settled, expired, or returned, and every time funds go back to the payer. Each delivery is signed; each event happens once."
+      lead="Register an HTTPS endpoint and Gum tells your server the moment a request is ready, funded, settled, expired, or returned, and every time funds go back to the payer. Each delivery is signed; each event happens once."
     >
       <H2 id="register">Register an endpoint</H2>
       <p>
         The URL must be a public HTTPS destination with a DNS hostname and no credentials in it.
-        Payday resolves and rejects private, loopback, and reserved addresses when the endpoint is
+        Gum resolves and rejects private, loopback, and reserved addresses when the endpoint is
         created and again before every delivery, and never follows redirects.
       </p>
       <CodeTabs
@@ -327,7 +327,7 @@ export default function WebhooksPage() {
           hand.
         </li>
         <li>
-          Deduplicate on <code>Payday-Event-Id</code>. A retry carries the same id and the same
+          Deduplicate on <code>Gum-Event-Id</code>. A retry carries the same id and the same
           body.
         </li>
       </ul>

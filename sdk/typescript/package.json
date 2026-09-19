@@ -1,7 +1,7 @@
 {
-  "name": "@payday/sdk",
+  "name": "@gum/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for the Payday payments API",
+  "description": "TypeScript SDK for the Gum payments API",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -7,12 +7,12 @@ import { Callout, DocsPage, Figure, H2, H3, Table } from "@/components/docs/pros
 export const metadata: Metadata = {
   title: "Hosted checkout",
   description:
-    "What the payer sees on a Payday deposit link, how the three ways to pay work, and how to build your own checkout on the public payer routes.",
+    "What the payer sees on a Gum deposit link, how the three ways to pay work, and how to build your own checkout on the public payer routes.",
 };
 
-const PAYER_READ = `import { PaydayPayerClient } from "@payday/sdk";
+const PAYER_READ = `import { GumPayerClient } from "@gum/sdk";
 
-const payer = new PaydayPayerClient(); // no key: these routes are public
+const payer = new GumPayerClient(); // no key: these routes are public
 
 const request = await payer.depositRequests.get("dr_0198f80c-…");
 request.issuer_name;          // always present, with heading
@@ -34,7 +34,7 @@ const [account] = await wallet.getAddresses();
 const network = request.networks.find((n) => n.chain.id === chosenChainId);
 await wallet.switchChain({ id: Number(network.chain.id) });
 
-// 2. Ask Payday for the document to sign on that chain. A permissionless
+// 2. Ask Gum for the document to sign on that chain. A permissionless
 //    request with no session yet gets one here; a gated request needs the
 //    session that satisfied its policy.
 const challenge = await payer.wallet.challenge(request.id, account, network.chain.id, {
@@ -57,9 +57,9 @@ const { requirements } = await payer.verification.confirmEmail(request.id, "1234
 export default function CheckoutPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Hosted checkout"
-      lead="Every deposit_url points at a page Payday hosts. It shows the payer exactly what they need, withholds what they should not see, and offers three ways to pay the same one-time address."
+      lead="Every deposit_url points at a page Gum hosts. It shows the payer exactly what they need, withholds what they should not see, and offers three ways to pay the same one-time address."
     >
       <Figure caption="The same request before and after its payer verifies and signs. A locked page renders nothing it was not sent: the withheld fields are absent from the HTML, not hidden by it.">
         <CheckoutMock />
@@ -84,7 +84,7 @@ export default function CheckoutPage() {
           token contract there, the one-time address, and a QR code encoding the same request.
         </li>
         <li>
-          <strong>The clock</strong>: a countdown to the deadline, driven by Payday&apos;s clock,
+          <strong>The clock</strong>: a countdown to the deadline, driven by Gum&apos;s clock,
           never the device&apos;s. When it reaches zero the page waits for the chain&apos;s verdict
           rather than declaring the request expired itself.
         </li>
@@ -124,11 +124,11 @@ export default function CheckoutPage() {
             <td>
               For stablecoins the payer holds on a chain the request is not on. The page lists the
               networks Relay takes deposits from and, per network, what the payer may send there
-              (USDC, and USDT where Relay takes it, Base&apos;s included); Payday quotes the route
+              (USDC, and USDT where Relay takes it, Base&apos;s included); Gum quotes the route
               pinned to the attested wallet, the payment address, and exactly the amount due in the
               request&apos;s currency, and the wallet sends the quote&apos;s transactions on that
               network; Relay swaps into the request&apos;s currency, delivers it to the address in
-              seconds, and Payday credits it to the payer once it finalizes. The route&apos;s fee
+              seconds, and Gum credits it to the payer once it finalizes. The route&apos;s fee
               and any spread are added to what the payer sends. Offered only on deployments with a
               Relay key.
             </td>
@@ -174,18 +174,18 @@ export default function CheckoutPage() {
         Search engines are told not to index it.
       </p>
       <p>
-        When the request names a <code>payer.email</code>, Payday emails that address as the request
-        is issued: a message in Payday&apos;s design naming the issuer, the amount, the heading and
+        When the request names a <code>payer.email</code>, Gum emails that address as the request
+        is issued: a message in Gum&apos;s design naming the issuer, the amount, the heading and
         reference, and the deadline, with a button to the same link. Merchant-session requests are
         never emailed, since their link opens only from your application.
       </p>
 
       <H2 id="build-your-own">Building your own checkout</H2>
       <p>
-        The hosted page is built on Payday&apos;s public payer routes, and so can yours. They take
+        The hosted page is built on Gum&apos;s public payer routes, and so can yours. They take
         no API key, return no merchant data, and answer reads from any browser origin. The
         verification and wallet writes are answered for the hosted checkout&apos;s origin only, so a
-        custom checkout drives those from a server or asks Payday to admit its origin.
+        custom checkout drives those from a server or asks Gum to admit its origin.
       </p>
       <CodeBlock code={PAYER_READ} lang="ts" title="Reading a request" />
 
@@ -195,7 +195,7 @@ export default function CheckoutPage() {
       <H3 id="wallet-step">The wallet step</H3>
       <p>
         Every request, gated or not, takes this step before it has an address. The payer chooses a
-        network first; the typed data comes from Payday for that chain and goes to the wallet
+        network first; the typed data comes from Gum for that chain and goes to the wallet
         verbatim.
       </p>
       <CodeBlock code={WALLET_STEP} lang="ts" />
@@ -209,7 +209,7 @@ export default function CheckoutPage() {
           Never let the device clock decide that a request expired; chain time does. Hide the
           address the moment <code>payable</code> is false. Do arithmetic on base units only. Show
           only what the API sent, so a gated request&apos;s withheld content cannot leak by
-          accident. And send the session token in the <code>Payday-Payer-Session</code> header,
+          accident. And send the session token in the <code>Gum-Payer-Session</code> header,
           never in a URL.
         </p>
       </Callout>

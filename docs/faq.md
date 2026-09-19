@@ -12,8 +12,8 @@ Issued deposit requests are immutable — to change one, cancel it and issue ano
 ## Can I add line items or tax?
 
 No. Specify the amount directly and attach a PDF if you need an itemized
-breakdown or jurisdiction-specific content; Payday stores and hashes the file
-but never parses it. Payday does not model line items, tax rates, tax IDs, or
+breakdown or jurisdiction-specific content; Gum stores and hashes the file
+but never parses it. Gum does not model line items, tax rates, tax IDs, or
 fiat, and does not intend to. Bounded free-text `details` on each party and
 the PDF are where that information goes.
 
@@ -26,7 +26,7 @@ verification** requires the payer to prove ownership of the mailbox you name.
 has signed in, with a single-use client secret. **Wallet attestation** asks
 the payer to sign an EIP-712 attestation from the wallet they will pay from.
 For email verification and merchant auth the checkout hides the amount,
-parties, PDF, and address until the check completes; Payday reports pass or
+parties, PDF, and address until the check completes; Gum reports pass or
 fail, not the payer's own data.
 
 ## How do PDF attachments work?
@@ -42,8 +42,8 @@ Payment. Reads return a signed URL valid for a few minutes.
 
 Once a deposit request settles, `GET /v1/deposit-requests/{id}/proof` exports the canonical
 deposit request, the nonce and salt, the deposit address, the settling transfer, and a
-Payday-signed verification attestation. Anyone holding it can recompute the
-hash, salt, and address and check the transfer offline, with no Payday access;
+Gum-signed verification attestation. Anyone holding it can recompute the
+hash, salt, and address and check the transfer offline, with no Gum access;
 the checks are published as `gum_core::verify_proof`, and the attached
 PDF's hash can be compared with the one the proof commits to. Share the proof
 with payers or auditors at your discretion; it is not a public link.
@@ -58,16 +58,16 @@ the network on the hosted checkout; a USDT request pins
 `chain_id` at creation. Read `networks` from the deposit request, then
 `chain` and `token` once the payer has chosen. A matching symbol is not
 enough: bridged wrappers, look-alike tokens, and the chain's gas currency do
-not count and may be unrecoverable. The other Payday stablecoin sent to the
-address is never credited; anyone can forward it to Payday's recovery custody
-with `recover(address)` on the deposit contract, from which Payday returns it
+not count and may be unrecoverable. The other Gum stablecoin sent to the
+address is never credited; anyone can forward it to Gum's recovery custody
+with `recover(address)` on the deposit contract, from which Gum returns it
 to the payer after review. The right token sent to the
 address on a different supported network is refused by the contract and
-recovered into Payday's custody, then returned to the payer after review.
+recovered into Gum's custody, then returned to the payer after review.
 
 ## Why must a USDT request name its network?
 
-Payday never gives a merchant a rate worse than 1:1. USDC bridges through
+Gum never gives a merchant a rate worse than 1:1. USDC bridges through
 CCTP at 1:1, so a USDC request can be paid on any network and withdrawn to
 any. USDT has no such path, so a USDT request is paid on the network it
 names and a USDT withdrawal moves that network's balance only. A payer can
@@ -83,7 +83,7 @@ the payer picks a network on the hosted checkout, and, on a request with the
 wallet-attestation add-on, only after the payer signs the attestation. Funds
 can arrive before the contract exists, and deployment later routes its
 balance under the amount, payout, expiry, and recovery terms committed into
-that address, the recovery term being Payday's dedicated KMS recovery wallet.
+that address, the recovery term being Gum's dedicated KMS recovery wallet.
 Without wallet attestation the payer may pay from any wallet, an exchange
 withdrawal included. Never reuse it for another order.
 
@@ -97,8 +97,8 @@ integrating your own UI, reproduce all safety guidance in
 
 ## Why has a wallet transaction not appeared?
 
-Payday credits only finalized transfers of the request's token. Inclusion or wallet
-confirmation can precede Payday's finality boundary and indexing cursor. Check
+Gum credits only finalized transfers of the request's token. Inclusion or wallet
+confirmation can precede Gum's finality boundary and indexing cursor. Check
 `as_of`, `indexer_freshness`, transfer provenance, and `/v1/status`; poll
 `GET /v1/deposit-requests/{id}` or register a webhook rather than treating submission
 as a deposit request.
@@ -109,10 +109,10 @@ as a deposit request.
   reach the requested amount.
 - `partially_deposited` remains open while the finalized total is short.
 - On-time execution sends exactly the requested amount to payout. Any excess goes
-  to Payday's recovery custody in the same transaction; it is never
-  forwarded to the merchant, and Payday returns it to the payer manually after
+  to Gum's recovery custody in the same transaction; it is never
+  forwarded to the merchant, and Gum returns it to the payer manually after
   review.
-- If execution happens after expiry, the complete balance goes to Payday's
+- If execution happens after expiry, the complete balance goes to Gum's
   recovery custody — even if enough arrived earlier.
 
 Leave time for inclusion, finality, and settlement before the deadline.
@@ -120,23 +120,23 @@ Leave time for inclusion, finality, and settlement before the deadline.
 ## Where do expired or late funds go?
 
 An underpaid address is recovered after expiry. Funds sent after expiry
-or after the deposit contract executes are recovered into Payday's recovery
-custody (`recovery_address` on the deposit request, always Payday's dedicated
-KMS recovery wallet). Payday returns every recovered amount to the payer
+or after the deposit contract executes are recovered into Gum's recovery
+custody (`recovery_address` on the deposit request, always Gum's dedicated
+KMS recovery wallet). Gum returns every recovered amount to the payer
 manually, after review; it is never an automatic on-chain return to the
 payer's wallet. Each recovery is recorded against the deposit and reported by
 a `deposit_request.recovered_funds` webhook. A payer who sent from a wallet
 other than the one they attested — on a wallet-attested request — is returned
 their funds through the same review process.
 
-## Can I cancel or refund through Payday?
+## Can I cancel or refund through Gum?
 
 `POST /v1/deposit-requests/{id}/cancel` is advisory: it stops
-Payday clients from presenting the deposit request but cannot disable an EVM address or
+Gum clients from presenting the deposit request but cannot disable an EVM address or
 alter its contract. There is no refund endpoint. Funds that settled to your
 payout address are yours to refund through your own wallet/process; recovered
-funds (overpayments, late or expired transfers) are returned by Payday after
-manual review, and `deposit_request.recovered_funds` webhooks tell you when Payday
+funds (overpayments, late or expired transfers) are returned by Gum after
+manual review, and `deposit_request.recovered_funds` webhooks tell you when Gum
 holds something for one of your deposit requests.
 
 ## How do I find and reconcile deposits?
@@ -153,12 +153,12 @@ state, and the Proof of Payment is the durable reconciliation record.
 Use signed webhooks for lifecycle automation and API long polling
 (`wait_for=change`) for an active screen. Webhooks report deposited, settled,
 expired, returned, and attention transitions, plus every amount recovered by
-Payday. Verify the HMAC over the exact raw body, reject stale timestamps, and
+Gum. Verify the HMAC over the exact raw body, reject stale timestamps, and
 deduplicate by event ID. See [Webhooks](webhooks.md).
 
 ## What does `needs_attention` mean?
 
-Automatic movement stopped because Payday cannot safely continue. Do not send
+Automatic movement stopped because Gum cannot safely continue. Do not send
 more funds. Follow the response's `attention.action` and contact support with
 the deposit request ID and the API request ID. Settlement and later-fund recovery stay paused
 until an operator resolves and releases the condition; funds are not necessarily
@@ -183,15 +183,15 @@ shown only at issuance. See [Authentication and API keys](authentication.md).
 
 ## What is available in sandbox?
 
-`https://api.sandbox.payday.sh` is an isolated service on Monad testnet, Base
-Sepolia, and Arbitrum Sepolia with test USDC (no USDT) and `payday_test_…`
+`https://api.sandbox.gum.money` is an isolated service on Monad testnet, Base
+Sepolia, and Arbitrum Sepolia with test USDC (no USDT) and `gum_test_…`
 credentials. It exercises real indexing/finality rather than a
 fake “mark deposited” endpoint. See [Sandbox](sandbox.md).
 
 ## Where can I get help?
 
 Check the public service status first. For deposit or authentication support,
-email `support@payday.sh` with the deposit request ID and API `request_id`. Never send
+email `support@gum.money` with the deposit request ID and API `request_id`. Never send
 API keys, OTPs, signer keys, webhook secrets, or unnecessary personal data.
 Report software or documentation defects through
-[GitHub issues](https://github.com/nkrishang/payday/issues).
+[GitHub issues](https://github.com/nkrishang/gum/issues).

@@ -8,7 +8,7 @@
 //!
 //! The payer never supplies an email: the gateway sends the code to the
 //! address the merchant asserted at issuance. What comes back is an opaque
-//! payer session in `Payday-Payer-Session`, which the public reads honour.
+//! payer session in `Gum-Payer-Session`, which the public reads honour.
 
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ use crate::payer_identity::EmailContinuation;
 use crate::state::AppState;
 
 /// The bearer header carrying an opaque payer session.
-pub const PAYER_SESSION_HEADER: &str = "payday-payer-session";
+pub const PAYER_SESSION_HEADER: &str = "gum-payer-session";
 /// One code per invoice per minute, whichever session asks: the merchant's
 /// customer must not be flooded by anyone holding the link.
 const RESEND_COOLDOWN: Duration = Duration::from_secs(60);

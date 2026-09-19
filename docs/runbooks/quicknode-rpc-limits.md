@@ -15,7 +15,7 @@ error=HTTP error 413 with body: {"jsonrpc":"2.0","id":...,"error":{"code":-32615
 
 The indexer handles this gracefully by halving the range and retrying, then
 growing it again after successes. Catch-up throughput is
-`range × PAYDAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, so a smaller
+`range × GUM_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, so a smaller
 range mostly costs extra requests, not lag.
 
 ## Provider limits on Monad
@@ -31,18 +31,18 @@ allows, independent of plan:
 | Alchemy | 1,000 blocks / 10,000 logs |
 
 Monad's `log_range_size` (per entry of `chains` in Terraform, and of
-`PAYDAY_CHAINS`) is 100 for that reason; Base and Arbitrum One allow 10,000. Raising it on QuickNode only produces rejections; it is useful
+`GUM_CHAINS`) is 100 for that reason; Base and Arbitrum One allow 10,000. Raising it on QuickNode only produces rejections; it is useful
 when switching to a provider with a larger window.
 
 ## Fix: request budget
 
-The indexer runs one worker per chain in `PAYDAY_CHAINS`, watching every
+The indexer runs one worker per chain in `GUM_CHAINS`, watching every
 contract in the entry's `tokens` with one cursor and one `eth_getLogs` per
 range (an address array), and each worker scans only while it has
 something to watch (an open bound request,
-uncollected funds, or a request settled within `PAYDAY_INDEXER_LATE_WATCH_DAYS`).
+uncollected funds, or a request settled within `GUM_INDEXER_LATE_WATCH_DAYS`).
 An idle chain costs two calls (boundary header and cursor check) every
-`PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes), fast-forwards its cursor
+`GUM_INDEXER_IDLE_INTERVAL_MS` (five minutes), fast-forwards its cursor
 without `eth_getLogs`, and holds no WebSocket. Per chain, per day:
 
 | State | Calls | Notes |
@@ -66,23 +66,23 @@ that carries stablecoin transfers costs nothing extra when the log carries
 If credits climb well above that, check in this order:
 
 1. `transfer signal disconnected` / `connection failed` warnings (the
-   `payday-indexer-signal-down` alarm; every log line names its
+   `gum-indexer-signal-down` alarm; every log line names its
    `chain_id`). While the socket is down on an active chain the reconciler
    runs every `indexer_poll_interval_ms` (5 s), which is the old cost
    profile: about 3.9M credits a day on Monad. Confirm that chain's `wss://`
-   URL works (`PAYDAY_RPC_WS_URL_<chain_id>` overrides the derivation from
-   `PAYDAY_RPC_URL_<chain_id>`). An idle chain holds no socket and never
+   URL works (`GUM_RPC_WS_URL_<chain_id>` overrides the derivation from
+   `GUM_RPC_URL_<chain_id>`). An idle chain holds no socket and never
    raises this.
 2. `indexer cursor lagging`: a backlog is draining at
-   `range × PAYDAY_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, three calls
+   `range × GUM_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, three calls
    per range. This is bounded work that ends when the cursor catches up.
-3. `429` / `-32007` errors counted by `payday-indexer-pass-failing`:
+3. `429` / `-32007` errors counted by `gum-indexer-pass-failing`:
    the pacing below should make these rare at this call volume; a sustained
    run means something else shares the endpoint's requests-per-second budget.
 
 Since the 2026-09 livelock (below), the indexer defends itself in two ways:
 
-- `PAYDAY_INDEXER_RPC_MAX_RPS` (default 40) paces every outgoing RPC call so
+- `GUM_INDEXER_RPC_MAX_RPS` (default 40) paces every outgoing RPC call so
   no burst can exceed the plan's requests-per-second budget; 0 disables pacing
   (the local runner sets it for Anvil, which has no budget to trip).
 - Retryable failures (429, timeouts) inside a tick back off exponentially and
@@ -124,7 +124,7 @@ restart — see [service-restart.md](service-restart.md).
 
 ```bash
 # Check indexer logs — rejections should stop
-aws logs tail /ecs/payday/indexer --since 5m --region "$AWS_REGION" \
+aws logs tail /ecs/gum/indexer --since 5m --region "$AWS_REGION" \
   | grep -E "413|rejected|splitting|lagging"
 
 # Test the RPC directly with a 100-block range (Monad's USDC; any configured token works)

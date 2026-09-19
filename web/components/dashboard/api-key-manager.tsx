@@ -1,7 +1,7 @@
 "use client";
 
-import type { AccountMetadata } from "@payday/sdk";
-import { PaydayError } from "@payday/sdk";
+import type { AccountMetadata } from "@gum/sdk";
+import { GumError } from "@gum/sdk";
 import { Check, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -92,11 +92,11 @@ function ApiKeyCard({
   };
 
   const failed = (cause: unknown) => {
-    if (cause instanceof PaydayError && cause.status === 401) {
+    if (cause instanceof GumError && cause.status === 401) {
       signOut();
       return;
     }
-    if (cause instanceof PaydayError && cause.code === "api_key_generation_conflict") {
+    if (cause instanceof GumError && cause.code === "api_key_generation_conflict") {
       onChanged();
       setStage({ kind: "idle" });
       setBusy(false);

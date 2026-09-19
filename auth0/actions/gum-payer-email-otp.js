@@ -1,12 +1,12 @@
 const crypto = require("crypto");
 
-const CLAIM_NAMESPACE = "https://api.payday.sh/auth";
+const CLAIM_NAMESPACE = "https://api.gum.money/auth";
 const MAX_AUTHENTICATION_AGE_SECONDS = 5 * 60;
 
 /**
  * A payer proves mailbox ownership for one deposit request, and gatewayd exchanges the
  * OTP on the payer's behalf against a dedicated audience. This Action guards
- * only that audience: the merchant Action (`payday-email-otp.js`) never sees
+ * only that audience: the merchant Action (`gum-email-otp.js`) never sees
  * it, and this one never sees the merchant API, so neither client can pick up
  * the other's claims. An unset secret is treated as "no such audience" so the
  * Action is inert until the payer resource server exists, and
@@ -18,7 +18,7 @@ function configuredSecret(secrets, name) {
 }
 
 exports.onExecutePostLogin = async (event, api) => {
-  const payerAudience = configuredSecret(event.secrets, "PAYDAY_PAYER_AUDIENCE");
+  const payerAudience = configuredSecret(event.secrets, "GUM_PAYER_AUDIENCE");
   if (
     payerAudience === undefined ||
     event.resource_server?.identifier !== payerAudience
@@ -26,7 +26,7 @@ exports.onExecutePostLogin = async (event, api) => {
     return;
   }
 
-  const payerClientId = configuredSecret(event.secrets, "PAYDAY_PAYER_CLIENT_ID");
+  const payerClientId = configuredSecret(event.secrets, "GUM_PAYER_CLIENT_ID");
   const emailMethod = event.authentication?.methods?.find(
     (method) => method.name === "email",
   );
@@ -46,7 +46,7 @@ exports.onExecutePostLogin = async (event, api) => {
     now - authenticatedAt <= MAX_AUTHENTICATION_AGE_SECONDS;
 
   if (!isPayerEmailOtp) {
-    api.access.deny("Payday payer verification requires a fresh email OTP.");
+    api.access.deny("Gum payer verification requires a fresh email OTP.");
     return;
   }
 

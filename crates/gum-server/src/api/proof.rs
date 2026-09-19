@@ -2,7 +2,7 @@
 //! holder needs to recompute hash → attestation → salt → CREATE3 address
 //! offline and tie the request to the transfers from the attested wallet
 //! that paid it and the transaction that settled it, plus a fresh
-//! Payday-signed attestation of the verification facts bound to that same
+//! Gum-signed attestation of the verification facts bound to that same
 //! commitment.
 
 use alloy_primitives::{Address, B256};
@@ -203,7 +203,7 @@ pub async fn get_proof(
     if let Some(wallet) = wallet_evidence {
         facts.push(VerificationFact {
             kind: "wallet".into(),
-            provider: "payday".into(),
+            provider: "gum".into(),
             at: wallet.bound_at.clone(),
         });
     }

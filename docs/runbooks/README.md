@@ -1,7 +1,7 @@
 # Operational runbooks
 
 Scenario-specific guides for monitoring, triaging, and resolving issues
-with the payday stablecoin deposit gateway on AWS, settling USDC on Monad,
+with the gum stablecoin deposit gateway on AWS, settling USDC on Monad,
 Base, and Arbitrum One and USDT (Tether's USDT0) on Monad and Arbitrum One.
 
 ## Prerequisites
@@ -9,7 +9,7 @@ Base, and Arbitrum One and USDT (Tether's USDT0) on Monad and Arbitrum One.
 All runbooks assume you have set up your shell environment:
 
 ```bash
-export AWS_PROFILE=payday
+export AWS_PROFILE=gum
 export AWS_REGION=eu-north-1
 export MONAD_RPC_URL='https://your-quicknode-monad-endpoint'
 export BASE_RPC_URL='https://your-quicknode-base-endpoint'
@@ -28,8 +28,8 @@ from the operator's approved secret store; Terraform does not create or retain
 user API keys:
 
 ```bash
-export PAYDAY_API_URL="https://api.payday.sh"
-export PAYDAY_API_KEY="<operator-account-api-key>"
+export GUM_API_URL="https://api.gum.money"
+export GUM_API_KEY="<operator-account-api-key>"
 ```
 
 ## Runbooks

@@ -1,17 +1,17 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { onExecutePostLogin } = require("./payday-payer-email-otp");
+const { onExecutePostLogin } = require("./gum-payer-email-otp");
 
-const PAYER_AUDIENCE = "https://api.payday.sh/payer";
-const MERCHANT_AUDIENCE = "https://api.payday.sh";
+const PAYER_AUDIENCE = "https://api.gum.money/payer";
+const MERCHANT_AUDIENCE = "https://api.gum.money";
 
 const EXPECTED_CLAIMS = [
-  "https://api.payday.sh/auth/authenticated_at",
-  "https://api.payday.sh/auth/client_id",
-  "https://api.payday.sh/auth/email",
-  "https://api.payday.sh/auth/event_id",
-  "https://api.payday.sh/auth/method",
+  "https://api.gum.money/auth/authenticated_at",
+  "https://api.gum.money/auth/client_id",
+  "https://api.gum.money/auth/email",
+  "https://api.gum.money/auth/event_id",
+  "https://api.gum.money/auth/method",
 ];
 
 function actionApi() {
@@ -31,10 +31,10 @@ function event(overrides = {}) {
   return {
     resource_server: { identifier: PAYER_AUDIENCE },
     secrets: {
-      PAYDAY_PAYER_AUDIENCE: PAYER_AUDIENCE,
-      PAYDAY_PAYER_CLIENT_ID: "payday-payer",
+      GUM_PAYER_AUDIENCE: PAYER_AUDIENCE,
+      GUM_PAYER_CLIENT_ID: "gum-payer",
     },
-    client: { client_id: "payday-payer" },
+    client: { client_id: "gum-payer" },
     connection: { strategy: "email" },
     authentication: {
       methods: [{ name: "email", timestamp: new Date().toISOString() }],
@@ -51,29 +51,29 @@ test("accepts the payer client on the payer audience and sets exactly the five c
   assert.equal(result.denial(), undefined);
   assert.deepEqual([...result.claims.keys()].sort(), EXPECTED_CLAIMS);
   assert.equal(
-    result.claims.get("https://api.payday.sh/auth/method"),
+    result.claims.get("https://api.gum.money/auth/method"),
     "email_otp",
   );
   assert.equal(
-    result.claims.get("https://api.payday.sh/auth/client_id"),
-    "payday-payer",
+    result.claims.get("https://api.gum.money/auth/client_id"),
+    "gum-payer",
   );
   assert.equal(
-    result.claims.get("https://api.payday.sh/auth/email"),
+    result.claims.get("https://api.gum.money/auth/email"),
     "payer@example.com",
   );
   assert.match(
-    result.claims.get("https://api.payday.sh/auth/event_id"),
+    result.claims.get("https://api.gum.money/auth/event_id"),
     /^[0-9a-f-]{36}$/,
   );
   const authenticatedAt = result.claims.get(
-    "https://api.payday.sh/auth/authenticated_at",
+    "https://api.gum.money/auth/authenticated_at",
   );
   assert.ok(Math.abs(Date.now() / 1000 - authenticatedAt) < 5);
 });
 
 test("denies the merchant dashboard client on the payer audience", async () => {
-  for (const clientId of ["payday-dashboard"]) {
+  for (const clientId of ["gum-dashboard"]) {
     const result = actionApi();
     await onExecutePostLogin(
       event({ client: { client_id: clientId } }),
@@ -95,7 +95,7 @@ test("denies a stale email authentication, another connection, or a missing clie
     event({ user: { email: "payer@example.com", email_verified: false } }),
     event({ client: {} }),
     // The payer client secret is not configured yet: nobody is admitted.
-    event({ secrets: { PAYDAY_PAYER_AUDIENCE: PAYER_AUDIENCE } }),
+    event({ secrets: { GUM_PAYER_AUDIENCE: PAYER_AUDIENCE } }),
   ]) {
     const result = actionApi();
     await onExecutePostLogin(invalid, result.api);
@@ -113,14 +113,14 @@ test("sets the email trimmed and lowercased so gatewayd can compare it", async (
 
   assert.equal(result.denial(), undefined);
   assert.equal(
-    result.claims.get("https://api.payday.sh/auth/email"),
+    result.claims.get("https://api.gum.money/auth/email"),
     "alice.payer@example.com",
   );
 });
 
 test("ignores the merchant API and any other audience, whatever the client", async () => {
   for (const identifier of [MERCHANT_AUDIENCE, "https://unrelated.example"]) {
-    for (const clientId of ["payday-payer", "payday-dashboard", "other-client"]) {
+    for (const clientId of ["gum-payer", "gum-dashboard", "other-client"]) {
       const result = actionApi();
       await onExecutePostLogin(
         event({
@@ -143,7 +143,7 @@ test("does nothing at all while the payer audience secret is unset", async () =>
     const result = actionApi();
     await onExecutePostLogin(
       event({
-        secrets: { PAYDAY_PAYER_CLIENT_ID: "payday-payer" },
+        secrets: { GUM_PAYER_CLIENT_ID: "gum-payer" },
         resource_server: resourceServer,
       }),
       result.api,

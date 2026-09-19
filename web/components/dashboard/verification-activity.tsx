@@ -1,6 +1,6 @@
 "use client";
 
-import type { VerificationAttempt } from "@payday/sdk";
+import type { VerificationAttempt } from "@gum/sdk";
 import { formatDate } from "./labels";
 import { LoadProblem } from "./load-problem";
 import { useResource } from "./session";

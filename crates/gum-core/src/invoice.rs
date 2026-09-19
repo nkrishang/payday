@@ -121,7 +121,7 @@ impl FromStr for InvoiceStatus {
 /// The payer's wallet, attested in their session on the network they chose —
 /// present only when the request attaches the wallet-attestation add-on — and
 /// everything the address commits to beyond the issuance document. The
-/// recovery term is never here: it is Payday's own recovery wallet, fixed in
+/// recovery term is never here: it is Gum's own recovery wallet, fixed in
 /// the issuance snapshot. Immutable once set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletEvidence {
@@ -139,7 +139,7 @@ pub struct WalletEvidence {
 pub struct PaymentBinding {
     /// The network the payer chose: one of the request's committed networks.
     pub network: NetworkTerms,
-    /// Always the issuance snapshot's recovery term: Payday's recovery wallet.
+    /// Always the issuance snapshot's recovery term: Gum's recovery wallet.
     pub recovery: RecoveryAddress,
     pub salt: Salt,
     pub payment_address: PaymentAddress,
@@ -312,7 +312,7 @@ impl Invoice {
         self.issuance_snapshot.payer_verification.wallet_attestation
     }
 
-    /// The issuance snapshot's recovery term: always Payday's own recovery
+    /// The issuance snapshot's recovery term: always Gum's own recovery
     /// wallet, never a payer's.
     pub fn recovery(&self) -> RecoveryAddress {
         RecoveryAddress(
@@ -374,7 +374,7 @@ impl Invoice {
     /// salt commits to the issuance nonce, the attribution hash, and the
     /// attestation digest, and the address follows from both plus the chosen
     /// network's token, factory, and chain id. The recovery term stays the
-    /// snapshot's — Payday's recovery wallet — whatever wallet the payer
+    /// snapshot's — Gum's recovery wallet — whatever wallet the payer
     /// attests. The attestation is verified here under that network's domain;
     /// a binding never exists for a signature that does not recover to its
     /// wallet or that was made for another chain. Only a request that
@@ -514,7 +514,7 @@ mod tests {
     const PAYER_KEY: [u8; 32] = [7u8; 32];
     const MONAD: ChainId = ChainId(143);
     const BASE: ChainId = ChainId(8453);
-    /// The snapshot's recovery term: Payday's own recovery wallet in tests.
+    /// The snapshot's recovery term: Gum's own recovery wallet in tests.
     const RECOVERY: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
 
     fn party(name: &str) -> Party {
@@ -914,7 +914,7 @@ mod tests {
             )
             .unwrap();
         assert_ne!(a.salt, c.salt);
-        // Whatever wallet attests, funds recover to Payday's wallet.
+        // Whatever wallet attests, funds recover to Gum's wallet.
         assert_eq!(a.recovery, c.recovery);
         assert_eq!(a.recovery, RecoveryAddress(RECOVERY));
         assert_ne!(a.payment_address, c.payment_address);
@@ -1023,7 +1023,7 @@ mod tests {
             }),
             ("schema", {
                 let mut s = snapshot();
-                s.schema = "payday.invoice".into();
+                s.schema = "gum.invoice".into();
                 s
             }),
         ];

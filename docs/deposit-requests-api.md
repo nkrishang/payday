@@ -43,9 +43,9 @@ the address exists only after it (`payer_wallet`), raising a
 `deposit_request.ready` webhook. Recovery is never a request field, so a
 request carrying
 `refund_address` is rejected: every deposit address's recovery term is
-Payday's own dedicated KMS recovery wallet (`recovery_address`), where
+Gum's own dedicated KMS recovery wallet (`recovery_address`), where
 overpayment remainders, expired balances, and late transfers land on-chain
-before Payday returns them to the payer manually, after review. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
+before Gum returns them to the payer manually, after review. Choose either `expires_in` (seconds) or RFC3339 `expires_at`, or omit
 both for a 24-hour lifetime. `currency` is `USDC` (the default) or `USDT`,
 and every response carries it. There is no token field: a USDC request
 offers every supported network (`networks`) and the payer chooses one on
@@ -85,10 +85,10 @@ live finalized status, and can send the transfer from a connected wallet.
 Address, settlement, and transfer explorer URLs are included when the configured
 chain has an explorer.
 
-When the `payer` party carries an `email`, Payday also emails that address as
-the request is issued: a message from `contact@payday.sh`, in Payday's design,
+When the `payer` party carries an `email`, Gum also emails that address as
+the request is issued: a message from `contact@gum.money`, in Gum's design,
 that names the issuer, the amount, the heading and reference, and the expiry,
-with a button to the same `deposit_url` and `contact@payday.sh` for questions.
+with a button to the same `deposit_url` and `contact@gum.money` for questions.
 The email is queued in the issuing transaction and sent by a background
 worker, so it never delays the create response and is never lost to a
 provider outage; an idempotent replay sends nothing again, and a request that
@@ -121,7 +121,7 @@ if you build your own.
 `GET /v1/deposit-requests/{id}/transfers` returns `{ "transfers": [...] }`, the
 finalized transfer provenance.
 `GET /v1/deposit-requests/{id}/attachment` returns the PDF descriptor with a signed
-download URL, `GET /v1/deposit-requests/{id}/request.pdf` renders Payday's
+download URL, `GET /v1/deposit-requests/{id}/request.pdf` renders Gum's
 deterministic deposit request summary, and `GET /v1/deposit-requests/{id}/proof` returns the
 Proof of Payment once settled. `GET /v1/deposit-requests/{id}?wait_for=change&timeout=30`
 waits until the deposit request changes or the timeout elapses, avoiding a polling
@@ -135,13 +135,13 @@ finalized-head, and sweep-queue state.
 
 The OpenAPI 3.1 document is served at `/openapi.json` and an interactive Scalar
 reference at `/docs`. Aliases `/api` and `/api/openapi.json` allow the same
-gateway routes to be published directly at `https://docs.payday.sh/api`.
+gateway routes to be published directly at `https://docs.gum.money/api`.
 
 Every response has `X-Request-Id`. A printable, non-whitespace caller value up
 to 128 bytes is echoed; otherwise the gateway generates a UUIDv7. Every JSON
 error includes the same value as top-level `request_id`, including
 authentication, malformed JSON, route/extractor, and body-size failures.
-For support, email `support@payday.sh` with that request ID; never send an API
+For support, email `support@gum.money` with that request ID; never send an API
 key, webhook secret, or full deposit metadata.
 
 Authenticated API-key traffic uses an in-memory token bucket independently per
@@ -162,10 +162,10 @@ logged, which keeps bearer keys, webhook secrets, and deposit metadata out.
 ## Curl quickstart
 
 ```bash
-export API=https://api.sandbox.payday.sh
-export PAYDAY_API_KEY=payday_test_...
+export API=https://api.sandbox.gum.money
+export GUM_API_KEY=gum_test_...
 REQUEST=$(curl -fsS "$API/v1/deposit-requests" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $GUM_API_KEY" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: quickstart-$(date +%s)" \
   -d '{"amount":"1.00","payout_address":"0x1111111111111111111111111111111111111111",
        "issuer":{"name":"Acme LLC"},"payer":{"name":"Customer Inc"},
@@ -181,5 +181,5 @@ DEPOSIT_URL=$(printf '%s' "$REQUEST" | jq -r .deposit_url)
 # it is not; there is intentionally no privileged "mark deposited" endpoint
 # because indexer finality is tested.
 curl -fsS "$API/v1/deposit-requests/$DEPOSIT_REQUEST_ID?wait_for=change&timeout=30" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq '{status, address, received}'
+  -H "Authorization: Bearer $GUM_API_KEY" | jq '{status, address, received}'
 ```

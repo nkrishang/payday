@@ -1,6 +1,6 @@
 //! The supported networks: their identity, the stablecoin contracts each
 //! carries, and the contract generation deployed on each. Both services read
-//! the same `PAYDAY_CHAINS` JSON, so a chain is either supported everywhere
+//! the same `GUM_CHAINS` JSON, so a chain is either supported everywhere
 //! or nowhere, and a currency is served on a chain exactly when that chain's
 //! entry lists its contract.
 
@@ -55,7 +55,7 @@ pub struct TokenConfig {
     pub address: Address,
 }
 
-/// One supported chain as `PAYDAY_CHAINS` describes it.
+/// One supported chain as `GUM_CHAINS` describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChainConfig {
@@ -103,7 +103,7 @@ pub struct ChainConfig {
 /// balances it shows.
 pub const MAX_CCTP_BURN_PER_MESSAGE: U256 = U256::from_limbs([10_000_000_000_000, 0, 0, 0]);
 
-/// CCTP V2 as deployed on one chain, plus Payday's `WithdrawalForwarder`.
+/// CCTP V2 as deployed on one chain, plus Gum's `WithdrawalForwarder`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CctpConfig {
@@ -151,39 +151,39 @@ impl ChainConfig {
     /// The environment variable carrying this chain's RPC URL. The URL is a
     /// secret (it carries the provider token), so it never sits in the JSON.
     pub fn rpc_url_var(&self) -> String {
-        format!("PAYDAY_RPC_URL_{}", self.chain_id)
+        format!("GUM_RPC_URL_{}", self.chain_id)
     }
 
     /// Optional WebSocket override; `off` disables the transfer signal.
     pub fn rpc_ws_url_var(&self) -> String {
-        format!("PAYDAY_RPC_WS_URL_{}", self.chain_id)
+        format!("GUM_RPC_WS_URL_{}", self.chain_id)
     }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChainRegistryError {
-    #[error("PAYDAY_CHAINS is not valid JSON: {0}")]
+    #[error("GUM_CHAINS is not valid JSON: {0}")]
     Json(String),
-    #[error("PAYDAY_CHAINS must list at least one chain")]
+    #[error("GUM_CHAINS must list at least one chain")]
     Empty,
-    #[error("PAYDAY_CHAINS lists chain {0} more than once")]
+    #[error("GUM_CHAINS lists chain {0} more than once")]
     Duplicate(u64),
-    #[error("PAYDAY_CHAINS chain {chain_id}: {field} must be positive")]
+    #[error("GUM_CHAINS chain {chain_id}: {field} must be positive")]
     NotPositive { chain_id: u64, field: &'static str },
-    #[error("PAYDAY_CHAINS chain {0}: tokens must list at least one currency")]
+    #[error("GUM_CHAINS chain {0}: tokens must list at least one currency")]
     NoTokens(u64),
-    #[error("PAYDAY_CHAINS chain {chain_id}: {currency} is listed more than once")]
+    #[error("GUM_CHAINS chain {chain_id}: {currency} is listed more than once")]
     DuplicateCurrency { chain_id: u64, currency: Currency },
-    #[error("PAYDAY_CHAINS chain {chain_id}: {address} is listed under more than one currency")]
+    #[error("GUM_CHAINS chain {chain_id}: {address} is listed under more than one currency")]
     DuplicateToken { chain_id: u64, address: Address },
     #[error(
-        "PAYDAY_CHAINS chain {0}: a cctp block needs USDC on the chain; CCTP burns and mints USDC alone"
+        "GUM_CHAINS chain {0}: a cctp block needs USDC on the chain; CCTP burns and mints USDC alone"
     )]
     CctpWithoutUsdc(u64),
-    #[error("PAYDAY_CHAINS must list USDC on at least one chain")]
+    #[error("GUM_CHAINS must list USDC on at least one chain")]
     NoUsdc,
     #[error(
-        "PAYDAY_CHAINS chain {chain_id}: factory {actual} differs from chain {first_chain_id}'s {expected}; \
+        "GUM_CHAINS chain {chain_id}: factory {actual} differs from chain {first_chain_id}'s {expected}; \
          wrong-chain rescue only works when every chain deploys the factory at the same address"
     )]
     FactoryMismatch {
@@ -276,10 +276,10 @@ impl ChainRegistry {
         Self::new(chains)
     }
 
-    /// `PAYDAY_CHAINS`, or a panic naming what is wrong: a service without a
+    /// `GUM_CHAINS`, or a panic naming what is wrong: a service without a
     /// valid registry has nothing to serve.
     pub fn from_env() -> Self {
-        let json = std::env::var("PAYDAY_CHAINS").expect("PAYDAY_CHAINS must be set");
+        let json = std::env::var("GUM_CHAINS").expect("GUM_CHAINS must be set");
         Self::parse(&json).unwrap_or_else(|error| panic!("{error}"))
     }
 
@@ -416,11 +416,11 @@ mod tests {
         assert_eq!(registry.first().chain_id, 143);
         assert_eq!(
             registry.get(8453).unwrap().rpc_url_var(),
-            "PAYDAY_RPC_URL_8453"
+            "GUM_RPC_URL_8453"
         );
         assert_eq!(
             registry.get(8453).unwrap().rpc_ws_url_var(),
-            "PAYDAY_RPC_WS_URL_8453"
+            "GUM_RPC_WS_URL_8453"
         );
         assert_eq!(registry.get(1), None);
         assert_eq!(

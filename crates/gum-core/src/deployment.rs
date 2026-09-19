@@ -32,7 +32,7 @@ pub enum DeploymentError {
         operation: &'static str,
         message: String,
     },
-    #[error("the RPC URL serves chain {actual}, but its PAYDAY_CHAINS entry is chain {expected}")]
+    #[error("the RPC URL serves chain {actual}, but its GUM_CHAINS entry is chain {expected}")]
     ChainId { expected: u64, actual: u64 },
     #[error(
         "PaymentFactory at {address} has runtime code hash {actual}, but the chain's factory_code_hash is {expected}; the configured factory is not the reviewed generation"

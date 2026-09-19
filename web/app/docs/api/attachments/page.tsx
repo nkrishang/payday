@@ -10,20 +10,20 @@ export const metadata: Metadata = {
   description: "Presigned, write-once, scanned PDF upload. One attachment per deposit request.",
 };
 
-const TS = `const pdf = await payday.attachments.upload(bytes, "INV-1042.pdf"); // reserve + PUT + finalize
-await payday.depositRequests.create({ ...fields, attachment_id: pdf.id }, "INV-1042");`;
+const TS = `const pdf = await gum.attachments.upload(bytes, "INV-1042.pdf"); // reserve + PUT + finalize
+await gum.depositRequests.create({ ...fields, attachment_id: pdf.id }, "INV-1042");`;
 
 export default function AttachmentsOverviewPage() {
   return (
     <DocsPage
       eyebrow="Attachments"
       title="The upload flow"
-      lead="One PDF per deposit request, ≤5 MiB. Bytes go to object storage through a presigned, write-once PUT; the object is scanned, hashed by Payday, and admitted by finalize. The hash is committed into the deposit address."
+      lead="One PDF per deposit request, ≤5 MiB. Bytes go to object storage through a presigned, write-once PUT; the object is scanned, hashed by Gum, and admitted by finalize. The hash is committed into the deposit address."
     >
       <Figure caption="Reserve, PUT, finalize, attach. The API never receives the bytes.">
         <Sequence
           label="Attachment upload sequence: reserve a slot, PUT the bytes to storage with the presigned headers, the scanner reports, finalize returns the descriptor, the id goes on the deposit request."
-          lanes={["Client", "Payday API", "Object storage"]}
+          lanes={["Client", "Gum API", "Object storage"]}
           messages={[
             { from: 0, to: 1, label: "POST /v1/attachments { filename }" },
             { from: 1, to: 0, label: "201 { id, upload_url, headers }", reply: true },

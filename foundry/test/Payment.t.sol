@@ -53,7 +53,7 @@ contract PaymentTest is Test {
     }
 
     /// @notice The receiver takes exactly the invoice amount; the overpayment is
-    /// Payday custody and leaves for the recovery wallet in the same deployment.
+    /// Gum custody and leaves for the recovery wallet in the same deployment.
     function test_overpayment_splits_receiver_and_recovery() public {
         (address paymentAddress, uint64 expirationTimestamp, bytes32 salt) = _invoice(10e6, 2);
         token.mint(paymentAddress, 12e6);
@@ -217,7 +217,7 @@ contract PaymentTest is Test {
         assertEq(token.balanceOf(RECEIVER), 10e6);
 
         // A repeat payment after settlement can no longer reach the receiver;
-        // anyone may forward it to the Payday recovery wallet.
+        // anyone may forward it to the Gum recovery wallet.
         token.mint(paymentAddress, 3e6);
         vm.expectEmit(true, true, true, true, paymentAddress);
         emit Recovered(RECOVERY, address(token), 3e6);

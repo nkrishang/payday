@@ -20,7 +20,7 @@ import {
 export const metadata: Metadata = {
   title: "Deposit requests and deposits",
   description:
-    "Payday's two primitives, the one-time address, every public status, and where each unit goes.",
+    "Gum's two primitives, the one-time address, every public status, and where each unit goes.",
 };
 
 export default function ConceptsPage() {
@@ -28,7 +28,7 @@ export default function ConceptsPage() {
     <DocsPage
       eyebrow="Getting started"
       title="Deposit requests and deposits"
-      lead="Payday has two primitives. A deposit request is the ask; a deposit is the funds that answer it. Everything else on this page follows from keeping the two apart."
+      lead="Gum has two primitives. A deposit request is the ask; a deposit is the funds that answer it. Everything else on this page follows from keeping the two apart."
     >
       <Compare>
         <CompareItem title="Deposit request" badge={<Pill tone="green">the document</Pill>}>
@@ -48,7 +48,7 @@ export default function ConceptsPage() {
       </Compare>
 
       <p>
-        Payday models no line items, quantities, discounts, tax, or fiat. The amount is
+        Gum models no line items, quantities, discounts, tax, or fiat. The amount is
         authoritative. A PDF you attach is stored, shown to the payer, and hashed into the address,
         but never parsed or reconciled against the amount. To change anything about an issued
         request, cancel it and issue another; that is what keeps a Proof of Payment meaningful.
@@ -77,7 +77,7 @@ export default function ConceptsPage() {
           settles to your payout address, no more and no less.
         </Def>
         <Def term="payout_address">
-          Your wallet. By default the wallet Payday created for your account at sign-in; any EVM
+          Your wallet. By default the wallet Gum created for your account at sign-in; any EVM
           address you save works too.
         </Def>
         <Def term="payer_policy">
@@ -94,7 +94,7 @@ export default function ConceptsPage() {
         Every deposit request gets its own EVM address, on one network, and that address belongs
         to one payer wallet. It does not exist when the request is issued. It exists once the
         payer, on the hosted checkout, chooses the network they will pay on and signs a short
-        message from the wallet they intend to pay from. Payday derives the address from the
+        message from the wallet they intend to pay from. Gum derives the address from the
         issued document, the chosen chain, and that signature together, which is why{" "}
         <code>chain</code>, <code>token</code>, and <code>address</code> are <code>null</code>{" "}
         until then. By default a USDC request offers every supported network and the payer picks;
@@ -109,7 +109,7 @@ export default function ConceptsPage() {
 
       <p>
         The address is <strong>counterfactual</strong>: it is calculated before any contract is
-        deployed at it, so funds can arrive the moment it is shown. When Payday later deploys and
+        deployed at it, so funds can arrive the moment it is shown. When Gum later deploys and
         executes the contract, the funds can only move under the terms the address already commits
         to: this token, this amount, your payout address, this deadline, and the payer&apos;s wallet
         as the recovery destination. Anyone may execute it; nobody can redirect it.
@@ -122,8 +122,8 @@ export default function ConceptsPage() {
           <code>likely_unsolicited</code> and no Proof of Payment will claim the payer paid it.
         </li>
         <li>
-          <strong>Everything Payday returns goes to the payer&apos;s own wallet, on-chain.</strong>{" "}
-          An overpayment remainder, an expired balance, a late transfer. Nothing is held by Payday,
+          <strong>Everything Gum returns goes to the payer&apos;s own wallet, on-chain.</strong>{" "}
+          An overpayment remainder, an expired balance, a late transfer. Nothing is held by Gum,
           and no one has to ask for a refund address.
         </li>
       </ul>
@@ -219,7 +219,7 @@ export default function ConceptsPage() {
         are on time. Execution at exactly the deadline is on time; a later block is not.
       </p>
 
-      <Figure caption="Every situation and its routing. Green is your payout address; yellow is the payer's attested wallet. Payday itself never appears, because it never holds the funds.">
+      <Figure caption="Every situation and its routing. Green is your payout address; yellow is the payer's attested wallet. Gum itself never appears, because it never holds the funds.">
         <RoutingFigure />
       </Figure>
 
@@ -238,7 +238,7 @@ export default function ConceptsPage() {
 
       <H2 id="finality-and-freshness">Finality and freshness</H2>
       <p>
-        Payday credits only <strong>finalized</strong> transfers of the request&apos;s currency,
+        Gum credits only <strong>finalized</strong> transfers of the request&apos;s currency,
         as its issuer&apos;s configured contract on the chosen network. A wallet may show a
         transaction as submitted, included, or confirmed before{" "}
         <code>received</code> changes. There is intentionally no endpoint to mark a request
@@ -275,8 +275,8 @@ export default function ConceptsPage() {
       <p>
         A settled request can be exported as a Proof of Payment: the canonical document, the
         payer&apos;s wallet attestation, the salt, the addresses, the credited transfers, the
-        settlement transaction, and a Payday-signed statement of the verification facts. From it
-        anyone can recompute the address and check the transfers with no access to Payday. See{" "}
+        settlement transaction, and a Gum-signed statement of the verification facts. From it
+        anyone can recompute the address and check the transfers with no access to Gum. See{" "}
         <Link href="/docs/proof-of-payment">Proof of Payment</Link>.
       </p>
 
@@ -285,7 +285,7 @@ export default function ConceptsPage() {
         <li>
           Only the exact <code>token.address</code> on the chosen <code>chain.id</code> is
           credited: the request&apos;s currency, as its issuer&apos;s contract there. Any other
-          stablecoin Payday serves, sent to the address (USDC to a USDT address, say), is not a
+          stablecoin Gum serves, sent to the address (USDC to a USDT address, say), is not a
           payment; it is returned to the payer&apos;s wallet by the wrong-asset procedure,{" "}
           <code>recover(address)</code> on the deployed contract. Bridged or wrapped versions,
           look-alike tokens, and native gas do not count and may be unrecoverable. The address

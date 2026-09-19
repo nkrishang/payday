@@ -194,7 +194,7 @@ test("an overpaid settled deposit request says where the remainder went", async 
   await expect(page.getByText("Deposit complete")).toBeVisible();
   await expect(page.getByText(/Exactly the requested amount reached the merchant/)).toBeVisible();
   await expect(
-    page.getByText(/above the requested amount went back to Payday's recovery wallet/),
+    page.getByText(/above the requested amount went back to Gum's recovery wallet/),
   ).toBeVisible();
   // The receipt shows both what was asked for and what actually arrived.
   await expect(page.getByText("25.00 USDC")).toBeVisible();
@@ -222,7 +222,7 @@ test("an expired deposit request holding funds says where they went", async ({ p
   await page.goto("/pay/dr_expired-funded");
 
   await expect(page.getByText("The deadline passed before this deposit completed")).toBeVisible();
-  await expect(page.getByText(/goes back to Payday's recovery wallet/)).toBeVisible();
+  await expect(page.getByText(/goes back to Gum's recovery wallet/)).toBeVisible();
   await expectNoInstructions(page);
 });
 
@@ -230,7 +230,7 @@ test("a returned deposit request does the same", async ({ page }) => {
   await page.goto("/pay/dr_returned");
 
   await expect(page.getByText("This deposit was not completed in time")).toBeVisible();
-  await expect(page.getByText(/back to Payday's recovery wallet/)).toBeVisible();
+  await expect(page.getByText(/back to Gum's recovery wallet/)).toBeVisible();
   await expectNoInstructions(page);
 });
 

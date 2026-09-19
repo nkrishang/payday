@@ -1,6 +1,6 @@
 # Merchant dashboard
 
-The dashboard at `payday.sh/dashboard` is the browser face of the same API the
+The dashboard at `gum.money/dashboard` is the browser face of the same API the
 SDK uses. It issues deposit requests, keeps customers, uploads the one PDF a
 deposit request may carry, and shows what happened to each deposit request. It adds no rules
 of its own: every limit, policy check, and status comes from the API, and the
@@ -11,7 +11,7 @@ before the API has the final word.
 
 The dashboard signs in through [Privy](https://privy.io) with an emailed
 one-time code, from the landing page's "Start Building", which opens the
-exchange in a dialog of Payday's own. There is no dashboard login page and no
+exchange in a dialog of Gum's own. There is no dashboard login page and no
 separate registration: the API provisions an account the first time it sees
 a Privy identity, so a first code creates the account and every later one
 signs into it, and the same dialog does both. Every account gets an embedded
@@ -26,7 +26,7 @@ The session is Privy's identity token
 ([Authentication § 7](authentication.md#7-dashboard-sessions)). Privy's SDK
 keeps it, and its refresh token, in the browser and refreshes it while the
 merchant stays signed in; the dashboard reads the current token from the SDK
-and sends it on every call. Nothing of Payday's stores a credential: **no API
+and sends it on every call. Nothing of Gum's stores a credential: **no API
 key exists in the browser** — the API accepts the identity token directly on
 the deposit request, customer, attachment, and account routes, and maps it to the
 merchant account. Signing out asks Privy to end the session.
@@ -48,9 +48,9 @@ marked `noindex`.
 The dashboard calls the API from the browser with `GET`, `POST`, `PATCH`,
 `PUT`, and `DELETE`, so `gum-server` answers cross-origin requests on the
 merchant routes from exactly one origin: the
-web origin it is configured with as `PAYDAY_PUBLIC_BASE_URL`. The dashboard
+web origin it is configured with as `GUM_PUBLIC_BASE_URL`. The dashboard
 must be served from that origin — `http://127.0.0.1:3002` locally,
-`https://payday.sh` in production; from any other origin every request fails
+`https://gum.money` in production; from any other origin every request fails
 its preflight. The payer checkout has no such constraint, because the payer
 routes allow any origin.
 
@@ -77,7 +77,7 @@ into setup.
 ## Account and wallet
 
 The foot of `/dashboard` is the account itself. The **Account** section shows
-the mailbox the merchant signed in with and their Payday wallet — the
+the mailbox the merchant signed in with and their Gum wallet — the
 embedded EVM wallet Privy created for the account — in full, ready to copy or
 open in each network's explorer, with its balance of every stablecoin the
 network serves and its gas balance on every supported network read straight
@@ -107,7 +107,7 @@ credential, and the API refuses these routes to an API key on its own.
 An identity is the merchant's own side of a deposit request — the party it is issued
 under and the address payers write to — saved once instead of retyped. It
 answers what the composer used to ask as free text. Where a request settles
-is not part of it: that is the account's Payday wallet by default, and an
+is not part of it: that is the account's Gum wallet by default, and an
 identity may keep saved wallets as alternatives.
 
 **Setting one up** takes two steps, in place on `/dashboard`: the name and
@@ -119,7 +119,7 @@ always to hand without ever appearing to belong to the card beside it; it
 names the section it is acting on, and finishing one scrolls the next into
 view. The contact address is **proven with an emailed code** (through Auth0,
 the same exchange payers use) before any deposit request can carry it: payers are
-told to write there, so Payday does not take a merchant's word for the mailbox
+told to write there, so Gum does not take a merchant's word for the mailbox
 any more than it takes a payer's. The flow resumes from whatever the account
 already holds, so an abandoned tab reopens at the step that is unfinished
 rather than the beginning. An identity counts as usable once its mailbox is
@@ -127,13 +127,13 @@ proven.
 
 **Managing them** is a section of the same page: a line per identity — the
 name, whether it can be issued under, its contact address, and whether it
-settles to the Payday wallet or has saved wallets of its own — that opens onto
+settles to the Gum wallet or has saved wallets of its own — that opens onto
 the rest. An open row *is* its form, with no Edit step, and one Save commits
 the whole row: rename it, move its contact address (which drops the proof,
 because a different mailbox is a different claim), and attach or drop saved
 wallets. Save lights up only once something differs from what is stored, takes
 the API's own answer as the new baseline when it lands, and Cancel puts it all
-back. Dropping the last saved wallet simply leaves the identity on the Payday
+back. Dropping the last saved wallet simply leaves the identity on the Gum
 wallet. A wallet is saved once per account and may serve several identities;
 an identity may keep several.
 
@@ -194,9 +194,9 @@ controls are the API's own `status` and `starting_after` parameters.
 **New deposit request** (in place on `/dashboard`). The only way to issue one,
 in four steps with a running preview beside them that doubles as the review.
 The identity is chosen from what the merchant set up and preselected when
-there is one; the request settles to the account's Payday wallet unless the
+there is one; the request settles to the account's Gum wallet unless the
 identity has saved wallets, in which case they are offered beside it with the
-Payday wallet still the default — so the common case is no clicks at all. A
+Gum wallet still the default — so the common case is no clicks at all. A
 customer's own page links here with `?customer=`, which opens the composer on
 that customer.
 
@@ -309,7 +309,7 @@ the flag says the attested wallet did not pay them, and no Proof of Payment
 will claim it did.
 
 **Recovered funds** — a section on the detail page, present only when
-something was recovered into Payday's recovery custody rather than paid out:
+something was recovered into Gum's recovery custody rather than paid out:
 the overpayment remainder on a settled deposit request, the full balance of
 a returned one, and every transfer the indexer classified as late, each with
 its transaction hash and whether it has been collected. Recovery is on-chain

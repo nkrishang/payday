@@ -167,13 +167,13 @@ mod tests {
 
     #[test]
     fn generated_keys_use_each_configured_prefix_and_256_bits_of_entropy() {
-        let first = generate_api_key("payday_live_");
-        let second = generate_api_key("payday_live_");
-        assert!(first.starts_with("payday_live_"));
-        assert_eq!(first.len(), 55);
+        let first = generate_api_key("gum_live_");
+        let second = generate_api_key("gum_live_");
+        assert!(first.starts_with("gum_live_"));
+        assert_eq!(first.len(), 52);
         assert_ne!(first, second);
-        let test = generate_api_key("payday_test_");
-        assert!(test.starts_with("payday_test_"));
-        assert_eq!(test.len(), 55);
+        let test = generate_api_key("gum_test_");
+        assert!(test.starts_with("gum_test_"));
+        assert_eq!(test.len(), 52);
     }
 }

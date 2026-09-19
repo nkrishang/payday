@@ -1,6 +1,6 @@
 # Deposit safety for merchants
 
-Payday deposit addresses are single-use. How the address behaves depends on
+Gum deposit addresses are single-use. How the address behaves depends on
 whether the deposit request carries the wallet-attestation add-on. Without it,
 the payer may pay from **any wallet** — an exchange withdrawal, a
 smart-contract wallet, any address they control — and every finalized
@@ -31,12 +31,12 @@ send from any wallet but the attested one.
   good. The one way to pay from another network is the hosted checkout's
   "Pay from another network"; it is unavailable on wallet-attested requests,
   because a relay solver pays from a different wallet. Where it is offered,
-  Payday quotes the route through Relay, and the delivery Relay's solver
+  Gum quotes the route through Relay, and the delivery Relay's solver
   makes settles as usual.
 - Verify the network and token contract in the wallet before approving the
   transfer. Token names and symbols are not sufficient; bridged wrappers (such
   as `USDC.e`), look-alike tokens, the other stablecoin, and the same token on
-  another network do not count. Payday credits only these contracts:
+  another network do not count. Gum credits only these contracts:
 
   | Network | USDC | USDT |
   |---|---|---|
@@ -50,18 +50,18 @@ send from any wallet but the attested one.
   Base's USDT is a bridge wrapper without EIP-3009, so it is not a deposit
   currency; a payer holding it pays a request through Relay instead.
 - Do not pay at the deadline boundary. The chain's block timestamp determines
-  whether the deposit request has expired, and Payday acts only after required block
+  whether the deposit request has expired, and Gum acts only after required block
   finality and a later sweep transaction. Wallet submission time and the
   checkout countdown do not guarantee that settlement will occur before
   expiry; confirmation and sweeping can take additional time.
 
 Wrong assets may be unrecoverable. Two cases are recoverable. A transfer of
-the *other* Payday-served stablecoin to the address (USDC to a USDT address,
+the *other* Gum-served stablecoin to the address (USDC to a USDT address,
 or the reverse) is observed but never credited; it stays at the address, and
 `recover(address)` on the deployed deposit contract — callable by anyone —
-forwards it to Payday's recovery custody. A deposit of the right token to
+forwards it to Gum's recovery custody. A deposit of the right token to
 the address on another *supported* network is refused by the contract rather
-than settled, and Payday's operator can recover it into custody by hand and
+than settled, and Gum's operator can recover it into custody by hand and
 have it returned to the payer after review
 (`runbooks/wrong-network-deposit.md`); treat that as a support
 case, not a feature. Do not promise recovery of anything else unless the
@@ -74,10 +74,10 @@ relevant wallet or token is demonstrably under your control.
   amount of its token is sent to the payout address.
 - **Partial deposit:** multiple transfers can accumulate. If the total is still
   short when the deposit request expires, the complete balance is recovered
-  into Payday's recovery custody.
+  into Gum's recovery custody.
 - **Overpayment before expiry:** the payout address receives exactly the
-  requested amount; the remainder is recovered into Payday's recovery custody.
-- **Late deposit:** the funds are recovered into Payday's recovery custody.
+  requested amount; the remainder is recovered into Gum's recovery custody.
+- **Late deposit:** the funds are recovered into Gum's recovery custody.
   This also applies to funds sent after the deposit address has already been
   swept.
 
@@ -89,13 +89,13 @@ payer initiated a transfer earlier.
 
 ## Recovery
 
-The recovery term of every deposit address is Payday's dedicated KMS recovery
+The recovery term of every deposit address is Gum's dedicated KMS recovery
 wallet, in every case — including on a wallet-attested request. Overpayment
 remainders, expired balances, late transfers, and wrong-network or wrong-token
-recoveries land in that custody on-chain, and Payday then returns the funds to
+recoveries land in that custody on-chain, and Gum then returns the funds to
 the payer **manually, after review**. Funds are never returned automatically
 on-chain to the payer's wallet, and the payer's wallet is never the recovery
-term. The intended requested amount still never passes through Payday: it
+term. The intended requested amount still never passes through Gum: it
 moves directly from the one-time address to the payout address. Every
 recovered amount is recorded against its deposit and reported by a
 `deposit_request.recovered_funds` webhook. A payer who sent from a wallet

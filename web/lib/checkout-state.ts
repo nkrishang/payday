@@ -1,4 +1,4 @@
-import type { Chain, Network, PayerDepositRequest, DepositRequestStatus, Token } from "@payday/sdk";
+import type { Chain, Network, PayerDepositRequest, DepositRequestStatus, Token } from "@gum/sdk";
 import { formatDisplayAmount } from "./format";
 
 /**
@@ -12,7 +12,7 @@ import { formatDisplayAmount } from "./format";
  *    deadline was reached and waits for the server to confirm, rather than
  *    claiming the request is over.
  * 2. Deposit instructions disappear the moment the request stops being payable.
- *    Funds sent after the deadline route back to Payday's recovery wallet
+ *    Funds sent after the deadline route back to Gum's recovery wallet
  *    rather than to the merchant, so continuing to show an address would only
  *    invite a transfer that has to come back.
  * 3. A gated deposit request discloses nothing but the issuer and heading until the
@@ -188,7 +188,7 @@ export function isTerminalStatus(status: DepositRequestStatus): boolean {
 }
 
 const RECOVERY_NOTE =
-  "Whatever arrived goes back to Payday's recovery wallet, not to the merchant. Nothing else is needed from you.";
+  "Whatever arrived goes back to Gum's recovery wallet, not to the merchant. Nothing else is needed from you.";
 
 export function checkoutView(payment: PayerDepositRequest, local: CheckoutLocalState): CheckoutView {
   const unlocked = unlockedDepositRequest(payment);
@@ -301,7 +301,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
 
   if (payment.status === "settled") {
     // Settlement is exact: the merchant receives the requested amount and any
-    // remainder goes back to Payday's recovery wallet, so an overpaid payer
+    // remainder goes back to Gum's recovery wallet, so an overpaid payer
     // is told where the rest went rather than left to assume the merchant is
     // holding it.
     const overpaid = received > BigInt(payment.amount_base_units);
@@ -313,7 +313,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       detail:
         "Exactly the requested amount reached the merchant. You can close this page." +
         (overpaid
-          ? " Anything above the requested amount went back to Payday's recovery wallet."
+          ? " Anything above the requested amount went back to Gum's recovery wallet."
           : ""),
       showInstructions: false,
       showWalletStep: false,
@@ -470,7 +470,7 @@ function unlockedView(payment: UnlockedPayerDepositRequest, local: CheckoutLocal
       label: "Partially deposited",
       title: `Send the remaining ${formatDisplayAmount(payment.remaining)} ${ready.token.symbol}`,
       detail:
-        "Transfers accumulate. If the total is still short at the deadline, the balance goes back to Payday's recovery wallet.",
+        "Transfers accumulate. If the total is still short at the deadline, the balance goes back to Gum's recovery wallet.",
       showInstructions: true,
       showWalletStep: false,
       isTerminal: false,

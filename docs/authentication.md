@@ -8,20 +8,20 @@ identity token: a signed statement of the user's DID, the mailbox they proved,
 and the embedded EVM wallet Privy created for them at their first sign-in.
 That token is the dashboard session. The API verifies it on every merchant
 route, provisions an account the first time it sees a DID, and records the
-wallet as where the account's deposits settle by default. Payday never sees a
+wallet as where the account's deposits settle by default. Gum never sees a
 password, never generates a code, and never holds the wallet's key.
 
 **Payers and issuer mailboxes are proven through Auth0.** A payer opening a
 gated deposit request, or a merchant proving an issuer identity's contact address,
-must show that a mailbox was just opened — but neither is a Payday customer,
+must show that a mailbox was just opened — but neither is a Gum customer,
 and those checks run many times more often than a merchant signs up. Creating
 a Privy user for each would be paying for accounts that exist for one code.
 So they stay on Auth0's embedded passwordless OTP: Auth0 creates the code,
 verifies it, and mints a token for a dedicated payer audience; Resend delivers
-the email; `gum-server` drives the exchange and only ever sees the code. Payday
+the email; `gum-server` drives the exchange and only ever sees the code. Gum
 stores neither the code nor the mailbox beyond the proof it needs.
 
-Each Privy identity owns exactly one active Payday API key. Requesting another
+Each Privy identity owns exactly one active Gum API key. Requesting another
 key atomically replaces the stored hash, increments its generation, and makes
 the prior key enter a 24-hour grace period. Plaintext keys are returned once;
 PostgreSQL stores only a SHA-256 digest and a final-six-character hint.
@@ -30,13 +30,13 @@ PostgreSQL stores only a SHA-256 digest and a final-six-character hint.
 
 | Value | Where to obtain it | Where to place it |
 |---|---|---|
-| Privy app id | Privy **Configuration → App settings** | API service (`PAYDAY_PRIVY_APP_ID`), web (`NEXT_PUBLIC_PRIVY_APP_ID`), `infra/terraform.tfvars`; it is public |
+| Privy app id | Privy **Configuration → App settings** | API service (`GUM_PRIVY_APP_ID`), web (`NEXT_PUBLIC_PRIVY_APP_ID`), `infra/terraform.tfvars`; it is public |
 | Auth0 issuer | Auth0 **Settings → Domain**, prefixed with `https://` and suffixed with `/` | API service, `infra/terraform.tfvars` |
-| Auth0 payer audience | The `Payday Payer` API identifier, `https://api.payday.sh/payer` | API service, `infra/terraform.tfvars` |
-| Auth0 payer client ID | `Payday Payer Verification` application **Settings → Client ID** | API service, Action secret, `infra/terraform.tfvars`; it is public |
+| Auth0 payer audience | The `Gum Payer` API identifier, `https://api.gum.money/payer` | API service, `infra/terraform.tfvars` |
+| Auth0 payer client ID | `Gum Payer Verification` application **Settings → Client ID** | API service, Action secret, `infra/terraform.tfvars`; it is public |
 | Resend API key | Resend **API Keys → Create API Key** | Auth0 **Branding → Email Provider** only |
 
-There is no Privy app secret anywhere in Payday: verifying an identity token
+There is no Privy app secret anywhere in Gum: verifying an identity token
 needs only the app's published keys, which `gum-server` fetches from
 `https://auth.privy.io/api/v1/apps/<app id>/jwks.json`. The Auth0 payer
 application has no client secret either. The separate Terraform deployment
@@ -46,9 +46,9 @@ it or the Resend API key in this repository, ECS, or a developer's shell.
 
 ### Launch authorization limitations
 
-At launch, a Privy identity maps to one Payday account with one active,
+At launch, a Privy identity maps to one Gum account with one active,
 unnamed server-side API key. That key can both create deposits and read every
-deposit owned by the account. Payday does not yet provide read-only or otherwise
+deposit owned by the account. Gum does not yet provide read-only or otherwise
 scoped keys, multiple concurrent named keys, source-IP allowlists, or
 team/organization membership. Share it only with principals that may exercise
 the account's full authority; rotation eventually disrupts every integration
@@ -68,7 +68,7 @@ are accepted for launch, not guarantees of the long-term authorization model.
    data in an identity token**. The identity token is the session; without
    it the dashboard has nothing to send.
 5. In **Configuration → App settings → Domains**, allow the dashboard's
-   origins: `https://payday.sh` in production, `http://127.0.0.1:3002` for
+   origins: `https://gum.money` in production, `http://127.0.0.1:3002` for
    the local Next.js dev server (there is no local stand-in for Privy; local
    development signs in against the development app for real).
 6. Optionally, in **Advanced**, enable **test accounts** on the development
@@ -78,18 +78,18 @@ are accepted for launch, not guarantees of the long-term authorization model.
 
 ## 2. Configure Resend
 
-1. Create a Resend account controlled by Payday.
+1. Create a Resend account controlled by Gum.
 2. In **Domains**, add a dedicated sending subdomain such as
-   `auth.payday.sh`.
+   `auth.gum.money`.
 3. Add the DKIM, SPF, and return-path DNS records Resend displays. Wait for the
    domain to show **Verified**. Add a DMARC record in monitoring mode and tighten
    it after verifying alignment.
 4. In **API Keys**, create a key named `Auth0 production`, grant **Sending
-   access**, and restrict it to `auth.payday.sh`. Copy it now; Resend will not
+   access**, and restrict it to `auth.gum.money`. Copy it now; Resend will not
    show it again.
 5. In Auth0, open **Branding → Email Provider**, enable **Use my own email
    provider**, select **Resend**, set the sender to a verified address such as
-   `Payday <login@auth.payday.sh>`, paste the Resend key, and save.
+   `Gum <login@auth.gum.money>`, paste the Resend key, and save.
 6. Click **Send Test Email**. Confirm delivery and check both Auth0
    **Monitoring → Logs** and Resend **Emails**.
 
@@ -102,30 +102,30 @@ Privy; Resend carries only payer and issuer-mailbox codes.
 
 Auth0's job is one audience: the proof that a merchant-asserted mailbox was
 just opened. It has no merchant audience and no merchant application any
-more — a tenant that still carries the `Payday API` resource server, the
-`Payday CLI` native application, the `Payday Dashboard` single-page
-application, or the `Payday email OTP claims` Action from before can delete
+more — a tenant that still carries the `Gum API` resource server, the
+`Gum CLI` native application, the `Gum Dashboard` single-page
+application, or the `Gum email OTP claims` Action from before can delete
 them; nothing reads their tokens.
 
 1. Create an Auth0 tenant in the desired production region. Record its domain as
-   `PAYDAY_PAYER_AUTH0_ISSUER=https://<tenant-domain>/`.
+   `GUM_PAYER_AUTH0_ISSUER=https://<tenant-domain>/`.
 2. Follow [`auth0/README.md`](../auth0/README.md) to import the existing Email
    connection and apply the tracked Terraform configuration. Terraform fixes
    the code at six digits and the expiry at five minutes, enables signups and
    brute-force protection, and installs the branded template. Auth0 supports
    HTML only for passwordless templates; it cannot attach a separate
    plain-text MIME part.
-3. Open **Applications → APIs** and create an API named `Payday Payer` with
-   identifier `https://api.payday.sh/payer` (RS256).
-4. Let Terraform create the `Payday Payer Verification` application
+3. Open **Applications → APIs** and create an API named `Gum Payer` with
+   identifier `https://api.gum.money/payer` (RS256).
+4. Let Terraform create the `Gum Payer Verification` application
    (`auth0/payer.tf`), or create a **Native** application by hand with only
    the passwordless OTP grant and the `email` connection enabled. In the
    connection's **Applications** tab, enable only this application.
 5. Open **Actions → Library → Build Custom** and create a **Post Login**
-   Action named `Payday payer email OTP claims` from
-   `auth0/actions/payday-payer-email-otp.js` with two secrets:
-   - `PAYDAY_PAYER_AUDIENCE` = `https://api.payday.sh/payer`
-   - `PAYDAY_PAYER_CLIENT_ID` = the `Payday Payer Verification` Client ID
+   Action named `Gum payer email OTP claims` from
+   `auth0/actions/gum-payer-email-otp.js` with two secrets:
+   - `GUM_PAYER_AUDIENCE` = `https://api.gum.money/payer`
+   - `GUM_PAYER_CLIENT_ID` = the `Gum Payer Verification` Client ID
 6. Deploy it and add it to the Post Login flow.
 
 The payer Action is inert for every other audience and denies every other
@@ -143,29 +143,29 @@ brute-force and suspicious-IP blocking and notifications; breached-password
 detection is intentionally irrelevant to this passwordless-only tenant. Keep
 the OTP email wording non-enumerating and free of deposit data.
 
-## 4. Configure Payday
+## 4. Configure Gum
 
 Configure `gum-server` (or its untracked local `.env`) with:
 
 ```bash
 # Merchant sign-in: the Privy app's public id. Unset, only API keys authenticate.
-export PAYDAY_PRIVY_APP_ID="<Privy app id>"
+export GUM_PRIVY_APP_ID="<Privy app id>"
 # Payer and issuer-mailbox verification (all four together, or none).
-export PAYDAY_PAYER_AUTH0_ISSUER="https://<tenant-domain>/"
-export PAYDAY_PAYER_AUTH0_AUDIENCE="https://api.payday.sh/payer"
-export PAYDAY_PAYER_AUTH0_CLIENT_ID="<Payday-Payer-Verification-client-id>"
+export GUM_PAYER_AUTH0_ISSUER="https://<tenant-domain>/"
+export GUM_PAYER_AUTH0_AUDIENCE="https://api.gum.money/payer"
+export GUM_PAYER_AUTH0_CLIENT_ID="<Gum-Payer-Verification-client-id>"
 # 32 random bytes, standard base64: derives the merchant-scoped payer references.
-export PAYDAY_PAYER_REF_MASTER_KEY="$(openssl rand -base64 32)"
+export GUM_PAYER_REF_MASTER_KEY="$(openssl rand -base64 32)"
 # The browser origin allowed to call the verification write routes; defaults
-# to PAYDAY_PUBLIC_BASE_URL.
-export PAYDAY_HOSTED_CHECKOUT_ORIGIN="https://payday.sh"
+# to GUM_PUBLIC_BASE_URL.
+export GUM_HOSTED_CHECKOUT_ORIGIN="https://gum.money"
 ```
 
 `gum-server` fetches the Privy app's key set at startup and refuses to start if
 it cannot; afterwards it refreshes the set every five minutes or on an unknown
 key id, and fails closed once it has gone an hour without a successful
-refresh. Without `PAYDAY_PRIVY_APP_ID` every dashboard session is refused and
-only API keys authenticate. Without the `PAYDAY_PAYER_*` settings the API
+refresh. Without `GUM_PRIVY_APP_ID` every dashboard session is refused and
+only API keys authenticate. Without the `GUM_PAYER_*` settings the API
 still serves gated deposit requests, but their verification routes — and issuer
 mailbox verification — answer `503 verification_unavailable`.
 
@@ -178,7 +178,7 @@ passes them to the API task.
 
 ## 5. Sign in and create a first key
 
-Open `payday.sh`, choose **Start Building**, enter a mailbox, and enter the
+Open `gum.money`, choose **Start Building**, enter a mailbox, and enter the
 code Privy emails. The API provisions the account on that first request, with
 the embedded wallet Privy created; the dashboard's **Account** section shows
 the mailbox, the wallet in full, and its balance on the deployment's chain.
@@ -201,13 +201,13 @@ and grace-period keys. A later **Generate key** issues a new generation.
 
 ## 7. Dashboard sessions
 
-The merchant dashboard at `payday.sh/dashboard` is a browser application, so it
+The merchant dashboard at `gum.money/dashboard` is a browser application, so it
 never holds an API key. Its session is Privy's identity token: the landing
 page's sign-up dialog, which is the only way in, runs Privy's email code
 exchange through Privy's own SDK (`useLoginWithEmail`), and the SDK keeps the
 resulting tokens in the browser and refreshes them while the merchant stays
 signed in. The dashboard reads the current identity token from the SDK and
-sends it as `Authorization: Bearer <token>` on every call; nothing of Payday's
+sends it as `Authorization: Bearer <token>` on every call; nothing of Gum's
 stores a credential of its own.
 
 `gum-server` verifies the token's ES256 signature against the app's JWKS, its
@@ -269,10 +269,10 @@ unit tests. Before launch, additionally:
    an address already exists.
 4. Deliver real payer codes to Gmail and one other mailbox; inspect the raw
    received headers and require `spf=pass`, `dkim=pass`, and `dmarc=pass`
-   with the Payday From domain aligned. Also confirm the preheader, mobile
+   with the Gum From domain aligned. Also confirm the preheader, mobile
    layout, code block, expiry copy, ignore copy, and support link render
    correctly.
-5. Send a message to `support@payday.sh` and confirm it reaches the operator
+5. Send a message to `support@gum.money` and confirm it reaches the operator
    who owns authentication support.
 6. Revoke a staging Resend key and confirm payer verification fails closed
    while merchant sign-in and already issued API keys continue to work.

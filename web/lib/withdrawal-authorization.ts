@@ -1,4 +1,4 @@
-import type { Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "@payday/sdk";
+import type { Withdrawal, WithdrawalLeg, WithdrawalTypedData } from "@gum/sdk";
 import { encodeAbiParameters, keccak256, type TypedDataDefinition } from "viem";
 import { bridges, chainById, tokenOn } from "./config";
 

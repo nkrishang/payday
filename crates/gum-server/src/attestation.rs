@@ -1,4 +1,4 @@
-//! Proof of Payment attestations (product plan §5.5): Payday's signature over
+//! Proof of Payment attestations (product plan §5.5): Gum's signature over
 //! a verification outcome. Outcomes happen after issuance, so they cannot be
 //! committed into the payment address; they are signed instead, with a key
 //! dedicated to attestations — never the sweep signer or the recovery wallet.
@@ -52,7 +52,7 @@ impl VerificationAttestor {
             AttestationSignerConfig::Local(key) => {
                 let signer: PrivateKeySigner = key
                     .parse()
-                    .map_err(|error| format!("invalid PAYDAY_ATTESTATION_SIGNER_KEY: {error}"))?;
+                    .map_err(|error| format!("invalid GUM_ATTESTATION_SIGNER_KEY: {error}"))?;
                 Ok(Self::local(signer))
             }
             AttestationSignerConfig::AwsKms(key_id) => {
@@ -62,7 +62,7 @@ impl VerificationAttestor {
                 let signer = AwsSigner::new(kms, key_id.clone(), None)
                     .await
                     .map_err(|error| {
-                        format!("failed to initialize PAYDAY_ATTESTATION_KMS_KEY_ID: {error}")
+                        format!("failed to initialize GUM_ATTESTATION_KMS_KEY_ID: {error}")
                     })?;
                 Ok(Self {
                     backend: Arc::new(Backend::Kms(signer)),

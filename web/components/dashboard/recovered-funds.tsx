@@ -1,4 +1,4 @@
-import type { DepositRequest } from "@payday/sdk";
+import type { DepositRequest } from "@gum/sdk";
 import { ArrowUpRight } from "lucide-react";
 import { formatBaseUnits, formatDisplayAmount, truncateHash } from "@/lib/format";
 import { formatDate } from "./labels";

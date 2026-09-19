@@ -1,4 +1,4 @@
-import type { Party } from "@payday/sdk";
+import type { Party } from "@gum/sdk";
 import { tokenSymbol, type UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { formatDisplayAmount } from "@/lib/format";
 import { AttachmentLink } from "./attachment-link";

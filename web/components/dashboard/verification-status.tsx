@@ -1,4 +1,4 @@
-import type { PayerVerification } from "@payday/sdk";
+import type { PayerVerification } from "@gum/sdk";
 import { AlertTriangle } from "lucide-react";
 import { StatusDot } from "@/components/ui/status-dot";
 import { formatDate, verificationLabel } from "./labels";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PaydayClient, PaydayError, checkoutUrl } from "../dist/index.js";
+import { GumClient, GumError, checkoutUrl } from "../dist/index.js";
 
 function mockFetch(handler) {
   const calls = [];
@@ -29,7 +29,7 @@ const request = {
 
 test("create sends bearer auth, JSON, and the caller's idempotency key", async () => {
   const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test/", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test/", fetch: mock.fetch });
 
   const payment = await client.depositRequests.create(request, "order-123");
 
@@ -43,7 +43,7 @@ test("create sends bearer auth, JSON, and the caller's idempotency key", async (
 
 test("create sends exactly the invoice fields, never a refund address or memo", async () => {
   const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await client.depositRequests.create(request, "order-123");
 
@@ -59,27 +59,27 @@ test("create sends exactly the invoice fields, never a refund address or memo", 
 
 test("create rejects a missing idempotency key before fetch", () => {
   const mock = mockFetch(() => { throw new Error("must not fetch"); });
-  const client = new PaydayClient({ apiKey: "secret", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", fetch: mock.fetch });
   assert.throws(() => client.depositRequests.create(request, ""), /idempotencyKey is required/);
   assert.equal(mock.calls.length, 0);
 });
 
 test("the client takes exactly one credential and sends either as the bearer", async () => {
-  assert.throws(() => new PaydayClient({}), /exactly one of apiKey or accessToken/);
+  assert.throws(() => new GumClient({}), /exactly one of apiKey or accessToken/);
   assert.throws(
-    () => new PaydayClient({ apiKey: "key", accessToken: "token" }),
+    () => new GumClient({ apiKey: "key", accessToken: "token" }),
     /exactly one of apiKey or accessToken/,
   );
 
   const mock = mockFetch(() => json({ deposit_requests: [], next_cursor: null }));
-  const dashboard = new PaydayClient({ accessToken: "eyJ.access.token", baseUrl: "https://example.test", fetch: mock.fetch });
+  const dashboard = new GumClient({ accessToken: "eyJ.access.token", baseUrl: "https://example.test", fetch: mock.fetch });
   await dashboard.depositRequests.list();
   assert.equal(mock.calls[0].init.headers.Authorization, "Bearer eyJ.access.token");
 });
 
 test("list and long polling encode deposit request query parameters", async () => {
   const mock = mockFetch(() => new Response('{"deposit_requests":[],"next_cursor":null}'));
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   const page = await client.depositRequests.list({ starting_after: "dr_cursor/id", status: "deposited", reference: "a & b", limit: 25 });
   assert.deepEqual(page, { deposit_requests: [], next_cursor: null });
   assert.equal(mock.calls[0].url, "https://example.test/v1/deposit-requests?starting_after=dr_cursor%2Fid&status=deposited&reference=a+%26+b&limit=25");
@@ -94,7 +94,7 @@ test("attachment, request PDF, and proof reads use the deposit request sub-route
     if (url.endsWith("/proof")) return json({ version: "1", payment_id: "dr_a/b", transfers: [] });
     return json({ id: "att_1", filename: "request.pdf", mime_type: "application/pdf", download_url: "https://signed.example" });
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const attachment = await client.depositRequests.attachment("dr_a/b");
   const blob = await client.depositRequests.requestPdf("dr_a/b");
@@ -113,10 +113,10 @@ test("attachment, request PDF, and proof reads use the deposit request sub-route
 
 test("proof before settlement surfaces deposit_request_not_settled", async () => {
   const mock = mockFetch(() => apiError("deposit_request_not_settled", 409, "DepositRequest has not settled"));
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await assert.rejects(client.depositRequests.proof("dr_1"), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "deposit_request_not_settled");
     assert.equal(error.status, 409);
     return true;
@@ -126,7 +126,7 @@ test("proof before settlement surfaces deposit_request_not_settled", async () =>
 test("customer methods use canonical routes, PATCH for updates, and encoded cursors", async () => {
   const customer = { id: "cus_1", name: "Customer Inc", email: null, details: null };
   const mock = mockFetch((url) => (url.includes("?") ? json({ customers: [customer], next_cursor: null }) : json(customer)));
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await client.customers.create({ name: "Customer Inc", email: "ap@customer.example" });
   await client.customers.get("cus/1");
@@ -163,7 +163,7 @@ test("upload reserves a slot, PUTs the bytes with the presigned headers verbatim
     if (url === "https://example.test/v1/attachments/att_1/finalize") return json(ready);
     throw new Error(`unexpected ${init.method} ${url}`);
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
 
   const descriptor = await client.attachments.upload(bytes, "request.pdf");
@@ -175,7 +175,7 @@ test("upload reserves a slot, PUTs the bytes with the presigned headers verbatim
   assert.deepEqual(JSON.parse(create.init.body), { filename: "request.pdf" });
   assert.equal(put.init.method, "PUT");
   // The presigned URL only admits a request whose headers match what was signed,
-  // and it is a bucket URL: no Payday bearer may leak to it.
+  // and it is a bucket URL: no Gum bearer may leak to it.
   assert.deepEqual(put.init.headers, slot.headers);
   assert.equal(put.init.headers.Authorization, undefined);
   assert.deepEqual(new Uint8Array(await put.init.body.arrayBuffer()), bytes);
@@ -191,7 +191,7 @@ test("upload retries finalize while the scan is pending and returns once admitte
     finalizeCalls += 1;
     return finalizeCalls === 1 ? apiError("attachment_scan_pending", 409) : json(ready);
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const descriptor = await client.attachments.upload(new Blob(["%PDF-"]), "request.pdf");
 
@@ -207,10 +207,10 @@ test("upload gives up with attachment_scan_timeout when the scan outlasts the bo
     finalizeCalls += 1;
     return apiError("attachment_scan_pending", 409);
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await assert.rejects(client.attachments.upload(new Blob(["%PDF-"]), "request.pdf", { scanTimeout: 0 }), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "attachment_scan_timeout");
     assert.equal(error.requestId, "req-attachment_scan_pending");
     return true;
@@ -226,9 +226,9 @@ test("upload surfaces a rejection or a failed PUT as the API error, without retr
     finalizeCalls += 1;
     return apiError("attachment_rejected", 422, "Not a PDF");
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: rejecting.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: rejecting.fetch });
   await assert.rejects(client.attachments.upload(new Blob(["nope"]), "request.pdf"), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "attachment_rejected");
     assert.equal(error.status, 422);
     assert.equal(error.message, "Not a PDF");
@@ -241,9 +241,9 @@ test("upload surfaces a rejection or a failed PUT as the API error, without retr
     if (url === slot.upload_url) return new Response("<Error/>", { status: 403 });
     throw new Error("finalize must not run after a failed PUT");
   });
-  const other = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: failingPut.fetch });
+  const other = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: failingPut.fetch });
   await assert.rejects(other.attachments.upload(new Blob(["%PDF-"]), "request.pdf"), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "attachment_upload_failed");
     assert.equal(error.status, 403);
     return true;
@@ -259,7 +259,7 @@ test("upload forwards an abort signal to every request and to the scan wait", as
     controller.abort(new Error("cancelled by the caller"));
     return apiError("attachment_scan_pending", 409);
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await assert.rejects(
     client.attachments.upload(new Blob(["%PDF-"]), "request.pdf", { signal: controller.signal }),
@@ -275,8 +275,8 @@ test("webhook and status methods use canonical routes and enveloped lists", asyn
     if (url.includes("/v1/webhook-deliveries")) return json({ deliveries: [], next_cursor: null });
     return json({});
   });
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
-  await client.webhooks.add("https://hooks.example.test/payday");
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  await client.webhooks.add("https://hooks.example.test/gum");
   const listed = await client.webhooks.list();
   await client.webhooks.get("endpoint/id");
   const removed = await client.webhooks.remove("endpoint/id");
@@ -323,7 +323,7 @@ test("status returns one picture per network, including signers and the withdraw
       ],
     }),
   );
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const status = await client.status();
 
@@ -342,7 +342,7 @@ test("cancel and transfers return the deposit request and an enveloped list", as
       ? json({ id: "dr_1", status: "awaiting_deposit", cancellation_requested_at: "2026-09-06T12:00:00Z" })
       : json({ transfers: [] }),
   );
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   const cancelled = await client.depositRequests.cancel("dr_1");
   const transfers = await client.depositRequests.transfers("dr_1");
   assert.equal(cancelled.id, "dr_1");
@@ -356,7 +356,7 @@ test("cancel and transfers return the deposit request and an enveloped list", as
 
 test("create may name saved records instead of inline parties", async () => {
   const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
-  const client = new PaydayClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   await client.depositRequests.create(
     { amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", verification: { wallet_attestation: true } },
     "order-124",
@@ -370,10 +370,10 @@ test("API errors expose stable code, requestId, and HTTP status", async () => {
   const mock = mockFetch(() => new Response(JSON.stringify({
     error: { code: "deposit_request_not_found", message: "Deposit request not found" }, request_id: "req-123",
   }), { status: 404 }));
-  const client = new PaydayClient({ apiKey: "secret", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "secret", fetch: mock.fetch });
 
   await assert.rejects(client.depositRequests.get("missing"), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.message, "Deposit request not found");
     assert.equal(error.code, "deposit_request_not_found");
     assert.equal(error.requestId, "req-123");
@@ -394,7 +394,7 @@ test("verification detail uses the payment sub-route", async () => {
     }],
   };
   const mock = mockFetch(() => json(detail));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const read = await client.depositRequests.verification("dr_a/b");
   assert.equal(read.attempts[0].status, "approved");
@@ -408,7 +408,7 @@ test("verification detail uses the payment sub-route", async () => {
 test("a merchant-auth deposit request returns its client secret once and mints more on request", async () => {
   const issued = {
     id: "dr_1",
-    deposit_url: "https://payday.sh/pay/dr_1",
+    deposit_url: "https://gum.money/pay/dr_1",
     verification: { merchant_auth: { payer_reference: "user_123" }, wallet_attestation: false },
     client_secret: "cs_first",
     client_secret_expires_at: "2026-09-01T00:15:00Z",
@@ -418,14 +418,14 @@ test("a merchant-auth deposit request returns its client secret once and mints m
     // The replay carries no secret; only the first response does.
     return json(init.headers["Idempotency-Key"] === "replay" ? { ...issued, client_secret: undefined, client_secret_expires_at: undefined } : issued, 201);
   });
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const created = await client.depositRequests.create(
     { ...request, verification: { merchant_auth: { payer_reference: "user_123" } } },
     "first",
   );
   assert.equal(created.client_secret, "cs_first");
-  assert.equal(checkoutUrl(created, created.client_secret), "https://payday.sh/pay/dr_1#cs=cs_first");
+  assert.equal(checkoutUrl(created, created.client_secret), "https://gum.money/pay/dr_1#cs=cs_first");
   assert.deepEqual(JSON.parse(mock.calls[0].init.body).verification, { merchant_auth: { payer_reference: "user_123" } });
 
   const replayed = await client.depositRequests.create(
@@ -442,15 +442,15 @@ test("a merchant-auth deposit request returns its client secret once and mints m
   assert.equal(mock.calls[2].init.body, undefined);
   assert.equal(mock.calls[2].init.headers.Authorization, "Bearer k");
   // The secret rides in the fragment, encoded, and never without a secret.
-  assert.equal(checkoutUrl({ deposit_url: "https://payday.sh/pay/dr_1" }, "cs_a+b"), "https://payday.sh/pay/dr_1#cs=cs_a%2Bb");
+  assert.equal(checkoutUrl({ deposit_url: "https://gum.money/pay/dr_1" }, "cs_a+b"), "https://gum.money/pay/dr_1#cs=cs_a%2Bb");
   assert.throws(() => checkoutUrl(created, ""), TypeError);
 });
 
 test("minting a client secret for the wrong mode surfaces the API's code", async () => {
   const mock = mockFetch(() => apiError("verification_method_not_applicable", 409));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
   await assert.rejects(client.depositRequests.createClientSecret("dr_1"), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "verification_method_not_applicable");
     assert.equal(error.status, 409);
     return true;
@@ -465,7 +465,7 @@ test("account.get reads with the client's own credential", async () => {
     rotated_at: "2026-09-02T00:00:00Z", previous_key_expires_at: "2026-09-03T00:00:00Z", revoked_at: null,
   };
   const mock = mockFetch(() => json(metadata));
-  const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const account = await client.account.get();
 
@@ -475,11 +475,11 @@ test("account.get reads with the client's own credential", async () => {
 });
 
 test("account.issueApiKey issues against the account's generation with the session", async () => {
-  const issued = { api_key: "payday_live_abc", generation: 3, replaced_previous_key: true };
+  const issued = { api_key: "gum_live_abc", generation: 3, replaced_previous_key: true };
   const mock = mockFetch(() => json(issued, 200));
   // The session is the credential: the same token the client reads with is
   // what mints the key. (The API refuses an API key here on its own.)
-  const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const result = await client.account.issueApiKey(2);
 
@@ -492,7 +492,7 @@ test("account.issueApiKey issues against the account's generation with the sessi
 
 test("account.revokeApiKey sends the session and resolves on 204 No Content", async () => {
   const mock = mockFetch(() => new Response(null, { status: 204 }));
-  const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const result = await client.account.revokeApiKey(2);
 
@@ -505,22 +505,22 @@ test("account.revokeApiKey sends the session and resolves on 204 No Content", as
 
 test("account.issueApiKey surfaces an API key's refusal as identity_unauthorized", async () => {
   const mock = mockFetch(() => apiError("identity_unauthorized", 401));
-  const client = new PaydayClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await assert.rejects(client.account.issueApiKey(1), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "identity_unauthorized");
     assert.equal(error.status, 401);
     return true;
   });
 });
 
-test("account.issueApiKey surfaces a generation conflict as a typed PaydayError", async () => {
+test("account.issueApiKey surfaces a generation conflict as a typed GumError", async () => {
   const mock = mockFetch(() => apiError("api_key_generation_conflict", 409));
-  const client = new PaydayClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
+  const client = new GumClient({ accessToken: "session-token", baseUrl: "https://example.test", fetch: mock.fetch });
 
   await assert.rejects(client.account.issueApiKey(1), (error) => {
-    assert.ok(error instanceof PaydayError);
+    assert.ok(error instanceof GumError);
     assert.equal(error.code, "api_key_generation_conflict");
     assert.equal(error.status, 409);
     return true;

@@ -452,10 +452,10 @@ mod tests {
         }
     }
 
-    const KEY: &str = "payday_live_0123456789abcdef0123456789abcdef";
+    const KEY: &str = "gum_live_0123456789abcdef0123456789abcdef";
     /// The wallet the test payer signs attestations with.
     const PAYER_KEY: [u8; 32] = [7u8; 32];
-    /// The test deployment's `PAYDAY_RECOVERY_ADDRESS`, set on every state.
+    /// The test deployment's `GUM_RECOVERY_ADDRESS`, set on every state.
     const RECOVERY_ADDRESS: Address = Address::repeat_byte(0x14);
     /// A minimal PDF, byte for byte what the e2e suite uploads.
     const PDF: &[u8] = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF";
@@ -570,7 +570,7 @@ mod tests {
             networks,
             RECOVERY_ADDRESS,
             payer_access(),
-            "payday_live_".into(),
+            "gum_live_".into(),
             Some(WEBHOOK_KEY),
             Some(store),
             Some(attestor()),
@@ -598,8 +598,8 @@ mod tests {
             .unwrap();
         let tenant = Arc::new(FakeTenant {
             issuer: "https://payer.issuer/".into(),
-            audience: "https://api.payday.sh/payer".into(),
-            client_id: "payday-payer".into(),
+            audience: "https://api.gum.money/payer".into(),
+            client_id: "gum-payer".into(),
             kid: "payer-key".into(),
             key: EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap(),
             started: Default::default(),
@@ -607,8 +607,8 @@ mod tests {
         });
         let verifier = auth::Auth0Verifier::for_test(
             "https://payer.issuer/",
-            "https://api.payday.sh/payer",
-            "payday-payer",
+            "https://api.gum.money/payer",
+            "gum-payer",
             "payer-key",
             DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
         );
@@ -744,7 +744,7 @@ mod tests {
     }
 
     const CHECKOUT_ORIGIN: &str = "http://127.0.0.1:3000";
-    const SESSION_HEADER: &str = "payday-payer-session";
+    const SESSION_HEADER: &str = "gum-payer-session";
 
     /// A payer read, with the session header when one is given.
     fn payer_get(path: &str, session: Option<&str>) -> Request<Body> {
@@ -1067,7 +1067,7 @@ mod tests {
             Request::get("/v1/deposit-requests/not-an-id")
                 .header(
                     header::AUTHORIZATION,
-                    "Bearer payday_live_fedcba9876543210fedcba9876543210",
+                    "Bearer gum_live_fedcba9876543210fedcba9876543210",
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -1089,7 +1089,7 @@ mod tests {
             Request::post("/v1/deposit-requests")
                 .header(
                     header::AUTHORIZATION,
-                    "Bearer payday_live_fedcba9876543210fedcba9876543210",
+                    "Bearer gum_live_fedcba9876543210fedcba9876543210",
                 )
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -1373,7 +1373,7 @@ mod tests {
             Address::ZERO.to_checksum(None)
         );
         assert_eq!(created["networks"][1]["chain"]["id"], "2");
-        // The recovery term is Payday's own wallet from issuance, whatever
+        // The recovery term is Gum's own wallet from issuance, whatever
         // the payer later attests.
         assert_eq!(
             created["recovery_address"],
@@ -1510,7 +1510,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get(format!("/v1/payer/deposit-requests/{id}"))
-                    .header(header::ORIGIN, "https://payday.sh")
+                    .header(header::ORIGIN, "https://gum.money")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1747,7 +1747,7 @@ mod tests {
     async fn create_rejects_foreign_customers_and_unusable_attachments(pool: PgPool) {
         let app = app(pool.clone()).await;
         let account = test_account(&pool).await;
-        let other = other_account(&pool, "payday_live_other0123456789abcdef0123456789abcdef").await;
+        let other = other_account(&pool, "gum_live_other0123456789abcdef0123456789abcdef").await;
         let foreign_customer = customer(&pool, other, "Theirs").await;
         let foreign_pdf = ready_attachment(&pool, other, "theirs.pdf").await;
         let pending_pdf = pending_attachment(&pool, account).await;
@@ -2771,7 +2771,7 @@ mod tests {
         assert_eq!(challenge["chain"]["id"], "1");
         assert_eq!(challenge["chain"]["name"], "Ethereum");
         assert_eq!(challenge["typed_data"]["primaryType"], "PayerAttestation");
-        assert_eq!(challenge["typed_data"]["domain"]["name"], "Payday");
+        assert_eq!(challenge["typed_data"]["domain"]["name"], "Gum");
         assert_eq!(challenge["typed_data"]["domain"]["chainId"], 1);
         assert_eq!(
             challenge["typed_data"]["domain"]["verifyingContract"],
@@ -2852,7 +2852,7 @@ mod tests {
             assert!(bound.get(private).is_none(), "{private}");
         }
 
-        // The merchant sees the same address, Payday's recovery wallet as
+        // The merchant sees the same address, Gum's recovery wallet as
         // the recovery term (recovery is never the payer's, even attested),
         // and the material to settle it themselves; the row's binding
         // recomputes to the address it stored.
@@ -3060,8 +3060,8 @@ mod tests {
 
     #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
     async fn invoices_and_idempotency_keys_are_isolated_by_account(pool: PgPool) {
-        const FIRST: &str = "payday_live_first0123456789abcdef0123456789abcdef";
-        const SECOND: &str = "payday_live_second0123456789abcdef0123456789abcdef";
+        const FIRST: &str = "gum_live_first0123456789abcdef0123456789abcdef";
+        const SECOND: &str = "gum_live_second0123456789abcdef0123456789abcdef";
         let accounts = AccountRepository::new(pool.clone());
         accounts
             .issue_api_key_with_email(
@@ -3451,10 +3451,7 @@ mod tests {
             "the key is reserved under the account"
         );
         assert_eq!(reserved["headers"]["content-type"], "application/pdf");
-        assert_eq!(
-            reserved["headers"]["x-amz-tagging"],
-            "payday-upload=pending"
-        );
+        assert_eq!(reserved["headers"]["x-amz-tagging"], "gum-upload=pending");
         assert_eq!(
             reserved["headers"]["if-none-match"], "*",
             "the key is write-once"
@@ -3510,12 +3507,12 @@ mod tests {
         assert_eq!(created["attachment"]["sha256"], sha256_hex(PDF));
         let tags = storage.tags_of_version(&object_key, Some(&version));
         assert_eq!(
-            tags["payday-upload"], "attached",
+            tags["gum-upload"], "attached",
             "issuance retags the hashed version"
         );
         assert_eq!(tags[SCAN_STATUS_TAG], CLEAN_SCAN, "the verdict is kept");
         assert_eq!(
-            storage.tags_of_version(&object_key, Some(&replaced))["payday-upload"],
+            storage.tags_of_version(&object_key, Some(&replaced))["gum-upload"],
             "pending",
             "the replacement is left to the lifecycle rule"
         );
@@ -3559,7 +3556,7 @@ mod tests {
                 Request::get(format!(
                     "/v1/payer/deposit-requests/{payment_id}/attachment"
                 ))
-                .header(header::ORIGIN, "https://payday.sh")
+                .header(header::ORIGIN, "https://gum.money")
                 .body(Body::empty())
                 .unwrap(),
             )
@@ -3657,7 +3654,7 @@ mod tests {
         assert_eq!(rejected, 5);
 
         // Another account sees none of it.
-        const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "gum_live_other0123456789abcdef0123456789abcdef";
         other_account(&pool, OTHER).await;
         let (id, object_key, _) = reserve_upload(&app, KEY, "mine.pdf").await;
         storage.put(&object_key, "application/pdf", PDF);
@@ -3868,7 +3865,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(
-            storage.tags_of(&object_key)["payday-upload"],
+            storage.tags_of(&object_key)["gum-upload"],
             "attached",
             "the retag happened before the insert"
         );
@@ -3881,7 +3878,7 @@ mod tests {
             "idempotency_conflict"
         );
         assert_eq!(
-            storage.tags_of(&object_key)["payday-upload"],
+            storage.tags_of(&object_key)["gum-upload"],
             "pending",
             "the object is handed back to the lifecycle rule"
         );
@@ -4172,12 +4169,12 @@ mod tests {
         assert_eq!(moved["name"], "Acme Inc.");
 
         // Nobody else's identity, listed or fetched.
-        let theirs = other_account(&pool, "payday_live_ffffffffffffffffffffffffffffffff").await;
+        let theirs = other_account(&pool, "gum_live_ffffffffffffffffffffffffffffffff").await;
         let _ = theirs;
         let foreign = app
             .clone()
             .oneshot(get_request(
-                "payday_live_ffffffffffffffffffffffffffffffff",
+                "gum_live_ffffffffffffffffffffffffffffffff",
                 &format!("/v1/issuers/{id}"),
             ))
             .await
@@ -4608,7 +4605,7 @@ mod tests {
             .unwrap();
         assert_eq!(wrapped.status(), StatusCode::CREATED);
 
-        const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "gum_live_other0123456789abcdef0123456789abcdef";
         other_account(&pool, OTHER).await;
         let foreign_get = app
             .clone()
@@ -4837,7 +4834,7 @@ mod tests {
             serde_json::to_value(&proof).unwrap()
         );
 
-        const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "gum_live_other0123456789abcdef0123456789abcdef";
         other_account(&pool, OTHER).await;
         let foreign = app.oneshot(proof_request(OTHER)).await.unwrap();
         assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
@@ -5706,7 +5703,7 @@ mod tests {
         assert_eq!(webhook_events(&pool, &id).await.len(), 2);
 
         // Only the owner mints, and only for this mode.
-        const OTHER: &str = "payday_live_other0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "gum_live_other0123456789abcdef0123456789abcdef";
         other_account(&pool, OTHER).await;
         let foreign = app
             .clone()
@@ -6143,7 +6140,7 @@ mod tests {
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                 .header(
                     header::ACCESS_CONTROL_REQUEST_HEADERS,
-                    "content-type, payday-payer-session",
+                    "content-type, gum-payer-session",
                 )
                 .body(Body::empty())
                 .unwrap()
@@ -6169,7 +6166,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_ascii_lowercase();
-        for name in ["content-type", "payday-payer-session"] {
+        for name in ["content-type", "gum-payer-session"] {
             assert!(allowed_headers.contains(name), "{allowed_headers}");
         }
         assert!(
@@ -6215,10 +6212,7 @@ mod tests {
                 Request::options("/v1/payer/deposit-requests/dr_x")
                     .header(header::ORIGIN, "https://merchant.example")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
-                    .header(
-                        header::ACCESS_CONTROL_REQUEST_HEADERS,
-                        "payday-payer-session",
-                    )
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "gum-payer-session")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6234,7 +6228,7 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_ascii_lowercase()
-                .contains("payday-payer-session")
+                .contains("gum-payer-session")
         );
     }
 
@@ -6382,7 +6376,7 @@ mod tests {
         )
         .await;
 
-        const OTHER: &str = "payday_live_previewother0123456789abcdef012345";
+        const OTHER: &str = "gum_live_previewother0123456789abcdef012345";
         other_account(&pool, OTHER).await;
         let foreign = app
             .clone()
@@ -6437,7 +6431,7 @@ mod tests {
         let endpoint = gum_ledger::WebhookRepository::new(pool.clone())
             .add(
                 account,
-                "https://hooks.example/payday",
+                "https://hooks.example/gum",
                 b"whsec_test",
                 &[1u8; 28],
             )
@@ -6475,7 +6469,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(fetched["url"], "https://hooks.example/payday");
+        assert_eq!(fetched["url"], "https://hooks.example/gum");
         assert!(fetched.get("secret").is_none());
 
         // A test event is one delivery, listed with its (so far empty) history.
@@ -6523,7 +6517,7 @@ mod tests {
         }
 
         // Missing, malformed, and foreign ids all read as not found.
-        const OTHER: &str = "payday_live_webhookother0123456789abcdef012345";
+        const OTHER: &str = "gum_live_webhookother0123456789abcdef012345";
         other_account(&pool, OTHER).await;
         for (key, path) in [
             (KEY, format!("/v1/webhooks/{}", WebhookId::generate())),
@@ -6749,11 +6743,11 @@ mod tests {
 
     // --- Withdrawals ---
 
-    /// The key behind the test merchant's Payday wallet.
+    /// The key behind the test merchant's Gum wallet.
     const MERCHANT_KEY: [u8; 32] = [9u8; 32];
     const WITHDRAWAL_DESTINATION: &str = "0xD00dD00dd00Dd00dD00DD00dD00Dd00dd00dD00D";
 
-    /// Give the test account a Payday wallet, as a dashboard session would.
+    /// Give the test account a Gum wallet, as a dashboard session would.
     async fn give_wallet(pool: &PgPool, account: AccountId) -> Address {
         let wallet = gum_core::wallet_of(&MERCHANT_KEY);
         sqlx::query("UPDATE accounts SET wallet_address = $2 WHERE id = $1")
@@ -7065,12 +7059,12 @@ mod tests {
         assert_eq!(again["legs"][1]["kind"], "bridge");
 
         // Other accounts see nothing of it.
-        let other = other_account(&pool, "payday_live_ffffffffffffffffffffffffffffffff").await;
+        let other = other_account(&pool, "gum_live_ffffffffffffffffffffffffffffffff").await;
         let _ = other;
         let foreign = app
             .clone()
             .oneshot(get_request(
-                "payday_live_ffffffffffffffffffffffffffffffff",
+                "gum_live_ffffffffffffffffffffffffffffffff",
                 &format!("/v1/withdrawals/{id}"),
             ))
             .await

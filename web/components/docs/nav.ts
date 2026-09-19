@@ -33,7 +33,7 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
       {
         href: "/docs",
         title: "Introduction",
-        summary: "What Payday does and how a deposit flows.",
+        summary: "What Gum does and how a deposit flows.",
       },
       {
         href: "/docs/quickstart",
@@ -53,7 +53,7 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
     ],
   },
   {
-    title: "Using Payday",
+    title: "Using Gum",
     pages: [
       {
         href: "/docs/dashboard",
@@ -63,7 +63,7 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
       {
         href: "/docs/withdrawals",
         title: "Withdrawals",
-        summary: "Move the Payday wallet's USDC or USDT to one address.",
+        summary: "Move the Gum wallet's USDC or USDT to one address.",
       },
       {
         href: "/docs/checkout",
@@ -102,7 +102,7 @@ export const DOCS_NAV: ReadonlyArray<DocsGroup> = [
     pages: [
       {
         href: "/docs/security",
-        title: "How Payday works",
+        title: "How Gum works",
         summary: "Architecture and security, for due diligence.",
       },
       { href: "/docs/faq", title: "FAQ", summary: "Short answers to the questions merchants ask." },

@@ -1,12 +1,12 @@
 "use client";
 
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 import type { UnlockedPayerDepositRequest } from "@/lib/checkout-state";
 import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
-import { payerClient } from "@/lib/payday";
+import { payerClient } from "@/lib/gum";
 import { NetworkSelect } from "./network-select";
 
 /**
@@ -98,7 +98,7 @@ export function NetworkStep({
 }
 
 function describe(cause: unknown): string {
-  if (cause instanceof PaydayError) {
+  if (cause instanceof GumError) {
     switch (cause.code) {
       case "network_already_chosen":
         return "This deposit request is already set to another network. Reload the page to see it.";

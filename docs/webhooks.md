@@ -1,6 +1,6 @@
 # Webhooks
 
-Set `PAYDAY_WEBHOOK_ENCRYPTION_KEY` to exactly 32 random bytes encoded with
+Set `GUM_WEBHOOK_ENCRYPTION_KEY` to exactly 32 random bytes encoded with
 standard base64. Startup without it is an explicit safe boundary: endpoint
 creation and delivery are disabled. Signing secrets are returned only by
 `POST /v1/webhooks`; the database stores SHA-256 for identification and an
@@ -14,7 +14,7 @@ version/key ID, so retain old key material until it has been re-encrypted; merel
 creating a new Secrets Manager version is not a complete application-level
 rotation.
 
-Endpoint URLs must be credential-free HTTPS URLs with a DNS hostname. Payday
+Endpoint URLs must be credential-free HTTPS URLs with a DNS hostname. Gum
 resolves and rejects every loopback, private, link-local, and reserved
 destination both when an endpoint is created and immediately before every
 request. Redirects are never followed. `DELETE /v1/webhooks/{id}` disables an
@@ -23,8 +23,8 @@ endpoint (`204`) without deleting delivery history, which
 subsequently be registered with a new secret. The routes are listed in the
 [HTTP API reference](api-reference.md#webhooks).
 
-Deliveries contain `Payday-Event-Id`, `Payday-Event-Type`, and
-`Payday-Signature: v1,t=<unix-seconds>,sha256=<hex>`. Verify HMAC-SHA256 with
+Deliveries contain `Gum-Event-Id`, `Gum-Event-Type`, and
+`Gum-Signature: v1,t=<unix-seconds>,sha256=<hex>`. Verify HMAC-SHA256 with
 the signing secret over the exact bytes `v1.<timestamp>.<raw HTTP body>`, and
 reject stale timestamps. Event IDs are idempotency keys. Non-2xx responses are
 retried exponentially (up to 12 attempts, capped at one hour); redirects are
@@ -43,7 +43,7 @@ that updates the lifecycle row.
 | Event | When |
 |---|---|
 | `deposit_request.deposited`, `deposit_request.settled`, `deposit_request.expired`, `deposit_request.returned`, `deposit_request.needs_attention` | The lifecycle transitions above |
-| `deposit_request.recovered_funds` | Funds were recovered on the deposit request's behalf into Payday's recovery custody: an overpayment remainder at settlement, an expired balance, or a late transfer. Payday returns them to the payer manually, after review. One event per recovered amount, written in the transaction that records it, so **a deposit request can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
+| `deposit_request.recovered_funds` | Funds were recovered on the deposit request's behalf into Gum's recovery custody: an overpayment remainder at settlement, an expired balance, or a late transfer. Gum returns them to the payer manually, after review. One event per recovered amount, written in the transaction that records it, so **a deposit request can raise this event more than once** (an overpayment, then a late transfer) and it does not consume the lifecycle uniqueness slot |
 | `verification.approved` | Raised by the database when `verification_completed_at` is first set: the deposit request's identity add-ons were satisfied — a proven mailbox, or a merchant-auth client secret exchanged by the hosted checkout. Requests with neither identity add-on never raise it |
 | `deposit_request.ready` | Raised by the database when the deposit address first exists: the network was fixed — at issuance for a pinned `chain_id`, on network selection otherwise — or, on a wallet-attested request, the payer attested their wallet. This is the moment an integration may quote the address |
 | `deposit_request.likely_unsolicited` | Raised by the database when `likely_unsolicited_at` is first set: on a wallet-attested request, finalized funds arrived from a wallet other than the attested one. They count toward the amount and settle, but they are not the payer's, and no Proof of Payment is issued. Requests without wallet attestation never raise it |
@@ -61,7 +61,7 @@ when the request failed or was not the payer's after all.
 ## Payload
 
 Payloads use the public, versioned `2026-08-01` envelope: `id` (the `evt_`
-event id, also sent as `Payday-Event-Id`), `type`, `occurred_at`, and
+event id, also sent as `Gum-Event-Id`), `type`, `occurred_at`, and
 `data`. Every deposit request event carries
 `data.deposit_request`, a strict subset of the API's own deposit request
 object under the same names, units, and formats — so a handler can hand
@@ -131,7 +131,7 @@ request is indistinguishable from one for an exact deposit, and
 ```
 
 `reason` is one of `overpayment`, `expired`, or `late_transfer`. The
-recovered funds moved on-chain to Payday's recovery custody in the named
+recovered funds moved on-chain to Gum's recovery custody in the named
 transaction; returning them to the payer is a separate, manual step after
 review. Use these events to explain to a payer where the
 difference went.

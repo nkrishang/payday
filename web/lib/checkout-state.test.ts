@@ -99,7 +99,7 @@ describe("checkoutView", () => {
     );
     expect(view.phase).toBe("settled");
     expect(view.detail).toMatch(/Exactly the requested amount reached the merchant/);
-    expect(view.detail).toMatch(/above the requested amount went back to Payday's recovery wallet/);
+    expect(view.detail).toMatch(/above the requested amount went back to Gum's recovery wallet/);
     expect(view.detail).not.toMatch(/wallet you signed with|Gum support|refund/i);
   });
 
@@ -189,14 +189,14 @@ describe("checkoutView", () => {
       open,
     );
     expect(funded.phase).toBe("expired_funded");
-    expect(funded.detail).toMatch(/back to Payday's recovery wallet/);
+    expect(funded.detail).toMatch(/back to Gum's recovery wallet/);
     expect(funded.detail).not.toMatch(/Gum support|wallet you signed with/);
   });
 
   it("says plainly where returned funds went", () => {
     const view = checkoutView(payment({ status: "returned", payable: false }), open);
     expect(view.phase).toBe("returned");
-    expect(view.detail).toMatch(/back to Payday's recovery wallet/);
+    expect(view.detail).toMatch(/back to Gum's recovery wallet/);
   });
 
   it("never calls the recovery wallet a refund address", () => {

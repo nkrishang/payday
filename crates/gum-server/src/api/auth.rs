@@ -264,15 +264,15 @@ struct Auth0VerifierInner {
 struct Claims {
     sub: String,
     azp: String,
-    #[serde(rename = "https://api.payday.sh/auth/method")]
+    #[serde(rename = "https://api.gum.money/auth/method")]
     authentication_method: String,
-    #[serde(rename = "https://api.payday.sh/auth/client_id")]
+    #[serde(rename = "https://api.gum.money/auth/client_id")]
     authentication_client_id: String,
-    #[serde(rename = "https://api.payday.sh/auth/authenticated_at")]
+    #[serde(rename = "https://api.gum.money/auth/authenticated_at")]
     authenticated_at: u64,
-    #[serde(rename = "https://api.payday.sh/auth/event_id")]
+    #[serde(rename = "https://api.gum.money/auth/event_id")]
     authentication_event_id: String,
-    #[serde(rename = "https://api.payday.sh/auth/email")]
+    #[serde(rename = "https://api.gum.money/auth/email")]
     email: String,
 }
 
@@ -290,7 +290,7 @@ impl Auth0Verifier {
             || parsed_issuer.fragment().is_some()
         {
             return Err(
-                "Auth0 issuer must be HTTPS; loopback HTTP requires PAYDAY_DEV_IDENTITY=1".into(),
+                "Auth0 issuer must be HTTPS; loopback HTTP requires GUM_DEV_IDENTITY=1".into(),
             );
         }
         for (name, value) in [("audience", &audience), ("client ID", &client_id)] {
@@ -370,7 +370,7 @@ impl Auth0Verifier {
     }
 }
 
-/// Payday's Auth0 Action stamps these claims only for its own email-OTP
+/// Gum's Auth0 Action stamps these claims only for its own email-OTP
 /// flow; a token from any other connection carries no proven mailbox.
 fn email_otp_subject(claims: &Claims) -> bool {
     claims.authentication_method == EMAIL_OTP_METHOD
@@ -490,7 +490,7 @@ fn validate_app_id(app_id: &str) -> Result<(), String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
-        return Err("PAYDAY_PRIVY_APP_ID must be a Privy app id (letters, digits, - and _)".into());
+        return Err("GUM_PRIVY_APP_ID must be a Privy app id (letters, digits, - and _)".into());
     }
     Ok(())
 }
@@ -512,7 +512,7 @@ fn merchant_from_claims(claims: PrivyClaims) -> Result<MerchantIdentity, ApiErro
         .find(|address| valid_email(address))
         .ok_or_else(ApiError::identity_unauthorized)?;
     // The embedded wallet, not any external wallet the user may also have
-    // linked: it is the one Payday can call the merchant's own by default.
+    // linked: it is the one Gum can call the merchant's own by default.
     let wallet_address = accounts
         .iter()
         .filter(|account| {
@@ -545,7 +545,7 @@ fn unix_now() -> Result<u64, ApiError> {
 
 /// Authenticate a merchant request with either an API key or a dashboard
 /// session (a Privy identity token). The bearer's prefix decides which: keys
-/// are always `payday_live_…`/`payday_test_…`, tokens never are. Either way
+/// are always `gum_live_…`/`gum_test_…`, tokens never are. Either way
 /// the request runs as one account, rate limited as that account; a session
 /// additionally carries its [`MerchantIdentity`] for the routes that need
 /// more than an account id.
@@ -627,7 +627,7 @@ pub async fn require_account(
 }
 
 fn looks_like_api_key(credential: &str) -> bool {
-    ["payday_live_", "payday_test_"]
+    ["gum_live_", "gum_test_"]
         .iter()
         .any(|prefix| credential.starts_with(prefix))
 }
@@ -673,11 +673,11 @@ async fn session_account(
 #[derive(Clone, Debug)]
 pub struct Reviewer(pub String);
 
-/// `PAYDAY_ADMIN_REVIEWER_ID`, or `operator` while a deployment has not named
+/// `GUM_ADMIN_REVIEWER_ID`, or `operator` while a deployment has not named
 /// its reviewer.
 pub fn reviewer_from_env() -> Reviewer {
     Reviewer(
-        std::env::var("PAYDAY_ADMIN_REVIEWER_ID")
+        std::env::var("GUM_ADMIN_REVIEWER_ID")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
@@ -688,13 +688,13 @@ pub fn reviewer_from_env() -> Reviewer {
 pub async fn require_admin(mut request: Request, next: Next) -> Result<Response, ApiError> {
     let supplied = bearer_from_request(&request).ok_or_else(ApiError::admin_unauthorized)?;
     let expected =
-        std::env::var("PAYDAY_ADMIN_BEARER_SECRET").map_err(|_| ApiError::admin_unauthorized())?;
+        std::env::var("GUM_ADMIN_BEARER_SECRET").map_err(|_| ApiError::admin_unauthorized())?;
     let mut expected_mac =
-        Hmac::<Sha256>::new_from_slice(b"Payday admin credential comparison").unwrap();
+        Hmac::<Sha256>::new_from_slice(b"Gum admin credential comparison").unwrap();
     expected_mac.update(expected.as_bytes());
     let expected_tag = expected_mac.finalize().into_bytes();
     let mut supplied_mac =
-        Hmac::<Sha256>::new_from_slice(b"Payday admin credential comparison").unwrap();
+        Hmac::<Sha256>::new_from_slice(b"Gum admin credential comparison").unwrap();
     supplied_mac.update(supplied.as_bytes());
     if expected.len() < 32 || supplied_mac.verify_slice(&expected_tag).is_err() {
         return Err(ApiError::admin_unauthorized());
@@ -849,15 +849,15 @@ mod tests {
         exp: u64,
         nbf: u64,
         azp: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/method")]
+        #[serde(rename = "https://api.gum.money/auth/method")]
         authentication_method: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/client_id")]
+        #[serde(rename = "https://api.gum.money/auth/client_id")]
         authentication_client_id: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/authenticated_at")]
+        #[serde(rename = "https://api.gum.money/auth/authenticated_at")]
         authenticated_at: u64,
-        #[serde(rename = "https://api.payday.sh/auth/event_id")]
+        #[serde(rename = "https://api.gum.money/auth/event_id")]
         authentication_event_id: &'a str,
-        #[serde(rename = "https://api.payday.sh/auth/email")]
+        #[serde(rename = "https://api.gum.money/auth/email")]
         email: &'a str,
     }
 
@@ -1055,8 +1055,8 @@ mod tests {
         let decoding = DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap();
         let verifier = Auth0Verifier::for_test(
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
-            "payday-payer",
+            "https://api.gum.money/payer",
+            "gum-payer",
             "test-key",
             decoding,
         );
@@ -1087,9 +1087,9 @@ mod tests {
                 aud: audience,
                 exp: expires_at,
                 nbf: 1,
-                azp: "payday-payer",
+                azp: "gum-payer",
                 authentication_method: EMAIL_OTP_METHOD,
-                authentication_client_id: "payday-payer",
+                authentication_client_id: "gum-payer",
                 authenticated_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -1108,7 +1108,7 @@ mod tests {
         let valid = token(
             &key,
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
         let identity = verifier.verify(&valid).await.unwrap();
@@ -1119,14 +1119,14 @@ mod tests {
             token(
                 &key,
                 "https://wrong.example/",
-                "https://api.payday.sh/payer",
+                "https://api.gum.money/payer",
                 u64::MAX,
             ),
             token(&key, "https://issuer.example/", "wrong-audience", u64::MAX),
             token(
                 &key,
                 "https://issuer.example/",
-                "https://api.payday.sh/payer",
+                "https://api.gum.money/payer",
                 1,
             ),
         ] {
@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_tokens_not_from_fresh_payday_email_otp_authentication() {
+    async fn rejects_tokens_not_from_fresh_gum_email_otp_authentication() {
         let (verifier, key) = verifier_and_key();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1144,9 +1144,9 @@ mod tests {
         for (sub, azp, method, client_id, authenticated_at, event_id) in [
             (
                 "google-oauth2|user",
-                "payday-payer",
+                "gum-payer",
                 EMAIL_OTP_METHOD,
-                "payday-payer",
+                "gum-payer",
                 now,
                 "event",
             ),
@@ -1154,13 +1154,13 @@ mod tests {
                 "email|user",
                 "other-client",
                 EMAIL_OTP_METHOD,
-                "payday-payer",
+                "gum-payer",
                 now,
                 "event",
             ),
             (
                 "email|user",
-                "payday-payer",
+                "gum-payer",
                 EMAIL_OTP_METHOD,
                 "other-client",
                 now,
@@ -1168,33 +1168,33 @@ mod tests {
             ),
             (
                 "email|user",
-                "payday-payer",
+                "gum-payer",
                 "social",
-                "payday-payer",
+                "gum-payer",
                 now,
                 "event",
             ),
             (
                 "email|user",
-                "payday-payer",
+                "gum-payer",
                 EMAIL_OTP_METHOD,
-                "payday-payer",
+                "gum-payer",
                 now - 301,
                 "event",
             ),
             (
                 "email|user",
-                "payday-payer",
+                "gum-payer",
                 EMAIL_OTP_METHOD,
-                "payday-payer",
+                "gum-payer",
                 now + 31,
                 "event",
             ),
             (
                 "email|user",
-                "payday-payer",
+                "gum-payer",
                 EMAIL_OTP_METHOD,
-                "payday-payer",
+                "gum-payer",
                 now,
                 "",
             ),
@@ -1206,7 +1206,7 @@ mod tests {
                 &TestClaims {
                     sub,
                     iss: "https://issuer.example/",
-                    aud: "https://api.payday.sh/payer",
+                    aud: "https://api.gum.money/payer",
                     exp: u64::MAX,
                     nbf: 1,
                     azp,
@@ -1317,8 +1317,8 @@ mod tests {
         Auth0Verifier {
             inner: Arc::new(Auth0VerifierInner {
                 issuer: "https://issuer.example/".into(),
-                audience: "https://api.payday.sh/payer".into(),
-                client_id: "payday-payer".into(),
+                audience: "https://api.gum.money/payer".into(),
+                client_id: "gum-payer".into(),
                 jwks: JwksCache::preloaded(
                     jwks_url,
                     kid,
@@ -1339,7 +1339,7 @@ mod tests {
             &old_encoding,
             "old-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
         assert!(verifier.verify(&old_token).await.is_err());
@@ -1347,7 +1347,7 @@ mod tests {
             &new_encoding,
             "new-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
         assert_eq!(
@@ -1368,7 +1368,7 @@ mod tests {
             &new_encoding,
             "new-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
 
@@ -1385,7 +1385,7 @@ mod tests {
             &new_encoding,
             "new-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
         // Spawn every caller before awaiting any: awaiting the first handle
@@ -1423,7 +1423,7 @@ mod tests {
             &encoding,
             "old-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
 
@@ -1470,7 +1470,7 @@ mod tests {
             &encoding,
             "old-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
 
@@ -1497,7 +1497,7 @@ mod tests {
             &encoding,
             "old-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
         assert!(verifier.verify(&token).await.is_ok());
@@ -1519,7 +1519,7 @@ mod tests {
             &encoding,
             "old-key",
             "https://issuer.example/",
-            "https://api.payday.sh/payer",
+            "https://api.gum.money/payer",
             u64::MAX,
         );
         let error = verifier.verify(&token).await.unwrap_err();

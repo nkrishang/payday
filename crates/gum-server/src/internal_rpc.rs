@@ -4,8 +4,8 @@
 //! `gum-indexer` never touches the database: everything it observes on a
 //! chain becomes a typed request here, and the server applies it to the
 //! ledger in one transaction. The routes live on their own listener
-//! (`PAYDAY_INTERNAL_BIND_ADDR`) behind a shared bearer token
-//! (`PAYDAY_INTERNAL_TOKEN`), so the public API surface never grows an
+//! (`GUM_INTERNAL_BIND_ADDR`) behind a shared bearer token
+//! (`GUM_INTERNAL_TOKEN`), so the public API surface never grows an
 //! unauthenticated write path by accident.
 //!
 //! Every mutation is idempotent or compare-and-set, which is what lets the
