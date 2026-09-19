@@ -10,15 +10,15 @@ use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use chrono::Utc;
 use uuid::Uuid;
 
 use gum_core::{
     Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
     Currency, CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
     DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, PDF_MIME_TYPE, Party,
-    PayerAttestation, PayerVerification, PaymentBinding, RecoveryAddress, SnapshotNetwork,
-    TransferDto, TransferListResponse, TransferRelayDto, parse_expiration,
-    payer_wallet_attestation, rfc3339, validate_expiration_window,
+    PayerVerification, RecoveryAddress, SnapshotNetwork, TransferDto, TransferListResponse,
+    TransferRelayDto, parse_expiration, rfc3339, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -785,7 +785,6 @@ pub async fn cancel_deposit_request(
         .ok_or_else(ApiError::deposit_request_not_found)?;
     Ok(Json(to_response(&state, account, row).await?))
 }
-
 
 #[derive(serde::Serialize)]
 pub struct PreviewSessionResponse {

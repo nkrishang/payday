@@ -6,7 +6,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachmentId, Currency, CustomerId, Invoice, InvoiceStatus, IssuerId, NetworkTerms, Party,
+    AttachmentId, Currency, CustomerId, Invoice, InvoiceStatus, NetworkTerms, Party,
     PayerVerification, chain_name, native_symbol,
 };
 

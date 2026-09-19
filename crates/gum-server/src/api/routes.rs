@@ -6483,8 +6483,6 @@ mod tests {
             issued["payer"],
             json!({"name": "Globex", "email": "ap@globex.example", "details": "Net 30"})
         );
-
-
     }
 
     // --- Withdrawals ---
