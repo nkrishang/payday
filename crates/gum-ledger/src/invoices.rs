@@ -102,7 +102,7 @@ pub struct DbInvoice {
     pub payer_policy_mode: String,
     pub expected_email: Option<String>,
     /// The merchant's own identifier for the authenticated payer
-    /// (`merchant_session` mode), opaque to Payday.
+    /// (`merchant_session` mode), opaque to Gum.
     pub payer_reference: Option<String>,
     pub verification_completed_at: Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     /// Proof material.
@@ -739,7 +739,7 @@ impl InvoiceRepository {
             r#"
             INSERT INTO payer_verifications
                 (id, invoice_id, account_id, payer_session_id, kind, status, provider, verified_at)
-            VALUES ($1, $2, $3, $4, 'wallet', 'approved', 'payday', $5)
+            VALUES ($1, $2, $3, $4, 'wallet', 'approved', 'gum', $5)
             "#,
         )
         .bind(Uuid::now_v7())

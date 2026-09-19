@@ -23,7 +23,7 @@ interface IUsdt0 {
 /// chain that serves USDT accepts the same EIP-3009 `TransferWithAuthorization`
 /// the relayer submits for a same-chain leg, under the EIP-712 domain the
 /// chain reader reconstructs (`name()`, version "1", which USDT0 does not
-/// expose through a getter). Skipped unless `PAYDAY_FORK_TESTS=1`
+/// expose through a getter). Skipped unless `GUM_FORK_TESTS=1`
 /// (`just forge-fork`), so `forge test` stays offline.
 abstract contract Usdt0AuthorizationForkTest is Test {
     // keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
@@ -40,13 +40,13 @@ abstract contract Usdt0AuthorizationForkTest is Test {
     address internal merchant;
 
     modifier onlyFork() {
-        if (!vm.envOr("PAYDAY_FORK_TESTS", false)) {
+        if (!vm.envOr("GUM_FORK_TESTS", false)) {
             vm.skip(true);
             return;
         }
         vm.createSelectFork(vm.envOr(rpcVariable, defaultRpc));
         assertEq(block.chainid, chainId, "fork is not the expected chain");
-        (merchant, merchantKey) = makeAddrAndKey("payday-fork-merchant");
+        (merchant, merchantKey) = makeAddrAndKey("gum-fork-merchant");
         deal(usdt, merchant, AMOUNT);
         _;
     }
@@ -102,7 +102,7 @@ contract MonadUsdt0ForkTest is Usdt0AuthorizationForkTest {
         chainId = 143;
         usdt = 0xe7cd86e13AC4309349F30B3435a9d337750fC82D;
         expectedName = "USDT0";
-        rpcVariable = "PAYDAY_FORK_RPC_URL_143";
+        rpcVariable = "GUM_FORK_RPC_URL_143";
         defaultRpc = "https://rpc.monad.xyz";
     }
 }
@@ -112,7 +112,7 @@ contract ArbitrumUsdt0ForkTest is Usdt0AuthorizationForkTest {
         chainId = 42161;
         usdt = 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9;
         expectedName = unicode"USD₮0";
-        rpcVariable = "PAYDAY_FORK_RPC_URL_42161";
+        rpcVariable = "GUM_FORK_RPC_URL_42161";
         defaultRpc = "https://arb1.arbitrum.io/rpc";
     }
 }

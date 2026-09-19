@@ -20,23 +20,23 @@ import { config } from "@/lib/config";
 export const metadata: Metadata = {
   title: "Withdrawals",
   description:
-    "Move the Payday wallet's USDC or USDT to one address: from the dashboard, or from your own server with the wallet key.",
+    "Move the Gum wallet's USDC or USDT to one address: from the dashboard, or from your own server with the wallet key.",
 };
 
-const EXPORT_NOTE = `PAYDAY_WALLET_KEY=0x…   # exported once from the dashboard; store it in a secret manager`;
+const EXPORT_NOTE = `GUM_WALLET_KEY=0x…   # exported once from the dashboard; store it in a secret manager`;
 
 export default function WithdrawalsPage() {
   const bridging = config.chains.filter((chain) => chain.cctp !== null);
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Withdrawals"
-      lead="Deposits settle to the Payday wallet on whichever network the payer chose. A withdrawal moves everything it holds in one currency to one address you name, with nothing deducted: USDC from every network at once, USDT from the destination network alone. Payday relays and pays the gas; your signature decides where each leg's funds may land."
+      lead="Deposits settle to the Gum wallet on whichever network the payer chose. A withdrawal moves everything it holds in one currency to one address you name, with nothing deducted: USDC from every network at once, USDT from the destination network alone. Gum relays and pays the gas; your signature decides where each leg's funds may land."
     >
       <H2 id="how">How a withdrawal works</H2>
       <p>
-        The Payday wallet is an ordinary account with the same address on every network, and its
-        key is yours: Privy holds it for you, Payday never has it. So Payday cannot simply move
+        The Gum wallet is an ordinary account with the same address on every network, and its
+        key is yours: Privy holds it for you, Gum never has it. So Gum cannot simply move
         your funds, and by design it cannot. Instead a withdrawal is four steps, the same over the
         API as in the dashboard:
       </p>
@@ -53,13 +53,13 @@ export default function WithdrawalsPage() {
           The document is an EIP-3009 authorization under the leg&apos;s token, the currency&apos;s
           contract on that network:{" "}
           <code>TransferWithAuthorization</code> naming your destination as the payee, or{" "}
-          <code>ReceiveWithAuthorization</code> naming Payday&apos;s <code>WithdrawalForwarder</code>{" "}
+          <code>ReceiveWithAuthorization</code> naming Gum&apos;s <code>WithdrawalForwarder</code>{" "}
           as the payee with a nonce that commits to your destination. The dashboard signs with
           the wallet Privy holds; a server signs with the exported key.
         </Step>
         <Step title="Submit">
           <code>POST /v1/withdrawals/&#123;id&#125;/authorizations</code> takes the signatures.
-          Payday verifies each against your wallet and hands the legs to its relayer.
+          Gum verifies each against your wallet and hands the legs to its relayer.
         </Step>
         <Step title="Poll">
           <code>GET /v1/withdrawals/&#123;id&#125;</code> follows every leg to the destination:
@@ -106,18 +106,18 @@ export default function WithdrawalsPage() {
       </Table>
       <p>
         You receive the full amount: CCTP&apos;s standard transfer has no protocol fee, and
-        Payday pays every transaction&apos;s gas. One withdrawal may be open per account; its
+        Gum pays every transaction&apos;s gas. One withdrawal may be open per account; its
         authorizations are valid for 24 hours, and a leg left unsigned that long expires.
       </p>
       <Callout title="Circle's bridge limit">
-        One CCTP burn cannot exceed 10,000,000 USDC. Since Payday withdraws the whole balance,
+        One CCTP burn cannot exceed 10,000,000 USDC. Since Gum withdraws the whole balance,
         withdraw a network holding more than that to an address on the same network rather than
         bridging it. The dashboard and API refuse an oversized bridge leg.
       </Callout>
 
       <H2 id="only-usdc-bridges">Only USDC bridges</H2>
       <p>
-        Payday never gives you a rate worse than 1:1, and CCTP is the one bridge that holds to it.
+        Gum never gives you a rate worse than 1:1, and CCTP is the one bridge that holds to it.
         So bridge legs exist for USDC alone, and Circle&apos;s per-message limit applies to them
         alone. A USDT withdrawal is one <code>transfer</code> leg on the destination network, which
         must serve USDT (Monad or Arbitrum One; <code>400 invalid_request</code> otherwise); USDT
@@ -150,7 +150,7 @@ export default function WithdrawalsPage() {
       <H2 id="server">From your server</H2>
       <p>
         A server needs the wallet&apos;s key. Export it once from the Account section (
-        <strong>Export wallet key</strong>): Privy shows it to you on its own origin, and Payday
+        <strong>Export wallet key</strong>): Privy shows it to you on its own origin, and Gum
         never sees it. Anyone holding it controls the wallet, so keep it in a secret manager next
         to your API key and rotate the API key if either leaks.
       </p>
@@ -224,8 +224,8 @@ export default function WithdrawalsPage() {
         A bridge leg exactly as the API returns it. Its document hashes to the EIP-712 digest{" "}
         <code>{VECTOR_DIGEST}</code>, and its nonce <code>{VECTOR_NONCE}</code> is{" "}
         <code>keccak256(abi.encode(uint32 6, bytes32(0x…d00d), bytes32(0x…07)))</code> over the
-        preimage. Payday&apos;s Rust, Solidity, TypeScript and browser code all pin these two
-        values; an implementation that reproduces them signs what Payday expects.
+        preimage. Gum&apos;s Rust, Solidity, TypeScript and browser code all pin these two
+        values; an implementation that reproduces them signs what Gum expects.
       </p>
       <CodeBlock code={LEG_EXAMPLE} lang="json" title="A bridge leg" />
 

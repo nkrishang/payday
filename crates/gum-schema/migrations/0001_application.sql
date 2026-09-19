@@ -651,7 +651,7 @@ CREATE INDEX sweep_job_items_by_invoice ON sweep_job_items (invoice_id);
 --   quoted ─▶ expired          (never reported as sent)
 --   sent   ─▶ failed | refunded
 --
--- `filled` means Payday verified the origin payment itself, from the origin
+-- `filled` means Gum verified the origin payment itself, from the origin
 -- chain's receipt. Relay's record of a depositor and the page's reported
 -- hash are hints for finding the evidence, never the evidence:
 -- `origin_tx_hash` keeps the page's report (an unverified hint), while the
@@ -847,7 +847,7 @@ CREATE TABLE recovered_funds (
 );
 
 -- ---------------------------------------------------------------------------
--- Merchant withdrawals: the whole USDC balance of the account's Payday wallet
+-- Merchant withdrawals: the whole USDC balance of the account's Gum wallet
 -- on every chain, moved to one destination the merchant names. One row per
 -- withdrawal, one leg per source chain. The merchant authorizes each leg
 -- with an EIP-3009 signature (crates/gum-core/src/withdrawal_authorization.rs)
@@ -864,7 +864,7 @@ CREATE TABLE withdrawals (
     id UUID PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES accounts(id),
     idempotency_key TEXT NOT NULL,
-    -- The Payday wallet the legs are signed from, as it was at creation.
+    -- The Gum wallet the legs are signed from, as it was at creation.
     wallet_address TEXT NOT NULL,
     -- The one currency the legs move; a withdrawal never mixes two.
     currency TEXT NOT NULL CHECK (currency IN ('USDC', 'USDT')),
@@ -1346,7 +1346,7 @@ BEGIN
           CASE WHEN attention THEN jsonb_build_object('attention', jsonb_build_object(
             'code', NEW.attention_reason,
             'message', 'Automatic payout requires a manual review. Funds remain safe.',
-            'action', 'Contact Payday support and provide the deposit request ID.'))
+            'action', 'Contact Gum support and provide the deposit request ID.'))
           ELSE '{}'::jsonb END));
     END IF;
   END IF;

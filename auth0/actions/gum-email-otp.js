@@ -1,23 +1,23 @@
 const crypto = require("crypto");
 
-const CLAIM_NAMESPACE = "https://api.payday.sh/auth";
+const CLAIM_NAMESPACE = "https://api.gum.money/auth";
 const MAX_AUTHENTICATION_AGE_SECONDS = 5 * 60;
 
 /**
- * The one first-party application allowed to hold a Payday API token: the
+ * The one first-party application allowed to hold a Gum API token: the
  * dashboard (SPA). It is configured as an Action secret so a tenant edit
  * cannot admit another client without a reviewed change. An unset secret is
  * dropped rather than compared, because `undefined === undefined` would
  * otherwise admit a request that carries no client at all.
  */
 function allowedClientIds(secrets) {
-  return [secrets.PAYDAY_CLIENT_ID].filter(
+  return [secrets.GUM_CLIENT_ID].filter(
     (id) => typeof id === "string" && id.length > 0,
   );
 }
 
 exports.onExecutePostLogin = async (event, api) => {
-  if (event.resource_server?.identifier !== event.secrets.PAYDAY_API_AUDIENCE) {
+  if (event.resource_server?.identifier !== event.secrets.GUM_API_AUDIENCE) {
     return;
   }
 
@@ -29,7 +29,7 @@ exports.onExecutePostLogin = async (event, api) => {
   );
   const now = Math.floor(Date.now() / 1000);
   const clientId = event.client?.client_id;
-  const isPaydayEmailOtp =
+  const isGumEmailOtp =
     typeof clientId === "string" &&
     allowedClientIds(event.secrets).includes(clientId) &&
     event.connection?.strategy === "email" &&
@@ -39,8 +39,8 @@ exports.onExecutePostLogin = async (event, api) => {
     authenticatedAt <= now + 30 &&
     now - authenticatedAt <= MAX_AUTHENTICATION_AGE_SECONDS;
 
-  if (!isPaydayEmailOtp) {
-    api.access.deny("Payday account management requires a fresh email OTP.");
+  if (!isGumEmailOtp) {
+    api.access.deny("Gum account management requires a fresh email OTP.");
     return;
   }
 

@@ -1,6 +1,6 @@
 # Deposit safety for merchants
 
-Payday deposit addresses are single-use and belong to one payer wallet. The
+Gum deposit addresses are single-use and belong to one payer wallet. The
 address exists only once the payer has signed the request's attestation from
 the wallet they will pay from; it commits to that wallet, and only transfers
 from that wallet are the payer's. Give the payer the amount, deposit address,
@@ -22,13 +22,13 @@ due and stop being offered the moment the deposit request is no longer payable.
   amount and settles, but the deposit request is flagged `likely_unsolicited`, no Proof
   of Deposit is issued for it, and anything returned goes to the attested
   wallet, not the sending one. The one way to pay from another network is
-  the hosted checkout's "Pay from another network": Payday quotes the route
+  the hosted checkout's "Pay from another network": Gum quotes the route
   through Relay for the attested wallet, and the delivery Relay's solver
   makes is attributed to that wallet once Relay confirms it sent the deposit.
 - Verify the network and token contract in the wallet before approving the
   transfer. Token names and symbols are not sufficient; bridged wrappers (such
   as `USDC.e`), look-alike tokens, the other stablecoin, and the same token on
-  another network do not count. Payday credits only these contracts:
+  another network do not count. Gum credits only these contracts:
 
   | Network | USDC | USDT |
   |---|---|---|
@@ -42,18 +42,18 @@ due and stop being offered the moment the deposit request is no longer payable.
   Base's USDT is a bridge wrapper without EIP-3009, so it is not a deposit
   currency; a payer holding it pays a request through Relay instead.
 - Do not pay at the deadline boundary. The chain's block timestamp determines
-  whether the deposit request has expired, and Payday acts only after required block
+  whether the deposit request has expired, and Gum acts only after required block
   finality and a later sweep transaction. Wallet submission time and the
   checkout countdown do not guarantee that settlement will occur before
   expiry; confirmation and sweeping can take additional time.
 
 Wrong assets may be unrecoverable. Two cases are recoverable. A transfer of
-the *other* Payday-served stablecoin to the address (USDC to a USDT address,
+the *other* Gum-served stablecoin to the address (USDC to a USDT address,
 or the reverse) is observed but never credited; it stays at the address, and
 `recover(address)` on the deployed deposit contract — callable by anyone —
 returns it to the payer's attested wallet. A deposit of the right token to
 the address on another *supported* network is refused by the contract rather
-than settled, and Payday's operator can return it to the payer's attested
+than settled, and Gum's operator can return it to the payer's attested
 wallet by hand (`runbooks/wrong-network-deposit.md`); treat that as a support
 case, not a feature. Do not promise recovery of anything else unless the
 relevant wallet or token is demonstrably under your control.
@@ -80,7 +80,7 @@ payer initiated a transfer earlier.
 
 ## No custody
 
-The intended requested amount never passes through Payday: it moves directly from
+The intended requested amount never passes through Gum: it moves directly from
 the one-time address to the payout address. Neither do returns: the payer's
 attested wallet is the address's recovery term, so overpayment remainders,
 expired balances, and late transfers go back to the payer on-chain, without

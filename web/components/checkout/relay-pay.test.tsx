@@ -1,4 +1,4 @@
-import type { RelayQuote, RelayOriginChain } from "@payday/sdk";
+import type { RelayQuote, RelayOriginChain } from "@gum/sdk";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,7 @@ vi.mock("wagmi", () => ({
 const { relay } = vi.hoisted(() => ({
   relay: { chains: vi.fn(), quote: vi.fn(), sent: vi.fn() },
 }));
-vi.mock("@/lib/payday", () => ({ payerClient: { relay } }));
+vi.mock("@/lib/gum", () => ({ payerClient: { relay } }));
 
 /** Base, the origin chain the fixture quotes route from. */
 const BASE: RelayOriginChain = {

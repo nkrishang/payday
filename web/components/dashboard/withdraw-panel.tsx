@@ -1,7 +1,7 @@
 "use client";
 
-import type { AccountMetadata, Withdrawal, WithdrawalLeg } from "@payday/sdk";
-import { PaydayError } from "@payday/sdk";
+import type { AccountMetadata, Withdrawal, WithdrawalLeg } from "@gum/sdk";
+import { GumError } from "@gum/sdk";
 import { useSignTypedData } from "@privy-io/react-auth";
 import { ArrowRight, ArrowUpRight, Check, Loader2 } from "lucide-react";
 import Link from "next/link";
@@ -67,8 +67,8 @@ export function WithdrawPanel({
 }) {
   const { client, signOut } = useMerchant();
   const { signTypedData } = useSignTypedData();
-  const recent = useResource("withdrawals:recent", (payday) =>
-    payday.withdrawals.list({ limit: 5 }),
+  const recent = useResource("withdrawals:recent", (gum) =>
+    gum.withdrawals.list({ limit: 5 }),
   );
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
@@ -86,20 +86,20 @@ export function WithdrawPanel({
 
   const failed = useCallback(
     (cause: unknown) => {
-      if (cause instanceof PaydayError && cause.status === 401) {
+      if (cause instanceof GumError && cause.status === 401) {
         signOut();
         return;
       }
-      if (cause instanceof PaydayError && cause.code === "nothing_to_withdraw") {
+      if (cause instanceof GumError && cause.code === "nothing_to_withdraw") {
         setFailure(
           bridges(currency)
             ? `Your Gum wallet holds no ${currency} on any network right now.`
             : `Your Gum wallet holds no ${currency} on ${chainById(destinationChain)?.name ?? "that network"}. ${currency} does not bridge: withdraw each network's balance to an address on that network.`,
         );
-      } else if (cause instanceof PaydayError && cause.code === "withdrawal_in_progress") {
+      } else if (cause instanceof GumError && cause.code === "withdrawal_in_progress") {
         setFailure("A withdrawal is already in progress. Continue it below, or cancel it first.");
         recent.reload();
-      } else if (cause instanceof PaydayError && cause.code === "withdrawal_exceeds_bridge_limit") {
+      } else if (cause instanceof GumError && cause.code === "withdrawal_exceeds_bridge_limit") {
         setFailure(
           "A network balance exceeds Circle's 10,000,000 USDC bridge limit. Withdraw that network's balance to an address on the same network.",
         );

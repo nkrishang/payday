@@ -9,8 +9,8 @@ is set. See [`docs/architecture.md`](../architecture.md) for the full flow.
 ## Step 1: Check the deposit request status
 
 ```bash
-curl -s -H "Authorization: Bearer $PAYDAY_API_KEY" \
-  "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $GUM_API_KEY" \
+  "$GUM_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" | python3 -m json.tool
 ```
 
 Note `status`, `received_base_units`, `attention`, and `address`. Database
@@ -98,11 +98,11 @@ Once the cause is resolved, use the audited release endpoint; do not clear the
 column directly:
 
 ```bash
-export PAYDAY_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
+export GUM_ADMIN_SECRET="$(aws secretsmanager get-secret-value \
   --secret-id payday/admin-bearer --query SecretString --output text)"
-curl -fsS -X POST "$PAYDAY_API_URL/v1/admin/deposit-requests/<DEPOSIT_REQUEST_ID>/release" \
-  -H "Authorization: Bearer $PAYDAY_ADMIN_SECRET" | jq
-unset PAYDAY_ADMIN_SECRET
+curl -fsS -X POST "$GUM_API_URL/v1/admin/deposit-requests/<DEPOSIT_REQUEST_ID>/release" \
+  -H "Authorization: Bearer $GUM_ADMIN_SECRET" | jq
+unset GUM_ADMIN_SECRET
 ```
 
 ## Reconciling returned funds
@@ -131,7 +131,7 @@ ORDER BY a.replacement_number;
 ```
 
 The open lane is unique per `(chain_id, signer)`. After
-`PAYDAY_SWEEP_PENDING_TIMEOUT_SECS`, signers raise fees up to
-`PAYDAY_SWEEP_MAX_SUBMISSIONS`; after that they stop raising fees but continue
+`GUM_SWEEP_PENDING_TIMEOUT_SECS`, signers raise fees up to
+`GUM_SWEEP_MAX_SUBMISSIONS`; after that they stop raising fees but continue
 reconciliation. Do not alter the nonce lane or send from its KMS key until the
 existing attempts and canonical nonce are understood.

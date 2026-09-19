@@ -1,6 +1,6 @@
 # Merchant dashboard
 
-The dashboard at `payday.sh/dashboard` is the browser face of the same API the
+The dashboard at `gum.money/dashboard` is the browser face of the same API the
 SDK uses. Gum is API-first: deposit requests, customers, attachments, and
 webhooks are created and managed through the API (see `docs/api-reference.md`
 and `docs/quickstart.md`). The dashboard creates none of them. It shows the
@@ -14,12 +14,12 @@ comes from the API.
 
 The dashboard signs in through [Privy](https://privy.io) with an emailed
 one-time code, from the landing page's "Start Building", which opens the
-exchange in a dialog of Payday's own. There is no dashboard login page and no
+exchange in a dialog of Gum's own. There is no dashboard login page and no
 separate registration: the API provisions an account the first time it sees
 a Privy identity, so a first code creates the account and every later one
 signs into it, and the same dialog does both. Every account gets an embedded
 EVM wallet from Privy at that first sign-in; it is the merchant's own, and it
-is where their settled deposits accumulate.
+is where a deposit settles when the request's `payout_address` names it.
 
 Anyone reaching a dashboard route without a live session — signed out, or
 holding tokens Privy will no longer refresh — is sent to the landing page,
@@ -29,7 +29,7 @@ The session is Privy's identity token
 ([Authentication § 7](authentication.md#7-dashboard-sessions)). Privy's SDK
 keeps it, and its refresh token, in the browser and refreshes it while the
 merchant stays signed in; the dashboard reads the current token from the SDK
-and sends it on every call. Nothing of Payday's stores a credential: **no API
+and sends it on every call. Nothing of Gum's stores a credential: **no API
 key exists in the browser** — the API accepts the identity token directly on
 the merchant routes, and maps it to the merchant account. Signing out asks
 Privy to end the session.
@@ -51,9 +51,9 @@ page is marked `noindex`.
 The dashboard calls the API from the browser with `GET`, `POST`, `PATCH`,
 `PUT`, and `DELETE`, so `gum-server` answers cross-origin requests on the
 merchant routes from exactly one origin: the
-web origin it is configured with as `PAYDAY_PUBLIC_BASE_URL`. The dashboard
+web origin it is configured with as `GUM_PUBLIC_BASE_URL`. The dashboard
 must be served from that origin — `http://127.0.0.1:3002` locally,
-`https://payday.sh` in production; from any other origin every request fails
+`https://gum.money` in production; from any other origin every request fails
 its preflight. The payer checkout has no such constraint, because the payer
 routes allow any origin.
 
@@ -77,13 +77,17 @@ current key and any key in its grace window at once.
 ## Account, balances, and withdrawals
 
 The middle of the page is the account itself. It shows the mailbox the
-merchant signed in with and their Payday wallet — the embedded EVM wallet
+merchant signed in with and their Gum wallet — the embedded EVM wallet
 Privy created for the account — in full, ready to copy or open in each
 network's explorer, with its balance of every stablecoin the network serves
 and its gas balance on every supported network read straight from the public
 RPCs (`NEXT_PUBLIC_CHAINS`), and a Sign out. The wallet is the same address on
-every chain, so a settled deposit lands there on whichever network the payer
-chose. A wallet that Privy is still creating shows as such with a *Check
+every chain. It shows what a deposit pays it: a request settles to the
+`payout_address`
+named when it is created, so balances and withdrawals here cover exactly the
+requests whose payout address is this wallet's address — an integration that
+pays some other address collects there, and its deposits still appear in the
+table below. A wallet that Privy is still creating shows as such with a *Check
 again*; the API records it as soon as a session carries it.
 
 **Change**, beside the sign-in email, moves the account to a new mailbox: a

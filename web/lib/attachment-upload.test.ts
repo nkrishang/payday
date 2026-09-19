@@ -9,7 +9,7 @@ import {
 const SLOT = {
   id: "att_0198f80c-8d2f-7dc1-a369-90556a64f7aa",
   upload_url: "https://bucket.example.test/uploads/acct/0198f80c.pdf?X-Amz-Signature=abc",
-  headers: { "content-type": "application/pdf", "x-amz-tagging": "payday-upload=pending" },
+  headers: { "content-type": "application/pdf", "x-amz-tagging": "gum-upload=pending" },
   expires_at: "2026-09-01T00:15:00Z",
 };
 

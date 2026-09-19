@@ -1,4 +1,4 @@
-import { PaydayError } from "@payday/sdk";
+import { GumError } from "@gum/sdk";
 
 /**
  * What a failed read means to the merchant looking at the page.
@@ -19,12 +19,12 @@ export interface LoadFailure {
   transient: boolean;
 }
 
-function requestSuffix(error: PaydayError): string {
+function requestSuffix(error: GumError): string {
   return error.requestId ? ` (request ${error.requestId})` : "";
 }
 
 export function describeLoadError(error: unknown): LoadFailure {
-  if (error instanceof PaydayError) {
+  if (error instanceof GumError) {
     const detail = `${error.message}${requestSuffix(error)}`;
     if (error.status === 429) {
       return { message: "Gum is busy right now.", detail, transient: true };

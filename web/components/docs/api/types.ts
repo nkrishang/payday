@@ -13,7 +13,7 @@ export type Auth =
   | "key" // an API key, or the dashboard session
   | "session" // the dashboard session only; an API key is refused
   | "none" // public: the payer routes
-  | "payer_session"; // public, but needs the Payday-Payer-Session header
+  | "payer_session"; // public, but needs the Gum-Payer-Session header
 
 export interface FieldDoc {
   name: string;

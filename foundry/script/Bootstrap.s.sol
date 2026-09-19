@@ -79,8 +79,8 @@ contract BootstrapScript is Script {
 
         // The services pin the generation by these hashes; print them on every
         // run so a developer can copy them into the environment.
-        console.log("PAYDAY_FACTORY_CODE_HASH=%s", vm.toString(FACTORY.codehash));
-        console.log("PAYDAY_BATCH_SWEEPER_CODE_HASH=%s", vm.toString(BATCH_SWEEPER.codehash));
+        console.log("GUM_FACTORY_CODE_HASH=%s", vm.toString(FACTORY.codehash));
+        console.log("GUM_BATCH_SWEEPER_CODE_HASH=%s", vm.toString(BATCH_SWEEPER.codehash));
 
         _topUp(USDC, ANVIL_ACCOUNT_0);
         _topUp(USDC, ANVIL_ACCOUNT_1);

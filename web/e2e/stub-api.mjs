@@ -1,5 +1,5 @@
 /**
- * A stand-in for the Payday API, so the checkout's states and the dashboard's
+ * A stand-in for the Gum API, so the checkout's states and the dashboard's
  * flows can be driven deterministically in a browser.
  *
  * Payer scenarios are encoded in the deposit request id, which keeps every test
@@ -184,7 +184,7 @@ const sessions = new Map();
 
 /** The session a request presents, if it is valid for `id`. */
 function sessionFor(req, id) {
-  const token = req.headers["payday-payer-session"];
+  const token = req.headers["gum-payer-session"];
   const session = token ? sessions.get(token) : undefined;
   return session && session.id === id ? session : null;
 }
@@ -360,7 +360,7 @@ const reads = new Map();
 const usdcToken = (address) => ({ currency: "USDC", symbol: "USDC", address, decimals: 6 });
 const RELAY_CHAINS = [
   { chain_id: "137", name: "Polygon", native_symbol: "POL", tokens: [usdcToken("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")], explorer_url: "https://polygonscan.com", icon_url: "https://assets.relay.link/icons/137/light.png", rpc_url: "https://polygon-rpc.com" },
-  // Base's USDT is a bridge wrapper Payday does not serve, but Relay takes it, so a payer may send it.
+  // Base's USDT is a bridge wrapper Gum does not serve, but Relay takes it, so a payer may send it.
   { chain_id: "8453", name: "Base", native_symbol: "ETH", tokens: [usdcToken(BASE_TOKEN), { currency: "USDT", symbol: "USDT", address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", decimals: 6 }], explorer_url: "https://basescan.org", icon_url: "https://assets.relay.link/icons/8453/light.png", rpc_url: "https://mainnet.base.org" },
   { chain_id: "42161", name: "Arbitrum One", native_symbol: "ETH", tokens: [usdcToken("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")], explorer_url: "https://arbiscan.io", icon_url: "https://assets.relay.link/icons/42161/light.png", rpc_url: "https://arb1.arbitrum.io/rpc" },
   { chain_id: "143", name: "Monad", native_symbol: "MON", tokens: [usdcToken(TOKEN)], explorer_url: "https://monadvision.com", icon_url: "https://assets.relay.link/icons/143/light.png", rpc_url: "https://rpc.monad.xyz" },
@@ -435,7 +435,7 @@ const scenarios = {
       ...CLOSED,
       status: "needs_attention",
       payer_message:
-        "Payout is paused, but your funds remain safe. The merchant and Payday support are resolving settlement; do not send a second transfer.",
+        "Payout is paused, but your funds remain safe. The merchant and Gum support are resolving settlement; do not send a second transfer.",
     }),
   // Payable false while the status has not yet flipped: the deadline passed but
   // the indexer has not committed the expiry.
@@ -654,10 +654,10 @@ function proofFor(payment) {
     }));
   const gated = GATED.has(payment.payer_policy.mode);
   return {
-    version: "payday.proof.v4",
+    version: "gum.proof.v4",
     payment_id: payment.id,
     canonical_issuance_snapshot: {
-      schema: "payday.invoice.v4",
+      schema: "gum.invoice.v4",
       canonicalization: "RFC8785",
       issuer: payment.issuer,
       payer: payment.payer,
@@ -702,7 +702,7 @@ function proofFor(payment) {
     transfers,
     verification: {
       payload: {
-        version: "payday.attestation.v4",
+        version: "gum.attestation.v4",
         payment_id: payment.id,
         attribution_hash: payment.attribution.hash,
         chain_id: "143",
@@ -713,7 +713,7 @@ function proofFor(payment) {
         result: gated ? "approved" : "not_required",
         verified_at: payment.verification_completed_at,
         wallet_bound_at: payment.wallet_bound_at,
-        facts: [{ kind: "wallet", provider: "payday", at: payment.wallet_bound_at }],
+        facts: [{ kind: "wallet", provider: "gum", at: payment.wallet_bound_at }],
       },
       signer: ATTESTOR,
       signature: `0x${"ab".repeat(65)}`,
@@ -724,7 +724,7 @@ function proofFor(payment) {
 /** `PayerAttestation::typed_data`: the EIP-712 document a payer's wallet signs, under the chosen chain's domain. */
 function typedData(attributionHash, wallet, nonce, chainId = 143) {
   return {
-    domain: { name: "Payday", version: "1", chainId, verifyingContract: FACTORY },
+    domain: { name: "Gum", version: "1", chainId, verifyingContract: FACTORY },
     primaryType: "PayerAttestation",
     types: {
       EIP712Domain: [
@@ -743,7 +743,7 @@ function typedData(attributionHash, wallet, nonce, chainId = 143) {
     },
     message: {
       statement:
-        "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request, and any funds Payday returns go back to it.",
+        "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request, and any funds Gum returns go back to it.",
       attributionHash,
       wallet,
       nonce,
@@ -885,7 +885,7 @@ const CORS = {
   // API would refuse at the preflight is not silently fine here.
   "access-control-allow-methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
   "access-control-allow-headers":
-    "authorization, content-type, accept, idempotency-key, payday-payer-session, x-amz-tagging",
+    "authorization, content-type, accept, idempotency-key, gum-payer-session, x-amz-tagging",
   "access-control-max-age": "600",
 };
 
@@ -1036,7 +1036,7 @@ async function account(req, res, url) {
       );
     }
     const replaced = record.keyHint !== null;
-    const rawKey = `payday_test_stub${randomUUID().replace(/-/g, "")}`;
+    const rawKey = `gum_test_stub${randomUUID().replace(/-/g, "")}`;
     record.generation += 1;
     record.keyHint = `…${rawKey.slice(-6)}`;
     const now = new Date().toISOString();
@@ -1268,7 +1268,7 @@ async function payer(req, res, url) {
     if (!GATED.has(mode)) return fail(res, 409, "verification_not_required", "Nothing to verify");
     // The code goes to the merchant's asserted mailbox; the request names none.
     const reused = session ?? null;
-    const token = reused ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
+    const token = reused ? req.headers["gum-payer-session"] : `pps_${randomUUID()}`;
     if (!reused) sessions.set(token, { id, emailVerified: false, walletBound: false });
     return send(res, 200, {
       payer_session: token,
@@ -1295,7 +1295,7 @@ async function payer(req, res, url) {
   }
 
   if (match[2] === "/verify") {
-    if (req.headers["payday-payer-session"] && !session) {
+    if (req.headers["gum-payer-session"] && !session) {
       return fail(res, 401, "payer_session_invalid", "Start verification again");
     }
     return send(res, 200, verifyStatus(payment));
@@ -1322,7 +1322,7 @@ async function payer(req, res, url) {
     if (GATED.has(mode) && !session?.emailVerified) {
       return fail(res, 401, session ? "verification_required" : "payer_session_invalid", "Verify first");
     }
-    let token = session ? req.headers["payday-payer-session"] : `pps_${randomUUID()}`;
+    let token = session ? req.headers["gum-payer-session"] : `pps_${randomUUID()}`;
     if (!session) sessions.set(token, { id, emailVerified: false, walletBound: false });
     sessions.get(token).chainId = network.chain.id;
     return send(res, 200, {
@@ -1382,7 +1382,7 @@ async function objectStore(req, res, url) {
     // A presigned URL signs these two headers; S3 refuses a PUT without them.
     if (
       req.headers["content-type"] !== "application/pdf" ||
-      req.headers["x-amz-tagging"] !== "payday-upload=pending"
+      req.headers["x-amz-tagging"] !== "gum-upload=pending"
     ) {
       return sendBytes(res, 403, Buffer.from("SignatureDoesNotMatch"), "text/plain");
     }
@@ -1495,7 +1495,7 @@ async function attachments(req, res, url) {
     return send(res, 201, {
       id,
       upload_url: `${ORIGIN}/__upload/${id}`,
-      headers: { "content-type": "application/pdf", "x-amz-tagging": "payday-upload=pending" },
+      headers: { "content-type": "application/pdf", "x-amz-tagging": "gum-upload=pending" },
       expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
     });
   }
@@ -1822,7 +1822,7 @@ async function withdrawals(req, res, url) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(String(destination.address ?? ""))) {
       return fail(res, 400, "invalid_request", "invalid destination.address");
     }
-    if (!session.wallet) return fail(res, 409, "wallet_not_ready", "The account's Payday wallet is not known yet");
+    if (!session.wallet) return fail(res, 409, "wallet_not_ready", "The account's Gum wallet is not known yet");
     const replay = [...world.values()].find((row) => row.idempotency_key === idempotencyKey);
     if (replay) return send(res, 200, shapeWithdrawal(replay), { "Idempotency-Replayed": "true" });
     if ([...world.values()].some((row) => ["awaiting_signature", "in_progress"].includes(withdrawalStatus(row)))) {
@@ -1972,7 +1972,7 @@ createServer(async (req, res) => {
     return fail(res, 500, "internal_error", "stub failure");
   }
 }).listen(PORT, "127.0.0.1", () => {
-  console.log(`stub Payday API on ${ORIGIN}`);
+  console.log(`stub Gum API on ${ORIGIN}`);
 });
 
 // The dashboard reads each network's USDC balance straight from the public RPC

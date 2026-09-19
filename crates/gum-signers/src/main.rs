@@ -145,8 +145,7 @@ async fn signer_pool(
     match config.signer() {
         SignerConfig::Local(keys) => {
             for key in keys {
-                let signer: PrivateKeySigner =
-                    key.parse().expect("invalid PAYDAY_SIGNER_KEYS entry");
+                let signer: PrivateKeySigner = key.parse().expect("invalid GUM_SIGNER_KEYS entry");
                 register(Box::new(signer), "local");
             }
         }

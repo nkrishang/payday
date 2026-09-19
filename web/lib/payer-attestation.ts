@@ -1,4 +1,4 @@
-import type { PayerAttestationTypedData } from "@payday/sdk";
+import type { PayerAttestationTypedData } from "@gum/sdk";
 import type { TypedDataDefinition } from "viem";
 
 /**

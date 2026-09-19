@@ -88,8 +88,8 @@ If the indexer was stopped, restart it — see [service-restart.md](service-rest
 ## Step 5: Verify deposit requests are progressing
 
 ```bash
-curl -fsS "$PAYDAY_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
-  -H "Authorization: Bearer $PAYDAY_API_KEY" | jq .status
+curl -fsS "$GUM_API_URL/v1/deposit-requests/<DEPOSIT_REQUEST_ID>" \
+  -H "Authorization: Bearer $GUM_API_KEY" | jq .status
 ```
 
 The status should advance from `created` to `funded` within a few seconds.

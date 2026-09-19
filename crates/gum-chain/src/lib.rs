@@ -73,7 +73,7 @@ sol! {
 
 /// Recipients per `eth_getLogs` call: one OR-array in `topics[2]`. Every
 /// range scan is filtered by the watch list, so the cost of a range grows
-/// with the addresses Payday watches and never with the chain's transfer volume.
+/// with the addresses Gum watches and never with the chain's transfer volume.
 /// Providers accept thousands; 500 keeps every request small and matches the
 /// signal's subscription chunk.
 pub const LOG_FILTER_CHUNK: usize = 500;

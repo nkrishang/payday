@@ -1,4 +1,4 @@
-import { type PaydayClient, PaydayError } from "@payday/sdk";
+import { type GumClient, GumError } from "@gum/sdk";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
@@ -37,7 +37,7 @@ function Invalidator({ prefix }: { prefix: string }) {
 }
 
 function provider(get: (id: string) => Promise<unknown>, signOut = vi.fn()) {
-  const client = { customers: { get } } as unknown as PaydayClient;
+  const client = { customers: { get } } as unknown as GumClient;
   const value = {
     client,
     accessToken: "eyJ.dash.token",
@@ -143,10 +143,10 @@ describe("useResource", () => {
     const get = vi
       .fn()
       .mockRejectedValueOnce(
-        new PaydayError("Per-account request limit exceeded", "rate_limited", 429, "req-1"),
+        new GumError("Per-account request limit exceeded", "rate_limited", 429, "req-1"),
       )
       .mockRejectedValueOnce(
-        new PaydayError("Per-account request limit exceeded", "rate_limited", 429, "req-2"),
+        new GumError("Per-account request limit exceeded", "rate_limited", 429, "req-2"),
       )
       .mockResolvedValueOnce({ name: "Globex" });
     const { value } = provider(get);
@@ -177,7 +177,7 @@ describe("useResource", () => {
   it("reports a failure in the merchant's words once every retry is spent, and tries again on demand", async () => {
     const get = vi
       .fn()
-      .mockRejectedValue(new PaydayError("upstream timeout", "internal_error", 503, "req-9"));
+      .mockRejectedValue(new GumError("upstream timeout", "internal_error", 503, "req-9"));
     const { value } = provider(get);
     render(
       <MerchantProvider value={value}>
@@ -208,7 +208,7 @@ describe("useResource", () => {
   it("does not retry a refusal that repeating cannot fix", async () => {
     const get = vi
       .fn()
-      .mockRejectedValue(new PaydayError("Customer not found", "customer_not_found", 404, "req-4"));
+      .mockRejectedValue(new GumError("Customer not found", "customer_not_found", 404, "req-4"));
     const { value } = provider(get);
     render(
       <MerchantProvider value={value}>
@@ -222,7 +222,7 @@ describe("useResource", () => {
   });
 
   it("ends the session on a 401 rather than showing it", async () => {
-    const get = vi.fn().mockRejectedValue(new PaydayError("expired", "identity_unauthorized", 401));
+    const get = vi.fn().mockRejectedValue(new GumError("expired", "identity_unauthorized", 401));
     const { value, signOut } = provider(get);
     render(
       <MerchantProvider value={value}>

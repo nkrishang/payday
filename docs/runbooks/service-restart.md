@@ -45,8 +45,8 @@ Verify:
 
 ```bash
 # Wait ~30 seconds:
-curl -sf "$PAYDAY_API_URL/health/live" && echo " live OK" || echo " live FAIL"
-curl -sf "$PAYDAY_API_URL/health/ready" && echo " ready OK" || echo " ready FAIL"
+curl -sf "$GUM_API_URL/health/live" && echo " live OK" || echo " live FAIL"
+curl -sf "$GUM_API_URL/health/ready" && echo " ready OK" || echo " ready FAIL"
 ```
 
 Readiness reports `schema behind` after a deployment containing migrations.

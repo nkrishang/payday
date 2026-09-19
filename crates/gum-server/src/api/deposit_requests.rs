@@ -233,12 +233,8 @@ pub async fn create_deposit_request(
     let payout_address = req.payout_address.clone();
     // The opaque issuer id carries no meaning of its own; only its length is
     // bounded. It is stored and returned verbatim.
-    if let Some(issuer_id) = &req.issuer_id
-        && !(1..=MAX_ISSUER_ID_BYTES).contains(&issuer_id.len())
-    {
-        return Err(ApiError::invalid_request(format!(
-            "issuer_id must be 1 to {MAX_ISSUER_ID_BYTES} bytes when present"
-        )));
+    if let Some(issuer_id) = &req.issuer_id {
+        validate_issuer_id(issuer_id)?;
     }
     validate_document(&issuer, &payer, &req)?;
     let payer_policy = req.payer_policy.normalized();
@@ -580,7 +576,7 @@ pub async fn transfers(
     }))
 }
 
-/// Payday's invoice summary as a PDF download, rendered deterministically
+/// Gum's invoice summary as a PDF download, rendered deterministically
 /// from the same response the JSON route serves.
 pub async fn request_pdf(
     State(state): State<AppState>,
@@ -636,6 +632,22 @@ pub struct ListQuery {
 const VERIFICATION_FILTERS: [&str; 4] =
     ["not_required", "pending", "verified", "likely_unsolicited"];
 
+/// The opaque `issuer_id` is stored in a PostgreSQL `TEXT` column, which
+/// cannot hold U+0000; every other byte passes through verbatim. Checked
+/// before any database access so a bad value is a `400 invalid_request`
+/// rather than a mistaken `503 database_unavailable`.
+fn validate_issuer_id(issuer_id: &str) -> Result<(), ApiError> {
+    if issuer_id.is_empty() || issuer_id.len() > MAX_ISSUER_ID_BYTES {
+        return Err(ApiError::invalid_request(format!(
+            "issuer_id must be 1 to {MAX_ISSUER_ID_BYTES} bytes when present"
+        )));
+    }
+    if issuer_id.contains('\0') {
+        return Err(ApiError::invalid_request("issuer_id must not contain NUL"));
+    }
+    Ok(())
+}
+
 pub async fn list_deposit_requests(
     State(state): State<AppState>,
     Extension(account): Extension<AccountId>,
@@ -655,6 +667,9 @@ pub async fn list_deposit_requests(
     let limit = query.limit.unwrap_or(20);
     if !(1..=100).contains(&limit) {
         return Err(ApiError::invalid_request("limit must be between 1 and 100"));
+    }
+    if let Some(issuer_id) = query.issuer_id.as_deref() {
+        validate_issuer_id(issuer_id)?;
     }
     let starting_after = query
         .starting_after
@@ -1038,6 +1053,20 @@ mod tests {
             request.issuer_id.as_deref(),
             Some("merchant-acme/invoice#42 (FY26)")
         );
+    }
+
+    #[test]
+    fn issuer_id_takes_any_bytes_its_length_allows_except_nul() {
+        assert!(validate_issuer_id("merchant-acme").is_ok());
+        assert!(validate_issuer_id("merchant-acme/invoice#42 (FY26)").is_ok());
+        assert!(validate_issuer_id(&"x".repeat(255)).is_ok());
+        // Too short or too long is a 400...
+        assert!(validate_issuer_id("").is_err());
+        assert!(validate_issuer_id(&"x".repeat(256)).is_err());
+        // ...and so is NUL, which PostgreSQL TEXT cannot store: rejecting it
+        // before the database keeps the error a 400, not a 503.
+        assert!(validate_issuer_id("a\0b").is_err());
+        assert!(validate_issuer_id("\0").is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 import { PrivyProvider } from "@privy-io/react-auth";
 import type { ComponentProps, ReactNode } from "react";
-import { privyAppId } from "@/lib/merchant-payday";
+import { privyAppId } from "@/lib/merchant-gum";
 import { viemChains } from "@/lib/viem-chain";
 
 type PrivyConfig = NonNullable<ComponentProps<typeof PrivyProvider>["config"]>;
@@ -21,7 +21,7 @@ const privyChains = viemChains as unknown as [PrivyChain, ...PrivyChain[]];
  *
  * Email is the only way in, and every account gets an embedded EVM wallet on
  * its first sign-in; that wallet is where deposits settle by default. The
- * sign-in UI is Payday's own (`useLoginWithEmail`), so Privy's modal is never
+ * sign-in UI is Gum's own (`useLoginWithEmail`), so Privy's modal is never
  * shown and its appearance settings do not matter here.
  *
  * `createOnLogin` is deliberately "off": per Privy's docs

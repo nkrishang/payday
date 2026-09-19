@@ -33,7 +33,7 @@ describe("the withdrawals prompt", () => {
 
   it("names the four steps and the routes", () => {
     for (const route of [
-      "POST https://api.payday.sh/v1/withdrawals",
+      "POST https://api.gum.money/v1/withdrawals",
       "/v1/withdrawals/{id}/authorizations",
       "GET /v1/withdrawals/{id}",
       "/v1/withdrawals/{id}/cancel",

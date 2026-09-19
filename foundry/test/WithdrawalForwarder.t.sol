@@ -229,7 +229,7 @@ contract WithdrawalForwarderTest is Eip3009Test {
 }
 
 /// @notice The empirical gate: the forwarder against the real USDC and CCTP V2
-/// contracts on each supported chain. Skipped unless `PAYDAY_FORK_TESTS=1`
+/// contracts on each supported chain. Skipped unless `GUM_FORK_TESTS=1`
 /// (`just forge-fork`), so `forge test` stays offline.
 abstract contract ForwarderForkTest is Eip3009Test {
     address internal constant TOKEN_MESSENGER_V2 = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
@@ -248,14 +248,14 @@ abstract contract ForwarderForkTest is Eip3009Test {
     address internal merchant;
 
     modifier onlyFork() {
-        if (!vm.envOr("PAYDAY_FORK_TESTS", false)) {
+        if (!vm.envOr("GUM_FORK_TESTS", false)) {
             vm.skip(true);
             return;
         }
         vm.createSelectFork(vm.envOr(rpcVariable, defaultRpc));
         assertEq(block.chainid, chainId, "fork is not the expected chain");
         forwarder = new WithdrawalForwarder(ITokenMessengerV2(TOKEN_MESSENGER_V2));
-        (merchant, merchantKey) = makeAddrAndKey("payday-fork-merchant");
+        (merchant, merchantKey) = makeAddrAndKey("gum-fork-merchant");
         deal(usdc, merchant, AMOUNT);
         _;
     }
@@ -373,7 +373,7 @@ contract MonadForwarderForkTest is ForwarderForkTest {
         domain = 15;
         usdc = 0x754704Bc059F8C67012fEd69BC8A327a5aafb603;
         expectedName = "USDC";
-        rpcVariable = "PAYDAY_FORK_RPC_URL_143";
+        rpcVariable = "GUM_FORK_RPC_URL_143";
         defaultRpc = "https://rpc.monad.xyz";
     }
 }
@@ -384,7 +384,7 @@ contract BaseForwarderForkTest is ForwarderForkTest {
         domain = 6;
         usdc = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
         expectedName = "USD Coin";
-        rpcVariable = "PAYDAY_FORK_RPC_URL_8453";
+        rpcVariable = "GUM_FORK_RPC_URL_8453";
         defaultRpc = "https://mainnet.base.org";
     }
 }
@@ -395,7 +395,7 @@ contract ArbitrumForwarderForkTest is ForwarderForkTest {
         domain = 3;
         usdc = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
         expectedName = "USD Coin";
-        rpcVariable = "PAYDAY_FORK_RPC_URL_42161";
+        rpcVariable = "GUM_FORK_RPC_URL_42161";
         defaultRpc = "https://arb1.arbitrum.io/rpc";
     }
 }

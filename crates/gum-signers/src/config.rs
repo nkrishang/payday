@@ -1,4 +1,4 @@
-//! Process configuration from the environment. Every `PAYDAY_*` variable
+//! Process configuration from the environment. Every `GUM_*` variable
 //! that this service reads is named here and nowhere else.
 
 use std::collections::HashMap;
@@ -45,44 +45,41 @@ impl Config {
             .iter()
             .map(|chain| (chain.chain_id, required(&chain.rpc_url_var())))
             .collect();
-        let local_keys = list("PAYDAY_SIGNER_KEYS");
-        let kms_key_ids = list("PAYDAY_KMS_KEY_IDS");
+        let local_keys = list("GUM_SIGNER_KEYS");
+        let kms_key_ids = list("GUM_KMS_KEY_IDS");
         let signer = match (local_keys.is_empty(), kms_key_ids.is_empty()) {
             (false, true) => SignerConfig::Local(local_keys),
             (true, false) => SignerConfig::AwsKms(kms_key_ids),
-            _ => panic!("exactly one of PAYDAY_SIGNER_KEYS and PAYDAY_KMS_KEY_IDS must be set"),
+            _ => panic!("exactly one of GUM_SIGNER_KEYS and GUM_KMS_KEY_IDS must be set"),
         };
-        let max_submissions = number("PAYDAY_SWEEP_MAX_SUBMISSIONS", 5);
+        let max_submissions = number("GUM_SWEEP_MAX_SUBMISSIONS", 5);
         assert!(
             max_submissions > 0,
-            "PAYDAY_SWEEP_MAX_SUBMISSIONS must be positive"
+            "GUM_SWEEP_MAX_SUBMISSIONS must be positive"
         );
-        let max_attempts = number("PAYDAY_SWEEP_MAX_ATTEMPTS", 8);
-        assert!(
-            max_attempts > 0,
-            "PAYDAY_SWEEP_MAX_ATTEMPTS must be positive"
-        );
+        let max_attempts = number("GUM_SWEEP_MAX_ATTEMPTS", 8);
+        assert!(max_attempts > 0, "GUM_SWEEP_MAX_ATTEMPTS must be positive");
         Self {
             chains,
             rpc_urls,
             database_url: required("DATABASE_URL"),
-            listen: std::env::var("PAYDAY_SIGNERS_LISTEN_ADDR")
+            listen: std::env::var("GUM_SIGNERS_LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".into())
                 .parse()
-                .expect("invalid PAYDAY_SIGNERS_LISTEN_ADDR"),
-            poll_interval: Duration::from_millis(number("PAYDAY_SIGNERS_POLL_INTERVAL_MS", 2_000)),
-            pending_timeout: Duration::from_secs(number("PAYDAY_SWEEP_PENDING_TIMEOUT_SECS", 60)),
+                .expect("invalid GUM_SIGNERS_LISTEN_ADDR"),
+            poll_interval: Duration::from_millis(number("GUM_SIGNERS_POLL_INTERVAL_MS", 2_000)),
+            pending_timeout: Duration::from_secs(number("GUM_SWEEP_PENDING_TIMEOUT_SECS", 60)),
             max_submissions: max_submissions as u32,
             max_attempts: max_attempts as u32,
-            rpc_max_rps: number("PAYDAY_SIGNERS_RPC_MAX_RPS", 20),
+            rpc_max_rps: number("GUM_SIGNERS_RPC_MAX_RPS", 20),
             // 0.05 native token: enough for many sweeps, low enough to alert
             // well before a signer is unusable.
-            default_low_balance_wei: std::env::var("PAYDAY_SIGNER_LOW_BALANCE_WEI")
+            default_low_balance_wei: std::env::var("GUM_SIGNER_LOW_BALANCE_WEI")
                 .ok()
                 .map(|value| {
                     value
                         .parse()
-                        .expect("PAYDAY_SIGNER_LOW_BALANCE_WEI must be an integer")
+                        .expect("GUM_SIGNER_LOW_BALANCE_WEI must be an integer")
                 })
                 .unwrap_or(U256::from(50_000_000_000_000_000u64)),
             signer,

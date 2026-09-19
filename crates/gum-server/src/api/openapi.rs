@@ -144,7 +144,7 @@ struct CreateDepositRequest {
     customer_id: Option<String>,
     /// An opaque, merchant-supplied correlation id for this request, stored
     /// and returned verbatim: 1 to 255 bytes of UTF-8 when present, never
-    /// parsed or normalized. Payday attaches no meaning to it.
+    /// parsed or normalized. Gum attaches no meaning to it.
     issuer_id: Option<String>,
     /// At most 4000 bytes.
     notes: Option<String>,
@@ -611,8 +611,8 @@ struct PayerAttestationTypedData {
 }
 /// The payer's wallet attestation: the exact typed data the wallet signed
 /// (`{statement, attributionHash, wallet, nonce, expiresAt}` under the
-/// Payday domain of the chain the payer chose), its EIP-712 digest, and the
-/// signature. The proof's salt is `keccak256("PAYDAY_SALT_V3" ||
+/// Gum domain of the chain the payer chose), its EIP-712 digest, and the
+/// signature. The proof's salt is `keccak256("GUM_SALT_V3" ||
 /// attribution_hash || digest)` and the wallet is the address's recovery term.
 #[derive(Serialize, ToSchema)]
 struct PayerWalletAttestation {
@@ -623,8 +623,8 @@ struct PayerWalletAttestation {
     /// `ecdsa`.
     method: String,
 }
-/// One fact Payday observed: `mailbox` (provider `auth0`) or `wallet`
-/// (provider `payday`), and when.
+/// One fact Gum observed: `mailbox` (provider `auth0`) or `wallet`
+/// (provider `gum`), and when.
 #[derive(Serialize, ToSchema)]
 struct VerificationFact {
     kind: String,
@@ -655,7 +655,7 @@ struct RelayAttribution {
     origin_transaction_hash: String,
     /// Always the attested wallet.
     origin_sender: String,
-    /// `receipt` (read from a chain Payday serves) or `relay_api` (Relay's
+    /// `receipt` (read from a chain Gum serves) or `relay_api` (Relay's
     /// record of the depositor).
     attribution_source: String,
 }
@@ -680,7 +680,7 @@ struct VerificationAttestationPayload {
     chain_id: String,
     payment_address: String,
     payer_wallet: String,
-    /// The nonce inside the payer's signed attestation; Payday's word is
+    /// The nonce inside the payer's signed attestation; Gum's word is
     /// that it was issued only after the policy passed.
     wallet_nonce: String,
     payer_policy_mode: PayerPolicyMode,
@@ -690,13 +690,13 @@ struct VerificationAttestationPayload {
     wallet_bound_at: String,
     facts: Vec<VerificationFact>,
     /// The transfers Relay's solver made for cross-chain payments the
-    /// attested wallet sent, each with the origin Payday verified; absent
+    /// attested wallet sent, each with the origin Gum verified; absent
     /// when every transfer came from the wallet itself.
     relay_fills: Option<Vec<AttestedRelayFill>>,
 }
-/// Payday-attested, not address-committed: verification happens after
+/// Gum-attested, not address-committed: verification happens after
 /// issuance. `signature` recovers to `signer` over
-/// `keccak256("PAYDAY_VERIFICATION_ATTESTATION_V4" || JCS(payload))`.
+/// `keccak256("GUM_VERIFICATION_ATTESTATION_V4" || JCS(payload))`.
 #[derive(Serialize, ToSchema)]
 struct SignedVerificationAttestation {
     payload: VerificationAttestationPayload,
@@ -740,7 +740,7 @@ fn get_deposit_request() {}
 fn cancel_deposit_request() {}
 #[utoipa::path(get, path="/v1/deposit-requests/{id}/transfers", operation_id="listDepositRequestTransfers", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Finalized transfer provenance",body=TransferList),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn transfers() {}
-#[utoipa::path(get, path="/v1/deposit-requests/{id}/attachment", operation_id="getDepositRequestAttachment", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Descriptor with a signed download_url valid for PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,description="deposit_request_not_found or attachment_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
+#[utoipa::path(get, path="/v1/deposit-requests/{id}/attachment", operation_id="getDepositRequestAttachment", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Descriptor with a signed download_url valid for GUM_ATTACHMENT_DOWNLOAD_TTL_SECS",body=AttachmentDescriptor),(status=401,body=ErrorResponse),(status=404,description="deposit_request_not_found or attachment_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn deposit_request_attachment() {}
 #[utoipa::path(get, path="/v1/deposit-requests/{id}/request.pdf", operation_id="getDepositRequestPdf", tag="deposit-requests", params(("id"=String, Path)), responses((status=200,description="Deterministic deposit request summary as application/pdf, served as an attachment"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
 fn request_pdf() {}
@@ -871,7 +871,7 @@ struct Withdrawal {
     id: String,
     /// `awaiting_signature`, `in_progress`, `completed`, `failed`, or `cancelled`.
     status: String,
-    /// The Payday wallet every leg is signed from.
+    /// The Gum wallet every leg is signed from.
     wallet_address: String,
     /// `USDC` or `USDT`: the one currency every leg moves.
     currency: String,
@@ -890,7 +890,7 @@ struct WithdrawalPage {
 }
 
 #[utoipa::path(post, path="/v1/withdrawals", operation_id="createWithdrawal", tag="withdrawals",
- request_body(content=CreateWithdrawal, description="Snapshot the Payday wallet's balance in one currency (USDC unless named) into legs towards one destination: every network for USDC, which bridges through CCTP at 1:1; the destination network alone for USDT, which does not bridge. Each leg carries the typed data to sign; nothing moves until it is signed. A reused Idempotency-Key with the same destination replays the withdrawal; with another destination it is a 409 idempotency_conflict."),
+ request_body(content=CreateWithdrawal, description="Snapshot the Gum wallet's balance in one currency (USDC unless named) into legs towards one destination: every network for USDC, which bridges through CCTP at 1:1; the destination network alone for USDT, which does not bridge. Each leg carries the typed data to sign; nothing moves until it is signed. A reused Idempotency-Key with the same destination replays the withdrawal; with another destination it is a 409 idempotency_conflict."),
  params(("Idempotency-Key"=String, Header, description="Required, 1-255 bytes")),
  responses((status=201, description="Created; every leg is awaiting_signature", body=Withdrawal), (status=200, description="Idempotent replay", body=Withdrawal, headers(("Idempotency-Replayed"=String, description="true"))), (status=400, body=ErrorResponse), (status=401, body=ErrorResponse), (status=409, description="wallet_not_ready, withdrawal_in_progress, nothing_to_withdraw, or idempotency_conflict", body=ErrorResponse), (status=422, description="withdrawal_exceeds_bridge_limit: a bridge leg is above Circle's 10,000,000 USDC per-message burn limit", body=ErrorResponse), (status=429, body=ErrorResponse), (status=503, description="withdrawals_unavailable: a balance could not be read, or a chain the wallet holds funds on cannot bridge on this deployment", body=ErrorResponse)), security(("apiKey"=[])))]
 fn create_withdrawal() {}
@@ -912,7 +912,7 @@ fn cancel_withdrawal() {}
 #[derive(OpenApi)]
 #[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
  components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerPolicyMode,PayerPolicy,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,StatusWithdrawals,StatusSigner,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
- modifiers(&Security), tags((name="withdrawals",description="Moving the Payday wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
+ modifiers(&Security), tags((name="withdrawals",description="Moving the Gum wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
 struct Security;
@@ -931,7 +931,7 @@ impl utoipa::Modify for Security {
             "dashboardSession",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
         );
-        api.info.title = "Payday API".into();
+        api.info.title = "Gum API".into();
         api.info.version = "1.0.0".into();
         api.info.description = Some(
             "Every id is a UUID behind a prefix naming its resource: dr_ deposit request, \
@@ -952,7 +952,7 @@ pub fn document() -> utoipa::openapi::OpenApi {
 }
 pub async fn reference() -> Html<&'static str> {
     Html(
-        r#"<!doctype html><html><head><title>Payday API</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><script id="api-reference" data-url="/api/openapi.json"></script><script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script></body></html>"#,
+        r#"<!doctype html><html><head><title>Gum API</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><script id="api-reference" data-url="/api/openapi.json"></script><script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script></body></html>"#,
     )
 }
 

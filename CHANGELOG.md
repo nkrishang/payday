@@ -28,6 +28,23 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
+- The product is Gum. Every surface carries the new name: the TypeScript
+  SDK is `@gum/sdk` with `GumClient`, `GumPayerClient`, and `GumError`
+  (was `@payday/sdk`, `PaydayClient`, `PaydayPayerClient`, `PaydayError`);
+  the web app is `@gum/web`; every environment variable is `GUM_*`; the
+  webhook and payer-session headers are `Gum-Event-Id`, `Gum-Event-Type`,
+  `Gum-Signature`, and `Gum-Payer-Session`; API keys mint as `gum_live_`,
+  `gum_test_`, and `gum_dev_`; the canonical schema strings are
+  `gum.invoice.v4`, `gum.attestation.v4`, and `gum.proof.v4`; the
+  attestation's EIP-712 domain and statement name Gum; the proof's wallet
+  fact is `provider: "gum"`; and the product domain and mail are
+  `gum.money`, `api.gum.money`, and `@gum.money`. A new migration
+  (`0004_gum_provider.sql`) rewrites the recorded `provider` value and
+  re-pins its check constraint. The pinned canonicalization and
+  attestation digests moved with the renamed bytes, in the Rust and web
+  pinning tests together. Existing staging API keys minted with the old
+  prefix must be re-minted after deploy.
+
 - The dashboard is the account's control panel for an API-first Gum, and
   nothing more. It is three sections on one page: the **API key** the
   merchant's own server calls the API with (generate, roll with a 24-hour
@@ -67,7 +84,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `issuer_in_use`, and `issuer_email_already_verified` errors are gone,
   as are the SDK's `issuers` and `payoutAddresses` resources; the SDK's
   `create` now requires `payout_address` and `issuer` and takes `issuer_id`
-  as the opaque string. Migration `0004` converts `invoices.issuer_id` to
+  as the opaque string. Migration `0005` converts `invoices.issuer_id` to
   text — existing UUID values are prefixed with `iss_` to stay
   distinguishable — and drops the `issuers`, `issuer_payout_addresses`,
   `payout_addresses`, and `onboarding_demo_payments` tables.
@@ -75,10 +92,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   its live payer preview, `POST /v1/deposit-requests/{id}/onboarding-deposit`
   with its `409 onboarding_deposit_*` and `503 onboarding_deposit_unavailable`
   errors, the onboarding payer signer lane in gum-signers and its bus
-  command and event, the `PAYDAY_ONBOARDING_*` settings, and the demo
+  command and event, the `GUM_ONBOARDING_*` settings, and the demo
   payer's KMS key and its Terraform wiring. Wallet pregeneration
   (`POST /v1/wallets/pregenerate`) stays: it is part of sign-up, not the
   walkthrough.
+
 
 ### Added
 

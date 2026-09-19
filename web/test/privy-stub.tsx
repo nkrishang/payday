@@ -7,7 +7,7 @@ import { useCallback, useSyncExternalStore, type ReactNode } from "react";
  * component tests.
  *
  * Privy cannot be driven by a test: a sign-in needs a real mailbox and a real
- * code. So when the suite asks (`PAYDAY_PRIVY_STUB=1`, see next.config.ts)
+ * code. So when the suite asks (`GUM_PRIVY_STUB=1`, see next.config.ts)
  * this module takes the SDK's place at bundle time, with the same hooks and
  * the same shapes the app reads — `usePrivy`, `useLoginWithEmail`,
  * `useIdentityToken`, `getIdentityToken`, `useCreateWallet`, `useUser` —
@@ -21,7 +21,7 @@ import { useCallback, useSyncExternalStore, type ReactNode } from "react";
  * the real API keeps accounts apart.
  */
 
-const SESSION_KEY = "payday.privy-stub.session";
+const SESSION_KEY = "gum.privy-stub.session";
 const TOKEN_PREFIX = "stub-dashboard-token";
 export const STUB_OTP = "123456";
 
@@ -192,27 +192,56 @@ export const emailUpdates: Array<{ newEmailAddress: string; confirmed: boolean }
  * The stub keeps the identity (sub) and wallet — a changed email is the same
  * merchant — and rewrites the session, so a signed-in page can watch
  * `usePrivy().user.email` move.
+ *
+ * Failure semantics match the real SDK's: a bad address or wrong code does
+ * not reject — the `onError` callback fires (and `verifyCode` resolves
+ * `undefined`) — because that is how the real `useUpdateEmail` reports
+ * problems, and the dashboard reads them from there.
  */
-export function useUpdateEmail() {
-  const sendCode = useCallback(async ({ newEmailAddress }: { newEmailAddress: string }) => {
-    const session = read();
-    if (!session) throw new Error("Not signed in");
-    if (!newEmailAddress.includes("@")) throw new Error("Invalid email address");
-    emailUpdates.push({ newEmailAddress: newEmailAddress.trim().toLowerCase(), confirmed: false });
-  }, []);
-  const verifyCode = useCallback(async ({ code }: { code: string }) => {
-    const session = read();
-    if (!session) throw new Error("Not signed in");
-    if (code !== STUB_OTP) throw new Error("Invalid verification code");
-    const last = emailUpdates[emailUpdates.length - 1];
-    if (!last || last.confirmed) throw new Error("No code was sent");
-    last.confirmed = true;
-    const email = last.newEmailAddress;
-    // Same identity, same wallet, new mailbox — and a fresh token to match.
-    const claims = base64url(JSON.stringify({ sub: session.sub, email, wallet: session.wallet }));
-    write({ email, sub: session.sub, wallet: session.wallet, identityToken: `${TOKEN_PREFIX}.${claims}` });
-    return { user: { id: session.sub, email: { address: email } } };
-  }, []);
+export function useUpdateEmail(callbacks?: {
+  onError?: (code: string, details: { linkMethod: string }) => void;
+}) {
+  const onError = callbacks?.onError;
+  const sendCode = useCallback(
+    async ({ newEmailAddress }: { newEmailAddress: string }) => {
+      const session = read();
+      if (!session) {
+        onError?.("not_signed_in", { linkMethod: "email" });
+        return;
+      }
+      if (!newEmailAddress.includes("@")) {
+        onError?.("invalid_data", { linkMethod: "email" });
+        return;
+      }
+      emailUpdates.push({ newEmailAddress: newEmailAddress.trim().toLowerCase(), confirmed: false });
+    },
+    [onError],
+  );
+  const verifyCode = useCallback(
+    async ({ code }: { code: string }) => {
+      const session = read();
+      if (!session) {
+        onError?.("not_signed_in", { linkMethod: "email" });
+        return undefined;
+      }
+      if (code !== STUB_OTP) {
+        onError?.("invalid_data", { linkMethod: "email" });
+        return undefined;
+      }
+      const last = emailUpdates[emailUpdates.length - 1];
+      if (!last || last.confirmed) {
+        onError?.("failed_to_update_account", { linkMethod: "email" });
+        return undefined;
+      }
+      last.confirmed = true;
+      const email = last.newEmailAddress;
+      // Same identity, same wallet, new mailbox — and a fresh token to match.
+      const claims = base64url(JSON.stringify({ sub: session.sub, email, wallet: session.wallet }));
+      write({ email, sub: session.sub, wallet: session.wallet, identityToken: `${TOKEN_PREFIX}.${claims}` });
+      return { user: { id: session.sub, email: { address: email } } };
+    },
+    [onError],
+  );
   return { sendCode, verifyCode, state: { status: "initial" as const } };
 }
 

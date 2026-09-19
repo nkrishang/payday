@@ -132,7 +132,7 @@ test("the sign-in email can be changed, and the account keeps everything it had"
   // The same merchant is still signed in: same wallet, same loaded data —
   // the page did not empty and re-fetch around them.
   const wallet = await page.evaluate(
-    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+    () => JSON.parse(sessionStorage.getItem("gum.privy-stub.session") ?? "{}").wallet,
   );
   expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
   await expect(section).toContainText(wallet);

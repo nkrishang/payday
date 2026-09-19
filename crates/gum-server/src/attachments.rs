@@ -41,7 +41,7 @@ pub const SCAN_STATUS_TAG: &str = "GuardDutyMalwareScanStatus";
 pub const CLEAN_SCAN: &str = "NO_THREATS_FOUND";
 /// The lifecycle tag: `pending` uploads are expired by the bucket after a
 /// bounded time, `attached` objects never are. Issuance flips it.
-const UPLOAD_STATE_TAG: &str = "payday-upload";
+const UPLOAD_STATE_TAG: &str = "gum-upload";
 const UPLOAD_PENDING: &str = "pending";
 const UPLOAD_ATTACHED: &str = "attached";
 const PDF_MAGIC: &[u8] = b"%PDF-";
@@ -1026,7 +1026,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(upload.headers["content-type"], "application/pdf");
-        assert_eq!(upload.headers["x-amz-tagging"], "payday-upload=pending");
+        assert_eq!(upload.headers["x-amz-tagging"], "gum-upload=pending");
         assert_eq!(
             upload.headers["if-none-match"], "*",
             "the PUT is write-once"
@@ -1086,14 +1086,14 @@ mod tests {
     /// that every finalization step reads what the client actually wrote. On
     /// a versioned bucket it also proves that reads stay pinned to the
     /// hashed version after an unconditional overwrite. Needs
-    /// PAYDAY_ATTACHMENT_BUCKET, PAYDAY_ATTACHMENT_S3_ENDPOINT, and AWS_*
+    /// GUM_ATTACHMENT_BUCKET, GUM_ATTACHMENT_S3_ENDPOINT, and AWS_*
     /// credentials in the environment, so it is opt-in:
     /// `cargo test -- --ignored`.
     #[tokio::test]
     #[ignore = "needs a reachable S3-compatible bucket"]
     async fn s3_storage_round_trips_against_the_configured_bucket() {
-        let bucket = std::env::var("PAYDAY_ATTACHMENT_BUCKET").unwrap();
-        let endpoint = std::env::var("PAYDAY_ATTACHMENT_S3_ENDPOINT").ok();
+        let bucket = std::env::var("GUM_ATTACHMENT_BUCKET").unwrap();
+        let endpoint = std::env::var("GUM_ATTACHMENT_S3_ENDPOINT").ok();
         let sdk = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let storage: Arc<dyn ObjectStorage> = Arc::new(S3ObjectStorage::new(
             &sdk,
@@ -1117,7 +1117,7 @@ mod tests {
         // The client's PUT, with exactly the signed headers.
         let upload = store.presign_upload(account, attachment_id).await.unwrap();
         assert_eq!(upload.headers["content-type"], "application/pdf");
-        assert_eq!(upload.headers["x-amz-tagging"], "payday-upload=pending");
+        assert_eq!(upload.headers["x-amz-tagging"], "gum-upload=pending");
         assert_eq!(upload.headers["if-none-match"], "*");
         let http = reqwest::Client::new();
         let put = |bytes: &'static [u8]| {
@@ -1250,7 +1250,7 @@ mod tests {
             .bucket(bucket)
             .key(key)
             .content_type(content_type)
-            .tagging("payday-upload=pending")
+            .tagging("gum-upload=pending")
             .body(bytes.to_vec().into())
             .send()
             .await

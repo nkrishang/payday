@@ -248,7 +248,7 @@ async fn deliver_merchant(
                     Message::builder()
                         .subject(
                             Content::builder()
-                                .data("Payday payout needs attention")
+                                .data("Gum payout needs attention")
                                 .build()
                                 .unwrap(),
                         )
@@ -281,33 +281,33 @@ pub fn guidance(code: &str, currency: gum_core::Currency) -> (String, &'static s
     let (message, action): (String, &'static str) = match code {
         "beneficiary_blacklisted" => (
             format!("The payout address is restricted by {issuer}, the {currency} issuer."),
-            "Contact Payday support to agree on recovery after the deposit request expires.",
+            "Contact Gum support to agree on recovery after the deposit request expires.",
         ),
         "recovery_blacklisted" => (
             format!(
                 "The payer's wallet, where excess funds return, is restricted by {issuer}, the {currency} issuer."
             ),
-            "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
+            "Contact Gum support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
             format!("The deposit address is restricted by {issuer}, the {currency} issuer."),
-            "Contact Payday support for a compliance escalation.",
+            "Contact Gum support for a compliance escalation.",
         ),
         "balance_below_amount" => (
             "The finalized deposit record does not match the on-chain balance.".into(),
-            "No action is needed from the payer; Payday support is investigating.",
+            "No action is needed from the payer; Gum support is investigating.",
         ),
         "parameters_mismatch" | "corrupt_row" => (
             "The stored deposit request details require manual review.".into(),
-            "Contact Payday support to review the deposit request before payout resumes.",
+            "Contact Gum support to review the deposit request before payout resumes.",
         ),
         "retries_exhausted" => (
             "Automatic payout attempts were unsuccessful.".into(),
-            "No action is needed from the payer; Payday support will inspect and retry the payout.",
+            "No action is needed from the payer; Gum support will inspect and retry the payout.",
         ),
         _ => (
             "Automatic payout requires a manual review.".into(),
-            "Contact Payday support and provide the deposit request ID.",
+            "Contact Gum support and provide the deposit request ID.",
         ),
     };
     (message, action)
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn composes_the_payer_email_from_the_issued_document() {
-        let access = PayerAccess::new("https://payday.sh/", vec![], None).unwrap();
+        let access = PayerAccess::new("https://gum.money/", vec![], None).unwrap();
         let invoice = invoice();
         let email = compose(&invoice, &access);
         assert_eq!(email.issuer_name, "Acme");
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(email.expires_at.timestamp(), 1_788_000_000);
         assert_eq!(
             email.deposit_url,
-            format!("https://payday.sh/pay/{}", invoice.id)
+            format!("https://gum.money/pay/{}", invoice.id)
         );
     }
 
@@ -424,7 +424,7 @@ mod tests {
             merchant: None,
             payer: Some(ResendClient::new(
                 "re_test".into(),
-                "Payday <c@payday.sh>".into(),
+                "Gum <c@gum.money>".into(),
             )),
         };
         assert_eq!(payer_only.recipients(), vec![NotificationRecipient::Payer]);

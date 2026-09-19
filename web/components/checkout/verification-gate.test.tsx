@@ -1,4 +1,4 @@
-import type { PayerDepositRequest } from "@payday/sdk";
+import type { PayerDepositRequest } from "@gum/sdk";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { checkoutView, type CheckoutLocalState } from "@/lib/checkout-state";

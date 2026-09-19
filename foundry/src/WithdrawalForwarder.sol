@@ -35,7 +35,7 @@ interface ITokenMessengerV2 {
 /// The merchant signs an EIP-3009 `ReceiveWithAuthorization` naming this
 /// contract as the payee and, as the authorization's nonce, a commitment to
 /// the CCTP destination: `keccak256(abi.encode(destinationDomain,
-/// mintRecipient, salt))`. Whoever relays it (Payday pays the gas) must
+/// mintRecipient, salt))`. Whoever relays it (Gum pays the gas) must
 /// supply the same destination, because this contract recomputes the nonce
 /// from what it is told and USDC checks that nonce against the signature. A
 /// relayer that substitutes its own recipient produces a nonce the merchant

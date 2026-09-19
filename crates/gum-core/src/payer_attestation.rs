@@ -6,7 +6,7 @@
 //! and the wallet is the address's recovery term (see [`crate::Invoice`]).
 //!
 //! ```text
-//! domain  = EIP712Domain{name: "Payday", version: "1", chainId, verifyingContract: factory}
+//! domain  = EIP712Domain{name: "Gum", version: "1", chainId, verifyingContract: factory}
 //! message = PayerAttestation{statement, attributionHash, wallet, nonce, expiresAt}
 //! digest  = keccak256(0x1901 || domainSeparator || hashStruct(message))
 //! ```
@@ -23,12 +23,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// EIP-712 domain name and version. A new message shape means a new version.
-pub const PAYER_ATTESTATION_DOMAIN_NAME: &str = "Payday";
+pub const PAYER_ATTESTATION_DOMAIN_NAME: &str = "Gum";
 pub const PAYER_ATTESTATION_DOMAIN_VERSION: &str = "1";
 pub const PAYER_ATTESTATION_PRIMARY_TYPE: &str = "PayerAttestation";
 /// The sentence the payer signs. It is part of the signed bytes, so a wallet
 /// that renders typed data shows the payer exactly what they are agreeing to.
-pub const PAYER_ATTESTATION_STATEMENT: &str = "I control this wallet and will pay this Payday deposit request from it. Only transfers from this wallet count toward the request, and any funds Payday returns go back to it.";
+pub const PAYER_ATTESTATION_STATEMENT: &str = "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request, and any funds Gum returns go back to it.";
 /// The one signature method verifiable offline.
 pub const PAYER_ATTESTATION_METHOD_ECDSA: &str = "ecdsa";
 
@@ -211,7 +211,7 @@ pub enum PayerAttestationError {
     Malformed(&'static str),
     #[error("payer attestation method is not supported")]
     UnsupportedMethod,
-    #[error("payer attestation typed data is not the Payday attestation type")]
+    #[error("payer attestation typed data is not the Gum attestation type")]
     UnexpectedTypedData,
     #[error("payer attestation domain does not match this deployment")]
     DomainMismatch,
@@ -225,7 +225,7 @@ pub enum PayerAttestationError {
     SignerMismatch,
 }
 
-/// Verify an attestation offline: the typed data must be the Payday
+/// Verify an attestation offline: the typed data must be the Gum
 /// attestation type under `scope`'s domain and name `scope`'s attribution
 /// hash; its digest must be what the typed data hashes to; and the signature
 /// must recover to the wallet the message names, which must be `address`.
@@ -367,7 +367,7 @@ mod tests {
         let message = message();
         assert_eq!(
             message.digest(CHAIN, FACTORY).to_string(),
-            "0x23f81e489d7192b8735c0d0c7866fbd8cd502c345b7dca546fc0bd29c0585392"
+            "0xc55420e71bf84f9530d88c39ca101708dc8426be79b5432b4f636910c6909743"
         );
         let typed = message.typed_data(CHAIN, FACTORY);
         let json = serde_json::to_value(&typed).unwrap();

@@ -835,7 +835,7 @@ mod tests {
             }),
             ("schema", {
                 let mut s = snapshot();
-                s.schema = "payday.invoice".into();
+                s.schema = "gum.invoice".into();
                 s
             }),
         ];

@@ -163,7 +163,7 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
 
 const OBJECT = `{
   "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "deposit_url": "https://payday.sh/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
+  "deposit_url": "https://gum.money/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "status": "awaiting_deposit",
   "networks": [
     { "chain": { "id": "143", "name": "Monad" }, "token": { "symbol": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "decimals": 6 } },
@@ -455,7 +455,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" \\
+  -H "Authorization: Bearer $GUM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: INV-1042" \\
   -d '{
@@ -472,7 +472,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
     "expires_in": 3600,
     "metadata": { "po": "PO-77" }
   }'`,
-        ts: `const request = await payday.depositRequests.create(
+        ts: `const request = await gum.depositRequests.create(
   {
     amount: "10.50",
     payout_address: "0x1111111111111111111111111111111111111111",
@@ -534,13 +534,13 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests?status=partially_deposited&limit=20" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const page = await payday.depositRequests.list({ status: "partially_deposited", limit: 20 });`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const page = await gum.depositRequests.list({ status: "partially_deposited", limit: 20 });`,
         response: `{
   "deposit_requests": [
     {
       "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-      "deposit_url": "https://payday.sh/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
+      "deposit_url": "https://gum.money/pay/dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
       "heading": "March retainer",
       "payer_name": "Customer Inc",
       "reference": "INV-1042",
@@ -609,9 +609,9 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       ],
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-8d2f-7dc1-a369-90556a64f700?wait_for=change&timeout=30" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const request = await payday.depositRequests.get(id);
-const latest = await payday.depositRequests.get(id, { waitForChange: true, timeout: 30 });`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const request = await gum.depositRequests.get(id);
+const latest = await gum.depositRequests.get(id, { waitForChange: true, timeout: 30 });`,
         response: SETTLED,
         responseTitle: "200 OK",
       },
@@ -639,8 +639,8 @@ const latest = await payday.depositRequests.get(id, { waitForChange: true, timeo
       },
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/cancel" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const cancelled = await payday.depositRequests.cancel(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const cancelled = await gum.depositRequests.cancel(id);`,
         response: OBJECT.replace(
           '"cancellation_requested_at": null',
           '"cancellation_requested_at": "2026-09-06T12:30:00Z"',
@@ -682,8 +682,8 @@ const latest = await payday.depositRequests.get(id, { waitForChange: true, timeo
       },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/transfers" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const { transfers } = await payday.depositRequests.transfers(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const { transfers } = await gum.depositRequests.transfers(id);`,
         response: `{
   "transfers": [
     {
@@ -737,8 +737,8 @@ const latest = await payday.depositRequests.get(id, { waitForChange: true, timeo
       },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/verification" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const detail = await payday.depositRequests.verification(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const detail = await gum.depositRequests.verification(id);`,
         response: `{
   "payer_policy_mode": "verified_email",
   "verification_completed_at": "2026-09-06T12:05:00Z",
@@ -788,10 +788,10 @@ const latest = await payday.depositRequests.get(id, { waitForChange: true, timeo
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/client-secret" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `import { checkoutUrl } from "@payday/sdk";
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `import { checkoutUrl } from "@gum/sdk";
 
-const { client_secret } = await payday.depositRequests.createClientSecret(id);
+const { client_secret } = await gum.depositRequests.createClientSecret(id);
 res.redirect(303, checkoutUrl(request, client_secret));`,
         response: `{
   "client_secret": "cs_…",
@@ -826,10 +826,10 @@ res.redirect(303, checkoutUrl(request, client_secret));`,
       ],
       examples: {
         curl: `curl -fsS -X POST "$API/v1/deposit-requests/dr_0198f80c-…/preview-session" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `import { previewUrl } from "@payday/sdk";
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `import { previewUrl } from "@gum/sdk";
 
-const { payer_session } = await payday.depositRequests.previewSession(id);
+const { payer_session } = await gum.depositRequests.previewSession(id);
 window.open(previewUrl(request, payer_session));`,
         response: `{
   "payer_session": "…",
@@ -865,8 +865,8 @@ window.open(previewUrl(request, payer_session));`,
       answers: [{ status: 404, code: "attachment_not_found", when: "No attachment." }],
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/attachment" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"`,
-        ts: `const pdf = await payday.depositRequests.attachment(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY"`,
+        ts: `const pdf = await gum.depositRequests.attachment(id);`,
         response: `{
   "id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "filename": "INV-1042.pdf",
@@ -889,8 +889,8 @@ window.open(previewUrl(request, payer_session));`,
       response: { description: "application/pdf." },
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/request.pdf" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" -o request.pdf`,
-        ts: `const blob = await payday.depositRequests.requestPdf(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY" -o request.pdf`,
+        ts: `const blob = await gum.depositRequests.requestPdf(id);`,
         response: `HTTP/1.1 200 OK
 Content-Type: application/pdf
 Content-Length: 31288`,
@@ -906,12 +906,12 @@ Content-Length: 31288`,
       summary: "Retrieves the Proof of Payment for a settled request.",
       body: (
         <p>
-          Document version <code>payday.proof.v4</code>: canonical issuance snapshot (with every
+          Document version <code>gum.proof.v4</code>: canonical issuance snapshot (with every
           network offered), attribution hash, payer wallet attestation, salt, the chosen chain,
           factory, and token, deposit and recovery addresses, credited transfers (a transfer
           Relay&apos;s solver delivered for a payment from another network carries{" "}
           <code>relay</code>: request id, origin chain, origin transaction, origin sender), settlement
-          transaction hash, and a Payday-signed verification attestation whose{" "}
+          transaction hash, and a Gum-signed verification attestation whose{" "}
           <code>relay_fills</code> vouch for those origins. Verifiable offline; reference
           implementation <code>gateway_core::verify_proof</code>. Schema:{" "}
           <a href="/docs/proof-of-payment">Proof of Payment</a>.
@@ -930,12 +930,12 @@ Content-Length: 31288`,
       ],
       examples: {
         curl: `curl -fsS "$API/v1/deposit-requests/dr_0198f80c-…/proof" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" > proof.json`,
-        ts: `const proof = await payday.depositRequests.proof(id);`,
+  -H "Authorization: Bearer $GUM_API_KEY" > proof.json`,
+        ts: `const proof = await gum.depositRequests.proof(id);`,
         response: `{
-  "version": "payday.proof.v4",
+  "version": "gum.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
-  "canonical_issuance_snapshot": { "schema": "payday.invoice.v4", "canonicalization": "RFC8785", "currency": "USDC", "decimals": "6", "networks": [ "…" ], "…": "…" },
+  "canonical_issuance_snapshot": { "schema": "gum.invoice.v4", "canonicalization": "RFC8785", "currency": "USDC", "decimals": "6", "networks": [ "…" ], "…": "…" },
   "canonicalization": "RFC8785",
   "attribution_hash": "0x…",
   "payer_wallet": { "address": "0x5aAe…", "typed_data": { "…": "…" }, "digest": "0x…", "signature": "0x…", "method": "ecdsa" },

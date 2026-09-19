@@ -16,9 +16,9 @@ pub struct Config {
     privy: Option<PrivyConfig>,
     dev_identity: bool,
     /// Every network a deposit request may be paid on, with the contract
-    /// generation deployed on each (`PAYDAY_CHAINS`).
+    /// generation deployed on each (`GUM_CHAINS`).
     networks: ChainRegistry,
-    /// One RPC URL per registered chain (`PAYDAY_RPC_URL_<chain_id>`), read
+    /// One RPC URL per registered chain (`GUM_RPC_URL_<chain_id>`), read
     /// at startup to verify the deployment.
     rpc_urls: HashMap<u64, String>,
     attachments: AttachmentConfig,
@@ -35,21 +35,21 @@ pub struct Config {
     /// The Resend key that sends payers their deposit request emails;
     /// `None` leaves those queued and unsent.
     resend: Option<ResendConfig>,
-    /// Relay (`PAYDAY_RELAY_URL`), for cross-chain payments into a deposit
-    /// address; `PAYDAY_RELAY_API_KEY` unset leaves them unoffered.
+    /// Relay (`GUM_RELAY_URL`), for cross-chain payments into a deposit
+    /// address; `GUM_RELAY_API_KEY` unset leaves them unoffered.
     relay_url: String,
     relay_api_key: Option<String>,
-    /// The listener `gum-indexer` calls (`PAYDAY_INTERNAL_BIND_ADDR`) and
-    /// the bearer token it presents (`PAYDAY_INTERNAL_TOKEN`). Never the
+    /// The listener `gum-indexer` calls (`GUM_INTERNAL_BIND_ADDR`) and
+    /// the bearer token it presents (`GUM_INTERNAL_TOKEN`). Never the
     /// public listener: these routes mutate the ledger unauthenticated by
     /// anything but the token.
     internal_bind_addr: String,
     internal_token: String,
-    /// Circle's Iris API (`PAYDAY_CCTP_IRIS_URL`), polled for the
+    /// Circle's Iris API (`GUM_CCTP_IRIS_URL`), polled for the
     /// attestation of every bridge leg's burn. Mainnet by default.
     iris_url: String,
     /// How often the sweep scheduler looks at the queue when nothing woke it
-    /// (`PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS`, 5000 by default).
+    /// (`GUM_SWEEP_SCHEDULER_INTERVAL_MS`, 5000 by default).
     sweep_scheduler_interval: Duration,
 }
 
@@ -64,14 +64,14 @@ pub struct ResendConfig {
 
 impl Config {
     pub fn from_env() -> Self {
-        let dev_identity = std::env::var("PAYDAY_DEV_IDENTITY").as_deref() == Ok("1");
+        let dev_identity = std::env::var("GUM_DEV_IDENTITY").as_deref() == Ok("1");
         // Absent (or empty, as an unconfigured task might set it) means
         // dashboard sessions are not accepted at all.
-        let privy_app_secret = std::env::var("PAYDAY_PRIVY_APP_SECRET")
+        let privy_app_secret = std::env::var("GUM_PRIVY_APP_SECRET")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let privy = std::env::var("PAYDAY_PRIVY_APP_ID")
+        let privy = std::env::var("GUM_PRIVY_APP_ID")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
@@ -81,28 +81,28 @@ impl Config {
             });
         if privy.is_none() && privy_app_secret.is_some() {
             panic!(
-                "PAYDAY_PRIVY_APP_SECRET is set but PAYDAY_PRIVY_APP_ID is not; wallet pregeneration needs both"
+                "GUM_PRIVY_APP_SECRET is set but GUM_PRIVY_APP_ID is not; wallet pregeneration needs both"
             );
         }
 
         let payer_verification = match (
-            std::env::var("PAYDAY_PAYER_AUTH0_ISSUER").ok(),
-            std::env::var("PAYDAY_PAYER_AUTH0_AUDIENCE").ok(),
-            std::env::var("PAYDAY_PAYER_AUTH0_CLIENT_ID").ok(),
-            std::env::var("PAYDAY_PAYER_REF_MASTER_KEY").ok(),
+            std::env::var("GUM_PAYER_AUTH0_ISSUER").ok(),
+            std::env::var("GUM_PAYER_AUTH0_AUDIENCE").ok(),
+            std::env::var("GUM_PAYER_AUTH0_CLIENT_ID").ok(),
+            std::env::var("GUM_PAYER_REF_MASTER_KEY").ok(),
         ) {
             (Some(issuer), Some(audience), Some(client_id), Some(master_key)) => {
                 Some(PayerVerificationConfig {
                     issuer,
                     audience,
                     client_id,
-                    payer_ref_master_key: decode_key_32("PAYDAY_PAYER_REF_MASTER_KEY", &master_key)
+                    payer_ref_master_key: decode_key_32("GUM_PAYER_REF_MASTER_KEY", &master_key)
                         .unwrap_or_else(|message| panic!("{message}")),
                 })
             }
             (None, None, None, None) => None,
             _ => panic!(
-                "PAYDAY_PAYER_AUTH0_ISSUER, PAYDAY_PAYER_AUTH0_AUDIENCE, PAYDAY_PAYER_AUTH0_CLIENT_ID, and PAYDAY_PAYER_REF_MASTER_KEY must be set together"
+                "GUM_PAYER_AUTH0_ISSUER, GUM_PAYER_AUTH0_AUDIENCE, GUM_PAYER_AUTH0_CLIENT_ID, and GUM_PAYER_REF_MASTER_KEY must be set together"
             ),
         };
 
@@ -116,49 +116,48 @@ impl Config {
             .collect();
 
         let attachments = AttachmentConfig {
-            bucket: required("PAYDAY_ATTACHMENT_BUCKET"),
-            s3_endpoint: std::env::var("PAYDAY_ATTACHMENT_S3_ENDPOINT")
+            bucket: required("GUM_ATTACHMENT_BUCKET"),
+            s3_endpoint: std::env::var("GUM_ATTACHMENT_S3_ENDPOINT")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            force_path_style: std::env::var("PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE").as_deref()
+            force_path_style: std::env::var("GUM_ATTACHMENT_S3_FORCE_PATH_STYLE").as_deref()
                 == Ok("1"),
             download_ttl: parse_download_ttl(
-                std::env::var("PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS")
+                std::env::var("GUM_ATTACHMENT_DOWNLOAD_TTL_SECS")
                     .ok()
                     .as_deref(),
             )
             .unwrap_or_else(|message| panic!("{message}")),
         };
         let attestation = attestation_signer(
-            std::env::var("PAYDAY_ATTESTATION_SIGNER_KEY").ok(),
-            std::env::var("PAYDAY_ATTESTATION_KMS_KEY_ID").ok(),
+            std::env::var("GUM_ATTESTATION_SIGNER_KEY").ok(),
+            std::env::var("GUM_ATTESTATION_KMS_KEY_ID").ok(),
         )
         .unwrap_or_else(|message| panic!("{message}"));
 
         let api_key_prefix =
-            std::env::var("PAYDAY_API_KEY_PREFIX").unwrap_or_else(|_| "payday_live_".into());
+            std::env::var("GUM_API_KEY_PREFIX").unwrap_or_else(|_| "gum_live_".into());
         validate_api_key_prefix(&api_key_prefix).unwrap_or_else(|message| panic!("{message}"));
         let webhook_encryption_key =
-            std::env::var("PAYDAY_WEBHOOK_ENCRYPTION_KEY")
+            std::env::var("GUM_WEBHOOK_ENCRYPTION_KEY")
                 .ok()
                 .map(|value| {
-                    decode_key_32("PAYDAY_WEBHOOK_ENCRYPTION_KEY", &value)
+                    decode_key_32("GUM_WEBHOOK_ENCRYPTION_KEY", &value)
                         .unwrap_or_else(|message| panic!("{message}"))
                 });
 
-        let resend = std::env::var("PAYDAY_RESEND_API_KEY")
+        let resend = std::env::var("GUM_RESEND_API_KEY")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .map(|api_key| ResendConfig {
                 api_key,
-                from: payer_email_from(std::env::var("PAYDAY_PAYER_EMAIL_FROM").ok())
+                from: payer_email_from(std::env::var("GUM_PAYER_EMAIL_FROM").ok())
                     .unwrap_or_else(|message| panic!("{message}")),
             });
 
         Config {
-            bind_addr: std::env::var("PAYDAY_BIND_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:3000".into()),
+            bind_addr: std::env::var("GUM_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             privy,
             dev_identity,
@@ -167,38 +166,38 @@ impl Config {
             attachments,
             attestation,
             payer_verification,
-            public_base_url: std::env::var("PAYDAY_PUBLIC_BASE_URL")
+            public_base_url: std::env::var("GUM_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
-            hosted_checkout_origin: std::env::var("PAYDAY_HOSTED_CHECKOUT_ORIGIN")
+            hosted_checkout_origin: std::env::var("GUM_HOSTED_CHECKOUT_ORIGIN")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
             api_key_prefix,
             webhook_encryption_key,
-            notification_from_address: std::env::var("PAYDAY_NOTIFICATION_FROM_ADDRESS").ok(),
+            notification_from_address: std::env::var("GUM_NOTIFICATION_FROM_ADDRESS").ok(),
             resend,
-            relay_url: std::env::var("PAYDAY_RELAY_URL")
+            relay_url: std::env::var("GUM_RELAY_URL")
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| gum_relay::DEFAULT_RELAY_URL.to_owned()),
-            relay_api_key: std::env::var("PAYDAY_RELAY_API_KEY")
+            relay_api_key: std::env::var("GUM_RELAY_API_KEY")
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
-            internal_bind_addr: std::env::var("PAYDAY_INTERNAL_BIND_ADDR")
+            internal_bind_addr: std::env::var("GUM_INTERNAL_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:3010".into()),
-            internal_token: required("PAYDAY_INTERNAL_TOKEN"),
-            iris_url: std::env::var("PAYDAY_CCTP_IRIS_URL")
+            internal_token: required("GUM_INTERNAL_TOKEN"),
+            iris_url: std::env::var("GUM_CCTP_IRIS_URL")
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| crate::iris::DEFAULT_IRIS_URL.to_owned()),
             sweep_scheduler_interval: Duration::from_millis(
-                std::env::var("PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS")
+                std::env::var("GUM_SWEEP_SCHEDULER_INTERVAL_MS")
                     .ok()
                     .map(|value| {
                         value.parse::<u64>().unwrap_or_else(|_| {
-                            panic!("PAYDAY_SWEEP_SCHEDULER_INTERVAL_MS must be a positive integer")
+                            panic!("GUM_SWEEP_SCHEDULER_INTERVAL_MS must be a positive integer")
                         })
                     })
                     .unwrap_or(5_000)
@@ -305,7 +304,7 @@ impl Config {
     }
 }
 
-/// The payer email's `From`: Payday's contact mailbox unless a deployment
+/// The payer email's `From`: Gum's contact mailbox unless a deployment
 /// (the sandbox, on its own subdomain) says otherwise. Whatever it is, it
 /// must at least look like a mailbox, since the dispatcher only learns of a
 /// bad sender from the provider, one rejected email at a time.
@@ -317,11 +316,11 @@ fn payer_email_from(value: Option<String>) -> Result<String, String> {
     let address = match (value.rfind('<'), value.ends_with('>')) {
         (Some(start), true) => &value[start + 1..value.len() - 1],
         (None, false) => value.as_str(),
-        _ => return Err(format!("invalid PAYDAY_PAYER_EMAIL_FROM '{value}'")),
+        _ => return Err(format!("invalid GUM_PAYER_EMAIL_FROM '{value}'")),
     };
     match address.split_once('@') {
         Some((local, domain)) if !local.is_empty() && domain.contains('.') => Ok(value),
-        _ => Err(format!("invalid PAYDAY_PAYER_EMAIL_FROM '{value}'")),
+        _ => Err(format!("invalid GUM_PAYER_EMAIL_FROM '{value}'")),
     }
 }
 
@@ -336,11 +335,11 @@ fn attestation_signer(
     match (signer_key, kms_key_id) {
         (Some(key), None) => Ok(AttestationSignerConfig::Local(key)),
         (None, Some(key_id)) => Ok(AttestationSignerConfig::AwsKms(key_id)),
-        (Some(_), Some(_)) => Err(
-            "PAYDAY_ATTESTATION_SIGNER_KEY and PAYDAY_ATTESTATION_KMS_KEY_ID are mutually exclusive",
-        ),
+        (Some(_), Some(_)) => {
+            Err("GUM_ATTESTATION_SIGNER_KEY and GUM_ATTESTATION_KMS_KEY_ID are mutually exclusive")
+        }
         (None, None) => Err(
-            "exactly one of PAYDAY_ATTESTATION_SIGNER_KEY or PAYDAY_ATTESTATION_KMS_KEY_ID must be set",
+            "exactly one of GUM_ATTESTATION_SIGNER_KEY or GUM_ATTESTATION_KMS_KEY_ID must be set",
         ),
     }
 }
@@ -349,12 +348,12 @@ fn parse_download_ttl(value: Option<&str>) -> Result<Duration, String> {
     let seconds = match value {
         None => DEFAULT_DOWNLOAD_TTL_SECS,
         Some(value) => value.parse::<u64>().map_err(|_| {
-            "PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS must be a positive integer".to_string()
+            "GUM_ATTACHMENT_DOWNLOAD_TTL_SECS must be a positive integer".to_string()
         })?,
     };
     if !(1..=MAX_PRESIGN_SECS).contains(&seconds) {
         return Err(format!(
-            "PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS must be between 1 and {MAX_PRESIGN_SECS}"
+            "GUM_ATTACHMENT_DOWNLOAD_TTL_SECS must be between 1 and {MAX_PRESIGN_SECS}"
         ));
     }
     Ok(Duration::from_secs(seconds))
@@ -362,8 +361,8 @@ fn parse_download_ttl(value: Option<&str>) -> Result<Duration, String> {
 
 fn validate_api_key_prefix(value: &str) -> Result<(), &'static str> {
     match value {
-        "payday_live_" | "payday_test_" => Ok(()),
-        _ => Err("PAYDAY_API_KEY_PREFIX must be exactly payday_live_ or payday_test_"),
+        "gum_live_" | "gum_test_" => Ok(()),
+        _ => Err("GUM_API_KEY_PREFIX must be exactly gum_live_ or gum_test_"),
     }
 }
 
@@ -420,10 +419,10 @@ mod tests {
 
     #[test]
     fn accepts_only_supported_api_key_prefixes() {
-        assert!(validate_api_key_prefix("payday_live_").is_ok());
-        assert!(validate_api_key_prefix("payday_test_").is_ok());
-        assert!(validate_api_key_prefix("payday_dev_").is_err());
-        assert!(validate_api_key_prefix("payday_live").is_err());
+        assert!(validate_api_key_prefix("gum_live_").is_ok());
+        assert!(validate_api_key_prefix("gum_test_").is_ok());
+        assert!(validate_api_key_prefix("gum_dev_").is_err());
+        assert!(validate_api_key_prefix("gum_live").is_err());
     }
 
     #[test]
@@ -457,44 +456,41 @@ mod tests {
     fn keys_require_standard_base64_of_32_bytes() {
         assert_eq!(
             decode_key_32(
-                "PAYDAY_WEBHOOK_ENCRYPTION_KEY",
+                "GUM_WEBHOOK_ENCRYPTION_KEY",
                 "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
             )
             .unwrap()
             .len(),
             32
         );
-        assert!(decode_key_32("PAYDAY_PAYER_REF_MASTER_KEY", "not base64").is_err());
+        assert!(decode_key_32("GUM_PAYER_REF_MASTER_KEY", "not base64").is_err());
         assert!(
-            decode_key_32("PAYDAY_PAYER_REF_MASTER_KEY", "c2hvcnQ=")
+            decode_key_32("GUM_PAYER_REF_MASTER_KEY", "c2hvcnQ=")
                 .unwrap_err()
-                .contains("PAYDAY_PAYER_REF_MASTER_KEY")
+                .contains("GUM_PAYER_REF_MASTER_KEY")
         );
     }
 
     #[test]
     fn payer_email_from_defaults_to_contact_and_must_be_a_mailbox() {
-        assert_eq!(
-            payer_email_from(None).unwrap(),
-            "Payday <contact@payday.sh>"
-        );
+        assert_eq!(payer_email_from(None).unwrap(), "Gum <contact@gum.money>");
         assert_eq!(
             payer_email_from(Some("  ".into())).unwrap(),
-            "Payday <contact@payday.sh>"
+            "Gum <contact@gum.money>"
         );
         assert_eq!(
-            payer_email_from(Some(" Payday Sandbox <contact@sandbox.payday.sh> ".into())).unwrap(),
-            "Payday Sandbox <contact@sandbox.payday.sh>"
+            payer_email_from(Some(" Gum Sandbox <contact@sandbox.gum.money> ".into())).unwrap(),
+            "Gum Sandbox <contact@sandbox.gum.money>"
         );
         assert_eq!(
-            payer_email_from(Some("contact@payday.sh".into())).unwrap(),
-            "contact@payday.sh"
+            payer_email_from(Some("contact@gum.money".into())).unwrap(),
+            "contact@gum.money"
         );
         for bad in [
-            "Payday",
-            "Payday <contact>",
-            "Payday <contact@payday.sh",
-            "@payday.sh",
+            "Gum",
+            "Gum <contact>",
+            "Gum <contact@gum.money",
+            "@gum.money",
         ] {
             assert!(payer_email_from(Some(bad.into())).is_err(), "{bad}");
         }

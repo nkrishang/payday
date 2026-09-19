@@ -2,7 +2,7 @@
 
 ## Deposit request versus deposit
 
-Payday has two primitives. A **deposit request** is the ask; a **deposit** is
+Gum has two primitives. A **deposit request** is the ask; a **deposit** is
 the funds that answer it.
 
 A **deposit request** is the document a merchant issues: an issuer and a payer party
@@ -13,7 +13,7 @@ that deposit request — the virtual account, the transfers that reach it, and i
 settlement. The API, the dashboard, and this documentation use the same two words: deposit
 request for the document, deposit for the funds.
 
-Payday models no line items, quantities, subtotals, discounts, tax, or fiat.
+Gum models no line items, quantities, subtotals, discounts, tax, or fiat.
 The amount is authoritative; an attached PDF is stored, presented, and hashed
 but never parsed or reconciled against it. An issued deposit request is an immutable
 snapshot: changing the amount, parties, policy, or attachment means cancelling
@@ -29,7 +29,7 @@ request on Monad or Arbitrum One shows `USDT0`, Tether's omnichain USDT on
 those chains (backed 1:1 by USDT locked on Ethereum). Every supported
 stablecoin has six decimals.
 
-The rule behind the two models is that Payday never gives a merchant a rate
+The rule behind the two models is that Gum never gives a merchant a rate
 worse than 1:1. USDC bridges through CCTP at 1:1, so a USDC request may be
 paid on any supported network and withdrawn to any. USDT has no such path, so
 a USDT request must pin `chain_id` to a network that serves USDT — Monad or
@@ -39,8 +39,8 @@ network through Relay; Relay swaps, and the payer carries the spread.
 
 ## One deposit request, one virtual account, one payer wallet
 
-Every Payday deposit request receives a unique EVM address once its payer has attested
-the wallet they will pay from. The address is *counterfactual*: Payday
+Every Gum deposit request receives a unique EVM address once its payer has attested
+the wallet they will pay from. The address is *counterfactual*: Gum
 calculates it before deploying the deposit contract, so the payer can send the
 request's stablecoin to it as soon as it exists. Until the payer's wallet is bound, the deposit request has
 no address at all (`address` is null), because the address commits to that
@@ -51,7 +51,7 @@ page, from the wallet they will pay from, over the deposit request's attribution
 and a one-time nonce issued to their session once the deposit request's policy is
 satisfied. The address then commits to the configured token, amount, payout
 address, deadline, the payer's wallet as the recovery term, and a salt derived
-from the deposit request and that signature: Payday canonicalizes the issued document
+from the deposit request and that signature: Gum canonicalizes the issued document
 (RFC 8785), hashes it, and hashes that with the attestation's EIP-712 digest
 to make the salt. Deployment cannot change those terms. Anyone may execute the
 contract, but the caller cannot redirect its funds. Settlement depends on the
@@ -61,9 +61,9 @@ wallet can be proven, never so that funds depend on it.
 Two consequences follow. Only transfers from the attested wallet are the
 payer's: money from any other wallet still counts toward the amount and
 settles, but the deposit request is flagged `likely_unsolicited_at` and no Proof of
-Payment claims the payer paid it. And anything Payday returns — an overpayment
+Payment claims the payer paid it. And anything Gum returns — an overpayment
 remainder, an expired balance, a late transfer — goes back to the payer's own
-wallet on-chain, never to a Payday-held account.
+wallet on-chain, never to a Gum-held account.
 
 Treat the address as single-use. Share the `deposit_url` or all returned
 deposit instructions, and stop presenting the address after it is no longer
@@ -79,7 +79,7 @@ Every deposit request names who may pay and what they must prove first:
 | `verified_email` | Expected email | Mailbox ownership |
 | `merchant_session` | Its own user id (`payer_reference`) | Nothing: the merchant's app opens the page with a single-use client secret |
 
-The merchant asserts; Payday confirms. Payday returns whether the check
+The merchant asserts; Gum confirms. Gum returns whether the check
 passed, never the payer's own data. For the gated modes the hosted page
 withholds the amount, payer, notes, reference, PDF, address, URI, and QR
 until the payer's session satisfies the policy — only the issuer name and
@@ -90,7 +90,7 @@ heading show, with a masked hint of the expected mailbox for
 fund crediting an onboarded investor, an exchange or a prediction market
 crediting a logged-in customer. The application creates the request
 server-side, receives a client secret, and hands it only to the user it named.
-Exchanging that secret is the verification; Payday's added claim is only that
+Exchanging that secret is the verification; Gum's added claim is only that
 the merchant's server released the secret before the session opened, and the
 webhooks carry `payer_reference` back so the application credits the right
 ledger. It is created through the API; the dashboard shows these requests but
@@ -101,7 +101,7 @@ session that satisfied the policy (any session, for `permissionless`) is
 issued a one-time nonce and signs the attestation from the wallet it will pay
 from, and only then does the address exist. That is what ties the person who
 completed the checks — or the user the merchant's app vouched for — to the
-wallet that pays: the identity facts are Payday's word, the wallet signature
+wallet that pays: the identity facts are Gum's word, the wallet signature
 and the transfers from that wallet are anyone's to recompute.
 
 ## Public lifecycle
@@ -117,15 +117,15 @@ and the transfers from that wallet are anyone's to recompute.
 | `needs_attention` | Automatic movement stopped; follow `attention.action` or contact support. |
 
 `deposited` is not yet payout finality. Fulfil an order according to your own risk
-policy; `settled` is the strongest Payday state for completed routing.
+policy; `settled` is the strongest Gum state for completed routing.
 
-Cancellation is separate lifecycle metadata. It asks Payday clients to stop
+Cancellation is separate lifecycle metadata. It asks Gum clients to stop
 presenting the deposit request, but cannot disable an EVM address or alter its immutable
 settlement terms. A transfer sent afterward is still detected and routed.
 
 ## Finality and freshness
 
-Payday credits only finalized transfers from the request's `token.address`:
+Gum credits only finalized transfers from the request's `token.address`:
 the canonical contract of its currency on the chosen chain (Circle's native
 USDC, or Tether's USDT0). A wallet may display a submitted, included, or confirmed
 transaction before `received` changes. There is intentionally no privileged
@@ -164,18 +164,18 @@ is expired. Leave room for inclusion, finality, and sweeping rather than paying
 at the boundary.
 
 The recovery term of every address is the payer's attested wallet, so
-returns are automatic and on-chain: nothing is held by Payday, and no
+returns are automatic and on-chain: nothing is held by Gum, and no
 operator action is needed. Every returned amount is still recorded against its
 deposit in the `recovered_funds` ledger and a `deposit_request.recovered_funds` webhook
-reports it. Payday does not hold the intended requested amount either, which
+reports it. Gum does not hold the intended requested amount either, which
 moves directly to the payout address. A payer who sent from a wallet other
 than the one they attested will find excess or late funds returned to the
 attested wallet, not the sending one.
 
 ## Proof of Payment
 
-A settled deposit request can be exported as a Proof of Payment (`payday.proof.v4`):
-the canonical issuance snapshot (`payday.invoice.v4`, which names the
+A settled deposit request can be exported as a Proof of Payment (`gum.proof.v4`):
+the canonical issuance snapshot (`gum.invoice.v4`, which names the
 currency and its decimals and lists every network the request offered, each
 with the currency's contract and factory), the canonicalization
 version, the attribution hash, the payer's wallet attestation (the exact
@@ -183,27 +183,27 @@ EIP-712 document the wallet signed, its digest, and the signature), the salt,
 the chain the payer chose with its factory and token, the deposit and
 recovery addresses, the credited transfers, the fulfilment
 transaction that executed the deposit contract, the attachment's hash, and a
-Payday-signed attestation of the verification facts. From it anyone —
+Gum-signed attestation of the verification facts. From it anyone —
 merchant, payer, or auditor — can recompute the hash, verify the wallet
 signature, derive the salt from the hash and the signature's digest, recompute
 the CREATE3 deposit address with the wallet as its recovery term, and confirm
 that the address received transfers from that wallet (or, for a payment made
 from another network through Relay, from Relay's solver with an origin the
 signed attestation vouches for) covering the deposit request
-amount, with no access to Payday's database and no need to trust a later PDF
+amount, with no access to Gum's database and no need to trust a later PDF
 export. A PDF receipt proves none of that on its own.
 
 The proof establishes deposit request-to-wallet-to-address-to-transfer integrity: the
 sentence it supports is that a session which satisfied this deposit request's policy
 proved control of wallet W, every credited transfer came from W to an address
 that can only belong to this deposit request and this attestation, and exactly the
-requested amount reached the merchant. What stays Payday's word is the
+requested amount reached the merchant. What stays Gum's word is the
 identity facts — that the mailbox code was exchanged, and that the wallet's
 nonce was issued only after the policy passed — which the attestation lists
 as `facts` and signs together with the attribution hash, chain, address,
 wallet, and nonce, so it belongs to that deposit request and that payer alone. Funds
 credited from any other wallet make the proof unavailable
-(`409 deposit_sender_mismatch`): Payday does not issue a proof it cannot
+(`409 deposit_sender_mismatch`): Gum does not issue a proof it cannot
 stand behind. The proof is available to the merchant
 (`GET /v1/deposit-requests/{id}/proof`) and shared at the merchant's discretion;
 `gum_core::verify_proof` checks it offline.
@@ -212,7 +212,7 @@ stand behind. The proof is available to the merchant
 
 - Only the exact `token.address` on the chosen `chain.id` is credited.
   Bridged wrappers, look-alike tokens, and native gas do not count and may be
-  unrecoverable. A transfer of another Payday-served stablecoin (USDC to a
+  unrecoverable. A transfer of another Gum-served stablecoin (USDC to a
   USDT address, say) is observed but never credited; it stays at the address
   and `recover(address)` on the deployed contract returns it to the payer's
   wallet. The address commits to its chain: on any other supported network

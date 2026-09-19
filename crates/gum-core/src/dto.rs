@@ -10,7 +10,7 @@ use crate::{
     PayerPolicyMode, chain_name, native_symbol,
 };
 
-/// The only attachment type Payday accepts (product plan §4.2).
+/// The only attachment type Gum accepts (product plan §4.2).
 pub const PDF_MIME_TYPE: &str = "application/pdf";
 
 /// Every timestamp the API emits, in one shape: RFC 3339, UTC, whole
@@ -51,7 +51,7 @@ pub struct CreateDepositRequest {
     pub customer_id: Option<CustomerId>,
     /// An opaque, merchant-supplied correlation id for this request, stored
     /// and returned verbatim: 1 to 255 bytes of UTF-8 when present, never
-    /// parsed or normalized. Payday attaches no meaning to it.
+    /// parsed or normalized. Gum attaches no meaning to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,7 +497,7 @@ pub struct PayerDepositRequestResponse {
     pub remaining: Option<String>,
     pub remaining_base_units: Option<String>,
     /// The wallet bound to this request, once a payer has attested one.
-    /// Only transfers from it count; anything Payday returns goes to it.
+    /// Only transfers from it count; anything Gum returns goes to it.
     pub payer_wallet: Option<String>,
     /// Present once unlocked and a wallet is bound; the address does not
     /// exist before the attestation it commits to.
@@ -795,7 +795,7 @@ pub fn attention(code: &str, currency: Currency) -> AttentionDto {
             format!(
                 "The payer's wallet, where excess funds return, is restricted by {issuer}, the {currency} issuer."
             ),
-            "Contact Payday support with the deposit request ID; the payer may need to be contacted.",
+            "Contact Gum support with the deposit request ID; the payer may need to be contacted.",
         ),
         "payment_address_blacklisted" => (
             format!("{issuer} has blacklisted the deposit address."),
@@ -803,7 +803,7 @@ pub fn attention(code: &str, currency: Currency) -> AttentionDto {
         ),
         "balance_below_amount" => (
             "The deposit address balance is lower than the confirmed amount.".into(),
-            "Contact support so Payday can investigate safely.",
+            "Contact support so Gum can investigate safely.",
         ),
         _ => (
             "Automatic settlement has paused.".into(),

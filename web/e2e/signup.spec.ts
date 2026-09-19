@@ -38,11 +38,11 @@ test("the hero opens a sign-up dialog that signs a new merchant in", async ({ pa
   // The session is Privy's to keep (the stub keeps it in this tab); the page
   // itself stores no credential of its own anywhere.
   const storage = await page.evaluate(() => ({
-    stub: sessionStorage.getItem("payday.privy-stub.session"),
+    stub: sessionStorage.getItem("gum.privy-stub.session"),
     keys: [...Object.keys(sessionStorage), ...Object.keys(localStorage)],
   }));
   expect(storage.stub).toContain("stub-dashboard-token");
-  expect(storage.keys.filter((key) => key.startsWith("payday.") && !key.includes("privy"))).toEqual(
+  expect(storage.keys.filter((key) => key.startsWith("gum.") && !key.includes("privy"))).toEqual(
     [],
   );
 });

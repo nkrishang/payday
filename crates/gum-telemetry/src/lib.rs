@@ -1,7 +1,7 @@
 //! Observability shared by every Gum service.
 //!
 //! * [`init`] installs the `tracing` subscriber: JSON lines in production
-//!   (`PAYDAY_LOG_FORMAT=json`), human-readable locally. Every line carries
+//!   (`GUM_LOG_FORMAT=json`), human-readable locally. Every line carries
 //!   `service`, and span fields such as `correlation_id`, `deposit_request_id`
 //!   and `chain_id` are flattened into each event, so one deposit can be
 //!   followed across all three services by grepping one id.
@@ -47,10 +47,10 @@ pub enum LogFormat {
 }
 
 impl LogFormat {
-    /// `PAYDAY_LOG_FORMAT`: `json` or `pretty`; unset means pretty when
+    /// `GUM_LOG_FORMAT`: `json` or `pretty`; unset means pretty when
     /// stdout is a terminal and JSON otherwise.
     pub fn from_env() -> Self {
-        match std::env::var("PAYDAY_LOG_FORMAT").as_deref() {
+        match std::env::var("GUM_LOG_FORMAT").as_deref() {
             Ok("json") => Self::Json,
             Ok("pretty") | Ok("text") => Self::Pretty,
             _ => {

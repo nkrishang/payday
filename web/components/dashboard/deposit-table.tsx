@@ -1,6 +1,6 @@
 "use client";
 
-import type { Customer, DepositRequestStatus } from "@payday/sdk";
+import type { Customer, DepositRequestStatus } from "@gum/sdk";
 import { ChevronRight, Paperclip } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Amount } from "@/components/ui/amount";
@@ -355,42 +355,73 @@ function CustomerFilter({
   onChange: (next: string) => void;
 }) {
   const { client } = useMerchant();
-  const first = useResource("customers:filter", (payday) =>
-    payday.customers.list({ limit: CUSTOMER_PAGE }),
+  const first = useResource("customers:filter", (gum) =>
+    gum.customers.list({ limit: CUSTOMER_PAGE }),
   );
   const [rest, setRest] = useState<Customer[]>([]);
+  const [pagesFailed, setPagesFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
 
-  // Continue past the first page in the background; the filter is usable the
-  // moment it is, and a list of hundreds still lands in a couple of rounds.
+  // Continue past the first page in the background, following the cursor
+  // until the list is exhausted — a filter that silently omitted customers
+  // past its first hundred would narrow the wrong thing. Each run replaces
+  // what an earlier run collected (the client, and with it the identity
+  // token, can change mid-life) rather than appending to it, so a token
+  // refresh never duplicates an option.
   const cursor = first.data?.next_cursor ?? null;
   useEffect(() => {
     if (!cursor) return;
     let disposed = false;
     (async () => {
+      const collected: Customer[] = [];
       try {
-        const page = await client.customers.list({ limit: CUSTOMER_PAGE, starting_after: cursor });
-        if (!disposed) setRest((current) => [...current, ...page.customers]);
-        // A failed extra page keeps the filter at the customers it has.
+        let next: string | null = cursor;
+        while (next) {
+          const page = await client.customers.list({ limit: CUSTOMER_PAGE, starting_after: next });
+          collected.push(...page.customers);
+          next = page.next_cursor ?? null;
+        }
+        if (!disposed) {
+          setRest(collected);
+          setPagesFailed(false);
+        }
       } catch {
-        // Leave the rest empty; the chosen value still filters correctly.
+        // Whatever pages came back stay usable; the missing ones are called
+        // out below, with a retry, rather than silently narrowing the
+        // filter's choices.
+        if (!disposed) setPagesFailed(true);
       }
     })();
     return () => {
       disposed = true;
     };
-  }, [cursor, client]);
+  }, [cursor, client, retry]);
 
-  const options = [...(first.data?.customers ?? []), ...rest];
+  // Without a cursor the first page is the whole list, so anything an
+  // earlier run collected is stale; ignoring it here keeps a token refresh
+  // from duplicating an option.
+  const firstCustomers = first.data?.customers ?? [];
+  const options = cursor ? [...firstCustomers, ...rest] : firstCustomers;
   return (
-    <MenuSelect
-      label="Customer"
-      className="w-[190px]"
-      value={value}
-      onChange={onChange}
-      options={[
-        { value: "", label: "Any customer" },
-        ...options.map((entry): MenuOption => ({ value: entry.id, label: entry.name })),
-      ]}
-    />
+    <>
+      <MenuSelect
+        label="Customer"
+        className="w-[190px]"
+        value={value}
+        onChange={onChange}
+        options={[
+          { value: "", label: "Any customer" },
+          ...options.map((entry): MenuOption => ({ value: entry.id, label: entry.name })),
+        ]}
+      />
+      {pagesFailed ? (
+        <LoadProblem
+          compact
+          title="Couldn't load every customer."
+          message="The customer filter may be missing some names."
+          onRetry={() => setRetry((attempt) => attempt + 1)}
+        />
+      ) : null}
+    </>
   );
 }

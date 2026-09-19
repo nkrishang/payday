@@ -5,7 +5,7 @@ import {
   privyAppId,
   RETRY_ATTEMPTS,
   retryingFetch,
-} from "./merchant-payday";
+} from "./merchant-gum";
 
 type Call = { url: string; init: RequestInit };
 

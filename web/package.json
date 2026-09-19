@@ -1,5 +1,5 @@
 {
-  "name": "@payday/web",
+  "name": "@gum/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,13 +11,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "predev": "npm run build -w @payday/sdk",
-    "prebuild": "npm run build -w @payday/sdk",
-    "pretest": "npm run build -w @payday/sdk",
+    "predev": "npm run build -w @gum/sdk",
+    "prebuild": "npm run build -w @gum/sdk",
+    "pretest": "npm run build -w @gum/sdk",
     "test:e2e:dev": "PW_TARGET=dev playwright test"
   },
   "dependencies": {
-    "@payday/sdk": "^0.1.0",
+    "@gum/sdk": "^0.1.0",
     "@privy-io/react-auth": "^3.40.0",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-tabs": "^1.1.21",

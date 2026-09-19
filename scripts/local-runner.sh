@@ -7,18 +7,18 @@ cd "$root"
 mode="${1:-}"
 case "$mode" in dev|e2e|seed) ;; *) echo "usage: $0 {dev|e2e|seed}" >&2; exit 2 ;; esac
 
-container="payday-postgres-${mode}-${PPID}-$$"
-pg_port="${PAYDAY_POSTGRES_PORT:-55432}"
-postgres_image="${PAYDAY_POSTGRES_IMAGE:-postgres:16-alpine}"
-postgres_password="${PAYDAY_POSTGRES_PASSWORD:-payday-local}"
-minio_container="payday-minio-${mode}-${PPID}-$$"
-minio_port="${PAYDAY_MINIO_PORT:-9000}"
+container="gum-postgres-${mode}-${PPID}-$$"
+pg_port="${GUM_POSTGRES_PORT:-55432}"
+postgres_image="${GUM_POSTGRES_IMAGE:-postgres:16-alpine}"
+postgres_password="${GUM_POSTGRES_PASSWORD:-gum-local}"
+minio_container="gum-minio-${mode}-${PPID}-$$"
+minio_port="${GUM_MINIO_PORT:-9000}"
 # MinIO removed its Docker Hub images; quay.io is the official registry now.
-minio_image="${PAYDAY_MINIO_IMAGE:-quay.io/minio/minio}"
-mc_image="${PAYDAY_MC_IMAGE:-quay.io/minio/mc}"
+minio_image="${GUM_MINIO_IMAGE:-quay.io/minio/minio}"
+mc_image="${GUM_MC_IMAGE:-quay.io/minio/mc}"
 # MinIO's root credentials double as the AWS credentials gum-server signs with.
-minio_credential="payday-local"
-attachment_bucket="payday-attachments-local"
+minio_credential="gum-local"
+attachment_bucket="gum-attachments-local"
 pids=()
 postgres_started=false
 minio_started=false
@@ -49,21 +49,21 @@ start_postgres() {
   docker info >/dev/null 2>&1 || { echo "Docker daemon is not available" >&2; exit 1; }
   echo "[runner] starting PostgreSQL ($postgres_image) on port $pg_port"
   docker run -d --rm --name "$container" \
-    -e POSTGRES_USER=payday -e POSTGRES_PASSWORD="$postgres_password" -e POSTGRES_DB=gateway \
+    -e POSTGRES_USER=gum -e POSTGRES_PASSWORD="$postgres_password" -e POSTGRES_DB=gateway \
     -p "127.0.0.1:${pg_port}:5432" "$postgres_image" >/dev/null
   postgres_started=true
   # Probe over TCP: the image's bootstrap runs a temporary server on the Unix
   # socket only, which a socket probe would mistake for the real one.
   for _ in {1..120}; do
-    docker exec "$container" pg_isready -h 127.0.0.1 -U payday -d gateway >/dev/null 2>&1 && break
+    docker exec "$container" pg_isready -h 127.0.0.1 -U gum -d gateway >/dev/null 2>&1 && break
     sleep .25
   done
-  docker exec "$container" pg_isready -h 127.0.0.1 -U payday -d gateway >/dev/null 2>&1 || {
+  docker exec "$container" pg_isready -h 127.0.0.1 -U gum -d gateway >/dev/null 2>&1 || {
     docker logs "$container" >&2
     echo "PostgreSQL did not become ready" >&2
     exit 1
   }
-  export DATABASE_URL="postgresql://payday:${postgres_password}@127.0.0.1:${pg_port}/gateway"
+  export DATABASE_URL="postgresql://gum:${postgres_password}@127.0.0.1:${pg_port}/gateway"
 }
 
 # MinIO stands in for the S3 attachment bucket, and for GuardDuty: nothing
@@ -89,9 +89,9 @@ start_minio() {
   docker run --rm --network host \
     -e "MC_HOST_local=http://${minio_credential}:${minio_credential}@127.0.0.1:${minio_port}" \
     "$mc_image" mb --ignore-existing "local/${attachment_bucket}" >/dev/null
-  export PAYDAY_ATTACHMENT_BUCKET="$attachment_bucket"
-  export PAYDAY_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${minio_port}"
-  export PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE=1
+  export GUM_ATTACHMENT_BUCKET="$attachment_bucket"
+  export GUM_ATTACHMENT_S3_ENDPOINT="http://127.0.0.1:${minio_port}"
+  export GUM_ATTACHMENT_S3_FORCE_PATH_STYLE=1
   export AWS_ACCESS_KEY_ID="$minio_credential"
   export AWS_SECRET_ACCESS_KEY="$minio_credential"
   export AWS_REGION=us-east-1
@@ -150,80 +150,80 @@ load_local_env() {
   # the indexer runs one worker per chain: Anvil on 8545 (chain 31337, the
   # Monad-shaped `finalized` path) and Anvil on 8546 (chain 31338, the
   # L2-shaped `latest` plus confirmations path). The
-  # services read PAYDAY_CHAINS and PAYDAY_RPC_URL_<chain_id>; PAYDAY_RPC_URL
+  # services read GUM_CHAINS and GUM_RPC_URL_<chain_id>; GUM_RPC_URL
   # names the first chain for the scripts' own cast calls.
-  export PAYDAY_CHAIN_ID="${PAYDAY_CHAIN_ID:-31337}"
-  export PAYDAY_RPC_URL="${PAYDAY_RPC_URL:-http://127.0.0.1:8545}"
-  export PAYDAY_SECOND_CHAIN_ID="${PAYDAY_SECOND_CHAIN_ID:-31338}"
-  export PAYDAY_SECOND_RPC_URL="${PAYDAY_SECOND_RPC_URL:-http://127.0.0.1:8546}"
-  export "PAYDAY_RPC_URL_${PAYDAY_CHAIN_ID}=$PAYDAY_RPC_URL"
-  export "PAYDAY_RPC_URL_${PAYDAY_SECOND_CHAIN_ID}=$PAYDAY_SECOND_RPC_URL"
-  export PAYDAY_API_URL="${PAYDAY_API_URL:-http://127.0.0.1:3000}"
+  export GUM_CHAIN_ID="${GUM_CHAIN_ID:-31337}"
+  export GUM_RPC_URL="${GUM_RPC_URL:-http://127.0.0.1:8545}"
+  export GUM_SECOND_CHAIN_ID="${GUM_SECOND_CHAIN_ID:-31338}"
+  export GUM_SECOND_RPC_URL="${GUM_SECOND_RPC_URL:-http://127.0.0.1:8546}"
+  export "GUM_RPC_URL_${GUM_CHAIN_ID}=$GUM_RPC_URL"
+  export "GUM_RPC_URL_${GUM_SECOND_CHAIN_ID}=$GUM_SECOND_RPC_URL"
+  export GUM_API_URL="${GUM_API_URL:-http://127.0.0.1:3000}"
   # The three services. gum-server's internal listener serves the indexer's
   # RPC and its own health; the indexer and the signers each serve health
   # only. The shared bearer token is what makes the indexer's reports
   # trusted; any value works locally.
-  export PAYDAY_INTERNAL_BIND_ADDR="${PAYDAY_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
-  export PAYDAY_SERVER_INTERNAL_URL="${PAYDAY_SERVER_INTERNAL_URL:-http://$PAYDAY_INTERNAL_BIND_ADDR}"
-  export PAYDAY_INTERNAL_TOKEN="${PAYDAY_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
-  export PAYDAY_INDEXER_LISTEN_ADDR="${PAYDAY_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
-  export PAYDAY_SIGNERS_LISTEN_ADDR="${PAYDAY_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
+  export GUM_INTERNAL_BIND_ADDR="${GUM_INTERNAL_BIND_ADDR:-127.0.0.1:3010}"
+  export GUM_SERVER_INTERNAL_URL="${GUM_SERVER_INTERNAL_URL:-http://$GUM_INTERNAL_BIND_ADDR}"
+  export GUM_INTERNAL_TOKEN="${GUM_INTERNAL_TOKEN:-local-internal-token-0123456789abcdef}"
+  export GUM_INDEXER_LISTEN_ADDR="${GUM_INDEXER_LISTEN_ADDR:-127.0.0.1:3011}"
+  export GUM_SIGNERS_LISTEN_ADDR="${GUM_SIGNERS_LISTEN_ADDR:-127.0.0.1:3012}"
   # Merchants sign in through Privy, for real, even locally: the dashboard
   # (`just web`) uses the same app id, and gum-server verifies its identity
   # tokens against Privy's published keys. Payer and issuer-mailbox codes
   # come from the loopback development identity provider instead.
-  export PAYDAY_PRIVY_APP_ID="${PAYDAY_PRIVY_APP_ID:-cmt9wxn7h011h0cjsma7fzytr}"
-  export PAYDAY_DEV_IDENTITY=1
-  export PAYDAY_DEV_IDENTITY_ISSUER="${PAYDAY_DEV_IDENTITY_ISSUER:-http://127.0.0.1:3001}"
+  export GUM_PRIVY_APP_ID="${GUM_PRIVY_APP_ID:-cmt9wxn7h011h0cjsma7fzytr}"
+  export GUM_DEV_IDENTITY=1
+  export GUM_DEV_IDENTITY_ISSUER="${GUM_DEV_IDENTITY_ISSUER:-http://127.0.0.1:3001}"
   # The fixture addresses (Bootstrap.s.sol) are the same on both chains.
-  FACTORY="${PAYDAY_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
-  USDC="${PAYDAY_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
-USDT="${PAYDAY_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
-  BATCH_SWEEPER="${PAYDAY_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
-  export PAYDAY_INDEXER_POLL_INTERVAL_MS="${PAYDAY_INDEXER_POLL_INTERVAL_MS:-1000}"
+  FACTORY="${GUM_FACTORY_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
+  USDC="${GUM_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
+USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
+  BATCH_SWEEPER="${GUM_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
+  export GUM_INDEXER_POLL_INTERVAL_MS="${GUM_INDEXER_POLL_INTERVAL_MS:-1000}"
   # The transfer signal derives ws://127.0.0.1:8545 from the RPC URL; Anvil
   # serves subscriptions on the same port and the signal falls back to the
   # standard `logs` subscription there. The timer backstop stays quick
   # locally so a test never waits a minute on a missed wake.
-  export PAYDAY_INDEXER_RECONCILE_INTERVAL_MS="${PAYDAY_INDEXER_RECONCILE_INTERVAL_MS:-1000}"
+  export GUM_INDEXER_RECONCILE_INTERVAL_MS="${GUM_INDEXER_RECONCILE_INTERVAL_MS:-1000}"
   # An idle local chain still keeps its clock moving every few seconds so
   # expiry flows do not wait five minutes.
-  export PAYDAY_INDEXER_IDLE_INTERVAL_MS="${PAYDAY_INDEXER_IDLE_INTERVAL_MS:-2000}"
+  export GUM_INDEXER_IDLE_INTERVAL_MS="${GUM_INDEXER_IDLE_INTERVAL_MS:-2000}"
   # Anvil has no request budget to trip, so the indexer paces nothing locally.
-  export PAYDAY_INDEXER_RPC_MAX_RPS="${PAYDAY_INDEXER_RPC_MAX_RPS:-0}"
+  export GUM_INDEXER_RPC_MAX_RPS="${GUM_INDEXER_RPC_MAX_RPS:-0}"
   # Anvil account #0 deploys the local fixtures (Bootstrap.s.sol) and is the
   # first sweep signer; mnemonic accounts #10 and #11 (funded because Anvil
   # starts with twelve accounts below) complete a three-key signer pool so
   # several helper transactions can be in flight at once, as in production.
   BOOTSTRAP_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-  export PAYDAY_SIGNER_KEYS="${PAYDAY_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82}"
+  export GUM_SIGNER_KEYS="${GUM_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82}"
   # The web dev server hosts both dashboard and checkout; gum-server remains on
-  # PAYDAY_API_URL and is called cross-origin by the browser.
-  export PAYDAY_PUBLIC_BASE_URL="${PAYDAY_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
-  export PAYDAY_API_KEY_PREFIX="${PAYDAY_API_KEY_PREFIX:-payday_test_}"
-  export PAYDAY_ADMIN_BEARER_SECRET="${PAYDAY_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
-  export PAYDAY_ADMIN_REVIEWER_ID="${PAYDAY_ADMIN_REVIEWER_ID:-local-operator}"
+  # GUM_API_URL and is called cross-origin by the browser.
+  export GUM_PUBLIC_BASE_URL="${GUM_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
+  export GUM_API_KEY_PREFIX="${GUM_API_KEY_PREFIX:-gum_test_}"
+  export GUM_ADMIN_BEARER_SECRET="${GUM_ADMIN_BEARER_SECRET:-local-admin-bearer-secret-0123456789abcdef}"
+  export GUM_ADMIN_REVIEWER_ID="${GUM_ADMIN_REVIEWER_ID:-local-operator}"
   # Proof of Payment attestations are signed with Anvil account #6
   # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
   # local proof verification; production signs with a KMS key instead.
-  export PAYDAY_ATTESTATION_SIGNER_KEY="${PAYDAY_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
+  export GUM_ATTESTATION_SIGNER_KEY="${GUM_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
   # Payer email verification against the development provider's payer client
   # and audience.
-  export PAYDAY_PAYER_AUTH0_ISSUER="${PAYDAY_PAYER_AUTH0_ISSUER:-$PAYDAY_DEV_IDENTITY_ISSUER}"
-  export PAYDAY_PAYER_AUTH0_AUDIENCE="${PAYDAY_PAYER_AUTH0_AUDIENCE:-payday-payer-local}"
-  export PAYDAY_PAYER_AUTH0_CLIENT_ID="${PAYDAY_PAYER_AUTH0_CLIENT_ID:-payday-payer-local}"
+  export GUM_PAYER_AUTH0_ISSUER="${GUM_PAYER_AUTH0_ISSUER:-$GUM_DEV_IDENTITY_ISSUER}"
+  export GUM_PAYER_AUTH0_AUDIENCE="${GUM_PAYER_AUTH0_AUDIENCE:-gum-payer-local}"
+  export GUM_PAYER_AUTH0_CLIENT_ID="${GUM_PAYER_AUTH0_CLIENT_ID:-gum-payer-local}"
   # A fixed local key: payer references derived here never leave the developer's database.
-  export PAYDAY_PAYER_REF_MASTER_KEY="${PAYDAY_PAYER_REF_MASTER_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
+  export GUM_PAYER_REF_MASTER_KEY="${GUM_PAYER_REF_MASTER_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
   # The Next.js dev server (`just web`) is the hosted checkout locally.
-  export PAYDAY_HOSTED_CHECKOUT_ORIGIN="${PAYDAY_HOSTED_CHECKOUT_ORIGIN:-$PAYDAY_PUBLIC_BASE_URL}"
+  export GUM_HOSTED_CHECKOUT_ORIGIN="${GUM_HOSTED_CHECKOUT_ORIGIN:-$GUM_PUBLIC_BASE_URL}"
   # Relay is a stand-in locally (scripts/relay-stub.mjs): it quotes a USDC
   # transfer to its solver on the second chain and fills on the first.
-  export PAYDAY_RELAY_URL="${PAYDAY_RELAY_URL:-http://127.0.0.1:4020}"
-  export PAYDAY_RELAY_API_KEY="${PAYDAY_RELAY_API_KEY:-local}"
+  export GUM_RELAY_URL="${GUM_RELAY_URL:-http://127.0.0.1:4020}"
+  export GUM_RELAY_API_KEY="${GUM_RELAY_API_KEY:-local}"
 }
 
 
-# One PAYDAY_CHAINS entry for a bootstrapped Anvil: the fixture addresses are
+# One GUM_CHAINS entry for a bootstrapped Anvil: the fixture addresses are
 # the same on every Anvil (account #0's first CREATE addresses), and both
 # services compare the deployed runtime bytecode with the hashes at startup
 # and refuse to start on a mismatch, so the hashes are always read from the
@@ -256,13 +256,13 @@ build_chain_registry() {
   local first second
   # The first chain serves USDC and USDT, the second USDC alone, so a USDT
   # request pins the first and the second stands for a chain without it.
-  first="$(chain_entry "$PAYDAY_CHAIN_ID" "$PAYDAY_RPC_URL" finalized 0 \
+  first="$(chain_entry "$GUM_CHAIN_ID" "$GUM_RPC_URL" finalized 0 \
     "$(jq -cn --arg usdc "$USDC" --arg usdt "$USDT" '[{currency: "USDC", address: $usdc}, {currency: "USDT", address: $usdt}]')")"
-  second="$(chain_entry "$PAYDAY_SECOND_CHAIN_ID" "$PAYDAY_SECOND_RPC_URL" latest 2 \
+  second="$(chain_entry "$GUM_SECOND_CHAIN_ID" "$GUM_SECOND_RPC_URL" latest 2 \
     "$(jq -cn --arg usdc "$USDC" '[{currency: "USDC", address: $usdc}]')")"
-  PAYDAY_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
-  export PAYDAY_CHAINS
-  echo "[bootstrap] PAYDAY_CHAINS=$PAYDAY_CHAINS"
+  GUM_CHAINS="$(jq -cn --argjson first "$first" --argjson second "$second" '[$first, $second]')"
+  export GUM_CHAINS
+  echo "[bootstrap] GUM_CHAINS=$GUM_CHAINS"
 }
 
 wait_for_anvil() {
@@ -281,7 +281,7 @@ seed() {
   local key
   key="$(./scripts/local-api-key.sh "${SEED_EMAIL:-dev@example.test}")"
   echo "[seed] account ${SEED_EMAIL:-dev@example.test}"
-  echo "[seed] PAYDAY_API_KEY=$key"
+  echo "[seed] GUM_API_KEY=$key"
 }
 
 if [[ "$mode" == seed ]]; then
@@ -294,7 +294,7 @@ fi
 start_postgres
 load_local_env
 # DATABASE_URL must always address the managed container, never a value in .env.
-export DATABASE_URL="postgresql://payday:${postgres_password}@127.0.0.1:${pg_port}/gateway"
+export DATABASE_URL="postgresql://gum:${postgres_password}@127.0.0.1:${pg_port}/gateway"
 
 if [[ "$mode" == e2e ]]; then
   need cargo; need anvil; need cast; need forge; need jq; need psql; need node
@@ -310,12 +310,12 @@ start_minio
 prefix postgres docker logs -f "$container"
 prefix minio docker logs -f "$minio_container"
 prefix scan-stub start_scan_stub
-prefix anvil anvil --chain-id "$PAYDAY_CHAIN_ID" --port "${PAYDAY_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
-prefix anvil2 anvil --chain-id "$PAYDAY_SECOND_CHAIN_ID" --port "${PAYDAY_SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
-wait_for_anvil "$PAYDAY_RPC_URL"
-wait_for_anvil "$PAYDAY_SECOND_RPC_URL"
+prefix anvil anvil --chain-id "$GUM_CHAIN_ID" --port "${GUM_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil2 anvil --chain-id "$GUM_SECOND_CHAIN_ID" --port "${GUM_SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
+wait_for_anvil "$GUM_RPC_URL"
+wait_for_anvil "$GUM_SECOND_RPC_URL"
 echo "[bootstrap] deploying deterministic local fixtures on both chains"
-for rpc_url in "$PAYDAY_RPC_URL" "$PAYDAY_SECOND_RPC_URL"; do
+for rpc_url in "$GUM_RPC_URL" "$GUM_SECOND_RPC_URL"; do
   forge script foundry/script/Bootstrap.s.sol:BootstrapScript \
     --rpc-url "$rpc_url" --private-key "$BOOTSTRAP_KEY" --broadcast
 done
@@ -324,15 +324,15 @@ build_chain_registry
 # the first chain; the deployer's Bootstrap mint funds it.
 RELAY_SOLVER="$(cast wallet address --private-key 0x1111111111111111111111111111111111111111111111111111111111111111)"
 cast send "$USDC" 'transfer(address,uint256)' "$RELAY_SOLVER" 100000000 \
-  --private-key "$BOOTSTRAP_KEY" --rpc-url "$PAYDAY_RPC_URL" >/dev/null
-prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${PAYDAY_RELAY_URL##*:}" \
-  RELAY_STUB_API_KEY="$PAYDAY_RELAY_API_KEY" node scripts/relay-stub.mjs
-prefix identity ./target/debug/payday-dev-identity
+  --private-key "$BOOTSTRAP_KEY" --rpc-url "$GUM_RPC_URL" >/dev/null
+prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${GUM_RELAY_URL##*:}" \
+  RELAY_STUB_API_KEY="$GUM_RELAY_API_KEY" node scripts/relay-stub.mjs
+prefix identity ./target/debug/gum-dev-identity
 for _ in {1..100}; do
-  curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break
+  curl -fsS "$GUM_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break
   sleep .1
 done
-curl -fsS "$PAYDAY_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null || {
+curl -fsS "$GUM_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null || {
   echo "development identity provider did not become ready" >&2
   exit 1
 }
@@ -342,13 +342,13 @@ echo "[migrate] applying schema migrations"
 ./target/debug/gum-server migrate
 prefix gum-server ./target/debug/gum-server
 for _ in {1..100}; do
-  curl -fsS "$PAYDAY_SERVER_INTERNAL_URL/health/ready" >/dev/null 2>&1 && break
+  curl -fsS "$GUM_SERVER_INTERNAL_URL/health/ready" >/dev/null 2>&1 && break
   sleep .1
 done
-curl -fsS "$PAYDAY_SERVER_INTERNAL_URL/health/ready" >/dev/null || { echo "gum-server did not become ready" >&2; exit 1; }
+curl -fsS "$GUM_SERVER_INTERNAL_URL/health/ready" >/dev/null || { echo "gum-server did not become ready" >&2; exit 1; }
 prefix indexer ./target/debug/gum-indexer
 prefix signers ./target/debug/gum-signers
-echo "[runner] ready: API $PAYDAY_API_URL; 'just web' serves the dashboard, 'just seed' mints an API key"
+echo "[runner] ready: API $GUM_API_URL; 'just web' serves the dashboard, 'just seed' mints an API key"
 echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do
   for pid in "${pids[@]}"; do

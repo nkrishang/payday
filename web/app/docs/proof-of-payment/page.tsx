@@ -10,10 +10,10 @@ export const metadata: Metadata = {
 };
 
 const PROOF = `{
-  "version": "payday.proof.v4",
+  "version": "gum.proof.v4",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": {
-    "schema": "payday.invoice.v4",
+    "schema": "gum.invoice.v4",
     "canonicalization": "RFC8785",
     "issuer": { "name": "Acme LLC", "email": "billing@acme.example" },
     "bill_to": { "name": "Customer Inc" },
@@ -37,7 +37,7 @@ const PROOF = `{
   "attribution_hash": "0x…",
   "payer_wallet": {
     "address": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
-    "typed_data": { "domain": { "name": "Payday", "version": "1", "…": "…" }, "…": "…" },
+    "typed_data": { "domain": { "name": "Gum", "version": "1", "…": "…" }, "…": "…" },
     "digest": "0x…",
     "signature": "0x…",
     "method": "ecdsa"
@@ -74,7 +74,7 @@ const PROOF = `{
       "wallet_bound_at": "2026-09-01T11:58:30Z",
       "facts": [
         { "kind": "mailbox", "provider": "auth0", "at": "2026-09-01T11:58:00Z" },
-        { "kind": "wallet", "provider": "payday", "at": "2026-09-01T11:58:30Z" }
+        { "kind": "wallet", "provider": "gum", "at": "2026-09-01T11:58:30Z" }
       ]
     },
     "signer": "0x…",
@@ -85,9 +85,9 @@ const PROOF = `{
 export default function ProofPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Proof of Payment"
-      lead="A PDF receipt proves nothing on its own. A Proof of Payment lets anyone, with no access to Payday, recompute that this exact document, signed by this wallet, could only have been paid at this address, and that this wallet paid it."
+      lead="A PDF receipt proves nothing on its own. A Proof of Payment lets anyone, with no access to Gum, recompute that this exact document, signed by this wallet, could only have been paid at this address, and that this wallet paid it."
     >
       <p>
         Once a deposit request settles, <code>GET /v1/deposit-requests/&#123;id&#125;/proof</code>{" "}
@@ -104,10 +104,10 @@ export default function ProofPage() {
         named transaction.
       </Callout>
       <p>
-        Most of that is recomputable by anyone from the proof alone. What remains Payday&apos;s word
+        Most of that is recomputable by anyone from the proof alone. What remains Gum&apos;s word
         is the identity facts: that the mailbox code was exchanged, or that your server&apos;s
         secret was redeemed, and that the wallet&apos;s nonce was issued only after the policy
-        passed. Those facts are listed in the proof and signed by Payday together with the document
+        passed. Those facts are listed in the proof and signed by Gum together with the document
         hash, the chosen chain, the address, the wallet, and the nonce, so the statement belongs to
         this request and this payer alone and cannot be transplanted onto another.
       </p>
@@ -129,7 +129,7 @@ export default function ProofPage() {
             <td>canonical_issuance_snapshot</td>
             <td>
               The exact document that was hashed at issuance, in canonical form (
-              <code>payday.invoice.v4</code>): parties, the currency and its decimals, amount in
+              <code>gum.invoice.v4</code>): parties, the currency and its decimals, amount in
               base units, heading, reference, notes, deadline, policy, the attachment&apos;s length
               and SHA-256, your payout address, and every network offered, each with the
               currency&apos;s contract and factory there.
@@ -138,7 +138,7 @@ export default function ProofPage() {
           <tr>
             <td>attribution_hash</td>
             <td>
-              <code>keccak256(&quot;PAYDAY_ATTRIBUTION_V4&quot; || canonical bytes)</code> of that
+              <code>keccak256(&quot;GUM_ATTRIBUTION_V4&quot; || canonical bytes)</code> of that
               document, after RFC 8785 canonicalization.
             </td>
           </tr>
@@ -189,7 +189,7 @@ export default function ProofPage() {
           <tr>
             <td>verification</td>
             <td>
-              Payday&apos;s signed statement of the verification facts, bound to this request,
+              Gum&apos;s signed statement of the verification facts, bound to this request,
               address, wallet, and nonce.
             </td>
           </tr>
@@ -203,7 +203,7 @@ export default function ProofPage() {
 
       <H2 id="verifying">Verifying one</H2>
       <p>
-        The checks are published as <code>verify_proof</code> in Payday&apos;s open-source core
+        The checks are published as <code>verify_proof</code> in Gum&apos;s open-source core
         library, which is the reference. In words:
       </p>
       <Steps>
@@ -240,14 +240,14 @@ export default function ProofPage() {
             is on the origin chain it names.
           </p>
         </Step>
-        <Step title="Check Payday's attestation">
+        <Step title="Check Gum's attestation">
           <p>
-            Verify the signature over the <code>verification.payload</code> against Payday&apos;s
+            Verify the signature over the <code>verification.payload</code> against Gum&apos;s
             published signer, and that the payload&apos;s hash, chain, address, wallet, and nonce
-            match the rest of the proof. Its <code>relay_fills</code> are where Payday vouches that
+            match the rest of the proof. Its <code>relay_fills</code> are where Gum vouches that
             it verified who sent a relayed transfer&apos;s origin transaction: every attribution is
             an <code>attribution_source</code> of <code>receipt</code>, read from the origin
-            chain&apos;s own records on a network Payday serves — never from Relay&apos;s word.
+            chain&apos;s own records on a network Gum serves — never from Relay&apos;s word.
           </p>
         </Step>
       </Steps>
@@ -260,14 +260,14 @@ export default function ProofPage() {
         <li>
           When any credited transfer came from a wallet other than the attested one and is not a
           Relay delivery attributed to it: <code>409 deposit_sender_mismatch</code>. The funds still
-          settled, but no proof can claim the attested wallet paid them, so Payday does not issue
+          settled, but no proof can claim the attested wallet paid them, so Gum does not issue
           one it cannot stand behind. The request&apos;s <code>likely_unsolicited_at</code> and
           its transfers say what happened.
         </li>
       </ul>
 
       <Callout title="Also available">
-        <code>GET /v1/deposit-requests/&#123;id&#125;/request.pdf</code> renders Payday&apos;s own
+        <code>GET /v1/deposit-requests/&#123;id&#125;/request.pdf</code> renders Gum&apos;s own
         PDF summary of any request, settled or not. It is deterministic: the same request always
         renders byte-identical output, so two copies can be compared by hash.
       </Callout>

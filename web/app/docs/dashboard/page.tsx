@@ -5,15 +5,15 @@ import { Callout, DocsPage, H2, Table } from "@/components/docs/prose";
 export const metadata: Metadata = {
   title: "Dashboard",
   description:
-    "The Payday dashboard: your API key, the balance of settled deposits and the flow that withdraws it, your sign-in email, and every deposit read-only.",
+    "The Gum dashboard: your API key, the balance of settled deposits and the flow that withdraws it, your sign-in email, and every deposit read-only.",
 };
 
 export default function DashboardPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Dashboard"
-      lead="The dashboard at payday.sh/dashboard is the account's control panel: the key that calls the API, the balance of settled deposits and the flow that pulls it out to a chain of your choice, and every deposit itself, read-only."
+      lead="The dashboard at gum.money/dashboard is the account's control panel: the key that calls the API, the balance of settled deposits and the flow that pulls it out to a chain of your choice, and every deposit itself, read-only."
     >
       <p>
         Gum is API-first: deposit requests, customers, attachments, webhooks — everything about
@@ -28,8 +28,9 @@ export default function DashboardPage() {
         Choose <strong>Start Building</strong> on the landing page and enter your email. A one-time
         code arrives; entering it signs you in. There is no separate registration: the first
         accepted code creates the account, every later one signs into it. Each account gets its own
-        EVM wallet at that first sign-in. It is yours — Gum never holds its key — and it is where
-        settled deposits accumulate.
+        EVM wallet at that first sign-in. It is yours — Gum never holds its key. A deposit request
+        settles to the <code>payout_address</code> its creation names, so the dashboard&apos;s
+        balances and withdrawals cover exactly the requests paid to this wallet&apos;s address.
       </p>
       <p>
         The session lives in your browser and refreshes while you stay signed in. No API key ever
@@ -140,7 +141,7 @@ export default function DashboardPage() {
           <tr>
             <td>Files</td>
             <td>
-              The attached PDF, Payday&apos;s own PDF rendering of the request, and, once settled,
+              The attached PDF, Gum&apos;s own PDF rendering of the request, and, once settled,
               the Proof of Payment as JSON.
             </td>
           </tr>

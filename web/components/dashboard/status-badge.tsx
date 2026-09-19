@@ -1,4 +1,4 @@
-import type { DepositRequestStatus } from "@payday/sdk";
+import type { DepositRequestStatus } from "@gum/sdk";
 import { StatusDot } from "@/components/ui/status-dot";
 import { isTerminalStatus } from "@/lib/checkout-state";
 import { statusLabel, statusTone } from "./labels";

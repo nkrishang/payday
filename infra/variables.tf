@@ -14,7 +14,7 @@ variable "aws_region" {
 }
 
 variable "domain_name" {
-  description = "Existing Route53 DNS name to use for the API (api.payday.sh in production)."
+  description = "Existing Route53 DNS name to use for the API (api.gum.money in production)."
   type        = string
   validation {
     condition     = length(var.domain_name) <= 253 && can(regex("^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}$", var.domain_name))
@@ -25,7 +25,7 @@ variable "domain_name" {
 variable "checkout_base_url" {
   description = <<-EOT
     Origin serving the hosted checkout at /pay/{id}, which is where every
-    deposit_url points: the Vercel-hosted site, https://payday.sh in
+    deposit_url points: the Vercel-hosted site, https://gum.money in
     production. Staging points at the web app running on the operator's
     machine, so a loopback HTTP origin is also accepted (docs/staging.md).
   EOT
@@ -43,7 +43,7 @@ variable "privy_app_id" {
     docs/authentication.md). gum-server verifies dashboard sessions — Privy
     identity tokens — against this app's published keys; the web app is built
     with the same id as NEXT_PUBLIC_PRIVY_APP_ID. Public, like every value in
-    this file; there is no Privy secret anywhere in Payday.
+    this file; there is no Privy secret anywhere in Gum.
   EOT
   type        = string
   validation {
@@ -64,7 +64,7 @@ variable "auth0_issuer" {
 variable "payer_auth0_audience" {
   description = <<-EOT
     Identifier of the Auth0 API payers verify their mailbox against
-    (https://api.payday.sh/payer); see docs/authentication.md. Leave empty
+    (https://api.gum.money/payer); see docs/authentication.md. Leave empty
     with payer_auth0_client_id until both exist: the payer settings are then
     not passed to the task at all and verification answers unavailable.
   EOT
@@ -145,7 +145,7 @@ variable "indexer_idle_interval_ms" {
 variable "chains" {
   description = <<-EOT
     Every network a payer may pay on, in the order the checkout offers them,
-    each with the contract generation deployed there. Becomes PAYDAY_CHAINS on
+    each with the contract generation deployed there. Becomes GUM_CHAINS on
     both services. The factory and sweeper are one generation deployed at the
     same addresses on every chain (foundry/script/PaymentFactory.s.sol insists
     on a fresh deployer key); the code hashes are keccak256 of the runtime
@@ -158,7 +158,7 @@ variable "chains" {
     block needs USDC on the chain. finality_source is "finalized" (Monad: irreversible) or
     "latest" with finality_confirmations blocks of margin (Base, Arbitrum:
     seconds, trusting the sequencer). Every range scan is filtered to the
-    addresses Payday watches, so log_range_size is only the provider's cap.
+    addresses Gum watches, so log_range_size is only the provider's cap.
     Set start_block to the chain's block just before the services first run
     there; a currency added to a live chain needs no earlier block.
   EOT
@@ -311,10 +311,10 @@ variable "api_port" {
 variable "api_key_prefix" {
   description = "Prefix issued on account API keys for this deployment."
   type        = string
-  default     = "payday_live_"
+  default     = "gum_live_"
   validation {
-    condition     = contains(["payday_live_", "payday_test_"], var.api_key_prefix)
-    error_message = "api_key_prefix must be exactly payday_live_ or payday_test_."
+    condition     = contains(["gum_live_", "gum_test_"], var.api_key_prefix)
+    error_message = "api_key_prefix must be exactly gum_live_ or gum_test_."
   }
 }
 
@@ -365,7 +365,7 @@ variable "alarm_email" {
 variable "notification_from_address" {
   description = "Sender address used for merchant payout notifications. Its domain must equal notification_domain_name."
   type        = string
-  default     = "alerts@payday.sh"
+  default     = "alerts@gum.money"
   validation {
     condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.notification_from_address))
     error_message = "notification_from_address must be a valid email address."
@@ -411,7 +411,7 @@ variable "privy_app_secret" {
 variable "payer_email_from" {
   description = "From header of the payer's deposit request email; Resend must have verified its domain."
   type        = string
-  default     = "Payday <contact@payday.sh>"
+  default     = "Gum <contact@gum.money>"
   validation {
     condition     = can(regex("^([^<>]+<)?[^@<>[:space:]]+@[^@<>[:space:]]+\\.[^@<>[:space:]]+>?$", var.payer_email_from))
     error_message = "payer_email_from must be an email address, optionally as Name <address>."
@@ -421,7 +421,7 @@ variable "payer_email_from" {
 variable "notification_domain_name" {
   description = "SES Easy DKIM domain for merchant notification email."
   type        = string
-  default     = "payday.sh"
+  default     = "gum.money"
   validation {
     condition     = endswith(var.notification_from_address, "@${var.notification_domain_name}")
     error_message = "notification_from_address must belong to notification_domain_name."

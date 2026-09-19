@@ -19,7 +19,7 @@ The API task also requires the Privy app merchants sign in to
 app's published keys), an externally configured Auth0 tenant issuer, and the
 payer verification API and Native application once they exist
 (`payer_auth0_audience` and `payer_auth0_client_id`, set together; while
-empty, the payer settings and the generated `PAYDAY_PAYER_REF_MASTER_KEY`
+empty, the payer settings and the generated `GUM_PAYER_REF_MASTER_KEY`
 secret are not passed to the task and verification is unavailable). Terraform
 passes these non-secret identifiers to ECS; Privy, the embedded email OTP
 connection, and the payer application setup are documented in
@@ -32,11 +32,11 @@ Circle's USDC on every chain, Tether's USDT0 on Monad and Arbitrum One; at
 least one chain must list USDC, and a `cctp` block requires USDC on that
 chain), the contract generation's addresses and code hashes, `start_block`,
 finality policy, block time, log range, and explorer origin,
-passed to all three tasks as `PAYDAY_CHAINS`. Adding a currency to a live chain
+passed to all three tasks as `GUM_CHAINS`. Adding a currency to a live chain
 is a new `tokens` entry and an apply: no redeploy, no backfill. The paid RPC endpoints are the
 `rpc_urls` map, keyed by chain id (export `TF_VAR_rpc_urls` rather than
 writing them to a file); each becomes its own Secrets Manager secret,
-injected as `PAYDAY_RPC_URL_<chain_id>`. Gatewayd links addresses and
+injected as `GUM_RPC_URL_<chain_id>`. Gatewayd links addresses and
 settlement transactions through each chain's explorer; every `deposit_url`
 points at the checkout on `checkout_base_url`.
 
@@ -79,7 +79,7 @@ Review the plan, especially Route53, IAM, RDS, and deletion settings. No factory
 After apply, confirm the AWS SNS subscription sent to `alarm_email`; alarms do not deliver until it is confirmed.
 The stack creates an SES identity for `notification_domain_name` with Easy
 DKIM. Its three CNAMEs are the `notification_dkim_records` output; add them in
-the DNS provider hosting that domain (Vercel for `payday.sh`), since the API's
+the DNS provider hosting that domain (Vercel for `gum.money`), since the API's
 Route53 zone covers only `domain_name`. Before launch, also move the SES
 account out of the sandbox in this region and verify a test message from
 `notification_from_address` reaches an external recipient.
@@ -87,13 +87,13 @@ account out of the sandbox in this region and verify a test message from
 Payers named with an email on a deposit request are emailed their link
 through Resend, not SES. Supply the key as `TF_VAR_resend_api_key` (never in
 a tfvars file); the stack stores it in Secrets Manager and passes it to the
-API as `PAYDAY_RESEND_API_KEY` together with `payer_email_from`. Left empty,
+API as `GUM_RESEND_API_KEY` together with `payer_email_from`. Left empty,
 those emails queue unsent.
 
 Paying a deposit request from another network goes through Relay
 (relay.link). Supply a self-serve key from Relay's dashboard as
 `TF_VAR_relay_api_key`; the stack stores it in Secrets Manager and passes it
-to the API as `PAYDAY_RELAY_API_KEY`. Left empty, the
+to the API as `GUM_RELAY_API_KEY`. Left empty, the
 hosted checkout does not offer the option.
 
 ## Sandbox deployment
@@ -131,11 +131,11 @@ created; both happen outside Terraform, so never manage
 `aws_s3_bucket_notification` for this bucket.
 
 Cleanup is tag-based so the gateway never has to move objects. The presigned
-PUT carries `x-amz-tagging: payday-upload=pending` and `If-None-Match: *` as
+PUT carries `x-amz-tagging: gum-upload=pending` and `If-None-Match: *` as
 signed headers, so no upload can omit the tag and no key can be written twice
 (a replayed PUT fails with 412); gum-server pins the version it hashed at
 finalization and refers to it on every later read. Issuing a deposit request
-rewrites the tag to `payday-upload=attached` (keeping the GuardDuty tag); an
+rewrites the tag to `gum-upload=attached` (keeping the GuardDuty tag); an
 issuance that fails leaves the tag `pending`, so the object still expires.
 Finalize deletes an object it rejects. The lifecycle rule expires objects
 under `uploads/` still tagged `pending` seven days after upload, and their

@@ -1,7 +1,7 @@
 # HTTP API reference
 
-Production base URL: `https://api.payday.sh`. Sandbox uses
-`https://api.sandbox.payday.sh`. The live OpenAPI 3.1 document is available at
+Production base URL: `https://api.gum.money`. Sandbox uses
+`https://api.sandbox.gum.money`. The live OpenAPI 3.1 document is available at
 `/openapi.json` and the interactive Scalar reference at `/docs` (also `/api`
 and `/api/openapi.json`). The TypeScript client is documented in
 [`sdk/typescript`](../sdk/typescript/README.md).
@@ -11,11 +11,11 @@ and `/api/openapi.json`). The TypeScript client is documented in
 Authenticated customer routes require:
 
 ```http
-Authorization: Bearer payday_live_...
+Authorization: Bearer gum_live_...
 Content-Type: application/json
 ```
 
-Sandbox keys use `payday_test_…`. The same header also accepts the dashboard
+Sandbox keys use `gum_test_…`. The same header also accepts the dashboard
 session a signed-in merchant holds — the Privy identity token — and the API
 tells the two apart and maps the token's identity to the account without
 issuing a key. The account-key routes take only that session: an API key
@@ -31,7 +31,7 @@ tax fields, or fiat amounts. An issued deposit request is an immutable snapshot:
 changing anything means cancelling and reissuing.
 
 Every response includes `X-Request-Id`. A printable caller value up to 128 bytes
-is echoed; otherwise Payday generates a UUIDv7. JSON errors include the same
+is echoed; otherwise Gum generates a UUIDv7. JSON errors include the same
 value:
 
 ```json
@@ -63,7 +63,7 @@ support ticket, or a mistaken field reads for itself:
 | `att_` | attachment |
 | `wh_` | webhook endpoint |
 | `whd_` | webhook delivery |
-| `evt_` | webhook event (the envelope `id` and `Payday-Event-Id`) |
+| `evt_` | webhook event (the envelope `id` and `Gum-Event-Id`) |
 | `va_` | verification attempt |
 | `rec_` | recovery ledger entry (in `deposit_request.recovered_funds`) |
 | `acct_` | account |
@@ -120,10 +120,10 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `currency` | Optional; `USDC` (default) or `USDT`. USDC bridges 1:1, so a USDC request may be paid on any network and withdrawn to any; USDT has no such path, so a USDT request must pin `chain_id` to a network serving USDT (`400 invalid_request` naming `chain_id` when missing). `422 unsupported_currency` when no network serves it |
 | `chain_id` | Optional decimal chain id (`"143"`) pinning the network the payer must pay on; `networks` then holds that one entry and `chain` and `token` name it from issuance. Left out, the payer chooses among every network serving the currency when they sign. `422 unsupported_chain` when the chain does not serve the currency |
 | `payout_address` | Required nonzero EVM address; receives exactly `amount` |
-| `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is required and snapshotted onto the deposit request. `payer` is optional when `customer_id` is given: the saved record's name, email, and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Payday emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
+| `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is required and snapshotted onto the deposit request. `payer` is optional when `customer_id` is given: the saved record's name, email, and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Gum emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
 | `payer_policy` | Required; one of the three modes below |
 | `customer_id` | Optional `cus_` id of a customer the account owns; the deposit request still stores its own `payer` snapshot |
-| `issuer_id` | Optional opaque issuer identifier of your own, 1–255 bytes, stored verbatim beside the issued document and returned on reads. Not an internal id: nothing is looked up, and the list route filters on it by exact string equality |
+| `issuer_id` | Optional opaque issuer identifier of your own, 1–255 bytes, stored verbatim beside the issued document and returned on reads. Not an internal id: nothing is looked up, and the list route filters on it by exact string equality. Every byte but NUL (`U+0000`) passes through |
 | `notes` | Optional, up to 4,000 bytes |
 | `heading` | Optional short description, up to 200 bytes; shown to the payer before verification on gated deposit requests |
 | `reference` | Optional merchant reference, at most 128 characters |
@@ -181,7 +181,7 @@ SHA-256 — returns
 Relative-expiry retries retain the original resolved deadline. Deposit request creation
 also requires the account to have a verified support email from a recent login.
 
-At issuance Payday canonicalizes the deposit request (RFC 8785 JCS) and hashes it; the
+At issuance Gum canonicalizes the deposit request (RFC 8785 JCS) and hashes it; the
 response's `attribution {version, hash}` (version 2) reports the commitment.
 The deposit address does not exist yet: `address`, `payer_wallet`,
 `recovery_address`, `wallet_bound_at`, and `self_settlement` are `null` until
@@ -241,7 +241,7 @@ item has `timestamp`, `amount`, `amount_base_units`, `sender`,
 ### `GET /v1/deposit-requests/{reference}/attachment`
 
 Returns the deposit request's attachment descriptor with a signed `download_url` valid
-for a few minutes (`PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS`, default 300).
+for a few minutes (`GUM_ATTACHMENT_DOWNLOAD_TTL_SECS`, default 300).
 `404 attachment_not_found` when the deposit request has none.
 
 ```json
@@ -257,7 +257,7 @@ for a few minutes (`PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS`, default 300).
 
 ### `GET /v1/deposit-requests/{reference}/request.pdf`
 
-Returns Payday's deposit request summary as `application/pdf`. Rendering is
+Returns Gum's deposit request summary as `application/pdf`. Rendering is
 deterministic — fixed fonts and object order, no timestamps or random IDs — so
 the same deposit request always produces byte-identical output.
 
@@ -288,7 +288,7 @@ verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/deposit-requests/{reference}/proof`
 
-Returns the Proof of Payment JSON (`payday.proof.v4`) for a settled deposit request
+Returns the Proof of Payment JSON (`gum.proof.v4`) for a settled deposit request
 (`payment_id` is the `dr_` id; inside `canonical_issuance_snapshot`, `attachment.id`
 is the raw UUID behind the API's `att_` id, since that document is the hashed
 commitment and its schema is frozen);
@@ -306,9 +306,9 @@ recovery addresses (the recovery address is the attested wallet), every
 credited transfer of the request's token
 into the deposit address, and `settlement_transaction_hash`: the fulfilment
 transaction that executed the `Payment` contract — the same hash the
-`DepositRequest` object reports as `settlement_tx_hash`, whether Payday's batch or a
+`DepositRequest` object reports as `settlement_tx_hash`, whether Gum's batch or a
 third party submitted it — which is distinct from the transfers that funded
-the address. It ends with a Payday-signed verification attestation
+the address. It ends with a Gum-signed verification attestation
 (`{payload: {version, payment_id, attribution_hash, chain_id,
 payment_address, payer_wallet, wallet_nonce, payer_policy_mode, result,
 verified_at, wallet_bound_at, facts[{kind, provider, at}]}, signer,
@@ -394,6 +394,9 @@ merchant's own choosing, 1–255 bytes, stored verbatim beside the issued
 document and returned on `DepositRequest` and `DepositRequestSummary`. Nothing
 is looked up, no mailbox is proven, and the list route filters on it by exact
 string equality — it is a handle for the merchant's own records, nothing more.
+The one byte it cannot carry is NUL (`U+0000`), which PostgreSQL's `text`
+cannot store; a value containing it is refused with `400 invalid_request`, as
+is one outside the length bound.
 
 ## Attachments
 
@@ -406,7 +409,7 @@ it can be attached.
 2. `PUT` the bytes to `upload_url` sending exactly the returned `headers`.
    They include `If-None-Match: *`, which makes the object key write-once: a
    second `PUT` to the same URL fails with `412 Precondition Failed`, so the
-   bytes Payday hashes cannot be swapped afterwards. Payday also pins the
+   bytes Gum hashes cannot be swapped afterwards. Gum also pins the
    object version it finalized, and every later read — the scan tag, the
    download URL, the attached-tag rewrite — refers to that version.
 3. `POST /v1/attachments/{id}/finalize` → `200` attachment descriptor once the
@@ -415,7 +418,7 @@ it can be attached.
    `application/pdf`, outside 1–5,242,880 bytes, missing `%PDF-` magic bytes,
    or flagged. A presigned `PUT` cannot bound the upload's size, so the 5 MiB
    limit is enforced here, and a rejected object is deleted from storage
-   rather than left for the lifecycle rule. Payday hashes the stored bytes
+   rather than left for the lifecycle rule. Gum hashes the stored bytes
    itself; browser MIME, extension, ETag, or a client digest are never
    trusted.
 4. Pass the `id` as `attachment_id` when creating the deposit request. A draft that is
@@ -447,7 +450,7 @@ The SDK's `attachments.upload` performs the whole exchange.
 ## Account-key API
 
 These routes take a dashboard session (the Privy identity token), never a
-Payday API key — a key presenting itself here gets `401 identity_unauthorized`.
+Gum API key — a key presenting itself here gets `401 identity_unauthorized`.
 The key has no read route of its own: `GET /v1/account` is where its
 non-secret state (`key_hint`, `generation`, rotation timestamps) lives.
 
@@ -492,7 +495,7 @@ and retry policy.
 
 ## Withdrawals
 
-The Payday wallet's whole balance in one currency to one address: every
+The Gum wallet's whole balance in one currency to one address: every
 network's USDC, or the destination network's USDT.
 Prepare, sign, submit, poll: the API snapshots the balances into legs, the
 merchant signs each leg's EIP-712 document with the wallet's key (Privy's
@@ -504,7 +507,7 @@ on the currency's contract there (USDC or USDT0); a bridge leg, USDC only, is
 `MessageTransmitterV2.receiveMessage` on the destination. USDT has no 1:1
 bridge, so a USDT withdrawal moves the destination network's balance alone;
 USDT held on another network is withdrawn separately, to an address there.
-Payday pays gas; the signature fixes where each leg's funds may land. One
+Gum pays gas; the signature fixes where each leg's funds may land. One
 withdrawal may be open per account. The full guide, the signer's checklist,
 and TypeScript/Rust/Go samples are on the docs site under Withdrawals.
 
@@ -567,7 +570,7 @@ used. `409 withdrawal_not_cancellable` once a leg is in flight.
 ## Payer links and documentation
 
 The `deposit_url` points at the hosted checkout, whose origin is
-`PAYDAY_PUBLIC_BASE_URL`.
+`GUM_PUBLIC_BASE_URL`.
 
 The checkout reads deposit data from `GET /v1/payer/deposit-requests/{id}`, QR SVG
 from `GET /v1/payer/deposit-requests/{id}/qr`, and the PDF descriptor from
@@ -579,7 +582,7 @@ the address should no longer be presented. They send
 `Access-Control-Allow-Origin: *` for `GET`, so a browser on any origin can build
 a checkout against them. The merchant routes (deposit requests, customers,
 attachments) answer cross-origin requests from exactly one
-origin: the configured web origin (`PAYDAY_PUBLIC_BASE_URL`), where the
+origin: the configured web origin (`GUM_PUBLIC_BASE_URL`), where the
 dashboard lives, for `GET`, `POST`, `PATCH`, `PUT`, and `DELETE` with the
 `Authorization`, `Content-Type`, `Idempotency-Key`, and `Accept` headers. Any other origin receives no
 `Access-Control-Allow-Origin` and its preflight fails; server-side
@@ -606,7 +609,7 @@ expected mailbox as `a****@e***.com`, and is `null` for `merchant_session`,
 whose payer reference is never shown to the payer.
 The attachment and QR routes answer `401 verification_required` while content
 is locked, and the QR route `409 wallet_required` while no wallet is bound. A payer session token, obtained by completing verification on the
-hosted checkout, travels in the `Payday-Payer-Session` header on every payer
+hosted checkout, travels in the `Gum-Payer-Session` header on every payer
 read; the reads' `Access-Control-Allow-Headers` admits it. A session unlocks
 exactly the deposit request it was created for. When a session is presented,
 `requirements` reports that session's facts; without one it reports what the
@@ -623,7 +626,7 @@ GET  /v1/payer/deposit-requests/{id}/verify
 `start` sends a one-time code to the mailbox the merchant asserted at issuance
 (the request names no email) and returns `{payer_session, expires_at}`: an
 opaque token, valid for 24 hours, of which the API stores only a hash. Sending
-it back in `Payday-Payer-Session` on a second `start` resends the code on the
+it back in `Gum-Payer-Session` on a second `start` resends the code on the
 same session. At most one code per deposit request per minute is sent, whoever asks;
 sooner answers `429 otp_resend_cooldown` with `Retry-After`. `confirm` takes
 the session and the code, exchanges it with Auth0 against the payer audience,
@@ -658,7 +661,7 @@ session gets one here, returned as `payer_session`; a gated request needs
 the session that satisfied its policy, else `401 payer_session_invalid` or
 `401 verification_required`) and answers `{payer_session, expires_at, chain,
 typed_data}`, where `typed_data` is the EIP-712 document to hand to
-`eth_signTypedData_v4` verbatim: domain `{name: "Payday", version: "1",
+`eth_signTypedData_v4` verbatim: domain `{name: "Gum", version: "1",
 chainId, verifyingContract: factory}` for the chosen chain and its factory,
 so a wallet on another network refuses to sign it; primary type
 `PayerAttestation`, message `{statement, attributionHash, wallet, nonce,
@@ -743,14 +746,14 @@ fresh secret, minting a receipt session that never makes it payable again.
 Exchanging needs no Auth0 audience: merchant sessions never touch the email
 provider.
 
-What Payday attests here is narrow and stated plainly: your server released
+What Gum attests here is narrow and stated plainly: your server released
 this secret, and it was exchanged before this session saw the deposit request. Who
 the payer is remains your assertion — `payer_reference` — carried in the
 policy, the issuance snapshot the address commits to, and every webhook.
 
 The write routes answer cross-origin requests only from the hosted
-checkout origin (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
-`Content-Type` and `Payday-Payer-Session`; they never allow `*`. Bodies are
+checkout origin (`GUM_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
+`Content-Type` and `Gum-Payer-Session`; they never allow `*`. Bodies are
 limited to 8 KiB.
 
 ## Stable error codes
@@ -758,7 +761,7 @@ limited to 8 KiB.
 | Code | Typical status | Meaning |
 |---|---:|---|
 | `unauthorized` | 401 | Missing or invalid API key or dashboard session token |
-| `payer_session_invalid` | 401 | `Payday-Payer-Session` missing, unknown, expired, or for another deposit request |
+| `payer_session_invalid` | 401 | `Gum-Payer-Session` missing, unknown, expired, or for another deposit request |
 | `otp_invalid` | 401 | The verification code was not accepted |
 | `verification_required` | 401 | Content or QR requested for a gated deposit request without an unlocked session |
 | `verification_not_required` | 409 | Verification started, or a client secret requested, on a permissionless deposit request |
@@ -782,10 +785,10 @@ limited to 8 KiB.
 | `invalid_request` | 400 | Invalid field, query, JSON, or request shape — malformed JSON, a missing or unknown field, a wrong type, a missing JSON content type, control characters in a text field — with the problem named in the message |
 | `withdrawal_not_found` | 404 | Missing, malformed, or another account's `wd_` id |
 | `withdrawal_leg_not_found` | 404 | A `leg_id` that is not a leg of the withdrawal |
-| `wallet_not_ready` | 409 | The account's Payday wallet is not known yet; sign in to the dashboard once |
+| `wallet_not_ready` | 409 | The account's Gum wallet is not known yet; sign in to the dashboard once |
 | `withdrawal_in_progress` | 409 | Another withdrawal is open; finish or cancel it |
-| `nothing_to_withdraw` | 409 | The Payday wallet holds none of the currency where this withdrawal could move it: no USDC on any network, or no USDT on the destination (the message names USDT held elsewhere) |
-| `signature_invalid` | 400 | A leg's signature is malformed or was not made by the Payday wallet; the message names the leg |
+| `nothing_to_withdraw` | 409 | The Gum wallet holds none of the currency where this withdrawal could move it: no USDC on any network, or no USDT on the destination (the message names USDT held elsewhere) |
+| `signature_invalid` | 400 | A leg's signature is malformed or was not made by the Gum wallet; the message names the leg |
 | `leg_not_awaiting_signature` | 409 | The leg already carries another signature or has moved past signing |
 | `authorization_expired` | 409 | The leg's 24-hour authorization window passed; create a new withdrawal |
 | `withdrawal_not_cancellable` | 409 | A leg has been relayed; the withdrawal runs to completion |
@@ -827,5 +830,5 @@ limited to 8 KiB.
 Deposit request, customer, attachment, and webhook API bodies are limited to 64 KiB;
 account-key bodies to 16 KiB. PDF bytes go to the presigned URL, never to the
 API.
-Send `request_id` to `support@payday.sh` when requesting help—never credentials,
+Send `request_id` to `support@gum.money` when requesting help—never credentials,
 OTP codes, webhook secrets, or unnecessary deposit request metadata.

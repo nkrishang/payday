@@ -101,7 +101,7 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("payday.proof.v4");
+  expect(body.version).toBe("gum.proof.v4");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
   expect(body.recovery_address).toBe(body.payer_wallet.address);
   expect(body.payment_id).toBe("dr_seed-settled");
@@ -139,7 +139,7 @@ test("the account section shows the signed-in mailbox and the Gum wallet", async
   await expect(section).toContainText("account-view@example.com");
   // The wallet is the account's own, shown in full and ready to copy.
   const wallet = await page.evaluate(
-    () => JSON.parse(sessionStorage.getItem("payday.privy-stub.session") ?? "{}").wallet,
+    () => JSON.parse(sessionStorage.getItem("gum.privy-stub.session") ?? "{}").wallet,
   );
   expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
   await expect(section).toContainText(wallet);
@@ -166,7 +166,7 @@ test("a merchant can generate, roll, and revoke their API key from the session",
 
   await expect(section.getByText("Key generated")).toBeVisible();
   const firstKey = await section.locator("code").innerText();
-  expect(firstKey).toMatch(/^payday_test_stub/);
+  expect(firstKey).toMatch(/^gum_test_stub/);
   await section.getByRole("button", { name: "Done" }).click();
   await expect(section).toContainText(firstKey.slice(-6));
   await expect(section.getByRole("button", { name: "Roll key" })).toBeVisible();
@@ -198,7 +198,7 @@ test("signing out ends the session", async ({ page }) => {
   await signIn(page);
   await page.getByRole("button", { name: "Sign out" }).first().click();
   await expect(page).toHaveURL("/");
-  expect(await page.evaluate(() => sessionStorage.getItem("payday.privy-stub.session"))).toBeNull();
+  expect(await page.evaluate(() => sessionStorage.getItem("gum.privy-stub.session"))).toBeNull();
   // And the dashboard is closed again.
   await page.goto("/dashboard");
   await expect(page).toHaveURL("/");

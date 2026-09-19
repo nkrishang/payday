@@ -11,16 +11,16 @@ export const metadata: Metadata = {
 };
 
 const CREDIT_CREATE = `// POST /deposits  — your route, behind your own authentication
-import { PaydayClient, checkoutUrl } from "@payday/sdk";
+import { GumClient, checkoutUrl } from "@gum/sdk";
 
-const payday = new PaydayClient({ apiKey: process.env.PAYDAY_API_KEY! });
+const gum = new GumClient({ apiKey: process.env.GUM_API_KEY! });
 
 app.post("/deposits", requireUser, async (req, res) => {
   const { amount } = req.body; // "250.00", validated by you
-  const deposit = await payday.depositRequests.create(
+  const deposit = await gum.depositRequests.create(
     {
       amount,
-      payout_address: process.env.PAYDAY_PAYOUT_ADDRESS!, // where settled funds land
+      payout_address: process.env.GUM_PAYOUT_ADDRESS!, // where settled funds land
       issuer: { name: "Your Exchange" },
       payer: { name: req.user.displayName },
       heading: "Account top-up",
@@ -35,15 +35,15 @@ app.post("/deposits", requireUser, async (req, res) => {
   res.redirect(303, checkoutUrl(deposit, deposit.client_secret!));
 });`;
 
-const CREDIT_WEBHOOK = `app.post("/payday/webhook", rawJson, async (req, res) => {
-  if (!verify(req.body, req.header("Payday-Signature") ?? "", WEBHOOK_SECRET)) return res.status(400).end();
+const CREDIT_WEBHOOK = `app.post("/gum/webhook", rawJson, async (req, res) => {
+  if (!verify(req.body, req.header("Gum-Signature") ?? "", WEBHOOK_SECRET)) return res.status(400).end();
   const event = JSON.parse(req.body.toString("utf8"));
   if (await events.seen(event.id)) return res.status(200).end();
 
   if (event.type === "deposit_request.settled") {
     const { id, payer_reference, amount_base_units } = event.data.deposit_request;
     // Read it back: the API is the source of truth.
-    const fresh = await payday.depositRequests.get(id);
+    const fresh = await gum.depositRequests.get(id);
     if (fresh.status === "settled") {
       await ledger.credit(payer_reference, BigInt(amount_base_units), { depositRequestId: id });
     }
@@ -54,21 +54,21 @@ const CREDIT_WEBHOOK = `app.post("/payday/webhook", rawJson, async (req, res) =>
 
 const CREDIT_RETURN = `// The user comes back to /deposits/:id later: mint a fresh secret and redirect again.
 app.get("/deposits/:id", requireUser, async (req, res) => {
-  const deposit = await payday.depositRequests.get(req.params.id);
+  const deposit = await gum.depositRequests.get(req.params.id);
   if (deposit.payer_policy.mode !== "merchant_session" || deposit.payer_policy.payer_reference !== req.user.id) {
     return res.status(404).end();
   }
-  const { client_secret } = await payday.depositRequests.createClientSecret(deposit.id);
+  const { client_secret } = await gum.depositRequests.createClientSecret(deposit.id);
   res.redirect(303, checkoutUrl(deposit, client_secret));
 });`;
 
 const INVOICE_TS = `import { readFile } from "node:fs/promises";
 
 // 1. Upload the PDF. This reserves a slot, PUTs the bytes, and waits for the scan.
-const pdf = await payday.attachments.upload(await readFile("INV-1042.pdf"), "INV-1042.pdf");
+const pdf = await gum.attachments.upload(await readFile("INV-1042.pdf"), "INV-1042.pdf");
 
 // 2. Issue the request with the attachment and the payer's mailbox.
-const request = await payday.depositRequests.create(
+const request = await gum.depositRequests.create(
   {
     amount: "1250.00",
     payout_address: "0x1111…",       // your treasury wallet
@@ -83,10 +83,10 @@ const request = await payday.depositRequests.create(
   },
   "INV-1042",                         // reuse the invoice number: a retry never double-issues
 );
-// Payday emails the request to the customer's saved email, if it has one.`;
+// Gum emails the request to the customer's saved email, if it has one.`;
 
 const INVOICE_CURL = `PDF_SLOT=$(curl -fsS "$API/v1/attachments" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $GUM_API_KEY" -H "Content-Type: application/json" \\
   -d '{ "filename": "INV-1042.pdf" }')
 UPLOAD_URL=$(echo "$PDF_SLOT" | jq -r .upload_url)
 ATT_ID=$(echo "$PDF_SLOT" | jq -r .id)
@@ -98,10 +98,10 @@ curl -fsS -X PUT "$UPLOAD_URL" \\
 
 # Finalize; retry on 409 attachment_scan_pending.
 curl -fsS -X POST "$API/v1/attachments/$ATT_ID/finalize" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY"
+  -H "Authorization: Bearer $GUM_API_KEY"
 
 curl -fsS "$API/v1/deposit-requests" \\
-  -H "Authorization: Bearer $PAYDAY_API_KEY" -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $GUM_API_KEY" -H "Content-Type: application/json" \\
   -H "Idempotency-Key: INV-1042" \\
   -d "{
     \\"amount\\": \\"1250.00\\",
@@ -115,7 +115,7 @@ curl -fsS "$API/v1/deposit-requests" \\
 const RECONCILE = `// Everything still open, oldest first once you have paged through.
 let cursor: string | undefined;
 do {
-  const page = await payday.depositRequests.list({ status: "partially_deposited", limit: 100, ...(cursor && { starting_after: cursor }) });
+  const page = await gum.depositRequests.list({ status: "partially_deposited", limit: 100, ...(cursor && { starting_after: cursor }) });
   for (const row of page.deposit_requests) {
     console.log(row.reference, row.received, "of", row.amount, "expires", row.expires_at);
   }
@@ -123,17 +123,17 @@ do {
 } while (cursor);
 
 // One request, by your own reference.
-const [byRef] = (await payday.depositRequests.list({ reference: "INV-1042" })).deposit_requests;
+const [byRef] = (await gum.depositRequests.list({ reference: "INV-1042" })).deposit_requests;
 
 // Who paid, exactly: every finalized transfer to the address.
-const { transfers } = await payday.depositRequests.transfers(byRef!.id);
+const { transfers } = await gum.depositRequests.transfers(byRef!.id);
 for (const t of transfers) console.log(t.sender, t.amount, t.disposition, t.transaction_hash);`;
 
 const SETUP = `// Save your customers once; each supplies the payer party on later requests.
-const globex = await payday.customers.create({ name: "Globex", email: "ap@globex.example" });
+const globex = await gum.customers.create({ name: "Globex", email: "ap@globex.example" });
 
 // From then on, a request is the amount, who pays, and the policy:
-await payday.depositRequests.create(
+await gum.depositRequests.create(
   {
     amount: "10.00",
     payout_address: "0x1111…",
@@ -145,16 +145,16 @@ await payday.depositRequests.create(
 );`;
 
 const SCREEN = `// A screen that follows one request: return the moment it changes, or after 30 s.
-let request = await payday.depositRequests.get(id);
+let request = await gum.depositRequests.get(id);
 while (!["settled", "returned"].includes(request.status)) {
-  request = await payday.depositRequests.get(id, { waitForChange: true, timeout: 30 });
+  request = await gum.depositRequests.get(id, { waitForChange: true, timeout: 30 });
   render(request);
 }`;
 
 export default function RecipesPage() {
   return (
     <DocsPage
-      eyebrow="Using Payday"
+      eyebrow="Using Gum"
       title="Recipes"
       lead="Complete patterns, end to end. Each one is a few dozen lines against the API, and each is something a real integration has needed."
     >
@@ -259,7 +259,7 @@ export default function RecipesPage() {
         </Step>
         <Step title="Deploy the new key">
           <p>
-            Update the secret in every service that calls Payday. Confirm with a read of the
+            Update the secret in every service that calls Gum. Confirm with a read of the
             account.
           </p>
         </Step>
@@ -274,8 +274,8 @@ export default function RecipesPage() {
 
       <H2 id="test-in-the-sandbox">Test in the sandbox first</H2>
       <p>
-        Point the client at <code>https://api.sandbox.payday.sh</code> with a{" "}
-        <code>payday_test_</code> key and run the same code against the testnets and Circle&apos;s
+        Point the client at <code>https://api.sandbox.gum.money</code> with a{" "}
+        <code>gum_test_</code> key and run the same code against the testnets and Circle&apos;s
         test USDC. The sandbox runs real indexing and finality rather than a fake &quot;mark
         paid&quot; button, so what you see there is what production does. See{" "}
         <Link href="/docs/environments">Environments</Link>.

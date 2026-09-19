@@ -1,11 +1,11 @@
 "use client";
 
-import type { AccountMetadata } from "@payday/sdk";
+import type { AccountMetadata } from "@gum/sdk";
 import { useExportWallet, useUpdateEmail } from "@privy-io/react-auth";
 import { ArrowUpRight, KeyRound, LogOut, RefreshCw } from "lucide-react";
 import { CurrencyMark } from "@/components/ui/amount";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPublicClient, erc20Abi, http } from "viem";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -236,6 +236,16 @@ type Balances =
   | { status: "ready"; tokens: Record<string, bigint>; reload: () => void };
 
 /**
+ * What Privy's own error codes for the email-update flow mean, in the
+ * merchant's terms; anything else falls back to a plain retry sentence.
+ */
+const UPDATE_EMAIL_PROBLEM: Partial<Record<string, string>> = {
+  exited_update_flow: "The email change was cancelled.",
+  invalid_data: "That code is not right. Check it and try again.",
+  failed_to_update_account: "Changing the email failed. Try again.",
+};
+
+/**
  * The sign-in email, and changing it.
  *
  * Privy owns the address — it is how the merchant proves who they are — so
@@ -244,12 +254,22 @@ type Balances =
  * still the signed-in one, and it is what this row shows.
  */
 function EmailRow({ email, onChanged }: { email: string | null; onChanged: () => void }) {
-  const { sendCode, verifyCode } = useUpdateEmail();
   const [mode, setMode] = useState<"closed" | "edit" | "code">("closed");
   const [draft, setDraft] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // Set as the hook's onError fires, so a send that Privy refused — which the
+  // real SDK reports through the callback rather than a rejected promise —
+  // does not advance to the code screen.
+  const refused = useRef(false);
+
+  const { sendCode, verifyCode } = useUpdateEmail({
+    onError: (code) => {
+      refused.current = true;
+      setProblem(UPDATE_EMAIL_PROBLEM[code] ?? "Changing the email failed. Try again.");
+    },
+  });
 
   const valid = EMAIL.test(draft.trim());
 
@@ -264,9 +284,12 @@ function EmailRow({ email, onChanged }: { email: string | null; onChanged: () =>
     if (!valid || busy) return;
     setBusy(true);
     setProblem(null);
+    refused.current = false;
     try {
       await sendCode({ newEmailAddress: draft.trim() });
-      setMode("code");
+      // Privy reports a failed send through onError above, not through the
+      // promise; only an unrefused send may move on to the code.
+      if (!refused.current) setMode("code");
     } catch (cause) {
       setProblem(describeError(cause));
     } finally {
@@ -278,13 +301,17 @@ function EmailRow({ email, onChanged }: { email: string | null; onChanged: () =>
     if (busy) return;
     setBusy(true);
     setProblem(null);
+    refused.current = false;
     try {
-      await verifyCode({ code: code.trim() });
+      const result = await verifyCode({ code: code.trim() });
       // Privy has changed the address; the account's own copy follows. The
       // identity token rotates with it, so the next request carries the new
-      // email already.
-      onChanged();
-      close();
+      // email already. A resolved undefined is a wrong or expired code,
+      // reported through onError above.
+      if (result) {
+        onChanged();
+        close();
+      }
     } catch (cause) {
       // A wrong or expired code is fixable in place; anything else —
       // including a stale token the refresh above cannot mend — sends the

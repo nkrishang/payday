@@ -14,6 +14,31 @@
 -- exactly as it compared UUID.
 --
 -- Runs in the one transaction sqlx wraps every migration in.
+--
+-- Precondition: the deployment must have stopped the old signer and let it
+-- drain every persisted onboarding-payment job before this migration runs.
+-- The consumer no longer decodes `onboarding_payment` commands, and
+-- `queued_jobs` decodes its whole result at once, so one undrained job would
+-- wedge every queued job on its chain; an unresolved onboarding transaction
+-- would wedge reconciliation the same way. The old binary still understands
+-- them, so the check refuses to apply until they are gone rather than
+-- leaving the upgrade to fail at runtime.
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM execution.jobs
+        WHERE kind = 'onboarding_payment' AND resolved_at IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM execution.transactions t
+        JOIN execution.jobs j ON j.id = t.job_id
+        WHERE j.kind = 'onboarding_payment' AND t.resolved_at IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'unresolved onboarding_payment execution jobs or transactions remain; run the previous signer version until it drains them (nothing may be deleted: signed bytes may already be in a mempool) before applying this migration';
+    END IF;
+END
+$$;
 
 DROP TRIGGER invoice_issuance_immutable ON invoices;
 
